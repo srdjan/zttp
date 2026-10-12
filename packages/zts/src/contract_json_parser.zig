@@ -13,15 +13,9 @@ const json_wire = @import("zts-base").json_wire;
 // into a contract parser.
 const module_binding = @import("zts-base").module_authorization;
 const json_utils = @import("zts-base").json_utils;
-const tool_schema = @import("zts-base").tool_schema;
-const capability_profiles = @import("zts-base").capability_profiles;
-const credential_ref = @import("zts-base").credential_ref;
-const endpoint_rule = @import("zts-base").endpoint;
 
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
-const ServiceCallInfo = handler_contract.ServiceCallInfo;
-const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 const ApiRouteInfo = handler_contract.ApiRouteInfo;
 const ApiParamInfo = handler_contract.ApiParamInfo;
 const ApiBodyInfo = handler_contract.ApiBodyInfo;
@@ -441,17 +435,11 @@ fn combineSandboxWire(previous: *SandboxWire, next: SandboxWire) void {
     if (next.wasmPolicyHash.value != null) previous.wasmPolicyHash = next.wasmPolicyHash;
     if (next.artifactSha256.value != null) previous.artifactSha256 = next.artifactSha256;
 }
-
-const SourceFrontendIdentityWire = struct {
-    profileId: WireString = .{ .bytes = "" },
-    grammarHash: WireString = .{ .bytes = "" },
-};
-
 const SourceIdentityWire = struct {
     coreProfileId: WireString = .{ .bytes = "" },
     coreGrammarHash: WireString = .{ .bytes = "" },
     semanticsHash: WireString = .{ .bytes = "" },
-    frontend: ?SourceFrontendIdentityWire = null,
+    frontend: ?RawJson = null,
 };
 
 const BehaviorConditionWire = struct {
@@ -773,6 +761,7 @@ fn projectContract(
     allocator: std.mem.Allocator,
     wire: *const ContractWire,
 ) !HandlerContract {
+    try rejectRetiredFields(wire);
     var contract = handler_contract.emptyContract(try dupeWireString(allocator, wire.handler.path));
     contract.handler.line = wire.handler.line.value orelse 0;
     contract.handler.column = wire.handler.column.value orelse 0;
@@ -789,20 +778,9 @@ fn projectContract(
     contract.egress.endpoints = try projectStringList(allocator, wire.egress.endpoints);
     contract.egress.urls = try projectStringList(allocator, wire.egress.urls);
     contract.egress.dynamic = wire.egress.dynamic;
-    try projectServiceCalls(allocator, wire.serviceCalls, &contract);
-    try projectWorkflowCalls(allocator, wire.workflowCalls, &contract);
-    try projectAffordances(allocator, wire.affordances, &contract);
-    contract.affordances_dynamic = wire.affordancesDynamic;
-    try projectTools(allocator, wire.tools, contract.version == 2, &contract);
-    try projectToolAuth(allocator, wire.toolAuth, &contract);
-    try projectCredentials(allocator, wire.credentials, &contract);
-    try projectClassifications(allocator, wire.classifications, &contract);
-    try projectCeiling(allocator, wire.ceiling, &contract);
     contract.cache.namespaces = try projectStringList(allocator, wire.cache.namespaces);
     contract.cache.dynamic = wire.cache.dynamic;
     try projectSql(allocator, &wire.sql, &contract);
-    try projectDurable(allocator, &wire.durable, &contract);
-    try projectScope(allocator, &wire.scope, &contract);
     try projectApi(allocator, &wire.api, &contract);
     projectVerification(wire.verification, &contract);
     projectAot(wire.aot, &contract);
@@ -812,7 +790,6 @@ fn projectContract(
     try projectSpecDiagnostics(allocator, wire.specDiagnostics.value, &contract);
     try projectSandbox(wire.sandbox.value, &contract);
     try projectIntent(allocator, wire.intent, &contract);
-    try projectSagas(allocator, wire.sagas, &contract);
     try projectBehaviors(allocator, wire.behaviors.value, &contract);
     contract.behaviors_exhaustive = wire.behaviorsExhaustive;
     contract.cost_envelope = try projectCostEnvelope(allocator, wire.costEnvelope);
@@ -820,6 +797,60 @@ fn projectContract(
     try projectRateLimit(allocator, wire.rateLimiting, &contract);
 
     return contract;
+}
+
+fn rejectRetiredFields(wire: *const ContractWire) !void {
+    if (wire.serviceCalls.len != 0 or
+        wire.workflowCalls.len != 0 or
+        wire.affordances.len != 0 or
+        wire.affordancesDynamic or
+        wire.tools.len != 0 or
+        wire.toolAuth != null or
+        wire.credentials != null or
+        wire.classifications.len != 0 or
+        wire.ceiling != null or
+        wire.sagas.len != 0)
+    {
+        return error.UnsupportedRuntimeAuthority;
+    }
+
+    if (wire.durable.used or
+        wire.durable.keys.literal.len != 0 or
+        wire.durable.keys.dynamic or
+        wire.durable.steps.len != 0 or
+        wire.durable.timers or
+        wire.durable.signals.literal.len != 0 or
+        wire.durable.signals.dynamic or
+        wire.durable.producerKeys.literal.len != 0 or
+        wire.durable.producerKeys.dynamic or
+        hasRetiredWorkflowData(wire.durable.workflow))
+    {
+        return error.UnsupportedRuntimeAuthority;
+    }
+
+    if (wire.scope.used or
+        wire.scope.names.len != 0 or
+        wire.scope.dynamic or
+        (wire.scope.maxDepth.value orelse 0) != 0)
+    {
+        return error.UnsupportedRuntimeAuthority;
+    }
+
+    if (wire.sourceIdentity) |identity| {
+        if (identity.frontend != null) return error.UnsupportedRuntimeAuthority;
+    }
+}
+
+fn hasRetiredWorkflowData(section: DurableWorkflowSectionWire) bool {
+    const workflow = section.value orelse return false;
+    return workflow.workflowId != null or
+        !std.mem.eql(u8, workflow.proofLevel.bytes, "none") or
+        workflow.properties.retrySafe or
+        workflow.properties.idempotent or
+        workflow.properties.faultCovered or
+        workflow.properties.reasons.len != 0 or
+        workflow.nodes.len != 0 or
+        workflow.edges.len != 0;
 }
 
 fn projectSourceIdentity(wire: ?SourceIdentityWire, contract: *HandlerContract) !void {
@@ -831,14 +862,6 @@ fn projectSourceIdentity(wire: ?SourceIdentityWire, contract: *HandlerContract) 
     }
     if (!try parseOptionalHash(&contract.source_identity.semantics_hash, identity.semanticsHash.bytes)) {
         return error.InvalidJson;
-    }
-    if (identity.frontend) |frontend| {
-        var projected = contract_types.SourceFrontendIdentity{
-            .profile = contract_types.SourceFrontendProfile.parse(frontend.profileId.bytes) orelse return error.InvalidJson,
-            .grammar_hash = undefined,
-        };
-        if (!try parseOptionalHash(&projected.grammar_hash, frontend.grammarHash.bytes)) return error.InvalidJson;
-        contract.source_identity.frontend = projected;
     }
 }
 
@@ -964,485 +987,6 @@ fn projectFunctions(
     }
 }
 
-fn projectServiceCalls(
-    allocator: std.mem.Allocator,
-    wires: []const ServiceCallWire,
-    contract: *HandlerContract,
-) !void {
-    try contract.service_calls.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const owned = try dupeWireStringPair(allocator, wire.service, wire.route);
-        var call = ServiceCallInfo{
-            .service = owned.first,
-            .route_pattern = owned.second,
-        };
-        errdefer call.deinit(allocator);
-        call.dynamic = wire.dynamic;
-        call.path_params = try projectKnownList(allocator, wire.pathParams, wire.pathParamsDynamic);
-        call.query_keys = try projectKnownList(allocator, wire.queryKeys, wire.queryDynamic);
-        call.header_keys = try projectKnownList(allocator, wire.headerKeys, wire.headerDynamic);
-        call.body = pickBodySpec(wire.hasBody, wire.bodyDynamic);
-        contract.service_calls.appendAssumeCapacity(call);
-    }
-}
-
-fn projectKnownList(
-    allocator: std.mem.Allocator,
-    wire: []const WireString,
-    dynamic: bool,
-) !ServiceCallInfo.KnownList {
-    if (dynamic) return .dynamic;
-    return .{ .complete = try projectStringList(allocator, wire) };
-}
-
-fn pickBodySpec(has_body: bool, body_dynamic: bool) ServiceCallInfo.BodySpec {
-    if (body_dynamic) return .dynamic;
-    if (has_body) return .present;
-    return .none;
-}
-
-fn projectWorkflowCalls(
-    allocator: std.mem.Allocator,
-    wires: []const WorkflowCallWire,
-    contract: *HandlerContract,
-) !void {
-    try contract.workflow_calls.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const owned = try dupeWireStringPair(allocator, wire.target, wire.route);
-        var call = WorkflowCallInfo{
-            .target = owned.first,
-            .route_pattern = owned.second,
-            .dynamic = wire.dynamic,
-        };
-        errdefer call.deinit(allocator);
-        contract.workflow_calls.appendAssumeCapacity(call);
-    }
-}
-
-fn projectAffordances(
-    allocator: std.mem.Allocator,
-    wires: []const AffordanceWire,
-    contract: *HandlerContract,
-) !void {
-    try contract.affordances.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const owned = try dupeWireStringTriple(allocator, wire.rel, wire.method, wire.href);
-        var affordance = contract_types.EmittedAffordance{
-            .rel = owned.first,
-            .method = owned.second,
-            .href = owned.third,
-            .templated = wire.templated,
-            .dynamic = wire.dynamic,
-        };
-        errdefer affordance.deinit(allocator);
-        contract.affordances.appendAssumeCapacity(affordance);
-    }
-}
-
-/// Project the tool catalog. A catalog that the build could not have written is
-/// refused rather than repaired: an empty or duplicate name, an empty or
-/// duplicate route, a missing, zero, or over-ceiling byte bound, a schema with
-/// no name or outside the closed subset, or a reachable-export list that is not
-/// strictly sorted. Every check runs on the decoded strings, so an escaped
-/// spelling of a name is still the same name.
-fn projectTools(
-    allocator: std.mem.Allocator,
-    wires: []const ToolWire,
-    snake_case: bool,
-    contract: *HandlerContract,
-) !void {
-    try contract.tools.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const max_input_bytes = wire.maxInputBytes.value orelse return error.InvalidToolCatalog;
-        if (max_input_bytes == 0 or max_input_bytes > tool_schema.max_input_bytes_ceiling) return error.InvalidToolCatalog;
-
-        var entry = contract_types.ToolEntry{
-            .name = &.{},
-            .route = &.{},
-            .description = &.{},
-            .input_schema_name = &.{},
-            .input_schema_json = &.{},
-            .output_schema_name = &.{},
-            .output_schema_json = &.{},
-            .max_input_bytes = max_input_bytes,
-        };
-        errdefer entry.deinit(allocator);
-        entry.name = try decodeWireString(allocator, wire.name);
-        entry.route = try decodeWireString(allocator, wire.route);
-        entry.description = try decodeWireString(allocator, wire.description);
-        entry.input_schema_name = try decodeWireString(allocator, wire.inputSchema.name);
-        entry.input_schema_json = try decodeWireString(allocator, wire.inputSchema.json);
-        entry.output_schema_name = try decodeWireString(allocator, wire.outputSchema.name);
-        entry.output_schema_json = try decodeWireString(allocator, wire.outputSchema.json);
-        if (wire.scope) |scope| {
-            if (scope.tenant) |field| entry.scope_tenant = try decodeWireString(allocator, field);
-            if (scope.subject) |field| entry.scope_subject = try decodeWireString(allocator, field);
-            // The build writes `scope` only when it binds a field, and never
-            // an empty name.
-            if (entry.scope_tenant == null and entry.scope_subject == null) return error.InvalidToolCatalog;
-        }
-        if (entry.scope_tenant) |field| if (field.len == 0) return error.InvalidToolCatalog;
-        if (entry.scope_subject) |field| if (field.len == 0) return error.InvalidToolCatalog;
-        try entry.reachable_exports.ensureTotalCapacity(allocator, wire.reachableExports.len);
-        for (wire.reachableExports) |exp| {
-            const module = try decodeWireString(allocator, exp.module);
-            errdefer allocator.free(module);
-            const name = try decodeWireString(allocator, exp.name);
-            entry.reachable_exports.appendAssumeCapacity(.{ .module = module, .name = name });
-        }
-
-        if (entry.name.len == 0 or entry.route.len == 0) return error.InvalidToolCatalog;
-        for (contract.tools.items) |prior| {
-            if (std.mem.eql(u8, prior.name, entry.name)) return error.InvalidToolCatalog;
-            if (std.mem.eql(u8, prior.route, entry.route)) return error.InvalidToolCatalog;
-        }
-        if (wire.agent.bytes.len != 0) {
-            if (wire.scope != null or entry.scope_tenant != null or entry.scope_subject != null or
-                entry.input_schema_name.len != 0 or entry.input_schema_json.len != 0 or
-                entry.output_schema_name.len != 0 or entry.output_schema_json.len != 0)
-            {
-                return error.InvalidToolCatalog;
-            }
-            if (entry.credentials.items.len != 0) return error.InvalidToolCatalog;
-            entry.agent = try projectAgentJson(allocator, wire.agent.bytes, snake_case);
-        } else {
-            if (!try schemaInSubset(allocator, entry.input_schema_name, entry.input_schema_json)) return error.InvalidToolCatalog;
-            if (!try schemaInSubset(allocator, entry.output_schema_name, entry.output_schema_json)) return error.InvalidToolCatalog;
-        }
-        for (entry.reachable_exports.items, 0..) |exp, j| {
-            if (exp.module.len == 0 or exp.name.len == 0) return error.InvalidToolCatalog;
-            if (j > 0 and !contract_types.ToolExport.lessThan({}, entry.reachable_exports.items[j - 1], exp)) {
-                return error.InvalidToolCatalog;
-            }
-        }
-        try projectToolCredentials(allocator, wire.credentials, &entry);
-        if (entry.agent) |agent| {
-            if (entry.credentials.items.len != 1 or
-                !std.mem.eql(u8, entry.credentials.items[0].name, agent.provider_credential) or
-                !std.mem.eql(u8, entry.credentials.items[0].endpoint, agent.provider_endpoint))
-            {
-                return error.InvalidToolCatalog;
-            }
-        }
-        contract.tools.appendAssumeCapacity(entry);
-    }
-
-    var agent_count: usize = 0;
-    for (contract.tools.items) |entry| {
-        const agent = entry.agent orelse continue;
-        agent_count += 1;
-        if (agent_count > 1) return error.InvalidToolCatalog;
-        for (agent.tools.items) |tool_name| {
-            for (contract.tools.items) |candidate| {
-                if (!std.mem.eql(u8, candidate.name, tool_name)) continue;
-                if (candidate.agent != null) return error.InvalidToolCatalog;
-                break;
-            } else return error.InvalidToolCatalog;
-        }
-    }
-}
-
-fn projectAgentJson(allocator: std.mem.Allocator, json: []const u8, snake_case: bool) !contract_types.AgentEntry {
-    const options = std.json.ParseOptions{
-        .duplicate_field_behavior = .@"error",
-        .ignore_unknown_fields = false,
-        .max_value_len = json.len,
-        .allocate = .alloc_if_needed,
-    };
-    if (snake_case) {
-        var parsed = std.json.parseFromSlice(AgentWireV2, allocator, json, options) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidToolCatalog,
-        };
-        defer parsed.deinit();
-        const wire = parsed.value;
-        return projectAgentWire(
-            allocator,
-            wire.tools,
-            wire.provider,
-            wire.limits.rounds,
-            wire.limits.tool_calls,
-            wire.limits.tool_calls_per_round,
-            wire.limits.argument_bytes,
-            wire.limits.result_bytes,
-            wire.limits.turn_deadline_ms,
-            wire.limits.provider_request_bytes,
-        );
-    }
-    var parsed = std.json.parseFromSlice(AgentWire, allocator, json, options) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => return error.InvalidToolCatalog,
-    };
-    defer parsed.deinit();
-    const wire = parsed.value;
-    return projectAgentWire(
-        allocator,
-        wire.tools,
-        wire.provider,
-        wire.limits.rounds,
-        wire.limits.toolCalls,
-        wire.limits.toolCallsPerRound,
-        wire.limits.argumentBytes,
-        wire.limits.resultBytes,
-        wire.limits.turnDeadlineMs,
-        wire.limits.providerRequestBytes,
-    );
-}
-
-fn projectAgentWire(
-    allocator: std.mem.Allocator,
-    tool_wires: []const WireString,
-    provider: AgentProviderWire,
-    rounds_wire: WireU32,
-    tool_calls_wire: WireU32,
-    tool_calls_per_round_wire: WireU32,
-    argument_bytes_wire: WireU32,
-    result_bytes_wire: WireU32,
-    turn_deadline_ms_wire: WireU32,
-    provider_request_bytes_wire: WireU32,
-) !contract_types.AgentEntry {
-    if (tool_wires.len == 0) return error.InvalidToolCatalog;
-
-    var tools: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (tools.items) |name| allocator.free(name);
-        tools.deinit(allocator);
-    }
-    try tools.ensureTotalCapacity(allocator, tool_wires.len);
-    for (tool_wires, 0..) |tool_wire, index| {
-        const name = try decodeWireString(allocator, tool_wire);
-        errdefer allocator.free(name);
-        if (name.len == 0) return error.InvalidToolCatalog;
-        if (index > 0 and std.mem.order(u8, tools.items[index - 1], name) != .lt) {
-            return error.InvalidToolCatalog;
-        }
-        tools.appendAssumeCapacity(name);
-    }
-
-    const endpoint = try decodeWireString(allocator, provider.endpoint);
-    errdefer allocator.free(endpoint);
-    const credential = try decodeWireString(allocator, provider.credential);
-    errdefer allocator.free(credential);
-    if (endpoint.len == 0 or credential.len == 0) return error.InvalidToolCatalog;
-    var endpoint_buf: [endpoint_rule.max_endpoint_bytes]u8 = undefined;
-    const canonical = endpoint_rule.normalize(endpoint, &endpoint_buf) catch return error.InvalidToolCatalog;
-    if (!std.mem.eql(u8, endpoint, canonical)) return error.InvalidToolCatalog;
-
-    const rounds = rounds_wire.value orelse return error.InvalidToolCatalog;
-    const tool_calls = tool_calls_wire.value orelse return error.InvalidToolCatalog;
-    const tool_calls_per_round = tool_calls_per_round_wire.value orelse return error.InvalidToolCatalog;
-    const argument_bytes = argument_bytes_wire.value orelse return error.InvalidToolCatalog;
-    const result_bytes = result_bytes_wire.value orelse return error.InvalidToolCatalog;
-    const turn_deadline_ms = turn_deadline_ms_wire.value orelse return error.InvalidToolCatalog;
-    const provider_request_bytes = provider_request_bytes_wire.value orelse return error.InvalidToolCatalog;
-    if (rounds == 0 or rounds > contract_types.max_agent_rounds or
-        tool_calls == 0 or tool_calls > contract_types.max_agent_tool_calls or
-        tool_calls_per_round == 0 or tool_calls_per_round > tool_calls or
-        argument_bytes == 0 or argument_bytes > contract_types.max_agent_argument_bytes or
-        result_bytes == 0 or result_bytes > contract_types.max_agent_result_bytes or
-        turn_deadline_ms == 0 or turn_deadline_ms > contract_types.max_agent_turn_deadline_ms or
-        provider_request_bytes == 0 or provider_request_bytes > contract_types.max_agent_provider_request_bytes)
-    {
-        return error.InvalidToolCatalog;
-    }
-
-    return .{
-        .tools = tools,
-        .provider_endpoint = endpoint,
-        .provider_credential = credential,
-        .limits = .{
-            .rounds = rounds,
-            .tool_calls = tool_calls,
-            .tool_calls_per_round = tool_calls_per_round,
-            .argument_bytes = argument_bytes,
-            .result_bytes = result_bytes,
-            .turn_deadline_ms = turn_deadline_ms,
-            .provider_request_bytes = provider_request_bytes,
-        },
-    };
-}
-
-/// Project one tool's credential grant (M4 T6). The build writes each name
-/// with the canonical endpoint of its call, sorted by (name, endpoint) with no
-/// repeat, and never an empty field.
-fn projectToolCredentials(
-    allocator: std.mem.Allocator,
-    wires: []const ToolCredentialWire,
-    entry: *contract_types.ToolEntry,
-) !void {
-    try entry.credentials.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const name = try decodeWireString(allocator, wire.name);
-        errdefer allocator.free(name);
-        const endpoint_text = try decodeWireString(allocator, wire.endpoint);
-        entry.credentials.appendAssumeCapacity(.{ .name = name, .endpoint = endpoint_text });
-    }
-    var buf: [endpoint_rule.max_endpoint_bytes]u8 = undefined;
-    for (entry.credentials.items, 0..) |cred, j| {
-        if (cred.name.len == 0) return error.InvalidToolCatalog;
-        const canonical = endpoint_rule.normalize(cred.endpoint, &buf) catch return error.InvalidToolCatalog;
-        if (!std.mem.eql(u8, canonical, cred.endpoint)) return error.InvalidToolCatalog;
-        if (j > 0 and !contract_types.ToolCredential.lessThan({}, entry.credentials.items[j - 1], cred)) {
-            return error.InvalidToolCatalog;
-        }
-    }
-}
-
-/// Project the tool handler's identity source (M4 T5). The build writes both
-/// names or neither, and never an empty one, so anything else is refused.
-fn projectToolAuth(
-    allocator: std.mem.Allocator,
-    wire: ?ToolAuthWire,
-    contract: *HandlerContract,
-) !void {
-    const auth = wire orelse return;
-    const key_env_wire = auth.keyEnv orelse return error.InvalidToolAuth;
-    const tenant_claim_wire = auth.tenantClaim orelse return error.InvalidToolAuth;
-    const key_env = try decodeWireString(allocator, key_env_wire);
-    errdefer allocator.free(key_env);
-    const tenant_claim = try decodeWireString(allocator, tenant_claim_wire);
-    errdefer allocator.free(tenant_claim);
-    if (key_env.len == 0 or tenant_claim.len == 0) return error.InvalidToolAuth;
-    contract.tool_auth = .{ .key_env = key_env, .tenant_claim = tenant_claim };
-}
-
-/// Project the credential references (M4 T6). The build writes them in the
-/// canonical form `credential_ref.zig` defines, sorted by name, and never an
-/// empty list, so each entry is validated in that form and the set's order is
-/// checked: a contract cannot carry a reference the build could not have made.
-fn projectCredentials(
-    allocator: std.mem.Allocator,
-    wire: ?[]const CredentialWire,
-    contract: *HandlerContract,
-) !void {
-    const entries = wire orelse return;
-    if (entries.len == 0 or entries.len > credential_ref.max_credentials) return error.InvalidCredentialRefs;
-
-    // Decoded strings live in a scratch arena; `validate` copies what it keeps.
-    var scratch = std.heap.ArenaAllocator.init(allocator);
-    defer scratch.deinit();
-    const a = scratch.allocator();
-
-    var refs: std.ArrayList(credential_ref.CredentialRef) = .empty;
-    errdefer {
-        for (refs.items) |*r| r.deinit(allocator);
-        refs.deinit(allocator);
-    }
-    try refs.ensureTotalCapacityPrecise(allocator, entries.len);
-    for (entries) |entry| {
-        const fields: credential_ref.Fields = .{
-            .name = try decodeWireString(a, entry.name orelse return error.InvalidCredentialRefs),
-            .env = try decodeWireString(a, entry.env orelse return error.InvalidCredentialRefs),
-            .endpoint = try decodeWireString(a, entry.endpoint orelse return error.InvalidCredentialRefs),
-            .header = try decodeWireString(a, entry.header orelse return error.InvalidCredentialRefs),
-            .scheme = if (entry.scheme) |s| try decodeWireString(a, s) else null,
-            .methods = try decodeWireList(a, entry.methods orelse return error.InvalidCredentialRefs),
-            .paths = try decodeWireList(a, entry.paths orelse return error.InvalidCredentialRefs),
-        };
-        switch (try credential_ref.validate(allocator, fields, .canonical)) {
-            .ok => |ref| refs.appendAssumeCapacity(ref),
-            .refused => return error.InvalidCredentialRefs,
-        }
-    }
-    if (credential_ref.setOrder(refs.items) != null) return error.InvalidCredentialRefs;
-    contract.credentials = try refs.toOwnedSlice(allocator);
-}
-
-fn decodeWireList(allocator: std.mem.Allocator, wire: []const WireString) ![]const []const u8 {
-    const out = try allocator.alloc([]const u8, wire.len);
-    for (wire, 0..) |item, i| out[i] = try decodeWireString(allocator, item);
-    return out;
-}
-
-/// Project the applied ceiling (M4 T5b). The build derives every field but the
-/// declaration's exclusions from the profile, so a report whose categories or
-/// `requiresReadOnly` differ from the named profile, whose `excludedModules`
-/// is not strictly increasing, names something that is not a `zttp:` module,
-/// or leaves out a module the profile excludes, is refused: the build could
-/// not have written it. The declaration's own exclusions are the entries the
-/// profile does not already make.
-fn projectCeiling(
-    allocator: std.mem.Allocator,
-    wire: ?CeilingWire,
-    contract: *HandlerContract,
-) !void {
-    const ceiling = wire orelse return;
-    const profile_name = ceiling.profile orelse return error.InvalidCeilingReport;
-    const profile = capability_profiles.findProfile(profile_name.bytes) orelse return error.InvalidCeilingReport;
-    const categories = ceiling.categories orelse return error.InvalidCeilingReport;
-    const excluded = ceiling.excludedModules orelse return error.InvalidCeilingReport;
-    const requires_read_only = ceiling.requiresReadOnly orelse return error.InvalidCeilingReport;
-    if (requires_read_only != profile.requires_read_only) return error.InvalidCeilingReport;
-    if (categories.len != profile.categories.len) return error.InvalidCeilingReport;
-    for (categories, profile.categories) |name, cap| {
-        if (!std.mem.eql(u8, name.bytes, @tagName(cap))) return error.InvalidCeilingReport;
-    }
-    for (excluded, 0..) |entry, i| {
-        const m = entry.bytes;
-        if (!std.mem.startsWith(u8, m, "zttp:") or m.len <= "zttp:".len) return error.InvalidCeilingReport;
-        if (std.mem.indexOfScalar(u8, m, '\\') != null) return error.InvalidCeilingReport;
-        if (i > 0 and std.mem.order(u8, excluded[i - 1].bytes, m) != .lt) return error.InvalidCeilingReport;
-    }
-    for (profile.excluded_modules) |m| {
-        var found = false;
-        for (excluded) |entry| {
-            if (std.mem.eql(u8, entry.bytes, m)) found = true;
-        }
-        if (!found) return error.InvalidCeilingReport;
-    }
-    const own = try allocator.alloc([]const u8, excluded.len);
-    defer allocator.free(own);
-    for (excluded, own) |entry, *slot| slot.* = entry.bytes;
-    contract.ceiling = try contract_types.CeilingReport.fromCeiling(allocator, .{ .profile = profile, .exclude = own });
-}
-
-/// Project the P8 report (M4 T4). The value sets are closed: a label other than
-/// `secret` or `credential`, a status other than `matched`, `indeterminate`, or
-/// `absent`, a missing `required`, a source that names neither a `fetch:` nor a
-/// `service:` source, or an empty path is refused rather than read as a default,
-/// because a report the build could not have written must not pass for one.
-fn projectClassifications(
-    allocator: std.mem.Allocator,
-    wires: []const ClassificationWire,
-    contract: *HandlerContract,
-) !void {
-    try contract.classifications.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const label = contract_types.ClassificationLabel.fromText(wire.label.bytes) orelse
-            return error.InvalidClassificationReport;
-        const status = contract_types.ClassificationStatus.fromText(wire.status.bytes) orelse
-            return error.InvalidClassificationReport;
-        const required = wire.required orelse return error.InvalidClassificationReport;
-        const source = decodeWireString(allocator, wire.source) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidClassificationReport,
-        };
-        errdefer allocator.free(source);
-        const path = decodeWireString(allocator, wire.path) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.InvalidClassificationReport,
-        };
-        errdefer allocator.free(path);
-        const named_source = (std.mem.startsWith(u8, source, "fetch:") and source.len > "fetch:".len) or
-            (std.mem.startsWith(u8, source, "service:") and source.len > "service:".len);
-        if (!named_source or path.len == 0) return error.InvalidClassificationReport;
-        contract.classifications.appendAssumeCapacity(.{
-            .source = source,
-            .path = path,
-            .label = label,
-            .required = required,
-            .status = status,
-        });
-    }
-}
-
-fn schemaInSubset(allocator: std.mem.Allocator, name: []const u8, schema_json: []const u8) !bool {
-    if (name.len == 0) return false;
-    const result = try tool_schema.checkSubset(allocator, schema_json);
-    defer result.deinit(allocator);
-    return result == .ok;
-}
-
 /// Decode one wire string. `WireString` keeps the raw bytes between the quotes,
 /// escapes included, which is harmless for the plain names elsewhere in the
 /// contract but not for schema text and descriptions. The scanner already
@@ -1478,86 +1022,6 @@ fn projectSql(
         query.tables = try projectStringList(allocator, query_wire.tables);
         contract.sql.queries.appendAssumeCapacity(query);
     }
-}
-
-fn projectDurable(
-    allocator: std.mem.Allocator,
-    wire: *const DurableWire,
-    contract: *HandlerContract,
-) !void {
-    contract.durable.used = wire.used;
-    contract.durable.keys.literal = try projectStringList(allocator, wire.keys.literal);
-    contract.durable.keys.dynamic = wire.keys.dynamic;
-    contract.durable.steps = try projectStringList(allocator, wire.steps);
-    contract.durable.timers = wire.timers;
-    contract.durable.signals.literal = try projectStringList(allocator, wire.signals.literal);
-    contract.durable.signals.dynamic = wire.signals.dynamic;
-    contract.durable.producer_keys.literal = try projectStringList(allocator, wire.producerKeys.literal);
-    contract.durable.producer_keys.dynamic = wire.producerKeys.dynamic;
-    if (wire.workflow.value) |workflow| {
-        contract.durable.workflow.workflow_id = try dupeOptionalWireString(allocator, workflow.workflowId);
-        contract.durable.workflow.proof_level = contract_types.DurableWorkflowProofLevel.fromString(workflow.proofLevel.bytes);
-        contract.durable.workflow.properties.retry_safe = workflow.properties.retrySafe;
-        contract.durable.workflow.properties.idempotent = workflow.properties.idempotent;
-        contract.durable.workflow.properties.fault_covered = workflow.properties.faultCovered;
-        contract.durable.workflow.properties.reasons = try projectStringList(allocator, workflow.properties.reasons);
-        try projectDurableNodes(allocator, workflow.nodes, &contract.durable.workflow);
-        try projectDurableEdges(allocator, workflow.edges, &contract.durable.workflow);
-    }
-}
-
-fn projectDurableNodes(
-    allocator: std.mem.Allocator,
-    wires: []const DurableWorkflowNodeWire,
-    workflow: *contract_types.DurableWorkflow,
-) !void {
-    try workflow.nodes.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const owned = try dupeWireStringPair(allocator, wire.id, wire.label);
-        var node = contract_types.DurableWorkflowNode{
-            .id = owned.first,
-            .kind = contract_types.DurableWorkflowNodeKind.fromString(wire.kind.bytes),
-            .label = owned.second,
-            .detail = null,
-            .status = null,
-        };
-        errdefer node.deinit(allocator);
-        node.detail = try dupeOptionalWireString(allocator, wire.detail);
-        if (wire.status) |status| {
-            node.status = status.value orelse return error.InvalidJson;
-        }
-        workflow.nodes.appendAssumeCapacity(node);
-    }
-}
-
-fn projectDurableEdges(
-    allocator: std.mem.Allocator,
-    wires: []const DurableWorkflowEdgeWire,
-    workflow: *contract_types.DurableWorkflow,
-) !void {
-    try workflow.edges.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        const owned = try dupeWireStringPair(allocator, wire.from, wire.to);
-        var edge = contract_types.DurableWorkflowEdge{
-            .from = owned.first,
-            .to = owned.second,
-            .condition = null,
-        };
-        errdefer edge.deinit(allocator);
-        edge.condition = try dupeOptionalWireString(allocator, wire.condition);
-        workflow.edges.appendAssumeCapacity(edge);
-    }
-}
-
-fn projectScope(
-    allocator: std.mem.Allocator,
-    wire: *const ScopeWire,
-    contract: *HandlerContract,
-) !void {
-    contract.scope.used = wire.used;
-    contract.scope.names = try projectStringList(allocator, wire.names);
-    contract.scope.dynamic = wire.dynamic;
-    contract.scope.max_depth = wire.maxDepth.value orelse 0;
 }
 
 fn projectApi(
@@ -1989,32 +1453,6 @@ fn projectIntent(
     contract.intent = intent;
 }
 
-fn projectSagas(
-    allocator: std.mem.Allocator,
-    wires: []const SagaWire,
-    contract: *HandlerContract,
-) !void {
-    try contract.sagas.ensureTotalCapacity(allocator, wires.len);
-    for (wires) |wire| {
-        var saga = contract_types.SagaCallInfo{
-            .dynamic = wire.dynamic,
-            .source_line = wire.sourceLine.value orelse 0,
-            .source_column = wire.sourceColumn.value orelse 0,
-        };
-        errdefer saga.deinit(allocator);
-        try saga.steps.ensureTotalCapacity(allocator, wire.steps.len);
-        for (wire.steps) |step_wire| {
-            const name = try dupeWireString(allocator, step_wire.name);
-            errdefer allocator.free(name);
-            saga.steps.appendAssumeCapacity(.{
-                .name = name,
-                .has_compensate = step_wire.hasCompensate,
-            });
-        }
-        contract.sagas.appendAssumeCapacity(saga);
-    }
-}
-
 fn projectBehaviors(
     allocator: std.mem.Allocator,
     wires: ?[]const BehaviorWire,
@@ -2242,16 +1680,9 @@ test "parseFromJson reads version 2 snake_case fields" {
         \\  "routes": [
         \\    { "pattern": "/orders", "type": "exact", "field": "path", "status": 202, "content_type": "application/json", "aot": true }
         \\  ],
-        \\  "modules": ["zttp:service"],
+        \\  "modules": ["zttp:fetch"],
         \\  "env": { "literal": ["TOKEN"], "dynamic": false },
-        \\  "egress": { "endpoints": ["api.example.com"], "urls": [], "dynamic": false },
-        \\  "service_calls": [{
-        \\    "service": "orders", "route": "POST /orders", "dynamic": false,
-        \\    "path_params": ["id"], "path_params_dynamic": false,
-        \\    "query_keys": [], "query_dynamic": false,
-        \\    "header_keys": [], "header_dynamic": false,
-        \\    "has_body": true, "body_dynamic": false
-        \\  }]
+        \\  "egress": { "endpoints": ["api.example.com"], "urls": [], "dynamic": false }
         \\}
     ;
 
@@ -2259,9 +1690,8 @@ test "parseFromJson reads version 2 snake_case fields" {
     defer contract.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 2), contract.version);
     try std.testing.expectEqualStrings("application/json", contract.routes.items[0].content_type);
-    try std.testing.expectEqual(@as(usize, 1), contract.service_calls.items.len);
-    try std.testing.expectEqualStrings("id", contract.service_calls.items[0].path_params.items()[0]);
-    try std.testing.expect(contract.service_calls.items[0].body.isPresent());
+    try std.testing.expectEqualStrings("zttp:fetch", contract.modules.items[0]);
+    try std.testing.expectEqualStrings("api.example.com", contract.egress.endpoints.items[0]);
 }
 
 test "parseFromJson still reads a version 1 document" {
@@ -2361,78 +1791,6 @@ const valid_agent_provider = "{\"endpoint\":\"https://api.example:443\",\"creden
 const valid_agent_limits = "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}";
 const valid_agent_credentials = "[{\"name\":\"provider\",\"endpoint\":\"https://api.example:443\"}]";
 
-test "agent contract JSON preserves every field and reachable export" {
-    const allocator = std.testing.allocator;
-    const json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials);
-    var contract = try parseFromJson(allocator, json);
-    defer contract.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
-    const entry = contract.tools.items[1];
-    const agent = entry.agent orelse return error.TestExpectedAgent;
-    try std.testing.expectEqualStrings("assistant", entry.name);
-    try std.testing.expectEqualStrings("", entry.input_schema_json);
-    try std.testing.expectEqual(@as(usize, 1), entry.reachable_exports.items.len);
-    try std.testing.expectEqualStrings("zttp:fetch", entry.reachable_exports.items[0].module);
-    try std.testing.expectEqualStrings("lookup", agent.tools.items[0]);
-    try std.testing.expectEqualStrings("https://api.example:443", agent.provider_endpoint);
-    try std.testing.expectEqualStrings("provider", agent.provider_credential);
-    try std.testing.expectEqual(@as(u32, 4), agent.limits.rounds);
-    try std.testing.expectEqual(@as(u32, 8), agent.limits.tool_calls);
-    try std.testing.expectEqual(@as(u32, 4), agent.limits.tool_calls_per_round);
-    try std.testing.expectEqual(@as(u32, 4096), agent.limits.argument_bytes);
-    try std.testing.expectEqual(@as(u32, 16384), agent.limits.result_bytes);
-    try std.testing.expectEqual(@as(u32, 20000), agent.limits.turn_deadline_ms);
-    try std.testing.expectEqual(@as(u32, 32768), agent.limits.provider_request_bytes);
-    try std.testing.checkAllAllocationFailures(allocator, parseAllocationFixture, .{json});
-}
-
-test "agent contract JSON refuses malformed fields and relations as an invalid catalog" {
-    const Case = struct { name: []const u8, json: []const u8 };
-    const cases = [_]Case{
-        .{ .name = "providerRequestBytes missing", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000}", "", "", valid_agent_credentials) },
-        .{ .name = "providerRequestBytes zero", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":0}", "", "", valid_agent_credentials) },
-        .{ .name = "providerRequestBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":8388609}", "", "", valid_agent_credentials) },
-        .{ .name = "providerRequestBytes non-integer", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":1.5}", "", "", valid_agent_credentials) },
-        .{ .name = "rounds", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":0,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCalls", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":0,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCallsPerRound relation", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":9,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "argumentBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":0,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "resultBytes", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":0,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "turnDeadlineMs", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":0,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "rounds maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":65,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCalls maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":257,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "toolCallsPerRound maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":256,\"toolCallsPerRound\":257,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "argumentBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":1048577,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "resultBytes maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":1048577,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "turnDeadlineMs maximum", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":600001,\"providerRequestBytes\":32768}", "", "", valid_agent_credentials) },
-        .{ .name = "empty tool name", .json = agentContractJson("[\"\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
-        .{ .name = "unknown tool", .json = agentContractJson("[\"missing\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
-        .{ .name = "agent tool", .json = agentContractJson("[\"assistant\"]", valid_agent_provider, valid_agent_limits, "", "", valid_agent_credentials) },
-        .{ .name = "scope", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, "", ",\"scope\":{}", valid_agent_credentials) },
-        .{ .name = "credential relation", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, "", "", "[{\"name\":\"other\",\"endpoint\":\"https://api.example:443\"}]") },
-        .{ .name = "unknown agent field", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, ",\"extra\":true", "", valid_agent_credentials) },
-        .{ .name = "version 2 limit spelling", .json = agentContractJson("[\"lookup\"]", valid_agent_provider, valid_agent_limits, ",\"tool_calls\":99999999999999999999", "", valid_agent_credentials) },
-    };
-    for (cases) |case| {
-        std.testing.expectError(error.InvalidToolCatalog, parseFromJson(std.testing.allocator, case.json)) catch |err| {
-            std.debug.print("agent case '{s}' returned the wrong result\n", .{case.name});
-            return err;
-        };
-    }
-    try std.testing.expectError(error.InvalidToolCatalog, parseFromJson(std.testing.allocator,
-        \\{"version":23,"handler":{"path":"agent.ts"},"tools":[{"name":"x","route":"POST /x","description":"x","maxInputBytes":1,"agent":null}]}
-    ));
-
-    const wrong_v1_limit_in_v2 =
-        \\{"version":2,"handler":{"path":"agent.ts"},"tools":[
-        \\{"name":"lookup","route":"POST /tools/lookup","description":"Lookup.","input_schema":{"name":"In","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"output_schema":{"name":"Out","json":"{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},"max_input_bytes":64,"reachable_exports":[]},
-        \\{"name":"assistant","route":"POST /agent","description":"Answer.","max_input_bytes":8192,"agent":{"tools":["lookup"],"provider":{"endpoint":"https://api.example:443","credential":"provider"},"limits":{"rounds":4,"tool_calls":8,"tool_calls_per_round":4,"argument_bytes":4096,"result_bytes":16384,"turn_deadline_ms":20000,"provider_request_bytes":32768,"toolCalls":99999999999999999999}},"reachable_exports":[],"credentials":[{"name":"provider","endpoint":"https://api.example:443"}]}
-        \\]}
-    ;
-    try std.testing.expectError(error.InvalidToolCatalog, parseFromJson(std.testing.allocator, wrong_v1_limit_in_v2));
-}
-
 test "parseFromJson compatibility matrix preserves legacy API response backfill" {
     const allocator = std.testing.allocator;
     const json =
@@ -2520,33 +1878,6 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     try std.testing.expect(contract.cache.dynamic);
     try std.testing.expectEqualStrings("sessions", contract.cache.namespaces.items[0]);
     try std.testing.expect(!(contract.properties orelse unreachable).no_secret_leakage);
-}
-
-test "parseFromJson accumulates repeated optional contract sections" {
-    const json =
-        \\{
-        \\  "sandbox": {"capabilities": ["clock"]},
-        \\  "sandbox": null,
-        \\  "sandbox": {"policyHash": "1111111111111111111111111111111111111111111111111111111111111111"},
-        \\  "durable": {"workflow": {"workflowId": "workflow.ts:handler"}},
-        \\  "durable": {"workflow": null},
-        \\  "durable": {"workflow": {"proofLevel": "complete"}},
-        \\  "behaviors": [{"method": "GET", "pattern": "/first"}],
-        \\  "behaviors": null,
-        \\  "behaviors": [{"method": "POST", "pattern": "/second"}]
-        \\}
-    ;
-    var contract = try parseFromJson(std.testing.allocator, json);
-    defer contract.deinit(std.testing.allocator);
-
-    const capabilities = contract.capabilities orelse unreachable;
-    try std.testing.expect(capabilities.has(.clock));
-    try std.testing.expectEqual(@as(u8, 0x11), contract.policy_hash[0]);
-    try std.testing.expectEqualStrings("workflow.ts:handler", contract.durable.workflow.workflow_id orelse unreachable);
-    try std.testing.expectEqual(contract_types.DurableWorkflowProofLevel.complete, contract.durable.workflow.proof_level);
-    try std.testing.expectEqual(@as(usize, 2), contract.behaviors.items.len);
-    try std.testing.expectEqualStrings("/first", contract.behaviors.items[0].route_pattern);
-    try std.testing.expectEqualStrings("/second", contract.behaviors.items[1].route_pattern);
 }
 
 test "parseFromJson keeps capability hashes scoped to one sandbox object" {
@@ -2675,22 +2006,68 @@ test "parseFromJson cleans every allocation failure" {
     );
 }
 
-test "parseFromJson cleans every allocation failure in the tool catalog" {
-    const json =
-        \\{
-        \\  "handler": {"path": "tool.ts"},
-        \\  "tools": [{
-        \\    "name": "lookup", "route": "POST /t", "description": "line one\nline two",
-        \\    "inputSchema": {"name": "In", "json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":4}}}"},
-        \\    "outputSchema": {"name": "Out", "json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"},
-        \\    "maxInputBytes": 64,
-        \\    "reachableExports": [{"module": "zttp:fetch", "name": "fetch"}, {"module": "zttp:validate", "name": "validateJson"}]
-        \\  }]
-        \\}
-    ;
-    var contract = try parseFromJson(std.testing.allocator, json);
-    defer contract.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("lookup", contract.tools.items[0].name);
-    try std.testing.expectEqualStrings("line one\nline two", contract.tools.items[0].description);
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, parseAllocationFixture, .{json});
+test "parseFromJson rejects meaningful retired authority fields" {
+    const cases = [_][]const u8{
+        "{\"serviceCalls\":[{}]}",
+        "{\"workflowCalls\":[{}]}",
+        "{\"affordances\":[{}]}",
+        "{\"affordancesDynamic\":true}",
+        "{\"tools\":[{}]}",
+        "{\"classifications\":[{}]}",
+        "{\"sagas\":[{}]}",
+        "{\"durable\":{\"used\":true}}",
+        "{\"scope\":{\"used\":true}}",
+    };
+    for (cases) |json| {
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            parseFromJson(std.testing.allocator, json),
+        );
+    }
+}
+
+test "parseFromJson rejects retired presence-sensitive fields" {
+    const cases = [_][]const u8{
+        "{\"toolAuth\":{}}",
+        "{\"credentials\":[]}",
+        "{\"ceiling\":{}}",
+        "{\"sourceIdentity\":{\"frontend\":{}}}",
+    };
+    for (cases) |json| {
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            parseFromJson(std.testing.allocator, json),
+        );
+    }
+}
+
+test "parseFromJson accepts empty retired compatibility placeholders" {
+    const cases = [_][]const u8{
+        "{\"serviceCalls\":[],\"workflowCalls\":[],\"affordances\":[],\"tools\":[],\"classifications\":[],\"sagas\":[],\"durable\":{\"used\":false,\"keys\":{\"literal\":[],\"dynamic\":false},\"steps\":[],\"timers\":false,\"signals\":{\"literal\":[],\"dynamic\":false},\"producerKeys\":{\"literal\":[],\"dynamic\":false},\"workflow\":{\"workflowId\":null,\"proofLevel\":\"none\",\"properties\":{\"retrySafe\":false,\"idempotent\":false,\"faultCovered\":false,\"reasons\":[]},\"nodes\":[],\"edges\":[]}},\"scope\":{\"used\":false,\"names\":[],\"dynamic\":false,\"maxDepth\":0}}",
+        "{\"version\":2,\"service_calls\":[],\"workflow_calls\":[],\"affordances\":[],\"tools\":[],\"classifications\":[],\"sagas\":[],\"durable\":{\"used\":false,\"keys\":{\"literal\":[],\"dynamic\":false},\"steps\":[],\"timers\":false,\"signals\":{\"literal\":[],\"dynamic\":false},\"producer_keys\":{\"literal\":[],\"dynamic\":false},\"workflow\":{\"workflow_id\":null,\"proof_level\":\"none\",\"properties\":{\"retry_safe\":false,\"idempotent\":false,\"fault_covered\":false,\"reasons\":[]},\"nodes\":[],\"edges\":[]}},\"scope\":{\"used\":false,\"names\":[],\"dynamic\":false,\"max_depth\":0}}",
+    };
+    for (cases) |json| {
+        var contract = try parseFromJson(std.testing.allocator, json);
+        contract.deinit(std.testing.allocator);
+    }
+}
+
+test "parseFromJson rejects every nondefault retired workflow and scope field" {
+    const cases = [_][]const u8{
+        "{\"durable\":{\"used\":false,\"timers\":true}}",
+        "{\"durable\":{\"used\":false,\"keys\":{\"literal\":[\"k\"]}}}",
+        "{\"durable\":{\"used\":false,\"workflow\":{\"workflowId\":\"id\"}}}",
+        "{\"durable\":{\"used\":false,\"workflow\":{\"proofLevel\":\"complete\"}}}",
+        "{\"durable\":{\"used\":false,\"workflow\":{\"properties\":{\"retrySafe\":true}}}}",
+        "{\"durable\":{\"used\":false,\"workflow\":{\"properties\":{\"reasons\":[\"reason\"]}}}}",
+        "{\"durable\":{\"used\":false,\"workflow\":{\"nodes\":[{}]}}}",
+        "{\"durable\":{\"used\":false,\"workflow\":{\"edges\":[{}]}}}",
+        "{\"scope\":{\"used\":false,\"maxDepth\":1}}",
+    };
+    for (cases) |json| {
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            parseFromJson(std.testing.allocator, json),
+        );
+    }
 }

@@ -52,9 +52,7 @@ layer, with its `--audit` flag and the `ZTTP_Z3` variable, was removed in plan
 `pre-rebase:packages/zts/src/semantics_audit.zig`, and
 `pre-rebase:packages/tools/src/smt_solver.zig`.
 
-The diagnostic codes `ZTS755` to `ZTS760` named failures of that layer. They
-remain in the catalog because removing them would change the diagnostic hash.
-No producer emits them now.
+Phase 3 removed the dead diagnostic codes for that retired layer.
 
 ## The Release Gate
 

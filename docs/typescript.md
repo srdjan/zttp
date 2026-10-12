@@ -1,6 +1,6 @@
 # TypeScript Support
 
-zttp includes native TypeScript and TSX support through two features: a type stripper that removes type annotations at load time, and a compile-time evaluator for the `comptime()` function.
+zttp supports a restricted TypeScript profile. A type stripper removes supported type annotations before parsing.
 
 Strict ZigTS is the default profile. Named functions must carry explicit
 parameter and return annotations, `any` is rejected, capability access
@@ -189,19 +189,6 @@ These produce clear error messages at strip or parse time:
 | `implements` | Parser | Use duck typing or runtime checks |
 | `@decorator` syntax | Parser | Use function composition |
 | Access modifiers (`public`, `private`, `protected`) | Parser | Use naming conventions |
-
-### TSX Handling
-
-`.tsx` selects the versioned `zts-tsx-1` frontend. It strips type annotations,
-lowers elements, fragments, attributes, component references, text, and
-expression children to ordinary `h(tag, props, ...children)` calls, and then
-passes only core syntax to the parser. Its source map composes with the type
-stripper map, so diagnostics still point into the authored `.tsx` file.
-
-Angle-bracket type assertions (`<T>expr`) are disallowed in TSX to avoid JSX
-ambiguity. `.jsx` is not an alternate frontend and is refused with ZTS052.
-
----
 
 ## Type Checking
 
@@ -651,69 +638,7 @@ compiler.
 
 ---
 
-## Compile-Time Evaluation
-
-The `comptime()` function (`packages/zts/src/comptime.zig`) evaluates expressions at compile time and replaces them with literal values. It integrates with the type stripper as a pre-parse transformation.
-
-### Usage
-
-```typescript
-const x = comptime(1 + 2 * 3);                 // -> const x = 7;
-const upper = comptime("hello".toUpperCase()); // -> const upper = "HELLO";
-const etag = comptime(hash("content-v1"));     // -> const etag = "a1b2c3d4";
-const pi = comptime(Math.PI);                  // -> const pi = 3.141592653589793;
-const cfg = comptime({ timeout: 30 });         // -> const cfg = ({timeout:30});
-const region = comptime(Env.AWS_REGION);       // -> const region = "us-east-1";
-```
-
-### Supported Operations
-
-**Literals**: number, string, boolean, `null`, `undefined`, `NaN`, `Infinity`
-
-**Operators**: `+ - * / % **`, `| & ^ << >> >>>`, `== != === !== < <= > >=`, `&& || ??`, `? :`, `+ - ! ~` (unary)
-
-**Arrays and objects**: `[1, 2, 3]`, `{ a: 1, b: "x" }` (comptime values only)
-
-**Math constants**: `Math.PI`, `Math.E`, `Math.LN2`, `Math.LN10`, `Math.LOG2E`, `Math.LOG10E`, `Math.SQRT2`, `Math.SQRT1_2`
-
-**Math functions**: `abs`, `floor`, `ceil`, `round`, `trunc`, `sqrt`, `cbrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `log`, `log2`, `log10`, `exp`, `pow`, `min`, `max`, `sign`, `clz32`, `imul`, `fround`, `hypot`
-
-**String properties**: `length`
-
-**String methods**: `toUpperCase()`, `toLowerCase()`, `trim()`, `trimStart()`, `trimEnd()`, `slice()`, `substring()`, `includes()`, `startsWith()`, `endsWith()`, `indexOf()`, `charAt()`, `split()`, `repeat()`, `replace()`, `replaceAll()`, `padStart()`, `padEnd()`
-
-**Built-in functions**: `parseInt()`, `parseFloat()`, `JSON.parse()`, `hash()` (FNV-1a, returns 8-char hex)
-
-**Environment variables**: `Env.VARNAME` (configured via `StripOptions.comptime_env`)
-
-**Build metadata**: `__BUILD_TIME__`, `__GIT_COMMIT__`, `__VERSION__`
-
-### Disallowed Operations
-
-Variables, arbitrary function calls, `Date.now()`, `Math.random()`, `new`, `this`, `eval`, assignments, loops, closures.
-
-### Error Types
-
-| Error | Description |
-|-------|-------------|
-| `ComptimeUnsupportedOp` | Operation not supported in comptime context |
-| `ComptimeUnknownIdentifier` | Variable/function not whitelisted |
-| `ComptimeCallNotAllowed` | Function call not allowed (e.g., `Math.random()`) |
-| `ComptimeSyntaxError` | Syntax error in comptime expression |
-| `ComptimeDepthExceeded` | Expression nesting too deep (max 64) |
-| `ComptimeExpressionTooLong` | Expression exceeds 8KB limit |
-| `ComptimeTypeMismatch` | Type error (e.g., string op on number) |
-
-Division by zero is not an error. `comptime(1 / 0)` folds to `Infinity`, the same
-value the expression produces at runtime.
-
-### Performance Guards
-
-- Max expression length: 8KB
-- Max AST depth: 64
-
----
-
+A declared function named `comptime` behaves like any other function. An unbound `comptime` call reports the normal unresolved-name diagnostic.
 ## TypeScript Patterns In The zts Subset
 
 The community list ["TypeScript Tips Everyone Should
@@ -1103,10 +1028,8 @@ not worth trading for it.
 
 ### Files
 
-- `packages/zts/src/stripper.zig` - Type stripper with comptime integration
-- `packages/zts/src/comptime.zig` - Compile-time expression evaluator (~2000 lines)
-- `StripOptions` controls features: `tsx_mode`, `enable_comptime`, `comptime_env`
+- `packages/zts/src/stripper.zig` - TypeScript stripper and source map.
 
 ### Build-Time Integration
 
-The stripper runs as a prepass for `.ts` and `.tsx` sources before zts parsing. Runtime parser receives JS-only output. Enable comptime via `StripOptions.enable_comptime`.
+The stripper runs as a prepass for `.ts` sources before zts parsing. The runtime parser receives stripped output.

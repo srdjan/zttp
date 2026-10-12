@@ -72,7 +72,6 @@ pub const Result = union(enum) {
 
 const ContextPaths = struct {
     schema_relative: ?[]u8 = null,
-    system_relative: ?[]u8 = null,
     /// The project's capability policy, if it declares one. Held relative to
     /// the workspace root like the other two, so baseline and candidate each
     /// read the copy inside their own materialized snapshot rather than a path
@@ -81,7 +80,6 @@ const ContextPaths = struct {
 
     fn deinit(self: *ContextPaths, allocator: std.mem.Allocator) void {
         if (self.schema_relative) |path| allocator.free(path);
-        if (self.system_relative) |path| allocator.free(path);
         if (self.policy_relative) |path| allocator.free(path);
         self.* = .{};
     }
@@ -109,7 +107,7 @@ pub fn prove(
     var baseline = try snapshot.materializeBaseline(allocator);
     defer baseline.deinit();
 
-    const roots = discoverProofRoots(allocator, prepared, &candidate, context.system_relative) catch |err| {
+    const roots = discoverProofRoots(allocator, prepared, &candidate) catch |err| {
         if (err == error.OutOfMemory) return err;
         return rejectedFmt(allocator, "proof_roots_failed", "aggregate proof roots failed: {s}", .{@errorName(err)});
     };
@@ -135,10 +133,6 @@ pub fn prove(
         defer if (before_schema) |path| allocator.free(path);
         const after_schema = try mappedOptionalPath(allocator, &candidate, context.schema_relative);
         defer if (after_schema) |path| allocator.free(path);
-        const before_system = try mappedOptionalPath(allocator, &baseline, context.system_relative);
-        defer if (before_system) |path| allocator.free(path);
-        const after_system = try mappedOptionalPath(allocator, &candidate, context.system_relative);
-        defer if (after_system) |path| allocator.free(path);
         const before_policy = mappedPolicySource(allocator, &baseline, context.policy_relative) catch |err| {
             if (err == error.OutOfMemory) return err;
             return rejectedFmt(
@@ -167,7 +161,6 @@ pub fn prove(
                 baseline.root,
                 before_path,
                 before_schema,
-                before_system,
                 before_policy,
             ) catch |err| {
                 if (err == error.OutOfMemory) return err;
@@ -181,7 +174,6 @@ pub fn prove(
             candidate.root,
             after_path,
             after_schema,
-            after_system,
             after_policy,
         ) catch |err| {
             if (err == error.OutOfMemory) return err;
@@ -199,21 +191,9 @@ pub fn prove(
         );
     }
 
-    var system_proven = false;
-    if (context.system_relative) |relative_system| {
-        const system_path = try candidate.pathFor(allocator, relative_system);
-        defer allocator.free(system_path);
-        var compiled = zts_cli.system_analysis.loadCompiledSystem(allocator, system_path) catch |err| {
-            if (err == error.OutOfMemory) return err;
-            return rejectedFmt(allocator, "system_proof_failed", "aggregate system proof failed: {s}", .{@errorName(err)});
-        };
-        compiled.deinit(allocator);
-        system_proven = true;
-    }
-
     const policy_hash = zts.policyHash();
     const read_set_digest = digestReadSet(snapshot);
-    const proof_id = digestProof(prepared, snapshot, roots, system_proven);
+    const proof_id = digestProof(prepared, snapshot, roots, false);
     const owned_diagnostics = try candidate_diagnostics.toOwnedSlice(allocator);
     roots_owned = false;
     return .{ .accepted = .{
@@ -222,7 +202,7 @@ pub fn prove(
         .read_set_digest = read_set_digest,
         .proof_roots = roots,
         .diagnostics = owned_diagnostics,
-        .system_proven = system_proven,
+        .system_proven = false,
         .baseline_primary_properties = baseline_primary_properties,
         .primary_properties = primary_properties,
     } };
@@ -285,17 +265,13 @@ fn discoverConsistentContext(
         defer paths.deinit(allocator);
         const schema_relative = try relativeOptionalContext(allocator, candidate.root, paths.sqlite);
         defer if (schema_relative) |path| allocator.free(path);
-        const system_relative = try relativeOptionalContext(allocator, candidate.root, paths.system);
-        defer if (system_relative) |path| allocator.free(path);
         const policy_relative = try relativeOptionalContext(allocator, candidate.root, paths.policy);
         defer if (policy_relative) |path| allocator.free(path);
         if (index == 0) {
             result.schema_relative = if (schema_relative) |path| try allocator.dupe(u8, path) else null;
-            result.system_relative = if (system_relative) |path| try allocator.dupe(u8, path) else null;
             result.policy_relative = if (policy_relative) |path| try allocator.dupe(u8, path) else null;
         } else {
             if (!optionalEqual(result.schema_relative, schema_relative)) return error.InconsistentSqlContext;
-            if (!optionalEqual(result.system_relative, system_relative)) return error.InconsistentSystemContext;
             if (!optionalEqual(result.policy_relative, policy_relative)) return error.InconsistentPolicyContext;
         }
     }
@@ -334,7 +310,6 @@ fn discoverProofRoots(
     allocator: std.mem.Allocator,
     prepared: *const change_set.PreparedChangeSet,
     candidate: *const workspace_snapshot.Materialized,
-    system_relative: ?[]const u8,
 ) ![][]u8 {
     var roots: std.ArrayList([]u8) = .empty;
     errdefer {
@@ -352,22 +327,6 @@ fn discoverProofRoots(
         const entry = try config.resolvedEntry(allocator);
         defer allocator.free(entry);
         if (fileExists(allocator, entry)) try appendRelativeRoot(allocator, &roots, candidate.root, entry);
-    }
-
-    if (system_relative) |relative_system| {
-        const system_path = try candidate.pathFor(allocator, relative_system);
-        defer allocator.free(system_path);
-        const system_bytes = try zts.file_io.readFile(allocator, system_path, 1024 * 1024);
-        defer allocator.free(system_bytes);
-        var system = try zts.parseSystemConfig(allocator, system_bytes);
-        defer system.deinit(allocator);
-        const system_dir = std.fs.path.dirname(system_path) orelse candidate.root;
-        for (system.handlers) |handler| {
-            if (std.fs.path.isAbsolute(handler.path)) return error.AbsoluteSystemHandlerUnsupported;
-            const handler_path = try std.fs.path.resolve(allocator, &.{ system_dir, handler.path });
-            defer allocator.free(handler_path);
-            try appendRelativeRoot(allocator, &roots, candidate.root, handler_path);
-        }
     }
 
     if (roots.items.len == 0) {
@@ -451,13 +410,11 @@ fn collectCheckDiagnostics(
     materialized_root: []const u8,
     handler_path: []const u8,
     schema_path: ?[]const u8,
-    system_path: ?[]const u8,
     policy_source: ?[]const u8,
 ) !?ui_payload.PropertiesSnapshot {
     var check = zts_cli.precompile.runCheckOnlyWithOptions(allocator, handler_path, .{
         .sql_schema_path = schema_path,
         .json_mode = true,
-        .system_path = system_path,
         .policy_source = policy_source,
     }) catch |full_error| {
         const source = try zts.file_io.readFile(allocator, handler_path, change_set.max_file_bytes);
@@ -469,7 +426,6 @@ fn collectCheckDiagnostics(
             .{
                 .sql_schema_path = schema_path,
                 .json_mode = true,
-                .system_path = system_path,
                 .skip_contract = true,
                 .policy_source = policy_source,
             },

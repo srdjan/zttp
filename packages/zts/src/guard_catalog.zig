@@ -185,8 +185,8 @@ pub const Disposition = union(enum) {
     /// policy section cannot express what the sink enforces.
     family_not_enabled: Entry,
     /// No catalog row: nothing at the sink decides this resource, so no policy
-    /// edit makes it checkable. A service call, a registered SQL statement, the
-    /// raw `fetchSync`.
+    /// edit makes it checkable. A registered SQL statement or raw `fetchSync`
+    /// call has this disposition.
     unguarded_surface,
 };
 
@@ -269,7 +269,6 @@ test "classification is exhaustive over the surface" {
 
     // Not carried at all: no policy edit makes these checkable.
     for ([_][2][]const u8{
-        .{ "zttp:service", "serviceCall" },
         .{ "zttp:sql", "sql" },
         .{ "zttp:fetch", "fetchSync" },
         .{ "zttp:unknown", "whatever" },
@@ -320,7 +319,6 @@ test "a row is found by module, export, and argument position together" {
     try testing.expect(lookup("zttp:cache", "cacheIncr", 1) == null);
     // Registering a statement is not executing a named query.
     try testing.expect(lookup("zttp:sql", "sql", 0) == null);
-    try testing.expect(lookup("zttp:service", "serviceCall", 0) == null);
     try testing.expect(guardsAnyArgument("zttp:fetch", "fetchWithRetry"));
     try testing.expect(!guardsAnyArgument("zttp:fetch", "fetchSync"));
 }

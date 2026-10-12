@@ -38,11 +38,6 @@ production-branch-metric-json measurement
 # release maintainer runs it explicitly after deciding to recalibrate.
 bench-record release-operation
 
-# Spends real model time against a live provider. `expert-qualification`
-# consumes three report-only live runs and edits no default; running it on
-# every build would bill every build.
-expert-qualification manual-model-spend
-
 # Needs a local MLX server, which this project never starts or manages. The
 # absence from the aggregate step is stated at its definition in build/host_tests.zig.
 test-expert-mlx-e2e needs-local-server

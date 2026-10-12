@@ -24,7 +24,6 @@ pub const platform = struct {
 
 pub const http = struct {
     pub const router = @import("http/router.zig");
-    pub const tool = @import("http/tool.zig");
     pub const url = @import("http/url.zig");
     pub const http_mod = @import("http/http_mod.zig");
 };
@@ -33,16 +32,12 @@ pub const data = struct {
     pub const ratelimit = @import("data/ratelimit.zig");
     pub const cache = @import("data/cache.zig");
     pub const sql = @import("data/sql.zig");
-    pub const ledger = @import("data/ledger.zig");
 };
 
 pub const net = struct {
     pub const fetch = @import("net/fetch.zig");
-    pub const service = @import("net/service.zig");
     pub const sse = @import("net/sse.zig");
 };
-
-pub const workflow = struct {};
 
 pub const catalog = struct {
     pub const crypto = security.crypto.binding;
@@ -57,17 +52,14 @@ pub const catalog = struct {
     pub const log = platform.log.binding;
 
     pub const router = http.router.binding;
-    pub const tool = http.tool.binding;
     pub const url = http.url.binding;
     pub const http_mod = http.http_mod.binding;
 
     pub const ratelimit = data.ratelimit.binding;
     pub const cache = data.cache.binding;
     pub const sql = data.sql.binding;
-    pub const ledger = data.ledger.binding;
 
     pub const fetch = net.fetch.binding;
-    pub const service = net.service.binding;
     pub const sse = net.sse.binding;
 };
 
@@ -82,15 +74,12 @@ pub const all_bindings = [_]sdk.ModuleBinding{
     catalog.time,
     catalog.log,
     catalog.router,
-    catalog.tool,
     catalog.url,
     catalog.http_mod,
     catalog.ratelimit,
     catalog.cache,
     catalog.sql,
-    catalog.ledger,
     catalog.fetch,
-    catalog.service,
     catalog.sse,
 };
 
@@ -111,14 +100,11 @@ test {
     _ = platform.time;
     _ = platform.log;
     _ = http.router;
-    _ = http.tool;
     _ = http.url;
     _ = http.http_mod;
     _ = data.ratelimit;
     _ = data.cache;
     _ = data.sql;
-    _ = data.ledger;
     _ = net.fetch;
-    _ = net.service;
     _ = net.sse;
 }

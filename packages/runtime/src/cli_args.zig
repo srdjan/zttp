@@ -16,7 +16,7 @@ pub const cloud_only_deploy_flags = [_][]const u8{ "--region", "--confirm", "--w
 /// Comma-separated list of template names accepted by `zttp init
 /// --template`. Used in both the help text and the preflight error
 /// message so the two stay in sync.
-pub const template_choices = "basic, api, htmx";
+pub const template_choices = "basic, api";
 
 pub fn hasHelpFlag(argv: []const []const u8) bool {
     for (argv) |arg| {

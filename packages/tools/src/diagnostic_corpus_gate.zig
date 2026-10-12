@@ -1,7 +1,7 @@
 //! Golden diagnostic corpus gate (Tier 1, R2).
 //!
-//! Every case under `tests/corpus/{parse,check}/{good,bad}/NAME.ts` (or
-//! `.tsx`) is run through the same in-process check that `zts check --json`
+//! Every case under `tests/corpus/{parse,check}/{good,bad}/NAME.ts` is run
+//! through the same in-process check that `zts check --json`
 //! uses, and its result is compared byte for byte against `NAME.diag`.
 //!
 //! A golden records two things. The first line lists the analysis stages that
@@ -50,10 +50,8 @@
 //! everything. The unit tests at the bottom probe every `FailureKind` through
 //! a scratch corpus, and a census test requires that every member is probed.
 //!
-//! The check runs with `persist_witnesses = false`, so a gate run writes no
-//! `.zttp/witnesses` into the working tree. It reads neither `zttp.json` nor
-//! `.zttp/witnesses`: `runCheckOnlyFromSourceWithOptions` takes its policy,
-//! declaration and schema from its options, and the gate passes none.
+//! The check reads no `zttp.json`. `runCheckOnlyFromSourceWithOptions` takes
+//! policy, declaration, and schema inputs directly. The gate passes none.
 
 const std = @import("std");
 const precompile = @import("precompile.zig");
@@ -63,7 +61,8 @@ const zts = @import("zts");
 /// The number of cases committed under `tests/corpus`. The gate fails below
 /// it, so deleting a case fails. Raise it in the commit that adds cases, to
 /// the count the gate prints. Never lower it to make a deletion pass.
-pub const minimum_cases: usize = 190;
+// The unfiltered Phase 3 run measured 182 retained cases.
+pub const minimum_cases: usize = 182;
 
 const corpus_root = "tests/corpus";
 const max_file_bytes = 1024 * 1024;
@@ -82,7 +81,6 @@ const good_stages: precompile.StageSet = blk: {
 pub const FailureKind = enum {
     layout,
     unexpected_file,
-    duplicate_name,
     below_floor,
     empty_family,
     filter_matched_nothing,
@@ -117,13 +115,11 @@ pub const Failure = struct {
 
 pub const CheckFn = *const fn (gpa: std.mem.Allocator, source: []const u8, handler_path: []const u8) anyerror!precompile.CheckResult;
 
-/// The same call `zts check --json` makes, with witness persistence off and no
-/// policy, declaration, schema or system path: nothing is read from
-/// `zttp.json`, and nothing is written under `.zttp/`.
+/// The same call `zts check --json` makes without project policy,
+/// declaration, or schema inputs.
 fn defaultCheck(gpa: std.mem.Allocator, source: []const u8, handler_path: []const u8) anyerror!precompile.CheckResult {
     return precompile.runCheckOnlyFromSourceWithOptions(gpa, source, handler_path, .{
         .json_mode = true,
-        .persist_witnesses = false,
     });
 }
 
@@ -317,10 +313,10 @@ fn discover(
         }
         if (count == 1 and std.mem.eql(u8, path, "README.md")) continue;
         const split = splitName(entry.basename);
-        const is_source = if (split) |s| std.mem.eql(u8, s.ext, ".ts") or std.mem.eql(u8, s.ext, ".tsx") else false;
+        const is_source = if (split) |s| std.mem.eql(u8, s.ext, ".ts") else false;
         const is_golden = if (split) |s| std.mem.eql(u8, s.ext, ".diag") else false;
         if (!is_source and !is_golden) {
-            try report.add(.unexpected_file, path, "only NAME.ts, NAME.tsx, NAME.diag and a root README.md belong in the corpus", .{});
+            try report.add(.unexpected_file, path, "only NAME.ts, NAME.diag and a root README.md belong in the corpus", .{});
             continue;
         }
         const family = if (!overflow and count == 3) std.meta.stringToEnum(Family, parts[0]) else null;
@@ -349,10 +345,6 @@ fn discover(
             return std.mem.lessThan(u8, lhs.source_path, rhs.source_path);
         }
     }.lessThan);
-}
-
-fn sameName(a: Case, b: Case) bool {
-    return a.family == b.family and a.kind == b.kind and std.mem.eql(u8, a.name, b.name);
 }
 
 fn renderGolden(
@@ -673,13 +665,6 @@ pub fn runCorpus(gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir, options: 
         }
     }
 
-    for (cases.items, 0..) |case, i| {
-        for (cases.items[0..i]) |earlier| {
-            if (sameName(earlier, case)) {
-                try report.add(.duplicate_name, case.source_path, "shares the golden {s} with {s}", .{ case.golden_path, earlier.source_path });
-            }
-        }
-    }
     for (goldens.items) |golden| {
         var has_source = false;
         for (cases.items) |case| {
@@ -688,7 +673,7 @@ pub fn runCorpus(gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir, options: 
                 break;
             }
         }
-        if (!has_source) try report.add(.orphan_golden, golden.path, "no NAME.ts or NAME.tsx beside this golden", .{});
+        if (!has_source) try report.add(.orphan_golden, golden.path, "no NAME.ts beside this golden", .{});
     }
 
     // A budget row for a path that is not a case, or one without a stated
@@ -1011,10 +996,6 @@ fn probe(kind: FailureKind) !void {
             try writeScratch(dir, "check/bad/notes.txt", "x");
             try expectFailure(dir, base, kind);
         },
-        .duplicate_name => {
-            try writeScratch(dir, "check/bad/c.tsx", check_bad_source);
-            try expectFailure(dir, base, kind);
-        },
         .below_floor => try expectFailure(dir, .{ .floor = 5 }, kind),
         .empty_family => {
             try dir.deleteFile(testing.io, "check/good/g.ts");
@@ -1323,28 +1304,6 @@ test "a filter selects cases and leaves the rest unrun" {
     try testing.expectEqual(@as(usize, 0), report.failures.items.len);
     try testing.expectEqual(@as(usize, 1), report.cases_run);
     try testing.expectEqual(@as(usize, 4), report.cases_found);
-}
-
-test "a check run leaves no witness corpus in the working tree" {
-    // A flow leak is what makes the check want to persist a witness. With
-    // persistence off, the directory named for this handler path must not
-    // appear. The path is relative, so a stray write lands in the test's cwd.
-    const leak =
-        \\import { env } from "zttp:env";
-        \\
-        \\function handler(req: Request): Response {
-        \\    const secret = env("API_KEY") ?? "";
-        \\    return Response.json({ leaked: secret });
-        \\}
-        \\
-    ;
-    const handler_path = "witness-probe/handler.ts";
-    var result = try defaultCheck(testing.allocator, leak, handler_path);
-    defer result.deinit(testing.allocator);
-    try testing.expect(result.stages_run.contains(.flow));
-    const corpus_dir = try zts.witness_corpus.corpusDir(testing.allocator, handler_path);
-    defer testing.allocator.free(corpus_dir);
-    try testing.expectError(error.FileNotFound, std.Io.Dir.cwd().access(testing.io, corpus_dir, .{}));
 }
 
 test "on the CPU-time source the gate reports a cost and fails nothing" {

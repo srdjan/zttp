@@ -130,6 +130,10 @@ convergence_source="$cli_root/convergence-source.md"
 printf '%s\n' \
   '# Convergence' \
   '' \
+  '## Repeatability' \
+  '' \
+  'Retired qualification fixture.' \
+  '' \
   '## Results' \
   '' \
   '| Recorded | Commit | Corpus | Cases | Provider | Model | Policy | Raw first-draft pass | First-attempt green | Median round-trips | Intent pass |' \
@@ -149,6 +153,10 @@ if ! "$publisher_binary" convergence \
 fi
 if [[ ! -s "$valid_convergence_json" || ! -s "$valid_convergence_md" ]]; then
   echo "evidence marker test: valid convergence CLI fixture wrote an empty output" >&2
+  exit 1
+fi
+if grep -q -F 'Retired qualification fixture.' "$valid_convergence_md"; then
+  echo "evidence marker test: convergence retained the qualification section" >&2
   exit 1
 fi
 public_cli_checks=$((public_cli_checks + 1))

@@ -120,30 +120,17 @@ pub const ContractCategory = enum {
     env,
     cache_namespace,
     sql_registration,
-    scope_name,
-    durable_key,
-    durable_step,
-    durable_signal,
-    durable_producer_key,
     schema_compile,
     request_schema,
     route_pattern,
     cookie_name,
     cors_origin,
     rate_limit_key,
-    service_call,
     fetch_host,
-    // A zttp:workflow call/saga/fanout target: a named co-located
-    // sub-handler dispatched in-process.
-    workflow_call,
     // Partner-declared category. The actual tag string lives on
     // ContractExtraction.extension_category and is keyed under
     // contract.json's extensions.<specifier>.categories.
     extension_specific,
-    // A zttp:tool catalog declaration: the literal argument becomes the
-    // contract's tool catalog. Built-in only; a partner manifest cannot
-    // declare it.
-    tool_catalog,
 };
 
 pub const ContractTransform = enum {
@@ -160,9 +147,6 @@ pub const ContractExtraction = struct {
 };
 
 pub const ContractFlags = struct {
-    sets_scope_used: bool = false,
-    sets_durable_used: bool = false,
-    sets_durable_timers: bool = false,
     sets_bearer_auth: bool = false,
     sets_jwt_auth: bool = false,
 };
@@ -318,8 +302,6 @@ pub const ModuleBinding = struct {
     state_deinit: ?*const fn (*anyopaque, std.mem.Allocator) void = null,
     contract_section: ?[]const u8 = null,
     sandboxable: bool = false,
-    comptime_only: bool = false,
-    self_managed_io: bool = false,
 };
 
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {

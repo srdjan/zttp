@@ -14,9 +14,7 @@ comptime {
     _ = @import("tools/zts_expert_normalize.zig");
     _ = @import("tools/zts_expert_holes.zig");
     _ = @import("tools/zts_expert_fill_hole.zig");
-    _ = @import("tools/zts_expert_review_patch.zig");
     _ = @import("tools/zts_expert_prove_patch.zig");
-    _ = @import("tools/zts_expert_system_proof.zig");
     _ = @import("tools/zts_expert_verify_modules.zig");
     _ = @import("tools/zts_agent_client.zig");
     _ = @import("tools/common.zig");
@@ -24,18 +22,13 @@ comptime {
     _ = @import("tools/workspace_read_file.zig");
     _ = @import("tools/workspace_search_text.zig");
     _ = @import("tools/zts_check.zig");
-    _ = @import("tools/zig_build_step.zig");
-    _ = @import("tools/zig_test_step.zig");
     _ = @import("tools/gen_tests.zig");
     _ = @import("tools/pi_goal_check.zig");
     _ = @import("tools/pi_goal_candidate.zig");
     _ = @import("tools/pi_repair_plan.zig");
     _ = @import("tools/pi_apply_repair_plan.zig");
     _ = @import("tools/zts_expert_ast_rewrite.zig");
-    _ = @import("tools/pi_remember_fact.zig");
-    _ = @import("tools/pi_recall_facts.zig");
     _ = @import("tools/repair_apply.zig");
-    _ = @import("memory_store.zig");
     _ = @import("repl.zig");
     _ = @import("commands.zig");
     _ = @import("turn.zig");
@@ -53,8 +46,6 @@ comptime {
     _ = @import("expert_eval.zig");
     _ = @import("expert_codegen_eval.zig");
     _ = @import("expert_evidence_identity.zig");
-    _ = @import("expert_failure_analysis.zig");
-    _ = @import("expert_qualification.zig");
     _ = @import("expert_security_probes.zig");
     _ = @import("expert_codegen_record.zig");
     _ = @import("auto_repair.zig");

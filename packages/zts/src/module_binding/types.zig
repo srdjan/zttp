@@ -121,9 +121,8 @@ pub const FailureSeverity = enum {
     critical,
     /// Cache miss, missing env, route not matched - 2xx is fine.
     expected,
-    /// External service or tool failure (`fetch`, `serviceCall`, `workflow.call`,
-    /// `callTool`) - 2xx is informational: the
-    /// site stays covered and the trace reports it in `upstreamFallbackSites`.
+    /// External network failure (`fetch`) - 2xx is informational. The site
+    /// stays covered, and the trace reports it in `upstreamFallbackSites`.
     upstream,
     /// The checker does not count this function. Some `none` exports can still
     /// fail with `false` or `undefined`; see the census above.
@@ -244,30 +243,17 @@ pub const ContractCategory = enum {
     env,
     cache_namespace,
     sql_registration,
-    scope_name,
-    durable_key,
-    durable_step,
-    durable_signal,
-    durable_producer_key,
     schema_compile,
     request_schema,
     route_pattern,
     cookie_name,
     cors_origin,
     rate_limit_key,
-    service_call,
     fetch_host,
-    /// A `zttp:workflow` `call`/`saga`/`fanout` target: a named co-located
-    /// sub-handler dispatched in-process. See `WorkflowCallInfo`.
-    workflow_call,
     /// Partner-declared category. The actual tag string lives on
     /// `ContractExtraction.extension_category` and is emitted under
     /// `contract.json` at `extensions.<specifier>.categories`.
     extension_specific,
-    /// A `zttp:tool` catalog declaration: the literal argument becomes the
-    /// contract's tool catalog. Built-in only; a partner manifest cannot
-    /// declare it.
-    tool_catalog,
 };
 
 /// Transform applied to extracted literal before storing.
@@ -297,9 +283,6 @@ pub const ContractExtraction = struct {
 
 /// Boolean flags set on the contract when a function is imported or called.
 pub const ContractFlags = struct {
-    sets_scope_used: bool = false,
-    sets_durable_used: bool = false,
-    sets_durable_timers: bool = false,
     sets_bearer_auth: bool = false,
     sets_jwt_auth: bool = false,
 };
@@ -363,30 +346,6 @@ pub const AbsorbingPattern = struct {
     };
 };
 
-/// How an export's return type is read off one of its arguments, for the
-/// exports whose answer is not a fixed type.
-///
-/// `ReturnKind` can only name a fixed type, so an export that hands back
-/// whatever its caller's callback produced had to declare `unknown`. That was
-/// harmless while an unresolved name answered assignable, and stops being
-/// harmless under D1 amendment A1: `unknown` is assignable to nothing, so every
-/// `durable.run(key, () => Response.json(...))` in a handler declaring
-/// `Response` became a return-type mismatch. The type is not unknown - it is
-/// the callback's, and this field says which argument to read it from.
-pub const ReturnFromParam = struct {
-    /// Position of the argument the return type is read from.
-    param_index: u8,
-
-    kind: enum {
-        /// The argument is a function and the export returns what calling it
-        /// returns: `run(key: string, fn: () => T) -> T`.
-        call_result,
-        /// The export returns the argument unchanged:
-        /// `using(resource: T, close: (T) => void) -> T`.
-        identity,
-    },
-};
-
 // -------------------------------------------------------------------------
 // Function binding
 // -------------------------------------------------------------------------
@@ -442,13 +401,6 @@ pub const FunctionBinding = struct {
     /// Return type classification. Drives verifier, bool checker, and type checker.
     returns: ReturnKind = .unknown,
 
-    /// Set when the return type is a function of an argument rather than a
-    /// fixed type. The type checker builds a one-parameter generic signature
-    /// from it and infers the parameter at each call site; every other consumer
-    /// keeps reading `returns`, which stays `.unknown` - the honest answer for
-    /// a caller that has no argument to read.
-    returns_from_param: ?ReturnFromParam = null,
-
     /// Type signature for parameter types (mapped to TypeIndex during type init).
     param_types: []const ReturnKind = &.{},
 
@@ -464,7 +416,7 @@ pub const FunctionBinding = struct {
     /// enough - there is no second place to keep in step.
     signature: ?DeclaredSignature = null,
 
-    /// Whether trace/replay/durable should wrap this function.
+    /// Whether trace and replay should wrap this function.
     /// false for setup-only functions (schemaCompile, schemaDrop, sql register).
     traceable: bool = true,
 
@@ -585,13 +537,6 @@ pub const ModuleBinding = struct {
     /// Whether the contract should feed into RuntimePolicy sandboxing.
     sandboxable: bool = false,
 
-    /// Whether this module is compile-time only (skip trace/replay/durable).
-    comptime_only: bool = false,
-
-    /// Whether this module manages its own I/O wrapping (skip trace/replay/durable).
-    /// Used by modules like durable that implement their own write-ahead logging.
-    self_managed_io: bool = false,
-
     /// Generate a legacy exports array from this binding.
     pub fn toModuleExports(comptime self: ModuleBinding) [self.exports.len]resolver.ModuleExport {
         var result: [self.exports.len]resolver.ModuleExport = undefined;
@@ -656,8 +601,8 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             }
             // `param_types` is what the type checker enforces at the call site,
             // so an under-declared list silently drops the diagnostic for that
-            // argument position. Three entries had drifted this way (cacheStats,
-            // io.parallel, io.race declared no parameters while reading args[0]).
+            // argument position. Earlier entries drifted this way when they
+            // declared no parameters while reading an argument.
             // Declare one kind per argument; mark trailing optional arguments
             // with `required_arg_count` rather than by omitting their type.
             // A declared signature replaces the coarse text for every
@@ -696,9 +641,7 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                 ));
             }
             // The same rule the SDK validator carries, which reaches only the
-            // SDK-pure half of the registry. The engine-coupled modules -
-            // zttp:durable, zttp:workflow, zttp:queue, zttp:scope, zttp:io,
-            // zttp:collections, zttp:bytes, zttp:json, zttp:result - declare
+            // SDK-pure half of the registry. Engine-coupled modules declare
             // FunctionBinding directly and are validated here, so without this
             // an argument added without a name compiled clean and
             // agent_protocol.writeExportParams told the model one name fewer
@@ -708,38 +651,6 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                     "{s}.{s} declares {d} param_types but {d} param_names; every parameter must be named",
                     .{ b.specifier, f.name, f.param_types.len, f.param_names.len },
                 ));
-            }
-            // A return read off an argument must name an argument that exists,
-            // and must leave `returns` at `.unknown`. A fixed kind beside it
-            // would be a second answer to the same question, and the consumers
-            // that cannot instantiate a signature read that one.
-            if (f.returns_from_param) |from| {
-                if (from.param_index >= f.param_types.len) {
-                    @compileError(std.fmt.comptimePrint(
-                        "{s}.{s} reads its return type from argument {d} but declares {d} param_types",
-                        .{ b.specifier, f.name, from.param_index, f.param_types.len },
-                    ));
-                }
-                if (f.returns != .unknown) {
-                    @compileError(b.specifier ++ "." ++ f.name ++ " reads its return type from an argument, so `returns` must stay `.unknown`");
-                }
-                if (f.param_types[from.param_index] != .unknown) {
-                    @compileError(b.specifier ++ "." ++ f.name ++ " reads its return type from an argument whose declared kind is not `.unknown`; a callback or pass-through argument has no fixed kind to name");
-                }
-                // An `.identity` return hands the argument back unchanged, so
-                // its result carries every label that argument carried. The
-                // flow checker learns that from `derives_from_args` and from
-                // nothing else: `scanImports` populates
-                // `module_fn_arg_derived` from that field alone, so an
-                // `.identity` declaration on its own is invisible to label
-                // propagation. `zttp:scope.using` shipped that way and
-                // laundered `secret` and `credential` through a pass-through
-                // the checker credited with closure labels only. A pass-through
-                // that must not propagate does not exist: if it transforms its
-                // argument it is not `.identity`.
-                if (from.kind == .identity and !f.derives_from_args) {
-                    @compileError(b.specifier ++ "." ++ f.name ++ " returns an argument unchanged (`.identity`) but does not declare `derives_from_args`; the flow checker propagates labels from that field alone, so the return would launder every label the argument carried");
-                }
             }
             // A declassification bound must name an argument that exists, and
             // it only means something beside a `declassifies` set: the labels
@@ -772,12 +683,6 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                 }
             }
             if (f.laws.len > 0) {
-                if (b.comptime_only) {
-                    @compileError("laws are not allowed on comptime_only module '" ++ b.specifier ++ "' function '" ++ f.name ++ "'");
-                }
-                if (b.self_managed_io) {
-                    @compileError("laws are not allowed on self_managed_io module '" ++ b.specifier ++ "' function '" ++ f.name ++ "'");
-                }
                 if (findDuplicateLawKind(f.laws)) |kind| {
                     @compileError("duplicate law '" ++ @tagName(kind) ++ "' on " ++ b.specifier ++ "." ++ f.name);
                 }

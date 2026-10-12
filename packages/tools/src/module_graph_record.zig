@@ -108,9 +108,8 @@ pub const GraphRecord = struct {
 };
 
 /// Existence probe for `file_resolver`, whose callback type carries no context.
-/// The runtime graph passes null here and defaults every extensionless
-/// specifier to `.ts`; probing instead means `./util` finds `util.tsx`, and a
-/// wrong guess would otherwise be recorded as a real target and digested.
+/// The runtime graph passes null here. This probe confirms each resolved path
+/// before the graph records and digests the target.
 fn probeExists(path: []const u8) bool {
     return zts.file_io.fileExists(std.heap.smp_allocator, path);
 }

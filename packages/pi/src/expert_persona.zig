@@ -94,9 +94,6 @@ const prologue =
     \\                                           pi_goal_candidate
     \\  Bound canonical repair preview         -> zts_expert_canonicalize,
     \\                                           pi_apply_repair_plan
-    \\  Project memory                         -> pi_recall_facts,
-    \\                                           pi_remember_fact
-    \\  Build and test steps                   -> zig_build_step, zig_test_step
     \\
     \\Registered tools are described by the stable tool schemas sent with this
     \\prompt. Do not infer arguments from this routing index.
@@ -256,7 +253,7 @@ test "stable core routes language facts through schema-v2 discovery" {
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_features") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_restrictions") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_modules") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_recall_facts") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_recall_facts") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_reference") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_witnesses") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT") == null);

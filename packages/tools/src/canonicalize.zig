@@ -1539,12 +1539,6 @@ fn isCanonicalBandCode(code: []const u8) bool {
     return zts.PolicyCatalog.isCanonicalProfileCode(code);
 }
 
-/// Authored TSX is outside the source-preserving formatter's coverage because
-/// element text has no representation in the core token stream.
-fn isJsxLike(path: []const u8) bool {
-    return zts.classifySourcePath(path) == .tsx;
-}
-
 pub const NormalizeResult = struct {
     /// The handler source after reaching the rewrite fixed point. Owned.
     canonical_source: []u8,
@@ -1803,7 +1797,6 @@ pub fn normalizeSourceWithOptions(
     var printed = false;
     if (options.layout) {
         if (zts.printer.print(allocator, current, .{
-            .jsx = isJsxLike(virtual_path),
             .reason_out = &refusal,
         })) |formatted| {
             allocator.free(current);
@@ -3089,25 +3082,6 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(req.method === \"GET\"))") != null);
     // The broken precedence form must never appear.
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "!!req.method") == null);
-}
-
-test "a file the formatter refuses reports it, and its bytes do not move" {
-    // The two verdicts `--check` and `--write` read. A refusal leaves the
-    // bytes where they were, so `changed` is false, and `--check` calling that
-    // canonical was the gate reporting green over files that were never laid
-    // out.
-    const allocator = std.testing.allocator;
-    const source =
-        \\function handler(req: Request): Response {
-        \\  return <div>hello</div>;
-        \\}
-    ;
-    var nr = try normalizeSource(allocator, source, "handler.tsx");
-    defer nr.deinit(allocator);
-
-    try std.testing.expect(!nr.printed);
-    try std.testing.expectEqual(zts.printer.Refusal.jsx_source, nr.printer_refusal.?);
-    try std.testing.expect(!nr.changed);
 }
 
 test "layout off returns the rewrite fixed point in the author's whitespace" {

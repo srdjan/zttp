@@ -154,6 +154,17 @@ pub const in_range = [_]Grammar{
 /// actually fire on.
 pub const out_of_range = [_]Grammar{
     .{
+        .id = "retired_workflow_authoring",
+        .kind = .unknown,
+        .leads = &common_leads,
+        .cores = &.{
+            "create a durable workflow handler using workflow.call",
+            "add a saga with compensation",
+            "dispatch a child through zttp:workflow",
+        },
+        .tails = &file_tails,
+    },
+    .{
         .id = "auth_jwt",
         .kind = .auth_jwt,
         .leads = &common_leads,
@@ -183,17 +194,6 @@ pub const out_of_range = [_]Grammar{
             "prove the handler holds injection_safe",
             "make the handler deterministic",
             "add a proof capsule",
-        },
-        .tails = &file_tails,
-    },
-    .{
-        .id = "workflow_authoring",
-        .kind = .workflow_authoring,
-        .leads = &common_leads,
-        .cores = &.{
-            "create a durable workflow handler using workflow.call",
-            "add a saga with compensation",
-            "dispatch a child through zttp:workflow",
         },
         .tails = &file_tails,
     },

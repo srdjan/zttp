@@ -45,7 +45,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     if (ctx.precompile.handler_path) |path| {
         // Run precompile tool to generate embedded handler
         const run_precompile = b.addRunArtifact(precompile_exe);
-        addPrecompileArgs(run_precompile, ctx.precompile, ctx.git_commit_sha);
+        addPrecompileArgs(run_precompile, ctx.precompile);
         run_precompile.addArg(path);
         run_precompile.addArg("packages/runtime/generated/embedded_handler.zig");
 
@@ -72,7 +72,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     b.installArtifact(runtime_exe);
 
     // Developer CLI — the primary user-facing `zttp` binary. Contains init,
-    // dev, serve, check, compile, prove, mock, link, expert, local deploy,
+    // dev, serve, check, compile, prove, mock, expert, local deploy,
     // doctor, and the proof/proof-ledger tools. Hosted deploy account verbs
     // are intentionally absent from CLI dispatch in the beta.
     const cli_exe = b.addExecutable(.{
@@ -147,7 +147,6 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
 fn addPrecompileArgs(
     run_precompile: *std.Build.Step.Run,
     opts: Context.PrecompileOptions,
-    git_commit_sha: ?[]const u8,
 ) void {
     if (opts.verify_enabled) {
         run_precompile.addArg("--verify");
@@ -156,20 +155,12 @@ fn addPrecompileArgs(
         run_precompile.addArg("--sql-schema");
         run_precompile.addArg(sql_schema);
     }
-    if (opts.system_path) |system| {
-        run_precompile.addArg("--system");
-        run_precompile.addArg(system);
-    }
     if (opts.contract_enabled) {
         run_precompile.addArg("--contract");
     }
     if (opts.policy_path) |policy| {
         run_precompile.addArg("--policy");
         run_precompile.addArg(policy);
-    }
-    if (git_commit_sha) |sha| {
-        run_precompile.addArg("--git-commit");
-        run_precompile.addArg(sha);
     }
 }
 
@@ -192,19 +183,4 @@ pub fn addRunSteps(ctx: Context, bins: Binaries) void {
     }
     const cli_run_step = b.step("cli", "Run the zttp CLI");
     cli_run_step.dependOn(&cli_run_cmd.step);
-}
-
-/// System linking step (cross-handler contract verification), present only
-/// when `-Dsystem` names a system definition.
-pub fn addSystemLink(ctx: Context, bins: Binaries) void {
-    const b = ctx.b;
-    const sys_path = ctx.precompile.system_path orelse return;
-    const run_system = b.addRunArtifact(bins.zts_exe);
-    run_system.addArg("link");
-    run_system.addArg(sys_path);
-    if (b.args) |args| {
-        run_system.addArgs(args);
-    }
-    const system_step = b.step("system", "Cross-handler contract linking");
-    system_step.dependOn(&run_system.step);
 }

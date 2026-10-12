@@ -121,8 +121,8 @@ pub fn shapeFor(returns: mb.ReturnKind) Shape {
 /// record export with severity `.none` reaches the reverse direction. The test reads the declared text on purpose: it is the census's
 /// own oracle, so a generator rule that stops recognizing the record shows up
 /// as a `no_fork` finding instead of moving the probe with it. A `Result`
-/// export (`ledger.post`) also spells `ok: boolean`, and forks through its
-/// return kind, so it keeps the `result_ok` probe and its Result stub.
+/// A Result export can also spell `ok: boolean`. Its return kind keeps the
+/// `result_ok` probe and its Result stub.
 pub fn shapeForExport(func: *const mb.FunctionBinding) Shape {
     if (func.returns != .result and declaresOkField(func)) return .ok_record;
     return shapeFor(func.returns);
@@ -202,9 +202,6 @@ pub const sentinel_exports = [_]SentinelExport{
 pub const Mechanism = enum {
     /// A fork for `=== undefined` on a return that does not declare it.
     sentinel_fork,
-    /// A severity decision: the failure is a fault, or it is not, and the
-    /// audit labels the call as inferred.
-    severity_decision,
     /// The false or absent answer is the export's answer, not a failure.
     answer_not_failure,
     /// A pure total function over data. Its Result is a value, not I/O.
@@ -215,7 +212,6 @@ pub const Mechanism = enum {
     /// signature, or an optional that also carries a non-failure answer. A
     /// fork on `x.ok` or `=== undefined` cannot read its failure, so it needs
     /// its own fork rule before it can declare a severity.
-    needs_own_fork,
     /// Its failure always reaches a later critical export that the handler must
     /// cover, so counting it again would only block handlers that call it
     /// outside every path.
@@ -256,15 +252,6 @@ const allowed_rows = [_]AllowedRow{
         .verdict = .no_fork,
         .mechanism = .sentinel_fork,
         .reason = "returns `undefined` on, for example, invalid base64 (crypto.zig:120-130; a representative list) while declaring a plain `string`; it declares no severity either",
-    },
-
-    // A fork with no severity, where the failure may be a fault. D3 (R4 F5)
-    // gave a severity to every export of this group but `race`.
-    .{
-        .key = "io.race#reverse_probe",
-        .verdict = .fork_without_severity,
-        .mechanism = .severity_decision,
-        .reason = "declares `optional_object`, so the generator already forks it on `undefined` (no thunk fetched, io.zig:337); that is one failure only. The winner is the first thunk, in declaration order, whose fetch completed, and a completed fetch sets `ok` for any status (runtime_http.zig:2636), so the result can be any non-2xx Response (io.zig:352-369); no severity check reads that status, so it needs its own fork",
     },
 
     // A fork with no severity, where a later critical export reports the failure.
@@ -419,32 +406,6 @@ const allowed_rows = [_]AllowedRow{
         .reason = "propagates the input Result; it performs no I/O",
     },
 
-    // An opaque `.object` I/O export with no signature and no severity: no
-    // `ok` or `undefined` fork can read its failure.
-    .{
-        .key = "io.parallel#object_probe",
-        .verdict = .no_fork,
-        .mechanism = .needs_own_fork,
-        .reason = "returns an array of the thunks' fetch Responses (io.zig:47); a thunk that gets a non-2xx status or a refusal puts that Response in the array, and no `ok` or `undefined` test reads an element, so it needs its own fork",
-    },
-    .{
-        .key = "workflow.follow#object_probe",
-        .verdict = .no_fork,
-        .mechanism = .needs_own_fork,
-        .reason = "dispatches an affordance to a bundle route and returns the sub-handler's Response record; it declares no signature, so `res.ok` and a status comparison have nothing to read, and it needs its own fork",
-    },
-    .{
-        .key = "workflow.saga#object_probe",
-        .verdict = .no_fork,
-        .mechanism = .needs_own_fork,
-        .reason = "returns the outcome of an ordered step list, including which steps compensated when a later step failed (workflow.zig summary); a handler that ignores it reports success on a rolled-back saga, and it needs its own fork",
-    },
-    .{
-        .key = "workflow.fanout#object_probe",
-        .verdict = .no_fork,
-        .mechanism = .needs_own_fork,
-        .reason = "aggregates co-located calls in declaration order and returns the combined record; one failed call is inside the aggregate, and it needs its own fork",
-    },
     .{
         .key = "cache.cacheStats#object_probe",
         .verdict = .no_fork,
@@ -495,12 +456,13 @@ pub const Floors = struct {
 /// The committed floors. A change to the registry that moves a row between
 /// verdicts edits `allowed_rows`; one that adds or drops an export edits these.
 const floors = Floors{
-    .total = 70,
-    .severity_rows = 37,
-    .forkable_rows = 62,
+    // Measured by the unfiltered census after the Phase 3 registry removal.
+    .total = 49,
+    .severity_rows = 21,
+    .forkable_rows = 45,
     .sentinel_rows = 3,
-    .object_rows = 5,
-    .ok_rows = 36,
+    .object_rows = 1,
+    .ok_rows = 20,
 };
 
 // ---------------------------------------------------------------------------
@@ -528,9 +490,7 @@ fn probeSource(
 /// Whether the stub has the shape that fails the probed call. An `ok_record` stub
 /// must be a response the replay reads as a failure: an integer `status` of 400
 /// or more, beside the `statusText`, `headers`, and `body` the replay reads. A
-/// `fetch` replay derives `ok` from `status` and ignores a field named `ok`; a
-/// `serviceCall` replay parses the stub verbatim. A stub `ok` field is therefore
-/// accepted only when it is `false`, so that both replays read a failure.
+/// `fetch` replay derives `ok` from `status` and ignores a field named `ok`.
 fn failingStubShape(shape: Shape, returns: mb.ReturnKind, json: []const u8) bool {
     if (shape == .ok_record) return failingResponseStub(json);
     return switch (returns) {
@@ -940,9 +900,6 @@ test "a probe observes a fork on a Result, an optional, and an ok record" {
         .{ .module = "env", .func = "env" },
         .{ .module = "fetch", .func = "fetch" },
         .{ .module = "fetch", .func = "fetchWithRetry" },
-        .{ .module = "service", .func = "serviceCall" },
-        .{ .module = "workflow", .func = "call" },
-        .{ .module = "tool", .func = "callTool" },
     };
     for (cases) |case| {
         const found = findExport(case.module, case.func) orelse return error.ExportMissing;
@@ -969,13 +926,11 @@ test "the failing stub of an ok-record call is a response the replay reads as a 
     try std.testing.expect(!failingResponseStub("not json"));
 }
 
-test "exactly the four response-record exports are probed as ok records" {
+test "exactly the fetch response-record exports are probed as ok records" {
     const allocator = std.testing.allocator;
     const expected = [_]struct { module: []const u8, func: []const u8 }{
         .{ .module = "fetch", .func = "fetch" },
         .{ .module = "fetch", .func = "fetchWithRetry" },
-        .{ .module = "service", .func = "serviceCall" },
-        .{ .module = "workflow", .func = "call" },
     };
     var count: usize = 0;
     for (&builtin_modules.all) |*binding| {
@@ -1037,14 +992,11 @@ test "an ok-record export with no severity reaches the reverse direction" {
 }
 
 test "a boolean export with a severity is probed with a failing boolean stub" {
-    // F5 gave the first boolean exports a severity: verifyWebhookSignature,
-    // cacheSet, signal, and signalAt.
+    // These boolean exports carry a failure severity.
     const allocator = std.testing.allocator;
     const cases = [_]struct { module: []const u8, func: []const u8 }{
         .{ .module = "auth", .func = "verifyWebhookSignature" },
         .{ .module = "cache", .func = "cacheSet" },
-        .{ .module = "durable", .func = "signal" },
-        .{ .module = "durable", .func = "signalAt" },
     };
     for (cases) |case| {
         const found = findExport(case.module, case.func) orelse return error.ExportMissing;

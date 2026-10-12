@@ -10,9 +10,9 @@
 //! alternatives it rejected are in
 //! `docs/plans/2026-09-23-m4-t1b-connect-deadline-design.md`.
 //!
-//! One fetch at a time per backend: a handler instance runs one request at a
-//! time, and each `zttp:io` worker owns its own backend. The connects inside one
-//! fetch can run at the same time, because `HostName.connect` tries every
+//! One fetch runs at a time per backend. A handler instance runs one request at
+//! a time. The connects inside one fetch can run concurrently because
+//! `HostName.connect` tries every
 //! resolved address at once on `Io` tasks. The first connect that succeeds
 //! claims the watchdog; a later one closes its socket and reports a failure
 //! that `HostName.connect` does not treat as fatal.

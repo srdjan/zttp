@@ -11,7 +11,7 @@ pub const version = "step-6-v2";
 // hash after review found it outside: emptying it changed no published number
 // while both false-fire gates silently fell to zero iterations. The declared
 // range itself did not change when this value did.
-pub const content_hash = "9fcc8fe3af9c6e99e2181f46ac2abad8ba570efa7e363f80fb5969e7b3961764";
+pub const content_hash = "cf2b4d7aa2e49f672cabdda30b314fe0a5f16c8d37470227de6bb72a8798a68a";
 
 pub const Action = enum {
     answer,
@@ -131,9 +131,9 @@ pub const negative_corpus = [_]NegativeCase{
         .expected_kind = .spec_goal,
     },
     .{
-        .id = "workflow-authoring",
+        .id = "retired-workflow-authoring",
         .prompt = "Create a durable workflow handler that dispatches a greet child handler with workflow.call",
-        .expected_kind = .workflow_authoring,
+        .expected_kind = .unknown,
     },
 };
 
@@ -192,7 +192,6 @@ pub fn coverageOf(kind: expert_workflow.TaskKind) Coverage {
         .unknown,
         .handler_scaffold,
         .spec_goal,
-        .workflow_authoring,
         .sql_feature,
         .auth_jwt,
         => .reserved,

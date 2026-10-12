@@ -60,7 +60,7 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped.
 | `pure` | the handler calls no virtual modules: it is a pure function of the request |
 | `read_only` | every virtual-module call is read-classified: no state is mutated |
 | `deterministic` | no `Date.now()`, `Math.random()`, or `performance.now()` on any path: every run is identical |
-| `retry_safe` | read-only, or every write sits inside a durable step |
+| `retry_safe` | every virtual-module call is read-classified |
 | `idempotent` | deterministic and retry-safe: safe under at-least-once delivery |
 
 **Security** - data-flow guarantees:
@@ -72,14 +72,10 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped.
 | `no_credential_leak` | no credential-labelled value reaches a response body or header, a log, or an egress call (URL, headers, or body) |
 | `input_validated` | all user input passes a validation step before any egress call |
 
-A write that stays inside the platform is not a sink for these chips: the
-durable store, a queue, the cache, SQL, and a call to another handler through
-`zttp:workflow`. The read side defends them instead. Each reader of stored
-data (`waitSignal`, `receive`, `cacheGet`, `sqlOne`, `sqlMany`) carries the
-label that means "could not follow", so a handler that returns a stored value
-is not proven. The results of `zttp:workflow` `call`, `saga`, `fanout`, and
-`follow` carry the same label, because another handler produced them and can
-echo what it received.
+A write to the cache or SQL is not a sink for these chips. The read side
+defends stored data instead. `cacheGet`, `sqlOne`, and `sqlMany` carry the
+label that means "could not follow". A handler that returns stored data is
+not proven.
 
 A `[-]` pill is not an error. It means the compiler could not prove that
 property for this handler, often because the handler legitimately does the
@@ -142,26 +138,6 @@ The trace is the same data on every surface. `zttp check --json` emits it as
 a `proof.proofTrace` object keyed by property name, so agents and CI read the
 exact reasoning the HUD shows.
 
-Durable workflow checks add a second receipt shape when you ask for the
-contract:
-
-```bash
-zttp check examples/workflow/dsl-orchestrator.ts --json
-zttp check examples/workflow/dsl-orchestrator.ts --contract
-```
-
-The JSON proof card exposes `proofTrace.durable_workflow_*`. The contract file
-exposes `durable.workflow.proofLevel` and
-`durable.workflow.properties.retrySafe` / `idempotent` / `faultCovered`.
-Deploy and verify receipts expose the same result as `durableWorkflowProofLevel`,
-`durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and
-`durableWorkflowFaultCovered`.
-Those workflow-specific fields can remain partial even when a handler's
-narrower `Spec` passes; they gate durable replay claims, not generic handler
-properties.
-The proof tells you what the compiler proved; the durable directory tells you
-what the runtime persisted.
-
 ## Counterexamples in the Live HUD
 
 When `zttp dev --watch --prove` recompiles your handler and a proven
@@ -179,8 +155,7 @@ For the `deterministic` property today:
 
 ```
 | Counterexample: -deterministic at src/handler.ts:14: Date.now()        |
-|   why: remove Date.now() / Math.random() / performance.now() or move   |
-|        the call inside a `durable.step`.                               |
+|   why: remove Date.now() / Math.random() / performance.now().          |
 |   [r] replay live   [s] pin as regression test   [a] ask expert to fix |
 ```
 
@@ -303,8 +278,7 @@ invocation):
 
 `<short_hash>` is the first sixteen hex characters of
 `sha256(handler_path)`. The original path is recorded in `handler.path`
-so the listing surface (`pi_witnesses`) can
-present it without reversing the hash.
+so tools can present it without reversing the hash.
 
 `<key>` is `counterexample.CounterexampleWitness.stableKey()`: a sha256
 over `(property, origin_node_id, sink_node_id)`. AST node ids survive
@@ -373,37 +347,6 @@ The block is read directly from `.zttp/witnesses/<short_hash>/` for
 the handler under check. A missing or empty corpus reports
 `{"total":0,"by_property":{}}`.
 
-#### Agent tool: `pi_witnesses`
-
-Single op: given a handler path, return the corpus listing.
-
-```json
-{
-  "ok": true,
-  "handler_path": "examples/system/users.ts",
-  "total": 3,
-  "by_property": { "injection_safe": 1, "no_secret_leakage": 2 },
-  "entries": [
-    {
-      "key": "abcdef0123456789...",
-      "property": "no_secret_leakage",
-      "summary": "SECRET_KEY flows into Response body",
-      "pinned": false,
-      "first_seen_unix_s": 1745539200
-    }
-  ]
-}
-```
-
-Use `pi_witnesses` before drafting a repair against a proof failure.
-Proof properties with zero witnesses are unprobed: the proof currently relies on
-the classifier alone, and a regression there would silently slip past
-the corpus. Properties with pinned witnesses are load-bearing; a repair
-that removes them weakens coverage.
-
-The slash command `/witnesses <path>` invokes the same tool from the
-expert REPL.
-
 ### Versioning
 
 The corpus is per-project state. Commit `.zttp/witnesses/` to your
@@ -416,7 +359,6 @@ in particular be treated as part of the source of truth.
 - [verification.md - Author-Declared Proof Discharge](verification.md#8-author-declared-proof-discharge)
 - `packages/zts/src/witness_corpus.zig` - persistence library
 - `packages/zts/src/counterexample.zig` - solver and JSONL wire format
-- `packages/pi/src/tools/pi_witnesses.zig` - agent tool
 
 ## Proof Gate
 
@@ -451,8 +393,8 @@ proof never changes the verdict.
 Only a critical lost proof makes the handler `breaking`. The critical set is
 `retry_safe`, `injection_safe`, `state_isolated`, `no_secret_leakage`,
 `no_credential_leakage`, `fault_covered`, `result_safe`, and `optional_safe`.
-The upgrade verifier behind `zttp rollout` classifies the same eight as
-critical, because both read one table, `contract_diff.propertyLossSeverity`.
+The live-reload upgrade verifier classifies the same eight as critical. Both
+paths read `contract_diff.propertyLossSeverity`.
 Every other lost proof, for example `pure`, `read_only`, or `stateless`, is
 listed in the report and leaves the verdict as it was. A first log call or
 cache read removes several of these properties, and failing the gate on them
@@ -479,7 +421,7 @@ zttp proofs gate --base origin/main --head HEAD --format json
 ```
 
 Exit code: `0` safe (equivalent / additive), `1` breaking, `2` usage or git
-error, or a changed `.ts`/`.tsx` file the analyzer could not read. A file that
+error, or a changed `.ts` file the analyzer could not read. A file that
 fails to analyze is never classified: calling it additive or skipping it would
 hide a route the branch removed, so the gate names the file and stops. The
 Markdown form is a ready-to-paste PR comment; the JSON form
@@ -498,7 +440,7 @@ Flags:
   `kind=equivalence` ledger rows; it writes none now. CI scripts that pass the
   flag keep working.
 
-Files that are not handlers (a changed `.ts`/`.tsx` with no routes and no
+Files that are not handlers (a changed `.ts` with no routes and no
 behavior paths, i.e. a config or library module) and files under `tests/`,
 `fixtures/`, or matching `*.test.*`/`*.spec.*` are skipped, and listed as such
 in the report. An added file is skipped for the same reason: it counts as

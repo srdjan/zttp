@@ -172,8 +172,8 @@ const property_info = [_]PropertyInfo{
     .{
         .name = "retry_safe",
         .family = .path,
-        .passing = "Read-only, or every write is inside a durable step: safe to retry.",
-        .failing = "A write happens outside a durable step, so a retry could double it.",
+        .passing = "The handler is read-only, so a retry cannot repeat a write.",
+        .failing = "A retry could repeat a write from this handler.",
     },
     .{
         .name = "idempotent",
@@ -467,74 +467,7 @@ pub fn collect(
             }
         }
     }
-    try appendDurableWorkflowTraces(arena, &list, contract);
     return list.toOwnedSlice(arena);
-}
-
-fn appendDurableWorkflowTraces(
-    arena: std.mem.Allocator,
-    list: *std.ArrayListUnmanaged(ProofTrace),
-    contract: *const HandlerContract,
-) !void {
-    const workflow = &contract.durable.workflow;
-    if (!contract.durable.used and
-        workflow.proof_level == .none and
-        workflow.nodes.items.len == 0 and
-        workflow.properties.reasons.items.len == 0)
-    {
-        return;
-    }
-
-    try appendDurableWorkflowTrace(
-        arena,
-        list,
-        "durable_workflow_retry_safe",
-        workflow.properties.retry_safe,
-        "retry safety",
-        workflow.proof_level.toString(),
-        workflow.properties.reasons.items,
-    );
-    try appendDurableWorkflowTrace(
-        arena,
-        list,
-        "durable_workflow_idempotent",
-        workflow.properties.idempotent,
-        "idempotency",
-        workflow.proof_level.toString(),
-        workflow.properties.reasons.items,
-    );
-    try appendDurableWorkflowTrace(
-        arena,
-        list,
-        "durable_workflow_fault_covered",
-        workflow.properties.fault_covered,
-        "fault coverage",
-        workflow.proof_level.toString(),
-        workflow.properties.reasons.items,
-    );
-}
-
-fn appendDurableWorkflowTrace(
-    arena: std.mem.Allocator,
-    list: *std.ArrayListUnmanaged(ProofTrace),
-    property: []const u8,
-    holds: bool,
-    label: []const u8,
-    proof_level: []const u8,
-    reasons: []const []const u8,
-) !void {
-    const reason = if (reasons.len > 0) reasons[0] else "durable workflow graph is not fully proven";
-    const prefix = if (holds) "proven" else "unproven";
-    try list.append(arena, .{
-        .property = property,
-        .holds = holds,
-        .kind = .structural,
-        .summary = try std.fmt.allocPrint(
-            arena,
-            "Durable workflow {s} is {s} (proof level: {s}): {s}.",
-            .{ label, prefix, proof_level, reason },
-        ),
-    });
 }
 
 fn buildTrace(
@@ -679,7 +612,7 @@ fn buildTrace(
                         .line = cause.line,
                         .column = cause.column,
                         .snippet = cause.snippet,
-                        .fix = "move the call inside a durable step() from zttp:durable, or take the value from the request.",
+                        .fix = "remove the varying read, or take the value from the request.",
                     };
                 }
             }
@@ -957,40 +890,6 @@ test "writeJson maps result_safe to results_safe UI key" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"result_safe\":{") == null);
 }
 
-test "collect emits durable workflow negative reasons" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
-    defer contract.deinit(testing.allocator);
-    contract.durable.used = true;
-    contract.durable.workflow.proof_level = .partial;
-    try contract.durable.workflow.properties.reasons.append(
-        testing.allocator,
-        try testing.allocator.dupe(u8, "durable workflow proof is partial due to dynamic names"),
-    );
-
-    const traces = try collect(
-        arena.allocator(),
-        &contract,
-        &.{},
-        &.{},
-        undefined,
-        0,
-        false,
-    );
-
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
-    try writeJson(&aw.writer, traces);
-    buf = aw.toArrayList();
-
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"durable_workflow_retry_safe\":{") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "Durable workflow retry safety is unproven") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "dynamic names") != null);
-}
-
 test "an incomplete fault analysis is named even when the enumerated paths are exhaustive" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -1084,7 +983,7 @@ test "writeJson emits an offending-node counterexample" {
             .line = 14,
             .column = 9,
             .snippet = "Date.now()",
-            .fix = "use durable step()",
+            .fix = "remove the varying read",
         },
     }};
     var buf: std.ArrayList(u8) = .empty;

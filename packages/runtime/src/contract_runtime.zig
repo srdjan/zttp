@@ -19,7 +19,6 @@ const cost_meter = zq.CostMeter;
 
 pub const CapabilityMatrix = zq.handler_contract.CapabilityMatrix;
 pub const CostCeilings = runtime_config.CostCeilings;
-pub const DurableWorkflowProperties = runtime_config.DurableWorkflowProperties;
 
 /// Proven handler properties extracted from the contract.
 /// Each field is a mathematical proof, not an annotation.
@@ -98,7 +97,7 @@ pub fn derivePoolingPolicy(contract: ?*const ProofCheckedContract) PoolingPolicy
 // obligations, checked the evidence, and accepted under a pinned policy. Only
 // this type may drive behavior that is unsound if a claim is wrong: the proof
 // response cache, unbounded runtime reuse, result and optional safety, and the
-// durable-workflow guarantees.
+// accepted runtime behavior.
 //
 // The split is enforced by construction. The only way to make one is to hand
 // `promote` an assessment the acceptance kernel itself produced and marked
@@ -109,7 +108,6 @@ pub const ProofCheckedContract = struct {
     /// The properties the consumer accepted. A snapshot, not a borrow: the
     /// promotion outlives no allocation of the contract it came from.
     properties: Properties,
-    durable_workflow: DurableWorkflowProperties,
     /// Whether any route reads request headers or body. Not a proof result, but
     /// the proof cache's key is method and URL only, so it is carried alongside.
     reads_request_state: bool,
@@ -159,10 +157,6 @@ pub fn promote(
 
     return .{
         .properties = acceptedProperties(validated.properties(), assessment.properties),
-        .durable_workflow = acceptedWorkflowProperties(
-            validated.durableWorkflowProperties(),
-            assessment.properties,
-        ),
         .reads_request_state = validated.view().reads_request_state,
         .grade = grade,
         .development_only = accepted.development_only,
@@ -186,21 +180,11 @@ fn acceptedProperties(
     };
 }
 
-fn acceptedWorkflowProperties(
-    claimed: DurableWorkflowProperties,
-    verdicts: pcc.verdict.PropertyVerdicts,
-) DurableWorkflowProperties {
-    return .{
-        .retry_safe = claimed.retry_safe and verdicts.accepted(.retry_safe),
-    };
-}
-
 /// Test-only promotion. Named so a reader can see at a glance that a call site
 /// is a test, and file-private so no consumer can reach it.
 fn promotedForTest(validated: *const ValidatedRuntimeContract) ProofCheckedContract {
     return .{
         .properties = validated.properties(),
-        .durable_workflow = validated.durableWorkflowProperties(),
         .reads_request_state = validated.view().reads_request_state,
         .grade = .translation_validated,
         .development_only = false,
@@ -226,15 +210,13 @@ pub const RuntimeContract = struct {
     /// treated as header-independent.
     reads_request_state: bool = false,
     properties: Properties,
-    durable_workflow_properties: DurableWorkflowProperties = .{},
     /// Null when the embedded contract did not emit a sandbox block (old
     /// contract, or contract parse fell through). A non-null matrix with
     /// len == 0 is a legitimate state for handlers that import only
     /// capability-free modules (e.g. zttp:router).
     capabilities: ?CapabilityMatrix = null,
-    /// Exact core and optional frontend identity used to compile the artifact.
+    /// Exact core identity used to compile the artifact.
     source_identity: zq.SourceIdentity = .{},
-    source_is_tsx: bool = false,
     /// SHA-256 of the bytecode blob, stamped at build time. All-zero means
     /// the contract did not carry a sandbox block.
     artifact_sha256: [32]u8 = [_]u8{0} ** 32,
@@ -347,10 +329,6 @@ pub const ValidatedRuntimeContract = struct {
 
     pub fn properties(self: *const ValidatedRuntimeContract) Properties {
         return self.inner.properties;
-    }
-
-    pub fn durableWorkflowProperties(self: *const ValidatedRuntimeContract) DurableWorkflowProperties {
-        return self.inner.durable_workflow_properties;
     }
 
     pub fn hasCapability(self: *const ValidatedRuntimeContract, cap: ModuleCapability) bool {
@@ -573,14 +551,8 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .routes_dynamic = hc.api.routes_dynamic,
         .reads_request_state = reads_request_state,
         .properties = runtime_properties,
-        .durable_workflow_properties = .{
-            .retry_safe = hc.durable.workflow.properties.retry_safe,
-            .idempotent = hc.durable.workflow.properties.idempotent,
-            .fault_covered = hc.durable.workflow.properties.fault_covered,
-        },
         .capabilities = hc.capabilities,
         .source_identity = hc.source_identity,
-        .source_is_tsx = std.mem.endsWith(u8, hc.handler.path, ".tsx"),
         .artifact_sha256 = hc.artifact_sha256,
         .policy_hash = hc.policy_hash,
         .modules = modules_out,
@@ -607,28 +579,20 @@ pub fn verifyCapabilityMatrix(contract: *const RuntimeContract) !void {
     }
 }
 
-/// Verify that the artifact was produced by the linked core grammar,
-/// semantics registry, and optional source frontend. Missing identity is a
+/// Verify that the artifact was produced by the linked core grammar and
+/// semantics registry. Missing identity is a
 /// refusal, not a compatibility skip: a runtime cannot safely infer which
 /// language accepted the embedded bytes.
 pub fn verifySourceIdentity(contract: *const RuntimeContract) !void {
     const identity = contract.source_identity;
     if (!identity.isStamped()) return error.SourceIdentityMissing;
     if (identity.core_profile != .model_1) return error.SourceProfileMismatch;
-    const live = zq.sourceIdentityForPath(if (contract.source_is_tsx) "handler.tsx" else "handler.ts");
+    const live = zq.sourceIdentityForPath("handler.ts");
     if (!std.mem.eql(u8, &identity.core_grammar_hash, &live.core_grammar_hash)) {
         return error.CoreGrammarHashMismatch;
     }
     if (!std.mem.eql(u8, &identity.semantics_hash, &live.semantics_hash)) {
         return error.SemanticsHashMismatch;
-    }
-
-    if (contract.source_is_tsx != (identity.frontend != null)) return error.SourceFrontendMismatch;
-    if (identity.frontend) |frontend| {
-        if (frontend.profile != .tsx_1) return error.SourceFrontendMismatch;
-        if (!std.mem.eql(u8, &frontend.grammar_hash, &live.frontend.?.grammar_hash)) {
-            return error.FrontendGrammarHashMismatch;
-        }
     }
 }
 
@@ -697,33 +661,38 @@ test "parseContractJson minimal" {
     try std.testing.expect(!contract.env_dynamic);
     try std.testing.expectEqual(@as(usize, 0), contract.routes.len);
     try std.testing.expect(!contract.properties.pure);
-    try std.testing.expect(!contract.durable_workflow_properties.retry_safe);
-    try std.testing.expect(!contract.durable_workflow_properties.idempotent);
-    try std.testing.expect(!contract.durable_workflow_properties.fault_covered);
 }
 
-test "parseContractJson reads durable workflow properties" {
-    const allocator = std.testing.allocator;
+test "parseContractJson preserves the retired authority error" {
+    const sources = [_][]const u8{
+        "{\"modules\":[],\"durable\":{\"used\":true}}",
+        "{\"modules\":[],\"scope\":{\"used\":true}}",
+        "{\"modules\":[],\"serviceCalls\":[{}]}",
+        "{\"modules\":[],\"workflowCalls\":[{}]}",
+        "{\"modules\":[],\"sagas\":[{}]}",
+    };
+    for (sources) |source| {
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            parseContractJson(std.testing.allocator, source),
+        );
+    }
+}
+
+test "parseContractJson accepts empty retired placeholders" {
     const source =
         \\{
-        \\  "durable": {
-        \\    "workflow": {
-        \\      "properties": {
-        \\        "retrySafe": true,
-        \\        "idempotent": true,
-        \\        "faultCovered": true
-        \\      }
-        \\    }
-        \\  }
+        \\  "modules": [],
+        \\  "durable": {},
+        \\  "scope": {},
+        \\  "serviceCalls": [],
+        \\  "workflowCalls": [],
+        \\  "sagas": []
         \\}
     ;
-
-    var raw = try parseContractJson(allocator, source);
+    var raw = try parseContractJson(std.testing.allocator, source);
     defer raw.deinit();
-
-    try std.testing.expect(raw.inner.durable_workflow_properties.retry_safe);
-    try std.testing.expect(raw.inner.durable_workflow_properties.idempotent);
-    try std.testing.expect(raw.inner.durable_workflow_properties.fault_covered);
+    try std.testing.expectEqual(@as(usize, 0), raw.inner.modules.len);
 }
 
 test "parseContractJson with properties and routes" {
@@ -961,20 +930,6 @@ test "fromHandlerContract converts properties and env vars" {
             .queries = .empty,
             .dynamic = false,
         },
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-            .timers = false,
-            .signals = .{ .literal = .empty, .dynamic = false },
-            .producer_keys = .{ .literal = .empty, .dynamic = false },
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -999,10 +954,6 @@ test "fromHandlerContract converts properties and env vars" {
 
     // Add an env var
     try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
-    hc.durable.workflow.properties.retry_safe = true;
-    hc.durable.workflow.properties.idempotent = true;
-    hc.durable.workflow.properties.fault_covered = true;
-
     var raw = try fromHandlerContract(allocator, &hc);
     defer raw.deinit();
     const rc = &raw.inner;
@@ -1014,12 +965,8 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(rc.properties.retry_safe);
     try std.testing.expect(rc.properties.deterministic);
     try std.testing.expect(!rc.properties.pure);
-    try std.testing.expect(rc.durable_workflow_properties.retry_safe);
-    try std.testing.expect(rc.durable_workflow_properties.idempotent);
-    try std.testing.expect(rc.durable_workflow_properties.fault_covered);
     try std.testing.expectEqual(zq.CoreProfile.model_1, rc.source_identity.core_profile);
     try std.testing.expect(rc.source_identity.isStamped());
-    try std.testing.expect(rc.source_identity.frontend == null);
 }
 
 // Drift guard: parseContractJson is a second, hand-rolled reader of the contract
@@ -1028,7 +975,7 @@ test "fromHandlerContract converts properties and env vars" {
 // condition that the wire keys it hardcodes match what the writer emits. This
 // test pins that link: it emits a contract through the canonical writer and
 // reads it back here, so any future writer-side key rename (env/literal,
-// api/routes/method/path, properties.*, modules, durable.workflow.properties.*)
+// api/routes/method/path, properties.*, and modules)
 // fails loudly instead of silently disabling a runtime check.
 test "contract wire format round-trips between writer and runtime parser" {
     const allocator = std.testing.allocator;
@@ -1042,15 +989,6 @@ test "contract wire format round-trips between writer and runtime parser" {
         .egress = .{ .endpoints = .empty, .urls = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-            .timers = false,
-            .signals = .{ .literal = .empty, .dynamic = false },
-            .producer_keys = .{ .literal = .empty, .dynamic = false },
-        },
-        .scope = .{ .used = false, .names = .empty, .dynamic = false, .max_depth = 0 },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -1074,9 +1012,6 @@ test "contract wire format round-trips between writer and runtime parser" {
 
     try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
     try hc.modules.append(allocator, try allocator.dupe(u8, "zttp:crypto"));
-    hc.durable.workflow.properties.retry_safe = true;
-    hc.durable.workflow.properties.idempotent = true;
-    hc.durable.workflow.properties.fault_covered = true;
     try hc.api.routes.append(allocator, .{
         .method = try allocator.dupe(u8, "GET"),
         .path = try allocator.dupe(u8, "/users"),
@@ -1107,9 +1042,6 @@ test "contract wire format round-trips between writer and runtime parser" {
     try std.testing.expect(rc.properties.retry_safe);
     try std.testing.expect(rc.properties.deterministic);
     try std.testing.expect(!rc.properties.pure);
-    try std.testing.expect(rc.durable_workflow_properties.retry_safe);
-    try std.testing.expect(rc.durable_workflow_properties.idempotent);
-    try std.testing.expect(rc.durable_workflow_properties.fault_covered);
 }
 
 test "parseContractJson reads sandbox block" {
@@ -1456,11 +1388,6 @@ test "promotion exposes only properties that cleared the policy" {
             .no_secret_leakage = true,
             .result_safe = true,
         },
-        .durable_workflow_properties = .{
-            .retry_safe = true,
-            .idempotent = true,
-            .fault_covered = true,
-        },
         .allocator = std.testing.allocator,
     };
     var validated = validatedFromInner(contract);
@@ -1486,9 +1413,6 @@ test "promotion exposes only properties that cleared the policy" {
     try std.testing.expect(promoted.properties.result_safe);
     try std.testing.expect(!promoted.properties.read_only);
     try std.testing.expect(!promoted.properties.state_isolated);
-    try std.testing.expect(!promoted.durable_workflow.retry_safe);
-    try std.testing.expect(!promoted.durable_workflow.idempotent);
-    try std.testing.expect(!promoted.durable_workflow.fault_covered);
     // The policy this generation was accepted against travels with it, and a
     // handler with nothing to guard says so with zeroes rather than by leaving
     // the question open.
@@ -1638,35 +1562,6 @@ test "runtime validation refuses missing or stale source identity" {
     stale_semantics.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
     stale_semantics.inner.source_identity.semantics_hash[0] ^= 0xff;
     try std.testing.expectError(error.SemanticsHashMismatch, validate(stale_semantics, .{}));
-}
-
-test "runtime validation binds the TSX frontend identity" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\{
-        \\  "version": 18,
-        \\  "handler": {"path": "handler.tsx", "line": 1, "column": 0},
-        \\  "modules": [],
-        \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"endpoints": [], "dynamic": false},
-        \\  "api": {"routes": [], "routesDynamic": false}
-        \\}
-    ;
-
-    var missing_frontend = try parseContractJson(allocator, source);
-    missing_frontend.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
-    try std.testing.expectError(error.SourceFrontendMismatch, validate(missing_frontend, .{}));
-
-    var stale_frontend = try parseContractJson(allocator, source);
-    stale_frontend.inner.source_identity = zq.sourceIdentityForPath("handler.tsx");
-    stale_frontend.inner.source_identity.frontend.?.grammar_hash[0] ^= 0xff;
-    try std.testing.expectError(error.FrontendGrammarHashMismatch, validate(stale_frontend, .{}));
-
-    var valid = try parseContractJson(allocator, source);
-    valid.inner.source_identity = zq.sourceIdentityForPath("handler.tsx");
-    var validated = try validate(valid, .{});
-    defer validated.deinit();
-    try std.testing.expectEqual(zq.SourceFrontendProfile.tsx_1, validated.view().source_identity.frontend.?.profile);
 }
 
 test "the module list survives the read" {

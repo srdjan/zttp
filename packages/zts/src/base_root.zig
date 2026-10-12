@@ -59,23 +59,6 @@ pub const guard_catalog = @import("guard_catalog.zig");
 /// Whether a request path matches a route pattern, parameter segments included.
 pub const route_match = @import("route_match.zig");
 
-/// The closed schema subset a tool catalog entry admits, and the streaming
-/// validator that checks a tool input against it.
-pub const tool_schema = @import("tool_schema.zig");
-
-/// The consumer declaration loader: classifications that assign `secret` or
-/// `credential` to a member of an outside source's value, and the closed
-/// refusal set (M4 T4).
-/// The capability profiles: the named ceilings a declaration may select, and
-/// the table the vocabulary envelope publishes (M4 T5b).
-pub const capability_profiles = @import("capability_profiles.zig");
-
-pub const declaration = @import("declaration.zig");
-
-/// Credential references: the deployment-owned description of one upstream
-/// credential and the closed refusal set of its loader (M4 T6).
-pub const credential_ref = @import("credential_ref.zig");
-
 /// The schema keywords `zttp:validate` compiles, for the build-time check of
 /// a call that names a schema it would refuse (M4 T7, ZTS514).
 pub const validate_keywords = @import("validate_keywords.zig");

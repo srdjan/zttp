@@ -66,7 +66,6 @@ pub const JsonDiagnostic = struct {
 fn parserErrorCode(kind: ErrorKind) []const u8 {
     return diagnostic_catalog.parserCode(kind);
 }
-
 // -------------------------------------------------------------------------
 // Conversion helpers
 // -------------------------------------------------------------------------
@@ -166,33 +165,11 @@ pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
     return .{
         .code = diagnostic_catalog.driverCode(.unsupported_source_extension),
         .severity = "error",
-        .message = "source files must use the .ts or .tsx extension",
+        .message = "source files must use the .ts extension",
         .file = file,
         .line = 1,
         .column = 1,
-        .suggestion = "rename the handler to .ts, or use .tsx when JSX lowering is required",
-    };
-}
-
-fn prepareSourceErrorCode(kind: zts.PrepareSourceDiagnosticKind) []const u8 {
-    return diagnostic_catalog.prepareSourceCode(kind);
-}
-
-pub fn fromPrepareSourceDiagnostic(diagnostic: zts.PrepareSourceDiagnostic, file: []const u8) JsonDiagnostic {
-    const message = switch (diagnostic.kind) {
-        .mismatched_tag => "mismatched JSX closing tag",
-        .invalid_attribute => "invalid JSX attribute",
-        .unclosed_element => "unclosed JSX element",
-        .expression_expected => "JSX expression expected",
-    };
-    return .{
-        .code = prepareSourceErrorCode(diagnostic.kind),
-        .severity = "error",
-        .message = message,
-        .file = file,
-        .line = diagnostic.line,
-        .column = diagnostic.column,
-        .suggestion = "fix the TSX syntax before running core analysis",
+        .suggestion = "rename the handler to .ts",
     };
 }
 
@@ -279,17 +256,10 @@ fn writeDiagnosticsArray(writer: anytype, diagnostics: []const JsonDiagnostic) !
 }
 
 /// Emit success JSON with proof summary and optional warnings.
-///
-/// `witnesses_block_json`, when non-null, is a pre-formatted JSON object
-/// (e.g. `{"total":3,"by_property":{"injection_safe":2,"no_secret_leakage":1}}`)
-/// inserted under `proof.witnesses`. Pass null when the corpus is unavailable
-/// or the caller chooses not to surface it. The caller is responsible for
-/// ensuring the block is well-formed JSON.
 pub fn writeSuccessJson(
     writer: anytype,
     contract: ?*const zts.HandlerContract,
     diagnostics: []const JsonDiagnostic,
-    witnesses_block_json: ?[]const u8,
     proof_trace_json: ?[]const u8,
 ) !void {
     return writeProofEnvelopeJson(
@@ -297,7 +267,6 @@ pub fn writeSuccessJson(
         true,
         contract,
         diagnostics,
-        witnesses_block_json,
         proof_trace_json,
     );
 }
@@ -305,14 +274,10 @@ pub fn writeSuccessJson(
 /// Emit error JSON with diagnostics array. When a contract exists, include the
 /// same proof object as the success envelope so clients can inspect declared
 /// specs that failed discharge while still treating the check as failed.
-///
-/// `witnesses_block_json` is the same as on `writeSuccessJson`: pre-formatted
-/// JSON inserted under `proof.witnesses`, or null to omit.
 pub fn writeErrorJson(
     writer: anytype,
     contract: ?*const zts.HandlerContract,
     diagnostics: []const JsonDiagnostic,
-    witnesses_block_json: ?[]const u8,
     proof_trace_json: ?[]const u8,
 ) !void {
     return writeProofEnvelopeJson(
@@ -320,7 +285,6 @@ pub fn writeErrorJson(
         false,
         contract,
         diagnostics,
-        witnesses_block_json,
         proof_trace_json,
     );
 }
@@ -330,7 +294,6 @@ fn writeProofEnvelopeJson(
     success: bool,
     contract: ?*const zts.HandlerContract,
     diagnostics: []const JsonDiagnostic,
-    witnesses_block_json: ?[]const u8,
     proof_trace_json: ?[]const u8,
 ) !void {
     try writer.writeAll(if (success) "{\"success\":true" else "{\"success\":false");
@@ -398,11 +361,6 @@ fn writeProofEnvelopeJson(
         try writer.writeByte(',');
         try writeSpecAndCapsulesJson(writer, c);
 
-        if (witnesses_block_json) |wb| {
-            try writer.writeAll(",\"witnesses\":");
-            try writer.writeAll(wb);
-        }
-
         try writer.writeByte('}');
     }
 
@@ -459,44 +417,6 @@ fn writeSpecAndCapsulesJson(
     try writeEffectCapsulesJson(writer, c.function_effect_capsules.items);
     try writer.writeAll(",\"holes\":");
     try writeHolesJson(writer, c.holes.items);
-    // The P8 report (M4 T4), only when a declaration was given: a declaration
-    // always has at least one entry, so an empty list means none was, and the
-    // envelope of a check without one stays byte-identical.
-    if (c.classifications.items.len > 0) {
-        try writer.writeAll(",\"classifications\":[");
-        for (c.classifications.items, 0..) |entry, i| {
-            if (i > 0) try writer.writeByte(',');
-            try writer.writeAll("{\"source\":");
-            try writeJsonString(writer, entry.source);
-            try writer.writeAll(",\"path\":");
-            try writeJsonString(writer, entry.path);
-            try writer.print(",\"label\":\"{s}\",\"required\":{s},\"status\":\"{s}\"}}", .{
-                @tagName(entry.label),
-                if (entry.required) "true" else "false",
-                @tagName(entry.status),
-            });
-        }
-        try writer.writeByte(']');
-    }
-    // The applied ceiling (M4 T5b), only when the declaration has one, so the
-    // envelope of a check without one stays byte-identical. Every breach is
-    // listed; each one counts as a check error.
-    if (c.ceiling) |*report| {
-        try writer.writeAll(",\"ceiling\":{\"profile\":");
-        try writeJsonString(writer, report.profile.name);
-        try writer.writeAll(",\"breaches\":[");
-        const ceiling = report.asCeiling();
-        var it = handler_contract.ceilingBreaches(c, &ceiling);
-        var first = true;
-        while (it.next()) |breach| {
-            if (!first) try writer.writeByte(',');
-            first = false;
-            try writer.print("{{\"reason\":\"{s}\",\"subject\":", .{@tagName(breach.reason())});
-            try writeJsonString(writer, breach.subject());
-            try writer.writeByte('}');
-        }
-        try writer.writeAll("]}");
-    }
 }
 
 /// Emit the `holes` array: every `hole()` call site with the type the
@@ -685,7 +605,6 @@ const allowed_features = [_]Feature{
     .{ .name = "readonly fields", .status = .allowed, .alternative = null },
     .{ .name = "type guards (x is T)", .status = .allowed, .alternative = null },
     .{ .name = "template literal types", .status = .allowed, .alternative = null },
-    .{ .name = "comptime()", .status = .allowed, .alternative = null },
     // Admitted in phase 3 (spec 5.3). It is data, not an absence sentinel, and
     // it is permitted only where the declared type names it. Its row left the
     // restriction matrix in the same commit, so the blocked count fell to 19.
@@ -1047,7 +966,7 @@ test "public proof writers omit proof without a contract" {
 
     var success: std.Io.Writer.Allocating = .init(allocator);
     defer success.deinit();
-    try writeSuccessJson(&success.writer, null, &.{}, null, null);
+    try writeSuccessJson(&success.writer, null, &.{}, null);
     try std.testing.expectEqualStrings(
         "{\"success\":true,\"diagnostics\":[]}\n",
         success.written(),
@@ -1055,20 +974,19 @@ test "public proof writers omit proof without a contract" {
 
     var failure: std.Io.Writer.Allocating = .init(allocator);
     defer failure.deinit();
-    try writeErrorJson(&failure.writer, null, &.{}, null, null);
+    try writeErrorJson(&failure.writer, null, &.{}, null);
     try std.testing.expectEqualStrings(
         "{\"success\":false,\"diagnostics\":[]}\n",
         failure.written(),
     );
 }
 
-test "public proof writers insert optional blocks as raw JSON" {
+test "public proof writers insert the proof trace as raw JSON" {
     const allocator = std.testing.allocator;
     var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
     defer contract.deinit(allocator);
 
     const proof_trace_json = "{\"retry_safe\":\"declared\"}";
-    const witnesses_block_json = "{\"total\":1}";
 
     var success: std.Io.Writer.Allocating = .init(allocator);
     defer success.deinit();
@@ -1076,11 +994,10 @@ test "public proof writers insert optional blocks as raw JSON" {
         &success.writer,
         &contract,
         &.{},
-        witnesses_block_json,
         proof_trace_json,
     );
     try std.testing.expectEqualStrings(
-        "{\"success\":true,\"proof\":{\"env_vars\":[],\"outbound_hosts\":[],\"virtual_modules\":[],\"proofTrace\":{\"retry_safe\":\"declared\"},\"declared_specs\":[],\"spec_diagnostics\":[],\"proofCapsules\":[],\"effectCapsules\":[],\"holes\":[],\"witnesses\":{\"total\":1}},\"diagnostics\":[]}\n",
+        "{\"success\":true,\"proof\":{\"env_vars\":[],\"outbound_hosts\":[],\"virtual_modules\":[],\"proofTrace\":{\"retry_safe\":\"declared\"},\"declared_specs\":[],\"spec_diagnostics\":[],\"proofCapsules\":[],\"effectCapsules\":[],\"holes\":[]},\"diagnostics\":[]}\n",
         success.written(),
     );
 
@@ -1090,11 +1007,10 @@ test "public proof writers insert optional blocks as raw JSON" {
         &failure.writer,
         &contract,
         &.{},
-        witnesses_block_json,
         proof_trace_json,
     );
     try std.testing.expectEqualStrings(
-        "{\"success\":false,\"proof\":{\"env_vars\":[],\"outbound_hosts\":[],\"virtual_modules\":[],\"proofTrace\":{\"retry_safe\":\"declared\"},\"declared_specs\":[],\"spec_diagnostics\":[],\"proofCapsules\":[],\"effectCapsules\":[],\"holes\":[],\"witnesses\":{\"total\":1}},\"diagnostics\":[]}\n",
+        "{\"success\":false,\"proof\":{\"env_vars\":[],\"outbound_hosts\":[],\"virtual_modules\":[],\"proofTrace\":{\"retry_safe\":\"declared\"},\"declared_specs\":[],\"spec_diagnostics\":[],\"proofCapsules\":[],\"effectCapsules\":[],\"holes\":[]},\"diagnostics\":[]}\n",
         failure.written(),
     );
 }
@@ -1299,7 +1215,6 @@ test "every diagnostic code names exactly one diagnostic" {
     const mappers = .{
         .{ ErrorKind, parserErrorCode },
         .{ zts.StripDiagnosticKind, stripErrorCode },
-        .{ zts.PrepareSourceDiagnosticKind, prepareSourceErrorCode },
     };
 
     inline for (mappers) |mapper| {
@@ -1360,19 +1275,7 @@ test "unsupported source extensions have one exact repair" {
     try std.testing.expectEqualStrings("ZTS052", diagnostic.code);
     try std.testing.expectEqualStrings("handler.js", diagnostic.file);
     try std.testing.expectEqualStrings(
-        "rename the handler to .ts, or use .tsx when JSX lowering is required",
+        "rename the handler to .ts",
         diagnostic.suggestion.?,
     );
-}
-
-test "TSX frontend diagnostics preserve stable JSX codes" {
-    const diagnostic = fromPrepareSourceDiagnostic(.{
-        .kind = .mismatched_tag,
-        .line = 7,
-        .column = 12,
-    }, "view.tsx");
-    try std.testing.expectEqualStrings("ZTS033", diagnostic.code);
-    try std.testing.expectEqualStrings("view.tsx", diagnostic.file);
-    try std.testing.expectEqual(@as(u32, 7), diagnostic.line);
-    try std.testing.expectEqual(@as(u32, 12), diagnostic.column);
 }

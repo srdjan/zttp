@@ -72,20 +72,8 @@ pub const ProvenFacts = struct {
     // Fault coverage
     fault_covered: bool = false,
 
-    // Durable workflow replay guarantees. Kept separate from handler-wide
-    // retry/idempotency so deployment artifacts can explain replay behavior
-    // without overloading the generic proof chips.
-    durable_workflow_used: bool = false,
-    durable_workflow_proof_level: handler_contract.DurableWorkflowProofLevel = .none,
-    durable_workflow_retry_safe: bool = false,
-    durable_workflow_idempotent: bool = false,
-    durable_workflow_fault_covered: bool = false,
-
-    // `zttp:fetch` host set. Populated from the contract's egress
-    // hosts when the handler imports `zttp:fetch`. Rendered as a
-    // separate allow-list so targets can distinguish "fetchSync
-    // egress" (all hosts) from "zttp:fetch egress" (the durable
-    // subset).
+    // `zttp:fetch` host set. The contract provides these egress hosts when the
+    // handler imports `zttp:fetch`.
     fetch_hosts: []const []const u8 = &.{},
 };
 
@@ -197,11 +185,6 @@ pub fn extractProvenFacts(
             .results_safe = if (contract.verification) |v| v.results_safe else false,
             .rate_limit_namespace = if (contract.rate_limiting) |rl| (if (rl.namespace.len > 0) rl.namespace else null) else null,
             .fault_covered = if (contract.properties) |p| p.fault_covered else false,
-            .durable_workflow_used = contract.durable.used,
-            .durable_workflow_proof_level = contract.durable.workflow.proof_level,
-            .durable_workflow_retry_safe = contract.durable.workflow.properties.retry_safe,
-            .durable_workflow_idempotent = contract.durable.workflow.properties.idempotent,
-            .durable_workflow_fault_covered = contract.durable.workflow.properties.fault_covered,
             .fetch_hosts = fetch_hosts,
         },
         .checks_buf = checks_buf,
@@ -296,17 +279,6 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     // Env proof status in metadata (not as a fake env var)
     try w.writeAll("      \"envProven\": ");
     try w.writeAll(if (facts.env_proven) "true" else "false");
-    try w.writeAll(",\n      \"durableWorkflow\": { \"used\": ");
-    try w.writeAll(if (facts.durable_workflow_used) "true" else "false");
-    try w.writeAll(", \"proofLevel\": \"");
-    try w.writeAll(facts.durable_workflow_proof_level.toString());
-    try w.writeAll("\", \"retrySafe\": ");
-    try w.writeAll(if (facts.durable_workflow_retry_safe) "true" else "false");
-    try w.writeAll(", \"idempotent\": ");
-    try w.writeAll(if (facts.durable_workflow_idempotent) "true" else "false");
-    try w.writeAll(", \"faultCovered\": ");
-    try w.writeAll(if (facts.durable_workflow_fault_covered) "true" else "false");
-    try w.writeAll(" }");
     if (!facts.env_proven) {
         try w.writeAll(",\n      \"envReview\": \"handler uses dynamic env access - additional vars may be needed\"");
     }
@@ -445,19 +417,6 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll("          \"zttp:proofLevel\": \"");
     try w.writeAll(facts.proof_level.toString());
     try w.writeAll("\"");
-    try w.writeAll(",\n          \"zttp:durableWorkflowProofLevel\": \"");
-    try w.writeAll(facts.durable_workflow_proof_level.toString());
-    try w.writeAll("\"");
-    try w.writeAll(",\n          \"zttp:durableWorkflowRetrySafe\": \"");
-    try w.writeAll(if (facts.durable_workflow_retry_safe) "true" else "false");
-    try w.writeAll("\"");
-    try w.writeAll(",\n          \"zttp:durableWorkflowIdempotent\": \"");
-    try w.writeAll(if (facts.durable_workflow_idempotent) "true" else "false");
-    try w.writeAll("\"");
-    try w.writeAll(",\n          \"zttp:durableWorkflowFaultCovered\": \"");
-    try w.writeAll(if (facts.durable_workflow_fault_covered) "true" else "false");
-    try w.writeAll("\"");
-
     try w.writeAll(",\n          \"zttp:retrySafe\": \"");
     try w.writeAll(if (facts.retry_safe) "true" else "false");
     try w.writeAll("\"");
@@ -681,22 +640,6 @@ fn renderCloudflareWorkers(allocator: std.mem.Allocator, facts: *const ProvenFac
     try w.writeAll("egress_proven = ");
     try w.writeAll(if (facts.egress_proven) "true" else "false");
     try w.writeByte('\n');
-    try w.writeAll("durable_workflow_used = ");
-    try w.writeAll(if (facts.durable_workflow_used) "true" else "false");
-    try w.writeByte('\n');
-    try w.writeAll("durable_workflow_proof_level = \"");
-    try w.writeAll(facts.durable_workflow_proof_level.toString());
-    try w.writeAll("\"\n");
-    try w.writeAll("durable_workflow_retry_safe = ");
-    try w.writeAll(if (facts.durable_workflow_retry_safe) "true" else "false");
-    try w.writeByte('\n');
-    try w.writeAll("durable_workflow_idempotent = ");
-    try w.writeAll(if (facts.durable_workflow_idempotent) "true" else "false");
-    try w.writeByte('\n');
-    try w.writeAll("durable_workflow_fault_covered = ");
-    try w.writeAll(if (facts.durable_workflow_fault_covered) "true" else "false");
-    try w.writeByte('\n');
-
     try w.writeAll("verification = [");
     for (facts.checks_passed, 0..) |check, i| {
         if (i > 0) try w.writeAll(", ");
@@ -904,16 +847,6 @@ pub fn writeDeployReport(w: anytype, facts: *const ProvenFacts, provider: []cons
     try w.writeAll("\nFAULT COVERAGE:\n");
     try writeProvenLine(w, facts.fault_covered, "every failable I/O call has an explicit failure path");
 
-    if (facts.durable_workflow_used or facts.durable_workflow_proof_level != .none) {
-        try w.writeAll("\nDURABLE WORKFLOW:\n");
-        try w.writeAll("  proof level: ");
-        try w.writeAll(facts.durable_workflow_proof_level.toString());
-        try w.writeByte('\n');
-        try writeProvenLine(w, facts.durable_workflow_retry_safe, "retry safe replay");
-        try writeProvenLine(w, facts.durable_workflow_idempotent, "idempotent completed-response reuse");
-        try writeProvenLine(w, facts.durable_workflow_fault_covered, "modeled workflow failure paths");
-    }
-
     try w.writeAll("\nHANDLER PROPERTIES:\n");
     try writeProvenLine(w, facts.retry_safe, "retry safe (auto-retry on failure)");
     try writeProvenLine(w, facts.read_only, "read only (no state mutations)");
@@ -1014,8 +947,6 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
 
 test "extractHandlerName basic" {
     try std.testing.expectEqualStrings("handler", extractHandlerName("handler.ts"));
-    try std.testing.expectEqualStrings("handler-full", extractHandlerName("examples/handler/handler-full.tsx"));
-    try std.testing.expectEqualStrings("handler", extractHandlerName("/some/path/handler.tsx"));
     try std.testing.expectEqualStrings("my-handler", extractHandlerName("my-handler.ts"));
 }
 
@@ -1125,29 +1056,6 @@ test "extractProvenFacts with env and egress" {
     try std.testing.expect(!facts.egress_proven);
     try std.testing.expectEqual(ProofLevel.partial, facts.proof_level);
     try std.testing.expectEqual(@as(usize, 3), facts.checks_passed.len);
-}
-
-test "extractProvenFacts includes durable workflow proof properties" {
-    const allocator = std.testing.allocator;
-    var contract = try makeTestContract(allocator);
-    defer contract.deinit(allocator);
-
-    contract.durable.used = true;
-    contract.durable.workflow.proof_level = .complete;
-    contract.durable.workflow.properties.retry_safe = true;
-    contract.durable.workflow.properties.idempotent = true;
-    contract.durable.workflow.properties.fault_covered = true;
-
-    const result = try extractProvenFacts(allocator, &contract);
-    defer allocator.free(result.checks_buf);
-    defer allocator.free(result.routes_buf);
-
-    const facts = result.facts;
-    try std.testing.expect(facts.durable_workflow_used);
-    try std.testing.expectEqual(handler_contract.DurableWorkflowProofLevel.complete, facts.durable_workflow_proof_level);
-    try std.testing.expect(facts.durable_workflow_retry_safe);
-    try std.testing.expect(facts.durable_workflow_idempotent);
-    try std.testing.expect(facts.durable_workflow_fault_covered);
 }
 
 test "renderAws minimal" {
@@ -1283,11 +1191,6 @@ test "renderAws with env vars and routes" {
         .routes = &routes,
         .proof_level = .complete,
         .checks_passed = &checks,
-        .durable_workflow_used = true,
-        .durable_workflow_proof_level = .complete,
-        .durable_workflow_retry_safe = true,
-        .durable_workflow_idempotent = true,
-        .durable_workflow_fault_covered = true,
     };
 
     const outputs = try renderAws(allocator, &facts);
@@ -1313,8 +1216,6 @@ test "renderAws with env vars and routes" {
     // Tags
     try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:proven\": \"true\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:proofLevel\": \"complete\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"durableWorkflow\": { \"used\": true, \"proofLevel\": \"complete\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"zttp:durableWorkflowRetrySafe\": \"true\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "api.stripe.com") != null);
 
     // Verification metadata
@@ -1372,11 +1273,6 @@ test "writeDeployReport complete proof" {
         .routes = &routes,
         .proof_level = .complete,
         .checks_passed = &checks,
-        .durable_workflow_used = true,
-        .durable_workflow_proof_level = .complete,
-        .durable_workflow_retry_safe = true,
-        .durable_workflow_idempotent = true,
-        .durable_workflow_fault_covered = true,
     };
 
     var output: std.ArrayList(u8) = .empty;
@@ -1398,8 +1294,6 @@ test "writeDeployReport complete proof" {
     try std.testing.expect(std.mem.indexOf(u8, report, "(none - all sections fully proven)") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "Exhaustive returns: PASS") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "Sound mode: PASS") != null);
-    try std.testing.expect(std.mem.indexOf(u8, report, "DURABLE WORKFLOW:") != null);
-    try std.testing.expect(std.mem.indexOf(u8, report, "PROVEN  retry safe replay") != null);
     try std.testing.expect(std.mem.indexOf(u8, report, "PROOF LEVEL: complete") != null);
 }
 
@@ -1517,11 +1411,6 @@ test "renderCloudflareWorkers omits path-only routes and keeps host-qualified ro
         .proof_level = .complete,
         .checks_passed = &checks,
         .fetch_hosts = &fetch_hosts,
-        .durable_workflow_used = true,
-        .durable_workflow_proof_level = .partial,
-        .durable_workflow_retry_safe = false,
-        .durable_workflow_idempotent = true,
-        .durable_workflow_fault_covered = false,
     };
 
     const outputs = try renderCloudflareWorkers(allocator, &facts);
@@ -1544,8 +1433,6 @@ test "renderCloudflareWorkers omits path-only routes and keeps host-qualified ro
     try std.testing.expect(std.mem.indexOf(u8, content, "[zttp]") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "fetch_hosts = [\"api.upstream.dev\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, content, "verification = [\"exhaustiveReturns\", \"resultsSafe\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "durable_workflow_proof_level = \"partial\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "durable_workflow_idempotent = true") != null);
 }
 
 test "renderCloudflareWorkers omits routes and vars blocks when neither is present" {

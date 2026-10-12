@@ -28,16 +28,13 @@ pub const names = [_][]const u8{
     "hole",
     "isBytes",
     "isDict",
-    "parallel",
     "parseFloat",
     "parseInt",
-    "race",
     "range",
     "renderToString",
     "requestBody",
     "requestJson",
     "requestText",
-    "resource",
 };
 
 /// Global member reads whose result differs between runs.
@@ -55,24 +52,12 @@ pub const names = [_][]const u8{
 pub const VaryingRead = struct {
     object: []const u8,
     property: []const u8,
-    /// True when a `durable.step()` callback records this read and replays the
-    /// recorded value on recovery.
-    ///
-    /// The analyzers exempt a varying read inside a durable step, and that
-    /// exemption is only sound when the runtime actually records it.
-    /// `Date.now` and `Math.random` do, through `durable.replayNext` and
-    /// `durable.persistIO` plus `recorder.recordIO`. `performance.now`
-    /// (`builtins/date.zig`) does none of the three: it reads a live monotonic
-    /// clock every time. Exempting it would certify a workflow as
-    /// `deterministic` and `idempotent` that takes a different branch on
-    /// replay than the one it was proven to take.
-    recorded_in_durable_step: bool,
 };
 
 pub const varying_reads = [_]VaryingRead{
-    .{ .object = "Date", .property = "now", .recorded_in_durable_step = true },
-    .{ .object = "Math", .property = "random", .recorded_in_durable_step = true },
-    .{ .object = "performance", .property = "now", .recorded_in_durable_step = false },
+    .{ .object = "Date", .property = "now" },
+    .{ .object = "Math", .property = "random" },
+    .{ .object = "performance", .property = "now" },
 };
 
 fn find(object_name: []const u8, property_name: []const u8) ?VaryingRead {
@@ -85,13 +70,6 @@ fn find(object_name: []const u8, property_name: []const u8) ?VaryingRead {
 
 pub fn isVaryingRead(object_name: []const u8, property_name: []const u8) bool {
     return find(object_name, property_name) != null;
-}
-
-/// True when this read varies AND a durable step cannot record it, so the
-/// varying-read verdict must stand even inside a `durable.step()` callback.
-pub fn isUnrecordableVaryingRead(object_name: []const u8, property_name: []const u8) bool {
-    const read = find(object_name, property_name) orelse return false;
-    return !read.recorded_in_durable_step;
 }
 
 pub fn isKnownGlobalFunction(name: []const u8) bool {

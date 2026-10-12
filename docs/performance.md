@@ -57,11 +57,7 @@ resulting `benchmarks/perf-baseline.json` separately from the tooling change.
 - `-n` controls isolated runtime count. The default is derived from CPU count
   and clamped to 8-128.
 - `-m` sets a per-runtime allocator ceiling. The default is no explicit limit.
-- `zttp:fetch`, `zttp:service`, `zttp:io`, and durable workflow paths depend on
-  external systems and runtime flags.
-- `--actor-queue` allocates in-memory mailbox rings only when enabled. The
-  default serving path pays no queue-worker or mailbox cost, and queued payloads
-  are stored as compact JSON byte slices outside the JS heap.
+- `zttp:fetch` depends on external systems and outbound HTTP runtime flags.
 - The response cache is gated by certificate-accepted `deterministic` and
   `read_only` properties plus a contract with no request-header or body
   dependency. The shipped production policy accepts neither property, so this

@@ -50,25 +50,20 @@ zig build -Doptimize=ReleaseFast
 
 ## First Handler
 
-```tsx
+```typescript
 structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"
 >;
 
-function HomePage(): JSX.Element {
-    return (
-        <html>
-            <head><title>Hello</title></head>
-            <body><h1>Hello from zttp</h1></body>
-        </html>
-    );
-}
-
 function handler(req: Request): Guardrails<Response> {
     if (req.path === "/") {
-        return Response.html(renderToString(<HomePage />));
+        const page = h("html", {},
+            h("head", {}, h("title", {}, "Hello")),
+            h("body", {}, h("h1", {}, "Hello from zttp")),
+        );
+        return Response.html(renderToString(page));
     }
     if (req.path === "/api/echo") {
         return Response.json({ method: req.method, path: req.path });
@@ -77,17 +72,15 @@ function handler(req: Request): Guardrails<Response> {
 }
 ```
 
-See [examples/](examples/) for routing, JSX/TSX, SQL, fetch, durable
-workflows, and proof examples.
+See [examples/](examples/) for routing, SQL, fetch, HTML rendering, and proof examples.
 
 ## Current Surface
 
 - Five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Advanced
   commands are listed by `zttp help --all`.
 - Handler API: `function handler(req): Response`, plus `Response.text`,
-  `Response.json`, and `Response.html`, and `resource(data, affordances)` for
-  content-negotiated HAL-JSON and HTMX from one declaration.
-- Language profile: a restricted JS/TS/TSX subset with no `var`, `while`,
+  `Response.json`, and `Response.html`. Use `h` and `renderToString` for HTML.
+- Language profile: a restricted TypeScript subset with no `var`, `while`,
   `class`, or `try/catch`; unsupported constructs fail at compile time.
 - Proofs: response-path verification, Result/optional checks, state-isolation
   checks, active `Proof<T, P>` obligations, flow checks, proof traces, witnesses,
@@ -95,8 +88,7 @@ workflows, and proof examples.
   reconstructs the required obligations and executable graph with an independent
   checker instead of trusting the compiler's serialized verdict.
 - Virtual modules: native modules under `zttp:*` for env, crypto, auth,
-  validation, cache, SQL, fetch, service calls, routing, durable and
-  multi-handler workflows, structured I/O, logging, IDs, time, text, and more.
+  validation, cache, SQL, fetch, routing, logging, IDs, time, text, and more.
 - Local deploy: self-contained binary output under
   `.zttp/deploy/<project-name>` with mandatory certificate acceptance and
   default-on provenance attestation.
@@ -117,7 +109,7 @@ exposing a binary publicly. Two boundaries are easy to miss:
 - A contract that matches the loaded bytes is still a set of compiler claims.
   Deployed artifacts must also pass certificate acceptance before startup. Only
   properties that clear the production policy can enable proof-authoritative
-  caching, pooling, check elision, or durable-workflow guarantees. `-Dhandler`
+  caching, pooling, or check elision. `-Dhandler`
   builds enforce their capability policy but carry no certificate and receive no
   proof promotion.
 - No TLS. The runtime serves plain HTTP and binds `127.0.0.1` by default.

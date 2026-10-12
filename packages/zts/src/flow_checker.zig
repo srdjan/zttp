@@ -24,7 +24,6 @@ const atom_table = @import("zts-engine").atom_table;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
 const route_resolution = @import("route_resolution.zig");
-const contract_types = @import("zts-contracts").contract_types;
 const type_checker_mod = @import("type_checker.zig");
 const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
@@ -175,12 +174,12 @@ pub fn propertyTagForKind(kind: DiagnosticKind) ?counterexample.PropertyTag {
 /// Proven data flow properties for a handler.
 pub const FlowProperties = struct {
     /// No {secret} data reaches response bodies or headers, logs, or external
-    /// egress. A write to the durable store, a queue, the cache, SQL, or another
-    /// handler is not a sink: the readers of stored data carry {unknown}.
+    /// egress. A write to cache or SQL is not a sink. Store readers carry
+    /// {unknown}.
     no_secret_leakage: bool = true,
     /// No {credential} data reaches response bodies or headers, logs, or
-    /// external egress (URL, headers, or body). The same exclusion as
-    /// `no_secret_leakage` applies to stores, queues, and other handlers.
+    /// external egress (URL, headers, or body). The same store exclusion
+    /// applies to `no_secret_leakage`.
     no_credential_leakage: bool = true,
     /// All {user_input} data passes through validation before external egress.
     input_validated: bool = true,
@@ -314,74 +313,11 @@ pub const ImportedSummary = struct {
     }
 };
 
-// ---------------------------------------------------------------------------
-// Declared classifications (M4 T4, producer obligations P8 and P9)
-// ---------------------------------------------------------------------------
-
-const declaration = @import("zts-base").declaration;
-pub const Declaration = declaration.Declaration;
-
-/// What the analysis established about one declared classification (P8). The
-/// order is the order of strength: a status only ever moves up.
-pub const EntryStatus = enum(u2) {
-    /// The analysis never produced a value from the entry's source, or never
-    /// reached the path or an aggregate above it.
-    absent = 0,
-    /// The entry applied only through an aggregate that contains the path, a
-    /// computed read, or a fetch whose source could not be named.
-    indeterminate = 1,
-    /// An expression was evaluated at the entry's exact path, or below it.
-    matched = 2,
-};
-
-/// Where a value came from, when it came from a declared source. Only a const
-/// binding keeps one, so an alias is tracked and a reassigned name is not.
-/// One declared source: a fetch host or a service name.
-const DeclaredSource = struct {
-    kind: declaration.SourceKind,
-    name: []const u8,
-};
-
-fn findSource(sources: []const DeclaredSource, kind: declaration.SourceKind, name: []const u8) ?u16 {
-    for (sources, 0..) |source, i| {
-        if (source.kind == kind and std.mem.eql(u8, source.name, name)) return @intCast(i);
-    }
-    return null;
-}
-
 /// What an imported declassifier discharges and which argument bounds it,
 /// copied from the export's `declassifies` and `declassify_bound_arg`.
 const DeclassifyRule = struct {
     bound_arg: u8,
     clears: LabelSet,
-};
-
-const Origin = struct {
-    /// Index of the source among `origin_sources`, or null for a fetch whose
-    /// URL is not a literal: every fetch entry then applies by path.
-    source: ?u16,
-    kind: declaration.SourceKind,
-    part: enum { response, body },
-    /// Path segments from the body root, borrowed from the atom table.
-    depth: u8 = 0,
-    segments: [max_origin_depth][]const u8 = undefined,
-
-    /// Deeper than any declared path can be: relations are decided by the
-    /// first `max_origin_depth` segments, so the rest need not be kept.
-    const max_origin_depth = 17;
-
-    fn path(self: *const Origin) []const []const u8 {
-        return self.segments[0..self.depth];
-    }
-
-    fn child(self: Origin, segment: []const u8) Origin {
-        var out = self;
-        if (out.depth < max_origin_depth) {
-            out.segments[out.depth] = segment;
-            out.depth += 1;
-        }
-        return out;
-    }
 };
 
 // ---------------------------------------------------------------------------
@@ -474,14 +410,6 @@ pub const FlowChecker = struct {
     /// Function bodies resolved from literal route tables passed to
     /// `routerMatch`. Each is walked as a request root after the handler.
     route_function_roots: std.ArrayListUnmanaged(NodeIndex),
-    /// Route functions for every tool named by the current agent entry. A
-    /// `callTool` result carries the union of these summaries regardless of
-    /// the runtime `name`, because that name is model-controlled.
-    listed_tool_route_functions: std.ArrayListUnmanaged(NodeIndex),
-    listed_tool_routes_ready: bool,
-    /// True when the catalog-to-route mapping was incomplete. A `callTool`
-    /// call then contributes `.unknown` and cannot discharge a flow proof.
-    listed_tool_routes_unresolved: bool,
     /// When non-null, the walk is summarizing a callee body: return statements
     /// merge their labels here instead of running response-sink checks.
     /// Expression sinks (log, egress) still run, with the parameters bound from
@@ -544,11 +472,6 @@ pub const FlowChecker = struct {
     defended_paths: std.ArrayListUnmanaged(DefendedPath),
     /// Handler request parameter binding key (packed scope_id + slot).
     req_binding_key: ?u32,
-    /// Whether `req.subject` and `req.tenant` still hold what the runtime
-    /// verified (M4 T5). False once any assignment in the program could write
-    /// either field or rebind the request, so a read then keeps the request's
-    /// `user_input` label: a handler cannot launder input through them.
-    req_identity_trusted: bool = false,
     /// Slot of the `env` function import (for smart label refinement).
     env_fn_slot: ?u16,
     /// Shared import index, injected by the orchestrator when one exists.
@@ -566,23 +489,6 @@ pub const FlowChecker = struct {
     /// Snapshotted alongside `working_constraints` on diagnostics.
     working_io_calls: std.ArrayListUnmanaged(counterexample.TrackedIoCall),
 
-    /// The consumer's declared classifications (M4 T4). Borrowed; must outlive
-    /// the checker. Null means none were declared.
-    declaration: ?*const Declaration = null,
-    /// One status per classification, in the declaration's order (P8).
-    entry_status: []EntryStatus = &.{},
-    /// Distinct declared sources, their names borrowed from the declaration.
-    /// An origin names its source by index.
-    origin_sources: std.ArrayListUnmanaged(DeclaredSource) = .empty,
-    /// The origin of each const binding whose initializer had one.
-    binding_origins: std.AutoHashMapUnmanaged(u32, Origin) = .empty,
-    /// The last classification that contributed each label, for the reason a
-    /// leak diagnostic names.
-    last_declared_secret: ?u32 = null,
-    last_declared_credential: ?u32 = null,
-    /// Nonzero while the object of a member read is evaluated: an aggregate
-    /// read only to reach one of its members is not forwarded (P8).
-    member_object_depth: u8 = 0,
     /// Dynamically formatted diagnostic messages that need freeing.
     allocated_messages: std.ArrayListUnmanaged([]const u8),
 
@@ -610,9 +516,6 @@ pub const FlowChecker = struct {
             .binding_value_nodes = .empty,
             .user_fn_decls = .empty,
             .route_function_roots = .empty,
-            .listed_tool_route_functions = .empty,
-            .listed_tool_routes_ready = false,
-            .listed_tool_routes_unresolved = false,
             .summary_returns = null,
             .summary_stack = @splat(0),
             .summary_call_sites = @splat(null_node),
@@ -668,17 +571,12 @@ pub const FlowChecker = struct {
         self.request_carriers.deinit(self.allocator);
         self.param_values.deinit(self.allocator);
         self.route_function_roots.deinit(self.allocator);
-        self.listed_tool_route_functions.deinit(self.allocator);
 
         // Free dynamically formatted diagnostic messages
         for (self.allocated_messages.items) |msg| {
             self.allocator.free(msg);
         }
         self.allocated_messages.deinit(self.allocator);
-
-        if (self.entry_status.len > 0) self.allocator.free(self.entry_status);
-        self.origin_sources.deinit(self.allocator);
-        self.binding_origins.deinit(self.allocator);
     }
 
     /// Run the flow analysis on the given handler function node.
@@ -687,14 +585,12 @@ pub const FlowChecker = struct {
         self.scanImports();
         self.scanFunctionDecls();
         self.scanRouteFunctionRoots();
-        self.scanListedToolRoutes();
         self.resolveCaptures();
         self.walkModuleDeclarations();
         self.findHandlerParam(handler_func);
         self.walkStmt(handler_func);
 
         const handler_req_key = self.req_binding_key;
-        const handler_identity_trusted = self.req_identity_trusted;
         {
             const handler_constraints = self.working_constraints;
             const handler_io = self.working_io_calls;
@@ -710,13 +606,11 @@ pub const FlowChecker = struct {
                 self.working_constraints.clearRetainingCapacity();
                 self.working_io_calls.clearRetainingCapacity();
                 self.req_binding_key = null;
-                self.req_identity_trusted = false;
                 self.findHandlerParam(route_func);
                 self.walkStmt(route_func);
             }
         }
         self.req_binding_key = handler_req_key;
-        self.req_identity_trusted = handler_identity_trusted;
         self.recordContainedSecrets();
         if (self.allocation_failed) return error.OutOfMemory;
 
@@ -730,44 +624,18 @@ pub const FlowChecker = struct {
     /// Labels a module call inherits from closures passed to it. A module
     /// export answers with its declared return labels, which describe what the
     /// module itself produces and cannot describe what a caller's callback
-    /// returns: `parallel([() => env("SECRET_KEY")])` declares `external` and
-    /// the secret vanished.
+    /// returns. A callback can return labels that the export cannot declare.
     ///
     /// Only closures contribute. Unioning every argument would taint results
     /// that carry no argument data - `cacheSet("ns", key, userInput)` answers a
     /// boolean, not the user's data - and the pass-through shape that needs
-    /// this is always a callback the module invokes: `parallel`, `race`,
-    /// `step`, `call`, `saga`, `using`.
-    ///
-    /// `nondeterministic` is dropped for a durable export, and only that label:
-    /// the callback's value is recorded on the first run and replayed after, so
-    /// it is the same on every run, while a secret it returns is still a secret
-    /// in the response.
-    fn closureArgLabels(self: *FlowChecker, slot: u16, call_data: Node.CallExpr) LabelSet {
-        const is_durable = if (self.module_fn_meta.get(slot)) |meta|
-            std.mem.eql(u8, meta.module, "durable")
-        else
-            false;
-
+    /// this is always a callback that the module invokes.
+    fn closureArgLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
         var labels = LabelSet.empty;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-
-            // Whether a closure is present is a question about the argument's
-            // shape, not about the labels it produced: `() => Date.now()` under
-            // a durable export produces exactly one label and then loses it, so
-            // an emptiness test would read it as "no closure here" and fall to
-            // the eager branch that puts the label back.
             if (self.closuresWithin(arg)) |from_closure| {
-                var l = from_closure;
-                if (is_durable) l.nondeterministic = false;
-                labels = LabelSet.merge(labels, l);
-            } else if (is_durable) {
-                // Only what a closure returns is replayed. `step("ts",
-                // Date.now())` reads the clock before `step` is ever called, so
-                // no replay reproduces that value and the eager form keeps the
-                // label the callback form loses.
-                labels = LabelSet.merge(labels, self.inferLabels(arg));
+                labels = LabelSet.merge(labels, from_closure);
             }
         }
         return labels;
@@ -776,9 +644,7 @@ pub const FlowChecker = struct {
     /// Union of what every closure inside `node` produces, or null when `node`
     /// holds no closure at all. Null and the empty set are different answers: a
     /// callback that returns nothing labelled still went through a call the
-    /// module makes, and a durable export replays only what such a call
-    /// returned. Testing emptiness instead would read `() => Date.now()` under
-    /// `step` - one label, then dropped as replayed - as "no closure here".
+    /// module makes.
     ///
     /// Descends through the array and object literals a callback is usually
     /// wrapped in, and ignores every other value.
@@ -830,7 +696,7 @@ pub const FlowChecker = struct {
             // array, as an object field, or under a name. No other tag can hold
             // a closure the callee invokes without going through one of them.
             // Null owes nothing here: it reports that the argument is a plain
-            // value, which is what tells the two durable forms apart.
+            // value, which distinguishes plain values from closure shapes.
             else => return null,
         }
     }
@@ -913,45 +779,6 @@ pub const FlowChecker = struct {
         self.summary_rewalks[frame] = rewalks;
         self.summary_widened[frame] = false;
         self.summary_depth += 1;
-    }
-
-    /// Install the agent-to-tool mapping from the catalog that contract
-    /// extraction accepted. Production precompile uses this path, so runtime
-    /// lowering and flow inference consume the same names and route strings.
-    /// Standalone checker callers fall back to the conservative literal scan.
-    pub fn setAcceptedToolCatalog(self: *FlowChecker, entries: []const contract_types.ToolEntry) !void {
-        const facts = self.resolveFacts() orelse {
-            self.listed_tool_routes_ready = true;
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        const agent_entry = for (entries) |*entry| {
-            if (entry.agent != null) break entry;
-        } else return;
-
-        self.listed_tool_route_functions.clearRetainingCapacity();
-        self.listed_tool_routes_ready = true;
-        self.listed_tool_routes_unresolved = false;
-        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
-        for (agent_entry.agent.?.tools.items) |tool_name| {
-            const tool = for (entries) |*entry| {
-                if (std.mem.eql(u8, entry.name, tool_name)) break entry;
-            } else {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            if (tool.agent != null) {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            }
-            var targets = try resolver.resolveRouteKey(self.allocator, tool.route);
-            defer targets.deinit(self.allocator);
-            if (targets.unresolved) self.listed_tool_routes_unresolved = true;
-            for (targets.functions.items) |function| {
-                if (std.mem.indexOfScalar(NodeIndex, self.listed_tool_route_functions.items, function) != null) continue;
-                try self.listed_tool_route_functions.append(self.allocator, function);
-            }
-        }
     }
 
     /// Return labels of the exported function named `name`, for a caller in
@@ -1466,33 +1293,8 @@ pub const FlowChecker = struct {
         return self.properties;
     }
 
-    /// Install the consumer's declared classifications (M4 T4). Borrowed: the
-    /// declaration must outlive the checker. Every entry starts `absent`.
-    pub fn setDeclaration(self: *FlowChecker, decl: *const Declaration) std.mem.Allocator.Error!void {
-        const statuses = try self.allocator.alloc(EntryStatus, decl.classifications.len);
-        errdefer self.allocator.free(statuses);
-        @memset(statuses, .absent);
-        var sources: std.ArrayListUnmanaged(DeclaredSource) = .empty;
-        errdefer sources.deinit(self.allocator);
-        for (decl.classifications) |entry| {
-            if (findSource(sources.items, entry.source_kind, entry.source_name) == null) {
-                try sources.append(self.allocator, .{ .kind = entry.source_kind, .name = entry.source_name });
-            }
-        }
-        if (self.entry_status.len > 0) self.allocator.free(self.entry_status);
-        self.origin_sources.deinit(self.allocator);
-        self.entry_status = statuses;
-        self.origin_sources = sources;
-        self.declaration = decl;
-    }
-
     pub fn setTypeChecker(self: *FlowChecker, checker: *type_checker_mod.TypeChecker) void {
         self.type_checker = checker;
-    }
-
-    /// The P8 status of each classification, in the declaration's order.
-    pub fn classificationStatuses(self: *const FlowChecker) []const EntryStatus {
-        return self.entry_status;
     }
 
     pub fn formatDiagnostics(self: *const FlowChecker, source: stripper.SourceView, writer: anytype) !void {
@@ -2024,182 +1826,6 @@ pub const FlowChecker = struct {
         if (roots.unresolved) _ = self.unknownRouteCallLabels();
     }
 
-    /// Resolve the current agent's literal `tools` list through the same
-    /// catalog route keys and `routerMatch` tables that contract extraction
-    /// accepts. This is intentionally a closed read. Any missing literal,
-    /// duplicate agent, unknown tool, or unresolved route sets the conservative
-    /// bit; contract construction later emits the precise ZTS513 refusal.
-    fn scanListedToolRoutes(self: *FlowChecker) void {
-        if (self.listed_tool_routes_ready) return;
-        const facts = self.resolveFacts() orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        const catalog_slot = for (facts.imports.items) |record| {
-            if (record.resolution != .builtin) continue;
-            if (std.mem.eql(u8, record.module_specifier, "zttp:tool") and
-                std.mem.eql(u8, record.imported_name, "toolCatalog")) break record.slot;
-        } else return;
-
-        var catalog_call: ?Node.CallExpr = null;
-        for (0..self.ir_view.nodeCount()) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            if (self.ir_view.getTag(idx) != .call) continue;
-            const call = self.ir_view.getCall(idx) orelse continue;
-            if (self.ir_view.getTag(call.callee) != .identifier) continue;
-            const binding = self.bindingAt(call.callee) orelse continue;
-            if (binding.slot != catalog_slot) continue;
-            if (catalog_call != null) {
-                self.listed_tool_routes_unresolved = true;
-                self.listed_tool_routes_ready = true;
-                return;
-            }
-            catalog_call = call;
-        }
-        const call = catalog_call orelse return;
-        self.listed_tool_routes_ready = true;
-        if (call.args_count != 1) {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        }
-        const catalog_node = self.resolveCatalogObject(
-            self.ir_view.getListIndex(call.args_start, 0),
-        ) orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        const catalog = self.ir_view.getObject(catalog_node) orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-
-        var agent_entry: ?NodeIndex = null;
-        for (0..catalog.properties_count) |index| {
-            const property_node = self.ir_view.getListIndex(catalog.properties_start, @intCast(index));
-            if (self.ir_view.getTag(property_node) != .object_property) {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            }
-            const property = self.ir_view.getProperty(property_node) orelse {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            const entry_node = self.resolveCatalogObject(property.value) orelse {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            if (self.catalogField(entry_node, "agent") == null) continue;
-            if (agent_entry != null) {
-                self.listed_tool_routes_unresolved = true;
-                return;
-            }
-            agent_entry = entry_node;
-        }
-        const agent = agent_entry orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        const agent_value = self.catalogField(agent, "agent") orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        const agent_object = self.resolveCatalogObject(agent_value) orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        const tools_node = self.catalogField(agent_object, "tools") orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        const tools = self.ir_view.getArray(tools_node) orelse {
-            self.listed_tool_routes_unresolved = true;
-            return;
-        };
-        if (tools.elements_count == 0) self.listed_tool_routes_unresolved = true;
-
-        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
-        for (0..tools.elements_count) |index| {
-            const tool_node = self.ir_view.getListIndex(tools.elements_start, @intCast(index));
-            const tool_name = self.catalogString(tool_node) orelse {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            const tool_entry = self.catalogEntry(catalog_node, tool_name) orelse {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            if (self.catalogField(tool_entry, "agent") != null) {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            }
-            const route_node = self.catalogField(tool_entry, "route") orelse {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            const route = self.catalogString(route_node) orelse {
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            var targets = resolver.resolveRouteKey(self.allocator, route) catch {
-                self.markAllocationFailure();
-                self.listed_tool_routes_unresolved = true;
-                continue;
-            };
-            defer targets.deinit(self.allocator);
-            if (targets.unresolved) self.listed_tool_routes_unresolved = true;
-            for (targets.functions.items) |function| {
-                if (std.mem.indexOfScalar(NodeIndex, self.listed_tool_route_functions.items, function) != null) continue;
-                self.listed_tool_route_functions.append(self.allocator, function) catch self.markAllocationFailure();
-            }
-        }
-    }
-
-    fn resolveCatalogObject(self: *const FlowChecker, node: NodeIndex) ?NodeIndex {
-        const tag = self.ir_view.getTag(node) orelse return null;
-        if (tag == .object_literal) return node;
-        if (tag != .identifier) return null;
-        const binding = self.bindingAt(node) orelse return null;
-        const binding_decl = self.findBindingDecl(binding) orelse return null;
-        if (self.bindingIsMutated(binding) or self.bindingHasAlias(binding)) return null;
-        return if (self.ir_view.getTag(binding_decl.init) == .object_literal) binding_decl.init else null;
-    }
-
-    fn catalogField(self: *const FlowChecker, object_node: NodeIndex, wanted: []const u8) ?NodeIndex {
-        const catalog_object = self.ir_view.getObject(object_node) orelse return null;
-        var found: ?NodeIndex = null;
-        for (0..catalog_object.properties_count) |index| {
-            const property_node = self.ir_view.getListIndex(catalog_object.properties_start, @intCast(index));
-            if (self.ir_view.getTag(property_node) != .object_property) return null;
-            const property = self.ir_view.getProperty(property_node) orelse return null;
-            const name = self.getPropertyKeyName(property.key) orelse return null;
-            if (!std.mem.eql(u8, name, wanted)) continue;
-            if (found != null) return null;
-            found = property.value;
-        }
-        return found;
-    }
-
-    fn catalogEntry(self: *const FlowChecker, catalog_node: NodeIndex, wanted: []const u8) ?NodeIndex {
-        const catalog = self.ir_view.getObject(catalog_node) orelse return null;
-        var found: ?NodeIndex = null;
-        for (0..catalog.properties_count) |index| {
-            const property_node = self.ir_view.getListIndex(catalog.properties_start, @intCast(index));
-            if (self.ir_view.getTag(property_node) != .object_property) return null;
-            const property = self.ir_view.getProperty(property_node) orelse return null;
-            const name = self.getPropertyKeyName(property.key) orelse return null;
-            if (!std.mem.eql(u8, name, wanted)) continue;
-            if (found != null) return null;
-            found = self.resolveCatalogObject(property.value);
-        }
-        return found;
-    }
-
-    fn catalogString(self: *const FlowChecker, node: NodeIndex) ?[]const u8 {
-        if (self.ir_view.getTag(node) != .lit_string) return null;
-        const string_idx = self.ir_view.getStringIdx(node) orelse return null;
-        return self.ir_view.getString(string_idx);
-    }
-
     fn appendRouteFunctionRoot(self: *FlowChecker, fn_node: NodeIndex) void {
         if (std.mem.indexOfScalar(NodeIndex, self.route_function_roots.items, fn_node) != null) return;
         self.route_function_roots.append(self.allocator, fn_node) catch self.markAllocationFailure();
@@ -2529,118 +2155,6 @@ pub const FlowChecker = struct {
         self.req_binding_key = key;
         // Request parameter carries user_input label
         self.binding_labels.put(self.allocator, key, .{ .user_input = true }) catch self.markAllocationFailure();
-        self.req_identity_trusted = !self.programMayWriteReqIdentity(key);
-    }
-
-    /// Identity fields a tool request carries from the verifier (M4 T5).
-    fn isReqIdentityField(name: []const u8) bool {
-        return std.mem.eql(u8, name, "subject") or std.mem.eql(u8, name, "tenant");
-    }
-
-    /// True when any assignment anywhere in the program could write
-    /// `subject` or `tenant` on the request, or rebind the request parameter.
-    /// The scan is by property name over every assignment, not only those
-    /// rooted at `req`, so an alias (`const r = req; r.subject = x`) or a
-    /// helper that writes its parameter is caught too; a computed write whose
-    /// key is not a literal could name either field and counts as well. Over
-    /// counting only keeps a label, so the direction is safe.
-    fn programMayWriteReqIdentity(self: *const FlowChecker, req_key: u32) bool {
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .assignment) continue;
-            const asgn = self.ir_view.getAssignment(idx) orelse return true;
-            const target_tag = self.ir_view.getTag(asgn.target) orelse return true;
-            switch (target_tag) {
-                .identifier => {
-                    const binding = self.bindingAt(asgn.target) orelse return true;
-                    if (packBindingKey(binding.scope_id, binding.slot) == req_key) return true;
-                },
-                .member_access, .optional_chain => {
-                    const member = self.ir_view.getMember(asgn.target) orelse return true;
-                    const name = self.resolveAtomName(member.property) orelse return true;
-                    if (isReqIdentityField(name)) return true;
-                },
-                .computed_access => {
-                    const member = self.ir_view.getMember(asgn.target) orelse return true;
-                    if (self.ir_view.getTag(member.computed) != .lit_string) return true;
-                    const str_idx = self.ir_view.getStringIdx(member.computed) orelse return true;
-                    const key = self.ir_view.getString(str_idx) orelse return true;
-                    if (isReqIdentityField(key)) return true;
-                },
-                // exhaustive: any other target shape binds nothing a read of
-                // `req.subject` could observe - a call result or a literal.
-                else => {},
-            }
-        }
-        return self.requestEscapesScan(req_key);
-    }
-
-    /// True when the request object can reach code the assignment scan above
-    /// cannot read: passed to a function from another file, a global such as
-    /// `Object.assign`, or a method, or copied into another binding. Only a
-    /// built-in module export (native, which writes no JS field) and a
-    /// function declared in this file (whose assignments the scan already
-    /// read) may receive it. Over counting only keeps a label.
-    fn requestEscapesScan(self: *const FlowChecker, req_key: u32) bool {
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
-            switch (tag) {
-                .var_decl => {
-                    const decl = self.ir_view.getVarDecl(idx) orelse return true;
-                    if (self.isBindingKey(decl.init, req_key)) return true;
-                },
-                .call, .method_call => {
-                    const call_data = self.ir_view.getCall(idx) orelse return true;
-                    var passes_req = false;
-                    for (0..call_data.args_count) |k| {
-                        if (self.isBindingKey(self.ir_view.getListIndex(call_data.args_start, @intCast(k)), req_key)) passes_req = true;
-                    }
-                    if (passes_req and !self.calleeCannotWriteRequest(call_data.callee)) return true;
-                },
-                // exhaustive: only a declaration or a call can hand the
-                // request object to code this scan does not read.
-                else => {},
-            }
-        }
-        return false;
-    }
-
-    fn isBindingKey(self: *const FlowChecker, node: NodeIndex, key: u32) bool {
-        if (node == null_node or self.ir_view.getTag(node) != .identifier) return false;
-        const binding = self.bindingAt(node) orelse return false;
-        return packBindingKey(binding.scope_id, binding.slot) == key;
-    }
-
-    /// A built-in module export or a function declared in this file.
-    fn calleeCannotWriteRequest(self: *const FlowChecker, callee: NodeIndex) bool {
-        if (self.ir_view.getTag(callee) != .identifier) return false;
-        const binding = self.bindingAt(callee) orelse return false;
-        if (self.moduleMeta(binding) != null) return true;
-        return self.user_fn_decls.contains(packBindingKey(binding.scope_id, binding.slot));
-    }
-
-    /// The labels of a `req.subject` / `req.tenant` read. They come from the
-    /// runtime's verifier, not the caller, so the request's `user_input` label
-    /// does not reach them - unless the program could have written them, in
-    /// which case the read keeps every label the request carries. Any other
-    /// label the request picked up (a secret assigned onto it) is kept either
-    /// way.
-    fn reqIdentityLabels(self: *const FlowChecker, req_labels: LabelSet) LabelSet {
-        var labels = req_labels;
-        if (self.req_identity_trusted) labels.user_input = false;
-        return labels;
-    }
-
-    /// True for `req.subject` / `req.tenant` (dot or optional-chain form) on
-    /// the handler's request parameter.
-    fn isReqIdentityMember(self: *const FlowChecker, member_object: NodeIndex, property: u16) bool {
-        if (!self.isReqBinding(member_object)) return false;
-        const name = self.resolveAtomName(property) orelse return false;
-        return isReqIdentityField(name);
     }
 
     /// What a value is when it is the request or the request's headers (plan
@@ -2713,8 +2227,6 @@ pub const FlowChecker = struct {
         if (target_tag == .identifier) {
             const binding = self.bindingAt(asgn.target) orelse return;
             const key = packBindingKey(binding.scope_id, binding.slot);
-            // Only a const holds an origin, but a written name never keeps one.
-            _ = self.binding_origins.remove(key);
             if (asgn.op) |_| {
                 // Compound assignment (+=, etc): merge with existing
                 const existing = self.binding_labels.get(key) orelse LabelSet.empty;
@@ -2737,9 +2249,6 @@ pub const FlowChecker = struct {
             const key = packBindingKey(binding.scope_id, binding.slot);
             const existing = self.binding_labels.get(key) orelse LabelSet.empty;
             self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
-            // The object now holds labels its origin does not explain, and a
-            // precise member read would subtract them with the declared ones.
-            _ = self.binding_origins.remove(key);
         }
     }
 
@@ -2790,8 +2299,6 @@ pub const FlowChecker = struct {
         const key = packBindingKey(binding.scope_id, binding.slot);
         const existing = self.binding_labels.get(key) orelse LabelSet.empty;
         self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, arg_labels)) catch self.markAllocationFailure();
-        // As for a member assignment: labels the origin does not explain.
-        _ = self.binding_origins.remove(key);
     }
 
     /// Record a defining value node for a binding so the response-sink check
@@ -2850,16 +2357,7 @@ pub const FlowChecker = struct {
             .var_decl => {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
                 if (vd.init != null_node) {
-                    // A const keeps its initializer's origin, so an alias of a
-                    // body or a field is read precisely (M4 T4). A let or var
-                    // can be reassigned, so it keeps only the labels. Binding
-                    // an aggregate is not forwarding it: its later uses decide
-                    // the P8 status, so the initializer is read as a member
-                    // object would be.
-                    const init_origin: ?Origin = if (vd.kind == .@"const") self.originOf(vd.init) else null;
-                    if (init_origin != null) self.member_object_depth += 1;
                     const labels = self.inferLabels(vd.init);
-                    if (init_origin != null) self.member_object_depth -= 1;
                     // A declaration is a fresh binding, so it overwrites even with
                     // the empty set: a callee walked once per call site must not
                     // keep the labels an earlier call bound here (plan unit F3).
@@ -2867,10 +2365,6 @@ pub const FlowChecker = struct {
                         const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
                         self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
                         self.setCarrier(key, self.carrierKind(vd.init));
-                    }
-                    if (init_origin) |origin| {
-                        const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-                        self.binding_origins.put(self.allocator, key, origin) catch self.markAllocationFailure();
                     }
                     self.recordBindingValue(vd.binding, vd.init);
                     self.trackModuleCallInit(vd);
@@ -3049,10 +2543,6 @@ pub const FlowChecker = struct {
             .identifier => {
                 const binding = self.bindingAt(node) orelse return LabelSet.empty;
                 const key = packBindingKey(binding.scope_id, binding.slot);
-                // A use of a name with an origin is where an aggregate is
-                // forwarded or a field is read (P8). Its labels are already on
-                // the binding; this only records the status.
-                if (self.binding_origins.get(key)) |origin| _ = self.declaredLabels(origin, true);
                 if (self.binding_labels.get(key)) |labels| return labels;
                 return self.unrecordedBindingLabels(binding, key);
             },
@@ -3062,11 +2552,7 @@ pub const FlowChecker = struct {
                 const saved_call = self.active_call_node;
                 self.active_call_node = node;
                 defer self.active_call_node = saved_call;
-                const labels = self.withHtmlFact(node, call_data, self.inferCallLabels(call_data));
-                // A response or body from a declared source carries the
-                // declared labels of everything it contains (M4 T4).
-                if (self.originOf(node)) |origin| return LabelSet.merge(labels, self.declaredLabels(origin, true));
-                return labels;
+                return self.withHtmlFact(node, call_data, self.inferCallLabels(call_data));
             },
 
             .binary_op => {
@@ -3084,26 +2570,7 @@ pub const FlowChecker = struct {
 
             .member_access, .optional_chain => {
                 const member = self.ir_view.getMember(node) orelse return LabelSet.empty;
-                // A member read on a value from a declared source is precise:
-                // it drops the declared labels the aggregate held and takes
-                // those of its own path, so a sibling field is not labelled.
-                const object_origin = self.originOf(member.object);
-                if (object_origin != null) self.member_object_depth += 1;
                 var labels = self.inferLabels(member.object);
-                if (object_origin != null) self.member_object_depth -= 1;
-                if (object_origin) |origin| {
-                    const inherited = self.declaredLabels(origin, false);
-                    if (inherited.secret) labels.secret = false;
-                    if (inherited.credential) labels.credential = false;
-                    if (self.originOf(node)) |child| labels = LabelSet.merge(labels, self.declaredLabels(child, true));
-                }
-
-                // req.subject / req.tenant come from the runtime's verifier
-                // (M4 T5), so the request's user_input label does not reach
-                // them.
-                if (self.isReqIdentityMember(member.object, member.property)) {
-                    return self.reqIdentityLabels(labels);
-                }
 
                 // req.headers.authorization carries credential label
                 if (self.carrierKind(member.object) == .headers) {
@@ -3132,15 +2599,6 @@ pub const FlowChecker = struct {
             .computed_access => {
                 const member = self.ir_view.getMember(node) orelse return LabelSet.empty;
                 const labels = self.inferLabels(member.object);
-                // req["subject"] / req["tenant"]: the computed spelling of the
-                // verified identity read, with the same labels.
-                if (self.isReqBinding(member.object) and self.ir_view.getTag(member.computed) == .lit_string) {
-                    if (self.ir_view.getStringIdx(member.computed)) |str_idx| {
-                        if (self.ir_view.getString(str_idx)) |key| {
-                            if (isReqIdentityField(key)) return self.reqIdentityLabels(labels);
-                        }
-                    }
-                }
                 // req.headers["authorization"] is the dominant header-read idiom
                 // and carries the credential label, mirroring the dot-access form.
                 if (self.carrierKind(member.object) == .headers) {
@@ -3342,8 +2800,7 @@ pub const FlowChecker = struct {
     /// Fails closed on every shape it cannot read as a literal - an
     /// identifier, an arithmetic expression, a call result - because the whole
     /// question is whether the magnitude is fixed at compile time. A
-    /// `comptime()`-folded bound reads as non-literal here and costs a
-    /// declassification rather than granting one.
+    /// A bound from any function call remains non-literal.
     fn declassificationBoundIsLiteral(
         self: *const FlowChecker,
         slot: u16,
@@ -3361,158 +2818,6 @@ pub const FlowChecker = struct {
 
     /// Infer labels for a function call expression.
     // -----------------------------------------------------------------
-    // Declared classifications (M4 T4)
-    // -----------------------------------------------------------------
-
-    /// The origin of an expression's value when it comes from a declared
-    /// source, or null. Only these shapes carry one: a const binding whose
-    /// initializer had one, a `fetch`/`fetchWithRetry`/`serviceCall` call, a
-    /// `.json()` call or `.body` read on such a response, and a member read on
-    /// a body value. Anything else - a call argument, a spread, an array, a
-    /// computed read - drops the origin and keeps the labels, which is the safe
-    /// direction.
-    fn originOf(self: *FlowChecker, node: NodeIndex) ?Origin {
-        if (self.declaration == null or node == null_node) return null;
-        const tag = self.ir_view.getTag(node) orelse return null;
-        switch (tag) {
-            .identifier => {
-                const binding = self.bindingAt(node) orelse return null;
-                return self.binding_origins.get(packBindingKey(binding.scope_id, binding.slot));
-            },
-            .call, .method_call => {
-                const call_data = self.ir_view.getCall(node) orelse return null;
-                return self.callOrigin(call_data);
-            },
-            .member_access, .optional_chain => {
-                const member = self.ir_view.getMember(node) orelse return null;
-                const parent = self.originOf(member.object) orelse return null;
-                const name = self.resolveAtomName(member.property) orelse return null;
-                return switch (parent.part) {
-                    .body => parent.child(name),
-                    // `resp.body` is the whole body as text: the body root.
-                    .response => if (std.mem.eql(u8, name, "body")) bodyRoot(parent) else null,
-                };
-            },
-            // exhaustive: every other expression either is not a value from a
-            // declared source or computes a new one; its labels still carry
-            // whatever declared labels flowed into it.
-            else => return null,
-        }
-    }
-
-    fn bodyRoot(response: Origin) Origin {
-        return .{ .source = response.source, .kind = response.kind, .part = .body };
-    }
-
-    fn callOrigin(self: *FlowChecker, call_data: Node.CallExpr) ?Origin {
-        const callee_tag = self.ir_view.getTag(call_data.callee) orelse return null;
-        if (callee_tag == .identifier) {
-            const binding = self.bindingAt(call_data.callee) orelse return null;
-            const meta = self.moduleMeta(binding) orelse return null;
-            if (std.mem.eql(u8, meta.module, "fetch") and
-                (std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry")))
-            {
-                return switch (self.literalUrlHost(call_data)) {
-                    // A URL this cannot name the host of could be any declared host.
-                    .unknown => self.anySource(.fetch),
-                    .undeclared => null,
-                    .declared => |index| .{ .source = index, .kind = .fetch, .part = .response },
-                };
-            }
-            if (std.mem.eql(u8, meta.module, "service") and std.mem.eql(u8, meta.func, "serviceCall")) {
-                const name = self.literalArg(call_data, 0) orelse return self.anySource(.service);
-                const index = findSource(self.origin_sources.items, .service, name) orelse return null;
-                return .{ .source = index, .kind = .service, .part = .response };
-            }
-            return null;
-        }
-        // `resp.json()` or `resp.text()` on a response from a declared source:
-        // the body root. `text()` is the whole body as a string, so it carries
-        // every declared field the body does.
-        if (callee_tag == .member_access or callee_tag == .optional_chain) {
-            const member = self.ir_view.getMember(call_data.callee) orelse return null;
-            const name = self.resolveAtomName(member.property) orelse return null;
-            if (!std.mem.eql(u8, name, "json") and !std.mem.eql(u8, name, "text")) return null;
-            const response = self.originOf(member.object) orelse return null;
-            if (response.part != .response) return null;
-            return bodyRoot(response);
-        }
-        return null;
-    }
-
-    /// A response whose source cannot be named: every entry of that kind then
-    /// applies by path, and none can be `matched`. Null when no entry has that
-    /// kind, so an undeclared kind costs nothing.
-    fn anySource(self: *const FlowChecker, kind: declaration.SourceKind) ?Origin {
-        for (self.origin_sources.items) |source| {
-            if (source.kind == kind) return .{ .source = null, .kind = kind, .part = .response };
-        }
-        return null;
-    }
-
-    fn literalArg(self: *const FlowChecker, call_data: Node.CallExpr, index: usize) ?[]const u8 {
-        if (call_data.args_count <= index) return null;
-        const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(index));
-        if (self.ir_view.getTag(arg) != .lit_string) return null;
-        const str_idx = self.ir_view.getStringIdx(arg) orelse return null;
-        return self.ir_view.getString(str_idx);
-    }
-
-    /// Which declared host a fetch URL names: `unknown` when the URL is not a
-    /// literal or has no host, `undeclared` for a literal host no entry names. Hosts in a declaration are lowercase,
-    /// so a literal that differs only in case must still match: the host
-    /// component is compared without regard to case.
-    fn literalUrlHost(self: *FlowChecker, call_data: Node.CallExpr) UrlHost {
-        const url = self.literalArg(call_data, 0) orelse return .unknown;
-        const uri = std.Uri.parse(url) catch return .unknown;
-        const host_component = uri.host orelse return .unknown;
-        const host = switch (host_component) {
-            .raw => |raw| raw,
-            .percent_encoded => |encoded| encoded,
-        };
-        for (self.origin_sources.items, 0..) |source, i| {
-            if (source.kind == .fetch and std.ascii.eqlIgnoreCase(source.name, host)) return .{ .declared = @intCast(i) };
-        }
-        return .undeclared;
-    }
-
-    const UrlHost = union(enum) { unknown, undeclared, declared: u16 };
-
-    /// The declared labels a value with `origin` carries, and the P8 status it
-    /// earns each entry. An entry applies at its exact path, below it, and at
-    /// any aggregate above it - forwarding the aggregate forwards the field
-    /// (P9 condition a) - and never at a sibling. Matching is by whole path
-    /// from the source root (P9 condition b).
-    fn declaredLabels(self: *FlowChecker, origin: Origin, mark: bool) LabelSet {
-        const decl = self.declaration orelse return LabelSet.empty;
-        const observed: []const []const u8 = if (origin.part == .body) origin.path() else &.{};
-        var labels = LabelSet.empty;
-        for (decl.classifications, 0..) |entry, i| {
-            if (entry.source_kind != origin.kind) continue;
-            if (origin.source) |index| {
-                if (!std.mem.eql(u8, self.origin_sources.items[index].name, entry.source_name)) continue;
-            }
-            const status: EntryStatus = switch (declaration.relation(entry.path, observed)) {
-                .unrelated => continue,
-                .exact, .observed_extends_declared => if (origin.source == null) .indeterminate else .matched,
-                // An aggregate read only as the object of a member read is not
-                // forwarded, so it earns nothing; the member read decides.
-                .observed_is_prefix => if (self.member_object_depth > 0) .absent else .indeterminate,
-            };
-            labels = LabelSet.merge(labels, switch (entry.label) {
-                .secret => LabelSet{ .secret = true },
-                .credential => LabelSet{ .credential = true },
-            });
-            if (!mark) continue;
-            if (@intFromEnum(status) > @intFromEnum(self.entry_status[i])) self.entry_status[i] = status;
-            const index: u32 = @intCast(i);
-            switch (entry.label) {
-                .secret => self.last_declared_secret = index,
-                .credential => self.last_declared_credential = index,
-            }
-        }
-        return labels;
-    }
 
     fn inferCallLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return LabelSet.empty;
@@ -3523,12 +2828,6 @@ pub const FlowChecker = struct {
 
         if (callee_tag == .identifier) {
             const binding = self.bindingAt(call_data.callee) orelse return LabelSet.empty;
-
-            // `callTool` has a catalog-directed rule. Its ok value carries the
-            // pending argument JSON and the union of every tool the agent may
-            // select. `callId` and `name` do not carry into the value. This
-            // must precede the export's generic `derives_from_args` rule.
-            if (self.moduleMeta(binding) != null and self.isCallToolSlot(binding.slot)) return self.callToolLabels(call_data);
 
             if (self.moduleLabels(binding)) |base_labels| {
                 if (self.env_fn_slot != null and binding.slot == self.env_fn_slot.? and call_data.args_count > 0) {
@@ -3549,7 +2848,7 @@ pub const FlowChecker = struct {
                 if (!self.declassificationBoundIsLiteral(binding.slot, call_data)) {
                     return self.argDerivedLabels(base_labels, call_data);
                 }
-                var result = LabelSet.merge(base_labels, self.closureArgLabels(binding.slot, call_data));
+                var result = LabelSet.merge(base_labels, self.closureArgLabels(call_data));
                 // A declassifier discharges the labels it names and keeps the
                 // rest of what its arguments carried. `mask(req.url, 4)` is
                 // still request text, so `user_input` survives it.
@@ -3574,12 +2873,8 @@ pub const FlowChecker = struct {
             // import and would otherwise report the value untraceable.
             // Carries whatever a callback it invokes returns, and nothing else:
             // the empty declared set is the export's own answer, not a gap.
-            // `step` is the case that matters - it declares no labels at all,
-            // so without this a secret read inside its callback would arrive
-            // unlabelled while the same read inside `parallel`'s callback,
-            // which does declare labels, would not.
             if (self.moduleMeta(binding) != null) {
-                return self.closureArgLabels(binding.slot, call_data);
+                return self.closureArgLabels(call_data);
             }
 
             // renderToString(jsx) auto-escapes its output, so a user_input value
@@ -3719,76 +3014,6 @@ pub const FlowChecker = struct {
         return labels;
     }
 
-    fn isCallToolSlot(self: *FlowChecker, slot: u16) bool {
-        const facts = self.resolveFacts() orelse return false;
-        for (facts.imports.items) |record| {
-            if (record.slot != slot or record.resolution != .builtin) continue;
-            return std.mem.eql(u8, record.module_specifier, "zttp:tool") and
-                std.mem.eql(u8, record.imported_name, "callTool");
-        }
-        return false;
-    }
-
-    fn callToolLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
-        var labels = if (call_data.args_count > 2)
-            self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 2))
-        else
-            LabelSet{ .unknown = true };
-
-        if (!self.listed_tool_routes_ready or self.listed_tool_routes_unresolved or
-            self.listed_tool_route_functions.items.len == 0)
-        {
-            return LabelSet.merge(labels, self.unknownRouteCallLabels());
-        }
-        for (self.listed_tool_route_functions.items) |function| {
-            labels = LabelSet.merge(labels, self.listedToolRouteLabels(function));
-        }
-        return labels;
-    }
-
-    /// Summarize a listed tool as a request root. The synthetic request still
-    /// has request provenance on its dispatch fields, while `argsJson` is
-    /// joined separately at the call site. Response helpers contribute only
-    /// their payload, matching the runtime response body surface.
-    fn listedToolRouteLabels(self: *FlowChecker, fn_node: NodeIndex) LabelSet {
-        if (self.summary_depth >= max_summary_depth) return self.unresolvedCallLabels(LabelSet.empty);
-        for (self.summary_stack[0..self.summary_depth]) |active| {
-            if (active == fn_node) return .{ .unknown = true };
-        }
-        const function = self.ir_view.getFunction(fn_node) orelse return self.unresolvedCallLabels(LabelSet.empty);
-
-        const saved_req_key = self.req_binding_key;
-        const saved_identity_trusted = self.req_identity_trusted;
-        self.req_binding_key = null;
-        self.req_identity_trusted = false;
-        self.findHandlerParam(fn_node);
-        defer {
-            self.req_binding_key = saved_req_key;
-            self.req_identity_trusted = saved_identity_trusted;
-        }
-
-        self.pushSummaryFrame(fn_node, false);
-        defer self.summary_depth -= 1;
-        self.route_summary_depth += 1;
-        defer self.route_summary_depth -= 1;
-        const is_root = std.mem.indexOfScalar(NodeIndex, self.route_function_roots.items, fn_node) != null;
-        if (is_root) self.root_dispatch_depth += 1;
-        defer if (is_root) {
-            self.root_dispatch_depth -= 1;
-        };
-
-        const body_tag = self.ir_view.getTag(function.body) orelse return self.unresolvedCallLabels(LabelSet.empty);
-        if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
-            var collected = LabelSet.empty;
-            const saved_returns = self.summary_returns;
-            self.summary_returns = &collected;
-            defer self.summary_returns = saved_returns;
-            self.walkStmt(function.body);
-            return collected;
-        }
-        return self.exprBodyLabels(function.body);
-    }
-
     fn isUnresolvedFunctionValueCallee(self: *const FlowChecker, callee: NodeIndex) bool {
         const tag = self.ir_view.getTag(callee) orelse return false;
         return switch (tag) {
@@ -3847,9 +3072,7 @@ pub const FlowChecker = struct {
 
     fn routeFunctionCallLabels(self: *FlowChecker, fn_node: NodeIndex, call_data: Node.CallExpr) LabelSet {
         const saved_req_key = self.req_binding_key;
-        const saved_identity_trusted = self.req_identity_trusted;
         self.req_binding_key = null;
-        self.req_identity_trusted = false;
         self.findHandlerParam(fn_node);
         const is_root = std.mem.indexOfScalar(NodeIndex, self.route_function_roots.items, fn_node) != null;
         if (is_root) self.root_dispatch_depth += 1;
@@ -3858,7 +3081,6 @@ pub const FlowChecker = struct {
         self.route_summary_depth -= 1;
         if (is_root) self.root_dispatch_depth -= 1;
         self.req_binding_key = saved_req_key;
-        self.req_identity_trusted = saved_identity_trusted;
         return labels;
     }
 
@@ -3987,12 +3209,8 @@ pub const FlowChecker = struct {
                     if (self.moduleMeta(binding)) |meta| {
                         if (meta.returns == .string or meta.returns == .optional_string) return .string;
                         if (meta.returns == .result) return .result;
-                        if ((std.mem.eql(u8, meta.module, "fetch") and
-                            (std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry"))) or
-                            (std.mem.eql(u8, meta.module, "service") and std.mem.eql(u8, meta.func, "serviceCall")) or
-                            (std.mem.eql(u8, meta.module, "workflow") and
-                                (std.mem.eql(u8, meta.func, "call") or std.mem.eql(u8, meta.func, "follow"))) or
-                            (std.mem.eql(u8, meta.module, "io") and std.mem.eql(u8, meta.func, "race"))) return .response;
+                        if (std.mem.eql(u8, meta.module, "fetch") and
+                            (std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry"))) return .response;
                     }
                 }
                 if (self.ir_view.getTag(call.callee) != .member_access) return null;
@@ -4005,8 +3223,7 @@ pub const FlowChecker = struct {
                 const member = self.ir_view.getMember(node) orelse return null;
                 const name = self.resolveAtomName(member.property) orelse return null;
                 if (std.mem.eql(u8, name, "headers") and self.isReqBinding(member.object)) return .headers;
-                if ((std.mem.eql(u8, name, "body") or std.mem.eql(u8, name, "url") or std.mem.eql(u8, name, "method") or
-                    std.mem.eql(u8, name, "subject") or std.mem.eql(u8, name, "tenant")) and
+                if ((std.mem.eql(u8, name, "body") or std.mem.eql(u8, name, "url") or std.mem.eql(u8, name, "method")) and
                     self.isReqBinding(member.object)) return .string;
                 if (std.mem.eql(u8, name, "headers")) {
                     const object_kind = self.builtinReceiverKind(member.object, depth + 1) orelse return null;
@@ -4786,24 +4003,14 @@ pub const FlowChecker = struct {
 
         if (tag == .call) {
             // Egress sinks: the bare `fetchSync(url, opts)` global plus the
-            // documented module APIs `fetch` (zttp:fetch) and `serviceCall`
-            // (zttp:service). Recognizing only the bare global let a secret
-            // flow into a `fetch(...)` body or URL go unflagged, falsely
-            // discharging no_secret_leakage / injection_safe.
+            // documented `fetch` API. This catches secret values in module calls.
             if (self.isFetchSyncCall(call_data.callee)) {
                 self.checkEgressCall(call_data, node, 0, 1);
-            } else if (self.egressModuleFunc(call_data.callee)) |kind| {
-                switch (kind) {
-                    // fetch(url, init): url at 0, options at 1.
-                    .fetch => self.checkEgressCall(call_data, node, 0, 1),
-                    // serviceCall(service, route, init): route at 1, init at 2.
-                    .service_call => self.checkEgressCall(call_data, node, 1, 2),
-                }
+            } else if (self.isFetchModuleCall(call_data.callee)) {
+                self.checkEgressCall(call_data, node, 0, 1);
             }
         }
     }
-
-    const EgressKind = enum { fetch, service_call };
 
     /// True if the callee is an imported zttp:log function (logDebug, logInfo,
     /// logWarn, logError), which writes its arguments to stderr.
@@ -4819,16 +4026,11 @@ pub const FlowChecker = struct {
             std.mem.eql(u8, meta.func, "logError");
     }
 
-    /// Identify a call whose callee is an imported egress module function
-    /// (`fetch` from zttp:fetch or `serviceCall` from zttp:service).
-    fn egressModuleFunc(self: *const FlowChecker, callee: NodeIndex) ?EgressKind {
-        const callee_tag = self.ir_view.getTag(callee) orelse return null;
-        if (callee_tag != .identifier) return null;
-        const binding = self.bindingAt(callee) orelse return null;
-        const meta = self.moduleMeta(binding) orelse return null;
-        if (std.mem.eql(u8, meta.func, "fetch")) return .fetch;
-        if (std.mem.eql(u8, meta.func, "serviceCall")) return .service_call;
-        return null;
+    fn isFetchModuleCall(self: *const FlowChecker, callee: NodeIndex) bool {
+        if (self.ir_view.getTag(callee) != .identifier) return false;
+        const binding = self.bindingAt(callee) orelse return false;
+        const meta = self.moduleMeta(binding) orelse return false;
+        return std.mem.eql(u8, meta.func, "fetch");
     }
 
     /// Apply the egress-URL and egress-body sink checks for a call with the URL
@@ -5394,34 +4596,10 @@ pub const FlowChecker = struct {
         }
     }
 
-    /// Return a diagnostic message naming the declared classification behind
-    /// a secret or credential label, when one contributed (M4 T4). The entry
-    /// named is the last one whose label the analysis applied; with no
-    /// declaration, or for any other label, the literal comes back unchanged
-    /// and nothing is allocated.
     fn messageWithReason(self: *FlowChecker, base: []const u8, label: DataLabel) []const u8 {
-        const decl = self.declaration orelse return base;
-        const index = switch (label) {
-            .secret => self.last_declared_secret,
-            .credential => self.last_declared_credential,
-            // exhaustive: a declaration can assign only secret and credential,
-            // so no other label has a declared entry to name.
-            else => null,
-        } orelse return base;
-        const entry = decl.classifications[index];
-        const formatted = std.fmt.allocPrint(self.allocator, "{s} (declared {s}: {s}:{s} {s} - {s})", .{
-            base,
-            @tagName(entry.label),
-            @tagName(entry.source_kind),
-            entry.source_name,
-            entry.path_text,
-            entry.reason,
-        }) catch return base;
-        self.allocated_messages.append(self.allocator, formatted) catch {
-            self.allocator.free(formatted);
-            return base;
-        };
-        return formatted;
+        _ = self;
+        _ = label;
+        return base;
     }
 
     /// The help text for a diagnostic raised while a callee is summarized: the
@@ -6774,104 +5952,6 @@ test "FlowChecker proves no_secret_leakage for a benign module fetch" {
     try std.testing.expect(checker.getProperties().no_secret_leakage);
 }
 
-test "FlowChecker keeps a secret passed through toolInput in its parsed value" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { env } from "zttp:env";
-        \\import { toolInput } from "zttp:tool";
-        \\function handler(req) {
-        \\  const parsed = toolInput("Input", { body: env("SECRET_KEY") });
-        \\  return Response.json(parsed.value);
-        \\}
-    ;
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
-        return error.HandlerNotFound;
-
-    var checker = FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    _ = try checker.check(handler_fn);
-
-    var secret_response_count: usize = 0;
-    for (checker.getDiagnostics()) |diagnostic| {
-        if (diagnostic.kind == .secret_in_response) secret_response_count += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 1), secret_response_count);
-    try std.testing.expect(!checker.getProperties().no_secret_leakage);
-}
-
-test "FlowChecker accepts a literal passed through toolInput and returned" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { toolInput } from "zttp:tool";
-        \\function handler(req) {
-        \\  const parsed = toolInput("Input", { body: "\"safe\"" });
-        \\  return Response.json(parsed.value);
-        \\}
-    ;
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
-        return error.HandlerNotFound;
-
-    var checker = FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    _ = try checker.check(handler_fn);
-
-    for (checker.getDiagnostics()) |diagnostic| {
-        try std.testing.expect(diagnostic.kind != .secret_in_response);
-    }
-    try std.testing.expect(checker.getProperties().no_secret_leakage);
-}
-
-test "FlowChecker keeps agentPrompt user input on a fetch body" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { fetch } from "zttp:fetch";
-        \\import { agentPrompt } from "zttp:tool";
-        \\function handler(req) {
-        \\  const prompt = agentPrompt();
-        \\  fetch("https://provider.example.com", { method: "POST", body: prompt.value });
-        \\  return Response.json({ ok: true });
-        \\}
-    ;
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
-        return error.HandlerNotFound;
-
-    var checker = FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    _ = try checker.check(handler_fn);
-
-    var unvalidated_egress_count: usize = 0;
-    for (checker.getDiagnostics()) |diagnostic| {
-        if (diagnostic.kind == .unvalidated_input_in_egress) unvalidated_egress_count += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 1), unvalidated_egress_count);
-    try std.testing.expect(!checker.getProperties().input_validated);
-    try std.testing.expect(!checker.getProperties().injection_safe);
-}
-
 test "FlowChecker records validated defended path reaching an HTML response" {
     const allocator = std.testing.allocator;
     const source =
@@ -7376,7 +6456,7 @@ fn runWithImportedFunction(
     var type_checker: ?type_checker_mod.TypeChecker = null;
     defer if (type_checker) |*checker| checker.deinit();
     if (type_env_storage.envPtr()) |type_env| {
-        type_checker = type_checker_mod.TypeChecker.init(allocator, imported_view, &imported_atoms, type_env, null);
+        type_checker = type_checker_mod.TypeChecker.init(allocator, imported_view, &imported_atoms, type_env);
         try std.testing.expectEqual(@as(u32, 0), try type_checker.?.check(imported_root));
     }
 
@@ -7529,27 +6609,6 @@ test "a parameter cannot read the summary of an import that shares its slot" {
         \\}
     ;
     try std.testing.expect(try runWithImportedFunction(std.testing.allocator, direct, imported, "name"));
-}
-
-test "a parameter cannot read the labels of a module import that shares its slot" {
-    // `call` is a predefined atom (92), so the import's slot is 92, and the
-    // ninety-third parameter has the same number as a frame slot. A lookup by
-    // slot alone reads the call `f(...)` as a call to the module export, which
-    // carries only what its callbacks return, and the secret passed to an
-    // unresolved callee is lost.
-    const allocator = std.testing.allocator;
-    var params: std.ArrayList(u8) = .empty;
-    defer params.deinit(allocator);
-    for (1..92) |i| try params.print(allocator, "a{d}, ", .{i});
-    const source = try std.fmt.allocPrint(allocator,
-        \\import {{ env }} from "zttp:env";
-        \\import {{ call }} from "zttp:workflow";
-        \\function handler(req, {s}f) {{
-        \\  return Response.json({{ v: f(env("SECRET_KEY")) }});
-        \\}}
-    , .{params.items});
-    defer allocator.free(source);
-    try std.testing.expect(!try runNoSecretLeakage(allocator, source));
 }
 
 test "an imported function carrying nothing keeps the property" {
@@ -8766,100 +7825,6 @@ test "FlowChecker keeps a property for a module-level clean constant or function
     try std.testing.expect((try runFlowProperties(std.testing.allocator, uninitialized)).no_secret_leakage);
 }
 
-test "FlowChecker resolves a captured value to the declaration it names" {
-    var buf: [512]u8 = undefined;
-
-    // A closure builds a response from a captured secret.
-    const returned =
-        \\import { env } from "zttp:env";
-        \\function handler(req) {
-        \\  const token = env("SECRET_KEY") ?? "";
-        \\  const inner = () => {
-        \\    return Response.json({ k: token });
-        \\  };
-        \\  return inner();
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, returned)).no_secret_leakage);
-
-    // A nested arrow logs a captured secret.
-    const logged =
-        \\import { env } from "zttp:env";
-        \\function handler(req) {
-        \\  const token = env("SECRET_KEY") ?? "";
-        \\  const note = () => {
-        \\    console.log(token);
-        \\    return 1;
-        \\  };
-        \\  const n = note();
-        \\  return Response.json({ n: n });
-        \\}
-    ;
-    const logged_report = try runFlowDiagnostics(std.testing.allocator, logged, .secret_in_log, &buf);
-    try std.testing.expectEqual(@as(usize, 1), logged_report.count);
-    try std.testing.expect(!logged_report.properties.no_secret_leakage);
-
-    // A nested function declaration reads a parameter of its enclosing function.
-    const param_capture =
-        \\import { env } from "zttp:env";
-        \\function relay(token) {
-        \\  function inner() {
-        \\    console.log(token);
-        \\    return 1;
-        \\  }
-        \\  return inner();
-        \\}
-        \\function handler(req) {
-        \\  const n = relay(env("SECRET_KEY") ?? "");
-        \\  return Response.json({ n: n });
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, param_capture)).no_secret_leakage);
-
-    // Two levels of nesting reach the same declaration.
-    const two_levels =
-        \\import { env } from "zttp:env";
-        \\function handler(req) {
-        \\  const token = env("SECRET_KEY") ?? "";
-        \\  const outer = () => {
-        \\    const inner = () => {
-        \\      console.log(token);
-        \\      return 1;
-        \\    };
-        \\    return inner();
-        \\  };
-        \\  const n = outer();
-        \\  return Response.json({ n: n });
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, two_levels)).no_secret_leakage);
-
-    // A closure that a module calls later still reads what it captured.
-    const parallel_callback =
-        \\import { env } from "zttp:env";
-        \\import { parallel } from "zttp:io";
-        \\function handler(req) {
-        \\  const token = env("SECRET_KEY") ?? "";
-        \\  const out = parallel([() => { console.log(token); return 1; }]);
-        \\  return Response.json({ ok: 1 });
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, parallel_callback)).no_secret_leakage);
-
-    // A captured module-level secret resolves through its global declaration.
-    const module_level =
-        \\import { env } from "zttp:env";
-        \\const token = env("SECRET_KEY") ?? "";
-        \\function handler(req) {
-        \\  const inner = () => {
-        \\    return Response.json({ k: token });
-        \\  };
-        \\  return inner();
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, module_level)).no_secret_leakage);
-}
-
 test "FlowChecker keeps a property for a captured value that holds no secret" {
     // Control: the captured value is clean.
     const clean =
@@ -9408,243 +8373,6 @@ test "FlowChecker unions routerMatch route return labels at dispatch" {
     try std.testing.expect(!properties.pii_contained);
 }
 
-test "FlowChecker unions every listed tool return at the callTool call site" {
-    const source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\import { fetch } from "zttp:fetch";
-        \\function clean(req) { return Response.json({ ok: true }); }
-        \\function tainted(req) { return Response.json({ url: req.url }); }
-        \\function assistant(req) {
-        \\  const result = callTool("call-1", "clean", "{}");
-        \\  fetch("https://api.example.com/collect", { body: result.value });
-        \\  return Response.json({ ok: true });
-        \\}
-        \\const routes = {
-        \\  "POST /clean": clean,
-        \\  "POST /tainted": tainted,
-        \\  "POST /agent": assistant,
-        \\};
-        \\toolCatalog({
-        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  tainted: { route: "POST /tainted", description: "tainted", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: {
-        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
-        \\    agent: {
-        \\      tools: ["clean", "tainted"],
-        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\      limits: { rounds: 1, toolCalls: 2, toolCallsPerRound: 2, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
-        \\    },
-        \\  },
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
-        \\  return found.handler(req);
-        \\}
-    ;
-    const properties = try runFlowProperties(std.testing.allocator, source);
-    // The selected name is clean. Only the union of the other listed route's
-    // return can carry request input to this egress sink.
-    try std.testing.expect(!properties.injection_safe);
-}
-
-test "FlowChecker preserves secret labels through the callTool route union" {
-    const direct_source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { env } from "zttp:env";
-        \\function secretTool(req) { return Response.json({ value: env("SECRET_KEY") }); }
-        \\const routes = { "POST /secret": secretTool };
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(
-        std.testing.allocator,
-        direct_source,
-    )).no_secret_leakage);
-
-    const call_tool_source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\import { env } from "zttp:env";
-        \\function secretTool(req) { return Response.json({ value: env("SECRET_KEY") }); }
-        \\function assistant(req) {
-        \\  const result = callTool("call-1", "secret", "{}");
-        \\  return Response.json({ value: result.value });
-        \\}
-        \\const routes = { "POST /secret": secretTool, "POST /agent": assistant };
-        \\toolCatalog({
-        \\  secret: { route: "POST /secret", description: "secret", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: {
-        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
-        \\    agent: {
-        \\      tools: ["secret"],
-        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
-        \\    },
-        \\  },
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(
-        std.testing.allocator,
-        call_tool_source,
-    )).no_secret_leakage);
-
-    const clean_source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\function clean(req) { return Response.json({ value: "clean" }); }
-        \\function assistant(req) {
-        \\  const result = callTool("call-1", "clean", "{}");
-        \\  return Response.json({ value: result.value });
-        \\}
-        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
-        \\toolCatalog({
-        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: {
-        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
-        \\    agent: {
-        \\      tools: ["clean"],
-        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
-        \\    },
-        \\  },
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    try std.testing.expect((try runFlowProperties(
-        std.testing.allocator,
-        clean_source,
-    )).no_secret_leakage);
-}
-
-test "FlowChecker keeps callTool callId and name out of the ok labels" {
-    const source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\import { fetch } from "zttp:fetch";
-        \\function clean(req) { return Response.json({ ok: true }); }
-        \\function assistant(req) {
-        \\  const result = callTool(req.body, req.url, "{}");
-        \\  fetch("https://api.example.com/collect", { body: result.value });
-        \\  return Response.json({ ok: true });
-        \\}
-        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
-        \\toolCatalog({
-        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: {
-        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
-        \\    agent: {
-        \\      tools: ["clean"],
-        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
-        \\    },
-        \\  },
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    const properties = try runFlowProperties(std.testing.allocator, source);
-    try std.testing.expect(properties.injection_safe);
-}
-
-test "FlowChecker fails closed when a callTool route table escapes" {
-    const source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\import { fetch } from "zttp:fetch";
-        \\function clean(req) { return Response.json({ ok: true }); }
-        \\function assistant(req) {
-        \\  const result = callTool("call-1", "clean", "{}");
-        \\  fetch("https://api.example.com/collect", { body: result.value });
-        \\  return Response.json({ ok: true });
-        \\}
-        \\function mutate(value) { value.changed = clean; }
-        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
-        \\mutate(routes);
-        \\toolCatalog({
-        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: {
-        \\    route: "POST /agent", description: "agent", maxInputBytes: 64,
-        \\    agent: {
-        \\      tools: ["clean"],
-        \\      provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 },
-        \\    },
-        \\  },
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    const properties = try runFlowProperties(std.testing.allocator, source);
-    try std.testing.expect(!properties.injection_safe);
-}
-
-test "FlowChecker joins argsJson and fails closed for an unresolved listed tool" {
-    const args_source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\import { env } from "zttp:env";
-        \\function clean(req) { return Response.json({ ok: true }); }
-        \\function assistant(req) {
-        \\  const secret = env("SECRET_KEY");
-        \\  const result = callTool("call-1", "clean", secret);
-        \\  return Response.json({ value: result.value });
-        \\}
-        \\const routes = { "POST /clean": clean, "POST /agent": assistant };
-        \\toolCatalog({
-        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: { route: "POST /agent", description: "agent", maxInputBytes: 64, agent: { tools: ["clean"], provider: { endpoint: "https://api.example.com", credential: "provider" }, limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 } } },
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, args_source)).no_secret_leakage);
-
-    const unresolved_source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\import { fetch } from "zttp:fetch";
-        \\function assistant(req) {
-        \\  const result = callTool("call-1", "ghost", "{}");
-        \\  fetch("https://api.example.com/collect", { body: result.value });
-        \\  return Response.json({ ok: true });
-        \\}
-        \\const routes = { "POST /agent": assistant };
-        \\toolCatalog({
-        \\  ghost: { route: "POST /missing", description: "ghost", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: { route: "POST /agent", description: "agent", maxInputBytes: 64, agent: { tools: ["ghost"], provider: { endpoint: "https://api.example.com", credential: "provider" }, limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 } } },
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    try std.testing.expect(!(try runFlowProperties(std.testing.allocator, unresolved_source)).injection_safe);
-}
-
 test "FlowChecker proves every flow property for clean routerMatch routes" {
     const source =
         \\import { routerMatch } from "zttp:router";
@@ -10108,98 +8836,6 @@ test "FlowChecker preserves known request string and rawJson calls" {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Verified identity reads (M4 T5): `req.subject` and `req.tenant` come from
-// the runtime's verifier, so they carry no `user_input`, while `req.body`
-// still does. The egress body is the sink that distinguishes the two: it
-// clears `input_validated` for unvalidated user input and for nothing else.
-// ---------------------------------------------------------------------------
-
-test "FlowChecker gives req.subject and req.tenant no user_input label" {
-    const allocator = std.testing.allocator;
-    try std.testing.expect(try runInputValidated(allocator,
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  fetch("https://api.example.com/v1", { body: req.tenant });
-        \\  return Response.json({ s: req.subject });
-        \\}
-    ));
-    try std.testing.expect(try runInputValidated(allocator,
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  fetch("https://api.example.com/v1", { body: req["tenant"] });
-        \\  return Response.json({ t: req["subject"] });
-        \\}
-    ));
-    // The request body in the same position still carries user_input.
-    try std.testing.expect(!try runInputValidated(allocator,
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  fetch("https://api.example.com/v1", { body: req.body });
-        \\  return Response.json({ s: req.subject });
-        \\}
-    ));
-}
-
-test "FlowChecker keeps user_input on an identity field the program could write" {
-    const allocator = std.testing.allocator;
-    const cases = [_][]const u8{
-        // A direct write launders the body into the field.
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  req.subject = req.body;
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  return Response.json({ ok: true });
-        \\}
-        ,
-        // Through an alias of the same object.
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  const r = req;
-        \\  r.tenant = req.body;
-        \\  fetch("https://api.example.com/v1", { body: req.tenant });
-        \\  return Response.json({ ok: true });
-        \\}
-        ,
-        // Through a computed key the checker cannot read.
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  const k = req.body;
-        \\  req[k] = req.body;
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  return Response.json({ ok: true });
-        \\}
-        ,
-        // Through a helper that writes its parameter.
-        \\import { fetch } from "zttp:fetch";
-        \\function stamp(r, v) { r.subject = v; return r; }
-        \\function handler(req) {
-        \\  stamp(req, req.body);
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  return Response.json({ ok: true });
-        \\}
-        ,
-    };
-    for (cases) |source| {
-        if (try runInputValidated(allocator, source)) {
-            std.debug.print("identity write not caught:\n{s}\n", .{source});
-            return error.TestIdentityLaundered;
-        }
-    }
-}
-
-test "FlowChecker keeps a secret assigned onto the request on its identity reads" {
-    // Only user_input is discharged; a secret the request picked up stays.
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator,
-        \\import { env } from "zttp:env";
-        \\function handler(req) {
-        \\  req.extra = env("SECRET_KEY");
-        \\  return Response.json({ s: req.subject });
-        \\}
-    ));
-}
-
 test "FlowChecker flags a credential in a hoisted egress options object" {
     // Inline, the `headers` extractor sees the credential. Hoisted into a
     // binding the options object is no longer a literal, so the per-field
@@ -10216,57 +8852,6 @@ test "FlowChecker flags a credential in a hoisted egress options object" {
         \\}
     ;
     try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
-}
-
-test "FlowChecker flags a secret returned by a callback a module invokes" {
-    // A module export answers with its declared return labels, and `parallel`
-    // declares `external`. Those describe what the module produces and cannot
-    // describe what a caller's callback returns, so the secret vanished.
-    const source =
-        \\import { env } from "zttp:env";
-        \\import { parallel } from "zttp:io";
-        \\function handler(req) {
-        \\  const results = parallel([() => env("SECRET_KEY")]);
-        \\  return Response.json({ results: results });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
-test "FlowChecker flags a secret through a callback passed by name" {
-    // Same laundering with the closure bound first. The argument is an
-    // identifier, so finding it needs the declaration index rather than the
-    // shape of the argument expression.
-    const source =
-        \\import { env } from "zttp:env";
-        \\import { parallel } from "zttp:io";
-        \\function handler(req) {
-        \\  const cb = () => env("SECRET_KEY");
-        \\  const results = parallel([cb]);
-        \\  return Response.json({ results: results });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
-test "a durable step callback keeps determinism but not secrecy" {
-    // The replay boundary neutralizes one label and not the other: the clock
-    // read is recorded and replayed, so the response is the same on every run,
-    // while a secret the callback returns is still a secret in the response.
-    const deterministic_source =
-        \\import { step } from "zttp:durable";
-        \\function handler(req) { return Response.json({ at: step("ts", () => Date.now()) }); }
-    ;
-    try std.testing.expect(try runDeterministic(std.testing.allocator, deterministic_source));
-
-    const secret_source =
-        \\import { env } from "zttp:env";
-        \\import { step } from "zttp:durable";
-        \\function handler(req) {
-        \\  return Response.json({ k: step("key", () => env("SECRET_KEY")) });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, secret_source));
 }
 
 test "FlowChecker flags a secret produced by a closure argument" {
@@ -10419,62 +9004,6 @@ test "FlowChecker proves no_secret_leakage for benign method calls on untainted 
     ;
     try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
 }
-
-const JsxCheckResult = struct { no_secret_leakage: bool, injection_safe: bool };
-
-/// TSX-frontend harness: lower `source` to the core before parsing, run the
-/// FlowChecker, and return the two properties the laundering tests assert on.
-fn runJsxCheck(allocator: std.mem.Allocator, source: []const u8) !JsxCheckResult {
-    var prepared = try source_frontend.PreparedSource.init(allocator, source, "flow-check.tsx", .{});
-    defer prepared.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, prepared.parserInput());
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
-        return error.HandlerNotFound;
-
-    var checker = FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    _ = try checker.check(handler_fn);
-    return .{
-        .no_secret_leakage = checker.getProperties().no_secret_leakage,
-        .injection_safe = checker.getProperties().injection_safe,
-    };
-}
-
-test "FlowChecker flags a secret interpolated through lowered TSX" {
-    // Lowering makes `{secret}` an ordinary `h` argument. The conservative
-    // call-argument union must retain that taint through renderToString.
-    const source =
-        \\import { env } from "zttp:env";
-        \\function handler(req) {
-        \\  const secret = env("SECRET_KEY");
-        \\  return Response.html(renderToString(<p>{secret}</p>));
-        \\}
-    ;
-    const r = try runJsxCheck(std.testing.allocator, source);
-    try std.testing.expect(!r.no_secret_leakage);
-}
-
-test "FlowChecker keeps injection_safe for request data escaped through renderToString" {
-    // renderToString auto-escapes, so user input interpolated into JSX and sent
-    // via Response.html is defended -- no XSS warning, injection_safe stays true.
-    const source =
-        \\function handler(req) {
-        \\  return Response.html(renderToString(<p>Method: {req.method}</p>));
-        \\}
-    ;
-    const r = try runJsxCheck(std.testing.allocator, source);
-    try std.testing.expect(r.injection_safe);
-}
-
-const import_corpus = @import("tests/import_corpus.zig");
 
 test "the import scan populates labels, meta, and the env slot in both atom modes" {
     // Replaces the differential that proved this scan matches the pre-C1
@@ -11048,45 +9577,6 @@ test "the direct return of a secret is refused" {
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
 }
 
-test "scope.using does not launder the resource it hands back" {
-    // `using` returns argument 0 unchanged at runtime. It declared
-    // `returns_from_param = .identity` and no `derives_from_args`, and
-    // `scanImports` populates `module_fn_arg_derived` from that field alone, so
-    // the identity return was never wired to label propagation: the call was
-    // credited with closure labels only and the secret arrived unlabelled.
-    const source =
-        \\import { env } from "zttp:env";
-        \\import { using } from "zttp:scope";
-        \\function handler(req) {
-        \\  return Response.json({ v: using(env("API_SECRET"), (r) => r) });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
-test "scope.using does not launder a credential either" {
-    const source =
-        \\import { using } from "zttp:scope";
-        \\function handler(req) {
-        \\  const token = req.headers.get("authorization");
-        \\  return Response.json({ v: using(token, (r) => r) });
-        \\}
-    ;
-    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
-}
-
-test "scope.using still proves clean for an ordinary resource" {
-    // The pass-through has to keep working for the handlers it exists for.
-    // A propagating export is only useful if it does not refuse those.
-    const source =
-        \\import { using } from "zttp:scope";
-        \\function handler(req) {
-        \\  return Response.json({ v: using("plain", (r) => r) });
-        \\}
-    ;
-    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
-}
-
 test "a secret written to the cache and read back is not proven clean" {
     // The read call holds no reference to what the write put there, so the
     // checker cannot follow the provenance - and the export answered with a
@@ -11103,18 +9593,6 @@ test "a secret written to the cache and read back is not proven clean" {
         \\function handler(req) {
         \\  cacheSet("ns", "k", env("API_SECRET"));
         \\  return Response.json({ v: cacheGet("ns", "k") });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
-test "a queue read is not proven clean" {
-    const source =
-        \\import { env } from "zttp:env";
-        \\import { send, receive } from "zttp:queue";
-        \\function handler(req) {
-        \\  send("q", env("API_SECRET"));
-        \\  return Response.json({ v: receive("q") });
         \\}
     ;
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
@@ -11138,73 +9616,6 @@ test "a sql row set read is not proven clean" {
         \\}
     ;
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
-test "a durable signal payload is not proven clean" {
-    // `waitSignalNative` returns `callbacks.wait_signal_fn(...)` directly -
-    // literally the `payload` argument of a separate `signal(key, name,
-    // payload)` call - and relabelled it `.external`.
-    const source =
-        \\import { waitSignal } from "zttp:durable";
-        \\function handler(req) {
-        \\  return Response.json({ v: waitSignal("approved") });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
-test "a workflow call echo is not proven clean" {
-    // `call` declared its result `.external`, which is neither `.unknown` nor
-    // derived from the arguments, so a sub-handler that echoes its input
-    // laundered the label: a secret passed to `call` and returned reached the
-    // response with `no_secret_leakage` proven. The result is a value another
-    // execution produced, the same shape as the store reads.
-    const source =
-        \\import { env } from "zttp:env";
-        \\import { call } from "zttp:workflow";
-        \\function handler(req) {
-        \\  const res = call("echo", { method: "POST", path: "/echo", body: env("API_SECRET") });
-        \\  return Response.json({ v: res.text() });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
-test "a workflow saga, fanout, and follow result is not proven clean" {
-    const saga =
-        \\import { saga } from "zttp:workflow";
-        \\function handler(req) {
-        \\  return Response.json({ v: saga([]) });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, saga));
-    const fanout =
-        \\import { fanout } from "zttp:workflow";
-        \\function handler(req) {
-        \\  return Response.json({ v: fanout([]) });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, fanout));
-    const follow =
-        \\import { follow } from "zttp:workflow";
-        \\function handler(req) {
-        \\  return Response.json({ v: follow(req, "next") });
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, follow));
-}
-
-test "a workflow call whose result is discarded is still proven clean" {
-    // The control: the result never reaches a sink, so the label of the result
-    // costs nothing.
-    const source =
-        \\import { call } from "zttp:workflow";
-        \\function handler(req) {
-        \\  const res = call("echo", { method: "GET", path: "/echo" });
-        \\  return Response.json({ ok: 1 });
-        \\}
-    ;
-    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
 }
 
 test "a rate-limit counter is still proven clean" {
@@ -11542,320 +9953,4 @@ fn collectFlowDiagnosticKinds(
             return error.FlowDiagnosticOffersUnperformableRepair;
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Declared classifications (M4 T4): P8 statuses and P9 enforcement
-// ---------------------------------------------------------------------------
-
-const declared_test_json =
-    \\{"version":1,"classifications":[
-    \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":true,"reason":"Tax identifier."},
-    \\ {"source":"service:billing","path":"card.token","label":"credential","required":false,"reason":"Payment token."}]}
-;
-
-const DeclaredRun = struct {
-    no_secret_leakage: bool,
-    no_credential_leakage: bool,
-    statuses: [2]EntryStatus,
-    /// Whether some diagnostic names the declared tax-id entry.
-    reason_named: bool,
-};
-
-/// Parse `source`, install the test declaration (unless `with_declaration` is
-/// false), run the flow checker, and report what it established.
-fn runDeclared(source: []const u8, with_declaration: bool) !DeclaredRun {
-    const allocator = std.testing.allocator;
-    var parsed = try declaration.parse(allocator, declared_test_json);
-    var decl = switch (parsed) {
-        .ok => |d| d,
-        .refused => return error.TestDeclarationRefused,
-    };
-    defer decl.deinit();
-    _ = &parsed;
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
-        return error.HandlerNotFound;
-
-    var checker = FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    if (with_declaration) try checker.setDeclaration(&decl);
-    _ = try checker.check(handler_fn);
-
-    var run = DeclaredRun{
-        .no_secret_leakage = checker.getProperties().no_secret_leakage,
-        .no_credential_leakage = checker.getProperties().no_credential_leakage,
-        .statuses = .{ .absent, .absent },
-        .reason_named = false,
-    };
-    if (with_declaration) @memcpy(&run.statuses, checker.classificationStatuses());
-    for (checker.getDiagnostics()) |diag| {
-        if (std.mem.indexOf(u8, diag.message, "fetch:api.example.com customer.tax_id") != null) run.reason_named = true;
-    }
-    return run;
-}
-
-fn declaredHandler(comptime body: []const u8) []const u8 {
-    return
-    \\import { fetch } from "zttp:fetch";
-    \\import { validateJson } from "zttp:validate";
-    \\function handler(req) {
-    \\  const r = fetch("https://api.example.com/customers/1");
-    \\  const body = r.json();
-    \\
-    ++ body ++
-        \\
-        \\}
-    ;
-}
-
-test "AE4: a declared secret is refused on every path to the response" {
-    const cases = [_][]const u8{
-        // The field itself.
-        declaredHandler("  return Response.json({ t: body.customer.tax_id });"),
-        // Through a const alias of the aggregate.
-        declaredHandler("  const c = body.customer;\n  return Response.json({ t: c.tax_id });"),
-        // A part of the field.
-        declaredHandler("  return Response.json({ t: body.customer.tax_id.last4 });"),
-        // A projection into a new object.
-        declaredHandler("  const p = { id: body.customer.tax_id };\n  return Response.json(p);"),
-        // Validation does not remove it.
-        declaredHandler("  const v = validateJson(\"Customer\", r.body);\n  if (v.ok) { return Response.json(v.value); }\n  return Response.json({});"),
-        // Serialization does not remove it.
-        declaredHandler("  return Response.text(JSON.stringify(body.customer));"),
-        // The whole-body text.
-        declaredHandler("  return Response.text(r.text());"),
-        // Through a helper that reads the field from the aggregate.
-        declaredHandler("  const pick = (c) => c.tax_id;\n  return Response.json({ t: pick(body.customer) });"),
-        // P9 (a): the whole aggregate, the whole body, the whole response.
-        declaredHandler("  return Response.json(body.customer);"),
-        declaredHandler("  return Response.json(body);"),
-        declaredHandler("  return Response.json({ r: r });"),
-        // A computed read.
-        declaredHandler("  return Response.json({ t: body.customer[\"tax_id\"] });"),
-        // A later write into the aggregate does not let a read launder it.
-        declaredHandler("  const c = body.customer;\n  c.name = c.tax_id;\n  return Response.json({ n: c.name });"),
-    };
-    for (cases, 0..) |source, i| {
-        const run = try runDeclared(source, true);
-        if (run.no_secret_leakage) {
-            std.debug.print("case {d} was admitted:\n{s}\n", .{ i, source });
-            return error.TestExpectedRefusal;
-        }
-    }
-}
-
-test "the same reads are admitted for a sibling field, a local object, and another host" {
-    const cases = [_][]const u8{
-        // A sibling of the declared field.
-        declaredHandler("  return Response.json({ n: body.customer.name });"),
-        declaredHandler("  const c = body.customer;\n  return Response.json({ n: c.name });"),
-        // P9 (b): the same last segment under another parent, same source.
-        declaredHandler("  return Response.json({ t: body.other.tax_id });"),
-        // P9 (b): a local object with the same short name.
-        declaredHandler("  const local = { tax_id: \"x\" };\n  return Response.json({ t: local.tax_id });"),
-        // Response metadata is not the body.
-        declaredHandler("  return Response.json({ s: r.status });"),
-        // Another host, same path.
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  const r = fetch("https://other.example.com/customers/1");
-        \\  const body = r.json();
-        \\  return Response.json({ t: body.customer.tax_id });
-        \\}
-        ,
-    };
-    for (cases, 0..) |source, i| {
-        const run = try runDeclared(source, true);
-        if (!run.no_secret_leakage) {
-            std.debug.print("case {d} was refused:\n{s}\n", .{ i, source });
-            return error.TestExpectedAdmission;
-        }
-    }
-    // Without a declaration the declared read is admitted too: the refusals
-    // above come from the declaration and nothing else.
-    const undeclared = try runDeclared(declaredHandler("  return Response.json({ t: body.customer.tax_id });"), false);
-    try std.testing.expect(undeclared.no_secret_leakage);
-}
-
-test "a fetch whose host cannot be named applies every fetch entry, indeterminate" {
-    const source =
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  const r = fetch(["https://", req.url].join(""));
-        \\  const body = r.json();
-        \\  return Response.json({ t: body.customer.tax_id });
-        \\}
-    ;
-    const run = try runDeclared(source, true);
-    try std.testing.expect(!run.no_secret_leakage);
-    try std.testing.expectEqual(EntryStatus.indeterminate, run.statuses[0]);
-}
-
-test "a literal host matches without regard to case" {
-    const source =
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  const r = fetch("https://API.Example.COM/customers/1");
-        \\  return Response.json({ t: r.json().customer.tax_id });
-        \\}
-    ;
-    const run = try runDeclared(source, true);
-    try std.testing.expect(!run.no_secret_leakage);
-    try std.testing.expectEqual(EntryStatus.matched, run.statuses[0]);
-}
-
-test "a declared credential from a service is refused and a sibling admitted" {
-    const refused =
-        \\import { serviceCall } from "zttp:service";
-        \\function handler(req) {
-        \\  const s = serviceCall("billing", "GET /card", {});
-        \\  const b = s.json();
-        \\  return Response.json({ t: b.card.token });
-        \\}
-    ;
-    const run = try runDeclared(refused, true);
-    try std.testing.expect(!run.no_credential_leakage);
-    try std.testing.expectEqual(EntryStatus.matched, run.statuses[1]);
-
-    const sibling =
-        \\import { serviceCall } from "zttp:service";
-        \\function handler(req) {
-        \\  const s = serviceCall("billing", "GET /card", {});
-        \\  return Response.json({ l: s.json().card.last4 });
-        \\}
-    ;
-    try std.testing.expect((try runDeclared(sibling, true)).no_credential_leakage);
-}
-
-test "P8: each classification reports matched, indeterminate, or absent" {
-    const Case = struct { source: []const u8, status: EntryStatus };
-    const cases = [_]Case{
-        .{ .source = declaredHandler("  return Response.json({ t: body.customer.tax_id });"), .status = .matched },
-        // Reached only as an aggregate that is forwarded.
-        .{ .source = declaredHandler("  return Response.json(body.customer);"), .status = .indeterminate },
-        // The whole body, forwarded by name.
-        .{ .source = declaredHandler("  return Response.json(body);"), .status = .indeterminate },
-        // A computed read below the source root.
-        .{ .source = declaredHandler("  const k = \"tax_id\";\n  return Response.json({ t: body.customer[k] });"), .status = .indeterminate },
-        // Reading only a sibling reaches no aggregate above the field.
-        .{ .source = declaredHandler("  return Response.json({ n: body.customer.name });"), .status = .absent },
-        // The source is never read.
-        .{ .source = "function handler(req) { return Response.json({ ok: true }); }", .status = .absent },
-    };
-    for (cases, 0..) |case, i| {
-        const run = try runDeclared(case.source, true);
-        if (run.statuses[0] != case.status) {
-            std.debug.print("case {d}: expected {s}, got {s}\n", .{ i, @tagName(case.status), @tagName(run.statuses[0]) });
-            return error.TestUnexpectedStatus;
-        }
-    }
-    // Census: every status is driven by a case above.
-    for (std.meta.tags(EntryStatus)) |status| {
-        var seen = false;
-        for (cases) |case| {
-            if (case.status == status) seen = true;
-        }
-        try std.testing.expect(seen);
-    }
-}
-
-test "a leak diagnostic names the declared entry behind it" {
-    const run = try runDeclared(declaredHandler("  return Response.json({ t: body.customer.tax_id });"), true);
-    try std.testing.expect(run.reason_named);
-}
-
-test "AE18: a declared secret round-tripped through the cache is not proven clean" {
-    const source =
-        \\import { fetch } from "zttp:fetch";
-        \\import { cacheSet, cacheGet } from "zttp:cache";
-        \\function handler(req) {
-        \\  const r = fetch("https://api.example.com/customers/1");
-        \\  cacheSet("customers", "tax", r.json().customer.tax_id, 60);
-        \\  return Response.json({ t: cacheGet("customers", "tax") });
-        \\}
-    ;
-    try std.testing.expect(!(try runDeclared(source, true)).no_secret_leakage);
-}
-
-test "AE19: mask keeps a declared label under a runtime bound and declassifies under a literal" {
-    const runtime_bound =
-        \\import { fetch } from "zttp:fetch";
-        \\import { mask } from "zttp:text";
-        \\function handler(req) {
-        \\  const r = fetch("https://api.example.com/customers/1");
-        \\  const n = req.url.length;
-        \\  return Response.json({ t: mask(r.json().customer.tax_id, n) });
-        \\}
-    ;
-    try std.testing.expect(!(try runDeclared(runtime_bound, true)).no_secret_leakage);
-
-    const literal_bound =
-        \\import { fetch } from "zttp:fetch";
-        \\import { mask } from "zttp:text";
-        \\function handler(req) {
-        \\  const r = fetch("https://api.example.com/customers/1");
-        \\  return Response.json({ t: mask(r.json().customer.tax_id, 4) });
-        \\}
-    ;
-    try std.testing.expect((try runDeclared(literal_bound, true)).no_secret_leakage);
-}
-
-test "FlowChecker keeps user_input on identity reads when the request escapes the write scan" {
-    const allocator = std.testing.allocator;
-    const escaping = [_][]const u8{
-        // A function from another file could write req.subject.
-        \\import { fetch } from "zttp:fetch";
-        \\import { stamp } from "./stamp.ts";
-        \\function handler(req) {
-        \\  stamp(req);
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  return Response.json({});
-        \\}
-        ,
-        // A method call receives it: the callee is not a name the scan resolves.
-        \\import { fetch } from "zttp:fetch";
-        \\const box = { take: (r) => r.method };
-        \\function handler(req) {
-        \\  box.take(req);
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  return Response.json({});
-        \\}
-        ,
-        // An alias the scan cannot follow.
-        \\import { fetch } from "zttp:fetch";
-        \\function handler(req) {
-        \\  const r = req;
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  return Response.json({});
-        \\}
-        ,
-    };
-    for (escaping, 0..) |source, i| {
-        if (try runInputValidated(allocator, source)) {
-            std.debug.print("case {d} kept identity reads clean:\n{s}\n", .{ i, source });
-            return error.TestExpectedUserInput;
-        }
-    }
-    // A built-in module export and a function declared in this file may
-    // receive the request: the read stays clean.
-    try std.testing.expect(try runInputValidated(allocator,
-        \\import { fetch } from "zttp:fetch";
-        \\import { routerMatch } from "zttp:router";
-        \\function show(r) { return r.method; }
-        \\const routes = { "POST /a": show };
-        \\function handler(req) {
-        \\  routerMatch(routes, req);
-        \\  show(req);
-        \\  fetch("https://api.example.com/v1", { body: req.subject });
-        \\  return Response.json({});
-        \\}
-    ));
 }

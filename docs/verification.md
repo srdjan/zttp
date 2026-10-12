@@ -267,9 +267,9 @@ corpus. Each falsifying input the analyzer materialises is written
 under `.zttp/witnesses/<short_hash>/` so the same logical leak does
 not need to be rediscovered next session. See
 [Witness Corpus](proofs-and-receipts.md#witness-corpus)
-for layout and the agent tool (`pi_witnesses`).
+for layout.
 
-A witness drives each `fetch`, `serviceCall`, or `workflow.call` that a
+A witness drives each `fetch` that a
 branch tests to the response the branch needs: status 503 behind `!res.ok`
 or `res.status !== 200`, status 200 on the success side, and a status that
 takes the branch for any other status comparison. A witness written before
@@ -333,12 +333,15 @@ The `FaultCoverageChecker` (`packages/zts/src/fault_coverage.zig`) analyzes the 
 | Severity | Functions | Meaning |
 |----------|-----------|---------|
 | `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart`, `verifyWebhookSignature`, `rateCheck` | Auth, validation, signature, and rate-limit failures must not produce 2xx |
-| `expected` | `cacheGet`, `env`, `cacheSet`, `signal`, `signalAt` | Cache misses and missing env vars are normal degradation. A failed `cacheSet` (capacity, a clock error) can leave an earlier value in place, and `signal` fails when the target run does not exist |
-| `upstream` | `fetch`, `fetchWithRetry`, `serviceCall`, `workflow.call` | An external service failure. These calls return the `fetch` response record. The `res.ok` and status forks cover them. A 2xx answer can be an intended fallback. The checker records that fallback without a warning. |
+| `expected` | `cacheGet`, `env`, `cacheSet` | Cache misses and missing env vars are normal degradation. A failed `cacheSet` can leave an earlier value in place. |
+| `upstream` | `fetch`, `fetchWithRetry` | An external service failure. These calls return the fetch response record. The `res.ok` and status forks cover them. A 2xx answer can be an intended fallback. |
 
 The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning `{ok: false}`) produces a 2xx response. This is a structural pattern overwhelmingly correlated with bugs. Cache misses returning 200 are correctly classified as graceful degradation and do not trigger warnings.
 
-A function with severity `none` is not counted. That is not a claim that it cannot fail: several `none` exports return `false` or `undefined` on failure, and `severity_census.zig` lists each one with its reason. `schemaCompile` is one: a schema that did not compile makes `validateJson`, `validateObject`, and `coerceJson` answer `schema not found`, and those are critical, so its failure is counted where the schema is used. `parallel`, `race`, `follow`, `saga`, and `fanout` need a fork of their own before they can declare a severity.
+A function with severity `none` is not counted. That is not a claim that the
+function cannot fail. `severity_census.zig` lists each exception with its
+reason. For example, validation calls count a missing schema where the schema
+is used.
 
 Every call to a failable function counts as its own site, keyed by call site. Two calls to `jwtVerify` are two sites, and a failure path for one does not cover the other. `fault_covered` is proven only when all of these hold:
 
@@ -351,7 +354,11 @@ Every call to a failable function counts as its own site, keyed by call site. Tw
 
 A 2xx fallback on an upstream failure does not block the property. It is reported in `upstreamFallbackSites` and the proof trace summary.
 
-A handler that proved `fault_covered` under an earlier analysis can lose it here, for example when a `fetch` sits in a callback passed to `parallel()`. The upgrade verifier (`upgrade_verifier.zig`) classifies a lost `fault_covered` as a critical regression. The path analysis version (`path_generator.path_analyzer_version`) is part of the policy hash, so a contract stamped by an earlier analysis no longer matches and is rebuilt.
+A handler that proved `fault_covered` under an earlier analysis can lose it
+when a `fetch` moves into a callback. The upgrade verifier
+(`upgrade_verifier.zig`) classifies a lost `fault_covered` as a critical
+regression. The policy hash includes the path analysis version. An older
+contract no longer matches and is rebuilt.
 
 Results appear in:
 - `contract.json` under the `faultCoverage` section
@@ -375,10 +382,8 @@ of every module call along the enumerated paths into a per-module `CostEnvelope`
 - `unbounded` - no expressible bound (an unidentifiable iterable, or two dynamic
   collections on one path), carrying the offending loop's location.
 
-The envelope is written to `contract.json` under `costEnvelope`, covered by the
-`Zttp-Attest` JWS signature, and composed across `serviceCall` chains by the
-system linker (a handler with no envelope composes as `unbounded`, failing
-closed). `HandlerProperties.max_io_depth` is kept but made honest: it is set
+The envelope is written to `contract.json` under `costEnvelope` and covered by
+the `Zttp-Attest` JWS signature. `HandlerProperties.max_io_depth` is set
 only when the total bound is constant, else `null`.
 
 A `linear` or `unbounded` bound is dischargeable to `constant` by sizing the
@@ -576,8 +581,8 @@ at 255 bytes and normalized endpoints at 512 bytes.
 ### What proof acceptance unlocks, and what it does not
 
 Only a proof-checked contract drives behavior that is unsound if a claim is
-wrong: the proof response cache, unbounded runtime reuse, the result and
-optional safety shortcuts, and the durable-workflow guarantees. An artifact
+wrong: the proof response cache, unbounded runtime reuse, and the result and
+optional safety shortcuts. An artifact
 whose certificate is missing or refused does not serve at all.
 
 A development server, a live-reload swap, and a `-Dhandler` build carry no

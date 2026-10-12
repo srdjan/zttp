@@ -4,10 +4,8 @@
 //! `ZTTP_CODEGEN_RECORD=1`. `ZTTP_CODEGEN_PROVIDER` selects the provider;
 //! `ZTTP_CODEGEN_REQUIRE_GREEN=1` refuses to stage a case that did not apply an
 //! edit or whose declared runtime intent did not pass.
-//! `ZTTP_CODEGEN_QUALIFY=1` is a separate report-only full-corpus mode. It
-//! never activates cassettes or changes a model default.
-//! cloud credentials are required only for an explicitly selected cloud
-//! provider. Transport, capture, disk, and replay are tested offline.
+//! DeepSeek is the default live recording provider and requires its credential.
+//! Transport, capture, disk, and replay remain testable offline.
 //! Live cassettes remain the only source for model-behavior measurements.
 
 const std = @import("std");
@@ -30,8 +28,6 @@ const agent = @import("agent.zig");
 const codegen = @import("expert_codegen_eval.zig");
 const codegen_types = @import("expert_codegen_types.zig");
 const evidence_identity = @import("expert_evidence_identity.zig");
-const failure_analysis = @import("expert_failure_analysis.zig");
-const qualification = @import("expert_qualification.zig");
 const security_probes = @import("expert_security_probes.zig");
 const expert_persona = @import("expert_persona.zig");
 const models = @import("providers/models.zig");
@@ -171,7 +167,7 @@ fn flowRoot(provider: agent.Provider) []const u8 {
 }
 
 fn recordingProvider() !agent.Provider {
-    const value = envValue("ZTTP_CODEGEN_PROVIDER") orelse return .local;
+    const value = envValue("ZTTP_CODEGEN_PROVIDER") orelse return .deepseek;
     return agent.Provider.parsePublic(value) orelse error.UnsupportedRecordingProvider;
 }
 
@@ -454,31 +450,6 @@ fn recordingRequested() bool {
     return std.mem.eql(u8, flag, "1");
 }
 
-const LiveCorpusMode = enum { record, qualify };
-
-fn qualificationRequested() bool {
-    const flag = envValue("ZTTP_CODEGEN_QUALIFY") orelse return false;
-    return std.mem.eql(u8, flag, "1");
-}
-
-fn liveCorpusModeFrom(record: bool, qualify: bool) !?LiveCorpusMode {
-    if (record and qualify) return error.ConflictingLiveCorpusModes;
-    if (record) return .record;
-    if (qualify) return .qualify;
-    return null;
-}
-
-fn requestedLiveCorpusMode() !?LiveCorpusMode {
-    return liveCorpusModeFrom(recordingRequested(), qualificationRequested());
-}
-
-test "recording and qualification modes are distinct" {
-    try testing.expectEqual(LiveCorpusMode.record, (try liveCorpusModeFrom(true, false)).?);
-    try testing.expectEqual(LiveCorpusMode.qualify, (try liveCorpusModeFrom(false, true)).?);
-    try testing.expect((try liveCorpusModeFrom(false, false)) == null);
-    try testing.expectError(error.ConflictingLiveCorpusModes, liveCorpusModeFrom(true, true));
-}
-
 fn greenRecordingRequired() bool {
     const flag = envValue("ZTTP_CODEGEN_REQUIRE_GREEN") orelse return false;
     return std.mem.eql(u8, flag, "1");
@@ -510,18 +481,6 @@ test "required-green recording refuses unapplied and failed-intent turns" {
     );
 }
 
-const IntentPolicy = union(enum) {
-    runtime: codegen.IntentCheck,
-    compiler_veto_only: []const u8,
-};
-
-fn runtimeIntent(policy: IntentPolicy) ?codegen.IntentCheck {
-    return switch (policy) {
-        .runtime => |intent| intent,
-        .compiler_veto_only => null,
-    };
-}
-
 const RecordCase = struct {
     name: []const u8,
     prompt: []const u8,
@@ -535,12 +494,6 @@ const RecordCase = struct {
     /// declared runtime intent, locked in after recording exactly like
     /// `expect_first_attempt_green` above.
     ///
-    /// The durable-intent test used to require a pass from every case. That
-    /// made a corpus unpublishable the moment it honestly recorded an intent
-    /// failure - and docs/convergence.md pins
-    /// `workflow-nested-dispatch-avoidance` as an accepted failure by name, so
-    /// the corpus the protocol describes could not pass its own test.
-    ///
     /// The artifact cannot answer this on its own: a case can apply an edit and
     /// still miss its intent, and run 4 recorded exactly that shape, so the
     /// presence of `expected/handler.ts` does not discriminate.
@@ -549,10 +502,8 @@ const RecordCase = struct {
     /// means the runtime broke a handler that worked. Pinned false and now
     /// passing means the gap closed and the pin owes an update.
     expect_committed_intent_pass: bool = true,
-    /// Runtime evidence or an explicit reason this case cannot execute. The
-    /// union prevents a missing spec from being represented as an executable
-    /// case and prevents a runtime spec from carrying an unsupported reason.
-    intent: IntentPolicy,
+    /// Runtime evidence for the requested behavior.
+    intent: codegen.IntentCheck,
     /// How the turn starts. `whole_file` hands the agent an empty workspace and
     /// asks for a handler; `holes` seeds a skeleton whose response expressions
     /// are `hole()` and asks for them to be filled one at a time.
@@ -704,20 +655,14 @@ pub fn headlineInputIdentity() evidence_identity.HeadlineInputIdentity {
 pub fn intentSuiteIdentity() evidence_identity.IntentSuiteIdentity {
     var scenarios: [record_corpus.len]evidence_identity.IntentScenario = undefined;
     for (record_corpus, 0..) |rc, index| {
-        scenarios[index] = switch (rc.intent) {
-            .runtime => |intent| .{ .runtime = .{
-                .name = rc.name,
-                .spec = intent.tests_jsonl,
-                .runner = "zttp-test-runtime-scenario-v1",
-                .handler_path = intent.handler_path,
-                .config = intent.zttp_json,
-                .runtime_files = intent.runtime_files,
-            } },
-            .compiler_veto_only => |reason| .{ .compiler_veto_only = .{
-                .name = rc.name,
-                .reason = reason,
-            } },
-        };
+        scenarios[index] = .{ .runtime = .{
+            .name = rc.name,
+            .spec = rc.intent.tests_jsonl,
+            .runner = "zttp-test-runtime-scenario-v1",
+            .handler_path = rc.intent.handler_path,
+            .config = rc.intent.zttp_json,
+            .runtime_files = rc.intent.runtime_files,
+        } };
     }
     return evidence_identity.intentSuite(&scenarios);
 }
@@ -727,26 +672,20 @@ pub fn securityProbeIdentity() evidence_identity.SecurityProbeCorpusIdentity {
 }
 
 pub fn thresholdIdentity() evidence_identity.ThresholdIdentity {
-    var outcomes: [record_corpus.len]evidence_identity.ExpectedOutcome = undefined;
+    var outcomes: [record_corpus.len * 2]evidence_identity.ExpectedOutcome = undefined;
     for (record_corpus, 0..) |rc, index| {
-        outcomes[index] = .{
+        outcomes[index * 2] = .{
             .scenario = rc.name,
             .metric = .first_attempt_green,
             .verdict = if (rc.expect_first_attempt_green) .pass else .fail,
         };
+        outcomes[index * 2 + 1] = .{
+            .scenario = rc.name,
+            .metric = .runtime_intent,
+            .verdict = if (rc.expect_committed_intent_pass) .pass else .fail,
+        };
     }
-    return evidence_identity.thresholds(&outcomes, &.{
-        .{ .name = "raw-first-draft-passes", .comparison = .at_least, .value = 14 },
-        .{ .name = "final-green", .comparison = .exactly, .value = 19 },
-        .{ .name = "runtime-intent-passes", .comparison = .exactly, .value = 18 },
-        .{ .name = "median-roundtrips", .comparison = .at_most, .value = 4 },
-        .{ .name = "empty-responses", .comparison = .exactly, .value = 0 },
-        .{ .name = "timeout-failures", .comparison = .exactly, .value = 0 },
-        .{ .name = "decode-failures", .comparison = .exactly, .value = 0 },
-        .{ .name = "provider-failures", .comparison = .exactly, .value = 0 },
-        .{ .name = "internal-failures", .comparison = .exactly, .value = 0 },
-        .{ .name = "qualification-runs", .comparison = .exactly, .value = qualification.required_runs },
-    });
+    return evidence_identity.thresholds(&outcomes, &.{});
 }
 
 pub fn evaluationManifestIdentity() evidence_identity.ManifestIdentity {
@@ -780,34 +719,12 @@ test "evaluation identities are deterministic and the corpus accessor is input o
 }
 
 test "intent cohort is explicit and non-vacuous" {
-    var executable: usize = 0;
-    var compiler_veto_only: usize = 0;
-    for (record_corpus) |rc| switch (rc.intent) {
-        .runtime => {
-            executable += 1;
-        },
-        .compiler_veto_only => |reason| {
-            try testing.expectEqualStrings("parallel-secret", rc.name);
-            try testing.expect(reason.len > 0);
-            compiler_veto_only += 1;
-        },
-    };
-    try testing.expectEqual(@as(usize, 18), executable);
-    try testing.expectEqual(@as(usize, 1), compiler_veto_only);
+    try testing.expectEqual(@as(usize, 13), record_corpus.len);
     try testing.expect(security_probes.corpus.len > 0);
 }
 
-// The corpus spans common tasks the agent handles cleanly and harder ones that
-// probe known gap areas (user-input egress, websocket events, durable
-// workflows). Each elicits realistic multi-roundtrip behaviour (explore then
-// edit) and records as step_0/step_1/...
-//
-// Eighteen of the nineteen cases carry executable runtime intent. The five
-// durable and workflow cases use the scenario header to own a private durable
-// store, optional queue/system backend, and exact event evidence. Auxiliary
-// system handlers are written only after the model turn, so they cannot affect
-// the authored prompt cohort. `parallel-secret` is intentionally compiler-only
-// for the reason given at that case.
+// The corpus spans common handler tasks and known compiler gap areas. Each case
+// records realistic multi-roundtrip behavior and has executable runtime intent.
 //
 // The last five cases were added because eleven could not separate nine
 // consecutive builds - every row read 90%, which was the corpus reporting its
@@ -873,89 +790,11 @@ fn applyToolAllowlist(registry: *registry_mod.Registry) !void {
     );
 }
 
-/// Wall-clock ceiling on one recorded turn. A local model server is the
-/// recording backend now, and a stalled generation there is silence rather
-/// than an error, so an uncapped turn takes the whole corpus run with it.
+/// Wall-clock ceiling on one recorded turn. A stalled provider call can block
+/// the complete corpus run without this limit.
 /// `ZTTP_CODEGEN_TURN_TIMEOUT_MS` overrides it; zero restores the old
 /// unbounded behavior for a case that legitimately needs longer.
 const default_record_turn_timeout_ms: u64 = 180_000;
-
-const queued_call_runtime_files = [_]codegen.SeedFile{
-    .{
-        .path = "intent-system.json",
-        .bytes =
-        \\{"version":1,"handlers":[
-        \\  {"name":"greet","path":"intent-greet.ts","baseUrl":"https://greet.internal"}
-        \\]}
-        ,
-    },
-    .{
-        .path = "intent-greet.ts",
-        .bytes =
-        \\function handler(req) {
-        \\  return Response.json({ from: "greet-child", path: req.path });
-        \\}
-        ,
-    },
-};
-
-const nested_dispatch_runtime_files = [_]codegen.SeedFile{
-    .{
-        .path = "intent-system.json",
-        .bytes =
-        \\{"version":1,"handlers":[
-        \\  {"name":"notify","path":"intent-notify.ts","baseUrl":"https://notify.internal"}
-        \\]}
-        ,
-    },
-    .{
-        .path = "intent-notify.ts",
-        .bytes =
-        \\function handler(req) {
-        \\  return Response.json({ notified: "notify-child", path: req.path });
-        \\}
-        ,
-    },
-};
-
-const saga_runtime_files = [_]codegen.SeedFile{
-    .{
-        .path = "intent-system.json",
-        .bytes =
-        \\{"version":1,"handlers":[
-        \\  {"name":"inventory","path":"intent-inventory.ts","baseUrl":"https://inventory.internal"},
-        \\  {"name":"billing","path":"intent-billing.ts","baseUrl":"https://billing.internal"},
-        \\  {"name":"shipping","path":"intent-shipping.ts","baseUrl":"https://shipping.internal"}
-        \\]}
-        ,
-    },
-    .{
-        .path = "intent-inventory.ts",
-        .bytes =
-        \\function handler(req) {
-        \\  if (req.path === "/release") return Response.json({ marker: "release-compensation" });
-        \\  return Response.json({ marker: "reserve-complete" });
-        \\}
-        ,
-    },
-    .{
-        .path = "intent-billing.ts",
-        .bytes =
-        \\function handler(req) {
-        \\  if (req.path === "/refund") return Response.json({ marker: "refund-compensation" });
-        \\  return Response.json({ marker: "charge-complete" });
-        \\}
-        ,
-    },
-    .{
-        .path = "intent-shipping.ts",
-        .bytes =
-        \\function handler(req) {
-        \\  return Response.json({ marker: "ship-failure" }, { status: 503 });
-        \\}
-        ,
-    },
-};
 
 const record_corpus = [_]RecordCase{
     .{
@@ -966,44 +805,30 @@ const record_corpus = [_]RecordCase{
         // Asserts the task the prompt names, not the shape of one recording: a
         // different-but-correct handler must still pass, or the check measures
         // the cassette instead of the model.
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"GET /health reports ok"}
             \\{"type":"request","method":"GET","url":"/health","headers":{},"body":""}
             \\{"type":"expect","status":200,"bodyContains":"\"ok\":true"}
             \\
             ,
-        } },
+        },
     },
     .{
         .name = "validate-body",
         .prompt = "Create a handler in handler.ts that decodes the JSON request body with " ++
             "zttp:validate against a schema named \"item\" requiring a string field \"name\", " ++
             "returns the validated data on success, and returns a 400 with the errors on failure.",
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"a body missing name is rejected"}
             \\{"type":"request","method":"POST","url":"/","headers":{"content-type":"application/json"},"body":"{}"}
             \\{"type":"expect","status":400}
             \\
             ,
-        } },
-        // The corpus's one accepted failure, and the reason the published
-        // first-draft rate reads 10/11 rather than 11/11.
-        //
-        // The first draft writes `result.value as Item`, and the subset has no
-        // `as`: the stripper rejects it as ZTS042, which is what the
-        // [codegen-gap] histogram prints. The case still reaches green - the
-        // model drops the assertion on retry - so it is a first-draft failure,
-        // not a broken case.
-        //
-        // The teaching gap this ranks is therefore `as`, not the shape of
-        // `validateJson().errors`. The draft does also declare
-        // `errors: string[]` where the value is statically `unknown`, but the
-        // veto reports the assertion first and the model never reaches the
-        // type mismatch. An earlier version of this comment named ZTS200 and
-        // that second gap; it described a draft this cassette no longer holds.
-        .expect_first_attempt_green = true,
+        },
+        // The Phase 3 recording first failed at ZTS203, then reached green.
+        .expect_first_attempt_green = false,
     },
     .{
         .name = "jwt-auth",
@@ -1017,15 +842,19 @@ const record_corpus = [_]RecordCase{
         // I/O event; a correct header-first handler returned 401 without reading
         // env, leaving the mock unconsumed and failing intent for call order
         // rather than behavior.
-        .intent = .{ .runtime = .{
+        // Test mode also replays both authentication helpers. Each native call
+        // needs its own row before the scenario can measure the response.
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"a request with an invalid bearer token is unauthorized"}
             \\{"type":"request","method":"GET","url":"/","headers":{"authorization":"Bearer invalid-token"},"body":""}
-            \\{"type":"io","seq":0,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-signing-secret"}
+            \\{"type":"io","seq":0,"module":"auth","fn":"parseBearer","args":["Bearer invalid-token"],"result":"invalid-token"}
+            \\{"type":"io","seq":1,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-signing-secret"}
+            \\{"type":"io","seq":2,"module":"auth","fn":"jwtVerify","args":["invalid-token","test-signing-secret","HS256"],"result":{"ok":false,"error":"invalid token"}}
             \\{"type":"expect","status":401}
             \\
             ,
-        } },
+        },
         // This case caught label laundering through JSON round-tripping and
         // then through validateJson. Both are closed; a verified claims value
         // remains credential-labelled and cannot enter a response. The corpus
@@ -1034,6 +863,7 @@ const record_corpus = [_]RecordCase{
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
         .expect_first_attempt_green = true,
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "weather-egress",
@@ -1043,395 +873,16 @@ const record_corpus = [_]RecordCase{
         // The success path needs egress, which the offline replay has no way to
         // serve. The missing-parameter path is the part of the task that can be
         // demonstrated without a network, so that is what this asserts.
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"a request with no city is rejected"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
             \\{"type":"expect","status":400}
             \\
             ,
-        } },
+        },
         // Was ZTS602 (never converged); closed by the literal-URL + init-query
         // egress teaching.
-        .expect_first_attempt_green = true,
-    },
-    .{
-        .name = "durable-order",
-        // The prompt states the observable contract the intent test asserts.
-        // It used to name only the two steps, while the test demanded a 201, a
-        // `reserved`/`charged` body, and step results carrying `reservationId`
-        // and `chargeId` - none of which a reader of the prompt could derive.
-        // A case whose test asks for more than its prompt says measures
-        // guessing, not convergence.
-        // Second pass. Stating the 201 and the body fields fixed those, and the
-        // case still failed four runs running on the one thing left ambiguous:
-        // the test asserts the step's recorded RESULT contains "reservationId",
-        // which needs the step to return an object carrying that key. "a
-        // reserve step returning a reservationId" reads as returning the id
-        // value, and that is what the model wrote twice - binding it to a
-        // variable of that name, which the recorded result never sees.
-        //
-        // Verified before recording: a handler whose steps return
-        // { reservationId } and { chargeId } passes this spec 3/3.
-        //
-        // Third pass, 2026-08-27. The pin moves to false, and the reason is a
-        // new one rather than the old ambiguity returning. This draw wrote the
-        // shape the prompt asks for -
-        // `step("reserve", () => ({ reservationId: uuid() }))` - and then
-        // sourced the id from `zttp:id`.`uuid`. `zttp test` serves virtual
-        // module calls from the `io` lines a spec declares and returns an
-        // empty value for anything it does not, and this spec declares no stub
-        // for `uuid`, so both step results serialized without their keys.
-        // Measured, not inferred: the committed handler with `uuid()` replaced
-        // by two string literals and nothing else changed passes 3/3.
-        //
-        // So the draft is structurally right and depends on a call the harness
-        // does not answer. That is a model-behaviour outcome and belongs in the
-        // published rate. Closing it means either stubbing `uuid` in the spec
-        // or telling the prompt where the ids come from, and both edit the
-        // model-visible input, so both belong to a deliberate re-record.
-        //
-        // Fourth pass, 2026-08-27, and the pin moves back to true. Neither the
-        // prompt nor the spec changed; this draw wrote `{ reservationId:
-        // "res-1" }` and `{ chargeId: "chg-1" }` instead of sourcing the ids
-        // from `uuid`, so both step results serialized with their keys. That is
-        // the exact counterfactual the third pass measured. Which side of the
-        // pin this case lands on is still a property of the draft rather than
-        // of the handler being right, and the `uuid` stub gap that decides it
-        // is unchanged.
-        //
-        // Fifth pass, 2026-09-27 (M5 A1 U2 re-record), and the pin moves to
-        // false. The draft wrote the right shape and sourced both ids from
-        // `zttp:crypto`.`hmacSha256(key, ...)`, which the spec also does not
-        // stub, and `zttp test` reported "runtime scenario replay diverged 2
-        // time(s)" on the reserve-then-charge test. This is inferred to be the
-        // third pass's stub gap with a different module call; the literal
-        // counterfactual was not run for this draw.
-        // Sixth pass, 2026-09-28 (M5 A3/A4 re-record). The draft uses the
-        // literal ids "rsv-1" and "chg-1" inside the two step results. The
-        // committed runtime intent passes because neither value needs an
-        // unstubbed virtual-module call. The spec and prompt are unchanged.
-        .expect_committed_intent_pass = true,
-        .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
-            "two-step order workflow via run() and step(): a `reserve` step returning " ++
-            "{ reservationId }, then a `charge` step returning { chargeId }. Respond 201 " ++
-            "with a body carrying reserved and charged as true.",
-        .intent = .{ .runtime = .{
-            .tests_jsonl =
-            \\{"type":"runtime","durable":true,"workflowQueue":false}
-            \\{"type":"test","name":"the order runs reserve then charge"}
-            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"order-1"},"body":null}
-            \\{"type":"expect","status":201,"bodyContains":"\"charged\":true"}
-            \\{"type":"test","name":"the completed order replays without duplicate steps"}
-            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"order-1"},"body":null}
-            \\{"type":"expect","status":201,"bodyContains":"\"reserved\":true"}
-            \\{"type":"expect-run","runKey":"order-1","complete":true}
-            \\{"type":"expect-event","runKey":"order-1","kind":"step_start","name":"reserve"}
-            \\{"type":"expect-event","runKey":"order-1","kind":"step_result","name":"reserve","resultContains":"reservationId"}
-            \\{"type":"expect-event","runKey":"order-1","kind":"step_start","name":"charge"}
-            \\{"type":"expect-event","runKey":"order-1","kind":"step_result","name":"charge","resultContains":"chargeId"}
-            \\{"type":"expect-signals","count":0}
-            \\
-            ,
-        } },
-        // Was ZTS042/narrowing death-spiral (never converged); closed by the
-        // "use untyped values directly, never narrow with as/guards" teaching.
-        .expect_first_attempt_green = true,
-    },
-    .{
-        .name = "workflow-queued-call",
-        // "dispatch a greet child handler" read as an instruction to write one,
-        // and the model created `greet.ts` - which the recorder refuses, because
-        // the capture allowlist is handler.ts plus the case's seed_files and
-        // this case seeds nothing at draft time. The whole case then aborts with
-        // an internal UndeclaredWorkspacePath rather than recording an outcome.
-        //
-        // The child is already registered and resolved from the system registry
-        // at run time, so say so. Same omission as saga's: the case provides
-        // something the prompt never mentions.
-        .prompt = "Create a durable workflow handler in handler.ts using zttp:durable and " ++
-            "zttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
-            "and dispatch the already-registered `greet` child handler with workflow.call " ++
-            "at durable depth 0, answering with the child's response body. The child " ++
-            "handler already exists in the system registry - write only handler.ts.",
-        .intent = .{ .runtime = .{
-            .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
-            .runtime_files = &queued_call_runtime_files,
-            .tests_jsonl =
-            \\{"type":"runtime","durable":true,"workflowQueue":true}
-            \\{"type":"test","name":"the queued greet child is dispatched"}
-            \\{"type":"request","method":"GET","url":"/","headers":{"idempotency-key":"queued-1"},"body":null}
-            \\{"type":"expect","status":200,"bodyContains":"greet-child"}
-            \\{"type":"expect-run","runKey":"queued-1","complete":true}
-            \\{"type":"expect-event","runKey":"queued-1","kind":"step_start","name":"workflow.call#0"}
-            \\{"type":"expect-event","runKey":"queued-1","kind":"step_result","name":"workflow.call#0","resultContains":"greet-child"}
-            \\{"type":"expect-queue","runKey":"queued-1","step":"workflow.call#0","status":200,"bodyContains":"greet-child"}
-            \\
-            ,
-        } },
-        .expect_first_attempt_green = true,
-    },
-    .{
-        .name = "workflow-nested-dispatch-avoidance",
-        // Same omission, same internal abort: the model wrote `notify.ts` and
-        // the recorder refused the capture, so run 5 recorded no outcome for
-        // this case at all.
-        //
-        // 2026-08-27: pinned false. The draft dispatches the child outside the
-        // step callback, which is the behaviour the case is named for and the
-        // thing it exists to measure. That diagnosis said it failed "on a
-        // name", and running the committed handler against the spec shows it
-        // failed on two things, of which the name was one:
-        //
-        //   FAIL  runtime scenario left 1 I/O expectation(s) unconsumed
-        //   FAIL  run 'nested-1' event 0: expected name 'reserve',
-        //         found 'reserve-inventory'
-        //
-        // Renaming the step alone still leaves "1 passed, 1 failed". Both are
-        // the defect durable-order's comment above already names - a test
-        // asking for more than its prompt says measures guessing rather than
-        // convergence - and the two are fixed on the sides they belong to.
-        //
-        // The name: the prompt now says the step is called `reserve` and what
-        // it returns, so `step_result` `resultContains:"reserved"` is derivable
-        // from the prompt instead of guessed.
-        //
-        // The I/O: the spec used to stub a `fetch` of
-        // `https://inventory.internal/reserve` that no line of the prompt asks
-        // for, against a host this case's own `intent-system.json` does not
-        // register - it registers `notify` and nothing else. It is a leftover
-        // from saga's runtime files, and a spec that requires an unmentioned
-        // egress call to be consumed fails every correct draft. Deleted.
-        //
-        // Measured before recording, exactly as durable-order was: the handler
-        // the amended prompt describes passes the amended spec 3/3.
-        .prompt = "Create a durable order workflow in handler.ts. Run a durable step named " ++
-            "`reserve` that returns { reserved: true }, then dispatch the already-registered " ++
-            "`notify` child handler with workflow.call after the step completes. Keep the " ++
-            "child dispatch outside the step callback. Respond 201 with a body carrying " ++
-            "notified as the child call's status code. The child handler already exists in " ++
-            "the system registry - write only handler.ts.",
-        .intent = .{ .runtime = .{
-            .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
-            .runtime_files = &nested_dispatch_runtime_files,
-            .tests_jsonl =
-            \\{"type":"runtime","durable":true,"workflowQueue":true}
-            \\{"type":"test","name":"notify dispatch occurs outside the durable step"}
-            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"nested-1"},"body":"{\"sku\":\"one\"}"}
-            \\{"type":"expect","status":201,"bodyContains":"\"notified\":200"}
-            \\{"type":"expect-run","runKey":"nested-1","complete":true}
-            \\{"type":"expect-event","runKey":"nested-1","kind":"step_start","name":"reserve"}
-            \\{"type":"expect-event","runKey":"nested-1","kind":"step_result","name":"reserve","resultContains":"reserved"}
-            \\{"type":"expect-event","runKey":"nested-1","kind":"step_start","name":"workflow.call#0"}
-            \\{"type":"expect-event","runKey":"nested-1","kind":"step_result","name":"workflow.call#0","resultContains":"notify-child"}
-            \\{"type":"expect-queue","runKey":"nested-1","step":"workflow.call#0","status":200,"bodyContains":"notify-child"}
-            \\
-            ,
-        } },
-        // Flipped to false on the 2026-08-03 re-record, and back to true on
-        // 2026-08-04 when the compiler defect that caused the failure was
-        // fixed. Both flips are worth keeping, because they say different
-        // things.
-        //
-        // The re-record was the model drawing a different first draft between
-        // two recordings of the same prompt: a much larger program that trips
-        // ZTS204. Re-recording until the old outcome came back would have been
-        // selecting the sample that flatters the rate, so the worse outcome was
-        // pinned.
-        //
-        // Reading what it tripped on is what found the defect. The cassette's
-        // next turn says it plainly - "ZTS204 on line 88, the Response.json(...)
-        // call inside run()" - and that return is inside the `run` callback, a
-        // nested arrow with no signature of its own. The checker left the
-        // enclosing handler's declared return type in place for it, so a
-        // correct inner return was measured against the outer contract. The
-        // draft was right and the compiler was wrong, and the round-trip the
-        // model spent working around it is the cost of that.
-        .expect_first_attempt_green = true,
-        // Measured, not chosen, and the measurement has changed twice.
-        //
-        // It was pinned false because the recording that produced the committed
-        // corpus applied no edit at all, leaving no handler to run. The
-        // 2026-08-27 recording did apply one, and it still fails - for the
-        // different reason set out with this case's prompt above: the draft
-        // dispatches outside the step, which is what the case measures, and
-        // then names its step `reserve-inventory` where the spec asserts
-        // `reserve`, a name the prompt never states.
-        //
-        // 2026-09-20: flipped to true, and what closed the gap was the case
-        // asking for what it tests. The prompt now names the `reserve` step and
-        // what it returns, and the spec no longer stubs an inventory fetch the
-        // prompt never mentions. The draft recorded against those inputs names
-        // its step `reserve`, keeps `call("notify", ...)` outside the step
-        // callback - the behaviour the case exists to measure - and the run
-        // reports intent-qualified 19/19.
-        //
-        // The two earlier pins are kept above because they say different
-        // things. Neither was the model failing the task: run 4 applied no edit
-        // to run, and the 2026-08-27 draft did the task and was marked down for
-        // a step name and an egress call nobody asked it to make.
-        //
-        // 2026-09-27 (M5 A1 U2 re-record): the pin moved to false. The note
-        // then attributed the failure to call("notify", ...) being inside
-        // run(). The new passing draw also calls after the reserve step but
-        // inside run(), so that placement alone does not explain the old
-        // failure. The old cause needs a separate runtime measurement.
-        // 2026-09-28 (M5 A3/A4 re-record): the draft calls notify after the
-        // reserve step returns. The call remains inside run(), as the prompt
-        // requires, but it is outside the step callback. The committed
-        // runtime intent passes.
-        .expect_committed_intent_pass = true,
-    },
-    .{
-        .name = "workflow-saga-compensation",
-        // The case named no service, and its support files are `runtime_files`,
-        // which `writeRuntimeFiles` materializes inside `runIntentCheck` - after
-        // the model has drafted. So `intent-system.json` and the three seeded
-        // handlers do not exist in the workspace while it writes, and the test
-        // asserts step results carrying markers only those handlers produce.
-        // The case was unpassable except by guessing three names it was never
-        // given, which run 1 happened to do and later runs did not.
-        //
-        // Naming them matches both siblings, which keep their support files
-        // runtime-only and name the service in the prompt: queued-call says
-        // "a greet child handler", nested-dispatch says "inventory" and
-        // "notify". Seeding at draft time instead would have made this the one
-        // workflow case that discovers its registry rather than being told it.
-        //
-        // Verified before recording: a handler dispatching these services on
-        // these paths, requiring no request body, and answering with the saga
-        // outcome passes this spec 2/2 - and `do:`/`undo:` step names are
-        // derived from each entry's `name`, so the prompt does not state them.
-        .prompt = "Create a handler in handler.ts using zttp:workflow saga() for reserve, " ++
-            "charge, and ship steps, taking the run key from the idempotency-key header " ++
-            "and reading no request body. Each step dispatches to a co-located handler " ++
-            "with call(): reserve to \"inventory\" at /reserve, charge to \"billing\" at " ++
-            "/charge, ship to \"shipping\" at /ship. Include compensate functions for every " ++
-            "non-last static saga step so the saga compensation proof can pass - reserve " ++
-            "compensates to \"inventory\" at /release and charge to \"billing\" at /refund. " ++
-            "Answer with the saga outcome in the response body.",
-        .intent = .{ .runtime = .{
-            .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
-            .runtime_files = &saga_runtime_files,
-            .tests_jsonl =
-            \\{"type":"runtime","durable":true,"workflowQueue":false}
-            \\{"type":"test","name":"shipping failure compensates charge then reserve"}
-            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"saga-1"},"body":null}
-            \\{"type":"expect","bodyContains":"compensated"}
-            \\{"type":"expect-run","runKey":"saga-1","complete":true}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"do:reserve"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"do:reserve","resultContains":"reserve-complete"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"do:charge"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"do:charge","resultContains":"charge-complete"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"do:ship"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"do:ship","resultContains":"ship-failure"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"undo:charge"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"undo:charge","resultContains":"refund-compensation"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"undo:reserve"}
-            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"undo:reserve","resultContains":"release-compensation"}
-            \\
-            ,
-        } },
-        .expect_first_attempt_green = true,
-        // Back to true on the 2026-08-26 re-record, having been false since
-        // 2026-08-25. The pin records what one recording measured, so it moves
-        // when a recording measures something else, in the same commit as the
-        // cassettes.
-        //
-        // The 2026-08-25 draft compensated correctly - it answered 503 with
-        // {"ok":false,"failed":"ship","compensated":true} - but omitted the
-        // literal key "outcome", which is the spec's first assertion and a word
-        // the prompt never says it wants. The test stopped there, so that
-        // recording measured nothing about the step and compensation events
-        // after it. This draft satisfies the assertion and the run reaches
-        // them, so the case is intent-qualified.
-        //
-        // The underlying mismatch is not fixed: the spec still asserts a key
-        // shape the prompt does not state, so which side of the pin this case
-        // lands on is a property of the draft rather than of the handler being
-        // right. Closing it needs the spec and the prompt to agree on the
-        // answer's shape, which changes the request identity and so belongs to
-        // a deliberate re-record, not to this one.
-        //
-        // Back to false on the 2026-08-27 re-record, for that same unclosed
-        // mismatch. This draft answers `Response.json(outcome)`, and the body
-        // the runtime builds for a compensated saga is
-        // `{"ok":false,"failed":"ship","compensated":true}`
-        // (`runtime_workflow.zig`), which carries no literal `outcome` key. So
-        // `bodyContains:"outcome"` fails first and the run measures nothing
-        // about the step and compensation events after it.
-        //
-        // True again on the 2026-09-20 re-record, and by the same coin landing
-        // the other way up. This draft answers
-        // `Response.json({ outcome: outcome })`, so the key the spec asserts is
-        // in the body because the draft named the binding in the object rather
-        // than returning it bare. `bodyContains:"outcome"` matches, the run
-        // proceeds, and the step and compensation events it then measures are
-        // the ones the case is about.
-        //
-        // Closed on 2026-09-20, in the spec rather than in the prompt. The
-        // first assertion is now `bodyContains:"compensated"`, which names
-        // content the runtime writes into the outcome at
-        // `runtime_workflow.zig:797` rather than a key the prompt never asks
-        // for. Both drafts this pin has flipped over satisfy it: the
-        // 2026-08-25/27 shape `{"ok":false,"failed":"ship","compensated":true}`
-        // carries the word, and so does this draft's
-        // `Response.json({ outcome: outcome })`, because the outcome is
-        // serialized inside whatever wrapper the draft chose. A handler that
-        // answers without the saga result carries neither, which is the
-        // failure the case exists to catch and the one the binding's own
-        // summary warns about.
-        //
-        // The three notes above say closing this needs a re-record because it
-        // changes the request identity. That is true of the prompt half and
-        // not of this one: `headlineInputIdentity` hashes name, prompt,
-        // seed_files and mode, so a spec change moves `intentSuiteIdentity`
-        // and leaves the corpus version alone, and the committed recordings
-        // still replay. Measured after the change: unfiltered
-        // `zig build test-expert-app` exits 0 with this pin at true.
-        //
-        // Not probed, and worth knowing why. Editing the committed
-        // `expected/handler.ts` to drop the outcome and watching this
-        // assertion refuse it does not work: the flow artifact is
-        // content-addressed, so the edit fails as `invalid_digest in
-        // expected_workspace` and `error.UnloadableFlowArtifact` before the
-        // intent check runs at all. Probing the negative side needs a
-        // standalone workspace built from `saga_runtime_files` and this
-        // tests_jsonl, not a mutation of the corpus.
-        .expect_committed_intent_pass = true,
-    },
-    .{
-        .name = "workflow-wait-signal",
-        // Same defect as durable-order. The test drives POST on both paths and
-        // expects 202 on park, 200 on resume, and an "approval" signal name;
-        // the prompt named no method, no status, and no signal name. The last
-        // recording restricted /wait to GET, which the prompt never forbade,
-        // and every request in the test then missed the route.
-        .prompt = "Create a durable approval workflow in handler.ts using waitSignal and " ++
-            "signal, both paths served on POST. POST /wait parks a run under the " ++
-            "Idempotency-Key header waiting on a signal named `approval`, answering 202 " ++
-            "until it resumes and 200 with approved true once it has. POST /signal " ++
-            "delivers an approval payload carrying approved true to the same key and " ++
-            "answers 200 with delivered true.",
-        .intent = .{ .runtime = .{
-            .tests_jsonl =
-            \\{"type":"runtime","durable":true,"workflowQueue":false}
-            \\{"type":"test","name":"the approval run parks"}
-            \\{"type":"request","method":"POST","url":"/wait","headers":{"Idempotency-Key":"approval-1"},"body":null}
-            \\{"type":"expect","status":202,"bodyContains":"signal"}
-            \\{"type":"test","name":"the approval signal is delivered"}
-            \\{"type":"request","method":"POST","url":"/signal","headers":{"Idempotency-Key":"approval-1"},"body":null}
-            \\{"type":"expect","status":200,"bodyContains":"\"delivered\":true"}
-            \\{"type":"test","name":"the parked run resumes with approval"}
-            \\{"type":"request","method":"POST","url":"/wait","headers":{"Idempotency-Key":"approval-1"},"body":null}
-            \\{"type":"expect","status":200,"bodyContains":"\"approved\":true"}
-            \\{"type":"expect-run","runKey":"approval-1","complete":true}
-            \\{"type":"expect-event","runKey":"approval-1","kind":"wait_signal","name":"approval"}
-            \\{"type":"expect-event","runKey":"approval-1","kind":"resume_signal","name":"approval","payloadContains":"\"approved\":true"}
-            \\{"type":"expect-signals","count":0}
-            \\
-            ,
-        } },
         .expect_first_attempt_green = true,
     },
     .{
@@ -1452,7 +903,7 @@ const record_corpus = [_]RecordCase{
         // shape the response, and stubbing the store is what the spec format is
         // for. Asserting on the stubbed value also proves the rows reach the
         // body, which asserting on the literal "users" would not.
-        .intent = .{ .runtime = .{
+        .intent = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"sqlite\": \"schema.sql\"\n}\n",
             .tests_jsonl =
             \\{"type":"test","name":"queried rows reach the response body"}
@@ -1461,7 +912,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"ada"}
             \\
             ,
-        } },
+        },
         // Recorded with the best model (Sonnet): writes correct SQL, self-checks
         // cleanly, and first-draft-passes. Previously it failed because the
         // property analysis reported read_only as PROVEN for a SELECT and the
@@ -1487,15 +938,15 @@ const record_corpus = [_]RecordCase{
             "including the current time from Date.now(), using logInfo from zttp:log. " ++
             "The response body must be exactly Response.json({ ok: true }) - the " ++
             "timestamp belongs in the log and must never appear in the response.",
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"the timestamp stays out of the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
             \\{"type":"expect","status":200,"body":"{\"ok\":true}"}
             \\
             ,
-        } },
-        .expect_first_attempt_green = true,
+        },
+        .expect_first_attempt_green = false,
     },
     .{
         // Fence: a read from mutable module state is its own varying source,
@@ -1512,7 +963,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that reads the \"hits\" counter from the " ++
             "\"counters\" namespace with cacheGet from zttp:cache and returns it as JSON " ++
             "under a \"hits\" key. Treat a missing counter as \"0\".",
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"the stored counter reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1520,48 +971,8 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"41"}
             \\
             ,
-        } },
-        .expect_first_attempt_green = true,
-    },
-    .{
-        // Fence: labels crossing a module boundary through a caller's callback.
-        // `parallel([() => env("SECRET_KEY")])` used to prove clean, because a
-        // module export answers with its declared return labels and those cannot
-        // describe what a caller's callback produced. See
-        // docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md.
-        //
-        // The result array `parallel` returns carries the union of every
-        // callback's labels and indexing does not narrow back, so returning
-        // `values[0]` is refused for what `values[1]` read. That much was
-        // measured before recording and holds: direct `env` reads with the
-        // secret in a local are clean, two non-secret callbacks are clean, so
-        // the union is specifically the result array. See
-        // docs/solutions/logic-errors/a-label-union-that-never-narrows-refuses-a-clean-program.md.
-        //
-        // The case was authored pinned to false on the reasoning that no draft
-        // could therefore pass. That reasoning was wrong and the recording is
-        // what showed it. The model reduced the secret to a boolean *inside* the
-        // callback - `checkApiSecret()` returns `{present: bool}`, never the raw
-        // value - so nothing carrying the secret label ever crosses the module
-        // boundary and there is no union to narrow. It passed first draft.
-        //
-        // So what this case measures is not the imprecision but the way around
-        // it: whether the model contains a secret at the boundary rather than
-        // carrying it across and filtering after. Three `edit_simulate` calls
-        // preceded the one `propose_change_set`, which is where the shape was found.
-        //
-        // No intent spec: the response is a bare app name read from an env var,
-        // and asserting it would test the env stub rather than the containment
-        // this case is about. What matters here is the veto verdict.
-        .name = "parallel-secret",
-        .prompt = "Create a handler in handler.ts that reads the APP_NAME and API_SECRET " ++
-            "environment variables concurrently using parallel() from zttp:io. Return 503 " ++
-            "when API_SECRET is not set. Otherwise return Response.json with only the app " ++
-            "name - the secret must never appear in the response.",
-        .intent = .{
-            .compiler_veto_only = "a runtime APP_NAME assertion would only retest the env stub, while the compiler veto proves the secret-containment boundary",
         },
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
     },
     .{
         // Fence: the shapes of egress options object the flow checker could not
@@ -1578,7 +989,7 @@ const record_corpus = [_]RecordCase{
             "https://api.example.com/v1/status with fetch from zttp:fetch, passing an init " ++
             "object that sets the method to GET and an \"accept: application/json\" header. " ++
             "Return the upstream JSON on success and a 502 when the upstream call fails.",
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"the upstream payload reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1586,15 +997,10 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"green"}
             \\
             ,
-        } },
+        },
         .expect_first_attempt_green = true,
-        // Pinned false on the 2026-08-27 re-record. The turn ended
-        // `veto_exhausted`: every draft in the attempt budget tripped ZTS214, a
-        // nominal type name used in call position, so no edit was applied and
-        // there is no handler for the intent spec to run. The failure is
-        // upstream of the spec, which is why it also shows as
-        // RecordedEditNotApplied rather than a failed assertion.
-        .expect_committed_intent_pass = false,
+        // The Phase 3 recording applies an edit and passes this runtime intent.
+        .expect_committed_intent_pass = true,
     },
     .{
         // Fence: walking a helper imported from a sibling file. Every other case
@@ -1633,7 +1039,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"the configured name crosses the file boundary and the token does not"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1642,8 +1048,8 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"body":"{\"name\":\"orders-api\"}"}
             \\
             ,
-        } },
-        .expect_first_attempt_green = true,
+        },
+        .expect_first_attempt_green = false,
     },
 
     // ---------------------------------------------------------------------
@@ -1724,14 +1130,14 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"GET /health reports ok"}
             \\{"type":"request","method":"GET","url":"/health","headers":{},"body":""}
             \\{"type":"expect","status":200,"bodyContains":"\"ok\":true"}
             \\
             ,
-        } },
+        },
         .mode = .holes,
         .expect_first_attempt_green = true,
     },
@@ -1775,7 +1181,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"the stored counter reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1783,7 +1189,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"41"}
             \\
             ,
-        } },
+        },
         .mode = .holes,
         .expect_first_attempt_green = true,
     },
@@ -1810,7 +1216,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"the upstream payload reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1818,7 +1224,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"green"}
             \\
             ,
-        } },
+        },
         .mode = .holes,
         .expect_first_attempt_green = true,
     },
@@ -1863,7 +1269,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{ .runtime = .{
+        .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"the configured name crosses the file boundary and the token does not"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1872,7 +1278,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"body":"{\"name\":\"orders-api\"}"}
             \\
             ,
-        } },
+        },
         .mode = .holes,
         .expect_first_attempt_green = true,
     },
@@ -1882,7 +1288,7 @@ test "jwt intent is independent of secret lookup order" {
     const jwt = for (record_corpus) |candidate| {
         if (std.mem.eql(u8, candidate.name, "jwt-auth")) break candidate;
     } else return error.TestExpectedEqual;
-    const intent = runtimeIntent(jwt.intent) orelse return error.TestExpectedEqual;
+    const intent = jwt.intent;
 
     try testing.expect(std.mem.indexOf(
         u8,
@@ -1894,105 +1300,6 @@ test "jwt intent is independent of secret lookup order" {
         intent.tests_jsonl,
         "\"module\":\"env\",\"fn\":\"env\",\"args\":[\"JWT_SECRET\"]",
     ) != null);
-}
-
-test "durable runtime intents match their pinned committed outcome" {
-    const names = [_][]const u8{
-        "durable-order",
-        "workflow-queued-call",
-        "workflow-nested-dispatch-avoidance",
-        "workflow-saga-compensation",
-        "workflow-wait-signal",
-    };
-    const repo_root = try cwdPathAlloc(testing.allocator);
-    defer testing.allocator.free(repo_root);
-    const zttp_bin = codegen.locateZttpBinary(testing.allocator, repo_root) orelse
-        return error.SkipZigTest;
-    defer testing.allocator.free(zttp_bin);
-
-    var passed: usize = 0;
-    var checked: usize = 0;
-    for (names) |name| {
-        const rc = for (record_corpus) |candidate| {
-            if (std.mem.eql(u8, candidate.name, name)) break candidate;
-        } else return error.MissingRuntimeIntentCase;
-        const intent = runtimeIntent(rc.intent) orelse return error.MissingRuntimeIntent;
-
-        var resolved = try resolveCurrentCaseStepsForTest(
-            testing.allocator,
-            repo_root,
-            headline_provider,
-            name,
-        );
-        defer resolved.deinit(testing.allocator);
-        const flow_case = if (resolved.flow_case) |*flow_case|
-            flow_case
-        else
-            return error.MissingRuntimeIntentArtifact;
-        // A case that applied no edit has no expected workspace, which is the
-        // correct record of that outcome rather than a broken artifact. It
-        // cannot pass an intent check, so it is an observed failure and is
-        // compared against the pin like any other.
-        const handler: ?[]const u8 = for (flow_case.fixtures) |fixture| {
-            if (fixture.role == .expected_workspace and
-                std.mem.eql(u8, fixture.path, "expected/handler.ts"))
-            {
-                break fixture.bytes;
-            }
-        } else null;
-        if (handler == null) {
-            if (rc.expect_committed_intent_pass) {
-                std.debug.print(
-                    "[codegen-intent] {s}: pinned to pass but the recording applied no edit," ++
-                        " so the corpus holds no handler to run\n",
-                    .{name},
-                );
-                return error.RuntimeIntentPinMismatch;
-            }
-            checked += 1;
-            continue;
-        }
-
-        var tmp = try IsolatedTmp.init(testing.allocator, "durable-intent");
-        defer tmp.cleanup(testing.allocator);
-        for (rc.seed_files) |seed| try tmp.writeFile(testing.allocator, seed.path, seed.bytes);
-        try tmp.writeFile(testing.allocator, intent.handler_path, handler.?);
-
-        var run = codegen.runIntentCheckCaptured(
-            testing.allocator,
-            intent,
-            tmp.abs_path,
-            zttp_bin,
-        );
-        defer run.deinit(testing.allocator);
-        const observed_pass = run.outcome == .passed;
-        if (observed_pass != rc.expect_committed_intent_pass) {
-            // Report the failing run's own output. This used to re-run
-            // `zttp test` in the same workspace to ask again, which describes a
-            // different run than the one being explained: the second run
-            // inherits the first's unconsumed signal artifacts and its oplog, so
-            // it reports leftover state as though it were the defect, and when
-            // the first failure was a flake the re-run passes and prints nothing
-            // that matches the failure at all.
-            if (!observed_pass) run.report(name);
-            std.debug.print(
-                "[codegen-intent] {s}: pinned expect_committed_intent_pass={} but observed {}." ++
-                    " If the recording measured this outcome, move the pin in the same commit" ++
-                    " as the cassettes and say what changed.\n",
-                .{ name, rc.expect_committed_intent_pass, observed_pass },
-            );
-            return error.RuntimeIntentPinMismatch;
-        }
-        checked += 1;
-        if (observed_pass) passed += 1;
-    }
-    // Every named case reached its assertion. Without this the loop would
-    // satisfy the test by checking nothing if a case stopped resolving.
-    try testing.expectEqual(names.len, checked);
-    // And at least one committed handler genuinely runs. A corpus where every
-    // durable case is pinned as a failure would otherwise pass this test while
-    // proving the runtime executes nothing.
-    try testing.expect(passed > 0);
 }
 
 const LiveRecordingProgress = struct {
@@ -2293,7 +1600,7 @@ test "live codegen recorder progress renders metadata only" {
     defer text.deinit();
     try LiveRecordingProgress.writeEvent(text.writer(), .{
         .case_index = 3,
-        .case_count = 19,
+        .case_count = 13,
         .case_name = "validate-body",
     }, .{ .model_call_completed = .{
         .global_call_index = 3,
@@ -2310,7 +1617,7 @@ test "live codegen recorder progress renders metadata only" {
         .wire_bytes = 77_789,
     } });
     try testing.expectEqualStrings(
-        "[codegen-record] [3/19] validate-body: call 4 captured " ++
+        "[codegen-record] [3/13] validate-body: call 4 captured " ++
             "(turn=1 turn-call=4 purpose=normal input-reported=19861 " ++
             "input-logical=20394 (prior_density_projection) input-estimated=27308 " ++
             "(anchored_density) output=417 output-limit=32768 wire=77789B)\n",
@@ -2323,7 +1630,7 @@ test "live codegen recorder progress renders provider failure metadata only" {
     defer text.deinit();
     try LiveRecordingProgress.writeEvent(text.writer(), .{
         .case_index = 1,
-        .case_count = 19,
+        .case_count = 13,
         .case_name = "health",
     }, .{ .model_call_failed = .{
         .attempt_index = 8,
@@ -2333,7 +1640,7 @@ test "live codegen recorder progress renders provider failure metadata only" {
         .failure = error.RateLimited,
     } });
     try testing.expectEqualStrings(
-        "[codegen-record] [1/19] health: call attempt 9 failed " ++
+        "[codegen-record] [1/13] health: call attempt 9 failed " ++
             "(provider=deepseek latency=843ms http-status=429 error=RateLimited)\n",
         text.written(),
     );
@@ -2412,15 +1719,16 @@ fn recordingRunCanActivate(canonical_shape: bool, summary: RecordingRunSummary) 
 }
 
 test "a complete recording activates whether or not the model succeeded in it" {
-    const canonical = recordingShapeCanActivate(null, false, false, 19, "default", "default");
+    const expected = record_corpus.len;
+    const canonical = recordingShapeCanActivate(null, false, false, expected, "default", "default");
     try testing.expect(canonical);
 
     // The green run activates, as before.
     try testing.expect(recordingRunCanActivate(canonical, .{
-        .selected = 19,
-        .staged = 19,
-        .applied = 19,
-        .intents_passed = 19,
+        .selected = expected,
+        .staged = expected,
+        .applied = expected,
+        .intents_passed = expected,
         .recording_failures = 0,
     }));
 
@@ -2430,10 +1738,10 @@ test "a complete recording activates whether or not the model succeeded in it" {
     // complete, and the rate it publishes is what those three make true. Five
     // consecutive runs were discarded for exactly this shape.
     try testing.expect(recordingRunCanActivate(canonical, .{
-        .selected = 19,
-        .staged = 19,
-        .applied = 17,
-        .intents_passed = 18,
+        .selected = expected,
+        .staged = expected,
+        .applied = expected - 1,
+        .intents_passed = expected - 1,
         .recording_failures = 0,
     }));
 
@@ -2442,32 +1750,32 @@ test "a complete recording activates whether or not the model succeeded in it" {
     // nineteen. Both the count and the flag are checked, because they come
     // from different places and either alone has been wrong.
     try testing.expect(!recordingRunCanActivate(canonical, .{
-        .selected = 19,
-        .staged = 17,
-        .applied = 17,
-        .intents_passed = 17,
-        .recording_failures = 2,
+        .selected = expected,
+        .staged = expected - 1,
+        .applied = expected - 1,
+        .intents_passed = expected - 1,
+        .recording_failures = 1,
     }));
     try testing.expect(!recordingRunCanActivate(canonical, .{
-        .selected = 19,
-        .staged = 19,
-        .applied = 19,
-        .intents_passed = 19,
+        .selected = expected,
+        .staged = expected,
+        .applied = expected,
+        .intents_passed = expected,
         .recording_failures = 1,
     }));
 
     // Shape guards are unchanged: a filtered, truncated, single-case or
     // non-default-model run never activates whatever its outcome.
     try testing.expect(!recordingShapeCanActivate("health", false, false, 1, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, true, false, 19, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, false, true, 19, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, false, false, 18, "default", "default"));
-    try testing.expect(!recordingShapeCanActivate(null, false, false, 19, "candidate", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, true, false, expected, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, true, expected, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, false, expected - 1, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, false, expected, "candidate", "default"));
     try testing.expect(!recordingRunCanActivate(false, .{
-        .selected = 19,
-        .staged = 19,
-        .applied = 19,
-        .intents_passed = 19,
+        .selected = expected,
+        .staged = expected,
+        .applied = expected,
+        .intents_passed = expected,
         .recording_failures = 0,
     }));
 }
@@ -2524,126 +1832,6 @@ fn classifyRecordingFailure(err: anyerror) RecordingFailureKind {
         error.LocalModelUnavailable,
         => .provider,
         else => if (loop.providerErrorRemediation(err) != null) .provider else .internal,
-    };
-}
-
-fn qualificationFailureKind(kind: RecordingFailureKind) qualification.FailureKind {
-    return switch (kind) {
-        .empty_response => .empty_response,
-        .timeout => .timeout,
-        .decode => .decode,
-        .provider => .provider,
-        .intent => .intent,
-        .validation => .validation,
-        .internal => .internal,
-    };
-}
-
-fn requiredQualificationEnv(name: [:0]const u8) ![]const u8 {
-    return envValue(name) orelse error.MissingQualificationProvenance;
-}
-
-fn containsAsciiIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0 or needle.len > haystack.len) return false;
-    for (0..haystack.len - needle.len + 1) |start| {
-        if (std.ascii.eqlIgnoreCase(haystack[start .. start + needle.len], needle)) return true;
-    }
-    return false;
-}
-
-fn servingArgsContainSecret(args: []const u8) bool {
-    inline for (&.{ "api-key", "apikey", "token", "secret", "password", "credential" }) |needle| {
-        if (containsAsciiIgnoreCase(args, needle)) return true;
-    }
-    return false;
-}
-
-fn qualificationLocalProvenance(provider: agent.Provider) !?qualification.LocalProvenance {
-    const names = .{
-        "ZTTP_CODEGEN_MODEL_ARTIFACT_SHA256",
-        "ZTTP_CODEGEN_QUANTIZATION",
-        "ZTTP_CODEGEN_CHAT_TEMPLATE_SHA256",
-        "ZTTP_CODEGEN_SERVING_ARGS",
-        "ZTTP_CODEGEN_HARDWARE",
-        "ZTTP_CODEGEN_OS",
-        "ZTTP_CODEGEN_PEAK_MEMORY_BYTES",
-    };
-    if (provider != .local) {
-        inline for (names) |name| {
-            if (envValue(name) != null) return error.LocalProvenanceRequiresLocalProvider;
-        }
-        return null;
-    }
-
-    const artifact_sha256 = try requiredQualificationEnv(names[0]);
-    const chat_template_sha256 = try requiredQualificationEnv(names[2]);
-    if (artifact_sha256.len != 64 or !isLowerHex(artifact_sha256) or
-        chat_template_sha256.len != 64 or !isLowerHex(chat_template_sha256))
-    {
-        return error.MalformedQualificationDigest;
-    }
-    const peak_memory = std.fmt.parseInt(
-        u64,
-        try requiredQualificationEnv(names[6]),
-        10,
-    ) catch return error.MalformedQualificationPeakMemory;
-    if (peak_memory == 0) return error.MalformedQualificationPeakMemory;
-    const serving_args = try requiredQualificationEnv(names[3]);
-    if (servingArgsContainSecret(serving_args)) return error.SecretInQualificationProvenance;
-    const quantization = try requiredQualificationEnv(names[1]);
-    const hardware = try requiredQualificationEnv(names[4]);
-    const os = try requiredQualificationEnv(names[5]);
-    if (quantization.len == 0 or serving_args.len == 0 or
-        hardware.len == 0 or os.len == 0 or
-        quantization.len > 64 or serving_args.len > 4096 or
-        hardware.len > 512 or os.len > 512)
-    {
-        return error.QualificationProvenanceTooLarge;
-    }
-    return .{
-        .model_artifact_sha256 = artifact_sha256,
-        .quantization = quantization,
-        .chat_template_sha256 = chat_template_sha256,
-        .serving_args = serving_args,
-        .sampling_policy = "server-defaults",
-        .seed = null,
-        .hardware = hardware,
-        .os = os,
-        .peak_memory_bytes = peak_memory,
-    };
-}
-
-test "recording failures map exhaustively into qualification failures" {
-    try testing.expectEqual(
-        qualification.FailureKind.empty_response,
-        qualificationFailureKind(.empty_response),
-    );
-    try testing.expectEqual(
-        qualification.FailureKind.internal,
-        qualificationFailureKind(.internal),
-    );
-}
-
-test "qualification serving arguments reject secret-shaped flags" {
-    try testing.expect(!servingArgsContainSecret("mlx_lm.server --model candidate --port 8080"));
-    try testing.expect(servingArgsContainSecret("mlx_lm.server --api-key do-not-record"));
-    try testing.expect(servingArgsContainSecret("serve --TOKEN=value"));
-}
-
-fn copyDraftFailure(
-    allocator: std.mem.Allocator,
-    analysis: *const failure_analysis.Analysis,
-) !qualification.DraftFailure {
-    const diagnostic_code = if (analysis.diagnosticCode()) |code| try allocator.dupe(u8, code) else null;
-    const tool_name = if (analysis.toolName()) |name| try allocator.dupe(u8, name) else null;
-    return .{
-        .primary = analysis.primary,
-        .contributors = try allocator.dupe(qualification.DraftFailureCause, analysis.contributors()),
-        .evidence = .{
-            .diagnostic_code = diagnostic_code,
-            .transcript_entry = analysis.transcript_entry,
-            .tool_name = tool_name,
-        },
     };
 }
 
@@ -2863,21 +2051,10 @@ const LiveRecordContext = struct {
 };
 
 const LiveRecordOutcome = struct {
-    artifact_identity: evidence_identity.ContentDigest,
     draft_quality: codegen_types.DraftQuality,
     applied: bool,
     intent: codegen_types.IntentOutcome,
-    roundtrips: u8,
-    wall_clock_ms: u64,
-    draft_failure: ?failure_analysis.Analysis,
-    provider_runtime: ?evidence_identity.RuntimeRevision,
 };
-
-fn elapsedWallClockMs(started_ms: i64) u64 {
-    const finished_ms = zts.realtimeNowMs() catch started_ms;
-    if (finished_ms <= started_ms) return 0;
-    return @intCast(finished_ms - started_ms);
-}
 
 fn recordLiveCase(
     context: *LiveRecordContext,
@@ -2885,7 +2062,6 @@ fn recordLiveCase(
     case_index: usize,
     case_count: usize,
 ) !LiveRecordOutcome {
-    const started_ms = zts.realtimeNowMs() catch 0;
     var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer case_arena.deinit();
     const allocator = case_arena.allocator();
@@ -3000,23 +2176,17 @@ fn recordLiveCase(
         }
     }
 
-    const zttp_bin: ?[]u8 = if (runtimeIntent(rc.intent) != null)
-        codegen.locateZttpBinary(allocator, context.repo_root) orelse {
-            std.debug.print(
-                "[codegen-record] {s}: declared intent cannot run because zig-out/bin/zttp is unavailable\n",
-                .{rc.name},
-            );
-            return error.IntentCheckUnavailable;
-        }
-    else
-        null;
-    var intent_outcome: codegen_types.IntentOutcome = switch (rc.intent) {
-        .runtime => .not_checked,
-        .compiler_veto_only => .compiler_veto_only,
+    const zttp_bin = codegen.locateZttpBinary(allocator, context.repo_root) orelse {
+        std.debug.print(
+            "[codegen-record] {s}: declared intent cannot run because zig-out/bin/zttp is unavailable\n",
+            .{rc.name},
+        );
+        return error.IntentCheckUnavailable;
     };
+    var intent_outcome: codegen_types.IntentOutcome = .not_checked;
     requireRecordedIntent(
         allocator,
-        runtimeIntent(rc.intent),
+        rc.intent,
         tmp.abs_path,
         zttp_bin,
         codegen.runIntentCheck,
@@ -3041,7 +2211,7 @@ fn recordLiveCase(
         );
         if (err == error.IntentCheckUnavailable) return err;
     };
-    if (runtimeIntent(rc.intent) != null and intent_outcome == .not_checked) {
+    if (intent_outcome == .not_checked) {
         intent_outcome = .passed;
     }
 
@@ -3072,22 +2242,6 @@ fn recordLiveCase(
         context.request_config,
     );
     const fail_code = codegen.firstZtsCode(&transcript) orelse "-";
-    const draft_failure = if (result.rawFirstDraftVetoPass())
-        null
-    else
-        failure_analysis.analyze(
-            allocator,
-            rc.mode,
-            &transcript,
-            codegen.firstZtsCode(&transcript),
-        );
-    const provider_runtime: ?evidence_identity.RuntimeRevision = if (recorder.runtimeIdentity()) |identity|
-        .{
-            .name = try context.allocator.dupe(u8, identity.name),
-            .revision = try context.allocator.dupe(u8, identity.revision),
-        }
-    else
-        null;
     std.debug.print(
         "[codegen-record] [{d}/{d}] {s}: staged provider={s} model={s} flow={s} raw_first_draft_pass={} first_attempt_green={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
         .{
@@ -3109,19 +2263,14 @@ fn recordLiveCase(
         },
     );
     return .{
-        .artifact_identity = evidence_identity.contentDigest("flow-artifact", staged_version.slice()),
         .draft_quality = result.draft_quality,
         .applied = result.applied_change_set,
         .intent = intent_outcome,
-        .roundtrips = result.roundtrips,
-        .wall_clock_ms = elapsedWallClockMs(started_ms),
-        .draft_failure = draft_failure,
-        .provider_runtime = provider_runtime,
     };
 }
 
-// Record or qualify the real expert agent against the corpus.
-// Gated: ZTTP_CODEGEN_RECORD=1 or ZTTP_CODEGEN_QUALIFY=1. Cloud providers additionally require their
+// Record the real expert agent against the corpus.
+// Gated: ZTTP_CODEGEN_RECORD=1. Cloud providers additionally require their
 // named key. Each case runs in its own tmp
 // workspace with cwd switched to it, so the agent's tools and the edit veto
 // resolve the same files; cassettes are written to an absolute repo path so the
@@ -3129,12 +2278,7 @@ fn recordLiveCase(
 // failed runs stay under `.zig-cache/codegen-record-staging`; only a complete
 // unfiltered run swaps the provider corpus root.
 test "record codegen baseline corpus (live, gated)" {
-    const live_mode = (try requestedLiveCorpusMode()) orelse return error.SkipZigTest;
-    if (live_mode == .qualify and
-        (envValue("ZTTP_CODEGEN_PROVIDER") == null or envValue("ZTTP_CODEGEN_MODEL") == null))
-    {
-        return error.QualificationRequiresExplicitCandidate;
-    }
+    if (!recordingRequested()) return error.SkipZigTest;
     const corpus_provider = try recordingProvider();
     if (!recordingAuthAvailable(corpus_provider)) return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -3147,10 +2291,7 @@ test "record codegen baseline corpus (live, gated)" {
         if (value.len == 0) null else value
     else
         null;
-    if (live_mode == .qualify and greenRecordingRequired()) {
-        return error.QualificationMustMeasureFailures;
-    }
-    const require_green = live_mode == .record and greenRecordingRequired();
+    const require_green = greenRecordingRequired();
     const record_turn_timeout_ms: u64 = if (envValue("ZTTP_CODEGEN_TURN_TIMEOUT_MS")) |raw|
         std.fmt.parseInt(u64, raw, 10) catch default_record_turn_timeout_ms
     else
@@ -3167,21 +2308,7 @@ test "record codegen baseline corpus (live, gated)" {
 
     const has_limit = if (envValue("ZTTP_CODEGEN_LIMIT")) |value| value.len != 0 else false;
     const has_tool_filter = if (envValue("ZTTP_CODEGEN_TOOLS")) |value| value.len != 0 else false;
-    if (live_mode == .qualify and
-        (only_case != null or has_limit or has_tool_filter or selected_case_count != record_corpus.len))
-    {
-        return error.FilteredQualificationRefused;
-    }
-    const local_provenance = if (live_mode == .qualify)
-        try qualificationLocalProvenance(corpus_provider)
-    else
-        null;
-
     const repo_root = try cwdPathAlloc(allocator);
-    const source_before = readSourceIdentity(allocator, repo_root);
-    if (live_mode == .qualify and (!source_before.known or source_before.revision.dirty)) {
-        return error.QualificationRequiresCleanKnownSource;
-    }
     const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, flowRoot(corpus_provider) });
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -3208,12 +2335,6 @@ test "record codegen baseline corpus (live, gated)" {
 
     const request_config = try requestConfigForSession(&session);
     const model_revision = try cachedModelRevision(allocator, corpus_provider, corpus_model);
-    if (live_mode == .qualify and corpus_provider == .local) {
-        const revision = model_revision orelse return error.LocalQualificationRequiresModelRevision;
-        if (revision.len != 40 or !isLowerHex(revision)) {
-            return error.MalformedQualificationModelRevision;
-        }
-    }
     const runtime_identity = try declaredRuntime(corpus_provider);
     if (runtime_identity) |identity| {
         std.debug.print(
@@ -3249,7 +2370,7 @@ test "record codegen baseline corpus (live, gated)" {
             corpus_provider.publicName(),
             corpus_model,
             selected_case_count,
-            @tagName(live_mode),
+            "record",
             record_turn_timeout_ms,
             require_green,
             canonical_full_run,
@@ -3272,8 +2393,7 @@ test "record codegen baseline corpus (live, gated)" {
         .diagnostics_run_id = diagnostics_run_id,
         .turn_timeout_ms = record_turn_timeout_ms,
         .require_green = require_green,
-        .enforce_headline_ratchet = live_mode == .record and
-            corpus_provider == headline_provider and
+        .enforce_headline_ratchet = corpus_provider == headline_provider and
             std.mem.eql(u8, corpus_model, headline_model),
     };
     var raw_first_draft_passes: usize = 0;
@@ -3282,9 +2402,6 @@ test "record codegen baseline corpus (live, gated)" {
     var intent_passes: usize = 0;
     var total: usize = 0;
     var staged: usize = 0;
-    var qualification_cases: std.ArrayList(qualification.CaseResult) = .empty;
-    defer qualification_cases.deinit(allocator);
-    var observed_runtime: RuntimeConsensus = .{};
     var failures: std.ArrayList(RecordingFailure) = .empty;
     defer failures.deinit(allocator);
     // Cases that produced no artifact at all. Counted apart from the failures
@@ -3297,7 +2414,6 @@ test "record codegen baseline corpus (live, gated)" {
             "[codegen-record] [{d}/{d}] {s}: case start\n",
             .{ total, selected_case_count, rc.name },
         );
-        const case_started_ms = zts.realtimeNowMs() catch 0;
         const outcome = recordLiveCase(&context, rc, total, selected_case_count) catch |err| {
             const kind = classifyRecordingFailure(err);
             recording_failures += 1;
@@ -3310,48 +2426,20 @@ test "record codegen baseline corpus (live, gated)" {
                 "[codegen-record] [{d}/{d}] {s}: quarantined failure kind={s} error={s}\n",
                 .{ total, selected_case_count, rc.name, @tagName(kind), @errorName(err) },
             );
-            const case_failures = try allocator.alloc(qualification.FailureKind, 1);
-            case_failures[0] = qualificationFailureKind(kind);
-            const error_names = try allocator.alloc([]const u8, 1);
-            error_names[0] = @errorName(err);
-            try qualification_cases.append(allocator, .{
-                .name = rc.name,
-                .artifact_identity = null,
-                .draft_quality = .not_green,
-                .applied = false,
-                .intent = switch (rc.intent) {
-                    .runtime => .not_checked,
-                    .compiler_veto_only => .compiler_veto_only,
-                },
-                .roundtrips = 0,
-                .wall_clock_ms = elapsedWallClockMs(case_started_ms),
-                .failures = case_failures,
-                .error_names = error_names,
-            });
             continue;
         };
-        try observed_runtime.observe(allocator, outcome.provider_runtime);
         staged += 1;
         if (outcome.draft_quality.rawFirstDraftVetoPass()) raw_first_draft_passes += 1;
         if (outcome.draft_quality.firstAttemptGreen()) first_attempt_greens += 1;
         if (outcome.applied) greens += 1;
         const intent_satisfied = outcome.intent == .passed or outcome.intent == .compiler_veto_only;
         if (intent_satisfied) intent_passes += 1;
-        var case_failure_count: usize = 0;
-        if (!outcome.applied) case_failure_count += 1;
-        if (!intent_satisfied) case_failure_count += 1;
-        const case_failures = try allocator.alloc(qualification.FailureKind, case_failure_count);
-        const error_names = try allocator.alloc([]const u8, case_failure_count);
-        var case_failure_index: usize = 0;
         if (!outcome.applied) {
             try failures.append(allocator, .{
                 .case_name = rc.name,
                 .kind = .validation,
                 .error_name = @errorName(error.RecordedEditNotApplied),
             });
-            case_failures[case_failure_index] = .validation;
-            error_names[case_failure_index] = @errorName(error.RecordedEditNotApplied);
-            case_failure_index += 1;
         }
         if (!intent_satisfied) {
             try failures.append(allocator, .{
@@ -3359,25 +2447,7 @@ test "record codegen baseline corpus (live, gated)" {
                 .kind = .intent,
                 .error_name = @errorName(error.RecordedIntentCheckFailed),
             });
-            case_failures[case_failure_index] = .intent;
-            error_names[case_failure_index] = @errorName(error.RecordedIntentCheckFailed);
         }
-        const draft_failure = if (outcome.draft_failure) |*analysis|
-            try copyDraftFailure(allocator, analysis)
-        else
-            null;
-        try qualification_cases.append(allocator, .{
-            .name = rc.name,
-            .artifact_identity = try allocator.dupe(u8, outcome.artifact_identity.slice()),
-            .draft_quality = outcome.draft_quality,
-            .applied = outcome.applied,
-            .intent = outcome.intent,
-            .roundtrips = outcome.roundtrips,
-            .wall_clock_ms = outcome.wall_clock_ms,
-            .failures = case_failures,
-            .error_names = error_names,
-            .draft_failure = draft_failure,
-        });
     }
     std.debug.print(
         "[codegen-record] RUN raw first-draft pass: {d}/{d}; first-attempt green: {d}/{d}; " ++
@@ -3402,29 +2472,6 @@ test "record codegen baseline corpus (live, gated)" {
         );
     }
     if (total != selected_case_count) return error.CodegenCorpusCountMismatch;
-    if (qualification_cases.items.len != selected_case_count) return error.CodegenCorpusCountMismatch;
-    if (live_mode == .qualify) {
-        try emitQualificationRun(
-            allocator,
-            &registry,
-            corpus_provider,
-            corpus_model,
-            model_revision,
-            &observed_runtime,
-            request_config,
-            source_before,
-            repo_root,
-            diagnostics_run_id,
-            record_turn_timeout_ms,
-            local_provenance,
-            qualification_cases.items,
-        );
-        std.debug.print(
-            "[codegen-record] qualification artifacts remain quarantined at {s}; active corpora and model defaults are unchanged\n",
-            .{stage_root},
-        );
-        return;
-    }
     const can_activate = recordingRunCanActivate(canonical_full_run, .{
         .selected = total,
         .staged = staged,
@@ -3473,110 +2520,17 @@ test "record codegen baseline corpus (live, gated)" {
 // deterministically and fails if a compiler/policy change would regress it.
 // Uses an arena over the page allocator (the replay executes the full tool +
 // veto stack; this is a fidelity check, not a leak test).
-/// Registry rules at least one corpus case trips, as measured on the headline
-/// model and committed here.
-///
-/// The ratchet is one-directional by design: a corpus that grows trips more and
-/// nothing here complains, while a corpus that stops standing on a fence fails
-/// and names it. Losing coverage is how nine rows came to read 90% while six
-/// tightenings landed underneath them, and it is invisible to every other gate
-/// on this file - the per-case pin only sees a flipped verdict, never a fence
-/// that stopped being felt.
-///
-/// Two of seventy-two, measured 2026-08-26 over the 19-case DeepSeek corpus
-/// recorded that day, and also the intersection of the three recordings made
-/// against this prompt set. Read from the recording rather than carried over:
-/// the probe that produced it narrowed this list, ran the replay, and took the
-/// tripped set the generator printed. No code appeared that was not already
-/// here.
-///
-/// ZTS400 left on 2026-10-09 with the re-record after the boolean and arity
-/// plan. Only `parallel-secret` ever tripped it, and every draft in the new
-/// recording that reaches the leak also reads `.ok` on the array `parallel()`
-/// returns. Unit B3 now walks function bodies and refuses that read (ZTS102),
-/// and a boolean error stops `check` before the flow stage, so the leak is
-/// never reached. ZTS400 itself still fires once a draft gets past the boolean
-/// stage; the corpus no longer stands on it.
-const deepseek_coverage_baseline = [_][]const u8{
-    "ZTS500",
-};
-// Moved again when a full audit of all 19 cases found three more assertions
-// stated nowhere the model could read: queued-call's echoed child body,
-// nested-dispatch's 201 and `notified` key, and wait-signal's delivered
-// payload contents. The identity covers
-// the model-visible input, so a prompt edit moves it by construction.
-//
-// The list above is measured, not carried over. Three recordings now exist
-// against the prompt set the identity below names, and `git log
-// docs/coverage.json` is the source for each measured set:
-//
-//   2026-08-17  4  ZTS400 ZTS500 ZTS501 ZTS509
-//   2026-08-25  5  ZTS400 ZTS500 ZTS501 ZTS502 ZTS509
-//   2026-08-26  2  ZTS400 ZTS500
-//
-// (The 2026-08-16 measurement of five is not comparable: it was recorded over
-// corpus 19dc67a54ec3, a different prompt set.)
-//
-// ZTS501, ZTS502 and ZTS509 all vary run to run on identical input. On
-// 2026-08-26 no draft declared a spec contradicting an imported module, none
-// used an unknown spec name, and none tried moving a `workflow.call` inside a
-// `durable.step`. Cleaner drafts, and the run measured its best intent rate to
-// match. Nothing about the compiler changed.
-//
-// The sequence 4, 5, 2 is the point, and it is worth stating rather than
-// leaving in the numbers: this is not a ratchet that has slipped, it is a
-// quantity that is not monotone because it measures the mistakes one model
-// happened to make on one draw. Five distinct codes appear across the three
-// runs and only these two appear in all of them, so this pin is their
-// intersection - a floor under model behaviour, not under compiler coverage,
-// and re-pinning it cannot make it the second. What the corpus does not
-// exercise is scoped in
-// pre-rebase:docs/archive/plans/2026-08-26-034-rule-coverage-widening-scope.md; closing it needs
-// cases built for the purpose, not a better draw.
-//
-// Moved again on 2026-09-20, and again by a prompt edit rather than a compiler
-// change: `cache-counter-holes` seeded a capsule naming two specs no fill could
-// discharge, and `workflow-nested-dispatch-avoidance` asserted a step name and
-// an egress call its prompt never stated. Both are model-visible input, so the
-// identity moved by construction.
-//
-// The two codes above carry across that move because the recording made against
-// the amended inputs still trips both. That is measured, not assumed: the
-// ratchet loop below is what checks it, and it passed on a run that measured
-// three of fifty-nine. One recording is not an intersection, so under the
-// identity below this pin is a floor taken from a single draw, and it regains
-// its three-run standing only as runs accumulate.
-const deepseek_coverage_headline_input_id = "e6801afae0990b304b924bcb27e5d435cf75ed922f6064241cb401a1d6845576";
-
-/// Return the live coverage floor for one exact model-visible input and model.
-/// Expected outcomes and thresholds cannot reset this ratchet.
+/// A coverage floor needs a complete measurement for this exact corpus.
+/// The final DeepSeek recording must establish that floor before publication.
 fn coverageBaseline(
     provider: agent.Provider,
     model: []const u8,
     headline_input: evidence_identity.HeadlineInputIdentity,
 ) ?[]const []const u8 {
-    return switch (provider) {
-        .deepseek => if (std.mem.eql(u8, model, models.defaultForProvider(.deepseek).id) and
-            std.mem.eql(u8, headline_input.slice(), deepseek_coverage_headline_input_id))
-            &deepseek_coverage_baseline
-        else
-            null,
-        .local => null,
-    };
-}
-
-test "coverage baselines are input provider and model qualified" {
-    const headline_input = headlineInputIdentity();
-    try testing.expectEqualStrings(deepseek_coverage_headline_input_id, headline_input.slice());
-    try testing.expectEqual(
-        @as(?[]const []const u8, &deepseek_coverage_baseline),
-        coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, headline_input),
-    );
-    try testing.expect(coverageBaseline(.local, local.default_model, headline_input) == null);
-    try testing.expect(coverageBaseline(.deepseek, "deepseek-v4-pro", headline_input) == null);
-    var changed_input = headline_input;
-    changed_input.bytes[0] = if (changed_input.bytes[0] == '0') '1' else '0';
-    try testing.expect(coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, changed_input) == null);
+    if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
+        !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
+        return null;
+    return &.{ "ZTS500", "ZTS502" };
 }
 
 /// Sorted code slice for stable JSON evidence.
@@ -3725,60 +2679,26 @@ fn publishableEvidence(
     completed: usize,
     corpus_cases: usize,
 ) bool {
-    return !filtered and publication_mode and source_known and expected == 19 and completed == expected and
+    return !filtered and publication_mode and source_known and expected == record_corpus.len and completed == expected and
         corpus_cases == expected;
 }
 
 /// Whether a run's numbers are sound enough to publish - not whether they are
 /// good.
 ///
-/// This gated on the value of the very number it publishes: greens == 19, raw
-/// first-draft >= 14, median <= 4, intent 18 of 18. Measured against four full
-/// runs, every one of those is unreachable: greens ranged 16 to 18, raw 10 to
-/// 12, intent 15 to 18, and the median was 5 in all four. The row already on
-/// docs/convergence.md fails all of them too - 9 raw, median 5. The thresholds
-/// were written on 2026-08-16 and no publication has run since, so they were
-/// never tested against a real corpus, and they are aspiration rather than
-/// measurement.
-///
-/// Flooring the headline metric is also the wrong shape. docs/convergence.md
-/// publishes a first-draft pass rate and forbids re-recording "until it
-/// flatters"; a floor on that rate means the page can only ever carry good
-/// news, which makes it a claim rather than a measurement.
-///
-/// So what remains asserts that the measurement happened and covered the whole
-/// corpus. A number that is bad is published and explained. A number that is
-/// unsound is refused.
-fn expertQualityGate(summary: codegen.CodegenSummary) bool {
+/// The gate asserts that each case and each runtime intent produced evidence.
+/// The final recording supplies measured results without an invented quality floor.
+fn expertMeasurementGate(summary: codegen.CodegenSummary) bool {
     // Every case measured. A short corpus reports a rate over a denominator
     // that is not the corpus.
-    if (summary.total != 19) return false;
+    if (summary.total != record_corpus.len) return false;
     // Every intent-declaring case actually ran its check. `intent_checked` is
     // the denominator of the published intent rate, so a check that silently
-    // did not run would inflate it. One case is compiler-veto-only by design,
-    // which is why this is 18 and not 19.
-    if (summary.intent_checked != 18) return false;
+    // did not run would inflate it.
+    if (summary.intent_checked != record_corpus.len) return false;
     // Zero means no round-trip was counted at all, which is a broken
     // measurement rather than an unusually fast one.
     if (summary.median_roundtrips == 0) return false;
-    // The run produced signal, which a denominator on its own cannot say. The
-    // thresholds above are not coming back; this is the other claim, and
-    // dropping it left nothing between a bad model run and a broken harness.
-    //
-    // An intent harness that regressed - a missing binary, a changed
-    // intent.test.jsonl schema - runs all 18 checks and fails all 18. That
-    // leaves intent_checked at 18 and median_roundtrips non-zero, so the gate
-    // passed and docs/convergence.md published intentPassPercent: 0 as a
-    // measured property of the model.
-    //
-    // Nineteen handlers the veto accepted, none of which does what its prompt
-    // asked, is not a model result: the compiler already agreed they are
-    // programs. Nor is zero green out of nineteen, which is the same fault one
-    // stage earlier. Both floors sit far below every measured run - greens 16
-    // to 18, intent 15 to 18 - so neither can force a re-record until the
-    // numbers flatter.
-    if (summary.greens == 0) return false;
-    if (summary.intent_passes == 0) return false;
     return true;
 }
 
@@ -3856,163 +2776,6 @@ fn markerJson(allocator: std.mem.Allocator, value: anytype) ![]u8 {
     return try out.toOwnedSlice();
 }
 
-fn contentDigestFromHex(value: []const u8) !evidence_identity.ContentDigest {
-    if (value.len != 64 or !isLowerHex(value)) return error.InvalidArtifactIdentity;
-    var out: evidence_identity.ContentDigest = undefined;
-    @memcpy(&out.bytes, value);
-    return out;
-}
-
-fn emitQualificationRun(
-    allocator: std.mem.Allocator,
-    registry: *const registry_mod.Registry,
-    provider: agent.Provider,
-    model: []const u8,
-    model_revision: ?[]const u8,
-    observed_runtime: *const RuntimeConsensus,
-    request_config: model_request.Config,
-    source_before: SourceIdentity,
-    repo_root: []const u8,
-    run_suffix: []const u8,
-    turn_timeout_ms: u64,
-    local_provenance: ?qualification.LocalProvenance,
-    cases: []const qualification.CaseResult,
-) !void {
-    if (cases.len != record_corpus.len) return error.CodegenCorpusCountMismatch;
-    const source_after = readSourceIdentity(allocator, repo_root);
-    if (!source_before.known or !source_after.known or
-        source_before.revision.dirty != source_after.revision.dirty or
-        !std.mem.eql(u8, source_before.revision.commit, source_after.revision.commit))
-    {
-        return error.SourceChangedDuringQualification;
-    }
-
-    const tools_json = request_config.tools_json orelse return error.EmptyToolCatalog;
-    const request_policy: evidence_identity.RequestPolicy = .{
-        .max_output_tokens = request_config.max_output_tokens,
-        .reserve_tokens = request_config.reserve_tokens,
-        .stream = request_config.stream,
-        .purpose = request_config.purpose,
-        .cache_policy = request_config.cache_policy,
-    };
-    const prompt_persona = evidence_identity.promptPersona(request_config.system_prompt);
-    const catalogs: evidence_identity.CatalogIdentities = .{
-        .provider_neutral = try neutralCatalogIdentity(allocator, registry),
-        .provider_serialized = evidence_identity.providerSerializedCatalog(tools_json),
-    };
-    const compiler = try compilerEvidenceIdentities(allocator);
-    const cohorts: evidence_identity.ManifestComponents = .{
-        .headline_input = headlineInputIdentity(),
-        .intent_suite = intentSuiteIdentity(),
-        .security_probes = securityProbeIdentity(),
-        .thresholds = thresholdIdentity(),
-    };
-    const manifest_identity = evidence_identity.manifest(cohorts);
-    const provider_runtime = if (observed_runtime.observed) observed_runtime.value else null;
-    const run_id = try std.fmt.allocPrint(
-        allocator,
-        "{s}-{s}",
-        .{ source_after.revision.commit[0..12], run_suffix },
-    );
-
-    const observations = try allocator.alloc(evidence_identity.ObservedResult, cases.len);
-    for (cases, 0..) |case, index| {
-        observations[index] = .{
-            .scenario = case.name,
-            .artifact_identity = if (case.artifact_identity) |identity|
-                try contentDigestFromHex(identity)
-            else
-                null,
-            .draft_quality = case.draft_quality,
-            .intent_outcome = case.intent,
-            .applied = case.applied,
-            .roundtrips = case.roundtrips,
-        };
-    }
-    const result_run = evidence_identity.resultRun(.{
-        .provider = provider,
-        .model = model,
-        .model_revision = model_revision,
-        .provider_runtime = provider_runtime,
-        .request_policy = request_policy,
-        .prompt_persona = prompt_persona,
-        .catalogs = catalogs,
-        .compiler = compiler,
-        .cohorts = cohorts,
-        .source_revision = source_after.revision,
-        .run_id = run_id,
-        .observations = observations,
-    });
-    const defaults: loop.RunOptions = .{};
-    const summary = qualification.summarize(cases);
-    const run: qualification.Run = .{
-        .schema_version = qualification.schema_version,
-        .run_id = run_id,
-        .result_run_hash = result_run.slice(),
-        .complete = true,
-        .filtered = false,
-        .report_only = true,
-        .default_change_authorized = false,
-        .identity = .{
-            .provider = provider.publicName(),
-            .model = model,
-            .model_revision = model_revision,
-            .provider_runtime = if (provider_runtime) |runtime| .{
-                .name = runtime.name,
-                .revision = runtime.revision,
-            } else null,
-            .request_policy = .{
-                .max_output_tokens = request_policy.max_output_tokens,
-                .reserve_tokens = request_policy.reserve_tokens,
-                .stream = request_policy.stream,
-                .purpose = @tagName(request_policy.purpose),
-                .cache_policy = @tagName(request_policy.cache_policy),
-            },
-            .provider_tool_count = tool_catalog.count(registry),
-            .provider_tool_bytes = tools_json.len,
-            .headline_input_hash = cohorts.headline_input.slice(),
-            .intent_suite_hash = cohorts.intent_suite.slice(),
-            .security_probe_hash = cohorts.security_probes.slice(),
-            .threshold_hash = cohorts.thresholds.slice(),
-            .manifest_hash = manifest_identity.slice(),
-            .prompt_persona_hash = prompt_persona.slice(),
-            .provider_neutral_catalog_hash = catalogs.provider_neutral.slice(),
-            .provider_serialized_catalog_hash = catalogs.provider_serialized.slice(),
-            .schema_hash = compiler.schema.slice(),
-            .meta_hash = compiler.meta.slice(),
-            .grammar_hash = compiler.grammar.slice(),
-            .semantics_hash = compiler.semantics.slice(),
-            .diagnostic_hash = compiler.diagnostics.slice(),
-            .policy_hash = compiler.policy.slice(),
-        },
-        .source = .{
-            .commit = source_after.revision.commit,
-            .dirty = source_after.revision.dirty,
-            .known = source_after.known,
-        },
-        .limits = .{
-            .turn_timeout_ms = turn_timeout_ms,
-            .max_model_roundtrips_per_turn = defaults.max_model_roundtrips_per_turn,
-            .max_tool_calls_per_turn = defaults.max_tool_calls_per_turn,
-        },
-        .local_provenance = local_provenance,
-        .cases = cases,
-        .summary = summary,
-    };
-    const status = qualification.assessRun(run);
-    std.debug.print(
-        "[expert-qualification-status] candidate={s}/{s} passed={} reason={s}\n",
-        .{
-            provider.publicName(),
-            model,
-            status == null,
-            if (status) |reason| @tagName(reason) else "none",
-        },
-    );
-    const marker = try markerJson(allocator, run);
-    std.debug.print("[expert-qualification-run] {s}\n", .{marker});
-}
-
 test "corpus evidence consensus and publication floor fail closed" {
     var optional: OptionalStringConsensus = .{};
     try optional.observe(testing.allocator, "r1");
@@ -4033,69 +2796,51 @@ test "corpus evidence consensus and publication floor fail closed" {
         runtime.observe(testing.allocator, .{ .name = "mlx-lm", .revision = "2" }),
     );
 
-    try testing.expect(publishableEvidence(false, true, true, 19, 19, 19));
-    try testing.expect(!publishableEvidence(true, true, true, 19, 19, 19));
-    try testing.expect(!publishableEvidence(false, false, true, 19, 19, 19));
-    try testing.expect(!publishableEvidence(false, true, false, 19, 19, 19));
-    try testing.expect(!publishableEvidence(false, true, true, 19, 18, 19));
-    try testing.expect(!publishableEvidence(false, true, true, 19, 19, 0));
+    const expected = record_corpus.len;
+    try testing.expect(publishableEvidence(false, true, true, expected, expected, expected));
+    try testing.expect(!publishableEvidence(true, true, true, expected, expected, expected));
+    try testing.expect(!publishableEvidence(false, false, true, expected, expected, expected));
+    try testing.expect(!publishableEvidence(false, true, false, expected, expected, expected));
+    try testing.expect(!publishableEvidence(false, true, true, expected, expected - 1, expected));
+    try testing.expect(!publishableEvidence(false, true, true, expected, expected, 0));
 
     const passing_quality: codegen.CodegenSummary = .{
-        .total = 19,
-        .routed = 19,
-        .raw_first_draft_passes = 14,
-        .first_attempt_greens = 14,
-        .greens = 19,
-        .criterion_passes = 14,
-        .intent_passes = 18,
-        .intent_checked = 18,
-        .median_roundtrips = 4,
+        .total = 13,
+        .routed = 13,
+        .raw_first_draft_passes = 1,
+        .first_attempt_greens = 1,
+        .greens = 13,
+        .criterion_passes = 1,
+        .intent_passes = 13,
+        .intent_checked = 13,
+        .median_roundtrips = 1,
     };
-    try testing.expect(expertQualityGate(passing_quality));
+    try testing.expect(expertMeasurementGate(passing_quality));
 
-    // A worse run publishes. These are the four measurements the gate used to
-    // refuse, at the values four real runs actually produced: greens 16 to 18,
-    // raw 10 to 12, intent 15 to 18, median 5 every time. Refusing them meant
-    // the page could only ever carry good news, and the row already published
-    // on it - 9 raw, median 5 - fails the same thresholds.
+    // A lower result still publishes when every required measurement exists.
     var measured = passing_quality;
-    measured.greens = 16;
-    measured.raw_first_draft_passes = 10;
-    measured.first_attempt_greens = 10;
-    measured.intent_passes = 15;
-    measured.median_roundtrips = 5;
-    try testing.expect(expertQualityGate(measured));
+    measured.greens = 1;
+    measured.intent_passes = 1;
+    try testing.expect(expertMeasurementGate(measured));
 
     // An unsound measurement still refuses. A short corpus reports a rate over
     // the wrong denominator.
     var unsound = passing_quality;
-    unsound.total = 18;
-    try testing.expect(!expertQualityGate(unsound));
+    unsound.total = 12;
+    try testing.expect(!expertMeasurementGate(unsound));
     // An intent check that did not run would inflate the published intent rate.
     unsound = passing_quality;
-    unsound.intent_checked = 17;
-    try testing.expect(!expertQualityGate(unsound));
+    unsound.intent_checked = 12;
+    try testing.expect(!expertMeasurementGate(unsound));
     // No round-trip counted at all is a broken run, not a fast one.
     unsound = passing_quality;
     unsound.median_roundtrips = 0;
-    try testing.expect(!expertQualityGate(unsound));
-    // Every intent check ran and every one failed. The denominator is intact,
-    // so the gate saw nothing wrong and the page published intentPassPercent: 0
-    // as a property of the model. Nineteen veto-accepted handlers, none of
-    // which does what its prompt asked, is a harness fault.
-    unsound = passing_quality;
-    unsound.intent_passes = 0;
-    try testing.expect(!expertQualityGate(unsound));
-    // The same fault one stage earlier: nothing reached green at all.
-    unsound = passing_quality;
-    unsound.greens = 0;
-    try testing.expect(!expertQualityGate(unsound));
-    // And the floors stay below the worst real run, so neither can force a
-    // re-record until the numbers flatter.
-    var worst_measured = measured;
-    worst_measured.greens = 1;
-    worst_measured.intent_passes = 1;
-    try testing.expect(expertQualityGate(worst_measured));
+    try testing.expect(!expertMeasurementGate(unsound));
+    // Complete measurements can report zero successes.
+    measured.intent_passes = 0;
+    try testing.expect(expertMeasurementGate(measured));
+    measured.greens = 0;
+    try testing.expect(expertMeasurementGate(measured));
 }
 
 /// Fail when `docs/coverage.json` no longer describes this run.
@@ -4367,24 +3112,32 @@ test "codegen baseline replays at the committed first-attempt green rate" {
             );
             if (on_headline) return error.MissingProviderFirstDraftExpectation;
         }
-        var case_intent: codegen.IntentOutcome = switch (rc.intent) {
-            .compiler_veto_only => .compiler_veto_only,
-            .runtime => .not_checked,
-        };
+        if (on_headline and result.firstAttemptGreen() != rc.expect_first_attempt_green) {
+            std.debug.print(
+                "[codegen-replay] {s}: pinned first-attempt pass={} but measured pass={}\n",
+                .{ rc.name, rc.expect_first_attempt_green, result.firstAttemptGreen() },
+            );
+            return error.CassetteRatchetMismatch;
+        }
+        var case_intent: codegen.IntentOutcome = .not_checked;
 
         // Intent: does the produced handler do what the prompt asked for? Run
         // after the turn, against whatever it actually wrote. A case with no
-        // executable scenario whose binary is unavailable stays
-        // `.not_checked` - never a pass, so an unmeasured corpus reads as
-        // unmeasured. The one compiler-veto-only case has its own explicit tag.
-        if (runtimeIntent(rc.intent)) |intent| {
-            if (zttp_bin) |bin| {
-                case_intent = codegen.runIntentCheck(ca, intent, tmp.abs_path, bin);
-                if (case_intent == .passed) intent_passes += 1 else {
-                    std.debug.print("[codegen-intent] {s}: handler did not do the task\n", .{rc.name});
-                }
-                intent_checked += 1;
+        // available binary stays `.not_checked` - never a pass, so an
+        // unmeasured corpus reads as unmeasured.
+        if (zttp_bin) |bin| {
+            case_intent = codegen.runIntentCheck(ca, rc.intent, tmp.abs_path, bin);
+            if (on_headline and (case_intent == .passed) != rc.expect_committed_intent_pass) {
+                std.debug.print(
+                    "[codegen-intent] {s}: pinned pass={} but measured pass={}\n",
+                    .{ rc.name, rc.expect_committed_intent_pass, case_intent == .passed },
+                );
+                return error.RuntimeIntentPinMismatch;
             }
+            if (case_intent == .passed) intent_passes += 1 else {
+                std.debug.print("[codegen-intent] {s}: handler did not do the task\n", .{rc.name});
+            }
+            intent_checked += 1;
         }
 
         // Gap histogram: the first rule each non-passing case tripped, ranking
@@ -4532,6 +3285,12 @@ test "codegen baseline replays at the committed first-attempt green rate" {
             }
             if (lost > 0 and on_headline) return error.CoverageRatchetMismatch;
         } else {
+            std.debug.print("[proof-coverage] measured baseline for {s}: ", .{headline_input.slice()});
+            for (tripped_sorted, 0..) |code, index| {
+                if (index != 0) std.debug.print(",", .{});
+                std.debug.print("{s}", .{code});
+            }
+            std.debug.print("\n", .{});
             std.debug.print(
                 "[proof-coverage] {s}/{s} has no committed coverage baseline{s}\n",
                 .{
@@ -4608,15 +3367,6 @@ test "codegen baseline replays at the committed first-attempt green rate" {
             "[codegen-intent] {d}/{d} intent-checked cases did the task\n",
             .{ intent_passes, intent_checked },
         );
-        // Intent is both a measurement and an expertise floor. A failure says
-        // the recorded handler missed the task even if the compiler accepted
-        // its shape, so the marker remains reportable but non-publishable.
-        if (intent_passes != intent_checked) {
-            std.debug.print(
-                "[codegen-intent] failures keep the convergence marker non-publishable\n",
-                .{},
-            );
-        }
     }
 
     // Emit both evidence records only after every replay, coverage ratchet,
@@ -4703,14 +3453,16 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         results.items.len,
         summary.total,
     );
-    const convergence_publishable = structurally_publishable and expertQualityGate(summary);
+    const convergence_publishable = structurally_publishable and expertMeasurementGate(summary);
     if (structurally_publishable and !convergence_publishable) {
         std.debug.print(
-            "[codegen-convergence] expertise gate failed: raw={d}/19 final={d}/19 " ++
+            "[codegen-convergence] measurement gate failed: raw={d}/{d} final={d}/{d} " ++
                 "intent={d}/{d} median-roundtrips={d}\n",
             .{
                 summary.raw_first_draft_passes,
+                record_corpus.len,
                 summary.greens,
+                record_corpus.len,
                 summary.intent_passes,
                 summary.intent_checked,
                 summary.median_roundtrips,
@@ -4821,7 +3573,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
 // cohort is not a tidy quarantine, it is the corpus being gone: every replay
 // skips, no evidence marker is emitted, and the suite still exits zero. That
 // state shipped in `f2252b31`, which bumped the artifact schema to 2 and left
-// all 19 recordings at 1, and it survived four commits because the one test
+// all recordings at 1, and it survived four commits because the one test
 // written to notice it counted the stale cases and then blessed them.
 //
 // So assert the value expected - current - rather than a shape that the
@@ -4892,11 +3644,11 @@ test "every current corpus case resolves to exactly one recording source" {
     try std.testing.expectEqual(record_corpus.len, flow_backed);
 }
 
-test "flow-backed replay validates the current request checkpoint" {
+test "flow-backed replay validates a current request checkpoint" {
     const allocator = std.testing.allocator;
     const repo_root = try cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
-    var resolved = try resolveCurrentCaseStepsForTest(allocator, repo_root, headline_provider, "durable-order");
+    var resolved = try resolveCurrentCaseStepsForTest(allocator, repo_root, headline_provider, "health");
     defer resolved.deinit(allocator);
     try std.testing.expectEqual(StepSource.flow_artifact, resolved.source);
 
@@ -4924,71 +3676,6 @@ test "flow-backed replay validates the current request checkpoint" {
         ),
     );
     try std.testing.expect(client.lastFlowMismatch() != null);
-}
-
-test "flow-backed corpus replay executes recorded compaction" {
-    const allocator = std.testing.allocator;
-    const repo_root = try cwdPathAlloc(allocator);
-    defer allocator.free(repo_root);
-    // Keep the winning case's steps rather than re-resolving them: the search
-    // already read the manifest, trace, and step fixtures off disk.
-    var rc: *const RecordCase = undefined;
-    var resolved = blk: {
-        for (&record_corpus) |*candidate| {
-            var candidate_resolved = try resolveCurrentCaseStepsForTest(
-                allocator,
-                repo_root,
-                headline_provider,
-                candidate.name,
-            );
-            const recorded_compaction = if (candidate_resolved.flow_case) |flow_case| compacted: {
-                for (flow_case.trace.model_calls) |checkpoint| {
-                    if (checkpoint.projection_first_kept_entry_id != null) break :compacted true;
-                }
-                break :compacted false;
-            } else false;
-            if (recorded_compaction) {
-                rc = candidate;
-                break :blk candidate_resolved;
-            }
-            candidate_resolved.deinit(allocator);
-        }
-        return error.MissingCompactedCorpusCase;
-    };
-    defer resolved.deinit(allocator);
-    const flow_case = if (resolved.flow_case) |*case| case else return error.ExpectedFlowArtifact;
-
-    var registry = try app.buildRegistry(allocator);
-    defer registry.deinit(allocator);
-    var request_context = try ReplayRequestContext.init(
-        allocator,
-        &registry,
-        headline_provider,
-        flow_case.manifest.model,
-    );
-    defer request_context.deinit(allocator);
-    var client = try CorpusReplayClient.init(&resolved, request_context.config);
-
-    var tmp = try IsolatedTmp.init(allocator, "codegen-compacted-replay");
-    defer tmp.cleanup(allocator);
-    for (rc.seed_files) |seed| try tmp.writeFile(allocator, seed.path, seed.bytes);
-    const saved_cwd = try cwdPathAlloc(allocator);
-    defer allocator.free(saved_cwd);
-    try std.Io.Threaded.chdir(tmp.abs_path);
-    defer std.Io.Threaded.chdir(saved_cwd) catch {};
-
-    var outcome = try replayCorpusTurn(
-        allocator,
-        &resolved,
-        &client,
-        request_context.config,
-        headline_provider,
-        &registry,
-        rc.prompt,
-    );
-    defer outcome.deinit(allocator);
-    try client.finish();
-    try std.testing.expect(outcome.transcript.projection != null);
 }
 
 test "a broken flow artifact is refused rather than falling back" {

@@ -3,7 +3,6 @@ const sdk = @import("zttp-sdk");
 
 var test_allocator = std.testing.allocator;
 var module_states = [_]?*anyopaque{null} ** 128;
-var active_agent_prompt: ?[]const u8 = null;
 
 const sqlite_error = "sqlite unavailable in sdk test shim";
 
@@ -30,10 +29,6 @@ pub fn allowCapability(capability: sdk.ModuleCapability) void {
 
 pub fn allowAllCapabilities() void {
     denied_capabilities_mask = 0;
-}
-
-pub fn setActiveAgentPrompt(prompt: ?[]const u8) void {
-    active_agent_prompt = prompt;
 }
 
 pub export fn zttpSdkHasCapability(_: *sdk.ModuleHandle, capability_tag: u8) bool {
@@ -175,18 +170,6 @@ pub export fn zttpSdkParseJson(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, o
     return true;
 }
 
-/// The shim never serves a tool request, so no input schema is active.
-pub export fn zttpSdkActiveToolInputSchema(_: *sdk.ModuleHandle, _: *[*]const u8, _: *usize) bool {
-    return false;
-}
-
-pub export fn zttpSdkActiveAgentPrompt(_: *sdk.ModuleHandle, out_ptr: *[*]const u8, out_len: *usize) bool {
-    const prompt = active_agent_prompt orelse return false;
-    out_ptr.* = prompt.ptr;
-    out_len.* = prompt.len;
-    return true;
-}
-
 pub export fn zttpSdkGetModuleState(_: *sdk.ModuleHandle, slot: usize) ?*anyopaque {
     if (slot >= module_states.len) return null;
     return module_states[slot];
@@ -271,10 +254,6 @@ pub export fn zttpSdkArrayPush(_: *sdk.ModuleHandle, _: sdk.JSValue, _: sdk.JSVa
 }
 
 pub export fn zttpSdkSqliteOpen(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, _: **sdk.SqliteDb) bool {
-    return false;
-}
-
-pub export fn zttpSdkLedgerOpen(_: *sdk.ModuleHandle, _: **sdk.SqliteDb) bool {
     return false;
 }
 

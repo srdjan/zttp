@@ -99,12 +99,7 @@ pub fn execute(
     };
     defer input.deinit(allocator);
 
-    // This tool declares effect=.analyze and must not persist: the RPC surface
-    // denies .persist_agent_state. Route through the non-persisting plan path
-    // (planFromSource with persist_witnesses=false) rather than
-    // pi_repair_plan.execute, whose planFromSource(..., true) writes to the
-    // on-disk witness corpus. Read the source here, mirroring how
-    // pi_repair_plan.execute reads it, so the ToolResult shape is unchanged.
+    // Read the source and compute a repair plan without writing workspace files.
     const source = readWorkspaceFile(allocator, input.path) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
@@ -113,7 +108,7 @@ pub fn execute(
         );
     };
     defer allocator.free(source);
-    var repair_result = try pi_repair_plan.planFromSource(allocator, source, input.path, input.goals, false);
+    var repair_result = try pi_repair_plan.planFromSource(allocator, source, input.path, input.goals);
     defer repair_result.deinit(allocator);
 
     if (repair_result.ok) {
@@ -441,7 +436,7 @@ pub fn candidateFromSource(
     goal_args: []const []const u8,
     max_repairs: usize,
 ) !Candidate {
-    var rr = try pi_repair_plan.planFromSource(allocator, source, rel_path, goal_args, false);
+    var rr = try pi_repair_plan.planFromSource(allocator, source, rel_path, goal_args);
     defer rr.deinit(allocator);
     const plans_json = try allocator.dupe(u8, rr.llm_text);
     errdefer allocator.free(plans_json);

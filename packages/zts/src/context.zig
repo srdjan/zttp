@@ -19,7 +19,6 @@ const bytecode = @import("bytecode.zig");
 const handler_policy = @import("handler_policy.zig");
 const modules = @import("modules/root.zig");
 const module_authorization = @import("zts-base").module_authorization;
-const parallel_collection = @import("parallel_collection.zig");
 
 pub const cost_meter = @import("cost_meter.zig");
 
@@ -86,24 +85,6 @@ pub const CallFrame = struct {
     return_fp: usize,
     func: value.JSValue,
     this: value.JSValue,
-};
-
-/// Maximum number of virtual module state slots.
-/// Sized to accommodate all built-in and extension module state slots.
-/// The export grant of the tool a request is being served for (M4 T5 design
-/// note, section 6). The runtime owns what `context` points at and supplies
-/// `allows`, so the engine never names a runtime type: the module call wrapper
-/// asks it, before an export runs, whether the active tool may call
-/// `module`.`name`.
-pub const ToolGrant = struct {
-    context: *const anyopaque,
-    allows: *const fn (context: *const anyopaque, module: []const u8, name: []const u8) bool,
-    /// The input schema the tool gate validated the request body against (M4
-    /// T7). `toolInput` answers only for this name. Borrowed.
-    input_schema: []const u8 = "",
-    /// The prompt admitted for the active agent request. Null for tool grants
-    /// and outside an agent request. Borrowed from the runtime frame.
-    agent_prompt: ?[]const u8 = null,
 };
 
 /// The accepted capability ceiling of the handler (M4 T5b design note,
@@ -268,22 +249,11 @@ pub const Context = struct {
     /// Authorization scope for the native module call executing in this
     /// Context. Nested wrappers restore the previous borrowed scope.
     active_module_scope: ?module_authorization.ActiveModuleScope,
-    /// The export grant of the tool the current request is served for. Null for
-    /// a handler that is not serving a tool request, which leaves every module
-    /// call as it was. The runtime sets it for the duration of one handler call
-    /// and clears it on every exit path.
-    active_tool_grant: ?ToolGrant = null,
-    /// True only while invoking a handler whose contract declares an agent.
-    /// A null grant then permits only `zttp:router.routerMatch`.
-    contract_has_agent: bool = false,
     /// The accepted capability ceiling of the handler. Null when the served
     /// artifact carries no declaration ceiling, which leaves every module call
     /// as it was. The runtime sets it for the duration of one handler call and
     /// clears it on every exit path.
     active_capability_ceiling: ?CapabilityCeiling = null,
-    /// Structured I/O collector installed by parallel/race while their
-    /// thunks execute. The Context owns the stack, not the worker thread.
-    parallel_collection: parallel_collection.State,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,
     /// Immutable policy generation pinned by the owning runtime. Guard-denial
@@ -296,8 +266,6 @@ pub const Context = struct {
     sdk_file_allowlist: SdkPathAllowList,
     /// Canonical SQLite database paths that SDK modules may open. Empty means deny.
     sdk_sqlite_allowlist: SdkPathAllowList,
-    /// Owned canonical path. Generic SDK file and SQLite access cannot reach it.
-    protected_ledger_path: ?[]const u8 = null,
     /// Cooperative per-request interrupt. Self-set by the deadline check at loop
     /// back-edges; may be set by any thread (atomic) for forced aborts.
     interrupt_requested: std.atomic.Value(bool),
@@ -372,7 +340,6 @@ pub const Context = struct {
             .literal_shapes = .empty,
             .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
             .active_module_scope = null,
-            .parallel_collection = .{},
             .capability_policy = .{},
             .policy_generation = 0,
             .cost_meter = .{},
@@ -670,10 +637,7 @@ pub const Context = struct {
         // quarantined Context before module-state destructors run so teardown
         // cannot inherit authority from the failed call.
         self.active_module_scope = null;
-        self.active_tool_grant = null;
-        self.contract_has_agent = false;
         self.active_capability_ceiling = null;
-        self.parallel_collection.clear();
 
         // Clean up per-module state (caches, registries) before destroying objects
         for (&self.module_state) |*slot| {
@@ -735,7 +699,6 @@ pub const Context = struct {
 
         self.sdk_sqlite_allowlist.deinit(self.allocator);
         self.sdk_file_allowlist.deinit(self.allocator);
-        if (self.protected_ledger_path) |path| self.allocator.free(path);
 
         // Clean up object literal shapes
         self.literal_shapes.deinit(self.allocator);
@@ -770,22 +733,11 @@ pub const Context = struct {
     }
 
     pub fn allowsSdkFilePathCanonical(self: *const Context, canonical_path: []const u8) bool {
-        if (self.isProtectedLedgerPath(canonical_path)) return false;
         return self.sdk_file_allowlist.contains(canonical_path);
     }
 
     pub fn allowsSdkSqlitePathCanonical(self: *const Context, canonical_path: []const u8) bool {
-        if (self.isProtectedLedgerPath(canonical_path)) return false;
         return self.sdk_sqlite_allowlist.contains(canonical_path);
-    }
-
-    pub fn isProtectedLedgerPath(self: *const Context, path: []const u8) bool {
-        const ledger = self.protected_ledger_path orelse return false;
-        if (std.ascii.eqlIgnoreCase(ledger, path)) return true;
-        if (path.len < ledger.len or !std.ascii.eqlIgnoreCase(path[0..ledger.len], ledger)) return false;
-        const suffix = path[ledger.len..];
-        return std.ascii.eqlIgnoreCase(suffix, "-wal") or std.ascii.eqlIgnoreCase(suffix, "-shm") or
-            std.ascii.eqlIgnoreCase(suffix, "-journal");
     }
 
     // ========================================================================
@@ -1064,37 +1016,6 @@ test "Context deinit clears module authorization before module state cleanup" {
 
     context.deinit();
     try std.testing.expect(state.scope_was_clear);
-}
-
-test "Context deinit clears parallel collector before module state cleanup" {
-    const State = struct {
-        context: *Context,
-        collector_was_clear: bool = false,
-
-        fn deinit(ptr: *anyopaque, _: std.mem.Allocator) void {
-            const self: *@This() = @ptrCast(@alignCast(ptr));
-            self.collector_was_clear = self.context.parallel_collection.active == null;
-        }
-    };
-
-    const allocator = std.testing.allocator;
-    var gc_state = try gc.GC.init(allocator, .{});
-    defer gc_state.deinit();
-
-    const context = try Context.init(allocator, &gc_state, .{});
-    var descriptors: [1]parallel_collection.FetchDescriptor = undefined;
-    var collector = parallel_collection.ParallelCollector{
-        .descriptors = &descriptors,
-        .count = 0,
-        .allocator = allocator,
-        .capacity = 1,
-    };
-    var state = State{ .context = context };
-    context.parallel_collection.active = &collector;
-    context.setModuleState(0, &state, State.deinit);
-
-    context.deinit();
-    try std.testing.expect(state.collector_was_clear);
 }
 
 /// Re-export: the table itself lives in atom_table.zig, which the parser and

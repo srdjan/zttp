@@ -1,3 +1,0 @@
-{"type":"test","name":"renders Hello JSX div"}
-{"type":"request","method":"GET","url":"/","headers":{},"body":null}
-{"type":"expect","status":200,"bodyContains":"Hello JSX"}

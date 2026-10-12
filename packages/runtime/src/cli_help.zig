@@ -94,7 +94,7 @@ const help_all_head =
     \\zttp - serverless JavaScript runtime
     \\
     \\Core commands:
-    \\  zttp init <name> [--template basic|api|htmx]  Create a project
+    \\  zttp init <name> [--template basic|api]  Create a project
     \\  zttp dev [handler.ts]                Run locally, watch and prove on save
     \\  zttp test [tests.jsonl]              Run handler tests
     \\  zttp expert                          Interactive compiler-in-the-loop agent
@@ -109,10 +109,6 @@ const help_all_mid =
     \\Run and inspect:
     \\  zttp serve [handler.ts]              Run a handler without watch or proof
     \\  zttp doctor [path]                   Check project readiness
-    \\  zttp workflow-queue [list|show|replay|discard] --durable <DIR>
-    \\                                            Inspect workflow queue dead letters
-    \\  zttp durable dead-runs [list|show|replay|discard] --durable <DIR>
-    \\                                            Inspect durable runs that permanently failed recovery
     \\
     \\Package:
     \\  zttp build [-o <bin>]                Emit a self-contained binary
@@ -275,8 +271,7 @@ test "help --all surfaces the advanced commands" {
         "zttp doctor",         "zttp proofs",        "zttp check",
         "zttp features",       "zttp modules",       "zttp restrictions",
         "zttp meta",           "zttp describe-rule", "zttp verify-paths",
-        "zttp verify-modules", "zttp edit-simulate", "zttp rollout",
-        "zttp workflow-queue", "zttp durable",
+        "zttp verify-modules", "zttp edit-simulate",
     }) |cmd| {
         try std.testing.expect(has(help_all, cmd));
     }

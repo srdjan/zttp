@@ -89,7 +89,8 @@ fn expectLiveDiagnosticCodes(text: []const u8) !void {
 test "stand-in gate: every reserved kind stays outside the playbook and the range" {
     // Floor first: an empty reserved set makes every loop below vacuous, and it
     // is the state the range reaches by covering one kind at a time.
-    try testing.expect(range.reserved_kinds.len >= 6);
+    // The closed enum retains five reserved kinds after workflow removal.
+    try testing.expect(range.reserved_kinds.len >= 5);
 
     for (range.reserved_kinds) |kind| {
         try testing.expectEqual(range.Coverage.reserved, range.coverageOf(kind));
@@ -144,7 +145,7 @@ test "stand-in gate: every negative and out-of-range kind is reserved, and every
         }
         probed += 1;
     }
-    try testing.expect(probed >= 5);
+    try testing.expect(probed >= 4);
     std.debug.print("[standin-gate] reserved probes {d}/{d} kinds\n", .{ probed, probed });
 }
 

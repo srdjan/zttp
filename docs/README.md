@@ -12,19 +12,14 @@ and superseded execution records live in the `pre-rebase` git tag, under
 ## Start Here
 
 - [User Guide](user-guide.md) - the single user guide for install, first
-  project, handler API, routing, JSON, JS/TS/TSX, virtual modules, tests,
+  project, handler API, routing, JSON, TypeScript, virtual modules, tests,
   deploy, proof receipts, and troubleshooting.
 - [CLI Reference](cli.md) - core commands, advanced analyzer commands,
   proof-ledger commands, expert mode, and machine-readable output.
 - [Virtual Modules](virtual-modules/README.md) - complete current `zttp:*`
   module list, exports, capabilities, effects, and runtime requirements.
-- [Durable Workflows](durable-workflows.md) - durable run/step/signal,
-  workflow queue, dead-letter handling, proof receipts, and replay boundaries.
 - [Roadmap](roadmap.md) - supported platforms, current limitations, planned
-  runtime work, artifact-assurance ratchets, local-model qualification, and
-  what remains of the reset.
-- [First Durable Workflow](tutorials/first-durable-workflow.md) - run the
-  durable workflow examples from a clean checkout and inspect replay state.
+  runtime work, artifact-assurance ratchets, and the reset status.
 - [Convergence](convergence.md) - the measured first-draft veto-pass rate over
   the frozen prompt corpus, with the corpus version and policy hash each figure
   was recorded against.
@@ -37,8 +32,7 @@ and superseded execution records live in the `pre-rebase` git tag, under
   contracts, least-privilege runtime policy, replay,
   upgrade checks, and `Proof<T, P>`.
 - [Verification](verification.md) - compile-time handler checks.
-- [TypeScript](typescript.md) - type stripping, type checking, TSX, and
-  `comptime()`.
+- [TypeScript](typescript.md) - type stripping, type checking, and sound mode.
 - [TypeScript Patterns](typescript.md#typescript-patterns-in-the-zts-subset) -
   the "TypeScript Tips Everyone Should Know" canon mapped onto the zts subset.
 - [Feature Detection](feature-detection.md) - allowed and rejected language

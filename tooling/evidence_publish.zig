@@ -280,7 +280,16 @@ fn renderConvergenceMarkdown(
     existing: []const u8,
     row: []const u8,
 ) ![]u8 {
-    const migrated = try replaceFirst(allocator, existing, old_intro, new_intro);
+    const intro_migrated = try replaceFirst(allocator, existing, old_intro, new_intro);
+    defer allocator.free(intro_migrated);
+
+    // The qualification product leaves with its dedicated measurement section.
+    // Retain historical result rows with their original corpus identities.
+    const migrated = if (std.mem.indexOf(u8, intro_migrated, "## Repeatability\n")) |start| block: {
+        const end = start + (std.mem.indexOf(u8, intro_migrated[start..], "## Results\n") orelse
+            return error.InvalidExistingMarkdown);
+        break :block try std.fmt.allocPrint(allocator, "{s}{s}", .{ intro_migrated[0..start], intro_migrated[end..] });
+    } else try allocator.dupe(u8, intro_migrated);
     defer allocator.free(migrated);
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);

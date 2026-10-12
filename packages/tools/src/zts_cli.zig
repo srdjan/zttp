@@ -15,10 +15,7 @@ pub const edit_simulate = @import("edit_simulate.zig");
 pub const canonicalize = @import("canonicalize.zig");
 pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
-pub const system_analysis = @import("system_analysis.zig");
 const json_diag = precompile.json_diag;
-pub const system_build = @import("system_build.zig");
-const system_rollout = @import("system_rollout.zig");
 const search_rules = @import("search_rules.zig");
 const prove_behavior = @import("prove_behavior.zig");
 const expert = @import("expert.zig");
@@ -30,8 +27,7 @@ const zts_file_io = zts.file_io;
 const writeContractJson = zts.writeContractJson;
 
 /// Help-grouping for the canonical analyzer surface. `analyze` commands act on
-/// a handler/system; `machine` commands emit JSON metadata for IDE and
-/// review-bot integrations.
+/// a handler. `machine` commands emit JSON metadata for integrations.
 pub const Category = enum { analyze, machine };
 
 /// One dispatchable analyzer command. This table is the single source of truth
@@ -53,12 +49,10 @@ pub const Command = struct {
 };
 
 pub const commands = [_]Command{
-    .{ .name = "check", .run = runCheckCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Run the analyzer once", .usage = "check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path]" },
-    .{ .name = "link", .run = system_build.runWithArgs, .category = .analyze, .args = "<system.json>", .blurb = "Cross-handler system linking", .usage = "link <system.json> [--output-dir <dir>]" },
+    .{ .name = "check", .run = runCheckCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Run the analyzer once", .usage = "check [handler.ts] [--json] [--contract] [--types] [--sql-schema path]" },
     .{ .name = "gen-tests", .run = runGenTestsCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Generate a starter test fixture", .usage = "gen-tests [handler.ts] [-o output.jsonl]" },
     .{ .name = "prove-behavior", .run = prove_behavior.runWithArgs, .category = .analyze, .args = "<before> <after>", .blurb = "Behavioral-equivalence verdict between two handler versions", .usage = "prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]" },
     .{ .name = "edit-simulate", .run = edit_simulate.runWithArgs, .category = .analyze, .args = "[handler.ts]", .blurb = "Simulate an edit and report violations", .usage = "edit-simulate [handler.ts] [--before old.ts] [--stdin-json]" },
-    .{ .name = "rollout", .run = system_rollout.runWithArgs, .category = .analyze, .args = "<old-system> <new>", .blurb = "System-level deployment manifest", .usage = "rollout <old-system.json> <new-system.json> [--output-dir <dir>]" },
     .{ .name = "canonicalize", .run = canonicalize.runWithArgs, .category = .analyze, .args = "<file> --json", .blurb = "Canonicalize a handler and report refactors", .usage = "canonicalize <file> --json [--simulate]" },
     .{ .name = "normalize", .run = canonicalize.runNormalizeWithArgs, .category = .analyze, .args = "<file>", .blurb = "Rewrite a handler into Canonical Normal Form", .usage = "normalize <file> [--write] [--check] [--json]" },
     .{ .name = "features", .run = runFeaturesCommand, .category = .machine, .args = "", .blurb = "List supported language features", .usage = "features [--json]" },
@@ -157,7 +151,6 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
 
 fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var sql_schema_path: ?[]const u8 = null;
-    var explicit_system_path: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
     var emit_contract = false;
     var emit_types = false;
@@ -175,12 +168,6 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
         if (std.mem.eql(u8, arg, "--contract")) {
             emit_contract = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--system")) {
-            i += 1;
-            if (i >= argv.len) return error.MissingArgument;
-            explicit_system_path = argv[i];
             continue;
         }
         if (std.mem.eql(u8, arg, "--types")) {
@@ -212,14 +199,6 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try defaultProjectEntry(allocator);
     defer if (handler_path == null) allocator.free(target);
 
-    const discovered_system = if (explicit_system_path == null)
-        try discoverProjectSystemPath(allocator, if (handler_path) |path| path else null)
-    else
-        null;
-    defer if (discovered_system) |path| allocator.free(path);
-
-    const system_path = explicit_system_path orelse discovered_system;
-
     const policy_source = edit_simulate.discoverProjectPolicySource(
         allocator,
         if (handler_path) |path| path else null,
@@ -236,7 +215,6 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var result = precompile.runCheckOnlyWithOptions(allocator, target, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = json_mode,
-        .system_path = system_path,
         .policy_source = policy_source,
     }) catch |err| switch (err) {
         error.MissingSqlSchema => {
@@ -260,29 +238,12 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         defer buf.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-        // Compute the witnesses summary for this handler from the on-disk
-        // corpus. The block is inserted under proof.witnesses when present.
-        // A missing corpus produces a {"total":0,"by_property":{}} block.
-        var witnesses_buf: std.ArrayList(u8) = .empty;
-        defer witnesses_buf.deinit(allocator);
-        const witnesses_block: ?[]const u8 = blk: {
-            const corpus_dir = zts.witness_corpus.corpusDir(allocator, target) catch break :blk null;
-            defer allocator.free(corpus_dir);
-            var wbuf_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &witnesses_buf);
-            zts.witness_corpus.writeProofEnvelopeBlock(allocator, &wbuf_aw.writer, corpus_dir) catch {
-                witnesses_buf = wbuf_aw.toArrayList();
-                break :blk null;
-            };
-            witnesses_buf = wbuf_aw.toArrayList();
-            break :blk if (witnesses_buf.items.len > 0) witnesses_buf.items else null;
-        };
-
         if (result.totalErrors() > 0) {
             const contract_ptr: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block, result.proof_trace_json) catch {};
+            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items, result.proof_trace_json) catch {};
         } else {
             const contract_ptr: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block, result.proof_trace_json) catch {};
+            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items, result.proof_trace_json) catch {};
         }
 
         buf = aw.toArrayList();
@@ -383,7 +344,7 @@ fn writePolicyLoadFailureJsonToWriter(writer: anytype, target: []const u8) !void
         .column = 1,
         .suggestion = "repair the policy entry in zttp.json or restore the policy file",
     }};
-    try json_diag.writeErrorJson(writer, null, diagnostics[0..], null, null);
+    try json_diag.writeErrorJson(writer, null, diagnostics[0..], null);
 }
 
 fn writePolicyLoadFailureText(allocator: std.mem.Allocator, target: []const u8) !void {
@@ -419,7 +380,7 @@ fn writeMissingSqlSchemaJsonToWriter(writer: anytype, target: []const u8) !void 
         .column = 1,
         .suggestion = "pass --sql-schema <schema.sql|schema.sqlite> or configure sqlite in zttp.json",
     }};
-    try json_diag.writeErrorJson(writer, null, diagnostics[0..], null, null);
+    try json_diag.writeErrorJson(writer, null, diagnostics[0..], null);
 }
 
 /// A standard help token (`--help`, `-h`, or bare `help`), accepted by the
@@ -575,18 +536,6 @@ fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
     return error.NoProjectConfig;
 }
 
-/// Resolve the system config exactly as `zts check` does for a handler path.
-/// In-process analyzer clients use this rather than re-parsing `zttp.json`.
-/// One walk backs both this and the schema resolver: a third hand-written copy
-/// here let `check` and `edit-simulate` drift into different verdicts for the
-/// same handler.
-pub fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
-    var paths = try edit_simulate.discoverProjectPaths(allocator, start_path);
-    if (paths.sqlite) |p| allocator.free(p);
-    paths.sqlite = null;
-    return paths.system;
-}
-
 pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
     var args_iter = std.process.Args.Iterator.init(args_vector);
     defer args_iter.deinit();
@@ -639,7 +588,6 @@ fn printCheckHelp() void {
         \\  --contract       Emit contract.json in current directory
         \\  --types          Emit zttp.d.ts type definitions for IDE autocomplete
         \\  --sql-schema P   SQLite schema file for query validation
-        \\  --system P       system.json for internal serviceCall typing
         \\  --require-export-capsules
         \\                   Docs mode: warn (ZTS508) when an exported helper
         \\                   carries no Proof<...> capsule

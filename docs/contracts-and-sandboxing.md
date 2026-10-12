@@ -17,24 +17,13 @@ Every precompilation extracts a contract from the handler's IR. Add
   are enumerated, dynamic access is flagged
 - **Outbound endpoints** called via `fetch` or `fetchWithRetry`; normalized
   scheme, host, and effective port are extracted from URL literals
-- **Internal service calls** made via `serviceCall("name", "METHOD
-  /path", init)`; service names, route signatures, and statically
-  proven params/query/header/body keys are captured
-- **Workflow dispatch targets** made via `zttp:workflow`'s `call`,
-  `saga`, and `fanout`; target handler names and synthesized `METHOD
-  /path` routes are captured (strict-literal - a non-literal target or
-  init, or an unrecognized init key, is flagged dynamic)
-- **System-linked payload facts** for named internal edges; target
-  response statuses, JSON payload proof, and payload-proof gaps
 - **Cache namespaces** used by `cacheGet`/`cacheSet`/etc.
 - **SQL queries** registered with `sql("name", "...")`; names,
   statement kinds, and touched tables after schema validation
-- **Scope usage** from `scope("name", fn)`; literal scope names,
-  whether scope callbacks stay dynamic, the maximum nested scope depth
 - **API surface** from proven routes; method/path, path/query/header
   params, JSON request bodies, response variants, bearer auth metadata
 - **Handler properties** derived from the internal effect summary of
-  virtual module calls, cache reads, scope usage, egress, and
+  virtual module calls, cache reads, egress, and
   nondeterministic builtins (`pure`, `read_only`, `stateless`,
   `retry_safe`, `deterministic`)
 - **Behavioral paths**: every execution path through the handler with
@@ -46,19 +35,14 @@ Every precompilation extracts a contract from the handler's IR. Add
 ```json
 {
   "version": 24,
-  "modules": ["zttp:auth", "zttp:cache", "zttp:scope"],
+  "modules": ["zttp:auth", "zttp:cache"],
   "functions": {
     "zttp:auth": ["jwtVerify", "parseBearer"],
-    "zttp:cache": ["cacheGet", "cacheSet"],
-    "zttp:scope": ["scope", "ensure"]
+    "zttp:cache": ["cacheGet", "cacheSet"]
   },
   "env": { "literal": ["JWT_SECRET"], "dynamic": false },
   "egress": { "endpoints": ["https://api.example.com:443"], "dynamic": false },
   "cache": { "namespaces": ["sessions"], "dynamic": false },
-  "scope": {
-    "used": true, "names": ["request", "enrich-user"],
-    "dynamic": false, "maxDepth": 2
-  },
   "sql": {
     "backend": "sqlite",
     "queries": [
@@ -219,8 +203,8 @@ won't boot" and "individual requests get rejected".
   scheme, host, and effective port and authorizes that endpoint before DNS. It
   resolves the name itself, classifies the returned address, and authorizes the
   address scope before opening a socket. The connect uses the checked literal
-  address while TLS retains the original host name. Sequential, parallel, race,
-  and retry paths all repeat the check under the request's pinned generation.
+  address while TLS retains the original host name. Retry paths repeat both
+  checks under the request's pinned generation.
 
 **Hot swap** (`--watch --prove`):
 - Re-runs the build-time contract diff against the running version
@@ -233,8 +217,7 @@ won't boot" and "individual requests get rejected".
   recycled into the new code on their next cycle.
 - `server.zig:updateContract` (called by `live_reload`) replaces the
   integrity-validated route table. It clears proof-checked properties,
-  the proof cache, and durable properties because the new source has
-  no accepted artifact certificate.
+  the proof cache because the new source has no accepted artifact certificate.
 - In the interpreted `dev`/`serve` path the embedded `RuntimePolicy`
   is the empty stub, so `live_reload` derives the full runtime policy
   from each accepted contract and applies it via
@@ -254,8 +237,6 @@ won't boot" and "individual requests get rejected".
   constant. In a deployed self-extracting binary it comes from signed
   payload section 4. Neither policy is hot-swapped; tightening or
   widening it requires a rebuild.
-- Durable handlers refuse hot swap entirely because replay state
-  depends on handler identity.
 
 A handler that flips `routes_dynamic` from `false` to `true` across a
 hot swap loses the route pre-filter on the next request. The new
@@ -365,8 +346,8 @@ structured diffs.
 
 ## Upgrade Verdict
 
-Live reload (`--watch --prove`) and `zttp rollout` compare two handler
-versions and classify the upgrade. Two diff levels run against the old and
+Live reload (`--watch --prove`) compares two handler versions and classifies
+the upgrade. Two diff levels run against the old and
 new contracts. The surface diff compares I/O capabilities. The
 behavioral diff compares every execution path, matching by route and
 branching conditions, then classifying each as preserved, response-changed, removed, or added.
@@ -399,8 +380,7 @@ applies the change only when the upgrade verdict is `safe` or
 diff. `--force-swap` overrides the block.
 
 Without `--prove`, `--watch` hot-reloads without contract proof.
-Compilation errors keep the old handler running. Durable handlers
-refuse live swap because replay state depends on handler identity.
+Compilation errors keep the old handler running.
 The configured capability-policy file is part of the watch set and is read
 again for every candidate. Tightening it blocks newly forbidden code without a
 restart; a missing or malformed policy keeps the previous handler running.

@@ -1,5 +1,5 @@
 //! Checks that run the built `zts` and `zttp` binaries against committed
-//! fixtures: module governance, the public contract goldens, the comptime and
+//! fixtures: module governance, the public contract goldens, the
 //! generic-intersection matrices, and the direct-tool expert contract.
 //!
 //! scripts/update-contract-goldens.sh and scripts/update-expert-goldens.sh
@@ -12,7 +12,6 @@ const artifacts = @import("artifacts.zig");
 pub const Result = struct {
     run_module_governance: *std.Build.Step.Run,
     contract_golden_step: *std.Build.Step,
-    comptime_cli_step: *std.Build.Step,
     generic_intersection_cli_step: *std.Build.Step,
     expert_golden_step: *std.Build.Step,
 };
@@ -35,8 +34,8 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     // packages/tools/tests/fixtures/expert/) after a deliberate contract
     // change; see docs/zts-expert-contract.md.
     // Public-contract goldens. These pin the analyzer's observable output for a
-    // handler set chosen to span distinct analysis paths (plain TS, JSX, every
-    // virtual module, durable/workflow) plus the three enumeration commands.
+    // ordinary TypeScript handlers and retained virtual modules, plus three
+    // enumeration commands.
     // Their purpose is refactor safety: a change that claims to preserve
     // behavior must leave every byte here untouched. Contract JSON carries no
     // timestamps, absolute paths, or version strings, so it is byte-stable by
@@ -46,56 +45,17 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     // intended reason is the gate doing its job.
     const contract_golden_step = b.step("test-contract-golden", "Check analyzer contract output against golden fixtures");
     const contract_fixtures = "packages/tools/tests/fixtures/contract";
-    // Exit codes are part of the pinned contract: plain_ts proves clean, the
-    // other three carry warnings and exit 1 today.
+    // Exit codes are part of the contract: plain_ts exits 0 and modules_all
+    // carries diagnostics and exits 1.
     addExpertGolden(b, contract_golden_step, zts_exe, &.{
         "check", contract_fixtures ++ "/plain_ts.ts", "--json", "--contract",
     }, contract_fixtures ++ "/plain_ts.contract.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{
-        "check", contract_fixtures ++ "/jsx.tsx", "--json", "--contract",
-    }, contract_fixtures ++ "/jsx.contract.golden.json", 1);
-    addExpertGolden(b, contract_golden_step, zts_exe, &.{
         "check", contract_fixtures ++ "/modules_all.ts", "--json", "--contract",
     }, contract_fixtures ++ "/modules_all.contract.golden.json", 1);
-    addExpertGolden(b, contract_golden_step, zts_exe, &.{
-        "check", contract_fixtures ++ "/durable_approval.ts", "--json", "--contract",
-    }, contract_fixtures ++ "/durable_approval.contract.golden.json", 1);
-    // M4 T2: a clean tool catalog proves clean; the refused one pins its ZTS513
-    // diagnostic, so a change to the catalog rules moves a byte here.
-    addExpertGolden(b, contract_golden_step, zts_exe, &.{
-        "check", contract_fixtures ++ "/tool_catalog.ts", "--json", "--contract",
-    }, contract_fixtures ++ "/tool_catalog.contract.golden.json", 0);
-    addExpertGolden(b, contract_golden_step, zts_exe, &.{
-        "check", contract_fixtures ++ "/tool_catalog_refused.ts", "--json", "--contract",
-    }, contract_fixtures ++ "/tool_catalog_refused.contract.golden.json", 1);
-    // B8.2: a tool input arrives structurally typed, so passing a field where a
-    // nominal type is required is refused (ZTS203); an explicit annotation in
-    // the handler, the developer's reviewed act, brands it.
-    addExpertGolden(b, contract_golden_step, zts_exe, &.{
-        "check", contract_fixtures ++ "/tool_nominal_forged.ts", "--json", "--contract",
-    }, contract_fixtures ++ "/tool_nominal_forged.contract.golden.json", 1);
-    addExpertGolden(b, contract_golden_step, zts_exe, &.{
-        "check", contract_fixtures ++ "/tool_nominal_branded.ts", "--json", "--contract",
-    }, contract_fixtures ++ "/tool_nominal_branded.contract.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "features", "--json" }, contract_fixtures ++ "/features.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "modules", "--json" }, contract_fixtures ++ "/modules.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "restrictions", "--json" }, contract_fixtures ++ "/restrictions.golden.json", 0);
-
-    // Comptime strip failures predate the ZTS registry and currently expose
-    // only StripError.ComptimeEvaluationFailed. Pin that exact real-CLI
-    // identity, its unregistered JSON shape, and an accepted safe contrast.
-    // There is no registry rule to add to the expert replay or coverage page.
-    const comptime_cli_step = b.step("test-comptime-cli-matrix", "Run comptime CLI reject and safe-contrast fixtures");
-    const comptime_fixtures = "packages/tools/tests/fixtures/comptime";
-    addExpertExitCheck(b, comptime_cli_step, zts_exe, &.{
-        "check", comptime_fixtures ++ "/safe.ts", "--json",
-    }, 0);
-    const comptime_reject = b.addRunArtifact(zts_exe);
-    comptime_reject.addArgs(&.{ "check", comptime_fixtures ++ "/reject_random.ts", "--json" });
-    comptime_reject.expectExitCode(1);
-    comptime_reject.expectStdOutEqual("{\"success\":false,\"diagnostics\":[]}\n");
-    comptime_reject.expectStdErrEqual("TypeScript strip error: error.ComptimeEvaluationFailed\n");
-    comptime_cli_step.dependOn(&comptime_reject.step);
 
     // Instantiating a generic application must preserve every intersection
     // obligation, including members beyond sixteen. Run the real analyzer so
@@ -224,7 +184,6 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     return .{
         .run_module_governance = run_module_governance,
         .contract_golden_step = contract_golden_step,
-        .comptime_cli_step = comptime_cli_step,
         .generic_intersection_cli_step = generic_intersection_cli_step,
         .expert_golden_step = expert_golden_step,
     };

@@ -172,6 +172,8 @@ Files: `packages/tools/src/retired_authority.zig`, `project_config.zig`, `precom
 Approach: Apply KTD1 to the six additional module names and the old project configuration paths.
 Keep current compiler bindings and metadata during this unit so ordinary baselines remain replayable.
 Execution note: Strengthen public refusal tests and observe their compiling failures before changing the predicate or readers.
+Execution evidence: The guard passes its named checks but refuses five historical workflow intents in the additional authoring check.
+Keep the refusal source with U3's atomic commit. Remove the obsolete subjects and replace current recordings before that commit.
 Patterns: The Phase 2 shared predicate, pre-pool refusal, unchanged generated-output test, and failed-reload generation retention.
 Test scenarios: retired imports refuse build and precompile; configured or automatic systems refuse discovery; rejected replay and reload cause no effects.
 An ordinary handler still serves its expected response, and failed reload preserves its current generation and in-flight requests.

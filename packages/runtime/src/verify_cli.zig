@@ -143,6 +143,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
 
 fn verificationFailureMessage(err: envelope.VerifyError) ?[]const u8 {
     return switch (err) {
+        error.UnsupportedRuntimeAuthority => "verify: attestation claims retired runtime authority\n",
         error.UnsupportedAttestationVersion => "verify: attestation format is not supported; rebuild the artifact with this zttp version\n",
         else => null,
     };
@@ -235,10 +236,10 @@ fn renderClaimsHuman(
             result.claims.routes_count,
             if (result.claims.property_summary.len > 0) result.claims.property_summary else "(none)",
             if (result.claims.guarded_categories.len > 0) result.claims.guarded_categories else "(none)",
-            result.claims.durable_workflow_proof_level,
-            boolString(result.claims.durable_workflow_retry_safe),
-            boolString(result.claims.durable_workflow_idempotent),
-            boolString(result.claims.durable_workflow_fault_covered),
+            "none",
+            "false",
+            "false",
+            "false",
         },
     );
 }
@@ -247,10 +248,6 @@ fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void 
     var buf: [4096]u8 = undefined;
     const out = renderClaimsHuman(&buf, url, result) catch return;
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
-}
-
-fn boolString(value: bool) []const u8 {
-    return if (value) "true" else "false";
 }
 
 fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) ![]u8 {
@@ -289,9 +286,9 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     try json.objectField("semanticsSha256");
     try json.write(result.claims.semantics_sha256);
     try json.objectField("frontendProfileId");
-    try json.write(result.claims.frontend_profile_id);
+    try json.write(@as(?[]const u8, null));
     try json.objectField("frontendGrammarSha256");
-    try json.write(result.claims.frontend_grammar_sha256);
+    try json.write(@as(?[]const u8, null));
     try json.objectField("routesCount");
     try json.write(result.claims.routes_count);
     try json.objectField("propertySummary");
@@ -299,13 +296,13 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     try json.objectField("guardedCategories");
     try json.write(result.claims.guarded_categories);
     try json.objectField("durableWorkflowProofLevel");
-    try json.write(result.claims.durable_workflow_proof_level);
+    try json.write("none");
     try json.objectField("durableWorkflowRetrySafe");
-    try json.write(result.claims.durable_workflow_retry_safe);
+    try json.write(false);
     try json.objectField("durableWorkflowIdempotent");
-    try json.write(result.claims.durable_workflow_idempotent);
+    try json.write(false);
     try json.objectField("durableWorkflowFaultCovered");
-    try json.write(result.claims.durable_workflow_fault_covered);
+    try json.write(false);
     try json.endObject();
     try aw.writer.writeByte('\n');
 
@@ -375,6 +372,15 @@ test "the predecessor attestation error tells the caller to rebuild" {
     try std.testing.expect(std.mem.indexOf(u8, message, "rebuild") != null);
 }
 
+test "retired attestation claims have an exact verification message" {
+    const message = verificationFailureMessage(error.UnsupportedRuntimeAuthority) orelse
+        return error.TestExpectedEqual;
+    try std.testing.expectEqualStrings(
+        "verify: attestation claims retired runtime authority\n",
+        message,
+    );
+}
+
 test "renderClaimsJson uses JSON string escaping" {
     const testing = std.testing;
 
@@ -387,17 +393,11 @@ test "renderClaimsJson uses JSON string escaping" {
             .core_profile_id = "zts-model-1",
             .core_grammar_sha256 = "1" ** 64,
             .semantics_sha256 = "2" ** 64,
-            .frontend_profile_id = "zts-tsx-1",
-            .frontend_grammar_sha256 = "3" ** 64,
             .compiler_version = "zttp\"dev\\test",
             .signed_at_unix = 1_700_000_000,
             .property_summary = "quote\" slash\\ newline\n",
             .guarded_categories = "env,cache",
             .routes_count = 2,
-            .durable_workflow_proof_level = "partial",
-            .durable_workflow_retry_safe = false,
-            .durable_workflow_idempotent = true,
-            .durable_workflow_fault_covered = false,
         },
         .public_key = [_]u8{0} ** std.crypto.sign.Ed25519.PublicKey.encoded_length,
         .fingerprint_hex = [_]u8{'f'} ** 64,
@@ -415,14 +415,15 @@ test "renderClaimsJson uses JSON string escaping" {
     try testing.expectEqualStrings("https://example.test/a?x=\"y\"", root.get("url").?.string);
     try testing.expectEqualStrings("zttp\"dev\\test", root.get("compilerVersion").?.string);
     try testing.expectEqualStrings("zts-model-1", root.get("coreProfileId").?.string);
-    try testing.expectEqualStrings("zts-tsx-1", root.get("frontendProfileId").?.string);
+    try testing.expect(root.get("frontendProfileId").? == .null);
+    try testing.expect(root.get("frontendGrammarSha256").? == .null);
     try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
     try testing.expectEqualStrings("env,cache", root.get("guardedCategories").?.string);
     try testing.expectEqualStrings("provenance_only", root.get("assurance").?.string);
     try testing.expect(root.get("propertySummary").? == .string);
-    try testing.expectEqualStrings("partial", root.get("durableWorkflowProofLevel").?.string);
+    try testing.expectEqualStrings("none", root.get("durableWorkflowProofLevel").?.string);
     try testing.expect(!root.get("durableWorkflowRetrySafe").?.bool);
-    try testing.expect(root.get("durableWorkflowIdempotent").?.bool);
+    try testing.expect(!root.get("durableWorkflowIdempotent").?.bool);
     try testing.expect(!root.get("durableWorkflowFaultCovered").?.bool);
     try testing.expectEqual(@as(i64, 1_700_000_000), root.get("signedAt").?.integer);
     try testing.expectEqual(@as(i64, 2), root.get("routesCount").?.integer);

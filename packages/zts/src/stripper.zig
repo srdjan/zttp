@@ -1,4 +1,4 @@
-//! TypeScript/TSX Type Stripper
+//! TypeScript Type Stripper
 //!
 //! Removes TypeScript type annotations from source code, producing
 //! JavaScript that the zts parser can handle. Preserves line/column
@@ -12,7 +12,7 @@
 //! - Generic parameters on functions/types
 //!
 //! Unsupported (errors):
-//! - angle-bracket assertions in TSX (<T>expr)
+//! - angle-bracket assertions (<T>expr)
 //! - `any` type annotations
 //!
 //! Note: enum, namespace, implements, decorators, access modifiers, class,
@@ -21,7 +21,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const comptime_eval = @import("comptime.zig");
 const type_map_mod = @import("zts-base").type_map;
 pub const TypeMap = type_map_mod.TypeMap;
 pub const TypeMapEntry = type_map_mod.TypeMapEntry;
@@ -38,7 +37,6 @@ pub const StripError = error{
     UnterminatedComment,
     NestingTooDeep,
     OutOfMemory,
-    ComptimeEvaluationFailed,
     /// 'as' type assertion is not supported
     UnsupportedAsAssertion,
     /// 'satisfies' type assertion is not supported
@@ -162,31 +160,6 @@ pub const Position = struct {
     column: u32,
 };
 
-/// One place where the stripped text stopped being byte-for-byte aligned with
-/// the source it came from.
-///
-/// Stripping is otherwise offset-preserving by construction: a removed type
-/// annotation is overwritten with spaces of its own width, so an offset in the
-/// stripped code is that same offset in the source, and every consumer can
-/// report a position from the stripped parse as if it came from the file the
-/// author wrote. `comptime(...)` folding is the one operation that cannot hold
-/// to that. The value it emits is not bounded by the width of the expression it
-/// replaces: `comptime(1/3)` is 13 characters and folds to the 18-character
-/// `0.3333333333333333`, so everything after it on that line sits 5 columns to
-/// the right of where the author put it.
-///
-/// Each entry records both ends of one such fold, in both coordinate systems,
-/// so `StripResult.sourceOffset` can undo the shift.
-///
-/// The type is defined beside `TypeMap`, which carries the lowering edits that
-/// a signature lookup needs; this is the same type under its original name.
-pub const SpanEdit = type_map_mod.SpanEdit;
-
-/// Map an offset through an ordered set of non-overlapping replacement spans.
-/// Both TypeScript folding and TSX lowering use this representation, so their
-/// maps compose without either frontend knowing about the other.
-pub const sourceOffsetForEdits = type_map_mod.offsetThroughEdits;
-
 pub const StripResult = struct {
     code: []const u8,
     allocator: std.mem.Allocator,
@@ -197,28 +170,16 @@ pub const StripResult = struct {
     /// the default abort-on-first-rejection mode (those still surface as a
     /// `StripError` instead).
     diagnostics: []const StripDiagnostic = &.{},
-    /// Folds whose emitted value did not fill the span it replaced, ordered by
-    /// `stripped_start`. Empty whenever stripping stayed offset-preserving,
-    /// which is every source with no `comptime(...)` and most sources with one -
-    /// so `sourceOffset` and `sourcePosition` are the identity on the common
-    /// path and no caller has to special-case the absence of a map.
-    span_edits: []const SpanEdit = &.{},
-
     pub fn deinit(self: *StripResult) void {
         @constCast(&self.type_map).deinit(self.allocator);
         self.allocator.free(self.code);
         if (self.diagnostics.len > 0) self.allocator.free(self.diagnostics);
-        if (self.span_edits.len > 0) self.allocator.free(self.span_edits);
     }
 
     /// Map an offset in `code` back to the offset it came from in the source.
     ///
-    /// An offset inside a folded value maps to the start of the `comptime(...)`
-    /// expression that produced it: the digits of `0.3333333333333333` have no
-    /// separate source of their own, and the expression is the span a reader or
-    /// a repair has to be pointed at.
-    pub fn sourceOffset(self: StripResult, stripped_offset: u32) u32 {
-        return sourceOffsetForEdits(self.span_edits, stripped_offset);
+    pub fn sourceOffset(_: StripResult, stripped_offset: u32) u32 {
+        return stripped_offset;
     }
 
     /// Map a 1-based line and column in `code` back to the line and column in
@@ -227,30 +188,21 @@ pub const StripResult = struct {
     /// fold changes how many newlines precede everything after it, and only the
     /// offsets know by how much.
     pub fn sourcePosition(self: StripResult, source: []const u8, line: u32, column: u32) Position {
-        if (self.span_edits.len == 0) return .{ .line = line, .column = column };
-        const stripped_offset = offsetOfPosition(self.code, line, column);
-        return positionOfOffset(source, self.sourceOffset(stripped_offset));
+        _ = self;
+        _ = source;
+        return .{ .line = line, .column = column };
     }
 };
 
 /// The text a diagnostic should be rendered against, plus what it takes to move
 /// a position from the parse back into it.
 ///
-/// A checker's positions come from parsing `StripResult.code`, but the line a
-/// reader is shown and the byte a repair rewrites both belong to the file the
-/// author wrote. Those are the same coordinates for every handler that is not
-/// TypeScript and for every TypeScript handler whose `comptime(...)` folds fit
-/// their spans, which is why `of` exists: a caller with nothing to translate
-/// says so, and pays nothing.
+/// TypeScript stripping keeps byte offsets stable.
 pub const SourceView = struct {
     /// What a diagnostic's line and caret are rendered from.
     text: []const u8,
-    /// The strip that produced the parsed text, when it was not `text` itself.
-    strip: ?*const StripResult = null,
-    /// The bytes the parser consumed after a second frontend transform.
-    parsed_text: ?[]const u8 = null,
-    /// Map from `parsed_text` into `strip.code`.
-    transform_edits: []const SpanEdit = &.{},
+    /// Stripped-source diagnostics use normalized source coordinates.
+    normalize_positions: bool = false,
     /// The path the author gave, shown in the `-->` line when it is set.
     name: ?[]const u8 = null,
 
@@ -261,37 +213,20 @@ pub const SourceView = struct {
 
     /// A view that renders `source` and translates positions out of `strip`.
     pub fn stripped(source: []const u8, result: *const StripResult) SourceView {
-        return .{ .text = source, .strip = result };
-    }
-
-    /// A view that composes a second source transform with TypeScript stripping.
-    pub fn transformed(
-        source: []const u8,
-        result: *const StripResult,
-        parsed_text: []const u8,
-        edits: []const SpanEdit,
-    ) SourceView {
-        return .{
-            .text = source,
-            .strip = result,
-            .parsed_text = parsed_text,
-            .transform_edits = edits,
-        };
+        _ = result;
+        return .{ .text = source, .normalize_positions = true };
     }
 
     pub fn position(self: SourceView, line: u32, column: u32) Position {
-        const result = self.strip orelse return .{ .line = line, .column = column };
-        const parsed = self.parsed_text orelse result.code;
-        const parsed_offset = offsetOfPosition(parsed, line, column);
-        const stripped_offset = sourceOffsetForEdits(self.transform_edits, parsed_offset);
-        return positionOfOffset(self.text, result.sourceOffset(stripped_offset));
+        if (self.normalize_positions) return positionOfOffset(self.text, offsetOfPosition(self.text, line, column));
+        return .{ .line = line, .column = column };
     }
 
     /// Map a byte offset in the parsed text back to the offset it came from in
     /// `text`. The identity when the view has nothing to translate.
     pub fn sourceOffset(self: SourceView, parsed_offset: u32) u32 {
-        const result = self.strip orelse return parsed_offset;
-        return result.sourceOffset(sourceOffsetForEdits(self.transform_edits, parsed_offset));
+        _ = self;
+        return parsed_offset;
     }
 
     /// Write one diagnostic for a human: the header with the ZTS code, the
@@ -425,23 +360,7 @@ fn positionOfOffset(text: []const u8, offset: u32) Position {
     return .{ .line = line, .column = @intCast(limit - line_start + 1) };
 }
 
-/// Environment for comptime evaluation
-pub const ComptimeEnv = struct {
-    /// Environment variables for Env.* lookups
-    env_vars: ?*const std.StringHashMap([]const u8) = null,
-    /// Build metadata
-    build_time: ?[]const u8 = null,
-    git_commit: ?[]const u8 = null,
-    version: ?[]const u8 = null,
-};
-
 pub const StripOptions = struct {
-    /// TSX mode: disallow angle-bracket assertions, preserve JSX
-    tsx_mode: bool = false,
-    /// Enable comptime() expression evaluation
-    enable_comptime: bool = false,
-    /// Environment for comptime evaluation
-    comptime_env: ?ComptimeEnv = null,
     /// Emit unsupported-feature diagnostics to std.log
     /// Disabled by default in tests to avoid expected-error log failures.
     report_errors: bool = !builtin.is_test,
@@ -464,7 +383,6 @@ pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOpt
     var stripper = Stripper.init(allocator, source, options);
     errdefer stripper.output.deinit(allocator);
     errdefer stripper.diagnostics.deinit(allocator);
-    errdefer stripper.span_edits.deinit(allocator);
     // The type map is handed to the caller inside `StripResult` on success and
     // owned by nobody on failure. Every annotation recorded before the fault
     // leaked, which nothing noticed while no test drove a strip failure past
@@ -487,18 +405,12 @@ const Stripper = struct {
     output: std.ArrayList(u8),
 
     // Configuration
-    tsx_mode: bool,
-    enable_comptime: bool,
-    comptime_env: ?ComptimeEnv,
     report_errors: bool,
     diagnostic_out: ?*?StripDiagnostic,
     collect_all_diagnostics: bool,
     /// All recorded type-assertion diagnostics. In abort mode only the first is
     /// recorded before the StripError; in collect mode every site lands here.
     diagnostics: std.ArrayListUnmanaged(StripDiagnostic),
-    /// Folds that broke offset alignment, appended in source order. Stays empty
-    /// unless a `comptime(...)` value failed to fill the span it replaced.
-    span_edits: std.ArrayListUnmanaged(SpanEdit),
 
     // State
     line: u32,
@@ -552,14 +464,10 @@ const Stripper = struct {
             .source = source,
             .pos = 0,
             .output = .empty,
-            .tsx_mode = options.tsx_mode,
-            .enable_comptime = options.enable_comptime,
-            .comptime_env = options.comptime_env,
             .report_errors = options.report_errors,
             .diagnostic_out = options.diagnostic_out,
             .collect_all_diagnostics = options.collect_all_diagnostics,
             .diagnostics = .empty,
-            .span_edits = .empty,
             .line = 1,
             .col = 1,
             .in_expression = false,
@@ -594,13 +502,11 @@ const Stripper = struct {
         errdefer self.allocator.free(code);
         const diags = self.diagnostics.toOwnedSlice(self.allocator) catch return StripError.OutOfMemory;
         errdefer self.allocator.free(diags);
-        const edits = self.span_edits.toOwnedSlice(self.allocator) catch return StripError.OutOfMemory;
         return StripResult{
             .code = code,
             .allocator = self.allocator,
             .type_map = self.type_map,
             .diagnostics = diags,
-            .span_edits = edits,
         };
     }
 
@@ -672,11 +578,6 @@ const Stripper = struct {
                 self.last_binding_name_end = self.pos;
                 self.last_binding_name_ordinal = gop.value_ptr.*;
                 gop.value_ptr.* += 1;
-            }
-
-            // Check for comptime() expression
-            if (self.enable_comptime and std.mem.eql(u8, ident, "comptime")) {
-                if (try self.tryEvaluateComptime(start)) return;
             }
 
             // Check for 'as' or 'satisfies' after expression
@@ -809,7 +710,7 @@ const Stripper = struct {
             self.output.appendSlice(self.allocator, self.source[ws_start..self.pos]) catch return StripError.OutOfMemory;
 
             // Check for generic arrow: = <T>(...)
-            if (self.pos < self.source.len and self.source[self.pos] == '<' and !self.tsx_mode) {
+            if (self.pos < self.source.len and self.source[self.pos] == '<') {
                 if (try self.looksLikeGenericArrow()) {
                     const generic_start = self.pos;
                     if (try self.skipBalancedAngles()) {
@@ -2071,132 +1972,12 @@ const Stripper = struct {
     }
 
     // ========================================================================
-    // Comptime Expression Evaluation
-    // ========================================================================
-
-    fn tryEvaluateComptime(self: *Self, keyword_start: usize) StripError!bool {
-        // We just scanned 'comptime', now expect (
-        const entry_col = self.col;
-        const entry_line = self.line;
-        self.skipWhitespaceTracked();
-
-        if (self.pos >= self.source.len or self.source[self.pos] != '(') {
-            // Not a comptime() call, restore and treat as regular identifier.
-            // Restore col/line too: skipWhitespaceTracked may have crossed a
-            // newline, and leaving them advanced drifts later source positions.
-            self.pos = keyword_start + 8; // "comptime".len
-            self.col = entry_col;
-            self.line = entry_line;
-            return false;
-        }
-
-        // Find the matching closing paren
-        self.pos += 1; // skip (
-        self.col += 1;
-
-        var paren_depth: u16 = 1;
-        const expr_start = self.pos;
-
-        while (self.pos < self.source.len and paren_depth > 0) {
-            const c = self.source[self.pos];
-
-            // Handle strings
-            if (c == '"' or c == '\'' or c == '`') {
-                self.skipString(c) catch return StripError.ComptimeEvaluationFailed;
-                continue;
-            }
-
-            if (c == '(') {
-                try self.increaseNestingDepth(&paren_depth, 0, 0, 0);
-            } else if (c == ')') {
-                paren_depth -= 1;
-            }
-
-            if (c == '\n') {
-                self.line += 1;
-                self.col = 1;
-            } else {
-                self.col += 1;
-            }
-            self.pos += 1;
-        }
-
-        if (paren_depth != 0) {
-            return StripError.ComptimeEvaluationFailed;
-        }
-
-        // expr_end is one before the closing paren
-        const expr_end = self.pos - 1;
-        const expr = self.source[expr_start..expr_end];
-
-        // Evaluate the expression
-        var evaluator = comptime_eval.ComptimeEvaluator.init(self.allocator, expr);
-
-        // Set up environment if provided
-        if (self.comptime_env) |env| {
-            evaluator.env = env.env_vars;
-            evaluator.build_time = env.build_time;
-            evaluator.git_commit = env.git_commit;
-            evaluator.version = env.version;
-        }
-
-        const result = evaluator.evaluate() catch return StripError.ComptimeEvaluationFailed;
-        defer result.deinit(self.allocator);
-
-        // Emit the literal value
-        const literal = comptime_eval.emitLiteral(self.allocator, result) catch return StripError.OutOfMemory;
-        defer self.allocator.free(literal);
-
-        const stripped_start = self.output.items.len;
-        self.output.appendSlice(self.allocator, literal) catch return StripError.OutOfMemory;
-
-        // Blank out the rest of the span the fold replaced, so a position after
-        // it is the position the author wrote. The span runs from keyword_start
-        // to self.pos (just past the closing paren). Each replaced byte becomes
-        // a space, except a newline, which stays a newline: a `comptime(...)`
-        // written across lines otherwise takes those lines away from everything
-        // below it.
-        const span = self.source[keyword_start..self.pos];
-        if (span.len > literal.len) {
-            for (span[literal.len..]) |byte| {
-                self.output.append(self.allocator, if (byte == '\n') '\n' else ' ') catch
-                    return StripError.OutOfMemory;
-            }
-        }
-
-        // A value wider than its span cannot be padded back, and a newline the
-        // literal covered cannot be recovered. Either way the text below is no
-        // longer where the source has it, so record the shift rather than let a
-        // consumer read a stale position as if it were exact.
-        const emitted = self.output.items[stripped_start..];
-        const aligned = emitted.len == span.len and
-            std.mem.count(u8, emitted, "\n") == std.mem.count(u8, span, "\n");
-        if (!aligned) {
-            self.span_edits.append(self.allocator, .{
-                .stripped_start = @intCast(stripped_start),
-                .stripped_end = @intCast(self.output.items.len),
-                .source_start = @intCast(keyword_start),
-                .source_end = @intCast(self.pos),
-            }) catch return StripError.OutOfMemory;
-        }
-
-        return true;
-    }
-
-    // ========================================================================
     // Generic Parameter Stripping (Phase 6)
     // ========================================================================
 
     fn tryStripGenericParams(self: *Self) StripError!bool {
         // We're at '<'
-        // This could be: generic params, comparison, JSX
-
-        if (self.tsx_mode) {
-            // In TSX, need to distinguish from JSX
-            if (self.looksLikeJsx()) {
-                return false;
-            }
-        }
+        // This could be generic parameters or a comparison.
 
         // Check if this is a comparison operator
         //
@@ -2224,9 +2005,6 @@ const Stripper = struct {
         // ALL of pos, line, and col - rewinding pos alone drifts the line
         // counter, which corrupts the byte/line positions recorded for later
         // type annotations. In TSX this fires on every multi-line JSX closing
-        // tag (`</body>` etc.): looksLikeJsx() rejects the `</` so we reach here,
-        // probe across the trailing newline, then bail - leaving self.line ahead
-        // and breaking declared-Spec extraction on the handler that follows.
         const start = self.pos;
         const start_line = self.line;
         const start_col = self.col;
@@ -2273,18 +2051,6 @@ const Stripper = struct {
         self.pos = start;
         self.line = start_line;
         self.col = start_col;
-        return false;
-    }
-
-    fn looksLikeJsx(self: *Self) bool {
-        if (self.pos + 1 >= self.source.len) return false;
-        const next = self.source[self.pos + 1];
-        // JSX: <div, <MyComponent, <>
-        if (next == '>') return true; // Fragment
-        if (std.ascii.isAlphabetic(next) or next == '_') {
-            // Could be JSX tag - check if lowercase (element) or uppercase (component)
-            return true;
-        }
         return false;
     }
 
@@ -4270,280 +4036,6 @@ test "full handler example" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "function handler") != null);
 }
 
-test "tsx mode preserves jsx" {
-    const source =
-        \\function App(props: Props): JSX.Element {
-        \\    const name: string = "World";
-        \\    return <div class="test">{name}</div>;
-        \\}
-    ;
-
-    const result = try strip(std.testing.allocator, source, .{ .tsx_mode = true });
-    defer @constCast(&result).deinit();
-
-    // JSX should be preserved
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "<div class=\"test\">") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "</div>") != null);
-
-    // Types should be stripped
-    try std.testing.expect(std.mem.indexOf(u8, result.code, ": Props") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, ": JSX.Element") == null);
-}
-
-test "tsx mode handles fragments" {
-    const source =
-        \\function List(items: string[]): JSX.Element {
-        \\    return <><span>a</span><span>b</span></>;
-        \\}
-    ;
-
-    const result = try strip(std.testing.allocator, source, .{ .tsx_mode = true });
-    defer @constCast(&result).deinit();
-
-    // Fragment syntax preserved
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "<>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "</>") != null);
-}
-
-test "multi-line JSX does not drift line tracking for later annotations" {
-    // Regression: a TSX closing tag like `</body>` is not recognized as JSX by
-    // looksLikeJsx() (the char after `<` is `/`), so it falls into the
-    // generic-params probe. That probe crosses the trailing newline via
-    // skipBalancedAngles/skipWhitespaceTracked and previously restored only
-    // `pos` on the not-generic path, leaving `self.line` advanced. The drift
-    // corrupted the recorded line of every annotation after the JSX, which broke
-    // declared-Spec extraction on the handler (getFnSigByLoc missed, so all
-    // specs activated). `handler` is on line 10; its return annotation must be
-    // recorded there.
-    const source =
-        \\function Page(): JSX.Element {
-        \\    return (
-        \\        <html>
-        \\            <body>
-        \\                <h1>x</h1>
-        \\            </body>
-        \\        </html>
-        \\    );
-        \\}
-        \\function handler(req: Request): Response {
-        \\    return Response.text("ok");
-        \\}
-    ;
-
-    const result = try strip(std.testing.allocator, source, .{ .tsx_mode = true });
-    defer @constCast(&result).deinit();
-
-    var found = false;
-    for (result.type_map.entries.items) |e| {
-        if (e.kind != .return_annotation) continue;
-        if (e.name_end <= e.name_start) continue;
-        if (std.mem.eql(u8, source[e.name_start..e.name_end], "handler")) {
-            try std.testing.expectEqual(@as(u32, 10), e.context_line);
-            found = true;
-        }
-    }
-    try std.testing.expect(found);
-}
-
-// ============================================================================
-// Comptime Tests
-// ============================================================================
-
-test "comptime disabled by default" {
-    // When enable_comptime is false, comptime() is passed through as-is
-    const result = try strip(std.testing.allocator, "const x = comptime(1 + 2);", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime(1 + 2)") != null);
-}
-
-test "comptime simple arithmetic" {
-    const result = try strip(std.testing.allocator, "const x = comptime(1 + 2 * 3);", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "7") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime") == null);
-}
-
-test "comptime Math.PI" {
-    const result = try strip(std.testing.allocator, "const pi = comptime(Math.PI);", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "3.14159") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime") == null);
-}
-
-test "comptime string" {
-    const result = try strip(std.testing.allocator, "const s = comptime(\"hello\");", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "\"hello\"") != null);
-}
-
-test "comptime array" {
-    const result = try strip(std.testing.allocator, "const arr = comptime([1, 2, 3]);", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "[1,2,3]") != null);
-}
-
-test "comptime object" {
-    const result = try strip(std.testing.allocator, "const cfg = comptime({ a: 1, b: 2 });", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "({a:1,b:2})") != null);
-}
-
-test "comptime ternary" {
-    const result = try strip(std.testing.allocator, "const v = comptime(true ? 1 : 0);", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "true") == null);
-}
-
-test "comptime Math.max" {
-    const result = try strip(std.testing.allocator, "const m = comptime(Math.max(1, 5, 3));", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "5") != null);
-}
-
-test "comptime hash" {
-    const result = try strip(std.testing.allocator, "const h = comptime(hash(\"test\"));", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    // Should have an 8-char hex string
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "hash") == null);
-}
-
-test "comptime with types" {
-    // Both type stripping and comptime should work together
-    const source = "const x: number = comptime(1 + 2);";
-    const result = try strip(std.testing.allocator, source, .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expectEqual(source.len, result.code.len);
-    try std.testing.expectEqualStrings("const x", result.code[0..7]);
-    for (result.code[7..15]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
-    try std.testing.expectEqualStrings(" = 3", result.code[15..19]);
-    for (result.code[19 .. result.code.len - 1]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
-    try std.testing.expectEqual(@as(u8, ';'), result.code[result.code.len - 1]);
-}
-
-test "the static-table form fails the build rather than evaluating to something else" {
-    // Spec 6.2's `comptime(dictFromEntries([...]))` does not land - see the
-    // closed name set in comptime.zig's `evalCall` for why. What matters is
-    // how it does not land: the whole point of that form is a duplicate-key
-    // check discharged at build time, so an answer that looked like it had run
-    // is worse than no answer. This one fails the strip.
-    try std.testing.expectError(
-        StripError.ComptimeEvaluationFailed,
-        strip(
-            std.testing.allocator,
-            "const table = comptime(dictFromEntries([[\"a\", 1], [\"a\", 2]]));",
-            .{ .enable_comptime = true },
-        ),
-    );
-}
-
-test "comptime identifier without parens passes through" {
-    // The identifier 'comptime' without () should be passed through
-    const result = try strip(std.testing.allocator, "const comptime = 5;", .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "const comptime = 5;") != null);
-}
-
-test "comptime strip matrix preserves delimiters literal bytes and source offsets" {
-    const cases = [_]struct {
-        source: []const u8,
-        expected_literal: []const u8,
-    }{
-        .{
-            .source = "const value = comptime(1 + 2);",
-            .expected_literal = "3",
-        },
-        .{
-            .source = "const value = comptime(\"right)paren\");",
-            .expected_literal = "\"right)paren\"",
-        },
-        .{
-            .source = "const value = comptime(Math.max(1, (2 + 3)));",
-            .expected_literal = "5",
-        },
-        .{
-            .source = "const value = comptime([1, true, null]);",
-            .expected_literal = "[1,true,null]",
-        },
-        .{
-            .source = "const value = comptime({ a: 1, b: \"x\" });",
-            .expected_literal = "({a:1,b:\"x\"})",
-        },
-        .{
-            .source = "const value = comptime(1 / 0);",
-            .expected_literal = "Infinity",
-        },
-        .{
-            .source = "const value = comptime(hash(\"test\"));\nconst next = 4;",
-            .expected_literal = "\"afd071e5\"",
-        },
-    };
-
-    for (cases) |case| {
-        const result = try strip(std.testing.allocator, case.source, .{ .enable_comptime = true });
-        defer @constCast(&result).deinit();
-
-        const replacement_start = std.mem.indexOf(u8, case.source, "comptime").?;
-        const replacement_end = std.mem.lastIndexOf(u8, case.source, ");").? + 1;
-        const literal_end = replacement_start + case.expected_literal.len;
-
-        try std.testing.expectEqual(case.source.len, result.code.len);
-        try std.testing.expectEqualStrings(case.source[0..replacement_start], result.code[0..replacement_start]);
-        try std.testing.expectEqualStrings(case.expected_literal, result.code[replacement_start..literal_end]);
-        for (result.code[literal_end..replacement_end]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
-        try std.testing.expectEqualStrings(case.source[replacement_end..], result.code[replacement_end..]);
-    }
-}
-
-test "comptime strip matrix exposes its current unregistered reject identity" {
-    try std.testing.expectError(
-        StripError.ComptimeEvaluationFailed,
-        strip(std.testing.allocator, "const nonce = comptime(Math.random());", .{ .enable_comptime = true }),
-    );
-}
-
-test "comptime strip rejects pipe syntax before parser desugaring" {
-    const cases = [_][]const u8{
-        "const value = comptime(\"value\" |> hash);",
-        "const value = comptime(1 |> Math.abs);",
-    };
-    for (cases) |source| {
-        try std.testing.expectError(
-            StripError.ComptimeEvaluationFailed,
-            strip(std.testing.allocator, source, .{ .enable_comptime = true }),
-        );
-    }
-}
-
-fn nestedComptimeJsonSource(allocator: std.mem.Allocator, nesting: usize) ![]u8 {
-    var json: std.ArrayList(u8) = .empty;
-    defer json.deinit(allocator);
-    for (0..nesting) |_| try json.append(allocator, '[');
-    try json.append(allocator, '0');
-    for (0..nesting) |_| try json.append(allocator, ']');
-    return std.fmt.allocPrint(allocator, "const value = comptime(JSON.parse(\"{s}\"));", .{json.items});
-}
-
-test "comptime strip enforces JSON root depth at 64 nodes" {
-    const allocator = std.testing.allocator;
-
-    const accepted_source = try nestedComptimeJsonSource(allocator, 63);
-    defer allocator.free(accepted_source);
-    const result = try strip(allocator, accepted_source, .{ .enable_comptime = true });
-    defer @constCast(&result).deinit();
-    try std.testing.expectEqual(accepted_source.len, result.code.len);
-
-    const rejected_source = try nestedComptimeJsonSource(allocator, 64);
-    defer allocator.free(rejected_source);
-    try std.testing.expectError(
-        StripError.ComptimeEvaluationFailed,
-        strip(allocator, rejected_source, .{ .enable_comptime = true }),
-    );
-}
-
-// ============================================================================
 // Type Annotation and TypeMap Tests
 // ============================================================================
 
@@ -5061,89 +4553,6 @@ test "removed source type spellings are refused before annotations disappear" {
         try std.testing.expectError(case.failure, strip(std.testing.allocator, case.source, .{ .diagnostic_out = &diag }));
         try std.testing.expectEqual(case.diagnostic, diag.?.kind);
     }
-}
-
-test "a fold that fits its span leaves offsets alone and records no edit" {
-    const source = "const x = comptime(1 + 2); const y: number = 3;";
-    var result = try strip(std.testing.allocator, source, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    });
-    defer result.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), result.span_edits.len);
-    try std.testing.expectEqual(source.len, result.code.len);
-    // `const y` sits at the same column in both, so mapping is the identity.
-    const column: u32 = @intCast(std.mem.indexOf(u8, source, "const y").? + 1);
-    const mapped = result.sourcePosition(source, 1, column);
-    try std.testing.expectEqual(@as(u32, 1), mapped.line);
-    try std.testing.expectEqual(column, mapped.column);
-}
-
-test "a fold wider than its span maps later columns back to the source" {
-    // `comptime(2**60)` is 15 characters; the value it folds to is 19, so the
-    // stripped line is 4 bytes longer and everything after it moves right.
-    const source = "const big = comptime(2**60); const bad: number = \"s\";";
-    var result = try strip(std.testing.allocator, source, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    });
-    defer result.deinit();
-
-    try std.testing.expectEqual(@as(usize, 1), result.span_edits.len);
-    try std.testing.expect(result.code.len > source.len);
-
-    const source_column: u32 = @intCast(std.mem.indexOf(u8, source, "const bad").? + 1);
-    const stripped_column: u32 = @intCast(std.mem.indexOf(u8, result.code, "const bad").? + 1);
-    try std.testing.expect(stripped_column > source_column);
-
-    const mapped = result.sourcePosition(source, 1, stripped_column);
-    try std.testing.expectEqual(@as(u32, 1), mapped.line);
-    try std.testing.expectEqual(source_column, mapped.column);
-}
-
-test "a position inside the folded value maps to the comptime expression" {
-    const source = "const big = comptime(2**60);";
-    var result = try strip(std.testing.allocator, source, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    });
-    defer result.deinit();
-
-    const keyword = std.mem.indexOf(u8, source, "comptime").?;
-    const edit = result.span_edits[0];
-    // The digits of the folded value have no source of their own, so every
-    // offset within them answers with the expression that produced them.
-    try std.testing.expectEqual(
-        @as(u32, @intCast(keyword)),
-        result.sourceOffset(edit.stripped_start + 3),
-    );
-}
-
-test "a fold spanning lines keeps the lines below it on their own numbers" {
-    const source =
-        \\const a = comptime(
-        \\  1 + 2
-        \\);
-        \\const bad: number = "s";
-    ;
-    var result = try strip(std.testing.allocator, source, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    });
-    defer result.deinit();
-
-    // The fold is replaced in place and its newlines are kept, so `const bad`
-    // is still on line 4 of the stripped code and maps back to line 4.
-    const stripped_line = std.mem.count(
-        u8,
-        result.code[0..std.mem.indexOf(u8, result.code, "const bad").?],
-        "\n",
-    ) + 1;
-    try std.testing.expectEqual(@as(usize, 4), stripped_line);
-    const mapped = result.sourcePosition(source, @intCast(stripped_line), 1);
-    try std.testing.expectEqual(@as(u32, 4), mapped.line);
-    try std.testing.expectEqual(@as(u32, 1), mapped.column);
 }
 
 // Regression: a function declaration's return-type colon consumed the `:` and

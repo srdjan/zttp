@@ -39,7 +39,7 @@ const Binding = scope_mod.Binding;
 const ErrorList = error_mod.ErrorList;
 
 pub const ExpressionProfile = enum {
-    comptime_expression,
+    kernel_expression,
 };
 
 /// Operator precedence levels (higher = binds tighter)
@@ -1821,10 +1821,9 @@ pub const Parser = struct {
                 return error.ParseError;
             },
 
-            // A leading `<` is never a core expression. The TSX frontend
-            // lowers element syntax before parsing.
+            // A leading `<` is never a core expression.
             .lt => {
-                self.errorAtCurrent("raw JSX is not core syntax; use a .tsx source frontend");
+                self.errorAtCurrent("raw JSX is not supported; use ordinary TypeScript expressions");
                 return error.UnexpectedToken;
             },
 
@@ -2158,14 +2157,14 @@ pub const Parser = struct {
         self.advance();
 
         if (self.expression_profile != null) {
-            return self.parseComptimeNumber(loc, text);
+            return self.parseExpressionNumber(loc, text);
         }
 
-        // Numeric separators belong to the comptime expression profile only.
+        // Numeric separators belong to the internal expression profile only.
         // `std.fmt.parseInt` and `parseFloat` both accept `_`, so without this
         // check `1_000` would quietly become a supported literal here.
         if (has_separator) {
-            self.errors.addError(.invalid_number, loc, "numeric separators are not supported outside comptime(); write the digits without '_'");
+            self.errors.addError(.invalid_number, loc, "numeric separators are not supported; write the digits without '_'");
             return error.InvalidNumber;
         }
 
@@ -2233,7 +2232,7 @@ pub const Parser = struct {
         return null;
     }
 
-    fn parseComptimeNumber(self: *Parser, loc: SourceLocation, text: []const u8) anyerror!NodeIndex {
+    fn parseExpressionNumber(self: *Parser, loc: SourceLocation, text: []const u8) anyerror!NodeIndex {
         var clean: std.ArrayList(u8) = .empty;
         defer clean.deinit(self.allocator);
         for (text) |byte| {
@@ -2275,7 +2274,7 @@ pub const Parser = struct {
         const token = self.current;
         self.advance();
 
-        if (self.expression_profile != null) return self.addComptimeStringNode(token);
+        if (self.expression_profile != null) return self.addExpressionStringNode(token);
 
         // Strip quotes
         const loc = token.location();
@@ -2285,7 +2284,7 @@ pub const Parser = struct {
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
-    fn addComptimeStringNode(self: *Parser, token: Token) anyerror!NodeIndex {
+    fn addExpressionStringNode(self: *Parser, token: Token) anyerror!NodeIndex {
         const loc = token.location();
         const text = token.text(self.source);
         if (text.len < 2 or text[text.len - 1] != text[0]) {
@@ -2399,7 +2398,7 @@ pub const Parser = struct {
         // async handler the runtime would otherwise execute as an empty 200.
         // (Bare `async` as an identifier or property name is still fine.)
         if (self.check(.kw_function) or self.isArrowFunction()) {
-            self.errors.addErrorAt(.unsupported_feature, async_token, "'async' functions are not supported; handlers run synchronously - use 'fetch' from zttp:fetch, or 'parallel'/'race' from zttp:io for concurrency");
+            self.errors.addErrorAt(.unsupported_feature, async_token, "'async' functions are not supported; handlers run synchronously - use 'fetch' from zttp:fetch for outbound I/O");
             return error.ParseError;
         }
 
@@ -2412,7 +2411,7 @@ pub const Parser = struct {
     fn parseAwaitExpression(self: *Parser) anyerror!NodeIndex {
         // `await` is unsupported: handlers run synchronously. Reject at parse
         // time rather than executing it as a no-op that yields an empty 200.
-        self.errors.addErrorAt(.invalid_await, self.current, "'await' is not supported; handlers run synchronously - use 'fetch' from zttp:fetch, or 'parallel'/'race' from zttp:io for concurrency");
+        self.errors.addErrorAt(.invalid_await, self.current, "'await' is not supported; handlers run synchronously - use 'fetch' from zttp:fetch for outbound I/O");
         return error.ParseError;
     }
 
@@ -2549,7 +2548,7 @@ pub const Parser = struct {
                         const key = self.current;
                         self.advance();
                         if (self.expression_profile != null) {
-                            key_node = try self.addComptimeStringNode(key);
+                            key_node = try self.addExpressionStringNode(key);
                         } else {
                             const text = key.text(self.source);
                             const content = if (text.len >= 2) text[1 .. text.len - 1] else text;
@@ -3251,8 +3250,8 @@ pub const Parser = struct {
     /// whether the string was new or a duplicate in the constant pool.
     ///
     /// Template literals unescape through the same table as quoted strings.
-    /// They always did on the normal profile, and a comptime-folded literal has
-    /// to be byte-identical to the same literal written outside `comptime(...)`.
+    /// Both parser profiles use the same decoding table. A literal must have
+    /// the same bytes in a program and in an internal expression comparison.
     /// Decode a string literal's content, reporting a closed-escape-set
     /// violation as a located diagnostic rather than propagating a bare error.
     /// The two faults are distinct to a reader and carry different repairs, so
@@ -3315,12 +3314,8 @@ pub const Parser = struct {
     /// `\'`, `\"`, `\0`, `\xNN`, `\uNNNN`, and `\u{N..}`; every other escape
     /// emits the character that follows the backslash.
     ///
-    /// The two profiles no longer differ here. The comptime profile used to be
-    /// the strict one and the normal profile copied a malformed escape through
-    /// literally, which meant a literal could be legal outside `comptime(...)`
-    /// and refused inside it - and, worse, that a mistyped escape silently
-    /// changed the string. The set is closed for both, so there is nothing left
-    /// to parameterize.
+    /// The two profiles use the same closed escape set. A mistyped escape must
+    /// not change the string silently, so there is nothing to parameterize.
     ///
     /// Returns the original input on the fast path, or an owned allocation plus
     /// the used byte range when escape decoding shortens the string.
@@ -3373,9 +3368,7 @@ pub const Parser = struct {
                 // A backslash before a real newline. JavaScript reads it as a
                 // line continuation and emits nothing; D3 section 1 refuses it,
                 // because a string that spans a line reads as two strings to
-                // everyone but the compiler. Refused in both profiles: a
-                // comptime-folded literal and the same literal written outside
-                // `comptime(...)` must not disagree about what is legal.
+                // everyone but the compiler. Both profiles refuse it.
                 '\n', '\r' => return error.StringLineContinuation,
                 else => {
                     result[out_pos] = switch (escaped) {
@@ -4164,10 +4157,10 @@ test "unsupported: loose equality ==" {
     try std.testing.expect(false);
 }
 
-test "comptime expression profile preserves null and loose equality in IR" {
+test "kernel expression profile preserves null and loose equality in IR" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.initExpression(allocator, "null == undefined", .comptime_expression);
+    var parser = try Parser.initExpression(allocator, "null == undefined", .kernel_expression);
     defer parser.deinit();
 
     const root = try parser.parseExpressionOnly();
@@ -4179,11 +4172,11 @@ test "comptime expression profile preserves null and loose equality in IR" {
     try std.testing.expectEqual(NodeTag.lit_undefined, view.getTag(binary.right).?);
 }
 
-test "comptime expression profile parses one aggregate root prefix" {
+test "kernel expression profile parses one aggregate root prefix" {
     const allocator = std.testing.allocator;
     const source = "{ loose: [1, 2] } trailing";
 
-    var parser = try Parser.initExpression(allocator, source, .comptime_expression);
+    var parser = try Parser.initExpression(allocator, source, .kernel_expression);
     defer parser.deinit();
 
     const root = try parser.parseExpressionPrefix();
@@ -4193,13 +4186,10 @@ test "comptime expression profile parses one aggregate root prefix" {
 }
 
 test "both profiles refuse the pipe operator with the same diagnostic" {
-    // This test used to pin a difference: the comptime profile refused `|>`
-    // while the normal profile folded it into a call. There is no difference
-    // left to pin, so it now asserts the absence - one kind and one message,
-    // whichever profile parsed it.
+    // Both profiles refuse `|>` with one kind and one message.
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "\"value\" |> hash", .comptime_expression);
+    var expression_parser = try Parser.initExpression(allocator, "\"value\" |> hash", .kernel_expression);
     defer expression_parser.deinit();
     try std.testing.expectError(error.ParseError, expression_parser.parseExpressionOnly());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, expression_parser.getErrors()[0].kind);
@@ -4211,16 +4201,16 @@ test "both profiles refuse the pipe operator with the same diagnostic" {
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, program_parser.getErrors()[0].kind);
 }
 
-test "comptime numeric separators remain isolated from normal parsing" {
+test "kernel expression numeric separators remain isolated from programs" {
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "1_000", .comptime_expression);
+    var expression_parser = try Parser.initExpression(allocator, "1_000", .kernel_expression);
     defer expression_parser.deinit();
     const root = try expression_parser.parseExpressionOnly();
     const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
     try std.testing.expectEqual(@as(f64, 1000), view.getFloat(view.getFloatIdx(root).?).?);
 
-    // Outside comptime the separator is a diagnostic, not a silent truncation:
+    // In a program, the separator is a diagnostic, not a silent truncation:
     // the literal used to lex as `1` followed by the identifier statement
     // `_000`, so a handler served 1 where the author wrote 1000.
     var program_parser = try Parser.init(allocator, "const value = 1_000;");
@@ -4344,20 +4334,20 @@ test "the legal escapes still parse" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "comptime string folding decodes unicode escapes like the normal parser" {
+test "kernel expression parsing decodes unicode escapes like programs" {
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "\"caf\\u00e9\"", .comptime_expression);
+    var expression_parser = try Parser.initExpression(allocator, "\"caf\\u00e9\"", .kernel_expression);
     defer expression_parser.deinit();
     const root = try expression_parser.parseExpressionOnly();
     const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
     try std.testing.expectEqualStrings("café", view.getString(view.getStringIdx(root).?).?);
 }
 
-test "comptime unary before exponent preserves legacy profile only" {
+test "kernel expression unary before exponent preserves its legacy grammar" {
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "-3 ** 2", .comptime_expression);
+    var expression_parser = try Parser.initExpression(allocator, "-3 ** 2", .kernel_expression);
     defer expression_parser.deinit();
     const root = try expression_parser.parseExpressionOnly();
     const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);

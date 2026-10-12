@@ -1,11 +1,7 @@
 //! What it takes to execute a handler, as data.
 //!
-//! Durable recovery, the durable scheduler, replay, and the handler-test runner
-//! all execute a handler without serving HTTP. They used to take a whole
-//! `ServerConfig` to do it, which put `server.zig` in their import graph and
-//! made the request-serving configuration look like a dependency of durable
-//! scheduling. Measured, they read two of its 27 fields: the handler source and
-//! the runtime configuration. Those two are this file.
+//! Replay and the handler-test runner execute a handler without serving HTTP.
+//! They use the handler source and runtime configuration from this file.
 //!
 //! `HandlerSource` and `AppendedPayload` live here rather than in `server.zig`
 //! for the same reason: they are pure data, and `handler_loader.zig` imported

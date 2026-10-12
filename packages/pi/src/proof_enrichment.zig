@@ -8,7 +8,6 @@ const tools_common = @import("tools/common.zig");
 
 const edit_simulate = zts_cli.edit_simulate;
 const precompile = zts_cli.precompile;
-const system_analysis = zts_cli.system_analysis;
 const contract_diff = zts.contract_diff;
 const HandlerProperties = zts.HandlerProperties;
 
@@ -18,7 +17,6 @@ pub const PatchAnalysis = struct {
     before_properties: ?ui_payload.PropertiesSnapshot,
     after_properties: ?ui_payload.PropertiesSnapshot,
     prove: ?ui_payload.ProveSummary,
-    system: ?ui_payload.SystemProofSummary,
     rule_citations: [][]u8,
     unified_diff: []u8,
     hunks: []ui_payload.DiffHunk,
@@ -27,7 +25,6 @@ pub const PatchAnalysis = struct {
         for (self.violations) |*item| item.deinit(allocator);
         allocator.free(self.violations);
         if (self.prove) |*prove| prove.deinit(allocator);
-        if (self.system) |*system| system.deinit(allocator);
         for (self.rule_citations) |citation| allocator.free(citation);
         allocator.free(self.rule_citations);
         allocator.free(self.unified_diff);
@@ -38,7 +35,6 @@ pub const PatchAnalysis = struct {
             .before_properties = null,
             .after_properties = null,
             .prove = null,
-            .system = null,
             .rule_citations = &.{},
             .unified_diff = &.{},
             .hunks = &.{},
@@ -57,15 +53,11 @@ pub fn analyzePatch(
     const absolute_path = try resolveHandlerPath(allocator, workspace_root, file);
     defer allocator.free(absolute_path);
 
-    const system_path = try discoverSystemPath(allocator, workspace_root, absolute_path);
-    defer if (system_path) |path| allocator.free(path);
-
     // zttp:sql handlers need the project SQL schema to analyze. Without it,
     // simulate() on a SQL handler throws MissingSqlSchema and crashes the
-    // receipt build after an otherwise successful apply. Root it at the handler
-    // like the system path above: from cwd, a run started outside the handler's
-    // project validated queries against a different zttp.json than the one the
-    // system manifest came from.
+    // receipt build after an otherwise successful apply. Root it at the handler:
+    // a run started outside the handler's project could otherwise validate
+    // queries against a different zttp.json.
     const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, absolute_path);
     defer if (sql_schema_path) |p| allocator.free(p);
 
@@ -83,16 +75,14 @@ pub fn analyzePatch(
         allocator.free(violations);
     }
 
-    const before_snapshot = try optionalPropertiesSnapshot(allocator, absolute_path, before, system_path, sql_schema_path);
+    const before_snapshot = try optionalPropertiesSnapshot(allocator, absolute_path, before, sql_schema_path);
     const after_snapshot = if (simulated.properties) |properties|
         propertiesSnapshot(properties)
     else
-        try optionalPropertiesSnapshot(allocator, absolute_path, after, system_path, sql_schema_path);
+        try optionalPropertiesSnapshot(allocator, absolute_path, after, sql_schema_path);
 
-    var prove = try optionalProveSummary(allocator, absolute_path, before, after, system_path, sql_schema_path);
+    var prove = try optionalProveSummary(allocator, absolute_path, before, after, sql_schema_path);
     errdefer if (prove) |*summary| summary.deinit(allocator);
-    var system = try optionalSystemSummary(allocator, system_path);
-    errdefer if (system) |*summary| summary.deinit(allocator);
     const citations = if (transcript) |tr|
         try collectRuleCitations(allocator, tr)
     else
@@ -118,7 +108,6 @@ pub fn analyzePatch(
         .before_properties = before_snapshot,
         .after_properties = after_snapshot,
         .prove = prove,
-        .system = system,
         .rule_citations = citations,
         .unified_diff = diff.text,
         .hunks = diff.hunks,
@@ -134,30 +123,10 @@ pub fn loadProveSummaryForPatch(
 ) !?ui_payload.ProveSummary {
     const absolute_path = try resolveHandlerPath(allocator, workspace_root, file);
     defer allocator.free(absolute_path);
-    const system_path = try discoverSystemPath(allocator, workspace_root, absolute_path);
-    defer if (system_path) |path| allocator.free(path);
-    // Rooted at the handler, like the system path above.
+    // Root the SQL schema lookup at the handler.
     const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, absolute_path);
     defer if (sql_schema_path) |p| allocator.free(p);
-    return computeProveSummary(allocator, absolute_path, before, after, system_path, sql_schema_path);
-}
-
-pub fn loadSystemSummary(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    explicit_system: ?[]const u8,
-    discovery_hint: ?[]const u8,
-) !?ui_payload.SystemProofSummary {
-    const resolved_system = if (explicit_system) |path|
-        try tools_common.resolveInsideWorkspace(allocator, workspace_root, path)
-    else if (discovery_hint) |hint| blk: {
-        const absolute_hint = try tools_common.resolveInsideWorkspace(allocator, workspace_root, hint);
-        defer allocator.free(absolute_hint);
-        break :blk try discoverSystemPath(allocator, workspace_root, absolute_hint);
-    } else try discoverSystemPath(allocator, workspace_root, workspace_root);
-    defer if (resolved_system) |path| allocator.free(path);
-
-    return computeSystemSummary(allocator, resolved_system);
+    return computeProveSummary(allocator, absolute_path, before, after, sql_schema_path);
 }
 
 pub fn formatProveSummary(
@@ -182,47 +151,6 @@ pub fn formatProveSummary(
         try w.writeAll("laws_used:\n");
         for (value.laws_used) |law| {
             try w.print("- {s}\n", .{law});
-        }
-    }
-
-    return buf.toOwnedSlice();
-}
-
-pub fn formatSystemSummary(
-    allocator: std.mem.Allocator,
-    summary: ?ui_payload.SystemProofSummary,
-) ![]u8 {
-    if (summary == null) return allocator.dupe(u8, "system proof: unavailable\n");
-
-    const value = summary.?;
-    var buf = TextBuffer.init(allocator);
-    defer buf.deinit();
-    const w = buf.writer();
-
-    try w.print(
-        "system: {s}\nproof_level: {s}\nall_links_resolved: {s}\nall_responses_covered: {s}\npayload_compatible: {s}\ninjection_safe: {s}\nno_secret_leakage: {s}\nno_credential_leakage: {s}\nretry_safe: {s}\nfault_covered: {s}\nstate_isolated: {s}\n",
-        .{
-            value.system_path,
-            value.proof_level,
-            boolString(value.all_links_resolved),
-            boolString(value.all_responses_covered),
-            boolString(value.payload_compatible),
-            boolString(value.injection_safe),
-            boolString(value.no_secret_leakage),
-            boolString(value.no_credential_leakage),
-            boolString(value.retry_safe),
-            boolString(value.fault_covered),
-            boolString(value.state_isolated),
-        },
-    );
-    if (value.max_system_io_depth) |depth| {
-        try w.print("max_system_io_depth: {d}\n", .{depth});
-    }
-    try w.print("dynamic_links: {d}\n", .{value.dynamic_links});
-    if (value.warnings.len > 0) {
-        try w.writeAll("warnings:\n");
-        for (value.warnings) |warning| {
-            try w.print("- {s}\n", .{warning});
         }
     }
 
@@ -262,14 +190,12 @@ fn loadPropertiesSnapshot(
     allocator: std.mem.Allocator,
     absolute_path: []const u8,
     source: ?[]const u8,
-    system_path: ?[]const u8,
     sql_schema_path: ?[]const u8,
 ) !?ui_payload.PropertiesSnapshot {
     const content = source orelse return null;
     var result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, content, absolute_path, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = true,
-        .system_path = system_path,
     });
     defer result.deinit(allocator);
 
@@ -283,10 +209,9 @@ fn optionalPropertiesSnapshot(
     allocator: std.mem.Allocator,
     absolute_path: []const u8,
     source: ?[]const u8,
-    system_path: ?[]const u8,
     sql_schema_path: ?[]const u8,
 ) !?ui_payload.PropertiesSnapshot {
-    return loadPropertiesSnapshot(allocator, absolute_path, source, system_path, sql_schema_path) catch |err| switch (err) {
+    return loadPropertiesSnapshot(allocator, absolute_path, source, sql_schema_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => null,
     };
@@ -297,7 +222,6 @@ fn computeProveSummary(
     absolute_path: []const u8,
     before: ?[]const u8,
     after: []const u8,
-    system_path: ?[]const u8,
     sql_schema_path: ?[]const u8,
 ) !?ui_payload.ProveSummary {
     const before_source = before orelse return null;
@@ -305,14 +229,12 @@ fn computeProveSummary(
     var before_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, before_source, absolute_path, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = true,
-        .system_path = system_path,
     });
     defer before_result.deinit(allocator);
 
     var after_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, after, absolute_path, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = true,
-        .system_path = system_path,
     });
     defer after_result.deinit(allocator);
 
@@ -358,111 +280,12 @@ fn optionalProveSummary(
     absolute_path: []const u8,
     before: ?[]const u8,
     after: []const u8,
-    system_path: ?[]const u8,
     sql_schema_path: ?[]const u8,
 ) !?ui_payload.ProveSummary {
-    return computeProveSummary(allocator, absolute_path, before, after, system_path, sql_schema_path) catch |err| switch (err) {
+    return computeProveSummary(allocator, absolute_path, before, after, sql_schema_path) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => null,
     };
-}
-
-fn computeSystemSummary(
-    allocator: std.mem.Allocator,
-    system_path: ?[]const u8,
-) !?ui_payload.SystemProofSummary {
-    const path = system_path orelse return null;
-    var compiled = system_analysis.loadCompiledSystem(allocator, path) catch |err| switch (err) {
-        error.EmptySystemConfig,
-        error.SystemHandlerCompilationFailed,
-        error.MissingHandlerContract,
-        error.FileNotFound,
-        => return null,
-        else => return err,
-    };
-    defer compiled.deinit(allocator);
-
-    const warnings = try allocator.alloc([]u8, compiled.analysis.warnings.items.len);
-    errdefer allocator.free(warnings);
-    var i: usize = 0;
-    errdefer {
-        while (i > 0) {
-            i -= 1;
-            allocator.free(warnings[i]);
-        }
-        allocator.free(warnings);
-    }
-    while (i < compiled.analysis.warnings.items.len) : (i += 1) {
-        warnings[i] = try allocator.dupe(u8, compiled.analysis.warnings.items[i]);
-    }
-
-    return .{
-        .system_path = try allocator.dupe(u8, path),
-        .proof_level = try allocator.dupe(u8, systemProofLevelString(compiled.analysis.proof_level)),
-        .all_links_resolved = compiled.analysis.properties.all_links_resolved,
-        .all_responses_covered = compiled.analysis.properties.all_responses_covered,
-        .payload_compatible = compiled.analysis.properties.payload_compatible,
-        .injection_safe = compiled.analysis.properties.injection_safe,
-        .no_secret_leakage = compiled.analysis.properties.no_secret_leakage,
-        .no_credential_leakage = compiled.analysis.properties.no_credential_leakage,
-        .retry_safe = compiled.analysis.properties.retry_safe,
-        .fault_covered = compiled.analysis.properties.fault_covered,
-        .state_isolated = compiled.analysis.properties.state_isolated,
-        .max_system_io_depth = compiled.analysis.properties.max_system_io_depth,
-        .dynamic_links = compiled.analysis.dynamic_links,
-        .warnings = warnings,
-    };
-}
-
-fn optionalSystemSummary(
-    allocator: std.mem.Allocator,
-    system_path: ?[]const u8,
-) !?ui_payload.SystemProofSummary {
-    return computeSystemSummary(allocator, system_path) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => null,
-    };
-}
-
-fn discoverSystemPath(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    absolute_path: []const u8,
-) !?[]u8 {
-    const root = try normalizeWorkspaceRoot(allocator, workspace_root);
-    defer allocator.free(root);
-
-    var current = if (std.mem.eql(u8, absolute_path, root))
-        try allocator.dupe(u8, root)
-    else
-        try allocator.dupe(u8, std.fs.path.dirname(absolute_path) orelse root);
-    defer allocator.free(current);
-
-    while (true) {
-        if (!tools_common.isPathInsideRoot(root, current)) break;
-
-        const manifest_path = try std.fs.path.join(allocator, &.{ current, "zttp.json" });
-        defer allocator.free(manifest_path);
-        if (try pathExists(allocator, manifest_path)) {
-            if (try systemPathFromManifest(allocator, current, manifest_path)) |resolved| return resolved;
-        }
-
-        const default_system = try std.fs.path.join(allocator, &.{ current, "system.json" });
-        if (try pathExists(allocator, default_system)) {
-            return default_system;
-        }
-        allocator.free(default_system);
-
-        if (std.mem.eql(u8, current, root)) break;
-        const parent = std.fs.path.dirname(current) orelse break;
-        if (parent.len == current.len) break;
-        if (!tools_common.isPathInsideRoot(root, parent)) break;
-        const next = try allocator.dupe(u8, parent);
-        allocator.free(current);
-        current = next;
-    }
-
-    return null;
 }
 
 fn resolveHandlerPath(
@@ -489,37 +312,6 @@ fn normalizeWorkspaceRoot(
     defer allocator.free(cwd_real);
 
     return std.fs.path.resolve(allocator, &.{ cwd_real, workspace_root });
-}
-
-fn pathExists(allocator: std.mem.Allocator, absolute_path: []const u8) !bool {
-    if (!std.fs.path.isAbsolute(absolute_path)) return false;
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    std.Io.Dir.accessAbsolute(io_backend.io(), absolute_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return false,
-        else => return false,
-    };
-    return true;
-}
-
-fn systemPathFromManifest(
-    allocator: std.mem.Allocator,
-    dir_path: []const u8,
-    manifest_path: []const u8,
-) !?[]u8 {
-    const bytes = zts.file_io.readFile(allocator, manifest_path, 256 * 1024) catch return null;
-    defer allocator.free(bytes);
-
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return null;
-    defer parsed.deinit();
-    if (parsed.value != .object) return null;
-
-    if (parsed.value.object.get("system")) |value| {
-        if (value == .string) {
-            return try std.fs.path.resolve(allocator, &.{ dir_path, value.string });
-        }
-    }
-    return null;
 }
 
 fn collectRuleCitations(
@@ -709,18 +501,6 @@ fn stableViolationKey(
     return out;
 }
 
-fn systemProofLevelString(level: zts.SystemProofLevel) []const u8 {
-    return switch (level) {
-        .complete => "complete",
-        .partial => "partial",
-        .none => "none",
-    };
-}
-
-fn boolString(value: bool) []const u8 {
-    return if (value) "true" else "false";
-}
-
 fn lessThanString(_: void, a: []u8, b: []u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
@@ -770,58 +550,6 @@ test "resolveHandlerPath rejects absolute paths outside workspace" {
         error.PathOutsideWorkspace,
         resolveHandlerPath(testing.allocator, "/tmp/zttp-proof-workspace", "/etc/passwd"),
     );
-}
-
-test "discoverSystemPath finds system config at workspace root" {
-    var tmp = try initTmp(testing.allocator);
-    defer tmp.cleanup(testing.allocator);
-
-    try tmp.writeFile(testing.allocator, "system.json", "{}");
-
-    const system_path = try discoverSystemPath(testing.allocator, tmp.abs_path, tmp.abs_path);
-    defer if (system_path) |path| testing.allocator.free(path);
-
-    try testing.expect(system_path != null);
-    const expected = try tmp.childPath(testing.allocator, "system.json");
-    defer testing.allocator.free(expected);
-    try testing.expectEqualStrings(expected, system_path.?);
-}
-
-test "discoverSystemPath does not climb above workspace root" {
-    var tmp = try initTmp(testing.allocator);
-    defer tmp.cleanup(testing.allocator);
-
-    try tmp.writeFile(testing.allocator, "outer/system.json", "{}");
-    try tmp.mkdir(testing.allocator, "outer/workspace/src");
-
-    const workspace_root = try tmp.childPath(testing.allocator, "outer/workspace");
-    defer testing.allocator.free(workspace_root);
-    const handler_path = try tmp.childPath(testing.allocator, "outer/workspace/src/handler.ts");
-    defer testing.allocator.free(handler_path);
-
-    const system_path = try discoverSystemPath(testing.allocator, workspace_root, handler_path);
-    defer if (system_path) |path| testing.allocator.free(path);
-
-    try testing.expect(system_path == null);
-}
-
-test "analyzePatch keeps enrichment best-effort for broken system manifests" {
-    var tmp = try initTmp(testing.allocator);
-    defer tmp.cleanup(testing.allocator);
-
-    try tmp.writeFile(testing.allocator, "system.json", "{not json");
-
-    var analysis = try analyzePatch(
-        testing.allocator,
-        tmp.abs_path,
-        "handler.ts",
-        "function handler(req: Request): Response { return Response.json({ ok: true }); }",
-        "function handler(req: Request): Response { return Response.json({ ok: true, v: 2 }); }",
-        null,
-    );
-    defer analysis.deinit(testing.allocator);
-
-    try testing.expect(analysis.system == null);
 }
 
 test "analyzePatch returns prove classification and rule citations" {

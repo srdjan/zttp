@@ -6,7 +6,6 @@ pub fn validateConfiguredPolicy(
     _: std.mem.Allocator,
     _: []const u8,
     _: ?[]const u8,
-    _: ?[]const u8,
     _: []const u8,
 ) !CheckedPolicy {
     if (!builtin.is_test) {

@@ -72,7 +72,7 @@ Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Resp
 
 Request body readers (globals): `requestBody(req)` returns `Bytes` and is total, `requestText(req)` and `requestJson(req)` return a `Result` whose error names `absent`, `invalid-encoding`, or spec 6.4's JSON taxonomy.
 
-File identity selects the frontend: `.ts` enters the `zts-model-1` core and `.tsx` enters the `zts-tsx-1` lowering frontend, which rewrites TSX to ordinary `h(...)` calls before the core parses it. `.js`, `.jsx`, and unknown extensions are refused with ZTS052. The core tokenizer, parser, IR, and bytecode generator carry no JSX mode. `h()` and `renderToString()` live in `packages/zts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md).
+`.ts` enters the `zts-model-1` core. `.js`, `.jsx`, `.tsx`, and unknown extensions are refused with ZTS052. The parser has no JSX mode. `h()` and `renderToString()` provide manual HTML construction. See [docs/typescript.md](docs/typescript.md).
 
 ## Compile-Time Systems
 
@@ -82,9 +82,8 @@ File identity selects the frontend: `.ts` enters the `zts-model-1` core and `.ts
 - **Type checking**: `packages/zts/src/type_checker.zig`, `packages/zts/src/type_map.zig`.
 - **Flow analysis**: data label tracking (secret, credential, user_input). `packages/zts/src/flow_checker.zig`.
 - **Fault coverage**: path enumeration, failure severity. `packages/zts/src/fault_coverage.zig`.
-- **Replay and durable**: `packages/zts/src/trace.zig`, `packages/runtime/src/durable_recovery.zig`.
+- **Replay**: `packages/zts/src/trace.zig`.
 - **Deploy manifests**: `packages/tools/src/deploy_manifest.zig`.
-- **System linking**: `packages/zts/src/system_linker.zig`.
 - **Artifact acceptance**: `packages/proof-checker/` owns bounded certificate
   decoding, obligation reconstruction, evidence checks, consumer policy, and
   exhaustive verdicts. `packages/runtime/src/proof_activation.zig` supplies the

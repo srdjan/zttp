@@ -1725,28 +1725,9 @@ pub const TypePool = struct {
         // below is the reporting half, so a caller can tell an unresolved name
         // (ZTS206) apart from a real mismatch (ZTS200).
         //
-        // Three things had to land first, and the deferral comment that stood
-        // here named only one of them correctly. Measured by deleting the two
-        // lines and sweeping every example, seven failed, all with "return type
-        // does not match declared return type":
-        //
-        //   - Six were `durable.run` returning the coarse `unknown`. Its return
-        //     type is its callback's, which `ReturnKind` cannot spell, so
-        //     `returns_from_param` says which argument to read it from and the
-        //     checker instantiates a generic signature per call site.
-        //   - One was `examples/jsx/jsx-ssr.tsx`, and not for the reason
-        //     recorded: the unresolved name was the file's own `Todo` inside
-        //     `Todo[]`, not `Response`. A name nested in a compound type never
-        //     resolved, because the pool holds no alias table; `AssignCtx` now
-        //     carries a resolver and `TypeEnv` supplies one.
-        //   - Neither of those was enough on its own, because `Response.json()`
-        //     inferred nothing, so the return check never ran and the six
-        //     orchestrators had no type to bind their callback's `T` to. The
-        //     `Response` global is typed in `abi_types.zig`.
-        //
-        // Count failures with a direct sweep rather than
-        // `scripts/test-examples.sh` - that script is `set -e` and stops at the
-        // third orchestrator, reporting four where seven exist.
+        // `AssignCtx` carries the resolver that handles names nested inside
+        // compound types. `Response` globals receive their types in
+        // `abi_types.zig` before this comparison runs.
         return false;
     }
 

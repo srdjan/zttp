@@ -145,9 +145,7 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             std.mem.eql(u8, arg, "--trace") or
             std.mem.eql(u8, arg, "--incident-log") or
             std.mem.eql(u8, arg, "--replay") or
-            std.mem.eql(u8, arg, "--test") or
-            std.mem.eql(u8, arg, "--durable") or
-            std.mem.eql(u8, arg, "--system"))
+            std.mem.eql(u8, arg, "--test"))
         {
             skip_next = true;
             continue;
@@ -235,9 +233,6 @@ pub fn buildWatchSet(allocator: std.mem.Allocator, argv: []const []const u8) !Wa
         try paths.append(allocator, try std.fs.path.resolve(allocator, &.{ cfg.root_dir, "src" }));
         if (try cfg.resolvedStaticDir(allocator)) |static_dir| {
             try paths.append(allocator, static_dir);
-        }
-        if (try cfg.resolvedSystemPath(allocator)) |system_path| {
-            try paths.append(allocator, system_path);
         }
         if (try cfg.resolvedPolicyPath(allocator)) |policy_path| {
             try paths.append(allocator, policy_path);

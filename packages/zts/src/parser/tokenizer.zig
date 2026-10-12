@@ -1,7 +1,7 @@
 //! Tokenizer for the core JavaScript syntax consumed by the ZTS parser.
 //!
 //! Single-pass tokenization with column tracking and lookahead for arrow
-//! function detection. TSX is lowered before this module receives source.
+//! function detection.
 
 const std = @import("std");
 const token = @import("token.zig");
@@ -452,10 +452,9 @@ pub const Tokenizer = struct {
         return saw_separator;
     }
 
-    /// A `_` between digits is always lexed into the number token, in both the
-    /// comptime and the normal parser profile, and the token records that it was
-    /// there. The profiles differ in what they then accept: `parseComptimeNumber`
-    /// strips the separators, `parseNumber` rejects them. Stopping the scan at
+    /// A `_` between digits is always lexed into the number token in both
+    /// parser profiles, and the token records that it was there. The internal
+    /// expression profile strips separators, while a program rejects them. Stopping the scan at
     /// the `_` instead would split `1_000` into the number `1` and the identifier
     /// `_000`, which ASI accepts as two statements and no diagnostic ever reports.
     fn scanNumber(self: *Tokenizer, start: u32, col: u32, line: u32) Token {

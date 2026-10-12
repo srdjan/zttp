@@ -65,11 +65,8 @@ fn specDiagnosticMessage(d: zts.SpecDiagnostic) []const u8 {
         .budget_exceeded => d.suggestion orelse "capability reached outside the handler's Effects<...> budget",
         .helper_budget_exceeded => d.suggestion orelse "helper reaches a capability outside the handler's budget",
         .missing_proof_capsule_export => d.suggestion orelse "exported helper has no Proof<...> capsule",
-        .workflow_call_in_step => d.suggestion orelse "workflow.call/saga/fanout/follow used inside step() silently loses durability",
-        .saga_step_missing_compensate => d.suggestion orelse "a non-last saga step has no compensate",
         .effect_ceiling_not_literal => d.suggestion orelse "Effects<...> is not a closed union of string literals, so no ceiling was read",
         .effect_row_lower_bound => d.suggestion orelse "effect row is a lower bound; a call through an unresolvable value cannot discharge a ceiling",
-        .tool_catalog_refused => d.suggestion orelse "the toolCatalog declaration is refused",
         .schema_not_compilable => d.suggestion orelse "a validation call names a schema zttp:validate cannot compile",
     };
 }

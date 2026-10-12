@@ -75,7 +75,7 @@ Code ranges:
 | `verify-modules --builtins --strict --json` | Built-in module governance. |
 | `edit-simulate [handler.ts] --stdin-json` | Pre-apply edit simulation. |
 
-Commands such as `prove`, `link`, `rollout`, and `compile` are useful
+Commands such as `prove` and `compile` are useful
 CLI tools, but their text output is not the structured v1 contract.
 
 ## Proof Envelope

@@ -6,9 +6,8 @@ by `zig build test-expert-app`. Replay is deterministic, needs no network and
 no key, and is what CI runs. Recording is the opposite: it spends real model
 time, and for a hosted provider it sends handler source off the machine.
 
-This page states how to re-record that corpus against each supported provider.
-The corpus itself lives in `packages/pi/src/expert_codegen_record.zig`, which
-also owns both build steps described here.
+This page states how to record the thirteen current DeepSeek cases. The corpus
+lives in `packages/pi/src/expert_codegen_record.zig`.
 
 ## When a re-record is owed
 
@@ -32,11 +31,10 @@ The other two are the ones a compiler change reaches, because anything the
 compiler publishes into a tool result is part of the transcript: the module
 registry payload, the inline handlers in
 `packages/tools/src/example_registry.zig` behind `meta.payload.examples`, and
-the compiler version string. Measured on 2026-08-27, bumping
-`packages/zts/src/root.zig` from 0.18.0 to 0.19.0 staled 16 of 19 cases, because
-`compiler_version` reaches the transcript through the `zts_expert_query` meta
-tool result. Every version bump therefore owes a full re-record. Bump last, and
-treat the bump and the re-record as one change.
+the compiler version string. The compiler version reaches the transcript
+through the `zts_expert_query` metadata result. Every version bump therefore
+owes a full recording. Bump the version last, and treat the bump and recording
+as one change.
 
 Handler files under `examples/` are not embedded and do not stale the corpus.
 `example_registry.zig` carries its own inline handlers.
@@ -70,85 +68,39 @@ needs its API key **in the environment**: the recorder reads the key with
 flag, or without the key, the recording test skips silently and the replay test
 runs instead.
 
-Record into a clean tree. Every case runs in its own temporary workspace with
-cwd switched to it, but the artifacts are written to the repository, and a row
-published from uncommitted work cannot be reproduced from its commit.
+The recorder can run from an uncommitted source tree. Publication requires the
+resulting source and recordings in a clean commit with accepted provenance.
 
 ## The command
 
 ```bash
-ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=<provider> \
+ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=deepseek \
+  ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000 \
   zig build test-expert-app -Dtest-filter="record codegen baseline corpus"
 ```
 
-`<provider>` is `deepseek` or `local`. It defaults to
-`local` when unset, which is rarely what a hosted run intends, so set it
-explicitly.
+The recording run must select all thirteen cases. `ZTTP_CODEGEN_ONLY` and
+`ZTTP_CODEGEN_LIMIT` cannot activate the current corpus.
 
 ### Environment
 
 | Variable | Effect |
 |---|---|
 | `ZTTP_CODEGEN_RECORD=1` | Required. Without it the recording test skips. |
-| `ZTTP_CODEGEN_PROVIDER` | `deepseek` or `local`. Defaults to `local`. |
+| `ZTTP_CODEGEN_PROVIDER` | Use `deepseek` for the current corpus. |
 | `ZTTP_CODEGEN_MODEL` | Records against a model other than the provider default. |
 | `ZTTP_CODEGEN_ONLY` | Records one case by name and leaves every other cassette untouched. |
 | `ZTTP_CODEGEN_LIMIT` | Caps the case count, for a cheap small-scale validation before a full run. |
-| `ZTTP_CODEGEN_TURN_TIMEOUT_MS` | Per-turn ceiling. Defaults to 180000. |
-| `ZTTP_CODEGEN_LOCAL_RUNTIME` | `name@version` of the local server stack. Local provider only. |
-| `ZTTP_CODEGEN_MODEL_REVISION` | Overrides the model revision the recorder otherwise reads from the Hugging Face cache. Local provider only. |
+| `ZTTP_CODEGEN_TURN_TIMEOUT_MS` | Per-turn ceiling. Use `600000` for the current DeepSeek recording. |
 | `ZTTP_CODEGEN_TOOLS` | Comma-separated allowlist that shrinks the model-facing tool catalog, for non-publishable experiments. It never drops `propose_change_set`, and it fails on a name matching no model-visible tool. |
 | `ZTTP_CODEGEN_REPLAY_PROVIDER` | Replays a non-headline corpus. Recording ignores it. |
-
-## Qualification is not recording
-
-Qualification measures a candidate without replacing a committed corpus. It
-attempts all 19 cases, keeps every generated flow under `.zig-cache`, and emits
-one report-only run record. `scripts/qualify-expert.sh` performs three
-consecutive runs and passes the records to the typed `expert-qualification`
-gate. It refuses filters, a dirty source tree, missing local provenance, and a
-run that omits any case.
-
-Every run must reach 19/19 final green, 18/18 runtime intents, at least 14/19
-raw model-authored first-draft passes, a median of at most four model round
-trips, and zero empty, timeout, decode, provider, or internal failures. All
-three runs must bind the same source, model, request policy, prompt, tool
-catalog, compiler identities, cohort identities, and local serving provenance.
-
-The wrapper spends three full runs of real model time, so it requires an
-explicit confirmation flag. For the current local candidate:
-
-```bash
-mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080
-
-export ZTTP_CODEGEN_QUALIFY_CONFIRM=1
-export ZTTP_CODEGEN_PROVIDER=local
-export ZTTP_CODEGEN_MODEL=mlx-community/Qwen3-8B-4bit
-export ZTTP_CODEGEN_MODEL_REVISION=<exact-model-revision>
-export ZTTP_CODEGEN_MODEL_ARTIFACT_SHA256=<canonical-snapshot-sha256>
-export ZTTP_CODEGEN_QUANTIZATION=4-bit
-export ZTTP_CODEGEN_CHAT_TEMPLATE_SHA256=<canonical-chat-template-sha256>
-export ZTTP_CODEGEN_SERVING_ARGS='mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080'
-export ZTTP_CODEGEN_HARDWARE="$(uname -m)"
-export ZTTP_CODEGEN_OS="$(uname -srv)"
-export ZTTP_CODEGEN_PEAK_MEMORY_BYTES=<measured-serving-process-peak>
-
-bash scripts/qualify-expert.sh > /tmp/qwen3-8b-4bit-qualification.json
-```
-
-The local request adapter sends no temperature, top-p, or seed override, so the
-report records `server-defaults` and a null seed. The exact serving arguments
-remain part of the report; secret-shaped serving flags are refused instead of
-being logged. A passing report sets `qualified: true` and still
-sets `default_change_authorized: false`. Changing either the LFM local-provider
-default or the DeepSeek product default is a separate product decision.
 
 ### The per-turn ceiling
 
 `ZTTP_CODEGEN_TURN_TIMEOUT_MS` exists because a stalled generation is silence
 rather than an error, and one stalled case would otherwise take the whole run
-with it. The default of 180000 truncates the heavier hosted cases: the DeepSeek
-corpus was recorded at 600000.
+with it. The default of 180000 can truncate heavier hosted cases. The current
+recording contract requires a 600000-millisecond ceiling.
 
 A turn cut off by the ceiling can never replay. The replay finishes in
 milliseconds and asks for one more model call than the recording holds, so the
@@ -179,57 +131,25 @@ no credential.
 
 Artifacts: `packages/pi/src/simulator/testdata/empirical/deepseek/codegen/`.
 
-### Local (MLX)
+### Local artifacts
 
-The local path needs a server on `http://127.0.0.1:8080`, or wherever
-`ZTTP_MLX_BASE_URL` points. Both tool flags below are required for LFM2: without
-them the server returns its native `[fn(arg='x')]` calls as prose and the agent
-loop sees nothing to run.
-
-```bash
-mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
-# or, for the rapid-mlx stack:
-rapid-mlx serve LiquidAI/LFM2.5-2.6B-MLX-8bit --port 8080 \
-  --enable-auto-tool-choice --tool-call-parser lfm
-
-ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=local \
-  ZTTP_CODEGEN_MODEL=LiquidAI/LFM2.5-2.6B-MLX-8bit \
-  ZTTP_CODEGEN_LOCAL_RUNTIME=rapid-mlx@0.12.11 \
-  zig build test-expert-app -Dtest-filter="record codegen baseline corpus"
-```
-
-`ZTTP_CODEGEN_LOCAL_RUNTIME` is only needed for a server that identifies
-neither itself nor its version. MLX-LM names itself in every response
-`system_fingerprint`, so a recording against it needs nothing. rapid-mlx sends
-no fingerprint and serves no version endpoint, so the identity exists only in
-the operator's shell, and the recorder refuses a malformed value rather than
-guessing one.
-
-Registered models: `LiquidAI/LFM2.5-2.6B-MLX-8bit` (default) and
-`mlx-community/Qwen3-8B-4bit` (qualification candidate).
-
-Artifacts: `packages/pi/src/simulator/testdata/empirical/local/codegen/`.
-
-A failing local case is the measurement, not a reason to reach for a hosted
-model. Use the qualification wrapper for a candidate comparison. Use recording
-only when deliberately replacing a committed provider corpus.
+The sixteen local recordings remain parked historical artifacts. They do not
+establish current replay compatibility or current model quality. The fifteen
+saved sessions also remain historical and must refuse stale protocol identities.
 
 ## Which corpus this repository records
 
-DeepSeek is the one remote provider and the headline. Local stays available and
-is preferred for everything that does not need to move the headline. The Claude
-and OpenAI providers and their corpora were removed; they live at the
-`pre-rebase` tag and are not re-recorded.
+The recording target is one thirteen-case DeepSeek headline corpus. The local
+provider remains available for interactive use. This release does not record
+a separate local corpus.
 
 ## One case, or the whole corpus
 
-`ZTTP_CODEGEN_ONLY=<name>` records a single case and leaves every other
-cassette untouched. Use it when one case went stale for its own reason, such as
-a compiler change that flipped its veto outcome.
+Use `ZTTP_CODEGEN_LIMIT=1` only for a small pipeline validation. Discard those
+artifacts. Then run the complete corpus with only the limit changed.
 
-A change to the persona or to any tool schema invalidates the whole corpus at
-once, so that one needs a full run. Validate the pipeline first with
-`ZTTP_CODEGEN_LIMIT=1` before spending a complete run.
+`ZTTP_CODEGEN_ONLY=<name>` is also diagnostic only. It cannot replace the
+complete thirteen-case recording required after a protocol or language change.
 
 A corpus must not be half re-recorded against two models: the replay asserts
 that every cassette names the same model, because two would publish one row
@@ -252,11 +172,10 @@ respectively. `scripts/check-convergence-emitter.sh` holds each marker to one
 producer and one publisher, so neither page can be written from the other's
 measurement.
 
-Never edit the generated Markdown or JSON by hand. Both publishers refuse to run
-when the working tree is not clean, and refuse a replay whose marker recorded
-dirty source, because a number published from uncommitted work cannot be
-reproduced from its commit. Run them one at a time: the coverage pages have to
-be committed before `update-convergence.sh` sees a clean tree.
+Never edit the generated Markdown or JSON by hand. Both publishers require a
+clean tree and a replay marker from clean source. Run them one at a time.
+Publish and commit convergence first. Then publish coverage from that clean
+convergence commit.
 
 A recording that moves a case's runtime intent outcome also moves its
 `expect_committed_intent_pass` pin, and the gate that checks it requires the pin

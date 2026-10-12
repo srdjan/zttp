@@ -120,29 +120,6 @@ pub fn registerVirtualModuleReplayWithOuter(
     }
 }
 
-/// Register module exports with durable execution wrappers.
-pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *context.Context, allocator: std.mem.Allocator) !void {
-    return registerVirtualModuleDurableWithOuter(binding, ctx, allocator, identityOuter);
-}
-
-pub fn registerVirtualModuleDurableWithOuter(
-    comptime binding: mb.ModuleBinding,
-    ctx: *context.Context,
-    allocator: std.mem.Allocator,
-    comptime outer: anytype,
-) !void {
-    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-
-    inline for (binding.exports) |exp| {
-        const base_func = comptime wrappedExportFn(binding, exp);
-        const func = if (comptime shouldWrapExport(binding, exp))
-            comptime trace.makeDurableWrapper(binding.name, exp.name, base_func)
-        else
-            base_func;
-        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, comptime outer(binding, exp, func));
-    }
-}
-
 fn identityOuter(
     comptime _: mb.ModuleBinding,
     comptime _: mb.FunctionBinding,
@@ -160,7 +137,7 @@ fn registerNativeExportForBinding(
     func: object.NativeFn,
 ) !void {
     // Only the namespaced atom is registered: two virtual modules may export
-    // the same function name (e.g. zttp:queue.send vs zttp:websocket.send),
+    // the same function name,
     // and a single shared bare-name global cannot resolve both. Import codegen
     // (importGlobalAtom) always binds `import { fn } from "zttp:module"` to
     // this namespaced atom, so it is the only reachable path for virtual
@@ -194,7 +171,8 @@ fn registerNativeExport(
 }
 
 fn shouldWrapExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) bool {
-    return !binding.comptime_only and !binding.self_managed_io and func_binding.traceable;
+    _ = binding;
+    return func_binding.traceable;
 }
 
 /// A function is replay-pure when running it live during replay is hermetic:
@@ -214,16 +192,11 @@ fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.F
 }
 
 fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
-    // Every export, with or without declared capabilities, runs inside the
-    // active tool's grant (M4 T5 design note, section 6). The grant check is
-    // outermost so a denied export pushes no scope and bumps no meter. The
-    // accepted capability ceiling (M4 T5b) is checked in the same wrapper,
-    // right after the grant, against the list `capabilityWrappedExportFn`
-    // pushes: the binding's module-level `required_capabilities`.
-    return comptime mb.wrapNativeFnWithToolGrant(
+    // Every export runs inside the accepted capability ceiling. The check is
+    // outermost, before the capability scope is pushed or the meter is bumped.
+    return comptime mb.wrapNativeFnWithCapabilityCeiling(
         capabilityWrappedExportFn(binding, func_binding),
         binding.specifier,
-        func_binding.name,
         binding.required_capabilities,
     );
 }
@@ -342,47 +315,8 @@ test "a capability-free func export gets no capability scope wrapper" {
     };
 
     // The capability layer adds nothing: the pointer is literally the original.
-    // Only the tool grant check (M4 T5) wraps it, which the next test covers.
     const scoped = comptime capabilityWrappedExportFn(binding, fb);
     try std.testing.expectEqual(@as(object.NativeFn, native), scoped);
-}
-
-test "every export, capability-free or not, runs inside the active tool grant" {
-    const allocator = std.testing.allocator;
-    var gc_state = try gc.GC.init(allocator, .{});
-    defer gc_state.deinit();
-    const ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const native = struct {
-        fn run(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
-            return value.JSValue.true_val;
-        }
-    }.run;
-    const fb = mb.FunctionBinding{ .name = "bare", .func = native, .arg_count = 0 };
-    const binding = mb.ModuleBinding{ .specifier = "zttp:test-bare", .name = "test-bare", .exports = &.{fb} };
-    const wrapped = comptime wrappedExportFn(binding, fb);
-
-    const Grant = struct {
-        fn allowsOnly(context_ptr: *const anyopaque, module: []const u8, name: []const u8) bool {
-            const allowed: *const [2][]const u8 = @ptrCast(@alignCast(context_ptr));
-            return std.mem.eql(u8, allowed[0], module) and std.mem.eql(u8, allowed[1], name);
-        }
-    };
-
-    // No grant: the call runs.
-    try std.testing.expect((try wrapped(ctx, value.JSValue.undefined_val, &.{})).isTrue());
-
-    // A grant that holds the export: the call runs.
-    const holds = [2][]const u8{ "zttp:test-bare", "bare" };
-    ctx.active_tool_grant = .{ .context = @ptrCast(&holds), .allows = Grant.allowsOnly };
-    try std.testing.expect((try wrapped(ctx, value.JSValue.undefined_val, &.{})).isTrue());
-
-    // A grant that lacks it: the named denial, before the export runs.
-    const lacks = [2][]const u8{ "zttp:test-bare", "other" };
-    ctx.active_tool_grant = .{ .context = @ptrCast(&lacks), .allows = Grant.allowsOnly };
-    try std.testing.expectError(error.ToolGrantDenied, wrapped(ctx, value.JSValue.undefined_val, &.{}));
-    ctx.active_tool_grant = null;
 }
 
 test "an export wrapper refuses under a ceiling that lacks its capability and runs under one that holds it" {

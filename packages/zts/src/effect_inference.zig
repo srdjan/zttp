@@ -31,22 +31,6 @@ const Capability = module_binding.ModuleCapability;
 
 pub const CapabilitySet = std.EnumSet(Capability);
 
-/// A `zttp:workflow` call (`call`, `saga`, `fanout`, or `follow`) found
-/// while `durable_callback_depth > 0` - i.e. lexically nested inside a
-/// `durable.step()` callback. `workflow.call` is only durable-recorded at
-/// step depth 0 (see runtime_workflow.zig); nested inside a user `step()`
-/// it silently loses durability at runtime with no error. This is an
-/// unconditional structural fact, not gated behind a declared `Proof<T, P>`
-/// or `Effects<...>` capsule - ZTS509 fires for every function regardless
-/// of what it claims about itself.
-pub const NestedWorkflowCall = struct {
-    /// Index into `Analyzer.functions` for the function the call sits in.
-    owner: usize,
-    /// Static name of the offending export: "call", "saga", "fanout", or
-    /// "follow". Borrowed from `imported.name`; never allocated.
-    workflow_fn: []const u8,
-};
-
 pub const EffectRow = struct {
     capabilities: CapabilitySet = CapabilitySet.initEmpty(),
     deterministic: bool = true,
@@ -155,16 +139,10 @@ pub const Analyzer = struct {
     /// `fn_count + 1` entries with a trailing sentinel.
     callee_starts: std.ArrayListUnmanaged(u32),
     callee_storage: std.ArrayListUnmanaged(usize),
-    durable_callback_depth: u32,
     /// The call node whose result the enclosing statement throws away, or
     /// `null_node`. Set only for the outermost call of an `expr_stmt`, so a
     /// nested call inside that statement is not mistaken for a discarded one.
     discarded_call: NodeIndex = null_node,
-    /// Every `zttp:workflow` call found nested inside a `step()` callback.
-    /// See `NestedWorkflowCall` - this is collected unconditionally during
-    /// the same walk that computes effect rows, regardless of any declared
-    /// `Proof<T, P>`/`Effects<...>` capsule.
-    nested_workflow_calls: std.ArrayListUnmanaged(NestedWorkflowCall),
     /// Inline route functions currently being folded into an owner's row.
     /// Named routes use the ordinary call graph recursion machinery.
     inline_route_stack: std.AutoHashMapUnmanaged(NodeIndex, void),
@@ -189,8 +167,6 @@ pub const Analyzer = struct {
             .user_fn_by_slot = .empty,
             .callee_starts = .empty,
             .callee_storage = .empty,
-            .durable_callback_depth = 0,
-            .nested_workflow_calls = .empty,
             .inline_route_stack = .empty,
         };
     }
@@ -202,7 +178,6 @@ pub const Analyzer = struct {
         self.user_fn_by_slot.deinit(self.allocator);
         self.callee_starts.deinit(self.allocator);
         self.callee_storage.deinit(self.allocator);
-        self.nested_workflow_calls.deinit(self.allocator);
         self.inline_route_stack.deinit(self.allocator);
     }
 
@@ -496,7 +471,6 @@ pub const Analyzer = struct {
             .call, .method_call => {
                 try self.handleCall(node, owner, row, seen_users);
                 const call = self.ir_view.getCall(node) orelse return;
-                const durable_step = self.isDurableStepCall(call);
                 try self.walkBaseExpr(call.callee, owner, row, seen_users);
                 for (0..call.args_count) |i| {
                     const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
@@ -506,13 +480,7 @@ pub const Analyzer = struct {
                     // argument. Without an edge here the helper's capabilities
                     // stay out of the caller's row entirely.
                     try self.recordFunctionValueArg(arg, owner, seen_users);
-                    if (durable_step and i == 1 and self.isFunctionNode(arg)) {
-                        self.durable_callback_depth += 1;
-                        defer self.durable_callback_depth -= 1;
-                        try self.walkBaseExpr(arg, owner, row, seen_users);
-                    } else {
-                        try self.walkBaseExpr(arg, owner, row, seen_users);
-                    }
+                    try self.walkBaseExpr(arg, owner, row, seen_users);
                 }
             },
             .member_access, .optional_chain, .computed_access => {
@@ -574,13 +542,7 @@ pub const Analyzer = struct {
         const call = self.ir_view.getCall(node) orelse return;
 
         if (self.calleeObjectProperty(call.callee)) |op| {
-            // The durable-step exemption holds only for reads the step records
-            // and replays. `performance.now` is not one, so it stays varying at
-            // any depth rather than being certified by an exemption whose
-            // premise it does not meet.
-            const exempt = self.durable_callback_depth > 0 and
-                !known_globals.isUnrecordableVaryingRead(op.object, op.property);
-            if (!exempt and isNonDeterministic(op.object, op.property)) {
+            if (isNonDeterministic(op.object, op.property)) {
                 row.deterministic = false;
                 row.pure = false;
             }
@@ -611,10 +573,6 @@ pub const Analyzer = struct {
             // declares `.clock` for its exp check and does not. Before those
             // rows every `zttp:auth` call carried the module union and this
             // would have demoted all five exports.
-            //
-            // Inside a `durable.step()` callback the read is recorded and
-            // replayed, which is the same reason the member-call rule above is
-            // gated on step depth.
             const effect = self.importEffect(imported.module, imported.name);
 
             // A write-effect call whose result the statement throws away is a
@@ -634,7 +592,7 @@ pub const Analyzer = struct {
             // `no_secret_leakage` already works; see the roadmap item.
             const result_discarded = node == self.discarded_call;
             const sinks_the_read = result_discarded and effect == .write;
-            if (self.durable_callback_depth == 0 and !sinks_the_read) {
+            if (!sinks_the_read) {
                 const added = row.capabilities.differenceWith(before);
                 if (added.contains(.clock) or added.contains(.random)) {
                     row.deterministic = false;
@@ -648,15 +606,6 @@ pub const Analyzer = struct {
                 std.mem.eql(u8, imported.name, fetch_sync_export))
             {
                 row.has_egress = true;
-            }
-            if (self.durable_callback_depth > 0 and
-                std.mem.eql(u8, imported.module, "zttp:workflow") and
-                isNestedWorkflowExport(imported.name))
-            {
-                try self.nested_workflow_calls.append(self.allocator, .{
-                    .owner = owner,
-                    .workflow_fn = imported.name,
-                });
             }
             return;
         }
@@ -867,24 +816,6 @@ pub const Analyzer = struct {
             },
             .local, .upvalue, .argument => return true,
         }
-    }
-
-    fn isDurableStepCall(self: *const Analyzer, call: ir.Node.CallExpr) bool {
-        if (self.ir_view.getTag(call.callee) != .identifier) return false;
-        const binding = self.ir_view.getBinding(call.callee) orelse return false;
-        const imported = self.imports.get(binding.slot) orelse return false;
-        return std.mem.eql(u8, imported.module, "zttp:durable") and
-            std.mem.eql(u8, imported.name, "step");
-    }
-
-    /// ZTS509's export allow-list: the four `zttp:workflow` exports that
-    /// only durably record at step depth 0 (runtime_workflow.zig). Nested
-    /// inside a `step()` callback, each one silently loses durability.
-    fn isNestedWorkflowExport(name: []const u8) bool {
-        return std.mem.eql(u8, name, "call") or
-            std.mem.eql(u8, name, "saga") or
-            std.mem.eql(u8, name, "fanout") or
-            std.mem.eql(u8, name, "follow");
     }
 
     /// Union the capabilities a call into `module` grants into `row`.
@@ -1155,46 +1086,6 @@ test "Date.now marks the enclosing function non-deterministic" {
     const row = analyzer.lookup("nowSeconds") orelse return error.FunctionNotFound;
     try testing.expect(!row.deterministic);
     try testing.expect(!row.pure);
-}
-
-test "Date.now inside durable step callback preserves determinism" {
-    const allocator = std.testing.allocator;
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
-        \\import { step } from "zttp:durable";
-        \\function handler(req) { return step("ts", () => Date.now()); }
-    );
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var analyzer = Analyzer.init(allocator, view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
-    const row = analyzer.lookup("handler") orelse return error.FunctionNotFound;
-    try std.testing.expect(row.deterministic);
-    try std.testing.expect(!row.pure);
-}
-
-test "Date.now as eager durable step argument is non-deterministic" {
-    const allocator = std.testing.allocator;
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
-        \\import { step } from "zttp:durable";
-        \\function handler(req) { return step("ts", Date.now()); }
-    );
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var analyzer = Analyzer.init(allocator, view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
-    const row = analyzer.lookup("handler") orelse return error.FunctionNotFound;
-    try std.testing.expect(!row.deterministic);
-    try std.testing.expect(!row.pure);
 }
 
 test "transitive non-determinism flows through callers" {
@@ -1682,34 +1573,6 @@ test "a cache delete does not reach the clock, a get does" {
 
     const lookup_fn = analyzer.lookup("lookup") orelse return error.FunctionNotFound;
     try testing.expect(lookup_fn.capabilities.contains(.clock));
-}
-
-test "a service call does not reach the filesystem" {
-    const allocator = testing.allocator;
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    // `zttp:service` declares `.filesystem` for the one-time system.json read in
-    // `installState`. That runs under the module set before any handler does;
-    // `serviceCall` reads the already populated registry map and dispatches, so
-    // charging every call a filesystem capability was over-approximation on the
-    // module's only export.
-    const source =
-        \\import { serviceCall } from "zttp:service";
-        \\function callBilling(route, init) { return serviceCall("billing", route, init); }
-    ;
-    var parser = try JsParser.init(allocator, source);
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var analyzer = Analyzer.init(allocator, view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
-
-    const call_billing = analyzer.lookup("callBilling") orelse return error.FunctionNotFound;
-    try testing.expect(call_billing.capabilities.contains(.network));
-    try testing.expect(call_billing.capabilities.contains(.runtime_callback));
-    try testing.expect(!call_billing.capabilities.contains(.filesystem));
 }
 
 test "base64 does not reach crypto, sha256 does" {

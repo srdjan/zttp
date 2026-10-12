@@ -118,7 +118,7 @@ pub const Manifest = struct {
     /// Optional partner-declared top-level section name. When set, the
     /// contract writer mirrors this extension's category buckets into a
     /// `<name>` block at the top of contract.json, giving partners parity
-    /// with built-ins like `cache` and `durable`. Owned by the manifest;
+    /// with built-ins like `cache`. Owned by the manifest;
     /// null when the partner is content with the per-specifier namespace
     /// under `extensions.<specifier>`.
     contract_section: ?[]u8 = null,
@@ -191,14 +191,6 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ManifestError!Mani
     if (exports_value != .array) return error.InvalidExport;
     for (exports_value.array.items) |item| {
         const exp = try parseExport(allocator, item);
-        // The tool catalog is a built-in declaration: only `zttp:tool` may
-        // carry it. A partner manifest that could declare one would put a
-        // catalog source outside the reviewed module set.
-        if (!std.mem.eql(u8, manifest.specifier, "zttp:tool") and declaresToolCatalog(exp)) {
-            var owned = exp;
-            owned.deinit(allocator);
-            return error.InvalidContractCategory;
-        }
         if (containsExport(manifest.exports.items, exp.name)) {
             var owned = exp;
             owned.deinit(allocator);
@@ -213,14 +205,6 @@ pub fn parse(allocator: std.mem.Allocator, bytes: []const u8) ManifestError!Mani
 
     return manifest;
 }
-
-fn declaresToolCatalog(exp: Export) bool {
-    for (exp.contract_extractions.items) |rule| {
-        if (rule.category == .tool_catalog) return true;
-    }
-    return false;
-}
-
 const BindingHasher = struct {
     hasher: std.crypto.hash.sha2.Sha256,
 
@@ -308,11 +292,6 @@ const BindingHasher = struct {
         self.boolean(exp.required_capabilities != null);
         if (exp.required_capabilities) |capabilities| self.tagList(capabilities);
         self.tag(exp.returns);
-        self.boolean(exp.returns_from_param != null);
-        if (exp.returns_from_param) |source| {
-            self.byte(source.param_index);
-            self.tag(source.kind);
-        }
         self.tagList(exp.param_types);
         self.count(exp.json_encodable_args.len);
         self.hasher.update(exp.json_encodable_args);
@@ -327,9 +306,6 @@ const BindingHasher = struct {
 
         self.count(exp.contract_extractions.len);
         for (exp.contract_extractions) |extraction| self.foldExtraction(extraction);
-        self.boolean(exp.contract_flags.sets_scope_used);
-        self.boolean(exp.contract_flags.sets_durable_used);
-        self.boolean(exp.contract_flags.sets_durable_timers);
         self.boolean(exp.contract_flags.sets_bearer_auth);
         self.boolean(exp.contract_flags.sets_jwt_auth);
 
@@ -363,8 +339,6 @@ const BindingHasher = struct {
         self.boolean(binding.state_deinit != null);
         self.optionalBytes(binding.contract_section);
         self.boolean(binding.sandboxable);
-        self.boolean(binding.comptime_only);
-        self.boolean(binding.self_managed_io);
     }
 };
 
@@ -663,14 +637,8 @@ fn validateContractFlags(value: std.json.Value) ManifestError!void {
 
 fn validateContractFlagName(raw: []const u8) ManifestError!void {
     const valid =
-        std.mem.eql(u8, raw, "sets_scope_used") or
-        std.mem.eql(u8, raw, "sets_durable_used") or
-        std.mem.eql(u8, raw, "sets_durable_timers") or
         std.mem.eql(u8, raw, "sets_bearer_auth") or
         std.mem.eql(u8, raw, "sets_jwt_auth") or
-        std.mem.eql(u8, raw, "setsScopeUsed") or
-        std.mem.eql(u8, raw, "setsDurableUsed") or
-        std.mem.eql(u8, raw, "setsDurableTimers") or
         std.mem.eql(u8, raw, "setsBearerAuth") or
         std.mem.eql(u8, raw, "setsJwtAuth");
     if (!valid) return error.InvalidContractFlag;
@@ -744,15 +712,13 @@ fn parseCapabilityDeclaration(
 /// writer emits at the top level, not just the existing module bindings,
 /// so partners cannot collide with `egress`, `properties`, etc.
 const reserved_contract_sections = [_][]const u8{
-    "handler",             "version",       "routes",
-    "modules",             "sandbox",       "functions",
-    "env",                 "egress",        "serviceCalls",
-    "workflowCalls",       "cache",         "sql",
-    "durable",             "scope",         "api",
-    "verification",        "aot",           "faultCoverage",
-    "rateLimiting",        "properties",    "behaviors",
-    "behaviorsExhaustive", "declaredSpecs", "specDiagnostics",
-    "extensions",
+    "handler",       "version",         "routes",
+    "modules",       "sandbox",         "functions",
+    "env",           "egress",          "cache",
+    "sql",           "api",             "verification",
+    "aot",           "faultCoverage",   "rateLimiting",
+    "properties",    "behaviors",       "behaviorsExhaustive",
+    "declaredSpecs", "specDiagnostics", "extensions",
 };
 
 fn reservedContractSectionName(raw: []const u8) bool {
@@ -923,20 +889,6 @@ test "parse manifest rejects an unknown contract category without freeing the ex
         \\  "exports": [
         \\    { "name": "f", "params": ["string"], "returns": "string", "effect": "none",
         \\      "contractExtractions": [{ "category": "no_such_category" }] }
-        \\  ]
-        \\}
-    ;
-    try std.testing.expectError(error.InvalidContractCategory, parse(std.testing.allocator, json));
-}
-
-test "parse manifest rejects a partner tool catalog extraction" {
-    const json =
-        \\{
-        \\  "schemaVersion": 1,
-        \\  "specifier": "zttp-ext:tools",
-        \\  "exports": [
-        \\    { "name": "catalog", "params": ["object"], "returns": "undefined", "effect": "none",
-        \\      "contractExtractions": [{ "category": "tool_catalog" }] }
         \\  ]
         \\}
     ;

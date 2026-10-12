@@ -9,8 +9,6 @@ pub const StateDeinitFn = *const fn (*anyopaque) callconv(.c) void;
 extern fn zttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator;
 extern fn zttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque;
 extern fn zttpSdkSetModuleState(handle: *ModuleHandle, slot: usize, ptr: *anyopaque, deinit_fn: StateDeinitFn) bool;
-extern fn zttpSdkActiveToolInputSchema(handle: *ModuleHandle, out_ptr: *[*]const u8, out_len: *usize) bool;
-extern fn zttpSdkActiveAgentPrompt(handle: *ModuleHandle, out_ptr: *[*]const u8, out_len: *usize) bool;
 
 /// Borrow the runtime's general-purpose allocator. Valid for the module
 /// call's lifetime.
@@ -36,23 +34,4 @@ pub fn setModuleState(
     deinit_fn: StateDeinitFn,
 ) RuntimeError!void {
     if (!zttpSdkSetModuleState(handle, slot, ptr, deinit_fn)) return error.OutOfMemory;
-}
-
-/// The input schema name the tool gate validated the current request against
-/// (M4 T7), or null when the current call is not serving a tool request.
-/// Borrowed for the module call's lifetime.
-pub fn activeToolInputSchema(handle: *ModuleHandle) ?[]const u8 {
-    var ptr: [*]const u8 = undefined;
-    var len: usize = 0;
-    if (!zttpSdkActiveToolInputSchema(handle, &ptr, &len)) return null;
-    return ptr[0..len];
-}
-
-/// The exact prompt admitted for the current agent request, or null outside an
-/// agent request. Borrowed for the module call's lifetime.
-pub fn activeAgentPrompt(handle: *ModuleHandle) ?[]const u8 {
-    var ptr: [*]const u8 = undefined;
-    var len: usize = 0;
-    if (!zttpSdkActiveAgentPrompt(handle, &ptr, &len)) return null;
-    return ptr[0..len];
 }

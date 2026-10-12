@@ -7,8 +7,6 @@ const engine = @import("engine_adapter.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const replay_runner = @import("replay_runner.zig");
 const test_runner = @import("test_runner.zig");
-const durable_recovery = @import("durable_recovery.zig");
-const durable_scheduler = @import("durable_scheduler.zig");
 const feature_options = @import("runtime_feature_options");
 const project_config_mod = @import("project_config");
 const retired_authority = project_config_mod.retired_authority;
@@ -17,8 +15,6 @@ const self_extract = @import("self_extract.zig");
 const live_reload_mod = @import("runtime_features.zig").live_reload;
 const serve_policy = @import("serve_policy.zig");
 const shared = @import("cli_shared.zig");
-const workflow_queue_cli = @import("workflow_queue_cli.zig");
-const durable_dead_runs_cli = @import("durable_dead_runs_cli.zig");
 
 const embedded_handler = @import("embedded_handler");
 
@@ -71,16 +67,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const user_args = args[1..];
     const command = if (user_args.len == 0) "" else user_args[0];
-
-    if (std.mem.eql(u8, command, "workflow-queue")) {
-        try workflowQueueCommand(allocator, user_args[1..]);
-        return;
-    }
-
-    if (std.mem.eql(u8, command, "durable")) {
-        try durableCommand(allocator, user_args[1..]);
-        return;
-    }
 
     if (self_payload) |payload| {
         defer payload.deinit(allocator);
@@ -144,43 +130,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     try serveCommandWithEnviron(allocator, user_args, init.environ);
 }
 
-pub fn workflowQueueCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    workflow_queue_cli.run(allocator, argv) catch |err| {
-        if (workflow_queue_cli.isExpectedUserError(err)) std.process.exit(1);
-        return err;
-    };
-}
-
-/// Dispatches `zttp durable <sub-verb> ...`. Only `dead-runs` exists today;
-/// structured as its own top-level command (rather than folding straight
-/// into `dead-runs` verbs) so other durable-run operator surfaces have a
-/// natural home under `durable` later without a breaking rename.
-pub fn durableCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    if (argv.len == 0 or std.mem.eql(u8, argv[0], "--help") or std.mem.eql(u8, argv[0], "help")) {
-        const usage =
-            \\zttp durable - durable-run operator commands
-            \\
-            \\Usage:
-            \\  zttp durable dead-runs list --durable <DIR>
-            \\  zttp durable dead-runs show --durable <DIR> <ID>
-            \\  zttp durable dead-runs replay --durable <DIR> <ID>
-            \\  zttp durable dead-runs discard --durable <DIR> <ID>
-            \\
-        ;
-        _ = std.c.write(std.c.STDOUT_FILENO, usage.ptr, usage.len);
-        return;
-    }
-    if (std.mem.eql(u8, argv[0], "dead-runs")) {
-        durable_dead_runs_cli.run(allocator, argv[1..]) catch |err| {
-            if (durable_dead_runs_cli.isExpectedUserError(err)) std.process.exit(1);
-            return err;
-        };
-        return;
-    }
-    std.debug.print("zttp durable: unknown subcommand '{s}'. Run `zttp durable --help` for usage.\n", .{argv[0]});
-    std.process.exit(1);
-}
-
 fn attestCommand(allocator: std.mem.Allocator) !void {
     var payload = (try self_extract.detect(allocator)) orelse {
         shared.writeStdoutLine("{\"error\":\"no embedded payload; attest is only available on self-extracting binaries\"}");
@@ -197,7 +146,8 @@ fn attestPayload(allocator: std.mem.Allocator, payload: *const self_extract.Payl
         std.process.exit(1);
     };
 
-    var raw = contract_runtime.parseContractJson(allocator, contract_json) catch {
+    var raw = contract_runtime.parseContractJson(allocator, contract_json) catch |err| {
+        if (err == error.UnsupportedRuntimeAuthority) return err;
         shared.writeStdoutLine("{\"error\":\"failed to parse contract\"}");
         std.process.exit(1);
     };
@@ -308,13 +258,12 @@ fn serveCommandWithDebugPanicPath(
             allocator,
             handler_path,
             config.runtime_config.sqlite_path,
-            config.runtime_config.system_config_path,
             policy.source,
         );
         applyCheckedServePolicy(&config, &checked_policy.?);
     }
 
-    // Source analysis must run before replay, fixture execution, scheduling,
+    // Source analysis must run before replay, fixture execution,
     // watching, or pool initialization can exercise recorded authority.
     try validateSourceAuthority(allocator, config);
 
@@ -336,21 +285,6 @@ fn serveCommandWithDebugPanicPath(
             std.process.exit(if (err == error.TestsFailed) 1 else 2);
         };
         return;
-    }
-
-    var scheduler: ?durable_scheduler.DurableScheduler = null;
-    defer if (scheduler) |*worker| worker.deinit();
-
-    if (config.runtime_config.durable_oplog_dir != null) {
-        _ = durable_recovery.recoverIncompleteOplogs(allocator, config.executionSpec()) catch |err| {
-            std.log.err("Durable recovery error: {}", .{err});
-            return;
-        };
-        scheduler = .{ .spec = config.executionSpec() };
-        scheduler.?.start() catch |err| {
-            std.log.err("Durable scheduler error: {}", .{err});
-            return;
-        };
     }
 
     var server = Server.init(allocator, config) catch |err| {
@@ -384,7 +318,6 @@ fn serveCommandWithDebugPanicPath(
                 .prove = feature_flags.prove_enabled,
                 .force_swap = feature_flags.force_swap,
                 .sql_schema_path = config.runtime_config.sqlite_path,
-                .system_path = config.runtime_config.system_config_path,
                 .policy_path = if (configured_policy) |*policy| policy.path else null,
             },
         );
@@ -413,7 +346,7 @@ fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !
                 source.filename,
                 .{
                     .strict = false,
-                    .version = zts.version.string,
+                    .type_check = refuseRetiredSourceImports,
                     .read_file = zts.file_io.readFileForModuleGraph,
                 },
             );
@@ -427,6 +360,20 @@ fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !
         },
         else => {},
     }
+}
+
+/// Contract projection omits unresolved imports. Inspect the existing parsed
+/// imports first, including each local dependency, before startup creates a pool.
+fn refuseRetiredSourceImports(checker: *zts.TypeChecker, root: u32) anyerror!u32 {
+    const view = checker.ir_view;
+    for (0..view.nodeCount()) |index| {
+        const node: u32 = @intCast(index);
+        if (view.getTag(node) != .import_decl) continue;
+        const declaration = view.getImportDecl(node) orelse continue;
+        const specifier = view.getString(declaration.module_idx) orelse continue;
+        if (retired_authority.isRetiredModule(specifier)) return error.UnsupportedRuntimeAuthority;
+    }
+    return checker.check(root);
 }
 
 fn applyCheckedServePolicy(config: *ServerConfig, checked: *const serve_policy.CheckedPolicy) void {
@@ -524,22 +471,6 @@ fn parseCommonServeFlag(
         config.log_requests = false;
         return true;
     }
-    if (std.mem.eql(u8, arg, "--system")) {
-        config.runtime_config.system_config_path = try shared.takeArg(i, argv, error.MissingSystemFile);
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--durable")) {
-        config.runtime_config.durable_oplog_dir = try shared.takeArg(i, argv, error.MissingDurableDir);
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--workflow-queue")) {
-        config.runtime_config.workflow_queue_enabled = true;
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--actor-queue")) {
-        config.runtime_config.queue_actor_enabled = true;
-        return true;
-    }
     if (std.mem.eql(u8, arg, "--outbound-http")) {
         config.runtime_config.outbound_http_enabled = true;
         return true;
@@ -595,8 +526,6 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         config.host = cfg.host;
         config.static_dir = cfg.static_dir;
         config.runtime_config.sqlite_path = cfg.sqlite;
-        config.runtime_config.durable_oplog_dir = cfg.durable_dir;
-        config.runtime_config.system_config_path = cfg.system;
         config.runtime_config.outbound_http_enabled = cfg.outbound_http;
         if (cfg.outbound_hosts.len > 1) return error.UnsupportedMultipleOutboundHosts;
         if (cfg.outbound_hosts.len == 1) {
@@ -782,10 +711,6 @@ fn printAppendedHelp() void {
         \\  --no-env-check        Skip required environment checks
         \\  --security-log <FILE> Write security decisions to FILE
         \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
-        \\  --system <FILE>       Handler bundle for service and workflow
-        \\  --durable <DIR>       Enable durable execution with write-ahead oplog
-        \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
-        \\  --actor-queue         Enable in-memory zttp:queue actor mailboxes
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -795,7 +720,7 @@ fn printAppendedHelp() void {
 /// bare-argument default, and `--version` / `--help` are spellings of two of
 /// these, so the list is the set of names a user can type as a subcommand.
 const dispatched_verbs = [_][]const u8{
-    "workflow-queue", "durable", "serve", "attest", "version", "help",
+    "serve", "attest", "version", "help",
 };
 
 fn printHelp() void {
@@ -807,8 +732,6 @@ const runtime_help_text =
     \\
     \\Usage:
     \\  zttp serve [options] [handler.ts]    Run handler
-    \\  zttp workflow-queue <cmd> --durable <DIR>  Inspect workflow queue dead letters
-    \\  zttp durable dead-runs <cmd> --durable <DIR>  Inspect failed durable runs
     \\  zttp attest                           Inspect embedded proof artifact
     \\  zttp version                          Show version
     \\  zttp help                             Show this help
@@ -841,10 +764,6 @@ fn printServeHelp() void {
         \\  --incident-log <FILE> Append runtime soundness incidents as JSONL
         \\  --replay <FILE>       Replay recorded traces and verify handler output
         \\  --test <FILE>         Run declarative handler tests from JSONL file
-        \\  --durable <DIR>       Enable durable execution with write-ahead oplog
-        \\  --system <FILE>       Handler bundle for zttp:service/workflow
-        \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
-        \\  --actor-queue         Enable in-memory zttp:queue actor mailboxes
         \\  --no-env-check        Skip startup env var validation
         \\  --security-log <FILE> Append security events to a JSONL file
         \\  --lifecycle <MODE>    Runtime lifecycle mode
@@ -920,67 +839,81 @@ test "parseServeArgs refuses a zero outbound timeout" {
     try std.testing.expectEqual(@as(u32, 1), config.runtime_config.outbound_timeout_ms);
 }
 
-test "source retired authority is refused before replay watch or pool startup" {
-    const source =
-        \\import { toolCatalog } from "zttp:tool";
-        \\import { routerMatch } from "zttp:router";
-        \\import { schemaCompile } from "zttp:validate";
-        \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
-        \\schemaCompile("Out", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
-        \\function lookup(req) { return Response.json({}); }
-        \\function assistant(req) { return Response.json({}); }
-        \\const routes = { "POST /tools/lookup": lookup, "POST /agent": assistant };
-        \\toolCatalog({
-        \\  lookup: { route: "POST /tools/lookup", description: "Look up one value.", input: "In", output: "Out", maxInputBytes: 4096 },
-        \\  assistant: { route: "POST /agent", description: "Answer.", maxInputBytes: 8192,
-        \\    agent: { tools: ["lookup"], provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\      limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 } }
-        \\  }
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
-        \\  return Response.json({}, { status: 404 });
-        \\}
-    ;
-    const config: ServerConfig = .{
-        .handler = .{ .inline_code = source },
-        .pool_size = 3,
+test "every retired module refuses supported startup modes" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { specifier: []const u8, symbol: []const u8 }{
+        .{ .specifier = "zttp:durable", .symbol = "run" },
+        .{ .specifier = "zttp:workflow", .symbol = "call" },
+        .{ .specifier = "zttp:queue", .symbol = "send" },
+        .{ .specifier = "zttp:scope", .symbol = "scope" },
+        .{ .specifier = "zttp:io", .symbol = "parallel" },
+        .{ .specifier = "zttp:service", .symbol = "serviceCall" },
+        .{ .specifier = "zttp:ledger", .symbol = "balance" },
+        .{ .specifier = "zttp:tool", .symbol = "toolInput" },
     };
-    try std.testing.expectError(
-        error.UnsupportedRuntimeAuthority,
-        validateSourceAuthority(std.testing.allocator, config),
-    );
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "import {{ {s} }} from \"{s}\";\n" ++
+                "function handler(req) {{ return Response.text(\"ok\"); }}\n",
+            .{ case.symbol, case.specifier },
+        );
+        defer allocator.free(source);
+        const modes = [_][]const []const u8{
+            &.{ "--pool", "3" },
+            &.{ "--replay", "missing-retired-replay.jsonl" },
+            &.{ "--test", "missing-retired-test.jsonl" },
+            &.{ "--watch", "--pool", "3" },
+        };
+        for (modes) |mode| {
+            // The internal runtime rejects watch mode before source processing.
+            if (std.mem.eql(u8, mode[0], "--watch") and !feature_options.enable_live_reload) continue;
+            // The command retains parsed configuration for its process lifetime.
+            var command_arena = std.heap.ArenaAllocator.init(allocator);
+            defer command_arena.deinit();
+            var args: std.ArrayList([]const u8) = .empty;
+            defer args.deinit(allocator);
+            try args.appendSlice(allocator, &.{ "--eval", source });
+            try args.appendSlice(allocator, mode);
+            try std.testing.expectError(error.UnsupportedRuntimeAuthority, serveCommand(command_arena.allocator(), args.items));
+        }
+    }
     try validateSourceAuthority(std.testing.allocator, .{ .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" } });
 }
 
 test "source startup refuses retired authority in a local dependency" {
     const allocator = std.testing.allocator;
-    const cases = [_]struct { import: []const u8, body: []const u8 }{
-        .{
-            .import = "import { balance } from \"zttp:ledger\";",
-            .body = "export function retired() { return balance(\"main\", \"USD\", \"asset:cash\"); }",
-        },
-        .{
-            .import = "import { agentPrompt } from \"zttp:tool\";",
-            .body = "export function retired() { return agentPrompt(); }",
-        },
+    const cases = [_]struct { specifier: []const u8, symbol: []const u8 }{
+        .{ .specifier = "zttp:durable", .symbol = "run" },
+        .{ .specifier = "zttp:workflow", .symbol = "call" },
+        .{ .specifier = "zttp:queue", .symbol = "send" },
+        .{ .specifier = "zttp:scope", .symbol = "scope" },
+        .{ .specifier = "zttp:io", .symbol = "parallel" },
+        .{ .specifier = "zttp:service", .symbol = "serviceCall" },
+        .{ .specifier = "zttp:ledger", .symbol = "balance" },
+        .{ .specifier = "zttp:tool", .symbol = "toolInput" },
     };
     for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const helper = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ case.import, case.body });
+        const helper = try std.fmt.allocPrint(
+            allocator,
+            "import {{ {s} }} from \"{s}\";\nexport function retired() {{ return 1; }}\n",
+            .{ case.symbol, case.specifier },
+        );
         defer allocator.free(helper);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = helper });
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data =
             \\import { retired } from "./dep.ts";
-            \\function handler(req) { return Response.text("ok"); }
+            \\function handler(req) { retired(); return Response.text("ok"); }
         });
         const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
         defer allocator.free(handler_path);
+        var command_arena = std.heap.ArenaAllocator.init(allocator);
+        defer command_arena.deinit();
         try std.testing.expectError(
             error.UnsupportedRuntimeAuthority,
-            validateSourceAuthority(allocator, .{ .handler = .{ .file_path = handler_path } }),
+            serveCommand(command_arena.allocator(), &.{ handler_path, "--pool", "3" }),
         );
     }
 }
@@ -1017,7 +950,6 @@ test "serve policy validation never bypasses a configured policy" {
             allocator,
             handler_path,
             config.runtime_config.sqlite_path,
-            config.runtime_config.system_config_path,
             "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
         ),
     );
@@ -1057,7 +989,6 @@ test "serve installs the checked configured policy for a computed env key" {
     var checked = try serve_policy.validateConfiguredPolicy(
         allocator,
         handler_path,
-        null,
         null,
         discovered.source,
     );
@@ -1130,14 +1061,6 @@ test "parseCommonServeFlag: --lifecycle parses known value" {
     try std.testing.expectEqual(contract_runtime.PoolingPolicy.ephemeral, config.lifecycle_override.?);
 }
 
-test "parseCommonServeFlag: --actor-queue enables queue runtime" {
-    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
-    const argv = [_][]const u8{"--actor-queue"};
-    var i: usize = 0;
-    try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
-    try std.testing.expect(config.runtime_config.queue_actor_enabled);
-}
-
 test "parseCommonServeFlag: --lifecycle rejects unknown value" {
     var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
     const argv = [_][]const u8{ "--lifecycle", "nonsense" };
@@ -1164,9 +1087,7 @@ test "replay exit codes distinguish verification failures from invalid fixtures"
 }
 
 test "the runtime help lists every verb the runtime dispatches" {
-    // The template binary had `durable` dispatched and unlisted until this
-    // gate was added. Same two-way check the developer CLI runs on its own
-    // table; this binary's dispatch is small enough not to need one.
+    // This binary's dispatch is small enough not to need a command table.
     for (dispatched_verbs) |verb| {
         var needle: [48]u8 = undefined;
         const line = try std.fmt.bufPrint(&needle, "  zttp {s}", .{verb});

@@ -1,6 +1,0 @@
-{
-  "version": 1,
-  "handlers": [
-    { "name": "greet", "path": "greet.ts", "baseUrl": "https://greet.internal" }
-  ]
-}

@@ -13,13 +13,6 @@ const std = @import("std");
 // adapter and the engine into every consumer of a contract.
 const module_binding = @import("zts-base").module_authorization;
 const profile_identity = @import("zts-base").profile_identity;
-// The consumer declaration and the profile table its ceiling names (M4 T5b).
-const declaration = @import("zts-base").declaration;
-const tool_schema = @import("zts-base").tool_schema;
-/// Credential references (M4 T6): the canonical type and its loader.
-pub const credential_ref = @import("zts-base").credential_ref;
-pub const CredentialRef = credential_ref.CredentialRef;
-const capability_profiles = @import("zts-base").capability_profiles;
 
 fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try allocator.dupe(u8, v) else null;
@@ -30,27 +23,16 @@ pub const HandlerLoc = struct {
     line: u32,
     column: u32,
 };
-
 pub const CoreProfile = profile_identity.CoreProfile;
-pub const SourceFrontendProfile = profile_identity.SourceFrontendProfile;
-
-pub const SourceFrontendIdentity = struct {
-    profile: SourceFrontendProfile,
-    grammar_hash: [32]u8,
-};
-
 /// Exact language identity used to turn authored source into core bytecode.
 /// Hashes are raw SHA-256 bytes on the domain type and lowercase hex on wire.
 pub const SourceIdentity = struct {
     core_profile: CoreProfile = profile_identity.core_profile,
     core_grammar_hash: [32]u8 = [_]u8{0} ** 32,
     semantics_hash: [32]u8 = [_]u8{0} ** 32,
-    frontend: ?SourceFrontendIdentity = null,
-
     pub fn isStamped(self: SourceIdentity) bool {
         return !std.mem.allEqual(u8, &self.core_grammar_hash, 0) and
-            !std.mem.allEqual(u8, &self.semantics_hash, 0) and
-            (self.frontend == null or !std.mem.allEqual(u8, &self.frontend.?.grammar_hash, 0));
+            !std.mem.allEqual(u8, &self.semantics_hash, 0);
     }
 };
 
@@ -104,8 +86,7 @@ pub const ExtensionContract = struct {
     categories: std.StringHashMapUnmanaged(ExtensionCategoryBucket) = .empty,
     /// Optional partner-declared top-level contract section name. When non-
     /// null, the writer mirrors this extension's category buckets under a
-    /// top-level `<name>` block, giving partners parity with built-ins like
-    /// `cache` and `durable`. Owned by the contract.
+    /// top-level `<name>` block. Owned by the contract.
     contract_section: ?[]u8 = null,
 
     pub fn deinit(self: *ExtensionContract, allocator: std.mem.Allocator) void {
@@ -148,166 +129,6 @@ pub const SqlInfo = struct {
     pub fn deinit(self: *SqlInfo, allocator: std.mem.Allocator) void {
         for (self.queries.items) |*query| query.deinit(allocator);
         self.queries.deinit(allocator);
-    }
-};
-
-pub const DurableKeyInfo = struct {
-    literal: std.ArrayList([]const u8), // each entry owned
-    dynamic: bool,
-};
-
-pub const DurableWorkflowProofLevel = enum {
-    none,
-    partial,
-    complete,
-
-    pub fn toString(self: DurableWorkflowProofLevel) []const u8 {
-        return switch (self) {
-            .none => "none",
-            .partial => "partial",
-            .complete => "complete",
-        };
-    }
-
-    pub fn fromString(raw: []const u8) DurableWorkflowProofLevel {
-        if (std.mem.eql(u8, raw, "complete")) return .complete;
-        if (std.mem.eql(u8, raw, "partial")) return .partial;
-        return .none;
-    }
-};
-
-pub const DurableWorkflowNodeKind = enum {
-    branch,
-    step,
-    step_with_timeout,
-    sleep,
-    sleep_until,
-    wait_signal,
-    signal,
-    signal_at,
-    return_response,
-
-    pub fn toString(self: DurableWorkflowNodeKind) []const u8 {
-        return switch (self) {
-            .branch => "branch",
-            .step => "step",
-            .step_with_timeout => "stepWithTimeout",
-            .sleep => "sleep",
-            .sleep_until => "sleepUntil",
-            .wait_signal => "waitSignal",
-            .signal => "signal",
-            .signal_at => "signalAt",
-            .return_response => "return",
-        };
-    }
-
-    pub fn fromString(raw: []const u8) DurableWorkflowNodeKind {
-        if (std.mem.eql(u8, raw, "branch")) return .branch;
-        if (std.mem.eql(u8, raw, "step")) return .step;
-        if (std.mem.eql(u8, raw, "stepWithTimeout")) return .step_with_timeout;
-        if (std.mem.eql(u8, raw, "sleep")) return .sleep;
-        if (std.mem.eql(u8, raw, "sleepUntil")) return .sleep_until;
-        if (std.mem.eql(u8, raw, "waitSignal")) return .wait_signal;
-        if (std.mem.eql(u8, raw, "signal")) return .signal;
-        if (std.mem.eql(u8, raw, "signalAt")) return .signal_at;
-        return .return_response;
-    }
-};
-
-pub const DurableWorkflowNode = struct {
-    id: []const u8,
-    kind: DurableWorkflowNodeKind,
-    label: []const u8,
-    detail: ?[]const u8 = null,
-    status: ?u16 = null,
-
-    pub fn deinit(self: *DurableWorkflowNode, allocator: std.mem.Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.label);
-        if (self.detail) |detail| allocator.free(detail);
-    }
-};
-
-pub const DurableWorkflowEdge = struct {
-    from: []const u8,
-    to: []const u8,
-    condition: ?[]const u8 = null,
-
-    pub fn deinit(self: *DurableWorkflowEdge, allocator: std.mem.Allocator) void {
-        allocator.free(self.from);
-        allocator.free(self.to);
-        if (self.condition) |condition| allocator.free(condition);
-    }
-};
-
-pub const DurableWorkflowProperties = struct {
-    retry_safe: bool = false,
-    idempotent: bool = false,
-    fault_covered: bool = false,
-    reasons: std.ArrayList([]const u8) = .empty,
-
-    pub fn deinit(self: *DurableWorkflowProperties, allocator: std.mem.Allocator) void {
-        for (self.reasons.items) |reason| allocator.free(reason);
-        self.reasons.deinit(allocator);
-    }
-};
-
-pub const DurableWorkflow = struct {
-    workflow_id: ?[]const u8 = null,
-    proof_level: DurableWorkflowProofLevel = .none,
-    properties: DurableWorkflowProperties = .{},
-    nodes: std.ArrayList(DurableWorkflowNode) = .empty,
-    edges: std.ArrayList(DurableWorkflowEdge) = .empty,
-
-    pub fn deinit(self: *DurableWorkflow, allocator: std.mem.Allocator) void {
-        if (self.workflow_id) |workflow_id| allocator.free(workflow_id);
-        self.properties.deinit(allocator);
-        for (self.nodes.items) |*node| node.deinit(allocator);
-        self.nodes.deinit(allocator);
-        for (self.edges.items) |*edge| edge.deinit(allocator);
-        self.edges.deinit(allocator);
-    }
-};
-
-pub const DurableInfo = struct {
-    used: bool,
-    keys: DurableKeyInfo,
-    steps: std.ArrayList([]const u8), // each entry owned
-    timers: bool = false,
-    signals: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
-    producer_keys: DurableKeyInfo = .{ .literal = .empty, .dynamic = false },
-    workflow: DurableWorkflow = .{},
-
-    pub fn deinit(self: *DurableInfo, allocator: std.mem.Allocator) void {
-        for (self.keys.literal.items) |key| {
-            allocator.free(key);
-        }
-        self.keys.literal.deinit(allocator);
-        for (self.steps.items) |step| {
-            allocator.free(step);
-        }
-        self.steps.deinit(allocator);
-        for (self.signals.literal.items) |signal| {
-            allocator.free(signal);
-        }
-        self.signals.literal.deinit(allocator);
-        for (self.producer_keys.literal.items) |key| {
-            allocator.free(key);
-        }
-        self.producer_keys.literal.deinit(allocator);
-        self.workflow.deinit(allocator);
-    }
-};
-
-pub const ScopeInfo = struct {
-    used: bool,
-    names: std.ArrayList([]const u8),
-    dynamic: bool = false,
-    max_depth: u32 = 0,
-
-    pub fn deinit(self: *ScopeInfo, allocator: std.mem.Allocator) void {
-        for (self.names.items) |name| allocator.free(name);
-        self.names.deinit(allocator);
     }
 };
 
@@ -563,17 +384,6 @@ pub fn emptyContract(path: []const u8) HandlerContract {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -629,7 +439,7 @@ pub const HandlerProperties = struct {
     read_only: bool,
     /// Read-only AND no cacheGet. Independent of mutable state.
     stateless: bool,
-    /// Read-only OR all writes within durable steps. Safe for Lambda retry.
+    /// Read-only. Safe for Lambda retry.
     retry_safe: bool,
     /// No Date.now(), Math.random(), or performance.now() usage.
     deterministic: bool,
@@ -637,19 +447,19 @@ pub const HandlerProperties = struct {
     has_egress: bool,
     // --- Data flow provenance (from FlowChecker) ---
     /// No {secret} data reaches response bodies or headers, logs, or external
-    /// egress. A write to the durable store, a queue, the cache, SQL, or another
-    /// handler is not a sink: the readers of stored data carry {unknown}.
+    /// egress. A write to cache or SQL is not a sink. Store readers carry
+    /// {unknown}.
     no_secret_leakage: bool = true,
     /// No {credential} data reaches response bodies or headers, logs, or external
-    /// egress (URL, headers, or body). The exclusion for stores, queues, and other
-    /// handlers is the same as for `no_secret_leakage`.
+    /// egress (URL, headers, or body). The store exclusion matches
+    /// `no_secret_leakage`.
     no_credential_leakage: bool = true,
     /// All {user_input} data passes through validation before external egress.
     input_validated: bool = true,
     /// {user_input} data does not flow to external egress hosts.
     pii_contained: bool = true,
     // --- Derived properties ---
-    /// Deterministic AND (read_only OR all writes in durable steps).
+    /// Deterministic AND read_only.
     /// Safe for at-least-once delivery and automatic retry.
     idempotent: bool = false,
     /// Maximum number of I/O calls on any single execution path.
@@ -971,20 +781,6 @@ pub const SpecDiagnostic = struct {
         /// This one survives because ZTS611 requires the handler to declare a
         /// proof-supported `Proof<T, P>` and this does not.
         missing_proof_capsule_export,
-        /// ZTS509: `workflow.call`/`saga`/`fanout`/`follow` is used inside a
-        /// `durable.step()` callback. These exports only durably record at
-        /// step depth 0 (runtime_workflow.zig); nested inside a user
-        /// `step()` they silently lose durability at runtime. Unconditional:
-        /// fires regardless of any declared `Proof<T, P>`/`Effects<...>`.
-        workflow_call_in_step,
-        /// ZTS510: a statically-analyzable `saga([...])` has a non-last step
-        /// with no `compensate`, leaving a partial-rollback hole - if a
-        /// later step fails, this step's completed side effect is never
-        /// undone. The last step may omit `compensate` (it never completed
-        /// if it's the one that failed, and nothing runs after it to
-        /// trigger a rollback). Only fires for statically-analyzable sagas;
-        /// see `SagaCallInfo.dynamic`.
-        saga_step_missing_compensate,
         /// ZTS511: an `Effects<...>` ceiling whose capability payload is not a
         /// closed union of string literals. The extractor recovers no names,
         /// which is indistinguishable from no annotation, so the ceiling check
@@ -997,14 +793,9 @@ pub const SpecDiagnostic = struct {
         /// ceiling or budget check needs an over-approximation; discharging
         /// against a lower bound would certify a program nobody analysed.
         effect_row_lower_bound,
-        /// ZTS513: the handler's `toolCatalog` declaration is refused. The
-        /// reason is a `ToolCatalogRefusal` tag, carried in `spec_name`.
-        tool_catalog_refused,
         /// ZTS514: a `validateJson`, `validateObject`, `coerceJson`, or
         /// `decodeJson` call names a schema `zttp:validate` cannot compile, so
-        /// it fails on every input; or a `schemaCompile` literal it cannot
-        /// compile that no tool catalog entry names (M4 T7). `spec_name` is the
-        /// schema name.
+        /// it fails on every input. `spec_name` is the schema name.
         schema_not_compilable,
 
         pub fn code(self: Kind) []const u8 {
@@ -1019,11 +810,8 @@ pub const SpecDiagnostic = struct {
                 .budget_exceeded => "ZTS506",
                 .helper_budget_exceeded => "ZTS607",
                 .missing_proof_capsule_export => "ZTS508",
-                .workflow_call_in_step => "ZTS509",
-                .saga_step_missing_compensate => "ZTS510",
                 .effect_ceiling_not_literal => "ZTS511",
                 .effect_row_lower_bound => "ZTS512",
-                .tool_catalog_refused => "ZTS513",
                 .schema_not_compilable => "ZTS514",
             };
         }
@@ -1404,847 +1192,6 @@ pub const CostEnvelope = struct {
     }
 };
 
-pub const ServiceCallInfo = struct {
-    service: []const u8, // owned
-    route_pattern: []const u8, // owned
-    /// Service or route_pattern is computed at runtime. When true, the
-    /// per-surface fields below carry no useful information.
-    dynamic: bool = false,
-    path_params: KnownList = .{ .complete = .empty },
-    query_keys: KnownList = .{ .complete = .empty },
-    header_keys: KnownList = .{ .complete = .empty },
-    body: BodySpec = .none,
-
-    /// A statically-enumerated list of string keys, or "opaque" when the
-    /// analyzer could not prove the set is complete. The system linker
-    /// treats `.dynamic` as "cannot prove" and fails closed on required keys.
-    pub const KnownList = union(enum) {
-        complete: std.ArrayList([]const u8), // each entry owned
-        dynamic,
-
-        pub fn isDynamic(self: KnownList) bool {
-            return self == .dynamic;
-        }
-
-        pub fn items(self: KnownList) []const []const u8 {
-            return switch (self) {
-                .complete => |list| list.items,
-                .dynamic => &.{},
-            };
-        }
-
-        pub fn deinitOwned(self: *KnownList, allocator: std.mem.Allocator) void {
-            switch (self.*) {
-                .complete => |*list| {
-                    for (list.items) |s| allocator.free(s);
-                    list.deinit(allocator);
-                },
-                .dynamic => {},
-            }
-        }
-
-        pub fn markDynamic(self: *KnownList, allocator: std.mem.Allocator) void {
-            self.deinitOwned(allocator);
-            self.* = .dynamic;
-        }
-    };
-
-    /// Three-state body presence: no body field, body present (statically
-    /// inspectable), or body present but opaque at compile time. Replaces the
-    /// prior `has_body: bool` + `body_dynamic: bool` pair where some
-    /// combinations were meaningless.
-    pub const BodySpec = union(enum) {
-        none,
-        present,
-        dynamic,
-
-        pub fn isDynamic(self: BodySpec) bool {
-            return self == .dynamic;
-        }
-
-        pub fn isPresent(self: BodySpec) bool {
-            return self != .none;
-        }
-    };
-
-    pub fn markAllDynamic(self: *ServiceCallInfo, allocator: std.mem.Allocator) void {
-        self.path_params.markDynamic(allocator);
-        self.query_keys.markDynamic(allocator);
-        self.header_keys.markDynamic(allocator);
-        self.body = .dynamic;
-    }
-
-    pub fn deinit(self: *ServiceCallInfo, allocator: std.mem.Allocator) void {
-        allocator.free(self.service);
-        allocator.free(self.route_pattern);
-        self.path_params.deinitOwned(allocator);
-        self.query_keys.deinitOwned(allocator);
-        self.header_keys.deinitOwned(allocator);
-    }
-};
-
-/// One `zttp:workflow` `call(name, init?)`/`saga([...])`/`fanout([...])`
-/// dispatch target: a named co-located sub-handler reached in-process via a
-/// `--system` bundle. The system linker resolves `target` against the
-/// bundle's handler names and `route_pattern` against the target's own
-/// routes, the same way `ServiceCallInfo` is resolved - but simpler, since
-/// `init` has no path-param-templating or required-query/header convention
-/// to prove (the path is matched directly, like an `EmittedAffordance` href).
-pub const WorkflowCallInfo = struct {
-    target: []const u8, // owned
-    /// Synthesized "METHOD /path" (defaults: GET, /) from `init.method`/
-    /// `init.path` when present and literal.
-    route_pattern: []const u8, // owned
-    /// True when `target` or `init.method`/`init.path` is not a compile-time
-    /// literal. A dynamic call is counted, never resolved, and downgrades
-    /// the bundle proof - fail-closed exactly like `ServiceCallInfo`.
-    dynamic: bool = false,
-
-    pub fn deinit(self: *WorkflowCallInfo, allocator: std.mem.Allocator) void {
-        allocator.free(self.target);
-        allocator.free(self.route_pattern);
-    }
-};
-
-/// One hypermedia affordance emitted by a `resource(data, affordances)` call:
-/// the single source of truth the system linker resolves to a bundle route
-/// (Subsystem 4 in the workflow/hypermedia design). Extracted strict-literal
-/// and fail-closed exactly like `ServiceCallInfo`: a non-literal `href` (or a
-/// computed `affordances` argument) sets `dynamic` so the linker never claims a
-/// dynamic link resolved.
-pub const EmittedAffordance = struct {
-    rel: []const u8, // owned
-    /// HTTP method, defaulting to "GET" when the affordance omits one (a HAL
-    /// navigation `_links` entry). Owned.
-    method: []const u8, // owned
-    href: []const u8, // owned
-    /// True when `href` carries a `{param}` placeholder (a HAL-FORMS templated
-    /// link). The linker normalizes `{param}` -> `:param` before route matching.
-    templated: bool = false,
-    /// True when `href` (or the enclosing affordance value) was not a compile
-    /// time literal. A dynamic affordance is counted, never resolved, and
-    /// downgrades the bundle proof.
-    dynamic: bool = false,
-
-    pub fn deinit(self: *EmittedAffordance, allocator: std.mem.Allocator) void {
-        allocator.free(self.rel);
-        allocator.free(self.method);
-        allocator.free(self.href);
-    }
-};
-
-/// Why the build refuses a `toolCatalog` declaration (ZTS513). One member per
-/// build rule of the M4 T2 design note, section 5. A refused catalog puts no
-/// entry in `HandlerContract.tools`.
-pub const ToolCatalogRefusal = enum {
-    /// The argument is not an object literal of literal keys.
-    catalog_not_literal,
-    /// `toolCatalog` is called somewhere other than a module-scope statement.
-    catalog_not_module_scope,
-    /// `toolCatalog` is called more than once.
-    catalog_repeated,
-    /// An entry is not an object literal, or a field is not a literal of its type.
-    entry_not_literal,
-    /// An entry lacks `route`, `description`, or `maxInputBytes`.
-    entry_field_missing,
-    /// An entry has a field outside the closed tool-or-agent entry shape.
-    entry_field_unknown,
-    /// An entry declares both tool schemas and an agent, or neither form.
-    entry_kind_invalid,
-    /// An agent entry declares a tool-only `scope` field.
-    agent_scope_forbidden,
-    /// `agent` is not an object literal.
-    agent_not_literal,
-    /// `agent` lacks `tools`, `provider`, or `limits`.
-    agent_field_missing,
-    /// `agent` holds a field other than `tools`, `provider`, and `limits`.
-    agent_field_unknown,
-    /// `agent` names the same field twice.
-    agent_field_repeated,
-    /// `agent.tools` is not a non-empty array of string literals.
-    agent_tools_not_literal,
-    /// `agent.tools` names one tool more than once.
-    agent_tool_duplicate,
-    /// `agent.tools` names no entry in this catalog.
-    agent_tool_unknown,
-    /// `agent.tools` names an agent entry instead of a tool entry.
-    agent_tool_is_agent,
-    /// An agent-listed tool route contains a `:param` path segment. M5a
-    /// supplies tool arguments in the request body and has no path binding.
-    agent_tool_route_param,
-    /// `agent.provider` is not an object literal.
-    agent_provider_not_literal,
-    /// `agent.provider` lacks `endpoint` or `credential`.
-    agent_provider_field_missing,
-    /// `agent.provider` holds a field other than `endpoint` and `credential`.
-    agent_provider_field_unknown,
-    /// `agent.provider` names the same field twice.
-    agent_provider_field_repeated,
-    /// The provider endpoint is not a literal endpoint that can be normalized.
-    agent_provider_endpoint_invalid,
-    /// An agent provider field is not a non-empty string literal.
-    agent_provider_value_invalid,
-    /// The provider credential has no reference in zttp.json.
-    agent_credential_unknown,
-    /// The provider endpoint differs from its zttp.json credential reference.
-    agent_credential_endpoint_mismatch,
-    /// `agent.limits` is not an object literal.
-    agent_limits_not_literal,
-    /// `agent.limits` lacks one of its seven required fields.
-    agent_limit_field_missing,
-    /// `agent.limits` holds a field outside its closed seven-field shape.
-    agent_limit_field_unknown,
-    /// `agent.limits` names the same field twice.
-    agent_limit_field_repeated,
-    /// An agent limit is not a positive integer literal within its named maximum.
-    agent_limit_invalid,
-    /// `toolCallsPerRound` is greater than `toolCalls`.
-    agent_tool_calls_per_round_invalid,
-    /// M5a admits at most one agent entry in a handler catalog.
-    agent_repeated,
-    /// Two entries have the same name.
-    duplicate_name,
-    /// Two entries name the same route.
-    duplicate_route,
-    /// The `routerMatch` table is not a literal, so its routes are unknown.
-    route_table_dynamic,
-    /// An entry names a route the `routerMatch` table does not hold.
-    route_unknown,
-    /// A route in the table has no catalog entry: a tool handler is tool-only.
-    route_untooled,
-    /// An entry names a schema no literal `schemaCompile` registers.
-    schema_unknown,
-    /// An entry names a schema that `schemaCompile` registers more than once.
-    schema_registered_twice,
-    /// A named schema is outside the closed tool schema subset.
-    schema_not_in_subset,
-    /// An entry names the same field twice.
-    entry_field_repeated,
-    /// `maxInputBytes` is not a positive integer literal at most 1 MiB.
-    max_input_bytes_invalid,
-    /// The walk that lists a route's reachable exports met a node it cannot
-    /// read. The catalog would claim less authority than the code has, so the
-    /// build refuses rather than under-report.
-    exports_unanalyzable,
-    /// `scope` is not an object literal holding at least one key whose value
-    /// is a string literal.
-    scope_not_literal,
-    /// `scope` holds a key other than `tenant` and `subject`.
-    scope_unknown_key,
-    /// A `scope` value does not name a required top-level string property of
-    /// the input schema.
-    scope_field_invalid,
-    /// The route reaches an export that reads state a separate call wrote
-    /// (decision 6): a `zttp:cache` read, any `zttp:sql` export,
-    /// `queue.receive`, `durable.waitSignal`, or `workflow.saga` (whose steps
-    /// produce a value the flow analysis cannot trace).
-    cross_call_read,
-    /// An agent route reaches an export that reads state a separate call wrote.
-    agent_cross_call_read,
-    /// A tool or agent route reaches workflow dispatch, which runs another
-    /// handler outside the current route grant.
-    indirect_dispatch,
-    /// An agent route reaches an egress sender other than plain `fetch`.
-    agent_egress,
-    /// An agent route reaches `queue.send`.
-    agent_queue_send,
-    /// An agent route reaches `durable.signal`.
-    agent_durable_signal,
-    /// An agent route calls a route function claimed by a tool entry.
-    agent_tool_route_call,
-    /// A plain `fetch` in an agent route does not use the provider endpoint.
-    agent_fetch_endpoint,
-    /// A plain `fetch` in an agent route has no literal options object with a
-    /// `credential` field.
-    agent_fetch_options,
-    /// A plain `fetch` in an agent route does not name the provider credential.
-    agent_fetch_credential,
-    /// A plain `fetch` in an agent route has a `durable` option.
-    agent_fetch_durable,
-    /// `callTool` is reached from a route that is not an agent route.
-    call_tool_outside_agent,
-    /// The handler's shared dispatch, outside every route function, reaches a
-    /// module export other than `routerMatch`. At runtime no tool's grant
-    /// holds it, so every tool request would fail on it.
-    dispatch_reaches_export,
-    /// In a tool route, a `zttp:fetch` `fetch` call whose URL is not a string
-    /// literal, whose options are not an object literal, or whose options hold a
-    /// spread (M4 T6). A value the build cannot see could carry a `credential`
-    /// that model input chose.
-    fetch_arguments_not_literal,
-    /// In a tool route, `fetch` is named other than as the callee of a call,
-    /// so a call the build cannot see could name a credential.
-    fetch_as_value,
-    /// A `credential` option is not a string literal.
-    credential_not_literal,
-    /// A `credential` option on `fetchWithRetry`, or beside `durable`: only the
-    /// synchronous `fetch` path injects a credential, and it never retries.
-    credential_sender_unsupported,
-    /// In a tool route, `toolInput` names its schema with something other than
-    /// a string literal (M4 T7).
-    tool_input_not_literal,
-    /// In a tool route, `toolInput` names a schema other than the route's
-    /// catalog input, so it could never answer `ok` on that route (M4 T7).
-    tool_input_mismatch,
-
-    pub fn sentence(self: ToolCatalogRefusal) []const u8 {
-        return switch (self) {
-            .catalog_not_literal => "the toolCatalog argument must be an object literal whose keys are literal tool names",
-            .catalog_not_module_scope => "call toolCatalog as a statement at module scope, not inside a function or expression",
-            .catalog_repeated => "call toolCatalog once; a handler has one catalog",
-            .entry_not_literal => "each entry must be an object literal whose fields use their required literal shapes",
-            .entry_field_missing => "each entry needs route, description, and maxInputBytes",
-            .entry_field_unknown => "an entry may hold only route, description, input, output, maxInputBytes, scope, and agent",
-            .entry_kind_invalid => "an entry must declare either input and output or agent, never both and never neither",
-            .agent_scope_forbidden => "an agent entry may not declare scope",
-            .agent_not_literal => "agent must be an object literal",
-            .agent_field_missing => "agent needs tools, provider, and limits",
-            .agent_field_unknown => "agent may hold only tools, provider, and limits",
-            .agent_field_repeated => "agent names the same field twice",
-            .agent_tools_not_literal => "agent.tools must be a non-empty array of string literals",
-            .agent_tool_duplicate => "agent.tools may name each tool once",
-            .agent_tool_unknown => "each agent.tools name must name an entry in the same catalog",
-            .agent_tool_is_agent => "each agent.tools name must name a tool entry, not an agent entry",
-            .agent_tool_route_param => "an agent-listed tool route may not contain a :param path segment because callTool supplies arguments in the request body",
-            .agent_provider_not_literal => "agent.provider must be an object literal",
-            .agent_provider_field_missing => "agent.provider needs endpoint and credential",
-            .agent_provider_field_unknown => "agent.provider may hold only endpoint and credential",
-            .agent_provider_field_repeated => "agent.provider names the same field twice",
-            .agent_provider_endpoint_invalid => "agent.provider.endpoint must be a literal URL with a normalizable endpoint",
-            .agent_provider_value_invalid => "agent provider fields must be non-empty string literals",
-            .agent_credential_unknown => "the agent provider credential must name a credential reference in zttp.json",
-            .agent_credential_endpoint_mismatch => "the agent provider endpoint must match the endpoint of its zttp.json credential reference",
-            .agent_limits_not_literal => "agent.limits must be an object literal",
-            .agent_limit_field_missing => "agent.limits needs rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, turnDeadlineMs, and providerRequestBytes",
-            .agent_limit_field_unknown => "agent.limits may hold only rounds, toolCalls, toolCallsPerRound, argumentBytes, resultBytes, turnDeadlineMs, and providerRequestBytes",
-            .agent_limit_field_repeated => "agent.limits names the same field twice",
-            .agent_limit_invalid => "each agent limit must be a positive integer literal no larger than its named maximum",
-            .agent_tool_calls_per_round_invalid => "toolCallsPerRound must not be greater than toolCalls",
-            .agent_repeated => "a handler catalog may hold at most one agent entry",
-            .duplicate_name => "two entries have the same tool name",
-            .duplicate_route => "two entries name the same route",
-            .route_table_dynamic => "the routerMatch table must be an object literal so every tool route is known at build time",
-            .route_unknown => "the entry names a route that the routerMatch table does not hold",
-            .route_untooled => "every route of a tool handler needs a catalog entry",
-            .schema_unknown => "the entry names a schema that no literal schemaCompile(name, schema) registers",
-            .schema_registered_twice => "the entry names a schema that schemaCompile registers more than once",
-            .schema_not_in_subset => "the schema is outside the closed tool schema subset",
-            .entry_field_repeated => "an entry names the same field twice",
-            .max_input_bytes_invalid => "maxInputBytes must be a positive integer literal no larger than 1048576",
-            .exports_unanalyzable => "the build cannot list every module export this route reaches, so it cannot bound the tool's authority",
-            .scope_not_literal => "scope must be an object literal with tenant, subject, or both, each a string literal naming an input field",
-            .scope_unknown_key => "scope may hold only tenant and subject",
-            .scope_field_invalid => "a scope value must name a required top-level string property of the input schema",
-            .cross_call_read => "a tool route may not reach an export that reads state a separate call wrote or returns a value another execution produced: zttp:cache reads, zttp:sql, queue.receive, durable.waitSignal, or workflow.saga",
-            .agent_cross_call_read => "an agent route may not reach an export that reads state a separate call wrote or returns a value another execution produced: zttp:cache reads, zttp:sql, queue.receive, durable.waitSignal, or workflow.saga",
-            .indirect_dispatch => "a tool or agent route may not reach workflow.call, workflow.fanout, or workflow.follow because the dispatched handler runs outside the route grant",
-            .agent_egress => "an agent route may use plain zttp:fetch.fetch only; every other egress sender is refused",
-            .agent_queue_send => "an agent route may not reach queue.send",
-            .agent_durable_signal => "an agent route may not reach durable.signal",
-            .agent_tool_route_call => "an agent route may not call a route function claimed by a tool entry",
-            .agent_fetch_endpoint => "an agent route fetch URL must be a string literal whose normalized endpoint matches the provider endpoint",
-            .agent_fetch_options => "an agent route fetch needs an object-literal options argument with no spread and with a credential field",
-            .agent_fetch_credential => "an agent route fetch credential must be the provider credential string literal",
-            .agent_fetch_durable => "an agent route fetch may not use the durable option",
-            .call_tool_outside_agent => "callTool may be reached only from an agent route",
-            .dispatch_reaches_export => "the handler's dispatch outside the route functions may call only routerMatch: no tool's grant holds any other export",
-            .fetch_arguments_not_literal => "in a tool route, fetch takes a string literal URL and, when present, an object literal of options with no spread, so the build sees every credential it names",
-            .fetch_as_value => "in a tool route, call fetch directly; a fetch passed or stored as a value could name a credential the build cannot see",
-            .credential_not_literal => "the credential option must be a string literal naming a credential in zttp.json",
-            .credential_sender_unsupported => "a credential goes only on a plain fetch call: not on fetchWithRetry and not beside durable, because a credentialed request is never retried",
-            .tool_input_not_literal => "toolInput takes the route's catalog input schema name as a string literal",
-            .tool_input_mismatch => "toolInput must name the input schema of the route's own catalog entry, which is the only schema the gate validated",
-        };
-    }
-};
-
-/// One module export a tool route can reach. Owned.
-pub const ToolExport = struct {
-    module: []const u8,
-    name: []const u8,
-
-    pub fn deinit(self: *ToolExport, allocator: std.mem.Allocator) void {
-        allocator.free(self.module);
-        allocator.free(self.name);
-    }
-
-    /// Sort by module, then by export name: the one order the catalog stores.
-    pub fn lessThan(_: void, a: ToolExport, b: ToolExport) bool {
-        return switch (std.mem.order(u8, a.module, b.module)) {
-            .lt => true,
-            .gt => false,
-            .eq => std.mem.lessThan(u8, a.name, b.name),
-        };
-    }
-};
-
-pub const max_agent_endpoint_bytes = @import("zts-base").endpoint.max_endpoint_bytes;
-pub const max_agent_rounds: u32 = 64;
-pub const max_agent_tool_calls: u32 = 256;
-pub const max_agent_argument_bytes: u32 = tool_schema.max_input_bytes_ceiling;
-pub const max_agent_result_bytes: u32 = tool_schema.max_input_bytes_ceiling;
-pub const max_agent_turn_deadline_ms: u32 = 600000;
-/// An encoding bound of 8 MiB, not a recommended value.
-pub const max_agent_provider_request_bytes: u32 = 8388608;
-
-/// The closed execution bounds of one agent entry. These are encoding bounds,
-/// not recommended defaults.
-pub const AgentLimits = struct {
-    rounds: u32,
-    tool_calls: u32,
-    tool_calls_per_round: u32,
-    argument_bytes: u32,
-    result_bytes: u32,
-    turn_deadline_ms: u32,
-    provider_request_bytes: u32,
-};
-
-/// The agent-only part of a tool catalog entry. Every string is owned. Tool
-/// names are stored in ascending byte order.
-pub const AgentEntry = struct {
-    tools: std.ArrayList([]const u8),
-    provider_endpoint: []const u8,
-    provider_credential: []const u8,
-    limits: AgentLimits,
-
-    pub fn deinit(self: *AgentEntry, allocator: std.mem.Allocator) void {
-        for (self.tools.items) |tool| allocator.free(tool);
-        self.tools.deinit(allocator);
-        allocator.free(self.provider_endpoint);
-        allocator.free(self.provider_credential);
-    }
-};
-
-/// One entry of the handler's tool catalog (M4 T2), read from the literal
-/// argument of `zttp:tool`'s `toolCatalog`. The schema texts are the literal
-/// `schemaCompile` sources the entry names, carried here so the catalog stands
-/// on its own when T3 binds it. Every string is owned.
-pub const ToolEntry = struct {
-    /// The public tool name: the catalog key.
-    name: []const u8,
-    /// The `routerMatch` key the tool is served on, such as `"POST /tools/x"`.
-    route: []const u8,
-    description: []const u8,
-    input_schema_name: []const u8,
-    input_schema_json: []const u8,
-    output_schema_name: []const u8,
-    output_schema_json: []const u8,
-    /// The declared input byte ceiling, at most
-    /// `tool_schema.max_input_bytes_ceiling`.
-    max_input_bytes: u32,
-    /// The input field bound to the verified tenant, when `scope` names one.
-    scope_tenant: ?[]const u8 = null,
-    /// The input field bound to the verified subject, when `scope` names one.
-    scope_subject: ?[]const u8 = null,
-    /// The module exports the route function reaches, sorted with
-    /// `ToolExport.lessThan`.
-    reachable_exports: std.ArrayList(ToolExport) = .empty,
-    /// The credentials the route function names (M4 T6): one per distinct
-    /// (name, endpoint) pair of a literal `credential` on a `fetch` call,
-    /// sorted with `ToolCredential.lessThan`. The names are the tool's
-    /// credential grant.
-    credentials: std.ArrayList(ToolCredential) = .empty,
-    /// Present when this catalog entry is an agent route. Agent entries keep
-    /// both schema names and schema JSON fields empty.
-    agent: ?AgentEntry = null,
-
-    pub fn deinit(self: *ToolEntry, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.route);
-        allocator.free(self.description);
-        allocator.free(self.input_schema_name);
-        allocator.free(self.input_schema_json);
-        allocator.free(self.output_schema_name);
-        allocator.free(self.output_schema_json);
-        if (self.scope_tenant) |s| allocator.free(s);
-        if (self.scope_subject) |s| allocator.free(s);
-        for (self.reachable_exports.items) |*e| e.deinit(allocator);
-        self.reachable_exports.deinit(allocator);
-        for (self.credentials.items) |*c| c.deinit(allocator);
-        self.credentials.deinit(allocator);
-        if (self.agent) |*agent| agent.deinit(allocator);
-    }
-};
-
-/// One credential a tool route names (M4 T6): the literal `credential` of a
-/// `zttp:fetch` `fetch` call, and the canonical endpoint of that call's
-/// literal URL. Owned.
-pub const ToolCredential = struct {
-    name: []const u8,
-    endpoint: []const u8,
-
-    pub fn deinit(self: *ToolCredential, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.endpoint);
-    }
-
-    /// Sort by name, then by endpoint.
-    pub fn lessThan(_: void, a: ToolCredential, b: ToolCredential) bool {
-        return switch (std.mem.order(u8, a.name, b.name)) {
-            .lt => true,
-            .gt => false,
-            .eq => std.mem.lessThan(u8, a.endpoint, b.endpoint),
-        };
-    }
-};
-
-/// Why a tool's credential does not match the project's references (M4 T6).
-pub const CredentialBreachReason = enum {
-    /// No reference in zttp.json has the name.
-    credential_unknown,
-    /// The fetch call's URL is at another endpoint than the reference names.
-    credential_endpoint_mismatch,
-
-    pub fn sentence(self: CredentialBreachReason) []const u8 {
-        return switch (self) {
-            .credential_unknown => "the tool names a credential that zttp.json \"credentials\" does not define",
-            .credential_endpoint_mismatch => "the fetch URL is at a different endpoint than the credential reference names",
-        };
-    }
-};
-
-pub const CredentialBreach = struct {
-    reason: CredentialBreachReason,
-    tool: []const u8,
-    credential: []const u8,
-    endpoint: []const u8,
-};
-
-/// The first tool credential that no reference in `refs` covers, in catalog
-/// order, or null. Borrows from `contract`.
-pub fn firstCredentialBreach(contract: *const HandlerContract, refs: []const CredentialRef) ?CredentialBreach {
-    for (contract.tools.items) |tool| {
-        for (tool.credentials.items) |use| {
-            const ref = credential_ref.find(refs, use.name) orelse return .{
-                .reason = .credential_unknown,
-                .tool = tool.name,
-                .credential = use.name,
-                .endpoint = use.endpoint,
-            };
-            if (!std.mem.eql(u8, ref.endpoint, use.endpoint)) return .{
-                .reason = .credential_endpoint_mismatch,
-                .tool = tool.name,
-                .credential = use.name,
-                .endpoint = use.endpoint,
-            };
-        }
-    }
-    return null;
-}
-
-/// A credential breach with its agent-specific ZTS513 reason when the
-/// breached catalog entry is an agent. The credential lookup and endpoint
-/// comparison stay in `firstCredentialBreach`.
-pub const CredentialRefusal = struct {
-    breach: CredentialBreach,
-    agent_reason: ?ToolCatalogRefusal,
-};
-
-pub fn firstCredentialRefusal(contract: *const HandlerContract, refs: []const CredentialRef) ?CredentialRefusal {
-    const breach = firstCredentialBreach(contract, refs) orelse return null;
-    const agent_reason: ?ToolCatalogRefusal = for (contract.tools.items) |tool| {
-        if (!std.mem.eql(u8, tool.name, breach.tool)) continue;
-        if (tool.agent == null) break null;
-        break switch (breach.reason) {
-            .credential_unknown => .agent_credential_unknown,
-            .credential_endpoint_mismatch => .agent_credential_endpoint_mismatch,
-        };
-    } else null;
-    return .{ .breach = breach, .agent_reason = agent_reason };
-}
-
-/// Where a tool handler's runtime finds the key and the tenant (M4 T5 design
-/// note, section 4): the environment variable that holds the HS256 key, and
-/// the claim that names the tenant. Both strings are owned and non-empty.
-pub const ToolAuth = struct {
-    key_env: []const u8,
-    tenant_claim: []const u8,
-
-    pub fn deinit(self: *ToolAuth, allocator: std.mem.Allocator) void {
-        allocator.free(self.key_env);
-        allocator.free(self.tenant_claim);
-    }
-
-    pub fn dupe(self: ToolAuth, allocator: std.mem.Allocator) std.mem.Allocator.Error!ToolAuth {
-        const key_env = try allocator.dupe(u8, self.key_env);
-        errdefer allocator.free(key_env);
-        return .{ .key_env = key_env, .tenant_claim = try allocator.dupe(u8, self.tenant_claim) };
-    }
-};
-
-/// The label a declared classification assigns (M4 T4). The declaration loader
-/// admits these two only, so the set is closed here too.
-pub const ClassificationLabel = enum {
-    secret,
-    credential,
-
-    pub fn fromText(text: []const u8) ?ClassificationLabel {
-        return std.meta.stringToEnum(ClassificationLabel, text);
-    }
-};
-
-/// What the flow analysis established about one declared classification (P8).
-/// The contract spelling of `flow_checker.EntryStatus`.
-pub const ClassificationStatus = enum {
-    matched,
-    indeterminate,
-    absent,
-
-    pub fn fromText(text: []const u8) ?ClassificationStatus {
-        return std.meta.stringToEnum(ClassificationStatus, text);
-    }
-};
-
-/// One entry of the P8 report: a declared classification and its status after
-/// the flow check. The contract carries one per declaration entry, in the
-/// declaration's canonical order. Every string is owned.
-pub const ClassificationReport = struct {
-    /// `fetch:<host>` or `service:<name>`, as the declaration spells it.
-    source: []const u8,
-    /// The dot-separated path inside the source's value.
-    path: []const u8,
-    label: ClassificationLabel,
-    /// A required entry whose status is `absent` refuses the build.
-    required: bool,
-    status: ClassificationStatus,
-
-    pub fn deinit(self: *ClassificationReport, allocator: std.mem.Allocator) void {
-        allocator.free(self.source);
-        allocator.free(self.path);
-    }
-};
-
-/// The first classification the build must refuse: a required entry the
-/// analysis never saw. Null when there is none. Both the build and `check`
-/// decide through this one function.
-pub fn firstRequiredAbsent(items: []const ClassificationReport) ?usize {
-    for (items, 0..) |item, index| {
-        if (item.required and item.status == .absent) return index;
-    }
-    return null;
-}
-
-/// The applied capability ceiling (M4 T5b, P15's report): the profile a
-/// version 2 declaration selects, and the modules that declaration excludes
-/// beyond the profile's own list. The contract writes it as `ceiling`, with the
-/// profile's categories, the sorted union of both exclusion lists, and whether
-/// the profile requires `read_only`.
-pub const CeilingReport = struct {
-    /// A row of `capability_profiles.profiles`. Never owned.
-    profile: *const capability_profiles.Profile,
-    /// The declaration's own exclusions that the profile does not already
-    /// exclude, sorted by bytes and unique. Each string and the slice are
-    /// owned. A declaration exclusion the profile also makes is not kept: the
-    /// profile reason comes first in the check order, so it cannot change a
-    /// verdict, and the written union is the same.
-    exclude: []const []const u8,
-
-    pub fn deinit(self: *CeilingReport, allocator: std.mem.Allocator) void {
-        for (self.exclude) |m| allocator.free(m);
-        allocator.free(self.exclude);
-        self.exclude = &.{};
-    }
-
-    /// The report for a declaration's ceiling. The caller owns the result.
-    pub fn fromCeiling(allocator: std.mem.Allocator, ceiling: declaration.Ceiling) std.mem.Allocator.Error!CeilingReport {
-        var list: std.ArrayList([]const u8) = .empty;
-        errdefer {
-            for (list.items) |m| allocator.free(m);
-            list.deinit(allocator);
-        }
-        for (ceiling.exclude) |m| {
-            if (containsModule(ceiling.profile.excluded_modules, m)) continue;
-            try list.ensureUnusedCapacity(allocator, 1);
-            list.appendAssumeCapacity(try allocator.dupe(u8, m));
-        }
-        std.mem.sort([]const u8, list.items, {}, lessThanBytes);
-        return .{ .profile = ceiling.profile, .exclude = try list.toOwnedSlice(allocator) };
-    }
-
-    /// The ceiling this report applies, borrowing the report's strings.
-    pub fn asCeiling(self: *const CeilingReport) declaration.Ceiling {
-        return .{ .profile = self.profile, .exclude = self.exclude };
-    }
-
-    /// The sorted union of the profile's exclusions and the declaration's,
-    /// without duplicates, as an iterator over borrowed strings. Both lists
-    /// are sorted by bytes (a test pins the profile table), so a merge gives
-    /// the union without an allocation.
-    pub fn excludedModules(self: *const CeilingReport) ExcludedModules {
-        return .{ .a = self.profile.excluded_modules, .b = self.exclude };
-    }
-
-    pub const ExcludedModules = struct {
-        a: []const []const u8,
-        b: []const []const u8,
-        i: usize = 0,
-        j: usize = 0,
-
-        pub fn next(self: *ExcludedModules) ?[]const u8 {
-            if (self.i < self.a.len and self.j < self.b.len) {
-                const x = self.a[self.i];
-                const y = self.b[self.j];
-                switch (std.mem.order(u8, x, y)) {
-                    .lt => {
-                        self.i += 1;
-                        return x;
-                    },
-                    .gt => {
-                        self.j += 1;
-                        return y;
-                    },
-                    .eq => {
-                        self.i += 1;
-                        self.j += 1;
-                        return x;
-                    },
-                }
-            }
-            if (self.i < self.a.len) {
-                self.i += 1;
-                return self.a[self.i - 1];
-            }
-            if (self.j < self.b.len) {
-                self.j += 1;
-                return self.b[self.j - 1];
-            }
-            return null;
-        }
-    };
-
-    pub fn dupe(self: CeilingReport, allocator: std.mem.Allocator) std.mem.Allocator.Error!CeilingReport {
-        return fromCeiling(allocator, self.asCeiling());
-    }
-};
-
-fn lessThanBytes(_: void, a: []const u8, b: []const u8) bool {
-    return std.mem.lessThan(u8, a, b);
-}
-
-fn containsModule(list: []const []const u8, module: []const u8) bool {
-    for (list) |m| {
-        if (std.mem.eql(u8, m, module)) return true;
-    }
-    return false;
-}
-
-/// Why a handler is outside its declaration's ceiling. The set is closed; a
-/// breach is a build error with this name, not a ZTS diagnostic.
-pub const CeilingBreachReason = enum {
-    /// The contract has no capability matrix, so the ceiling cannot be shown
-    /// to hold. The check fails closed.
-    capabilities_unknown,
-    /// A capability in the matrix is not in the profile's categories.
-    capability_outside_profile,
-    /// An imported module is in the profile's excluded list.
-    module_excluded_by_profile,
-    /// An imported module is in the declaration's exclude list.
-    module_excluded_by_declaration,
-    /// The profile requires `read_only` and the contract does not prove it.
-    read_only_required,
-};
-
-/// One breach of a ceiling, with the capability or the module it names.
-/// Module names borrow the contract's strings.
-pub const CeilingBreach = union(CeilingBreachReason) {
-    capabilities_unknown,
-    capability_outside_profile: module_binding.ModuleCapability,
-    module_excluded_by_profile: []const u8,
-    module_excluded_by_declaration: []const u8,
-    read_only_required,
-
-    pub fn reason(self: CeilingBreach) CeilingBreachReason {
-        return std.meta.activeTag(self);
-    }
-
-    /// The capability or module the breach names, or an empty string for a
-    /// reason that names neither.
-    pub fn subject(self: CeilingBreach) []const u8 {
-        return switch (self) {
-            .capabilities_unknown, .read_only_required => "",
-            .capability_outside_profile => |cap| @tagName(cap),
-            .module_excluded_by_profile, .module_excluded_by_declaration => |m| m,
-        };
-    }
-};
-
-/// Every breach of `ceiling` by `contract`, in a fixed order:
-///
-/// 1. The capability matrix: `capabilities_unknown` when the contract has no
-///    matrix, otherwise one `capability_outside_profile` per capability outside
-///    the profile's categories, in matrix order.
-/// 2. The imported modules, in contract order: `module_excluded_by_profile`
-///    when the profile excludes the module, else
-///    `module_excluded_by_declaration` when the declaration excludes it. A
-///    module excluded by both reports the profile reason once.
-/// 3. `read_only_required`, when the profile requires `read_only` and the
-///    contract has no properties or does not prove it.
-///
-/// The build refuses on the first breach and `check` counts all of them, both
-/// through this one iterator. It reads the contract only and allocates nothing.
-pub const CeilingBreaches = struct {
-    contract: *const HandlerContract,
-    ceiling: declaration.Ceiling,
-    phase: enum { capabilities, modules, read_only, done } = .capabilities,
-    index: usize = 0,
-
-    pub fn next(self: *CeilingBreaches) ?CeilingBreach {
-        const profile = self.ceiling.profile;
-        while (true) switch (self.phase) {
-            .capabilities => {
-                const matrix = if (self.contract.capabilities) |*m| m else {
-                    self.phase = .modules;
-                    self.index = 0;
-                    return .capabilities_unknown;
-                };
-                const caps = matrix.slice();
-                while (self.index < caps.len) {
-                    const cap = caps[self.index];
-                    self.index += 1;
-                    if (std.mem.indexOfScalar(module_binding.ModuleCapability, profile.categories, cap) == null) {
-                        return .{ .capability_outside_profile = cap };
-                    }
-                }
-                self.phase = .modules;
-                self.index = 0;
-            },
-            .modules => {
-                const modules = self.contract.modules.items;
-                while (self.index < modules.len) {
-                    const m = modules[self.index];
-                    self.index += 1;
-                    if (containsModule(profile.excluded_modules, m)) return .{ .module_excluded_by_profile = m };
-                    if (containsModule(self.ceiling.exclude, m)) return .{ .module_excluded_by_declaration = m };
-                }
-                self.phase = .read_only;
-            },
-            .read_only => {
-                self.phase = .done;
-                if (profile.requires_read_only) {
-                    const proven = if (self.contract.properties) |props| props.read_only else false;
-                    if (!proven) return .read_only_required;
-                }
-            },
-            .done => return null,
-        };
-    }
-};
-
-pub fn ceilingBreaches(contract: *const HandlerContract, ceiling: *const declaration.Ceiling) CeilingBreaches {
-    return .{ .contract = contract, .ceiling = ceiling.* };
-}
-
-/// The first breach of `ceiling` by `contract` in the order `CeilingBreaches`
-/// documents, or null when the handler is inside the ceiling.
-pub fn firstCeilingBreach(contract: *const HandlerContract, ceiling: *const declaration.Ceiling) ?CeilingBreach {
-    var it = ceilingBreaches(contract, ceiling);
-    return it.next();
-}
-
-/// Aggregate of module capabilities required by a handler's imports.
-/// Stable SHA-256 hash over the canonically-ordered tag names lets the
-/// runtime detect drift between the embedded contract and the linked
-/// module registry.
 pub const CapabilityMatrix = struct {
     items: [module_binding.capability_count]module_binding.ModuleCapability = undefined,
     len: u8 = 0,
@@ -2338,52 +1285,7 @@ pub const IntentInfo = struct {
     }
 };
 
-/// One step of a `saga([...])` call, as extracted by `saga_extractor.zig`.
-pub const SagaStep = struct {
-    /// Owned copy of the step's literal `name`.
-    name: []const u8,
-    /// True when the step object carries a `compensate` key (any value
-    /// shape - only presence is checked, not whether it correctly undoes
-    /// `run`; see ZTS510's scope note).
-    has_compensate: bool,
-
-    pub fn deinit(self: *SagaStep, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-    }
-};
-
-/// One `saga([...])` call site, as extracted by `saga_extractor.zig`.
-/// `dynamic = true` means the argument was not a fully static array of
-/// object literals (spread, computed step, identifier reference, unknown
-/// sibling key, etc.) - `steps` is then empty and no proof is attempted,
-/// mirroring `IntentInfo`'s dynamic-implies-empty invariant.
-pub const SagaCallInfo = struct {
-    steps: std.ArrayList(SagaStep) = .empty,
-    dynamic: bool = false,
-    source_line: u32 = 0,
-    source_column: u32 = 0,
-
-    pub fn deinit(self: *SagaCallInfo, allocator: std.mem.Allocator) void {
-        for (self.steps.items) |*s| s.deinit(allocator);
-        self.steps.deinit(allocator);
-    }
-
-    /// True when every step but possibly the last declares `compensate`
-    /// (KTD6's scope: structural presence, static sagas only).
-    pub fn compensationProven(self: SagaCallInfo) bool {
-        if (self.dynamic or self.steps.items.len == 0) return false;
-        for (self.steps.items[0 .. self.steps.items.len - 1]) |step| {
-            if (!step.has_compensate) return false;
-        }
-        return true;
-    }
-};
-
-/// One helper function's proof capsule, projected for the `proofCapsules`
-/// JSON envelope. Plain data so it carries no import dependency on the
-/// capsule discharge driver. Transient: populated during build, consumed by
-/// `zts check --json` / verify-paths, never serialized into contract.json
-/// and never part of the signed attestation surface.
+/// One function summary for a declared proof capsule.
 pub const CapsuleSummary = struct {
     /// Owned copy of the function name.
     function: []const u8,
@@ -2507,44 +1409,8 @@ pub const HandlerContract = struct {
     functions: std.ArrayList(FunctionEntry),
     env: EnvInfo,
     egress: EgressInfo,
-    service_calls: std.ArrayList(ServiceCallInfo) = .empty,
-    /// Every `zttp:workflow` `call`/`saga`/`fanout` dispatch target found in
-    /// the handler module. The system linker resolves each non-dynamic entry
-    /// against a `--system` bundle, mirroring `service_calls` resolution.
-    workflow_calls: std.ArrayList(WorkflowCallInfo) = .empty,
-    /// Hypermedia affordances emitted by `resource(data, affordances)` calls.
-    /// The system linker resolves each non-dynamic affordance to a bundle route
-    /// (`all_affordances_resolved`). Owned; each entry's `deinit` runs at free.
-    affordances: std.ArrayList(EmittedAffordance) = .empty,
-    /// True when a `resource()` call passed a computed (non-literal) affordances
-    /// argument, so the emitted affordance set cannot be enumerated. Counted as
-    /// a dynamic link: downgrades the bundle proof, never claimed resolved.
-    affordances_dynamic: bool = false,
-    /// The tool catalog (M4 T2): one entry per `toolCatalog` key, in source
-    /// order. Empty when the handler is not under the tool profile. Owned.
-    tools: std.ArrayList(ToolEntry) = .empty,
-    /// The identity source a tool handler's runtime verifies callers against
-    /// (M4 T5): the names from zttp.json's `auth` object, set by the build.
-    /// Names only - the key never enters the contract. Null when the project
-    /// configures no `auth`. Owned.
-    tool_auth: ?ToolAuth = null,
-    /// The credential references (M4 T6): zttp.json's `credentials`, set by
-    /// the build in the canonical form `credential_ref.zig` defines, sorted by
-    /// name. Names and rules only - no value ever enters the contract. Empty
-    /// when the project configures none. Owned.
-    credentials: []CredentialRef = &.{},
-    /// The P8 report (M4 T4): one entry per declared classification, in the
-    /// declaration's canonical order, with the status the flow check reached.
-    /// Empty when the build had no declaration. Owned.
-    classifications: std.ArrayList(ClassificationReport) = .empty,
-    /// The applied ceiling (M4 T5b): the profile and exclusions of the
-    /// declaration the build enforced. Null when the build had no declaration
-    /// or the declaration has no ceiling. Owned.
-    ceiling: ?CeilingReport = null,
     cache: CacheInfo,
     sql: SqlInfo,
-    durable: DurableInfo,
-    scope: ScopeInfo,
     api: ApiInfo,
     verification: ?VerificationInfo,
     aot: ?AotInfo,
@@ -2561,9 +1427,6 @@ pub const HandlerContract = struct {
     /// Author-declared intent assertions. Null when the handler module
     /// has no `export const intent` literal. See `IntentInfo` for shape.
     intent: ?IntentInfo = null,
-    /// Every `saga([...])` call site found in the handler module. See
-    /// `SagaCallInfo` for shape and `saga_extractor.zig` for extraction.
-    sagas: std.ArrayList(SagaCallInfo) = .empty,
     /// In-memory provenance for demoted properties. Not serialized; populated
     /// during build for the live-reload HUD's "Why" line. Snippets are
     /// borrowed static strings, so deinit is a no-op.
@@ -2617,7 +1480,7 @@ pub const HandlerContract = struct {
     /// return type. Empty when the handler declares no budget. Serialized
     /// into contract.json under `sandbox.declaredBudget`.
     capability_budget: CapabilityMatrix = .empty,
-    /// Core and optional lowering-frontend identity used for this artifact.
+    /// Core parser and opcode identity used for this artifact.
     /// A compiler-produced contract always carries non-zero hashes.
     source_identity: SourceIdentity = .{},
     /// SHA-256 of the compiled handler bytecode. Stamped by the build
@@ -2668,32 +1531,6 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.egress.urls.deinit(allocator);
-        for (self.service_calls.items) |*call| {
-            call.deinit(allocator);
-        }
-        self.service_calls.deinit(allocator);
-        for (self.workflow_calls.items) |*call| {
-            call.deinit(allocator);
-        }
-        self.workflow_calls.deinit(allocator);
-        for (self.affordances.items) |*aff| {
-            aff.deinit(allocator);
-        }
-        self.affordances.deinit(allocator);
-        for (self.tools.items) |*tool| {
-            tool.deinit(allocator);
-        }
-        self.tools.deinit(allocator);
-        if (self.tool_auth) |*auth| auth.deinit(allocator);
-        self.tool_auth = null;
-        credential_ref.freeAll(allocator, self.credentials);
-        self.credentials = &.{};
-        for (self.classifications.items) |*report| {
-            report.deinit(allocator);
-        }
-        self.classifications.deinit(allocator);
-        if (self.ceiling) |*report| report.deinit(allocator);
-        self.ceiling = null;
         for (self.cache.namespaces.items) |s| {
             allocator.free(s);
         }
@@ -2701,8 +1538,6 @@ pub const HandlerContract = struct {
         if (self.owned_rate_limit_namespace) |namespace| allocator.free(namespace);
         if (self.owned_fault_cause_snippet) |snippet| allocator.free(snippet);
         self.sql.deinit(allocator);
-        self.durable.deinit(allocator);
-        self.scope.deinit(allocator);
         self.api.deinit(allocator);
         for (self.behaviors.items) |*b| {
             @constCast(b).deinit(allocator);
@@ -2736,176 +1571,5 @@ pub const HandlerContract = struct {
         }
         self.extensions.deinit(allocator);
         if (self.intent) |*i| i.deinit(allocator);
-        for (self.sagas.items) |*s| s.deinit(allocator);
-        self.sagas.deinit(allocator);
     }
 };
-
-// The declaration ceiling check (M4 T5b). Each test builds a contract by hand
-// and reads the verdict through `firstCeilingBreach` and `ceilingBreaches`.
-
-const CeilingFixture = struct {
-    contract: HandlerContract,
-
-    fn init(
-        caps: ?[]const module_binding.ModuleCapability,
-        modules: []const []const u8,
-        read_only: ?bool,
-    ) std.mem.Allocator.Error!CeilingFixture {
-        var contract = emptyContract("handler.ts");
-        try contract.modules.appendSlice(std.testing.allocator, modules);
-        if (caps) |list| {
-            var matrix = CapabilityMatrix.empty;
-            for (list) |cap| {
-                matrix.items[matrix.len] = cap;
-                matrix.len += 1;
-            }
-            contract.capabilities = matrix;
-        }
-        if (read_only) |value| contract.properties = .{
-            .pure = false,
-            .read_only = value,
-            .stateless = value,
-            .retry_safe = value,
-            .deterministic = true,
-            .has_egress = false,
-        };
-        return .{ .contract = contract };
-    }
-
-    /// The module strings are static, so only the list is freed.
-    fn deinit(self: *CeilingFixture) void {
-        self.contract.modules.deinit(std.testing.allocator);
-    }
-};
-
-fn testCeiling(comptime profile_name: []const u8, exclude: []const []const u8) declaration.Ceiling {
-    return .{ .profile = capability_profiles.findProfile(profile_name).?, .exclude = exclude };
-}
-
-test "ceiling: a capability outside the profile is capability_outside_profile" {
-    var f = try CeilingFixture.init(&.{ .clock, .network }, &.{"zttp:fetch"}, true);
-    defer f.deinit();
-    const ceiling = testCeiling("boundary", &.{});
-    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
-    try std.testing.expectEqual(CeilingBreachReason.capability_outside_profile, breach.reason());
-    try std.testing.expectEqualStrings("network", breach.subject());
-}
-
-test "ceiling: a module the profile excludes is module_excluded_by_profile" {
-    var f = try CeilingFixture.init(&.{ .clock, .policy_check }, &.{"zttp:cache"}, true);
-    defer f.deinit();
-    const ceiling = testCeiling("adapter", &.{});
-    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
-    try std.testing.expectEqual(CeilingBreachReason.module_excluded_by_profile, breach.reason());
-    try std.testing.expectEqualStrings("zttp:cache", breach.subject());
-}
-
-test "ceiling: a module the declaration excludes is module_excluded_by_declaration" {
-    var f = try CeilingFixture.init(&.{.crypto}, &.{"zttp:crypto"}, true);
-    defer f.deinit();
-    const ceiling = testCeiling("boundary", &.{"zttp:crypto"});
-    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
-    try std.testing.expectEqual(CeilingBreachReason.module_excluded_by_declaration, breach.reason());
-    try std.testing.expectEqualStrings("zttp:crypto", breach.subject());
-}
-
-test "ceiling: a profile that requires read_only refuses a handler without it" {
-    var not_read_only = try CeilingFixture.init(&.{.clock}, &.{}, false);
-    defer not_read_only.deinit();
-    var no_properties = try CeilingFixture.init(&.{.clock}, &.{}, null);
-    defer no_properties.deinit();
-    const ceiling = testCeiling("boundary", &.{});
-    for ([_]*const HandlerContract{ &not_read_only.contract, &no_properties.contract }) |contract| {
-        const breach = firstCeilingBreach(contract, &ceiling) orelse return error.TestExpectedBreach;
-        try std.testing.expectEqual(CeilingBreachReason.read_only_required, breach.reason());
-        try std.testing.expectEqualStrings("", breach.subject());
-    }
-    // A profile that does not require it admits the same handler.
-    const adapter = testCeiling("adapter", &.{});
-    try std.testing.expectEqual(@as(?CeilingBreach, null), firstCeilingBreach(&not_read_only.contract, &adapter));
-}
-
-test "ceiling: a contract with no capability matrix is capabilities_unknown" {
-    var f = try CeilingFixture.init(null, &.{}, true);
-    defer f.deinit();
-    const ceiling = testCeiling("adapter", &.{});
-    const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
-    try std.testing.expectEqual(CeilingBreachReason.capabilities_unknown, breach.reason());
-}
-
-test "ceiling: a handler that uses every category of its profile passes" {
-    for (&capability_profiles.profiles) |*profile| {
-        var f = try CeilingFixture.init(profile.categories, &.{ "zttp:crypto", "zttp:env" }, true);
-        defer f.deinit();
-        const ceiling: declaration.Ceiling = .{ .profile = profile, .exclude = &.{"zttp:fetch"} };
-        try std.testing.expectEqual(@as(?CeilingBreach, null), firstCeilingBreach(&f.contract, &ceiling));
-    }
-}
-
-test "ceiling: a module both the profile and the declaration exclude reports the profile reason once" {
-    var f = try CeilingFixture.init(&.{.clock}, &.{"zttp:cache"}, true);
-    defer f.deinit();
-    const ceiling = testCeiling("boundary", &.{"zttp:cache"});
-    var it = ceilingBreaches(&f.contract, &ceiling);
-    const breach = it.next() orelse return error.TestExpectedBreach;
-    try std.testing.expectEqual(CeilingBreachReason.module_excluded_by_profile, breach.reason());
-    try std.testing.expectEqual(@as(?CeilingBreach, null), it.next());
-}
-
-test "ceiling: the iterator reports every breach in the documented order" {
-    var f = try CeilingFixture.init(&.{ .clock, .network, .sqlite }, &.{ "zttp:fetch", "zttp:cache", "zttp:sql" }, false);
-    defer f.deinit();
-    const ceiling = testCeiling("boundary", &.{"zttp:fetch"});
-    var it = ceilingBreaches(&f.contract, &ceiling);
-    const want = [_]struct { reason: CeilingBreachReason, subject: []const u8 }{
-        .{ .reason = .capability_outside_profile, .subject = "network" },
-        .{ .reason = .capability_outside_profile, .subject = "sqlite" },
-        .{ .reason = .module_excluded_by_declaration, .subject = "zttp:fetch" },
-        .{ .reason = .module_excluded_by_profile, .subject = "zttp:cache" },
-        .{ .reason = .read_only_required, .subject = "" },
-    };
-    for (want) |w| {
-        const breach = it.next() orelse return error.TestExpectedBreach;
-        try std.testing.expectEqual(w.reason, breach.reason());
-        try std.testing.expectEqualStrings(w.subject, breach.subject());
-    }
-    try std.testing.expectEqual(@as(?CeilingBreach, null), it.next());
-}
-
-test "ceiling census: every breach reason is produced by the check" {
-    for (std.enums.values(CeilingBreachReason)) |reason| {
-        var f = switch (reason) {
-            .capabilities_unknown => try CeilingFixture.init(null, &.{}, true),
-            .capability_outside_profile => try CeilingFixture.init(&.{.filesystem}, &.{}, true),
-            .module_excluded_by_profile => try CeilingFixture.init(&.{.clock}, &.{"zttp:ratelimit"}, true),
-            .module_excluded_by_declaration => try CeilingFixture.init(&.{.env}, &.{"zttp:env"}, true),
-            .read_only_required => try CeilingFixture.init(&.{.stderr}, &.{}, false),
-        };
-        defer f.deinit();
-        const ceiling = testCeiling("boundary", &.{"zttp:env"});
-        const breach = firstCeilingBreach(&f.contract, &ceiling) orelse return error.TestExpectedBreach;
-        try std.testing.expectEqual(reason, breach.reason());
-    }
-}
-
-test "ceiling report: excludedModules is the sorted union without duplicates" {
-    const ceiling = testCeiling("adapter", &.{ "zttp:cache", "zttp:fetch", "zttp:zz" });
-    var report = try CeilingReport.fromCeiling(std.testing.allocator, ceiling);
-    defer report.deinit(std.testing.allocator);
-    // The profile's own exclusion is not kept as a declaration exclusion.
-    try std.testing.expectEqual(@as(usize, 2), report.exclude.len);
-    var it = report.excludedModules();
-    for ([_][]const u8{ "zttp:cache", "zttp:fetch", "zttp:ratelimit", "zttp:zz" }) |want| {
-        try std.testing.expectEqualStrings(want, it.next() orelse return error.TestExpectedModule);
-    }
-    try std.testing.expectEqual(@as(?[]const u8, null), it.next());
-}
-
-test "ceiling report: every profile's excluded list is sorted and unique, as the merge needs" {
-    for (capability_profiles.profiles) |profile| {
-        for (profile.excluded_modules[1..], 1..) |m, i| {
-            try std.testing.expect(std.mem.order(u8, profile.excluded_modules[i - 1], m) == .lt);
-        }
-    }
-}

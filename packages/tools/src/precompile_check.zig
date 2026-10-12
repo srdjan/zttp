@@ -85,45 +85,13 @@ pub const CheckResult = struct {
     contract: ?HandlerContract = null,
     /// Structured diagnostics for JSON output mode.
     json_diagnostics: std.ArrayList(json_diag.JsonDiagnostic) = .empty,
-    /// Count of pinned-witness regressions re-fired by this build. Surfaced
-    /// by `--watch --prove` as a HUD-adjacent toast so authors notice when
-    /// a defended-against pattern reappears.
-    pinned_witness_regressions: usize = 0,
     /// Pre-rendered `proofTrace` JSON object: per-property reasoning for the
     /// proof card (how each proof was discharged, or the counterexample that
     /// broke it). Null when no contract was produced. Owned by CheckResult.
     proof_trace_json: ?[]u8 = null,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors() + self.classificationErrors() + self.ceilingErrors();
-    }
-
-    /// Declared classifications the check must refuse (M4 T4): a required
-    /// entry the analysis never saw. The build refuses the same entries through
-    /// the same predicate, `handler_contract.firstRequiredAbsent`.
-    pub fn classificationErrors(self: *const CheckResult) u32 {
-        const contract = if (self.contract) |*c| c else return 0;
-        var n: u32 = 0;
-        var rest = contract.classifications.items;
-        while (handler_contract.firstRequiredAbsent(rest)) |index| {
-            n += 1;
-            rest = rest[index + 1 ..];
-        }
-        return n;
-    }
-
-    /// Breaches of the declaration's ceiling the check must refuse (M4 T5b),
-    /// every one of them. The build refuses on the first through the same
-    /// iterator, `handler_contract.ceilingBreaches`. The contract's ceiling
-    /// report is filled from the declaration by the same contract build.
-    pub fn ceilingErrors(self: *const CheckResult) u32 {
-        const contract = if (self.contract) |*c| c else return 0;
-        const report = if (contract.ceiling) |*r| r else return 0;
-        const ceiling = report.asCeiling();
-        var it = handler_contract.ceilingBreaches(contract, &ceiling);
-        var n: u32 = 0;
-        while (it.next()) |_| n += 1;
-        return n;
+        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors();
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
@@ -164,66 +132,6 @@ pub const CheckResult = struct {
         return n;
     }
 };
-
-/// Walk borrowed flow-witness projections, materialise a counterexample witness
-/// for each one that maps to a tracked PropertyTag, and persist it to
-/// `.zttp/witnesses/<short_hash>/`. Failures here never block the
-/// analysis result; the corpus is best-effort persistence. Returns the
-/// number of pinned witnesses re-fired by this build, which the live
-/// reload HUD surfaces as a regression toast.
-///
-/// The corpus is filesystem state, so freestanding/wasm analyzer builds skip
-/// it: `persistFlowWitnessesNative` is referenced only inside the comptime
-/// branch below, keeping the `witness_corpus` subtree out of the module graph.
-pub fn persistFlowWitnesses(
-    allocator: std.mem.Allocator,
-    flow_witnesses: []const zts.DiagnosticProjection.FlowWitness,
-    handler_path: []const u8,
-) usize {
-    if (comptime builtin.target.os.tag != .freestanding) {
-        return persistFlowWitnessesNative(allocator, flow_witnesses, handler_path);
-    }
-    return 0;
-}
-
-fn persistFlowWitnessesNative(
-    allocator: std.mem.Allocator,
-    flow_witnesses: []const zts.DiagnosticProjection.FlowWitness,
-    handler_path: []const u8,
-) usize {
-    if (flow_witnesses.len == 0) return 0;
-
-    const corpus_dir = zts.witness_corpus.corpusDir(allocator, handler_path) catch return 0;
-    defer allocator.free(corpus_dir);
-    zts.witness_corpus.ensureCorpusDir(allocator, corpus_dir, handler_path) catch return 0;
-
-    var pinned_regressions: usize = 0;
-    for (flow_witnesses) |projection| {
-        var witness = zts.solveCounterexample(allocator, .{
-            .property = projection.property,
-            .origin = .{ .line = projection.line, .column = projection.column },
-            .sink = .{ .line = projection.line, .column = projection.column },
-            .summary = projection.summary,
-            .constraints = projection.constraints,
-            .io_calls = projection.io_calls,
-        }) catch continue;
-        defer witness.deinit(allocator);
-
-        if (zts.witness_corpus.persist(allocator, corpus_dir, witness)) |pres| {
-            var owned = pres;
-            defer owned.deinit(allocator);
-            // .refreshed means the witness was already persisted on a prior
-            // build. If the author had pinned it, this build re-fires a
-            // regression they explicitly chose to defend against.
-            if (owned.outcome == .refreshed and
-                zts.witness_corpus.isPinned(allocator, corpus_dir, owned.key))
-            {
-                pinned_regressions += 1;
-            }
-        } else |_| {}
-    }
-    return pinned_regressions;
-}
 
 pub fn syncCheckResultProperties(result: *CheckResult) void {
     if (result.contract) |*contract| {
@@ -628,37 +536,6 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         }
     }
 
-    // The P8 report (M4 T4): every declared classification and its status. A
-    // required entry the analysis never saw is an error line naming it.
-    if (r.contract) |*contract| {
-        if (contract.classifications.items.len > 0) {
-            writer.print("\n  Declared classifications:\n", .{}) catch return;
-            for (contract.classifications.items) |entry| {
-                const refused = entry.required and entry.status == .absent;
-                writer.print("    {s} {s} {s} ({s}, {s}){s}\n", .{
-                    @tagName(entry.status),
-                    entry.source,
-                    entry.path,
-                    @tagName(entry.label),
-                    if (entry.required) "required" else "optional",
-                    if (refused) "  error: a required entry the analysis never saw" else "",
-                }) catch return;
-            }
-        }
-        // The applied ceiling (M4 T5b): each breach is an error line.
-        if (contract.ceiling) |*report| {
-            writer.print("\n  Declaration ceiling '{s}':\n", .{report.profile.name}) catch return;
-            const ceiling = report.asCeiling();
-            var it = handler_contract.ceilingBreaches(contract, &ceiling);
-            var any = false;
-            while (it.next()) |breach| {
-                any = true;
-                writer.print("    error: {s} {s}\n", .{ @tagName(breach.reason()), breach.subject() }) catch return;
-            }
-            if (!any) writer.print("    inside the ceiling\n", .{}) catch return;
-        }
-    }
-
     if (r.strict_advisories > 0) {
         writer.print(
             "\n  {d} errors, {d} warnings, {d} advisories\n",
@@ -741,11 +618,8 @@ fn specDiagnosticMessage(diag: zts.SpecDiagnostic) []const u8 {
         .budget_exceeded => "handler reaches a capability outside its declared Effects<...> budget",
         .helper_budget_exceeded => "helper reaches a capability outside the handler's Effects<...> budget",
         .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
-        .workflow_call_in_step => "workflow.call/saga/fanout/follow used inside a step() callback silently loses durability",
-        .saga_step_missing_compensate => "a non-last saga step has no compensate, leaving a partial-rollback hole",
         .effect_ceiling_not_literal => "Effects<...> names its capabilities with something other than a closed union of string literals, so no ceiling was read",
         .effect_row_lower_bound => "function calls through a value the compiler cannot resolve, so its effect row is a lower bound and cannot discharge a ceiling",
-        .tool_catalog_refused => "the toolCatalog declaration is refused, so the handler publishes no tool",
         .schema_not_compilable => "a validation call names a schema zttp:validate cannot compile, so it fails on every input",
     };
 }
@@ -830,7 +704,6 @@ pub fn generateTypeDefs(writer: anytype) void {
         \\  body?: string | Bytes;
         \\  query?: Record<string, string>;
         \\  maxResponseBytes?: number;
-        \\  durable?: Record<string, unknown>;
         \\  credential?: string;
         \\}
         \\
@@ -1032,13 +905,13 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
     // in a fresh pool with no environment, and `TypePool.assignableStep` gives
     // `object` a rule of its own, so the checker resolves it where it matters.
     //
-    // `FetchOptions` and `MessageId`, for the same reason and one step
+    // `FetchOptions`, for the same reason and one step
     // further: each is a real registered alias that
     // `module_types.populateModuleTypes` builds before the export loop, so
-    // both resolve everywhere the checker runs and nowhere in this
+    // it resolves everywhere the checker runs and nowhere in this
     // environment-free pool. The gap between the two pipelines is why this set
     // is asserted exactly rather than counted.
-    const expected_unresolved = [_][]const u8{ "Record", "object", "FetchOptions", "MessageId" };
+    const expected_unresolved = [_][]const u8{ "Record", "object", "FetchOptions" };
     try std.testing.expectEqual(expected_unresolved.len, ctx.unresolved.items.len);
     for (expected_unresolved) |want| {
         var seen = false;
@@ -1056,22 +929,12 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 /// The committed digest of the whole signature surface. Regenerate deliberately:
 /// a diff here is a change to what every handler sees from `zttp:*`.
 ///
-/// Moved 2026-08-17 twice. First by `zttp:durable.signal`, which declared two
-/// parameters while `signalNative` reads `args[2]` and hands it to the runtime
-/// callback, so the payload argument was real and undeclared. Then by
-/// `zttp:workflow.call`, which declared `.object` for a value built by
-/// `createFetchResponse` - a real Response - and now declares that shape.
-/// Then by `zttp:sql`'s `sqlMany` and `sqlExec`, which declared `.object` for
+/// Moved by `zttp:sql`'s `sqlMany` and `sqlExec`, which declared `.object` for
 /// an array of rows and for `{ rowsAffected, lastInsertRowId? }`.
 /// Parameter names are not part of this digest, which covers arity and types.
-// Moved 2026-09-18 for the exact protected-ledger post and balance shapes.
-// Moved 2026-09-23 when zttp:tool added `toolCatalog(entries: object): undefined`.
-// Moved 2026-09-24 when zttp:tool added `toolInput(name: string, request: object): result` (M4 T7).
-// Moved 2026-09-27 when zttp:tool added agentPrompt() and callTool(callId, name, argsJson) (M5 A1 U2).
 // Moved 2026-09-28 when A4 changed the fetch return signatures and A3 added sseEvents.
-// Moved 2026-10-09 when zttp:durable.signalAt declared the payload parameter its native reads (A2).
-// Moved 2026-10-10 when zttp:service.serviceCall declared the fetch response record (R4 F5).
-const frozen_signature_digest = "4b462915ab0a9639b43a9d0d07d2cff72e662294da97c4c71e441b35df4b7c0e";
+// Measured twice from the retained Phase 3 signature surface.
+const frozen_signature_digest = "5b880ac021fa54f6b488a29f56b1f9dd9c8afb3d0251cfc0626183a84f952321";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

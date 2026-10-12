@@ -60,6 +60,7 @@ fn retiredInputFeature(allocator: std.mem.Allocator, inputs: Inputs) Error!?reti
     if (inputs.contract_section) |json| {
         var contract = zts.handler_contract.parseFromJson(allocator, json) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedRuntimeAuthority => return error.UnsupportedRuntimeAuthority,
             else => return error.InvalidContractSection,
         };
         defer contract.deinit(allocator);
@@ -200,6 +201,19 @@ fn certificateCommitments(certificate: []const u8) ?CertificateCommitments {
 
 const testing = std.testing;
 
+fn expectContractAuthorityRefused(contract: *const zts.HandlerContract) !void {
+    const allocator = testing.allocator;
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    try zts.writeContractJson(contract, &json.writer);
+    try testing.expectError(error.UnsupportedRuntimeAuthority, accept(allocator, .{
+        .certificate = null,
+        .bytecode = "",
+        .contract_section = json.written(),
+        .policy_section_digest = [_]u8{0} ** 32,
+    }, pcc.policy.production));
+}
+
 test "an artifact with no certificate is refused, not waved through" {
     const allocator = testing.allocator;
     const result = try accept(allocator, .{
@@ -213,25 +227,63 @@ test "an artifact with no certificate is refused, not waved through" {
     try testing.expect(result.rejection().?.recertifiable);
 }
 
-test "a retired contract refuses activation before proof acceptance" {
+test "every retired module refuses activation before proof acceptance" {
     const allocator = testing.allocator;
-    const handler_path = try allocator.dupe(u8, "handler.ts");
-    var contract = zts.handler_contract.emptyContract(handler_path);
-    defer contract.deinit(allocator);
-    try contract.modules.ensureUnusedCapacity(allocator, 1);
-    const module = try allocator.dupe(u8, "zttp:tool");
-    contract.modules.appendAssumeCapacity(module);
+    const retired = [_][]const u8{
+        "zttp:durable",
+        "zttp:workflow",
+        "zttp:queue",
+        "zttp:scope",
+        "zttp:io",
+        "zttp:service",
+        "zttp:ledger",
+        "zttp:tool",
+    };
+    for (retired) |module| {
+        var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+        defer contract.deinit(allocator);
+        try contract.modules.append(allocator, try allocator.dupe(u8, module));
+        try expectContractAuthorityRefused(&contract);
+    }
+}
 
-    var json: std.Io.Writer.Allocating = .init(allocator);
-    defer json.deinit();
-    try zts.writeContractJson(&contract, &json.writer);
+test "retired raw contract obligations refuse activation without module facts" {
+    const allocator = testing.allocator;
+    const contracts = [_][]const u8{
+        "{\"modules\":[],\"durable\":{\"used\":true}}",
+        "{\"modules\":[],\"scope\":{\"used\":true}}",
+        "{\"modules\":[],\"serviceCalls\":[{}]}",
+        "{\"modules\":[],\"workflowCalls\":[{}]}",
+        "{\"modules\":[],\"sagas\":[{}]}",
+    };
+    for (contracts) |contract| {
+        try testing.expectError(error.UnsupportedRuntimeAuthority, accept(allocator, .{
+            .certificate = null,
+            .bytecode = "",
+            .contract_section = contract,
+            .policy_section_digest = [_]u8{0} ** 32,
+        }, pcc.policy.production));
+    }
+}
 
-    try testing.expectError(error.UnsupportedRuntimeAuthority, accept(allocator, .{
+test "empty retired contract placeholders remain ordinary" {
+    const contract =
+        \\{
+        \\  "modules": [],
+        \\  "durable": {},
+        \\  "scope": {},
+        \\  "serviceCalls": [],
+        \\  "workflowCalls": [],
+        \\  "sagas": []
+        \\}
+    ;
+    const result = try accept(testing.allocator, .{
         .certificate = null,
         .bytecode = "",
-        .contract_section = json.written(),
+        .contract_section = contract,
         .policy_section_digest = [_]u8{0} ** 32,
-    }, pcc.policy.production));
+    }, pcc.policy.production);
+    try testing.expectEqual(pcc.ReasonCode.missing_required_section, result.rejection().?.code);
 }
 
 test "a malformed contract refuses activation before proof acceptance" {

@@ -1,9 +1,7 @@
 #!/bin/bash
 # E2E test for handler panic isolation (B1).
 # Verifies that a panicking handler returns HTTP 500 and the server survives to
-# serve subsequent requests. It also verifies that a nested workflow panic
-# becomes a 599 response while the outer interpreter continues and both handler
-# pools remain usable. Uses the internal --_debug-panic-path test hook to trigger
+# serve subsequent requests. Uses the internal --_debug-panic-path test hook to trigger
 # a real panic on a specific request path inside callHandlerGuarded.
 #
 # Usage: bash scripts/test-panic-isolation.sh [--skip-build] [--zttp PATH]
@@ -132,37 +130,5 @@ ok_status=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" \
 
 stop_server
 
-PORT=$((PORT + 1))
-step "start workflow system on :$PORT with nested panic injection path /boom"
-"$ZTTP" serve "$REPO_ROOT/examples/workflow/orchestrator.ts" -p "$PORT" \
-    --system "$REPO_ROOT/examples/workflow/system.json" \
-    --pool 1 \
-    --_debug-panic-path /boom >"$SERVER_LOG" 2>&1 &
-SRV_PID=$!
-
-wait_for_server "$PORT" || fail "workflow server did not become ready on :$PORT within 5s"
-
-step "verify nested child panic returns 599 and outer interpreter continues"
-panic_body=$(/usr/bin/curl -sf --max-time 5 "http://127.0.0.1:$PORT/panic") || \
-    fail "nested panic request did not return HTTP 200"
-case "$panic_body" in
-    *'"orchestrated":true'*'"subStatus":599'*'"error":"WorkflowDispatchFailed"'*'"details":"HandlerPanicked"'*) ;;
-    *) fail "nested panic response did not prove outer continuation: $panic_body" ;;
-esac
-
-step "verify nested panic reached the isolated handler boundary"
-grep -Fq 'handler panicked (isolated): zttp_debug_panic_path' "$SERVER_LOG" || \
-    fail "nested panic did not reach the isolated handler boundary"
-
-step "verify later outer request and rebuilt child slot both succeed"
-recovered_body=$(/usr/bin/curl -sf --max-time 5 "http://127.0.0.1:$PORT/ok") || \
-    fail "workflow recovery request did not return HTTP 200"
-case "$recovered_body" in
-    *'"orchestrated":true'*'"subStatus":200'*'"from":"greet"'*) ;;
-    *) fail "workflow recovery response was incomplete: $recovered_body" ;;
-esac
-
-kill -0 "$SRV_PID" 2>/dev/null || fail "workflow server exited after nested handler panic"
-
-step "PASS: top-level and nested handler panics were isolated and recovered"
+step "PASS: handler panic was isolated and the server recovered"
 exit 0

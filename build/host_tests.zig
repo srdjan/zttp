@@ -37,7 +37,6 @@ const host_test_roots = [_]HostTestRoot{
     // collected_via_named_module: canonicalize.zig is reached only through
     // the `zts_cli` module, so this root is what runs its tests.
     .{ .owner = .tools, .src = "src/canonicalize.zig", .step = "test-canonicalize", .desc = "Run canonicalize/normalize tool tests", .project_config = true },
-    .{ .owner = .tools, .src = "src/system_rollout.zig", .step = "test-rollout", .desc = "Run rollout planner tests", .project_config = true },
     .{ .owner = .tools, .src = "src/expert.zig", .step = "test-expert", .desc = "Run zts expert v1 contract tripwires", .project_config = true },
     // collected_via_named_module: zts_cli.zig and the command files it
     // imports (describe_rule.zig, search_rules.zig, ...) are reached only

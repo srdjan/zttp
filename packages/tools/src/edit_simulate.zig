@@ -27,8 +27,6 @@ pub const EditSimulateInput = struct {
     /// via `discoverProjectPaths`; when null, zttp:sql edits fail analysis
     /// with MissingSqlSchema exactly like a schema-less `check`.
     sql_schema_path: ?[]const u8 = null,
-    /// Optional system manifest for cross-handler type and policy context.
-    system_path: ?[]const u8 = null,
     /// Capability policy JSON, as source rather than a path. Boundary callers
     /// that own a workspace read it from the `policy` entry in the nearest
     /// `zttp.json`; the defect-seed suite supplies it inline for a handler that
@@ -93,22 +91,20 @@ pub fn simulate(
     allocator: std.mem.Allocator,
     input: EditSimulateInput,
 ) !SimulateResult {
-    // When the caller passes no explicit schema or system manifest, discover
-    // the project's from the edited file exactly as the CLI boundary (`run`,
+    // When the caller passes no explicit schema, discover the project's paths
+    // from the edited file exactly as the CLI boundary (`run`,
     // `zts check`) does. Without this, every in-process tool that simulates a
     // zttp:sql handler (the repair-apply lane, review patch, ast rewrite,
     // feature apply) throws MissingSqlSchema even though the project has a
-    // configured schema. A caller that already owns the schema, the system
-    // manifest, and the policy passes all three and skips discovery.
+    // configured schema. A caller that already owns the schema and policy
+    // passes both and skips discovery.
     var discovered: ProjectPaths = if (input.sql_schema_path == null or
-        input.system_path == null or
         input.policy_source == null)
         try discoverProjectPaths(allocator, input.file)
     else
         .{};
     defer discovered.deinit(allocator);
     const schema_path = input.sql_schema_path orelse discovered.sqlite;
-    const system_path = input.system_path orelse discovered.system;
     const discovered_policy_source: ?[]u8 = if (input.policy_source != null)
         null
     else if (discovered.policy) |path|
@@ -129,7 +125,6 @@ pub fn simulate(
         .{
             .sql_schema_path = schema_path,
             .json_mode = true,
-            .system_path = system_path,
             .policy_source = policy_source,
         },
     );
@@ -146,7 +141,6 @@ pub fn simulate(
             .{
                 .sql_schema_path = schema_path,
                 .json_mode = true,
-                .system_path = system_path,
                 .policy_source = policy_source,
             },
         );
@@ -374,11 +368,10 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
         };
     };
 
-    // The CLI owns project context, so it resolves both paths here and
+    // The CLI owns project context, so it resolves project paths here and
     // `simulate` walks nothing. Root at the edited file: resolving the schema
-    // from cwd while leaving system_path null made `simulate` walk a second
-    // time from `input.file`, so one invocation could analyze against two
-    // different zttp.json files.
+    // from cwd made `simulate` walk a second time from `input.file`, so one
+    // invocation could analyze against two different zttp.json files.
     //
     // Fall back to cwd when the file is outside every project. `findStartDir`
     // already reverts to cwd for a path with no dirent, which is the ordinary
@@ -390,7 +383,7 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
         try writeProjectContextFailure(writer, input.file);
         return false;
     };
-    if (paths.sqlite == null and paths.system == null and paths.policy == null) {
+    if (paths.sqlite == null and paths.policy == null) {
         paths.deinit(allocator);
         paths = discoverProjectPaths(allocator, null) catch {
             try writeProjectContextFailure(writer, input.file);
@@ -399,7 +392,6 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     }
     defer paths.deinit(allocator);
     input.sql_schema_path = paths.sqlite;
-    input.system_path = paths.system;
 
     // The policy is read here rather than in `simulate`, for the same reason
     // the paths are: one walk per invocation, rooted at the edited file, so
@@ -434,28 +426,26 @@ fn writeProjectContextFailure(writer: anytype, file: []const u8) !void {
     try writer.writeAll("}],\"total\":1,\"new\":1,\"preexisting\":0}\n");
 }
 
-/// The two `zttp.json` entries the analyzer reads. Caller frees via `deinit`.
+/// The `zttp.json` entries the analyzer reads. Caller frees via `deinit`.
 pub const ProjectPaths = struct {
     sqlite: ?[]u8 = null,
-    system: ?[]u8 = null,
     policy: ?[]u8 = null,
 
     pub fn deinit(self: *ProjectPaths, allocator: std.mem.Allocator) void {
         if (self.sqlite) |p| allocator.free(p);
-        if (self.system) |p| allocator.free(p);
         if (self.policy) |p| allocator.free(p);
         self.* = .{};
     }
 };
 
-/// Resolve the project's SQL schema and system manifest for analysis: the
-/// `sqlite` and `system` entries in the nearest `zttp.json` walking up from
+/// Resolve the project's SQL schema and capability policy for analysis. Read
+/// the entries in the nearest `zttp.json` walking up from
 /// `start_path` (or cwd when null), resolved against the project root. This is
 /// the same source `zttp dev`, `zttp test`, and `zttp doctor` pass to the
 /// analyzer, and the same boundary `zts check` uses. A field is null when the
 /// project exists but names no such entry.
 ///
-/// Both come from one walk. Resolving them separately walked the ancestor
+/// Both paths come from one walk. Resolving them separately walked the ancestor
 /// directories and parsed the same manifest twice for every simulated edit.
 ///
 /// A manifest that cannot be read or does not parse is an ERROR, not a null
@@ -473,7 +463,6 @@ pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u
     const cfg = if (project) |*p| p else return .{};
     var paths: ProjectPaths = .{ .sqlite = try cfg.resolvedSqlitePath(allocator) };
     errdefer paths.deinit(allocator);
-    paths.system = try cfg.resolvedSystemPath(allocator);
     paths.policy = try cfg.resolvedPolicyPath(allocator);
     return paths;
 }
@@ -486,9 +475,8 @@ pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u
 ///
 /// One resolver for every boundary that owns project context - `zts check`,
 /// the `edit-simulate` CLI, and the expert veto - for the reason
-/// `discoverProjectSystemPath` already gives: a hand-written copy per caller is
-/// how `check` and `edit-simulate` drifted into different verdicts for the same
-/// handler.
+/// `discoverProjectPaths` prevents a hand-written copy per caller from making
+/// `check` and `edit-simulate` produce different verdicts for one handler.
 ///
 pub fn discoverProjectPolicySource(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
     var paths = try discoverProjectPaths(allocator, start_path);
@@ -497,14 +485,12 @@ pub fn discoverProjectPolicySource(allocator: std.mem.Allocator, start_path: ?[]
     return try file_io.readFile(allocator, path, 1024 * 1024);
 }
 
-/// Single-path wrapper for the callers that analyze without a system manifest.
+/// Single-path wrapper for callers that need only a SQL schema.
 /// A broken manifest degrades to schema-less analysis here rather than failing
 /// the edit, which is what these callers have always done. Caller frees the
 /// returned slice.
 pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
     var paths = discoverProjectPaths(allocator, start_path) catch return null;
-    if (paths.system) |p| allocator.free(p);
-    paths.system = null;
     if (paths.policy) |p| allocator.free(p);
     paths.policy = null;
     return paths.sqlite;

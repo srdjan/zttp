@@ -20,11 +20,6 @@
 //! string, template, or regex logic to avoid mistaking `"// not a comment"` for
 //! a comment - the tokenizer already put that inside a token.
 //!
-//! One limitation, named rather than left to be discovered: authored TSX is
-//! lowered before core parsing, while this source-preserving pass sees the raw
-//! bytes. Element text would be tokenized as code and gaps inside it reported
-//! as whitespace, so the printer refuses TSX before collecting trivia.
-
 const std = @import("std");
 const token = @import("token.zig");
 const Tokenizer = @import("tokenizer.zig").Tokenizer;

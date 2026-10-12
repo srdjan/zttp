@@ -1,13 +1,12 @@
 //! File Import Path Resolution
 //!
 //! Pure functions for resolving relative import specifiers to absolute file paths.
-//! Handles extension probing (.ts, .tsx) and path normalization.
+//! Handles `.ts` extension probing and path normalization.
 
 const std = @import("std");
-const source_frontend = @import("../../source_frontend.zig");
 
 /// Extensions to probe when an import has no extension
-const probe_extensions = [_][]const u8{ ".ts", ".tsx" };
+const probe_extensions = [_][]const u8{".ts"};
 
 /// Maximum path length to prevent allocation issues
 /// Resolve an import specifier relative to the importing file's directory.
@@ -15,7 +14,7 @@ const probe_extensions = [_][]const u8{ ".ts", ".tsx" };
 /// Returns an owned absolute path string. Caller must free with the same allocator.
 ///
 /// If the specifier already has a recognized extension, it's used directly.
-/// Otherwise, tries .ts and .tsx in order using the provided `fileExists` callback.
+/// Otherwise, tries `.ts` using the provided `fileExists` callback.
 /// If no callback is provided (null), the first probe extension (.ts) is used.
 pub fn resolve(
     allocator: std.mem.Allocator,
@@ -23,8 +22,7 @@ pub fn resolve(
     importing_file_dir: []const u8,
     fileExists: ?*const fn (path: []const u8) bool,
 ) ![]const u8 {
-    const source_kind = source_frontend.classifyPath(specifier);
-    if (source_kind == .legacy_javascript or source_kind == .legacy_jsx) {
+    if (hasUnsupportedSourceExtension(specifier)) {
         return error.UnsupportedSourceExtension;
     }
 
@@ -69,12 +67,18 @@ pub fn dirName(path: []const u8) []const u8 {
     return "./";
 }
 
-/// Check if a specifier has a recognized JS/TS extension
+/// Check if a specifier has the supported TypeScript extension.
 fn hasRecognizedExtension(specifier: []const u8) bool {
     inline for (probe_extensions) |ext| {
         if (std.mem.endsWith(u8, specifier, ext)) return true;
     }
     return false;
+}
+
+fn hasUnsupportedSourceExtension(specifier: []const u8) bool {
+    return std.mem.endsWith(u8, specifier, ".js") or
+        std.mem.endsWith(u8, specifier, ".jsx") or
+        std.mem.endsWith(u8, specifier, ".tsx");
 }
 
 /// Join two path segments, handling trailing/leading slashes
@@ -173,6 +177,10 @@ test "resolve: JavaScript extensions are refused" {
         error.UnsupportedSourceExtension,
         resolve(std.testing.allocator, "./view.jsx", "/app/src/", null),
     );
+    try std.testing.expectError(
+        error.UnsupportedSourceExtension,
+        resolve(std.testing.allocator, "./view.tsx", "/app/src/", null),
+    );
 }
 
 test "resolve: specifier without extension defaults to .ts" {
@@ -199,13 +207,13 @@ test "resolve: nested relative path" {
 test "resolve: extension probing with callback" {
     const S = struct {
         fn exists(path: []const u8) bool {
-            return std.mem.endsWith(u8, path, "/app/utils.tsx");
+            return std.mem.endsWith(u8, path, "/app/utils.ts");
         }
     };
     const allocator = std.testing.allocator;
     const result = try resolve(allocator, "./utils", "/app/", S.exists);
     defer allocator.free(result);
-    try std.testing.expectEqualStrings("/app/utils.tsx", result);
+    try std.testing.expectEqualStrings("/app/utils.ts", result);
 }
 
 test "dirName: file in directory" {

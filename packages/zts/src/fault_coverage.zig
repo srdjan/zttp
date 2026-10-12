@@ -710,7 +710,6 @@ const FaultProbe = struct {
 
 const probe_prefix =
     \\import { jwtVerify } from "zttp:auth";
-    \\import { parallel } from "zttp:io";
     \\import { env } from "zttp:env";
     \\import { logInfo } from "zttp:log";
     \\function wrap(r) {
@@ -761,7 +760,7 @@ const fault_probes = [_]FaultProbe{
         \\  function check() {
         \\    return jwtVerify("t2", "secret");
         \\  }
-        \\  const rows = parallel([check]);
+        \\  const rows = [check()];
         \\  return Response.json({ rows: rows });
         \\}
     },
@@ -826,7 +825,7 @@ const fault_probes = [_]FaultProbe{
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
         \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
-        \\  const rows = parallel([jwtVerify]);
+        \\  const rows = ["t2"].map(jwtVerify);
         \\  return Response.json({ rows: rows });
         \\}
     },
@@ -1320,7 +1319,6 @@ test "a ?? fallback does not cover a Result export" {
 
 const fetch_prefix =
     \\import { fetch } from "zttp:fetch";
-    \\import { parallel } from "zttp:io";
     \\import { logInfo } from "zttp:log";
     \\import { routerMatch } from "zttp:router";
     \\function wrap(r) {
@@ -1480,14 +1478,14 @@ const fetch_probes = [_]FaultProbe{
         \\}
         \\
     ++ routed_tail },
-    .{ .name = "f1 second fetch in a nested function (parallel)", .clean = false, .source = fetch_prefix ++
+    .{ .name = "f1 second fetch in a nested function", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
         \\  if (!a.ok) return Response.text("a failed", { status: 502 });
         \\  function load() {
         \\    return fetch("https://api.example.com/b", {});
         \\  }
-        \\  const rows = parallel([load]);
+        \\  const rows = [load()];
         \\  return Response.json({ rows: rows });
         \\}
     },

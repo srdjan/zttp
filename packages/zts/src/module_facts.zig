@@ -202,10 +202,7 @@ pub const ModuleFacts = struct {
                 // contract extraction rules and flags for the call-site scan.
                 if (builtin_modules.findExport(module_str, imported_name)) |entry| {
                     const has_extractions = entry.func.contract_extractions.len > 0;
-                    const has_flags = entry.func.contract_flags.sets_scope_used or
-                        entry.func.contract_flags.sets_durable_used or
-                        entry.func.contract_flags.sets_durable_timers or
-                        entry.func.contract_flags.sets_bearer_auth or
+                    const has_flags = entry.func.contract_flags.sets_bearer_auth or
                         entry.func.contract_flags.sets_jwt_auth;
                     if (has_extractions or has_flags) {
                         try self.generic_bindings.append(allocator, .{

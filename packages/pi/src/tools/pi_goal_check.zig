@@ -35,7 +35,7 @@ const name = "pi_goal_check";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "goal-check",
-    .effect = .persist_agent_state,
+    .effect = .read_workspace,
     .context_policy = .exact,
     .model_exposure = .visible,
     .description =
@@ -151,7 +151,7 @@ fn execute(
         }
     }
 
-    return evaluateSourceWithTags(allocator, source, args[0], goals.items, true);
+    return evaluateSourceWithTags(allocator, source, args[0], goals.items);
 }
 
 /// Evaluate candidate bytes without reading or changing the live workspace.
@@ -173,7 +173,7 @@ pub fn evaluateSource(
             try goals.append(allocator, tag);
         }
     }
-    return evaluateSourceWithTags(allocator, source, path, goals.items, false);
+    return evaluateSourceWithTags(allocator, source, path, goals.items);
 }
 
 fn evaluateSourceWithTags(
@@ -181,11 +181,8 @@ fn evaluateSourceWithTags(
     source: []const u8,
     path: []const u8,
     goals: []const counterexample.PropertyTag,
-    persist_witnesses: bool,
 ) !registry_mod.ToolResult {
-    var prepared = zts.PreparedSource.init(allocator, source, path, .{
-        .comptime_env = .{},
-    }) catch |e| {
+    var prepared = zts.PreparedSource.init(allocator, source, path, .{}) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": TypeScript strip failed: {s}\n",
@@ -240,18 +237,6 @@ fn evaluateSourceWithTags(
     }
     try w.writeAll("],\"witnesses\":[");
 
-    // Persist materialised witnesses into the on-disk corpus so they
-    // accumulate across goal-check invocations. The corpus is keyed by
-    // the workspace-relative handler path. Failures are non-fatal.
-    const corpus_dir = if (persist_witnesses)
-        zts.witness_corpus.corpusDir(allocator, path) catch null
-    else
-        null;
-    defer if (corpus_dir) |d| allocator.free(d);
-    if (corpus_dir) |d| {
-        zts.witness_corpus.ensureCorpusDir(allocator, d, path) catch {};
-    }
-
     var witness_count: usize = 0;
     for (checker.getDiagnostics()) |diag| {
         const tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
@@ -279,13 +264,6 @@ fn evaluateSourceWithTags(
             .io_calls = io_calls,
         }) catch continue;
         defer witness.deinit(allocator);
-
-        if (corpus_dir) |d| {
-            if (zts.witness_corpus.persist(allocator, d, witness)) |pres| {
-                var owned = pres;
-                owned.deinit(allocator);
-            } else |_| {}
-        }
 
         if (witness_count > 0) try w.writeByte(',');
         witness_count += 1;

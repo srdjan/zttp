@@ -17,7 +17,6 @@ pub const Result = struct {
     zts_layering: *std.Build.Step.Run,
     convergence_emitter: *std.Build.Step.Run,
     evidence_marker: *std.Build.Step.Run,
-    expert_qualification_boundary: *std.Build.Step.Run,
     docs_drift_step: *std.Build.Step,
     meta_drift: *std.Build.Step.Run,
     doc_links: *std.Build.Step.Run,
@@ -61,8 +60,10 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
 
     const module_boundary = ctx.addGate(&.{ "/bin/bash", "scripts/test-module-boundary.sh" }, "test-module-boundary", "Check consumer reach into zts internals against the allowlist");
     const release_workflow = ctx.addGate(&.{ "/bin/bash", "scripts/test-release-workflow.sh" }, "test-release-workflow", "Check release workflow invariants");
+    release_workflow.run.addArtifactArg(tools.repo_gate_exe);
     const proof_swallow = ctx.addGate(&.{ "/bin/bash", "scripts/check-proof-swallow.sh" }, "test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
     const zts_layering = ctx.addGate(&.{ "/bin/bash", "scripts/check-zts-layering.sh" }, "test-zts-layering", "Check zts tier assignments import only downward");
+    zts_layering.run.addArtifactArg(tools.zts_graph_gate_exe);
     const convergence_emitter = ctx.addGate(&.{ "/bin/bash", "scripts/check-convergence-emitter.sh" }, "test-convergence-emitter", "Check the convergence marker has one producer and one consumer");
 
     const evidence_marker = ctx.addGate(&.{ "/bin/bash", "scripts/test-evidence-marker.sh" }, "test-evidence-marker", "Check release evidence marker and publisher boundaries");
@@ -72,11 +73,6 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     evidence_marker.run.step.dependOn(&tools.run_release_provenance_tests.step);
     convergence_emitter.run.step.dependOn(&evidence_marker.run.step);
 
-    const expert_qualification_boundary = ctx.addGate(&.{
-        "python3",
-        "scripts/test-expert-qualification.py",
-    }, "test-expert-qualification", "Check report-only expert qualification boundaries");
-
     const docs_drift = ctx.addGate(&.{ "/bin/bash", "scripts/check-docs-drift.sh" }, "test-docs-drift", "Check docs against current registry and build paths");
     _ = ctx.addGate(&.{ "/bin/bash", "scripts/check-idiom-table.sh" }, "test-idiom-table", "Check spec 4.2.1's idiom table against the registry");
     _ = ctx.addGate(&.{ "/bin/bash", "scripts/check-canonical-style.sh" }, "test-canonical-style", "Check the canonical-style skill's examples against the rule registry");
@@ -84,6 +80,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     _ = ctx.addGate(&.{ "/bin/bash", "scripts/check-decision-registry.sh" }, "test-decision-registry", "Check every published decision kind is emitted somewhere");
     // artifacts.zig appends the built `zts` binary to this gate's arguments.
     const meta_drift = ctx.addGate(&.{ "/bin/bash", "scripts/check-meta-drift.sh" }, "test-meta-drift", "Check meta's published registry hashes against their pins");
+    meta_drift.run.addArtifactArg(tools.repo_gate_exe);
     const doc_links = ctx.addGate(&.{ "/bin/bash", "scripts/audit-docs.sh" }, "test-doc-links", "Check docs for broken relative links");
 
     return .{
@@ -94,7 +91,6 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
         .zts_layering = zts_layering.run,
         .convergence_emitter = convergence_emitter.run,
         .evidence_marker = evidence_marker.run,
-        .expert_qualification_boundary = expert_qualification_boundary.run,
         .docs_drift_step = docs_drift.step,
         .meta_drift = meta_drift.run,
         .doc_links = doc_links.run,

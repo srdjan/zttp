@@ -184,10 +184,10 @@ const ok_record_stub_failed =
     \\{"status":503,"statusText":"Service Unavailable","ok":false,"headers":{},"body":"{}"}
 ;
 
-/// The stub for a call forked by `x.ok` on an `ok`-record export (`fetch`,
-/// `fetchWithRetry`, `serviceCall`). `fetch` replays through `runtime_http.zig`,
-/// which derives `ok` from `status` and ignores a stub `ok` field. The other
-/// exports replay through `trace.makeReplayStub`, which parses the JSON
+/// The stub for a call forked by `x.ok` on an `ok`-record export (`fetch` or
+/// `fetchWithRetry`). `fetch` replays through `runtime_http.zig`, which derives
+/// `ok` from `status` and ignores a stub `ok` field. `fetchWithRetry` replays
+/// through `trace.makeReplayStub`, which parses the JSON
 /// verbatim, so the stub carries `ok` itself, equal to `isOkStatus(status)`.
 /// `statusText`, `headers`, and `body` are the other fields `runtime_http.zig`
 /// reads from a recorded fetch. The generated tests and the counterexample
@@ -304,55 +304,4 @@ test "the canonical stubs keep the bytes the generated tests were recorded with"
     try std.testing.expectEqualStrings(
         \\{"status":404,"statusText":"Not Found","ok":false,"headers":{},"body":"{}"}
     , statusStub(404));
-}
-
-/// Replay one recorded `serviceCall` result through `trace.makeReplayStub` and
-/// read the `ok` property of the object the handler sees. Null means that the
-/// property is absent or is not a boolean.
-fn replayedServiceOk(result_json: []const u8) !?bool {
-    const engine = @import("zts-engine");
-    const trace = engine.trace;
-
-    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer test_arena.deinit();
-    const allocator = test_arena.allocator();
-
-    const gc_state = try allocator.create(engine.gc.GC);
-    gc_state.* = try engine.gc.GC.init(allocator, .{ .nursery_size = 4096 });
-    const heap_state = try allocator.create(engine.heap.Heap);
-    heap_state.* = engine.heap.Heap.init(allocator, .{});
-    gc_state.setHeap(heap_state);
-    const ctx = try engine.context.Context.init(allocator, gc_state, .{});
-    defer {
-        ctx.deinit();
-        gc_state.deinit();
-        heap_state.deinit();
-    }
-
-    const io_calls = [_]trace.IoEntry{
-        .{ .seq = 0, .module = "service", .func = "serviceCall", .args_json = "[]", .result_json = result_json },
-    };
-    var state = trace.ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
-    ctx.setModuleState(trace.REPLAY_STATE_SLOT, @ptrCast(&state), &trace.ReplayState.deinitOpaque);
-    defer ctx.module_state[trace.REPLAY_STATE_SLOT] = null;
-
-    const stub = comptime trace.makeReplayStub("service", "serviceCall");
-    const res = try stub(@ptrCast(ctx), engine.value.JSValue.undefined_val, &.{});
-    try std.testing.expect(res.isObject());
-    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-    const obj = res.toPtr(engine.object.JSObject);
-    const prop = obj.getProperty(pool, try ctx.atoms.intern("ok")) orelse return null;
-    if (prop.isTrue()) return true;
-    if (prop.isFalse()) return false;
-    return null;
-}
-
-test "a generated ok-record stub replays with a boolean ok through makeReplayStub" {
-    // `serviceCall` and `fetchWithRetry` replay through `makeReplayStub`, which
-    // parses the recorded JSON verbatim. Only `fetch` derives `ok` from `status`.
-    try std.testing.expectEqual(@as(?bool, true), try replayedServiceOk(okRecordStub(true)));
-    try std.testing.expectEqual(@as(?bool, false), try replayedServiceOk(okRecordStub(false)));
-    try std.testing.expectEqual(@as(?bool, true), try replayedServiceOk(statusStub(204)));
-    try std.testing.expectEqual(@as(?bool, false), try replayedServiceOk(statusStub(404)));
-    try std.testing.expectEqual(@as(?bool, false), try replayedServiceOk(statusStub(302)));
 }

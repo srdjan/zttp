@@ -174,24 +174,9 @@ fn getRandomFloat() f64 {
 /// When trace recording is active, the result is recorded as an I/O call
 /// so replay can reproduce the exact value.
 /// When replay is active, the recorded value is returned instead.
-/// When durable mode is active, replays from oplog or records with write-ahead.
 pub fn mathRandom(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
-
-    // Durable mode: replay from oplog or execute and persist
-    if (ctx.getModuleState(trace_mod.DurableState, trace_mod.DURABLE_STATE_SLOT)) |durable| {
-        if (durable.replayNext("builtin", "Math.random")) |entry| {
-            return trace_mod.jsonToJSValue(ctx, entry.result_json);
-        }
-        // Live phase: generate real random, persist, return
-        const r = getRandomFloat();
-        const result = allocFloat(ctx, r);
-        durable.persistIO("builtin", "Math.random", ctx, &.{}, result) catch |err| {
-            return trace_mod.throwDurablePersistenceError(ctx, err);
-        };
-        return result;
-    }
 
     // Replay mode: return recorded value
     if (ctx.getModuleState(trace_mod.ReplayState, trace_mod.REPLAY_STATE_SLOT)) |state| {

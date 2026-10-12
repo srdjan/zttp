@@ -41,17 +41,11 @@ pub const Claims = struct {
     core_profile_id: []const u8,
     core_grammar_sha256: []const u8,
     semantics_sha256: []const u8,
-    frontend_profile_id: ?[]const u8 = null,
-    frontend_grammar_sha256: ?[]const u8 = null,
     compiler_version: []const u8,
     signed_at_unix: i64,
     property_summary: []const u8,
     guarded_categories: []const u8 = "",
     routes_count: u64,
-    durable_workflow_proof_level: []const u8 = "none",
-    durable_workflow_retry_safe: bool = false,
-    durable_workflow_idempotent: bool = false,
-    durable_workflow_fault_covered: bool = false,
 };
 
 pub const Envelope = struct {
@@ -88,7 +82,6 @@ pub const SignError = error{
     InvalidHexLength,
     InvalidHexEncoding,
     InvalidProfileIdentity,
-    InvalidFrontendIdentity,
     OutOfMemory,
     /// The Ed25519 signature could not be produced. Every other failure in
     /// `sign` propagates, and this one was `catch unreachable` - a panic in
@@ -102,6 +95,7 @@ pub const VerifyError = error{
     MalformedJws,
     InvalidBase64,
     InvalidJson,
+    UnsupportedRuntimeAuthority,
     UnsupportedAttestationVersion,
     UnsupportedAlgorithm,
     MissingPublicKey,
@@ -192,6 +186,7 @@ pub fn verify(
     signature.verify(signing_input, public_key) catch return error.SignatureMismatch;
 
     const claims = parseClaims(ar, payload_bytes) catch |err| switch (err) {
+        error.UnsupportedRuntimeAuthority => return error.UnsupportedRuntimeAuthority,
         error.UnsupportedAttestationVersion => return error.UnsupportedAttestationVersion,
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.InvalidJson,
@@ -228,14 +223,6 @@ fn validateClaims(claims: Claims) SignError!void {
     try validateHexField(claims.core_grammar_sha256);
     try validateHexField(claims.semantics_sha256);
     if (claims.core_profile_id.len == 0) return error.InvalidProfileIdentity;
-
-    if ((claims.frontend_profile_id == null) != (claims.frontend_grammar_sha256 == null)) {
-        return error.InvalidFrontendIdentity;
-    }
-    if (claims.frontend_profile_id) |profile_id| {
-        if (profile_id.len == 0) return error.InvalidFrontendIdentity;
-        try validateHexField(claims.frontend_grammar_sha256.?);
-    }
 }
 
 const JwsParts = struct { header: []const u8, payload: []const u8, signature: []const u8 };
@@ -335,9 +322,9 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
         try json.write(field[1]);
     }
     try json.objectField(wire_key.frontend_profile_id);
-    try json.write(claims.frontend_profile_id);
+    try json.write(@as(?[]const u8, null));
     try json.objectField(wire_key.frontend_grammar_sha256);
-    try json.write(claims.frontend_grammar_sha256);
+    try json.write(@as(?[]const u8, null));
     try json.objectField(wire_key.compiler_version);
     try json.write(claims.compiler_version);
     try json.objectField(wire_key.signed_at);
@@ -349,13 +336,13 @@ fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
     try json.objectField(wire_key.routes_count);
     try json.write(claims.routes_count);
     try json.objectField(wire_key.durable_workflow_proof_level);
-    try json.write(claims.durable_workflow_proof_level);
+    try json.write("none");
     try json.objectField(wire_key.durable_workflow_retry_safe);
-    try json.write(claims.durable_workflow_retry_safe);
+    try json.write(false);
     try json.objectField(wire_key.durable_workflow_idempotent);
-    try json.write(claims.durable_workflow_idempotent);
+    try json.write(false);
     try json.objectField(wire_key.durable_workflow_fault_covered);
-    try json.write(claims.durable_workflow_fault_covered);
+    try json.write(false);
     try json.endObject();
     return try allocator.dupe(u8, aw.writer.buffered());
 }
@@ -403,6 +390,7 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
     if (payload_version != .string or !std.mem.eql(u8, payload_version.string, version_tag)) {
         return error.UnsupportedAttestationVersion;
     }
+    try refuseRetiredAuthority(obj);
 
     // Validate the borrowed JSON view before duplicating any strings. A
     // missing or malformed required claim must not leak the fields parsed
@@ -417,20 +405,30 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
         .core_profile_id = try readString(obj, wire_key.core_profile_id),
         .core_grammar_sha256 = try readString(obj, wire_key.core_grammar_sha256),
         .semantics_sha256 = try readString(obj, wire_key.semantics_sha256),
-        .frontend_profile_id = try readOptionalString(obj, wire_key.frontend_profile_id),
-        .frontend_grammar_sha256 = try readOptionalString(obj, wire_key.frontend_grammar_sha256),
         .compiler_version = try readString(obj, wire_key.compiler_version),
         .property_summary = try readString(obj, wire_key.property_summary),
         .guarded_categories = try readString(obj, wire_key.guarded_categories),
         .signed_at_unix = try readI64(obj, wire_key.signed_at),
         .routes_count = try readU64(obj, wire_key.routes_count),
-        .durable_workflow_proof_level = try readStringDefault(obj, wire_key.durable_workflow_proof_level, "none"),
-        .durable_workflow_retry_safe = try readBoolDefault(obj, wire_key.durable_workflow_retry_safe, false),
-        .durable_workflow_idempotent = try readBoolDefault(obj, wire_key.durable_workflow_idempotent, false),
-        .durable_workflow_fault_covered = try readBoolDefault(obj, wire_key.durable_workflow_fault_covered, false),
     };
     validateClaims(claims) catch return error.InvalidJson;
     return duplicateClaims(allocator, claims);
+}
+
+/// Version 4 keeps these keys only to preserve its JSON record shape.
+/// Non-default values represented retired runtime authority and are refused.
+fn refuseRetiredAuthority(obj: std.json.ObjectMap) !void {
+    const frontend_profile = try readOptionalString(obj, wire_key.frontend_profile_id);
+    const frontend_grammar = try readOptionalString(obj, wire_key.frontend_grammar_sha256);
+    const durable_level = try readStringDefault(obj, wire_key.durable_workflow_proof_level, "none");
+    const durable_retry = try readBoolDefault(obj, wire_key.durable_workflow_retry_safe, false);
+    const durable_idempotent = try readBoolDefault(obj, wire_key.durable_workflow_idempotent, false);
+    const durable_fault = try readBoolDefault(obj, wire_key.durable_workflow_fault_covered, false);
+    if (frontend_profile != null or frontend_grammar != null or
+        !std.mem.eql(u8, durable_level, "none") or durable_retry or durable_idempotent or durable_fault)
+    {
+        return error.UnsupportedRuntimeAuthority;
+    }
 }
 
 fn readString(obj: std.json.ObjectMap, key: []const u8) ![]const u8 {
@@ -473,24 +471,12 @@ fn duplicateClaims(allocator: std.mem.Allocator, claims: Claims) !Claims {
     errdefer allocator.free(core_grammar_sha256);
     const semantics_sha256 = try allocator.dupe(u8, claims.semantics_sha256);
     errdefer allocator.free(semantics_sha256);
-    const frontend_profile_id = if (claims.frontend_profile_id) |value|
-        try allocator.dupe(u8, value)
-    else
-        null;
-    errdefer if (frontend_profile_id) |value| allocator.free(value);
-    const frontend_grammar_sha256 = if (claims.frontend_grammar_sha256) |value|
-        try allocator.dupe(u8, value)
-    else
-        null;
-    errdefer if (frontend_grammar_sha256) |value| allocator.free(value);
     const compiler_version = try allocator.dupe(u8, claims.compiler_version);
     errdefer allocator.free(compiler_version);
     const property_summary = try allocator.dupe(u8, claims.property_summary);
     errdefer allocator.free(property_summary);
     const guarded_categories = try allocator.dupe(u8, claims.guarded_categories);
     errdefer allocator.free(guarded_categories);
-    const durable_workflow_proof_level = try allocator.dupe(u8, claims.durable_workflow_proof_level);
-    errdefer allocator.free(durable_workflow_proof_level);
 
     return .{
         .contract_sha256 = contract_sha256,
@@ -502,17 +488,11 @@ fn duplicateClaims(allocator: std.mem.Allocator, claims: Claims) !Claims {
         .core_profile_id = core_profile_id,
         .core_grammar_sha256 = core_grammar_sha256,
         .semantics_sha256 = semantics_sha256,
-        .frontend_profile_id = frontend_profile_id,
-        .frontend_grammar_sha256 = frontend_grammar_sha256,
         .compiler_version = compiler_version,
         .signed_at_unix = claims.signed_at_unix,
         .property_summary = property_summary,
         .guarded_categories = guarded_categories,
         .routes_count = claims.routes_count,
-        .durable_workflow_proof_level = durable_workflow_proof_level,
-        .durable_workflow_retry_safe = claims.durable_workflow_retry_safe,
-        .durable_workflow_idempotent = claims.durable_workflow_idempotent,
-        .durable_workflow_fault_covered = claims.durable_workflow_fault_covered,
     };
 }
 
@@ -556,17 +536,11 @@ fn testClaims() Claims {
         .core_profile_id = "zts-model-1",
         .core_grammar_sha256 = "1" ** 64,
         .semantics_sha256 = "2" ** 64,
-        .frontend_profile_id = "zts-tsx-1",
-        .frontend_grammar_sha256 = "3" ** 64,
         .compiler_version = "0.0.0-test",
         .signed_at_unix = 1_700_000_000,
         .property_summary = "pure,read_only,injection_safe",
         .guarded_categories = "env,cache",
         .routes_count = 3,
-        .durable_workflow_proof_level = "complete",
-        .durable_workflow_retry_safe = true,
-        .durable_workflow_idempotent = true,
-        .durable_workflow_fault_covered = true,
     };
 }
 
@@ -587,17 +561,11 @@ test "sign then verify recovers the same claims" {
     try std.testing.expectEqualStrings("zts-model-1", result.claims.core_profile_id);
     try std.testing.expectEqualStrings("1" ** 64, result.claims.core_grammar_sha256);
     try std.testing.expectEqualStrings("2" ** 64, result.claims.semantics_sha256);
-    try std.testing.expectEqualStrings("zts-tsx-1", result.claims.frontend_profile_id.?);
-    try std.testing.expectEqualStrings("3" ** 64, result.claims.frontend_grammar_sha256.?);
     try std.testing.expectEqualStrings("0.0.0-test", result.claims.compiler_version);
     try std.testing.expectEqualStrings("pure,read_only,injection_safe", result.claims.property_summary);
     try std.testing.expectEqualStrings("env,cache", result.claims.guarded_categories);
     try std.testing.expectEqual(@as(i64, 1_700_000_000), result.claims.signed_at_unix);
     try std.testing.expectEqual(@as(u64, 3), result.claims.routes_count);
-    try std.testing.expectEqualStrings("complete", result.claims.durable_workflow_proof_level);
-    try std.testing.expect(result.claims.durable_workflow_retry_safe);
-    try std.testing.expect(result.claims.durable_workflow_idempotent);
-    try std.testing.expect(result.claims.durable_workflow_fault_covered);
     try std.testing.expectEqualSlices(u8, &kp.public_key.bytes, &result.public_key);
 }
 
@@ -626,6 +594,37 @@ fn signPayloadJsonForTest(
     const signature_b64 = try encodeBase64Owned(allocator, &signature_bytes);
     defer allocator.free(signature_b64);
     return joinDot(allocator, signing_input, signature_b64);
+}
+
+test "verify refuses non-default retired authority claims" {
+    const allocator = std.testing.allocator;
+    const key_pair = try keyPairFromSeed(test_seed);
+    const base = try buildPayloadJson(allocator, testClaims());
+    defer allocator.free(base);
+
+    const mutations = [_]struct { needle: []const u8, replacement: []const u8 }{
+        .{
+            .needle = "\"frontendProfileId\":null",
+            .replacement = "\"frontendProfileId\":\"zts-tsx-1\"",
+        },
+        .{
+            .needle = "\"durableWorkflowIdempotent\":false",
+            .replacement = "\"durableWorkflowIdempotent\":true",
+        },
+    };
+    for (mutations) |mutation| {
+        const payload = try std.mem.replaceOwned(
+            u8,
+            allocator,
+            base,
+            mutation.needle,
+            mutation.replacement,
+        );
+        defer allocator.free(payload);
+        const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
+        defer allocator.free(jws);
+        try std.testing.expectError(error.UnsupportedRuntimeAuthority, verify(allocator, jws));
+    }
 }
 
 test "verify refuses a legacy receipt without source identity" {
@@ -726,7 +725,7 @@ test "an executable root that is not a hex digest is refused at signing" {
     try std.testing.expectError(error.InvalidHexLength, sign(allocator, claims, key_pair));
 }
 
-test "parseClaims defaults missing durable workflow fields" {
+test "parseClaims accepts retired claim placeholders" {
     const allocator = std.testing.allocator;
     const payload =
         "{\"v\":\"" ++ version_tag ++ "\"," ++
@@ -761,18 +760,11 @@ test "parseClaims defaults missing durable workflow fields" {
         allocator.free(claims.compiler_version);
         allocator.free(claims.property_summary);
         allocator.free(claims.guarded_categories);
-        allocator.free(claims.durable_workflow_proof_level);
     }
 
-    try std.testing.expectEqualStrings("none", claims.durable_workflow_proof_level);
     try std.testing.expectEqualStrings("", claims.guarded_categories);
     try std.testing.expectEqualStrings("e" ** 64, claims.runtime_policy_sha256);
     try std.testing.expectEqualStrings("zts-model-1", claims.core_profile_id);
-    try std.testing.expect(claims.frontend_profile_id == null);
-    try std.testing.expect(claims.frontend_grammar_sha256 == null);
-    try std.testing.expect(!claims.durable_workflow_retry_safe);
-    try std.testing.expect(!claims.durable_workflow_idempotent);
-    try std.testing.expect(!claims.durable_workflow_fault_covered);
 }
 
 test "parseClaims requires guardedCategories in v4" {
@@ -876,17 +868,13 @@ test "rejects claims with a non-64-char hex field" {
     try std.testing.expectError(error.InvalidHexLength, sign(allocator, bad, kp));
 }
 
-test "rejects malformed and incomplete source identity claims" {
+test "rejects malformed core source identity claims" {
     const allocator = std.testing.allocator;
     const kp = try keyPairFromSeed(test_seed);
 
     var bad_hex = testClaims();
     bad_hex.core_grammar_sha256 = "g" ** 64;
     try std.testing.expectError(error.InvalidHexEncoding, sign(allocator, bad_hex, kp));
-
-    var half_frontend = testClaims();
-    half_frontend.frontend_grammar_sha256 = null;
-    try std.testing.expectError(error.InvalidFrontendIdentity, sign(allocator, half_frontend, kp));
 }
 
 test "malformed JWS string is rejected before any crypto runs" {

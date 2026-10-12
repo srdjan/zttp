@@ -51,10 +51,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&gates.zts_layering.step);
     test_step.dependOn(&tools.run_release_check_tests.step);
     test_step.dependOn(&tools.run_evidence_publish_tests.step);
+    test_step.dependOn(tools.native_gate_test_step);
     test_step.dependOn(&tools.run_release_provenance_tests.step);
     test_step.dependOn(&tools.run_coverage_union_tests.step);
     test_step.dependOn(tools.production_branch_metric_test_step);
-    test_step.dependOn(golden.comptime_cli_step);
     test_step.dependOn(golden.generic_intersection_cli_step);
     // `zttp-standin` is deliberately not installed, so nothing else forces it
     // to compile and a break in that path would surface only when somebody ran
@@ -68,7 +68,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&gates.doc_links.step);
     test_step.dependOn(&gates.convergence_emitter.step);
     test_step.dependOn(&gates.evidence_marker.step);
-    test_step.dependOn(&gates.expert_qualification_boundary.step);
     test_step.dependOn(&golden.run_module_governance.step);
     test_step.dependOn(pkgs.zts_test_step);
     test_step.dependOn(&pkgs.run_sdk_tests.step);
@@ -94,7 +93,6 @@ pub fn build(b: *std.Build) void {
     const bench_exe = bench.addRuntimeBench(ctx, test_step);
     smoke.add(ctx);
     bench.addCompileBench(ctx, test_step, bench_exe);
-    artifacts.addSystemLink(ctx, bins);
 
     step_coverage.add(b, test_step);
 }

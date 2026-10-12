@@ -34,7 +34,7 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
 - Zig `0.16.0` as declared by `build.zig.zon`.
 - Threaded HTTP/1.1 server with per-request runtime isolation and decoded
   `Content-Length` or `Transfer-Encoding: chunked` request bodies.
-- Restricted TypeScript and TSX handler execution through `zts`.
+- Restricted TypeScript handler execution through `zts`.
 - The five core `zttp` commands: `init`, `dev`, `test`, `expert`, `deploy`.
 - Local self-contained deploy artifacts with default-on attestation.
 - Mandatory artifact-level proof certificates for deploy builds. Production
@@ -94,7 +94,7 @@ contract must identify which ones it needs.
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | Runtime lifecycle | Open; M2 grace-expiry coverage added | Current socket and panic-isolation tests | Check request-timeout policy and control-thread shutdown semantics against the intended deployment | Tests assert accepted requests, drain and expiry outcomes, and isolation; unfiltered runtime and panic suites pass |
-| Engine/runtime facade | Deferred | Lifecycle behavior pinned before changing state ownership | Replace one sibling back-import with a narrow interface | Selected cycle removed; request, durable, queue, and pool behavior preserved; boundary and runtime gates pass |
+| Engine/runtime facade | Deferred | Lifecycle behavior pinned before changing state ownership | Replace one sibling back-import with a narrow interface | Selected cycle removed; request and pool behavior preserved; boundary and runtime gates pass |
 | Module gaps | Needs scope | A concrete handler requirement | Identify a missing fetch-resilience, capability, or build-feature diagnostic case | Public example and regression test demonstrate the selected behavior |
 | Hosted deploy | Deferred | Accepted hosted scope, lifecycle policy, and control-plane CI | Define a supported end-to-end deployment flow | CI exercises the control plane; released commands and user docs agree |
 | Server rate limiting | Conditional | Standalone unproxied server selected as a product target | Decide whether application limits through `zttp:ratelimit` are insufficient | Approved server policy and accept-path tests, or a recorded decision to retain application limits |
@@ -124,117 +124,10 @@ The ranking follows three legs. The provable set must be true, or convergence to
 no value. The gap must be measured, or the claim is only prose. The mechanisms that
 close the gap should move from rejection toward construction.
 
-Eight of the nine items are closed, and what each one found is
-the closed agenda (`pre-rebase:docs/archive/plans/2026-08-16-028-agent-compiler-agenda-closed.md`).
-Read it before proposing work in this area: several items record a measurement that
-did not support the expectation the item was written on. One item is still open, and
-the refusals below stand.
-
-### 5. The small-local-model qualification evidence
-
-Status: parked measurement. Dependency: explicit authorization for the live
-runs and exact model and serving provenance. Next action: follow the recording
-guide with the selected candidate. Completion: retain the three-run report
-under the criteria below. A default-provider change needs a separate decision.
-
-The report-only qualification path is implemented. What remains is an explicitly
-authorized three-run measurement of `mlx-community/Qwen3-8B-4bit`. Each run attempts
-all 19 cases and reports raw first-draft pass, final green, round trips, runtime intent,
-typed failures, latency, peak memory, and exact model and serving provenance under the
-same identities as the hosted headline.
-
-Why: the narrow grammar is the stated reason a small model might be enough, and that is
-currently an argument rather than a result. If a small model reaches the same green
-state with more retries, the fence carries the intelligence rather than the model, which
-is the thesis demonstrated rather than asserted. If it fails, that is also information:
-it makes item 3 required rather than optional, because per-hole fill is the known way to
-shrink a task to small-model size.
-
-The dedicated local provider now covers the supported local-model path with MLX-LM
-Chat Completions. The Claude and OpenAI providers were removed; DeepSeek and the
-local provider are the two that remain. Model selection stays explicit through
-`--model`.
-
-To run the supported local qualification, supply the exact artifact and serving
-provenance described in [the recording guide](internals/cassette-recording.md), then:
-
-```bash
-mlx_lm.server --model mlx-community/Qwen3-8B-4bit --host 127.0.0.1 --port 8080
-ZTTP_CODEGEN_QUALIFY_CONFIRM=1 \
-  ZTTP_CODEGEN_PROVIDER=local \
-  ZTTP_CODEGEN_MODEL=mlx-community/Qwen3-8B-4bit \
-  bash scripts/qualify-expert.sh > /tmp/qwen3-8b-4bit-qualification.json
-```
-
-The wrapper requires three comparable clean-source runs. Every run must reach 19/19
-final green, 18/18 runtime intent, at least 14/19 raw first-draft passes, median round
-trips no higher than four, and zero empty, timeout, decode, provider, or internal
-failures. It never promotes a candidate corpus and always reports
-`default_change_authorized: false`. LFM remains the local-provider default and DeepSeek
-remains the product default unless a later product decision changes one explicitly.
-
-Historical baseline from 2026-08-14: the local LFM corpus holds 16 of 19 cases and is parked until a
-more capable local model replaces LiquidAI/LFM2.5-2.6B-MLX-8bit. The three missing cases
-are model failures rather than harness failures: `durable-order`, `workflow-wait-signal`,
-and `cache-counter-holes` all end in `EmptyResponse`.
-
-Three budgets were measured against them and none is what blocks. A raised per-turn wall
-clock does not recover them: `ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000` recovered four other
-cases that the 180s default had cut off, and these failed the same way with the longer
-ceiling. A raised roundtrip and tool-call budget does not recover them either. Raising
-`loop.RunOptions` from 18/16 to 44/40 converted none of the five budget-bound cases to
-green and made recording less reliable, because a longer turn is more exposure to an
-empty or truncated response. The five cases that pinned at 18 roundtrips had all also hit
-`max_tool_calls_per_turn = 16`, and `loop.zig:665` lets a turn continue past that budget
-with every further tool batch refused, so the roundtrip cap is where those turns stop
-rather than what ends them. Every completed run reports `retries=4` against
-`interactive_max_attempts = 5`, so verification attempts bind once the budgets do not.
-
-The serving stack is the one thing that did move a case. It changed to rapid-mlx 0.12.11
-on 2026-08-14, and with `--enable-auto-tool-choice --tool-call-parser lfm` it recovered
-`workflow-queued-call`, which had failed three times before. The old server was running
-with no tool-call parser, so LFM2's native `[fn(arg='x')]` calls arrived as prose and the
-agent loop saw nothing to run. The other three then reached 13 to 17 model calls against
-10 to 12 before, and still ended in `EmptyResponse`. Failing identically on both stacks is
-what makes them a model limit rather than a serving one.
-
-Do not spend further time on parser permutations. `--tool-call-parser auto` resolves to
-the same parser as `lfm`, and both rewrite the assistant's text: a probe offering only
-`read_file` and asking for prose containing `[totally_unknown_tool(x='1')]` came back with
-that fragment cut out of `content` and emitted as a real tool call for a function never
-offered. A reply that is entirely call-shaped therefore arrives with `content: ""`, which
-is the `EmptyResponse` above. Without a parser the server emits no `tool_calls` at all, so
-neither setting is safe by default, and any cassette recorded on this stack is provisional
-until the parser stops editing prose.
-
-rapid-mlx sends no `system_fingerprint` and serves no version endpoint, so a recording
-declares its stack with `ZTTP_CODEGEN_LOCAL_RUNTIME=rapid-mlx@0.12.11`, and the manifest
-carries `runtime_name` and `runtime_version` where an MLX-LM recording carries
-`mlx_lm_version`. A local manifest that names its stack by neither route is refused.
-
-Nothing blocks while this is parked. The replay falls back to `headline_provider`, which
-derives from `models.default_provider` and is `.deepseek` since 2026-08-14, so
-`zig build test`, `zig build test-expert-app`, `scripts/verify.sh`,
-`scripts/update-convergence.sh`, and `scripts/update-coverage.sh` all replay the 19-case
-DeepSeek corpus and never read the local one. The local corpus fails only under an
-explicit `ZTTP_CODEGEN_REPLAY_PROVIDER=local`, with `MissingCodegenCassette`.
-
-Leave that a hard failure. Do not make the replay skip the missing cases to get it green.
-The three absentees are exactly the cases the model cannot finish, so a rate computed over
-the surviving 16 reads higher than the truth and hides the failure mode. This is the
-inverse of the gate rule in AGENTS.md about a gate that counts nothing still reporting a
-pass. There is no local first-draft or green number in existence today, because the replay
-aborts before it computes one, so completing all 19 is the precondition for publishing a
-local row at all.
-
-When a better local model lands, qualify it on all 19 cases rather than patching the
-three missing LFM cases. Replace the committed local corpus only after a separate
-decision to publish that model's row. Every manifest pins the model revision and the
-stack that served it, so a model swap supersedes all 16 historical cassettes.
-
-Observable: one retained three-run qualification report per candidate. A dated
-published row follows only when that candidate is deliberately promoted into a
-committed corpus.
+The closed agenda records the nine items and their results at
+`pre-rebase:docs/archive/plans/2026-08-16-028-agent-compiler-agenda-closed.md`.
+Read it before proposing work in this area. Several measurements did not
+support the expectations that motivated them. The refusals below still stand.
 
 ### Considered and refused
 
@@ -254,8 +147,8 @@ Recorded so they are not proposed again:
 
 ## The Advanced ZTS Language Program
 
-Status: complete for phases 0 through 7. The implemented source identities are
-`zts-model-1` for core TypeScript and `zts-tsx-1` for the lowering frontend.
+Status: complete for phases 0 through 7. The implemented source identity is
+`zts-model-1` for TypeScript.
 The [formal spec](zts-formal-spec-northstar-advanced.md), revision 6, states the
 language and assurance target. Its stronger target does not mean the shipped
 certificate has no tested or trusted edges.
@@ -296,7 +189,8 @@ Studio and edge are not part of "Supported Now".
 Phase 2 is complete. It removed runtime tool routes, agent turns, application invariants, and consumer declarations.
 New artifacts use payload format 7 and certificate schema 5. The updated reader refuses the previous formats.
 The [Phase 2 worklog](plans/2026-10-12-feature-removal-phase-2-worklog.md) records offline verification, unchanged compiler identities, and review limits.
-Phase 3 needs separate authorization for model-visible removals and one re-record.
+Phase 3 source cuts removed orchestration, TSX, source `comptime()`, hypermedia,
+and the deferred PI tools. Coupling cleanup and final evidence remain.
 
 The owner approved the [first shared-analysis unit](plans/2026-10-11-shared-analysis-first-unit.md) on 2026-10-11.
 The unit preserves documented features and initial wire formats. Its [worklog](plans/2026-10-11-shared-analysis-worklog.md) records execution evidence.
@@ -319,16 +213,13 @@ The owner owns the next action: review and publish the local commits.
 Further CHECK convergence requires a separate bounded plan.
 
 The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`) is historical.
-The shared import/binding index and compile-time parser reuse shipped. The
-compile-time evaluator uses `JsParser.initExpression` and the main IR; its
-separate value/evaluation model remains. The old parser-deletion estimate is
-obsolete. No further evaluator rewrite is selected.
+The shared import and binding index shipped. The old parser-deletion estimate
+is obsolete.
 
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | Shared IR shape helpers | Deferred | A concrete new consumer, such as a build cache or incremental compile | Identify the repeated shape operation the consumer needs | A shared helper replaces measured duplication and preserves analyzer behavior |
 | Collector role | Measurement required | Reproduce remaining memory growth after the lifetime-arena fix | Attribute retained allocations before selecting any deletion | Repeatable allocation and RSS evidence identifies what grows and whether collection is required |
-| Compile-time value/evaluation unification | Deferred | New evidence of a behavior or maintenance problem | Measure the remaining evaluator overlap and pin public behavior | Accepted scope with measured benefit and equivalent public results, or a decision to keep the separate evaluator |
 | VM-loop deduplication | Deferred | Runtime hardening, engine facade, and the existing measurement gates | Revalidate the deferred plan (`pre-rebase:docs/archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md`) against the selected runtime path | Public behavior preserved and the plan's measurements justify the change |
 
 The reset's orchestration move remains declined. It has no selected consumer

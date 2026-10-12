@@ -14,14 +14,11 @@ const ascii = std.ascii;
 
 // Import zts module
 const zq = @import("zts");
-const durable_executor = @import("durable_executor.zig");
-const actor_queue = @import("actor_queue.zig");
 const trace_request_recorder = @import("trace_request_recorder.zig");
 const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const runtime_builtins = @import("runtime_builtins.zig");
 const console = @import("runtime_console.zig");
-const workflow = @import("runtime_workflow.zig");
 const http = @import("runtime_http.zig");
 const natives = @import("runtime_natives.zig");
 const buildQueryObject = natives.buildQueryObject;
@@ -31,11 +28,7 @@ const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 // the binding-registration sites keep referencing them by their bare names.
 const fetchSyncNative = http.fetchSyncNative;
 const httpRequestNative = http.httpRequestNative;
-const serviceCallCallback = http.serviceCallCallback;
 const fetchModuleCallback = http.fetchModuleCallback;
-const ioCallThunk = http.ioCallThunk;
-const ioExecuteFetches = http.ioExecuteFetches;
-const ioBuildResponse = http.ioBuildResponse;
 const headersGetNative = http.headersGetNative;
 const headersHasNative = http.headersHasNative;
 const headersSetNative = http.headersSetNative;
@@ -49,7 +42,6 @@ const responseTextStaticNative = http.responseTextStaticNative;
 const responseHtmlStaticNative = http.responseHtmlStaticNative;
 const responseRawJsonStaticNative = http.responseRawJsonStaticNative;
 const responseRedirectStaticNative = http.responseRedirectStaticNative;
-const scopeCall1 = http.scopeCall1;
 
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
@@ -57,17 +49,16 @@ const bytecode_cache = zq.bytecode_cache;
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
 const OutboundIo = @import("outbound_io.zig").OutboundIo;
-const queue_callbacks = @import("queue_runtime_callbacks.zig");
 
-/// Replay and durable wrappers are outermost. Apply the retired credential
-/// check outside those wrappers, so recorded results cannot bypass refusal.
+/// Replay wrappers are outermost. Apply the retired credential check outside
+/// those wrappers, so recorded results cannot bypass refusal.
 fn fetchCredentialOuter(
     comptime binding: zq.module_binding.ModuleBinding,
     comptime exp: zq.module_binding.FunctionBinding,
     comptime inner: zq.NativeFn,
 ) zq.NativeFn {
     if (comptime std.mem.eql(u8, binding.specifier, "zttp:fetch") and
-        (std.mem.eql(u8, exp.name, "fetch") or std.mem.eql(u8, exp.name, "fetchWithRetry")))
+        std.mem.eql(u8, exp.name, "fetch"))
     {
         return http.credentialOptionGuard(inner);
     }
@@ -87,25 +78,6 @@ const cost_meter = zq.CostMeter;
 /// consumes it in one module, so no consumer analyzes `runtime_config.zig`
 /// a second time and ends up with an incompatible `RuntimeConfig`.
 pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
-
-/// In-process registry of co-located sub-handlers, used by zttp:workflow to
-/// dispatch from an orchestrator handler without HTTP.
-// Private: `HandlerInstance.system_registry_ref` is typed on it. Not
-// re-exported - callers that need the type import in_process_dispatch.zig.
-const SystemRuntime = @import("in_process_dispatch.zig").SystemRuntime;
-
-/// Recover the typed registry pointer from the type-erased `RuntimeConfig`
-/// field. The config leaf cannot import `in_process_dispatch.zig` without an
-/// import cycle, so the pointer is stored as `?*anyopaque` and cast here.
-fn systemRegistryFromConfig(config: RuntimeConfig) ?*SystemRuntime {
-    const ptr = config.system_registry orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
-
-fn queueSystemFromConfig(config: RuntimeConfig) ?*actor_queue.ActorQueue {
-    const ptr = config.queue_system orelse return null;
-    return @ptrCast(@alignCast(ptr));
-}
 
 const openTraceFile = runtime_config_mod.openTraceFile;
 const applyRuntimeConfig = runtime_config_mod.applyRuntimeConfig;
@@ -140,8 +112,7 @@ pub const HandlerInstance = struct {
     cached_handler_arg_count: u8,
     cached_dispatch: ?*const zq.PatternDispatchTable,
     config: RuntimeConfig,
-    /// Policy tuple retained for this runtime's full lifetime. The Context and
-    /// parallel HTTP workers borrow its policy and optional index.
+    /// Policy tuple retained for this runtime's full lifetime.
     policy_generation: ?*RuntimePolicyGeneration = null,
     /// The pool reload-generation this runtime was compiled for. The pool's
     /// live-reload / egress-policy swap bumps the pool counter; ensureRuntime
@@ -166,8 +137,6 @@ pub const HandlerInstance = struct {
     trace_mutex: ?*zq.trace.TraceMutex,
     trace_recorder: ?*zq.TraceRecorder,
     active_request: ?HttpRequestView,
-    active_durable_run: ?ActiveDurableRun,
-    pending_durable_recovery: ?PendingDurableRecovery,
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
@@ -179,77 +148,7 @@ pub const HandlerInstance = struct {
     /// dispatch. Stays null on runtimes that never see a WS event.
     /// Read by the WS module's send/close callbacks via
     /// `wsPoolFromRuntime`. See `installWebSocketModuleState`.
-    /// Co-located sub-handler registry for in-process `zttp:workflow.call`
-    /// dispatch. Server-owned (one instance per process), referenced by every
-    /// pooled orchestrator runtime. Set from `config.system_registry` at init
-    /// (cast from the type-erased pointer). Null on runtimes with no `--system`
-    /// bundle. Read by `workflowCallCallback`; gates `installWorkflowModuleState`.
-    system_registry_ref: ?*SystemRuntime = null,
-    /// Server/test-owned actor queue used by `zttp:queue`. Null keeps the
-    /// module importable but makes queue functions return Result errors.
-    queue_system_ref: ?*actor_queue.ActorQueue = null,
-
     const Self = @This();
-
-    pub const PendingDurableWait = union(enum) {
-        timer: i64,
-        signal: []const u8,
-
-        pub fn deinit(self: *PendingDurableWait, allocator: std.mem.Allocator) void {
-            switch (self.*) {
-                .signal => |name| allocator.free(name),
-                .timer => {},
-            }
-        }
-    };
-
-    pub const ActiveDurableRun = struct {
-        key: []const u8,
-        oplog_path: []const u8,
-        oplog_fd: std.c.fd_t,
-        state: *zq.trace.DurableState,
-        owned_events: ?[]const zq.trace.DurableEvent = null,
-        source_snapshot: ?[]u8 = null,
-        step_depth: u32 = 0,
-        step_timeout_deadline_ms: ?i64 = null,
-        /// Monotonic per-run counter naming each `zttp:workflow.call` as its
-        /// own durable step ("workflow.call#N"). Deterministic across replay
-        /// because the orchestrator re-executes the same control flow, so the
-        /// Nth call resolves to the same oplog entry. See workflowCallDurable.
-        call_seq: u32 = 0,
-        pending_wait: ?PendingDurableWait = null,
-
-        pub fn setPendingTimer(self: *ActiveDurableRun, allocator: std.mem.Allocator, until_ms: i64) !void {
-            if (self.pending_wait) |*wait| {
-                wait.deinit(allocator);
-            }
-            self.pending_wait = .{ .timer = until_ms };
-        }
-
-        pub fn setPendingSignal(self: *ActiveDurableRun, allocator: std.mem.Allocator, name: []const u8) !void {
-            if (self.pending_wait) |*wait| {
-                wait.deinit(allocator);
-            }
-            self.pending_wait = .{ .signal = try allocator.dupe(u8, name) };
-        }
-
-        pub fn deinit(self: *ActiveDurableRun, allocator: std.mem.Allocator) void {
-            allocator.free(self.key);
-            allocator.free(self.oplog_path);
-            if (self.owned_events) |events| allocator.free(events);
-            if (self.source_snapshot) |source| allocator.free(source);
-            if (self.pending_wait) |*wait| wait.deinit(allocator);
-            self.state.deinit();
-            allocator.destroy(self.state);
-            std.Io.Threaded.closeFd(self.oplog_fd);
-        }
-    };
-
-    pub const PendingDurableRecovery = struct {
-        key: []const u8,
-        oplog_path: []const u8,
-        events: []const zq.trace.DurableEvent,
-    };
 
     /// Recover the runtime that owns `ctx`. This is the sanctioned way for a
     /// native callback to reach its host runtime: the engine hands callbacks a
@@ -347,12 +246,8 @@ pub const HandlerInstance = struct {
             .trace_mutex = null,
             .trace_recorder = null,
             .active_request = null,
-            .active_durable_run = null,
-            .pending_durable_recovery = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
-            .system_registry_ref = systemRegistryFromConfig(config),
-            .queue_system_ref = queueSystemFromConfig(config),
         };
         self.strings = &self.owned_strings.?;
         errdefer self.owned_strings.?.deinit();
@@ -426,13 +321,9 @@ pub const HandlerInstance = struct {
             .trace_mutex = null,
             .trace_recorder = null,
             .active_request = null,
-            .active_durable_run = null,
-            .pending_durable_recovery = null,
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
-            .system_registry_ref = systemRegistryFromConfig(config),
-            .queue_system_ref = queueSystemFromConfig(config),
         };
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
@@ -486,9 +377,6 @@ pub const HandlerInstance = struct {
             rec.deinit();
             self.allocator.destroy(rec);
         }
-        if (self.active_durable_run) |*run| {
-            run.deinit(self.allocator);
-        }
         if (self.owned_strings) |*owned_strings| {
             owned_strings.deinit();
         }
@@ -515,26 +403,8 @@ pub const HandlerInstance = struct {
         // This ensures import bindings resolve correctly whether the handler
         // was parsed or loaded from bytecode cache.
         try self.installVirtualModules();
-        try self.installScopeModuleState();
         try self.installSqlModuleState();
-        if (self.config.system_config_path) |_| {
-            try self.installServiceModuleState();
-        }
-        if (self.system_registry_ref != null) {
-            try self.installWorkflowModuleState();
-        }
-        if (self.queue_system_ref != null) {
-            try self.installQueueModuleState();
-        }
         try self.installFetchModuleState();
-
-        // Install io module callbacks for parallel/race (requires outbound HTTP)
-        if (self.config.outbound_http_enabled) {
-            try self.installIoModuleState();
-        }
-        if (self.config.durable_oplog_dir != null) {
-            try self.installDurableModuleState();
-        }
 
         // Note: Response, h(), renderToString(), Fragment are all set up by initBuiltins()
         // Don't re-register them here as it would overwrite the proper constructor
@@ -720,13 +590,9 @@ pub const HandlerInstance = struct {
 
         const fn_atom = try self.ctx.atoms.intern("fetchSync");
         // In replay mode, use a stub that returns recorded fetch responses.
-        // In durable mode, use a hybrid wrapper that replays then records.
         const fetch_replay_stub = comptime zq.trace.makeReplayStub("http", "fetchSync");
-        const fetch_durable_wrapper = comptime zq.trace.makeDurableWrapper("http", "fetchSync", fetchSyncNative);
         const func: zq.NativeFn = if (self.config.replay_file_path != null)
             comptime http.credentialOptionGuard(fetch_replay_stub)
-        else if (self.config.durable_oplog_dir != null)
-            comptime http.credentialOptionGuard(fetch_durable_wrapper)
         else
             comptime http.credentialOptionGuard(fetchSyncNative);
         const fn_obj = try zq.JSObject.createNativeFunction(
@@ -773,7 +639,7 @@ pub const HandlerInstance = struct {
                     has_file_imports = true;
                 },
                 .unknown => {
-                    std.log.err("Unknown module: '{s}'; only zttp:* virtual modules and relative file imports are supported", .{import_info.module_specifier});
+                    if (!builtin.is_test) std.log.err("Unknown module: '{s}'; only zttp:* virtual modules and relative file imports are supported", .{import_info.module_specifier});
                     return error.UnknownModule;
                 },
             }
@@ -842,30 +708,14 @@ pub const HandlerInstance = struct {
     /// Called during installBindings() for every runtime instance.
     /// In replay mode, registers stubs that return recorded values.
     /// In trace mode, registers wrappers that record I/O.
-    /// In durable mode, registers hybrid replay/record wrappers.
     fn installVirtualModules(self: *Self) !void {
         if (self.config.replay_file_path != null) {
             // Replay mode: stubs that return recorded values from ReplayState
             inline for (zq.builtinModules) |binding| {
-                if (comptime std.mem.eql(u8, binding.specifier, "zttp:queue")) {
-                    if (self.queue_system_ref != null) {
-                        try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
-                    } else {
-                        try zq.modules.registerVirtualModuleReplayWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
-                    }
-                } else if (comptime retired_authority.isRetiredModule(binding.specifier)) {
-                    try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
-                } else {
-                    try zq.modules.registerVirtualModuleReplayWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
-                }
-            }
-        } else if (self.config.durable_oplog_dir != null) {
-            // Durable mode: hybrid replay/record wrappers
-            inline for (zq.builtinModules) |binding| {
                 if (comptime retired_authority.isRetiredModule(binding.specifier)) {
                     try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
                 } else {
-                    try zq.modules.registerVirtualModuleDurableWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
+                    try zq.modules.registerVirtualModuleReplayWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
                 }
             }
         } else if (self.config.trace_file_path != null) {
@@ -884,98 +734,8 @@ pub const HandlerInstance = struct {
         }
     }
 
-    /// Install IoCallbacks into the io module's state slot.
-    /// Enables parallel() and race() to call thunks and execute concurrent fetches.
-    fn installIoModuleState(self: *Self) !void {
-        const io_state = try self.allocator.create(zq.modules.io.IoCallbacks);
-        io_state.* = .{
-            .call_thunk_fn = ioCallThunk,
-            .execute_fetches_fn = ioExecuteFetches,
-            .build_response_fn = ioBuildResponse,
-            .runtime_ptr = self,
-        };
-        self.ctx.setModuleState(
-            zq.modules.io.MODULE_STATE_SLOT,
-            @ptrCast(io_state),
-            &zq.modules.io.IoCallbacks.deinitOpaque,
-        );
-    }
-
-    fn installScopeModuleState(self: *Self) !void {
-        const scope_state = try self.allocator.create(zq.modules.scope.ScopeCallbacks);
-        scope_state.* = .{
-            .call0_fn = ioCallThunk,
-            .call1_fn = scopeCall1,
-            .runtime_ptr = self,
-            .current_state = null,
-        };
-        self.ctx.setModuleState(
-            zq.modules.scope.MODULE_STATE_SLOT,
-            @ptrCast(scope_state),
-            &zq.modules.scope.ScopeCallbacks.deinitOpaque,
-        );
-    }
-
-    fn installDurableModuleState(self: *Self) !void {
-        const durable_state = try self.allocator.create(zq.modules.durable.DurableCallbacks);
-        durable_state.* = .{
-            .run_fn = durable_executor.durableRunCallback,
-            .step_fn = durable_executor.durableStepCallback,
-            .step_with_timeout_fn = durable_executor.durableStepWithTimeoutCallback,
-            .sleep_until_fn = durable_executor.durableSleepUntilCallback,
-            .wait_signal_fn = durable_executor.durableWaitSignalCallback,
-            .signal_fn = durable_executor.durableSignalCallback,
-            .signal_at_fn = durable_executor.durableSignalAtCallback,
-            .runtime_ptr = self,
-        };
-        self.ctx.setModuleState(
-            zq.modules.durable.MODULE_STATE_SLOT,
-            @ptrCast(durable_state),
-            &zq.modules.durable.DurableCallbacks.deinitOpaque,
-        );
-    }
-
-    fn installWorkflowModuleState(self: *Self) !void {
-        const workflow_state = try self.allocator.create(zq.modules.workflow.WorkflowCallbacks);
-        workflow_state.* = .{
-            .call_fn = workflow.workflowCallCallback,
-            .saga_fn = workflow.workflowSagaCallback,
-            .fanout_fn = workflow.workflowFanoutCallback,
-            .follow_fn = workflow.workflowFollowCallback,
-            .runtime_ptr = self,
-        };
-        self.ctx.setModuleState(
-            zq.modules.workflow.MODULE_STATE_SLOT,
-            @ptrCast(workflow_state),
-            &zq.modules.workflow.WorkflowCallbacks.deinitOpaque,
-        );
-    }
-
-    fn installQueueModuleState(self: *Self) !void {
-        const queue_state = try self.allocator.create(zq.modules.queue.QueueCallbacks);
-        queue_state.* = .{
-            .send_fn = queue_callbacks.queueSendCallback,
-            .request_fn = queue_callbacks.queueRequestCallback,
-            .receive_fn = queue_callbacks.queueReceiveCallback,
-            .ack_fn = queue_callbacks.queueAckCallback,
-            .nack_fn = queue_callbacks.queueNackCallback,
-            .reply_fn = queue_callbacks.queueReplyCallback,
-            .runtime_ptr = self,
-        };
-        self.ctx.setModuleState(
-            zq.modules.queue.MODULE_STATE_SLOT,
-            @ptrCast(queue_state),
-            &zq.modules.queue.QueueCallbacks.deinitOpaque,
-        );
-    }
-
     fn installSqlModuleState(self: *Self) !void {
         try zq.modules.sql.installStore(self.ctx, self.config.sqlite_path);
-    }
-
-    fn installServiceModuleState(self: *Self) !void {
-        const system_path = self.config.system_config_path orelse return;
-        try zq.modules.service.installState(self.ctx, system_path, self, serviceCallCallback);
     }
 
     fn installFetchModuleState(self: *Self) !void {
@@ -1396,12 +1156,6 @@ pub const HandlerInstance = struct {
 
     fn executeHandlerFrame(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
         self.last_request_body_len = if (request.body) |b| b.len else 0;
-        defer {
-            if (self.pending_durable_recovery != null) {
-                self.pending_durable_recovery = null;
-            }
-        }
-
         if (self.cached_handler_obj == null) {
             try self.refreshHandlerCache();
         }
@@ -1479,9 +1233,6 @@ pub const HandlerInstance = struct {
         // Set the callback for JSX function component rendering.
         zq.http.setCallFunctionCallback(self.ctx, callFunctionWrapper);
         defer zq.http.clearCallFunctionCallback(self.ctx);
-
-        try zq.modules.scope.beginRequest(self.ctx);
-        defer zq.modules.scope.endRequest(self.ctx);
 
         self.ctx.hole_reached = false;
         const result = self.callFunction(handler_obj, args) catch |err| {
@@ -1744,9 +1495,6 @@ pub const HandlerInstance = struct {
             req_obj.setSlot(shapes.request.body_slot, zq.JSValue.undefined_val);
         }
 
-        req_obj.setSlot(shapes.request.subject_slot, zq.JSValue.undefined_val);
-        req_obj.setSlot(shapes.request.tenant_slot, zq.JSValue.undefined_val);
-
         // Copy request headers into the handler request object.
         const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, self.headers_prototype);
         for (request.headers.items) |header| {
@@ -1883,26 +1631,6 @@ pub const HandlerInstance = struct {
     }
 
     pub fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
-        // Hypermedia resource: content-negotiate to HAL-JSON or HTMX using the
-        // request's Accept / HX-Request headers, then extract the rendered
-        // Response normally. The rendered value is a plain Response (not branded),
-        // so the recursive call takes the standard path.
-        if (result.isObject() and zq.http.isResource(self.ctx, result)) {
-            var accept: []const u8 = "";
-            var hx_request = false;
-            if (self.active_request) |req| {
-                for (req.headers.items) |hdr| {
-                    if (std.ascii.eqlIgnoreCase(hdr.key, "accept")) {
-                        accept = hdr.value;
-                    } else if (std.ascii.eqlIgnoreCase(hdr.key, "hx-request")) {
-                        hx_request = std.ascii.eqlIgnoreCase(hdr.value, "true");
-                    }
-                }
-            }
-            const rendered = try zq.http.renderResource(self.ctx, result, accept, hx_request);
-            return self.extractResponseInternal(rendered, borrow_body);
-        }
-
         var response = HttpResponse.init(self.allocator);
 
         if (!result.isObject()) {

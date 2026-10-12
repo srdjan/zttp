@@ -14,8 +14,6 @@
 const std = @import("std");
 const zts = @import("zts");
 const pcc = @import("zttp_proof_checker");
-const retired_authority = @import("project_config").retired_authority;
-
 const artifact_graph = @import("artifact_graph.zig");
 
 const cert = pcc.certificate;
@@ -24,7 +22,6 @@ const ps = pcc.proof_system;
 
 pub const Error = error{
     OutOfMemory,
-    UnsupportedRuntimeAuthority,
     /// A guarded operation names no row in the consumer-owned catalog.
     GuardedOperationsNotRepresentable,
     BufferTooSmall,
@@ -159,7 +156,6 @@ fn irNodes(allocator: std.mem.Allocator, evidence: *const zts.ProofEvidence) Err
 }
 
 /// Retained compiler tags keep their kernel wire values.
-/// This exhaustive switch refuses the retired ledger tag before encoding.
 fn tagFor(tag: zts.ProofIrTag) Error!ps.NodeTag {
     return switch (tag) {
         .function => .function,
@@ -169,7 +165,6 @@ fn tagFor(tag: zts.ProofIrTag) Error!ps.NodeTag {
         .return_node => .return_node,
         .plain => .plain,
         .capability_call => .capability_call,
-        .ledger_call => error.UnsupportedRuntimeAuthority,
     };
 }
 
@@ -220,11 +215,6 @@ const ObligationBuilder = struct {
 
 /// Build and encode the certificate for one compiled handler.
 pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
-    var retired_facts: retired_authority.Facts = .{};
-    for (inputs.evidence.proof.nodes) |node| {
-        if (node.tag == .ledger_call) retired_facts.ledger_module = true;
-    }
-    try retired_authority.refuse(retired_facts);
     const nodes = try irNodes(allocator, inputs.evidence);
     defer allocator.free(nodes);
 
@@ -517,10 +507,6 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
     // copies are held against each other.
     inline for (@typeInfo(zts.ProofIrTag).@"enum".fields) |field| {
         const tag: zts.ProofIrTag = @enumFromInt(field.value);
-        if (tag == .ledger_call) {
-            try testing.expectError(error.UnsupportedRuntimeAuthority, tagFor(tag));
-            continue;
-        }
         try testing.expectEqual(
             @as(u16, @intFromEnum(try tagFor(tag))),
             @as(u16, field.value),
@@ -530,7 +516,7 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
     // side is being built, but only by members named here. A tag the kernel
     // gained that nobody wrote down is the drift this test exists to catch.
     try testing.expectEqual(
-        @typeInfo(zts.ProofIrTag).@"enum".fields.len - 1,
+        @typeInfo(zts.ProofIrTag).@"enum".fields.len,
         @typeInfo(ps.NodeTag).@"enum".fields.len,
     );
 

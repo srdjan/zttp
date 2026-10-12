@@ -15,11 +15,7 @@ pub const ModuleClass = enum {
     decode,
     cache,
     sql,
-    service,
     fetch,
-    io,
-    durable,
-    scope,
     url,
     id,
     http,
@@ -90,11 +86,7 @@ test "classForSpecifier maps builtin specifiers and defaults to other" {
     try std.testing.expectEqual(ModuleClass.decode, comptime classForSpecifier("zttp:decode"));
     try std.testing.expectEqual(ModuleClass.cache, comptime classForSpecifier("zttp:cache"));
     try std.testing.expectEqual(ModuleClass.sql, comptime classForSpecifier("zttp:sql"));
-    try std.testing.expectEqual(ModuleClass.service, comptime classForSpecifier("zttp:service"));
     try std.testing.expectEqual(ModuleClass.fetch, comptime classForSpecifier("zttp:fetch"));
-    try std.testing.expectEqual(ModuleClass.io, comptime classForSpecifier("zttp:io"));
-    try std.testing.expectEqual(ModuleClass.durable, comptime classForSpecifier("zttp:durable"));
-    try std.testing.expectEqual(ModuleClass.scope, comptime classForSpecifier("zttp:scope"));
     try std.testing.expectEqual(ModuleClass.url, comptime classForSpecifier("zttp:url"));
     try std.testing.expectEqual(ModuleClass.id, comptime classForSpecifier("zttp:id"));
     try std.testing.expectEqual(ModuleClass.http, comptime classForSpecifier("zttp:http"));
@@ -102,10 +94,8 @@ test "classForSpecifier maps builtin specifiers and defaults to other" {
     try std.testing.expectEqual(ModuleClass.text, comptime classForSpecifier("zttp:text"));
     try std.testing.expectEqual(ModuleClass.time, comptime classForSpecifier("zttp:time"));
     try std.testing.expectEqual(ModuleClass.ratelimit, comptime classForSpecifier("zttp:ratelimit"));
-    try std.testing.expectEqual(ModuleClass.other, comptime classForSpecifier("zttp:workflow"));
     try std.testing.expectEqual(ModuleClass.other, comptime classForSpecifier("partner:foo"));
     try std.testing.expectEqual(ModuleClass.sql, classForName("sql"));
-    try std.testing.expectEqual(ModuleClass.other, classForName("workflow"));
 }
 
 test "meter bump/reset/total" {

@@ -23,13 +23,6 @@
 # step or gate could depend on it.
 setup.sh developer-setup
 
-# Spends real model time on three complete expert cohorts and prints a decision
-# report. Report-only by design - it promotes no cassettes and edits no default -
-# so there is no artifact for a gate to check, and running it automatically
-# would spend on every build. docs/internals/cassette-recording.md is where the
-# command is written down.
-qualify-expert.sh manual-model-spend
-
 # Regenerates docs/restrictions-to-proofs.md from restriction_registry.zig. The
 # drift between the two is already gated - check-docs-drift.sh compares the
 # rendered table against the registry row by row - so this script is the

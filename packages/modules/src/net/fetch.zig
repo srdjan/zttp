@@ -203,14 +203,6 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
         last_response = try state.call_fn(state.runtime_ptr, handle, fetch_args);
         const deadline_passed = requestDeadlinePassed(state, handle);
 
-        // Inside a parallel()/race() thunk the underlying fetch is only RECORDED
-        // (a descriptor) and returns the `undefined` placeholder, not a real
-        // response. Retrying here would re-register the same fetch maxRetries+1
-        // times and nanosleep between each during the synchronous collection
-        // phase. Return the placeholder immediately; the real fetch runs once in
-        // the parallel execute phase.
-        if (last_response.isUndefined()) return last_response;
-
         // If the response has ok=true, return immediately.
         if (sdk.isObject(last_response)) {
             if (sdk.objectGet(handle, last_response, "ok")) |ok_val| {

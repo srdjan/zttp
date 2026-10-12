@@ -12,7 +12,6 @@ const client = @import("zts_agent_client.zig");
 const effects_tool = @import("zts_expert_effects.zig");
 const holes_tool = @import("zts_expert_holes.zig");
 const narrow_tool = @import("zts_expert_narrow.zig");
-const ratchet_tool = @import("zts_expert_ratchet.zig");
 
 const name = "zts_expert_query";
 
@@ -26,7 +25,6 @@ pub const Operation = enum {
     effects,
     holes,
     narrow,
-    ratchet,
 };
 
 /// The schema closes the vocabulary provider-side. `decodeJson` applies the
@@ -41,13 +39,13 @@ pub const tool: registry_mod.ToolDef = .{
     .model_exposure = .visible,
     .description = "Query compiler-owned facts through one closed operation. " ++
         "Use meta(view), describe_rule(rule), search_rules(query), " ++
-        "modules(file), or effects/holes/narrow/ratchet(path); " ++
+        "modules(file), or effects/holes/narrow(path); " ++
         "features and restrictions take no second field.",
     .input_schema = "{\"type\":\"object\",\"additionalProperties\":false," ++
         "\"properties\":{" ++
         "\"operation\":{\"type\":\"string\",\"enum\":[" ++
         "\"meta\",\"features\",\"restrictions\",\"describe_rule\"," ++
-        "\"search_rules\",\"modules\",\"effects\",\"holes\",\"narrow\",\"ratchet\"]}," ++
+        "\"search_rules\",\"modules\",\"effects\",\"holes\",\"narrow\"]}," ++
         "\"view\":{\"type\":\"string\",\"enum\":[\"bootstrap\",\"full\"]}," ++
         "\"rule\":{\"type\":\"string\"}," ++
         "\"query\":{\"type\":\"string\"}," ++
@@ -80,7 +78,7 @@ fn decodeJson(allocator: std.mem.Allocator, args_json: []const u8) ![]const []co
         .describe_rule => decodeOptionalField(allocator, value.object, operation, "rule", validateAnyString),
         .search_rules => decodeRequiredField(allocator, value.object, operation, "query"),
         .modules => decodeRequiredField(allocator, value.object, operation, "file"),
-        .effects, .holes, .narrow, .ratchet => decodeRequiredField(allocator, value.object, operation, "path"),
+        .effects, .holes, .narrow => decodeRequiredField(allocator, value.object, operation, "path"),
     };
 }
 
@@ -185,10 +183,6 @@ fn execute(allocator: std.mem.Allocator, args: []const []const u8) anyerror!regi
             registry_mod.ToolResult.err(allocator, "zts_expert_narrow: requires a path\n")
         else
             narrow_tool.run(allocator, tail[0]),
-        .ratchet => if (tail.len == 0)
-            registry_mod.ToolResult.err(allocator, "zts_expert_ratchet: requires a path\n")
-        else
-            ratchet_tool.run(allocator, tail[0]),
     };
 }
 
@@ -325,7 +319,6 @@ test "query decoder produces one exhaustive argv shape per operation" {
         .{ .json = "{\"operation\":\"effects\",\"path\":\"handler.ts\"}", .expected = &.{ "effects", "handler.ts" } },
         .{ .json = "{\"operation\":\"holes\",\"path\":\"handler.ts\"}", .expected = &.{ "holes", "handler.ts" } },
         .{ .json = "{\"operation\":\"narrow\",\"path\":\"handler.ts\"}", .expected = &.{ "narrow", "handler.ts" } },
-        .{ .json = "{\"operation\":\"ratchet\",\"path\":\"handler.ts\"}", .expected = &.{ "ratchet", "handler.ts" } },
     };
     for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -389,7 +382,6 @@ test "trusted argv errors preserve exact text and arity" {
         .{ .args = &.{"effects"}, .expected = "zts_expert_effects: requires a path\n" },
         .{ .args = &.{"holes"}, .expected = "zts_expert_holes: requires a path\n" },
         .{ .args = &.{"narrow"}, .expected = "zts_expert_narrow: requires a path\n" },
-        .{ .args = &.{"ratchet"}, .expected = "zts_expert_ratchet: requires a path\n" },
     };
     for (cases) |case| {
         var result = try tool.execute(testing.allocator, case.args);
@@ -442,7 +434,7 @@ test "search preserves frozen response bytes" {
     try testing.expect(query_result.ok);
     try testing.expectEqual(@as(usize, 1017), query_result.llm_text.len);
     try testing.expectEqualStrings(
-        "3d4712643f7f82d673220518d9ccc4ddb5cd096f9f016ba0a196c36766a7b461",
+        "3a594c50eaad2c88f1975ffe48b5dd17fccd04de54eee6ece904b18e13aa4ace",
         &hex,
     );
     try testing.expect(query_result.llm_text[query_result.llm_text.len - 1] == '\n');
@@ -457,7 +449,7 @@ test "search preserves frozen response bytes" {
 
 test "custom operations run through query" {
     const fixture = "packages/tools/tests/fixtures/expert/clean_handler.ts";
-    const cases = [_][]const u8{ "effects", "holes", "narrow", "ratchet" };
+    const cases = [_][]const u8{ "effects", "holes", "narrow" };
     for (cases) |operation| {
         var result = try tool.execute(testing.allocator, &.{ operation, fixture });
         defer result.deinit(testing.allocator);

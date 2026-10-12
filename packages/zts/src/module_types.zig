@@ -103,33 +103,9 @@ fn registerFetchOptions(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Alloc
         optionalField(pool, allocator, "body", body_type),
         optionalField(pool, allocator, "query", object_refFor(pool, allocator)),
         optionalField(pool, allocator, "maxResponseBytes", pool.idx_number),
-        optionalField(pool, allocator, "durable", object_refFor(pool, allocator)),
-        // M4 T6: the name of a credential reference the runtime injects. The
-        // build requires a string literal in a tool route.
-        optionalField(pool, allocator, "credential", pool.idx_string),
     });
     if (options == null_type_idx) return;
     env.putTypeAlias("FetchOptions", options);
-}
-
-/// `MessageId`, the token `zttp:queue`'s `ack` and `nack` settle a message
-/// with. Spec 7.2 splits this into `MessageId` and `ReceiptId`; the runtime
-/// has one token - `queueMessageToValue` builds no `receipt` field and
-/// `ackNative` says "ack() expects message id" - so there is one brand here
-/// and the second is recorded rather than invented.
-///
-/// What the brand buys is one direction only, and that is worth stating: a
-/// literal string or an actor name reaching `ack` is refused, which is the
-/// confusion the two-string signature invited. The other direction is not
-/// reached, because the id a caller has comes out of a `Result` whose value
-/// types as nothing - so the checker admits it for want of information rather
-/// than for want of a brand. Closing that needs the parameterized `Result`
-/// phase 7 brings.
-fn registerMessageId(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
-    if (env.getTypeAlias("MessageId") != null) return;
-    const message_id = pool.addNominalAlias(allocator, pool.idx_string, "MessageId");
-    if (message_id == null_type_idx) return;
-    env.putTypeAlias("MessageId", message_id);
 }
 
 fn object_refFor(pool: *TypePool, allocator: std.mem.Allocator) TypeIndex {
@@ -166,47 +142,6 @@ fn addField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, typ
     };
 }
 
-/// The type-parameter name the callback-shaped exports are given. It appears in
-/// no source text: a handler writes `run(key, () => ...)` and never names the
-/// parameter, so the name only has to be stable for `unify`, which matches a
-/// pattern node against the signature's declared parameters by name.
-const RETURN_PARAM_NAME = "T";
-
-/// Rewrite `sig` into the one-parameter generic signature that `returns_from_param`
-/// describes, so the checker infers the return type per call site rather than
-/// reading the fixed `unknown` the binding declares for every other consumer.
-///
-/// `call_result` re-declares the named argument as `() => T` and returns `T`;
-/// `identity` declares it `T` and returns `T`. The parameter list the callback
-/// is declared with is empty on purpose - `unify` walks a function pattern only
-/// as far as both sides have parameters, then unifies the return types, so an
-/// empty list binds `T` from any arity of callback the author writes.
-fn applyReturnFromParam(
-    func: mb.FunctionBinding,
-    sig: *type_env_mod.FunctionSig,
-    env: *TypeEnv,
-    pool: *TypePool,
-    allocator: std.mem.Allocator,
-) void {
-    const from = func.returns_from_param orelse return;
-    if (from.param_index >= sig.param_count) return;
-
-    const t = pool.addGenericParam(allocator, RETURN_PARAM_NAME);
-    if (t == null_type_idx) return;
-
-    sig.param_types[from.param_index] = switch (from.kind) {
-        .call_result => pool.addFunctionWithReturn(allocator, &.{}, t),
-        .identity => t,
-    };
-    sig.return_type = t;
-    sig.type_params[0] = .{
-        .name = env.internName(RETURN_PARAM_NAME),
-        .idx = t,
-        .constraint = null_type_idx,
-    };
-    sig.type_param_count = 1;
-}
-
 /// Populate the TypeEnv with full type signatures for all virtual module exports.
 /// Reads from the builtin_modules registry instead of hardcoded tables.
 pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
@@ -226,7 +161,6 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const optional_object = pool.addNullable(allocator, object_ref);
 
     registerFetchOptions(env, pool, allocator);
-    registerMessageId(env, pool, allocator);
 
     // Register all function signatures from the module registry
     for (builtin_modules.all) |binding| {
@@ -271,9 +205,6 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
                         optional_object,
                     );
             }
-
-            applyReturnFromParam(func, &sig, env, pool, allocator);
-
             const owned = env.internName(func.name);
             env.fn_sigs_by_name.put(allocator, owned, sig) catch env.markAllocationFailure();
         }
@@ -371,8 +302,7 @@ test "the bytes return kind maps to the Bytes primitive" {
 
 test "FetchOptions names what the runtime reads, and only that" {
     // The list is measured against `runtime_http.zig`, not copied from spec
-    // 7.2: the spec omits `query`, `maxResponseBytes`, and `durable`, all of
-    // which ship and are read, and names `timeoutMs`, which nothing reads.
+    // The type includes the shipped query and maxResponseBytes options.
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -382,7 +312,7 @@ test "FetchOptions names what the runtime reads, and only that" {
     populateModuleTypes(&env, &pool, allocator);
 
     const options = env.getTypeAlias("FetchOptions") orelse return error.MissingFetchOptions;
-    const expected = [_][]const u8{ "method", "headers", "body", "query", "maxResponseBytes", "durable", "credential" };
+    const expected = [_][]const u8{ "method", "headers", "body", "query", "maxResponseBytes" };
     const fields = pool.getRecordFields(options);
     try std.testing.expectEqual(expected.len, fields.len);
     for (expected, fields) |name, field| {

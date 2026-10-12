@@ -16,10 +16,6 @@ const handler_contract = zts.handler_contract;
 const writeContractJson = zts.writeContractJson;
 const HandlerContract = zts.HandlerContract;
 const VerificationInfo = handler_contract.VerificationInfo;
-const ServiceTypeContext = zts.service_types.ServiceTypeContext;
-const ServiceRouteInfo = zts.service_types.RouteInfo;
-const ServiceResponseVariant = zts.service_types.ResponseVariant;
-const system_linker = zts.system_linker;
 const handler_policy = zts.handler_policy;
 const HandlerPolicy = zts.HandlerPolicy;
 pub const json_diag = @import("json_diagnostics.zig");
@@ -40,7 +36,6 @@ pub const Stage = check_mod.Stage;
 pub const StageSet = check_mod.StageSet;
 pub const formatProofCard = check_mod.formatProofCard;
 pub const generateTypeDefs = check_mod.generateTypeDefs;
-const persistFlowWitnesses = check_mod.persistFlowWitnesses;
 const syncCheckResultProperties = check_mod.syncCheckResultProperties;
 const appendSpecDiagnosticsJson = check_mod.appendSpecDiagnosticsJson;
 pub const appendExportCapsuleDiagnostics = check_mod.appendExportCapsuleDiagnostics;
@@ -172,260 +167,6 @@ pub const CompiledHandler = struct {
 
 const readFilePosix = zts.file_io.readFile;
 
-const fileExists = zts.file_io.fileExists;
-
-pub fn resolveSystemHandlerPaths(
-    allocator: std.mem.Allocator,
-    system_path: []const u8,
-    config: *system_linker.SystemConfig,
-) !void {
-    const base_dir = std.fs.path.dirname(system_path) orelse ".";
-    for (config.handlers) |*entry| {
-        if (std.fs.path.isAbsolute(entry.path)) continue;
-        if (!fileExists(allocator, entry.path)) {
-            const resolved = try std.fs.path.resolve(allocator, &.{ base_dir, entry.path });
-            allocator.free(entry.path);
-            entry.path = resolved;
-        }
-    }
-}
-
-fn findSchemaJsonByName(contract: *const HandlerContract, schema_ref: []const u8) ?[]const u8 {
-    for (contract.api.schemas.items) |schema| {
-        if (std.mem.eql(u8, schema.name, schema_ref)) return schema.schema_json;
-    }
-    return null;
-}
-
-const collectRoutePathParamNames = system_linker.collectRoutePathParamNames;
-
-fn buildServiceTypeContextFromContracts(
-    allocator: std.mem.Allocator,
-    config: *const system_linker.SystemConfig,
-    contracts: []const HandlerContract,
-) !ServiceTypeContext {
-    var route_count: usize = 0;
-    for (contracts) |contract| route_count += contract.api.routes.items.len;
-
-    var routes = try allocator.alloc(ServiceRouteInfo, route_count);
-    var out_index: usize = 0;
-    errdefer {
-        for (routes[0..out_index]) |*route| route.deinit(allocator);
-        allocator.free(routes);
-    }
-    for (contracts, config.handlers) |contract, entry| {
-        for (contract.api.routes.items) |api_route| {
-            var required_path_params = try collectRoutePathParamNames(allocator, &api_route);
-            errdefer {
-                for (required_path_params.items) |name| allocator.free(name);
-                required_path_params.deinit(allocator);
-            }
-
-            var required_query_params: std.ArrayList([]const u8) = .empty;
-            errdefer {
-                for (required_query_params.items) |name| allocator.free(name);
-                required_query_params.deinit(allocator);
-            }
-            for (api_route.query_params.items) |param| {
-                if (!param.required) continue;
-                try required_query_params.append(allocator, try allocator.dupe(u8, param.name));
-            }
-
-            var required_header_params: std.ArrayList([]const u8) = .empty;
-            errdefer {
-                for (required_header_params.items) |name| allocator.free(name);
-                required_header_params.deinit(allocator);
-            }
-            for (api_route.header_params.items) |param| {
-                if (!param.required) continue;
-                try required_header_params.append(allocator, try allocator.dupe(u8, param.name));
-            }
-
-            var responses = try allocator.alloc(ServiceResponseVariant, api_route.responses.items.len);
-            // `alloc` returns uninitialized memory; the outer errdefer would
-            // call `deinit` on garbage variant fields if any populate step
-            // below failed. Track how many slots actually hold a constructed
-            // ResponseVariant and walk only that prefix on the unwind path.
-            var responses_initialized: usize = 0;
-            errdefer {
-                for (responses[0..responses_initialized]) |*response| response.deinit(allocator);
-                allocator.free(responses);
-            }
-            for (api_route.responses.items, 0..) |response, response_idx| {
-                const schema_json = if (response.schema.schemaJson()) |raw_schema|
-                    try allocator.dupe(u8, raw_schema)
-                else if (response.schema.schemaRef()) |schema_ref|
-                    if (findSchemaJsonByName(&contract, schema_ref)) |resolved_schema|
-                        try allocator.dupe(u8, resolved_schema)
-                    else
-                        null
-                else
-                    null;
-                errdefer if (schema_json) |owned| allocator.free(owned);
-
-                const content_type_dup: ?[]const u8 = if (response.content_type) |content_type|
-                    try allocator.dupe(u8, content_type)
-                else if (api_route.response_content_type) |content_type|
-                    try allocator.dupe(u8, content_type)
-                else
-                    null;
-                errdefer if (content_type_dup) |owned| allocator.free(owned);
-
-                responses[response_idx] = .{
-                    .status = response.status orelse api_route.response_status orelse 200,
-                    .content_type = content_type_dup,
-                    .schema_json = schema_json,
-                    .dynamic = response.schema.isDynamic(),
-                };
-                responses_initialized = response_idx + 1;
-            }
-
-            // Stage every owning allocation into a local with its own
-            // errdefer before assembling the struct literal. Inline
-            // `try allocator.dupe(...)` inside a struct literal leaks the
-            // prior fields on a later failure because Zig has no way to
-            // walk back through completed struct-field expressions, and the
-            // outer routes errdefer only covers slots whose `out_index` has
-            // been bumped. `toOwnedSlice` consumes the ArrayList, so its
-            // outer `errdefer ...deinit` becomes a no-op once it succeeds —
-            // the buffer must be freed by an explicit errdefer below.
-            const service_name_dup = try allocator.dupe(u8, entry.name);
-            errdefer allocator.free(service_name_dup);
-            const handler_path_dup = try allocator.dupe(u8, entry.path);
-            errdefer allocator.free(handler_path_dup);
-            const method_dup = try allocator.dupe(u8, api_route.method);
-            errdefer allocator.free(method_dup);
-            const path_dup = try allocator.dupe(u8, api_route.path);
-            errdefer allocator.free(path_dup);
-
-            const path_params_slice = try required_path_params.toOwnedSlice(allocator);
-            errdefer {
-                for (path_params_slice) |name| allocator.free(name);
-                allocator.free(path_params_slice);
-            }
-            const query_params_slice = try required_query_params.toOwnedSlice(allocator);
-            errdefer {
-                for (query_params_slice) |name| allocator.free(name);
-                allocator.free(query_params_slice);
-            }
-            const header_params_slice = try required_header_params.toOwnedSlice(allocator);
-            errdefer {
-                for (header_params_slice) |name| allocator.free(name);
-                allocator.free(header_params_slice);
-            }
-
-            routes[out_index] = .{
-                .service_name = service_name_dup,
-                .handler_path = handler_path_dup,
-                .method = method_dup,
-                .path = path_dup,
-                .required_path_params = path_params_slice,
-                .required_query_params = query_params_slice,
-                .required_header_params = header_params_slice,
-                .request_dynamic = api_route.request_schema_dynamic or api_route.query_params_dynamic or api_route.header_params_dynamic or api_route.request_bodies_dynamic,
-                .response_dynamic = api_route.responses_dynamic,
-                .requires_body = api_route.request_bodies.items.len > 0,
-                .responses = responses,
-            };
-            out_index += 1;
-        }
-    }
-
-    return .{ .routes = routes[0..out_index] };
-}
-
-fn buildContractForServiceContext(
-    allocator: std.mem.Allocator,
-    handler_path: []const u8,
-    sql_schema_path: ?[]const u8,
-) !HandlerContract {
-    const source = try readFilePosix(allocator, handler_path, 10 * 1024 * 1024);
-    defer allocator.free(source);
-
-    var strip_diag: ?zts.StripDiagnostic = null;
-    var prepared = zts.PreparedSource.init(allocator, source, handler_path, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-        .diagnostic_out = &strip_diag,
-    }) catch |err| {
-        debugPrintStripError(handler_path, err, strip_diag);
-        return err;
-    };
-    defer prepared.deinit();
-
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-
-    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-    const root = try js_parser.parse();
-    try validateVirtualModuleImports(
-        zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
-        &atoms,
-        handler_path,
-        null,
-    );
-    _ = zts.parser.optimizeIR(allocator, &js_parser.nodes, &js_parser.constants, root) catch {};
-
-    const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    return buildContractOnlyFromParsed(
-        allocator,
-        zts.pipeline.ParsedModule.fromExisting(view, root, &atoms),
-        handler_path,
-        prepared.typeMap(),
-        sql_schema_path,
-        null,
-        null,
-        null,
-    );
-}
-
-/// Load the cross-handler service type context from a `--system` file.
-/// This is filesystem-backed; the freestanding/wasm analyzer build has no
-/// `--system` input, so the native implementation is referenced only inside
-/// the comptime-gated branch and stays out of the wasm module graph.
-fn loadServiceTypeContext(
-    allocator: std.mem.Allocator,
-    system_path: ?[]const u8,
-    sql_schema_path: ?[]const u8,
-) !?ServiceTypeContext {
-    if (comptime builtin.target.os.tag != .freestanding) {
-        return loadServiceTypeContextNative(allocator, system_path, sql_schema_path);
-    }
-    return null;
-}
-
-fn loadServiceTypeContextNative(
-    allocator: std.mem.Allocator,
-    system_path: ?[]const u8,
-    sql_schema_path: ?[]const u8,
-) !?ServiceTypeContext {
-    const resolved_system_path = system_path orelse return null;
-
-    const system_json = try readFilePosix(allocator, resolved_system_path, 1024 * 1024);
-    defer allocator.free(system_json);
-
-    var config = try zts.parseSystemConfig(allocator, system_json);
-    defer config.deinit(allocator);
-    try resolveSystemHandlerPaths(allocator, resolved_system_path, &config);
-
-    var contracts = try allocator.alloc(HandlerContract, config.handlers.len);
-    defer allocator.free(contracts);
-
-    var initialized: usize = 0;
-    defer {
-        for (contracts[0..initialized]) |*contract| contract.deinit(allocator);
-    }
-
-    for (config.handlers, 0..) |entry, idx| {
-        contracts[idx] = try buildContractForServiceContext(allocator, entry.path, sql_schema_path);
-        initialized += 1;
-    }
-
-    return try buildServiceTypeContextFromContracts(allocator, &config, contracts[0..initialized]);
-}
-
 /// Write a file synchronously using posix operations
 pub const writeFilePosix = util.writeFilePosix;
 
@@ -492,10 +233,7 @@ const ImportedFile = struct {
             readFilePosix(allocator, path, 10 * 1024 * 1024)) catch return error.Unreadable;
         errdefer allocator.free(self.source);
 
-        self.prepared = zts.PreparedSource.init(allocator, self.source, path, .{
-            .enable_comptime = true,
-            .comptime_env = .{},
-        }) catch return error.Unreadable;
+        self.prepared = zts.PreparedSource.init(allocator, self.source, path, .{}) catch return error.Unreadable;
         errdefer self.prepared.deinit();
 
         self.atoms = zts.AtomTable.init(allocator);
@@ -536,11 +274,6 @@ fn collectImportedFnSummaries(
     allocator: std.mem.Allocator,
     facts: *const zts.pipeline.ModuleFacts,
     importer_path: []const u8,
-    /// The consumer declaration (M4 T4). Installed in each helper walk, so a
-    /// declared field a helper reads and returns keeps its label.
-    declaration: ?*const zts.declaration.Declaration,
-    /// One status per classification, raised to what any helper walk saw.
-    seen: []handler_contract.ClassificationStatus,
     stack: *ImportStack,
     /// Where each imported file's bytes come from; null is the working tree.
     reader: ?ImportReader,
@@ -566,8 +299,6 @@ fn collectImportedFnSummaries(
             path,
             rec.module_specifier,
             rec.imported_name,
-            declaration,
-            seen,
             stack,
             reader,
         ) orelse continue;
@@ -778,8 +509,6 @@ fn importedFunctionSummary(
     path: []const u8,
     specifier: []const u8,
     name: []const u8,
-    declaration: ?*const zts.declaration.Declaration,
-    seen: []handler_contract.ClassificationStatus,
     stack: *ImportStack,
     reader: ?ImportReader,
 ) ?zts.pipeline.ImportedSummary {
@@ -802,7 +531,7 @@ fn importedFunctionSummary(
     var type_checker: ?zts.TypeChecker = null;
     defer if (type_checker) |*checker| checker.deinit();
     if (type_env_storage.envPtr()) |type_env| {
-        type_checker = zts.TypeChecker.init(allocator, view, &file.atoms, type_env, null);
+        type_checker = zts.TypeChecker.init(allocator, view, &file.atoms, type_env);
         const type_errors = type_checker.?.check(file.root) catch return null;
         if (type_errors != 0) return null;
     }
@@ -811,14 +540,10 @@ fn importedFunctionSummary(
     defer flow.deinit();
     flow.facts = module_facts;
     if (type_checker) |*checker| flow.setTypeChecker(checker);
-    // Without the declaration a helper that reads a declared field would hand
-    // the handler a value carrying none of its declared labels. A failed
-    // install drops the entry, which leaves the call unresolved.
-    if (declaration) |decl| flow.setDeclaration(decl) catch return null;
 
     // The helpers of this helper come first, so a call into one of them applies
     // that file's sinks to this file's parameters.
-    var nested = collectImportedFnSummaries(allocator, module_facts, path, declaration, seen, stack, reader);
+    var nested = collectImportedFnSummaries(allocator, module_facts, path, stack, reader);
     defer deinitImportedSummaries(allocator, &nested);
     for (nested.items) |*entry| flow.setFileFunctionSummary(entry.slot, &entry.summary);
 
@@ -827,43 +552,7 @@ fn importedFunctionSummary(
         summary.deinit(allocator);
         return null;
     };
-    if (declaration) |decl| {
-        const statuses = flow.classificationStatuses();
-        if (statuses.len == decl.classifications.len and seen.len == statuses.len) {
-            for (statuses, seen) |status, *slot| {
-                const observed: handler_contract.ClassificationStatus = switch (status) {
-                    .absent => .absent,
-                    .indeterminate => .indeterminate,
-                    .matched => .matched,
-                };
-                slot.* = strongerStatus(slot.*, observed);
-            }
-        }
-    }
     return summary;
-}
-
-/// The stronger of two P8 statuses: matched over indeterminate over absent.
-fn strongerStatus(a: handler_contract.ClassificationStatus, b: handler_contract.ClassificationStatus) handler_contract.ClassificationStatus {
-    const rank = struct {
-        fn of(s: handler_contract.ClassificationStatus) u2 {
-            return switch (s) {
-                .absent => 0,
-                .indeterminate => 1,
-                .matched => 2,
-            };
-        }
-    }.of;
-    return if (rank(b) > rank(a)) b else a;
-}
-
-/// Raise each entry of the contract's P8 report to what an imported helper's
-/// walk saw. `seen` is empty when there was no declaration.
-fn mergeImportedClassificationStatus(contract: *HandlerContract, seen: []const handler_contract.ClassificationStatus) void {
-    if (seen.len != contract.classifications.items.len) return;
-    for (contract.classifications.items, seen) |*report, observed| {
-        report.status = strongerStatus(report.status, observed);
-    }
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -912,7 +601,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     const emit_verify = opts.emit_verify;
     const emit_contract = opts.emit_contract;
     const sql_schema_path = opts.sql_schema_path;
-    const system_path = opts.system_path;
     const policy_path = opts.policy_path;
 
     // Read the handler source file (using posix for synchronous I/O)
@@ -947,10 +635,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         .emit_contract = emit_contract,
         .policy = policy,
         .sql_schema_path = sql_schema_path,
-        .system_path = system_path,
         .manifest_registry = registry_ptr,
-        .build_time = opts.build_time,
-        .git_commit = opts.git_commit,
     }) catch |err| {
         debugPrint("Compilation failed: {}\n", .{err});
         return err;
@@ -959,11 +644,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
 
     var retired_facts: retired_authority.Facts = .{};
     if (compiled.contract) |*contract| retired_facts = retired_authority.contractFacts(contract);
-    if (compiled.proof_evidence) |*evidence| {
-        for (evidence.proof.nodes) |node| {
-            if (node.tag == .ledger_call) retired_facts.ledger_module = true;
-        }
-    }
     if (retired_authority.first(retired_facts)) |feature| {
         debugPrint("Precompile refused retired runtime authority: {s}\n", .{feature.sentence()});
         return error.UnsupportedRuntimeAuthority;
@@ -1091,7 +771,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
 pub const CheckOptions = struct {
     sql_schema_path: ?[]const u8 = null,
     json_mode: bool = false,
-    system_path: ?[]const u8 = null,
     skip_contract: bool = false,
     /// Capability policy JSON source. When present, the contract is validated
     /// against it and each violation becomes a coded POL diagnostic rather than
@@ -1099,15 +778,6 @@ pub const CheckOptions = struct {
     /// does not abort. Null means no policy, which is what a project that
     /// declares none has, and the POL rules stay silent.
     policy_source: ?[]const u8 = null,
-    /// The consumer's declared classifications (M4 T4), already loaded with
-    /// `loadDeclarationFile` or `parseDeclarationBytes`. Borrowed for the call.
-    /// The flow check enforces it, the contract carries its P8 report, and a
-    /// required entry the analysis never saw counts as a check error.
-    declaration: ?*const zts.declaration.Declaration = null,
-    /// Write flow-property witnesses to the on-disk corpus under
-    /// `.zttp/witnesses/`. On for every real check. The diagnostic corpus gate
-    /// turns it off so a gate run leaves nothing in the working tree.
-    persist_witnesses: bool = true,
     /// Where the files the handler imports are read from. Null reads the
     /// working tree. A caller that checks a revision other than the working
     /// tree (the PR gate, for the base side) passes a reader for that
@@ -1116,206 +786,15 @@ pub const CheckOptions = struct {
     import_reader: ?ImportReader = null,
 };
 
-/// Why a declaration was refused, for a caller that reports it itself.
-pub const DeclarationRefusal = struct {
-    reason: zts.declaration.Refusal,
-    /// Zero-based entry index in the document, when the refusal is about one.
-    entry: ?u32,
-};
-
-/// Validate declaration bytes. A refusal prints the reason tag and the entry
-/// index, names `origin` (the file or config key the bytes came from), fills
-/// `refusal_out` when given, and returns `error.DeclarationRefused`: a refused
-/// declaration stops the build or the check, it is never skipped. The caller
-/// owns the returned declaration.
-pub fn parseDeclarationBytes(
-    allocator: std.mem.Allocator,
-    bytes: []const u8,
-    origin: []const u8,
-    refusal_out: ?*DeclarationRefusal,
-) !zts.declaration.Declaration {
-    const result = try zts.declaration.parse(allocator, bytes);
-    switch (result) {
-        .ok => |decl| return decl,
-        .refused => |refused| {
-            if (refusal_out) |out| out.* = .{ .reason = refused.reason, .entry = refused.entry };
-            if (!builtin.is_test) {
-                if (refused.entry) |entry| {
-                    debugPrint("Declaration '{s}' refused: {s} at classification entry {d}\n", .{ origin, @tagName(refused.reason), entry });
-                } else {
-                    debugPrint("Declaration '{s}' refused: {s}\n", .{ origin, @tagName(refused.reason) });
-                }
-            }
-            return error.DeclarationRefused;
-        },
-    }
-}
-
-/// Read a declaration file, bounded by the loader's own document cap, and
-/// validate it with `parseDeclarationBytes`.
-pub fn loadDeclarationFile(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    refusal_out: ?*DeclarationRefusal,
-) !zts.declaration.Declaration {
-    const bytes = readFilePosix(allocator, path, zts.declaration.max_document_bytes) catch |err| {
-        if (!builtin.is_test) debugPrint("Declaration '{s}' could not be read: {s}\n", .{ path, @errorName(err) });
-        return err;
-    };
-    defer allocator.free(bytes);
-    return parseDeclarationBytes(allocator, bytes, path, refusal_out);
-}
-
-/// Fill the contract's P8 report from the declaration and the flow checker that
-/// ran with it. An entry is `absent` unless that checker ran with this very
-/// declaration installed and reported a status for it, so a flow check that
-/// never received the declaration cannot make a required entry look seen.
-fn fillClassificationReport(
-    allocator: std.mem.Allocator,
-    contract: *HandlerContract,
-    decl: *const zts.declaration.Declaration,
-    flow: ?*const zts.FlowChecker,
-) !void {
-    for (contract.classifications.items) |*report| report.deinit(allocator);
-    contract.classifications.clearRetainingCapacity();
-    try contract.classifications.ensureTotalCapacity(allocator, decl.classifications.len);
-    for (decl.classifications, 0..) |entry, index| {
-        const status: handler_contract.ClassificationStatus = blk: {
-            const checker = flow orelse break :blk .absent;
-            const installed = checker.declaration orelse break :blk .absent;
-            if (installed != decl) break :blk .absent;
-            const statuses = checker.classificationStatuses();
-            if (statuses.len != decl.classifications.len) break :blk .absent;
-            break :blk switch (statuses[index]) {
-                .absent => .absent,
-                .indeterminate => .indeterminate,
-                .matched => .matched,
-            };
-        };
-        const source = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ @tagName(entry.source_kind), entry.source_name });
-        errdefer allocator.free(source);
-        const path = try allocator.dupe(u8, entry.path_text);
-        contract.classifications.appendAssumeCapacity(.{
-            .source = source,
-            .path = path,
-            .label = switch (entry.label) {
-                .secret => .secret,
-                .credential => .credential,
-            },
-            .required = entry.required,
-            .status = status,
-        });
-    }
-}
-
-/// Refuse a build whose declaration names a required field the analysis never
-/// saw (design note section 5, owner decision Q2): it would enforce nothing.
-/// A build error with the entry named, not a ZTS diagnostic, so the policy hash
-/// does not move.
-pub fn refuseRequiredAbsent(contract: *const HandlerContract, filename: []const u8) !void {
-    const index = handler_contract.firstRequiredAbsent(contract.classifications.items) orelse return;
-    const report = contract.classifications.items[index];
-    if (!builtin.is_test) {
-        debugPrint(
-            "Declared classification is required but the analysis never saw it in {s}: source {s}, path {s}\n" ++
-                "  A required entry must name a field the handler reads from that source; fix the path or mark it \"required\": false.\n",
-            .{ filename, report.source, report.path },
-        );
-    }
-    return error.RequiredClassificationAbsent;
-}
-
-/// Write the declaration's ceiling into the contract (M4 T5b, the P15
-/// report). A declaration without a ceiling leaves `ceiling` null.
-fn fillCeilingReport(
-    allocator: std.mem.Allocator,
-    contract: *HandlerContract,
-    decl: *const zts.declaration.Declaration,
-) !void {
-    if (contract.ceiling) |*prior| prior.deinit(allocator);
-    contract.ceiling = null;
-    const ceiling = decl.ceiling orelse return;
-    contract.ceiling = try handler_contract.CeilingReport.fromCeiling(allocator, ceiling);
-}
-
-/// Refuse a build whose handler is outside its declaration's ceiling (M4 T5b,
-/// design note section 13): a capability outside the profile, an imported
-/// module the profile or the declaration excludes, or a missing `read_only`
-/// the profile requires. It reads the declaration's ceiling, not the contract's
-/// report, so a contract that lost its report cannot pass. A build error with
-/// the reason named, not a ZTS diagnostic, so the policy hash does not move.
-/// Call it after the last write to the properties it reads.
-pub fn refuseCeilingBreach(
-    contract: *const HandlerContract,
-    decl: ?*const zts.declaration.Declaration,
-    filename: []const u8,
-) !void {
-    const d = decl orelse return;
-    const ceiling = d.ceiling orelse return;
-    const breach = handler_contract.firstCeilingBreach(contract, &ceiling) orelse return;
-    if (!builtin.is_test) {
-        debugPrint(
-            "Declaration ceiling '{s}' refused {s}: {s} {s}\n  {s}\n",
-            .{ ceiling.profile.name, filename, @tagName(breach.reason()), breach.subject(), ceilingBreachHint(breach.reason()) },
-        );
-    }
-    return error.CeilingBreached;
-}
-
-/// Refuse a build whose tool names a credential the project does not define,
-/// or calls it at an endpoint other than the reference names (M4 T6 design
-/// note, section 4). A build error with the tool, the credential, and the
-/// reason named, not a ZTS diagnostic, so the policy hash does not move.
-pub fn refuseCredentialBreach(
-    contract: *const HandlerContract,
-    refs: ?[]const handler_contract.CredentialRef,
-    filename: []const u8,
-) !void {
-    const configured = refs orelse blk: {
-        for (contract.tools.items) |tool| {
-            if (tool.agent != null) break :blk &.{};
-        }
-        return;
-    };
-    const refusal = handler_contract.firstCredentialRefusal(contract, configured) orelse return;
-    const breach = refusal.breach;
-    if (!builtin.is_test) {
-        if (refusal.agent_reason) |reason| {
-            debugPrint(
-                "Credential refused {s}: ZTS513 {s}: tool \"{s}\" names credential \"{s}\" at {s}: {s}\n",
-                .{ filename, @tagName(reason), breach.tool, breach.credential, breach.endpoint, reason.sentence() },
-            );
-        } else {
-            debugPrint(
-                "Credential refused {s}: tool \"{s}\" names credential \"{s}\" at {s}: {s}\n",
-                .{ filename, breach.tool, breach.credential, breach.endpoint, breach.reason.sentence() },
-            );
-        }
-    }
-    return error.CredentialBreached;
-}
-
-fn ceilingBreachHint(reason: handler_contract.CeilingBreachReason) []const u8 {
-    return switch (reason) {
-        .capabilities_unknown => "The build produced no capability matrix, so the ceiling cannot be shown to hold.",
-        .capability_outside_profile => "Remove the import that needs this capability, or select a profile that admits it.",
-        .module_excluded_by_profile => "The profile refuses this module by name; remove the import or select another profile.",
-        .module_excluded_by_declaration => "The declaration's \"exclude\" list names this module; remove the import or the entry.",
-        .read_only_required => "The profile requires read_only; remove the call that writes state or egresses.",
-    };
-}
-
 pub fn runCheckOnly(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
     sql_schema_path: ?[]const u8,
     json_mode: bool,
-    system_path: ?[]const u8,
 ) !CheckResult {
     return runCheckOnlyWithOptions(allocator, handler_path, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = json_mode,
-        .system_path = system_path,
     });
 }
 
@@ -1544,13 +1023,11 @@ pub fn runCheckOnlyFromSource(
     handler_path: []const u8,
     sql_schema_path: ?[]const u8,
     json_mode: bool,
-    system_path: ?[]const u8,
     skip_contract: bool,
 ) !CheckResult {
     return runCheckOnlyFromSourceWithOptions(allocator, source, handler_path, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = json_mode,
-        .system_path = system_path,
         .skip_contract = skip_contract,
     });
 }
@@ -1570,12 +1047,8 @@ pub fn runCheckOnlyFromSourceWithOptions(
     );
 }
 
-/// Every stage below the strip reports positions in the coordinates of the
-/// stripped code. That is the same thing as the author's coordinates for all but
-/// one construct: a `comptime(...)` whose folded value does not fit the span it
-/// replaced shifts everything after it. `StripResult.span_edits` records those,
-/// and this is the single exit where the shift is undone, before any position
-/// reaches `--json`, `agent_protocol`'s byte offsets, or a repair splice.
+/// Every stage below the strip reports positions in stripped coordinates.
+/// This exit maps each position to the source before clients receive it.
 fn runCheckOnlyFromSourceWithPathAllocator(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
@@ -1630,7 +1103,6 @@ const AnalysisState = enum {
 
 const FullAnalysisOptions = struct {
     type_env: ?*zts.TypeEnv,
-    service_type_context: ?*const ServiceTypeContext,
     strict: bool,
     manifest_registry: ?*const zts.ManifestRegistry,
     policy_sections: @FieldType(zts.pipeline.ResolveOptions, "policy_sections"),
@@ -1669,7 +1141,6 @@ const SingleModuleAnalysis = struct {
             parsed,
             .{
                 .type_env = opts.type_env,
-                .service_type_context = opts.service_type_context,
                 .strict = opts.strict,
                 .module_facts = self.facts(),
                 .policy_sections = opts.policy_sections,
@@ -1687,21 +1158,18 @@ const SingleModuleAnalysis = struct {
         parsed: zts.pipeline.ParsedModule,
         type_env_storage: *zts.pipeline.TypeEnvStorage,
         type_map: ?*const zts.TypeMap,
-        service_type_context: ?*const ServiceTypeContext,
         manifest_registry: ?*const zts.ManifestRegistry,
-        declaration: ?*const zts.declaration.Declaration,
     ) !void {
         try self.initFacts(allocator, parsed, manifest_registry);
         errdefer self.deinit();
         self.resolution_state = .skipped;
         self.verifier_state = .skipped;
 
-        try self.ensureContractTypeSession(type_env_storage, type_map, service_type_context);
+        try self.ensureContractTypeSession(type_env_storage, type_map);
 
         self.standalone_flow_checker = zts.FlowChecker.init(allocator, parsed.ir_view, parsed.atoms);
         const flow = if (self.standalone_flow_checker) |*value| value else unreachable;
         flow.facts = self.facts();
-        if (declaration) |decl| try flow.setDeclaration(decl);
         self.flow_state = .unresolved;
     }
 
@@ -1771,14 +1239,12 @@ const SingleModuleAnalysis = struct {
     fn runFlow(
         self: *SingleModuleAnalysis,
         handler_func: ir.NodeIndex,
-        accepted_tools: ?[]const handler_contract.ToolEntry,
     ) !u32 {
         if (self.flow_state != .unresolved) return error.AnalysisPassUnavailable;
         self.flow_state = .refused;
         const count = if (self.checked) |*checked|
-            try checked.runFlow(handler_func, accepted_tools)
+            try checked.runFlow(handler_func)
         else if (self.standalone_flow_checker) |*flow| blk: {
-            if (accepted_tools) |tools| try flow.setAcceptedToolCatalog(tools);
             const errors = try flow.check(handler_func);
             break :blk errors;
         } else return error.AnalysisPassUnavailable;
@@ -1793,7 +1259,6 @@ const SingleModuleAnalysis = struct {
         self: *SingleModuleAnalysis,
         type_env_storage: *zts.pipeline.TypeEnvStorage,
         type_map: ?*const zts.TypeMap,
-        service_type_context: ?*const ServiceTypeContext,
     ) !void {
         if (self.contract_type_state == .completed) return;
         if (self.contract_type_state != .unresolved) return error.AnalysisPassUnavailable;
@@ -1805,7 +1270,6 @@ const SingleModuleAnalysis = struct {
             self.parsed.ir_view,
             self.parsed.atoms,
             type_env,
-            service_type_context,
         );
         const checker = if (self.standalone_type_checker) |*value| value else unreachable;
         _ = try checker.check(self.parsed.root);
@@ -1849,7 +1313,6 @@ fn runCheckOnPreparedSource(
 ) !CheckResult {
     const sql_schema_path = opts.sql_schema_path;
     const json_mode = opts.json_mode;
-    const system_path = opts.system_path;
     const skip_contract = opts.skip_contract;
     var result = CheckResult{};
     errdefer result.deinit(allocator);
@@ -1858,27 +1321,19 @@ fn runCheckOnPreparedSource(
     const source_kind = zts.classifySourcePath(handler_path);
     result.is_typescript = source_kind.isTyped();
 
-    var service_type_context = try loadServiceTypeContext(allocator, system_path, sql_schema_path);
-    defer if (service_type_context) |*ctx| ctx.deinit(allocator);
-    const stc_ptr: ?*const ServiceTypeContext = if (service_type_context) |*ctx| ctx else null;
-
     // Stage 1: source preparation and TypeScript stripping.
     var strip_diag: ?zts.StripDiagnostic = null;
-    var frontend_diag: ?zts.PrepareSourceDiagnostic = null;
-    prepared_out.* = zts.PreparedSource.initWithDiagnostic(
+    prepared_out.* = zts.PreparedSource.init(
         allocator,
         source,
         handler_path,
         .{
-            .enable_comptime = true,
-            .comptime_env = .{},
             .diagnostic_out = &strip_diag,
             // Report EVERY `as`/`satisfies`/`any` site in one pass instead of
             // aborting at the first, so an agent (or `check`) fixes them all in
             // a single round-trip rather than one per round-trip.
             .collect_all_diagnostics = true,
         },
-        &frontend_diag,
     ) catch |err| {
         result.stages_run.insert(.strip);
         if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
@@ -1886,11 +1341,6 @@ fn runCheckOnPreparedSource(
             result.json_diagnostics.append(
                 allocator,
                 json_diag.fromUnsupportedSourceExtension(handler_path),
-            ) catch {};
-        } else if (frontend_diag) |diagnostic| {
-            result.json_diagnostics.append(
-                allocator,
-                json_diag.fromPrepareSourceDiagnostic(diagnostic, handler_path),
             ) catch {};
         } else if (strip_diag) |d| {
             result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
@@ -2008,7 +1458,6 @@ fn runCheckOnPreparedSource(
         parsed,
         .{
             .type_env = type_env_storage.envPtr(),
-            .service_type_context = stc_ptr,
             .strict = true,
             .manifest_registry = null,
             // Which sections the project's policy declares, so a computed
@@ -2126,15 +1575,6 @@ fn runCheckOnPreparedSource(
     if (skip_contract) return result;
 
     var verify_info: ?VerificationInfo = null;
-    // What the walks of imported helpers saw of each declared classification,
-    // merged into the handler's P8 report after the contract is built. A field
-    // read only inside a helper was seen, and must not report `absent`.
-    const imported_seen: []handler_contract.ClassificationStatus = if (opts.declaration) |decl|
-        try allocator.alloc(handler_contract.ClassificationStatus, decl.classifications.len)
-    else
-        &.{};
-    defer allocator.free(imported_seen);
-    @memset(imported_seen, .absent);
     if (zts.findHandlerFunction(ir_view, root)) |hf| {
         // Sink summaries for helpers imported from sibling files. Without them
         // the flow checker has no body to walk for such a call and has to
@@ -2148,16 +1588,15 @@ fn runCheckOnPreparedSource(
             import_stack.paths[0] = p;
             import_stack.len = 1;
         }
-        var imported_summaries = collectImportedFnSummaries(allocator, analysis.facts(), handler_path, opts.declaration, imported_seen, &import_stack, opts.import_reader);
+        var imported_summaries = collectImportedFnSummaries(allocator, analysis.facts(), handler_path, &import_stack, opts.import_reader);
         defer deinitImportedSummaries(allocator, &imported_summaries);
 
         try analysis.prepareChecked(hf, .{
             .module_facts = analysis.facts(),
             .imported_fn_summaries = imported_summaries.items,
-            .declaration = opts.declaration,
         });
         _ = try analysis.runVerifier(hf);
-        _ = try analysis.runFlow(hf, null);
+        _ = try analysis.runFlow(hf);
         const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
         result.verify_ran = true;
         result.stages_run.insert(.verifier);
@@ -2215,33 +1654,11 @@ fn runCheckOnPreparedSource(
         // Non-JSON stderr output is emitted by projectCompletedFlow from the
         // same FlowChecker instance; avoid printing twice.
 
-        // Persist any flow-property witnesses to the on-disk corpus so the
-        // same falsifying input does not need to be rediscovered next session.
-        // Runs in both JSON and human modes; failures are non-fatal.
-        var flow_witnesses: std.ArrayList(zts.DiagnosticProjection.FlowWitness) = .empty;
-        defer flow_witnesses.deinit(allocator);
-        // Reserve for every diagnostic up front so no append can fail partway
-        // and silently drop the witnesses after it. A mid-loop truncation would
-        // under-count pinned regressions, and live_reload.zig gates its
-        // "previously-defended pattern re-fired" warning on that count being
-        // non-zero, so the loss would surface as silence rather than an error.
-        // If the single reservation fails there is nothing to truncate: the
-        // list stays empty and persistence is skipped, which is the same
-        // non-fatal outcome the block already documents.
-        if (flow_witnesses.ensureTotalCapacity(allocator, flow_diags.len)) {
-            for (flow_diags) |diag| {
-                const witness = zts.DiagnosticProjection.projectFlowWitness(diag, ir_view) orelse continue;
-                flow_witnesses.appendAssumeCapacity(witness);
-            }
-        } else |_| {}
-        if (opts.persist_witnesses) {
-            result.pinned_witness_regressions = persistFlowWitnesses(allocator, flow_witnesses.items, handler_path);
-        }
     }
 
     // Stage 8: Contract. Untyped full analysis creates a separate real type
     // session only now. The contract borrows the completed session.
-    try analysis.ensureContractTypeSession(&type_env_storage, prepared.typeMap(), stc_ptr);
+    try analysis.ensureContractTypeSession(&type_env_storage, prepared.typeMap());
     result.contract = try extractContractFromAnalysis(
         allocator,
         &analysis,
@@ -2257,14 +1674,12 @@ fn runCheckOnPreparedSource(
             false,
             null,
             ir_view,
-            opts.declaration,
         );
     } else {
-        try projectCompletedFlow(allocator, &result.contract.?, null, 0, false, null, ir_view, opts.declaration);
+        try projectCompletedFlow(allocator, &result.contract.?, null, 0, false, null, ir_view);
     }
     try validateContractPolicyInputs(allocator, handler_path, &result.contract.?, sql_schema_path, null);
     result.stages_run.insert(.contract);
-    if (result.contract) |*contract_ref| mergeImportedClassificationStatus(contract_ref, imported_seen);
 
     // Stage 8b: capability policy. Reported, not thrown.
     //
@@ -2400,8 +1815,6 @@ pub fn runGenTests(
 
     var strip_diag: ?zts.StripDiagnostic = null;
     var prepared = zts.PreparedSource.init(allocator, source, handler_path, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
         .diagnostic_out = &strip_diag,
     }) catch |err| {
         debugPrintStripError(handler_path, err, strip_diag);
@@ -2453,19 +1866,8 @@ const GuardResolver = struct {
         return index;
     }
 
-    fn resolveLedger(context: *const anyopaque, node: zts.parser.ir.NodeIndex) ?u32 {
-        const self: *const GuardResolver = @ptrCast(@alignCast(context));
-        const checker = self.checker orelse return null;
-        const call = self.view.getCall(node) orelse return null;
-        const imported = checker.importedFunctionForCallee(call.callee) orelse return null;
-        if (!std.mem.eql(u8, imported.module, "zttp:ledger")) return null;
-        if (std.mem.eql(u8, imported.name, "post")) return 0;
-        if (std.mem.eql(u8, imported.name, "balance")) return 1;
-        return null;
-    }
-
     fn resolver(self: *const GuardResolver) zts.ProofResolver {
-        return .{ .context = self, .resolve = resolve, .resolve_ledger = resolveLedger };
+        return .{ .context = self, .resolve = resolve };
     }
 };
 
@@ -2476,31 +1878,14 @@ pub const CompileOptions = struct {
     policy: ?HandlerPolicy = null,
     sql_schema_path: ?[]const u8 = null,
     generate_tests: bool = false,
-    system_path: ?[]const u8 = null,
     /// Partner virtual-module manifests registered for this compile.
     /// The registry must outlive the call.
     manifest_registry: ?*const zts.ManifestRegistry = null,
-    /// ISO-8601 build timestamp. When null, compileHandler synthesizes one
-    /// from the wall clock so `comptime(__BUILD_TIME__)` is never `undefined`.
-    build_time: ?[]const u8 = null,
-    /// Git commit hash for reproducibility. When null, defaults to "unknown".
-    git_commit: ?[]const u8 = null,
     /// Capture the canonical proof IR and the translation witnesses. Off by
     /// default: recording costs a null check per emitted node and an owned copy
     /// of the witness arrays, and only a caller producing a certificate needs
     /// them.
     emit_proof_evidence: bool = false,
-    /// The consumer's declared classifications (M4 T4). Borrowed; it must
-    /// outlive the call. The flow check enforces it, the contract carries its
-    /// P8 report, and a required entry the analysis never saw refuses the build
-    /// with `error.RequiredClassificationAbsent`. A handler outside the
-    /// declaration's ceiling refuses the build with `error.CeilingBreached`.
-    declaration: ?*const zts.declaration.Declaration = null,
-    /// The project's credential references (M4 T6). Borrowed. When set, a
-    /// tool that names a credential no reference defines, or calls it at
-    /// another endpoint, refuses the build with `error.CredentialBreached`.
-    /// Null means the caller has no project context and nothing is compared.
-    credentials: ?[]const handler_contract.CredentialRef = null,
 };
 
 const shared_analysis_clean_source =
@@ -2511,51 +1896,13 @@ const shared_analysis_clean_source =
     \\}
 ;
 
-const shared_analysis_tool_catalog_source =
-    \\import { routerMatch } from "zttp:router";
-    \\import { callTool, toolCatalog } from "zttp:tool";
-    \\import { schemaCompile } from "zttp:validate";
-    \\
-    \\schemaCompile("In", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"id\":{\"type\":\"string\",\"maxLength\":8}}}");
-    \\schemaCompile("Out", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
-    \\
-    \\function tool(req: Request): Response {
-    \\  return Response.json({});
-    \\}
-    \\
-    \\function assistant(req: Request): Response {
-    \\  const result = callTool("call-1", "tool", "{}");
-    \\  if (!result.ok) return Response.json({ error: result.error }, { status: 502 });
-    \\  return Response.json({});
-    \\}
-    \\
-    \\const routes = { "POST /tool": tool, "POST /agent": assistant };
-    \\toolCatalog({
-    \\  tool: { route: "POST /tool", description: "tool", input: "In", output: "Out", maxInputBytes: 64 },
-    \\  assistant: {
-    \\    route: "POST /agent", description: "agent", maxInputBytes: 8192,
-    \\    agent: {
-    \\      tools: ["tool"],
-    \\      provider: { endpoint: "https://api.deepseek.com/chat/completions", credential: "provider" },
-    \\      limits: { rounds: 4, toolCalls: 8, toolCallsPerRound: 4, argumentBytes: 4096, resultBytes: 16384, turnDeadlineMs: 20000, providerRequestBytes: 32768 }
-    \\    }
-    \\  }
-    \\});
-    \\
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
-    \\  const found = routerMatch(routes, req);
-    \\  if (found === undefined) return Response.json({ error: "not found" }, { status: 404 });
-    \\  return found.handler(req);
-    \\}
-;
-
 test "default check records its exact public stage set" {
     const allocator = std.testing.allocator;
     var result = try runCheckOnlyFromSourceWithOptions(
         allocator,
         shared_analysis_clean_source,
         "shared-analysis-default.ts",
-        .{ .json_mode = true, .persist_witnesses = false },
+        .{ .json_mode = true },
     );
     defer result.deinit(allocator);
 
@@ -2578,7 +1925,6 @@ test "skip_contract stops after the exact computed stage set" {
         .{
             .json_mode = true,
             .skip_contract = true,
-            .persist_witnesses = false,
         },
     );
     defer result.deinit(allocator);
@@ -2592,79 +1938,6 @@ test "skip_contract stops after the exact computed stage set" {
     try std.testing.expect(result.properties == null);
     try std.testing.expect(result.contract == null);
     try std.testing.expect(result.proof_trace_json == null);
-}
-
-test "check keeps its literal tool-catalog flow outcome" {
-    const allocator = std.testing.allocator;
-    var result = try runCheckOnlyFromSourceWithOptions(
-        allocator,
-        shared_analysis_tool_catalog_source,
-        "shared-analysis-tool-check.ts",
-        .{ .json_mode = true, .persist_witnesses = false },
-    );
-    defer result.deinit(allocator);
-
-    const contract = &(result.contract orelse return error.MissingContract);
-    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
-    try std.testing.expectEqualStrings("tool", contract.tools.items[0].name);
-    try std.testing.expectEqualStrings("assistant", contract.tools.items[1].name);
-    try std.testing.expect(contract.properties.?.no_secret_leakage);
-}
-
-test "compile keeps its accepted tool-catalog flow outcome" {
-    const allocator = std.testing.allocator;
-    const paths = [_][]const u8{"/chat/completions"};
-    const credentials = [_]handler_contract.CredentialRef{.{
-        .name = "provider",
-        .env = "PROVIDER_API_KEY",
-        .endpoint = "https://api.deepseek.com:443",
-        .header = "authorization",
-        .scheme = "Bearer",
-        .methods = std.EnumSet(handler_contract.credential_ref.Method).initOne(.POST),
-        .paths = &paths,
-    }};
-    var compiled = try compileHandler(
-        allocator,
-        shared_analysis_tool_catalog_source,
-        "shared-analysis-tool-compile.ts",
-        .{ .emit_contract = true, .credentials = &credentials },
-    );
-    defer compiled.deinit(allocator);
-
-    const contract = &(compiled.contract orelse return error.MissingContract);
-    try std.testing.expectEqual(@as(usize, 2), contract.tools.items.len);
-    try std.testing.expectEqualStrings("tool", contract.tools.items[0].name);
-    try std.testing.expectEqualStrings("assistant", contract.tools.items[1].name);
-    try std.testing.expect(contract.properties.?.no_secret_leakage);
-}
-
-test "precompile refuses a retired module before replacing generated output" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "handler.ts",
-        .data =
-        \\import { toolInput } from "zttp:tool";
-        \\function handler(req: Request): Response {
-        \\  const input = toolInput("Input", req);
-        \\  return Response.json({ ok: input.ok });
-        \\}
-        ,
-    });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "embedded_handler.zig", .data = "sentinel" });
-    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
-    defer allocator.free(handler_path);
-    const output_path = try tmp.dir.realPathFileAlloc(std.testing.io, "embedded_handler.zig", allocator);
-    defer allocator.free(output_path);
-
-    try std.testing.expectError(
-        error.UnsupportedRuntimeAuthority,
-        runCompileWithArgs(allocator, &.{ handler_path, output_path }),
-    );
-    const output = try zts.file_io.readFile(allocator, output_path, 64);
-    defer allocator.free(output);
-    try std.testing.expectEqualStrings("sentinel", output);
 }
 
 test "formatIsoTimestamp produces ISO-8601 UTC" {
@@ -2694,7 +1967,6 @@ test "compile and check agree on summarized and exhaustive behavior paths" {
     for (cases) |case| {
         var checked = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "behavior-coverage.ts", .{
             .json_mode = true,
-            .persist_witnesses = false,
         });
         defer checked.deinit(allocator);
         try std.testing.expectEqual(@as(u32, 0), checked.totalErrors());
@@ -2722,34 +1994,11 @@ pub fn compileHandler(
     const policy = opts.policy;
     const sql_schema_path = opts.sql_schema_path;
     const generate_tests = opts.generate_tests;
-    const system_path = opts.system_path;
     const manifest_registry = opts.manifest_registry;
 
     const source_kind = zts.classifySourcePath(filename);
-    var iso_buf: [24]u8 = undefined;
-    const comptime_env: zts.ComptimeEnv = if (source_kind.isTyped()) blk: {
-        // Build comptime environment with build metadata. Callers may pin
-        // build_time / git_commit for reproducible builds; otherwise we fill in
-        // the current wall clock and the sentinel "unknown" so the magic
-        // identifiers documented in docs/typescript.md never evaluate to
-        // `undefined`.
-        const fallback_seconds: i64 = timestamp: {
-            const ms = zts.realtimeNowMs() catch break :timestamp 0;
-            break :timestamp @divTrunc(ms, 1000);
-        };
-        const build_time_value = opts.build_time orelse zts.pipeline.formatIsoTimestamp(&iso_buf, fallback_seconds);
-        const git_commit_value = opts.git_commit orelse "unknown";
-        break :blk .{
-            .build_time = build_time_value,
-            .git_commit = git_commit_value,
-            .version = zts.version.string,
-            .env_vars = null,
-        };
-    } else .{};
     var strip_diag: ?zts.StripDiagnostic = null;
     var prepared = zts.PreparedSource.init(allocator, source, filename, .{
-        .enable_comptime = true,
-        .comptime_env = comptime_env,
         .diagnostic_out = &strip_diag,
     }) catch |err| {
         debugPrintStripError(filename, err, strip_diag);
@@ -2792,18 +2041,7 @@ pub fn compileHandler(
     // Check for file imports before proceeding with single-module compilation
     const has_file_imports = hasFileImports(&js_parser, root);
 
-    var service_type_context = try loadServiceTypeContext(allocator, system_path, sql_schema_path);
-    defer if (service_type_context) |*ctx| ctx.deinit(allocator);
-    const stc_ptr: ?*const ServiceTypeContext = if (service_type_context) |*ctx| ctx else null;
-
     if (has_file_imports) {
-        // The multi-module build path runs no flow check, so it cannot enforce
-        // a declaration or report its entries. Refuse rather than build an
-        // artifact whose declaration was silently ignored.
-        if (opts.declaration != null) {
-            if (!builtin.is_test) debugPrint("A consumer declaration cannot be enforced on {s}: the build path for a handler with file imports runs no flow check\n", .{filename});
-            return error.DeclarationNotEnforced;
-        }
         if (!builtin.is_test) debugPrint("File imports detected, building module graph...\n", .{});
         return compileMultiModule(
             allocator,
@@ -2815,7 +2053,6 @@ pub fn compileHandler(
             emit_contract,
             policy,
             sql_schema_path,
-            stc_ptr,
             manifest_registry,
         );
     }
@@ -2843,7 +2080,6 @@ pub fn compileHandler(
         parsed,
         .{
             .type_env = type_env_storage.envPtr(),
-            .service_type_context = stc_ptr,
             .strict = opts.strict,
             .manifest_registry = manifest_registry,
             // Which sections the author wrote, not what is in them: the
@@ -2938,7 +2174,7 @@ pub fn compileHandler(
     var result_safe: bool = false;
     var optional_safe: bool = false;
     const handler_fn = zts.findHandlerFunction(ir_view_check, root);
-    try analysis.prepareChecked(handler_fn, .{ .module_facts = analysis.facts(), .declaration = opts.declaration });
+    try analysis.prepareChecked(handler_fn, .{ .module_facts = analysis.facts() });
     if (emit_verify) {
         if (handler_fn) |hf| {
             const error_count = try analysis.runVerifier(hf);
@@ -3133,7 +2369,7 @@ pub fn compileHandler(
         var route_analysis = try analyzeAot(allocator, &js_parser, &atoms, root);
         defer if (route_analysis) |*t| t.deinit(allocator);
 
-        try analysis.ensureContractTypeSession(&type_env_storage, prepared.typeMap(), stc_ptr);
+        try analysis.ensureContractTypeSession(&type_env_storage, prepared.typeMap());
         contract = try extractContractFromAnalysis(
             allocator,
             &analysis,
@@ -3141,7 +2377,7 @@ pub fn compileHandler(
             .{ .aot = route_analysis, .verification = verify_info, .manifest_registry = manifest_registry },
         );
         if (handler_fn) |hf| {
-            const flow_errors = try analysis.runFlow(hf, contract.?.tools.items);
+            const flow_errors = try analysis.runFlow(hf);
             try projectCompletedFlow(
                 allocator,
                 &contract.?,
@@ -3150,13 +2386,11 @@ pub fn compileHandler(
                 true,
                 &all_violations,
                 ir_view_check,
-                opts.declaration,
             );
         } else {
-            try projectCompletedFlow(allocator, &contract.?, null, 0, true, &all_violations, ir_view_check, opts.declaration);
+            try projectCompletedFlow(allocator, &contract.?, null, 0, true, &all_violations, ir_view_check);
         }
         try validateContractPolicyInputs(allocator, filename, &contract.?, sql_schema_path, policy);
-        try refuseRequiredAbsent(&contract.?, filename);
 
         // Inject verification-derived properties (Checks 2, 6, 7)
         if (contract.?.properties) |*props| {
@@ -3164,9 +2398,6 @@ pub fn compileHandler(
             props.result_safe = result_safe;
             props.optional_safe = optional_safe;
         }
-        // After the last write to the properties, `read_only` is final.
-        try refuseCeilingBreach(&contract.?, opts.declaration, filename);
-        try refuseCredentialBreach(&contract.?, opts.credentials, filename);
     }
 
     // Generate exhaustive test cases from path analysis.
@@ -3487,7 +2718,6 @@ fn compileMultiModule(
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
-    service_type_context: ?*const ServiceTypeContext,
     manifest_registry: ?*const zts.ManifestRegistry,
 ) !CompiledHandler {
     // Build module graph
@@ -3579,7 +2809,6 @@ fn compileMultiModule(
             emit_contract,
             policy,
             sql_schema_path,
-            service_type_context,
             manifest_registry,
         );
     }
@@ -3669,10 +2898,6 @@ fn extractContractFromAnalysis(
     );
     errdefer contract.deinit(allocator);
 
-    if (contract.scope.used and contract.durable.used) {
-        return error.ScopeDurableUnsupported;
-    }
-
     return contract;
 }
 
@@ -3684,7 +2909,6 @@ fn projectCompletedFlow(
     fresh: bool,
     violations_out: ?*std.ArrayList(zts.property_diagnostics.PropertyViolation),
     ir_view: zts.IrView,
-    declaration: ?*const zts.declaration.Declaration,
 ) !void {
     if (flow) |completed| {
         const flow_diags = completed.getDiagnostics();
@@ -3715,14 +2939,7 @@ fn projectCompletedFlow(
         if (violations_out) |vout| {
             zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
         }
-        if (declaration) |decl| {
-            try fillClassificationReport(allocator, contract, decl, completed);
-            try fillCeilingReport(allocator, contract, decl);
-        }
         if (fresh and !builtin.is_test and flow_errors == 0) debugPrint("Flow analysis passed\n", .{});
-    } else if (declaration) |decl| {
-        try fillClassificationReport(allocator, contract, decl, null);
-        try fillCeilingReport(allocator, contract, decl);
     }
 }
 
@@ -3744,9 +2961,7 @@ fn buildContractOnlyFromParsed(
     filename: []const u8,
     type_map: ?*const zts.TypeMap,
     sql_schema_path: ?[]const u8,
-    service_type_context: ?*const ServiceTypeContext,
     manifest_registry: ?*const zts.ManifestRegistry,
-    declaration: ?*const zts.declaration.Declaration,
 ) !HandlerContract {
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
@@ -3757,9 +2972,7 @@ fn buildContractOnlyFromParsed(
         parsed,
         &type_env_storage,
         type_map,
-        service_type_context,
         manifest_registry,
-        declaration,
     );
     defer analysis.deinit();
 
@@ -3773,7 +2986,7 @@ fn buildContractOnlyFromParsed(
 
     const handler_func = findHandlerFunction(parsed.ir_view, parsed.root);
     if (handler_func) |hf| {
-        const flow_errors = try analysis.runFlow(hf, contract.tools.items);
+        const flow_errors = try analysis.runFlow(hf);
         try projectCompletedFlow(
             allocator,
             &contract,
@@ -3782,10 +2995,9 @@ fn buildContractOnlyFromParsed(
             true,
             null,
             parsed.ir_view,
-            declaration,
         );
     } else {
-        try projectCompletedFlow(allocator, &contract, null, 0, true, null, parsed.ir_view, declaration);
+        try projectCompletedFlow(allocator, &contract, null, 0, true, null, parsed.ir_view);
     }
     try validateContractPolicyInputs(allocator, filename, &contract, sql_schema_path, null);
     return contract;
@@ -3800,7 +3012,6 @@ fn buildMultiModuleContract(
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
-    service_type_context: ?*const ServiceTypeContext,
     manifest_registry: ?*const zts.ManifestRegistry,
 ) !HandlerContract {
     var merged = try handler_contract.initMergedContract(allocator, entry_filename);
@@ -3830,7 +3041,6 @@ fn buildMultiModuleContract(
             .{
                 .dispatch = if (temp_aot) |analysis| analysis.dispatch else null,
                 .has_default_response = if (temp_aot) |analysis| analysis.default_response != null else false,
-                .service_type_context = service_type_context,
                 .manifest_registry = manifest_registry,
             },
         );
@@ -4556,9 +3766,6 @@ fn buildTestContractForSource(
     filename: []const u8,
     sql_schema_path: ?[]const u8,
 ) !HandlerContract {
-    var strings = zts.StringTable.init(allocator);
-    defer strings.deinit();
-
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
@@ -4574,8 +3781,6 @@ fn buildTestContractForSource(
         filename,
         null,
         sql_schema_path,
-        null,
-        null,
         null,
     );
 }
@@ -4641,28 +3846,6 @@ fn contractDeterminism(allocator: std.mem.Allocator, source: []const u8) !struct
     defer contract.deinit(allocator);
     const props = contract.properties orelse return error.MissingProperties;
     return .{ .deterministic = props.deterministic, .idempotent = props.idempotent };
-}
-
-test "a durable step callback keeps determinism" {
-    // The read is recorded on the first run and replayed after, so every run
-    // answers the same thing.
-    const props = try contractDeterminism(std.testing.allocator,
-        \\import { step } from "zttp:durable";
-        \\function handler(req) { return step("ts", () => Date.now()); }
-    );
-    try std.testing.expect(props.deterministic);
-    try std.testing.expect(props.idempotent);
-}
-
-test "an eager durable step argument does not keep determinism" {
-    // `Date.now()` here is evaluated before `step` is called, so it is not the
-    // value the step records, and nothing replays it.
-    const props = try contractDeterminism(std.testing.allocator,
-        \\import { step } from "zttp:durable";
-        \\function handler(req) { return step("ts", Date.now()); }
-    );
-    try std.testing.expect(!props.deterministic);
-    try std.testing.expect(!props.idempotent);
 }
 
 test "a varying read that only reaches a log keeps determinism" {
@@ -4878,58 +4061,6 @@ test "schema contract refuses computed object keys before extraction" {
     } else |err| {
         try std.testing.expectEqual(error.ParseError, err);
     }
-}
-
-test "buildTestContractForSource extracts durable workflow contract" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { run, step, waitSignal } from "zttp:durable";
-        \\
-        \\function handler(req) {
-        \\  const isPost = req.method === "POST";
-        \\  return run("job:123", () => {
-        \\    const order = step("load", () => 1);
-        \\    if (isPost) {
-        \\      return Response.text(["loaded:", String(order)].join(""), { status: 202 });
-        \\    }
-        \\    const payload = waitSignal("approved");
-        \\    return Response.json(payload);
-        \\  });
-        \\}
-    ;
-
-    var contract = try buildTestContractForSource(allocator, source, "durable-workflow.ts", null);
-    defer contract.deinit(allocator);
-
-    try std.testing.expect(contract.durable.used);
-    try std.testing.expectEqual(handler_contract.DurableWorkflowProofLevel.complete, contract.durable.workflow.proof_level);
-    try std.testing.expect(contract.durable.workflow.workflow_id != null);
-    try std.testing.expect(std.mem.startsWith(u8, contract.durable.workflow.workflow_id.?, "durable-workflow.ts:handler:"));
-
-    var saw_branch = false;
-    var saw_step = false;
-    var saw_wait_signal = false;
-    var saw_return = false;
-    for (contract.durable.workflow.nodes.items) |node| {
-        switch (node.kind) {
-            .branch => saw_branch = true,
-            .step => {
-                saw_step = true;
-                try std.testing.expectEqualStrings("load", node.label);
-            },
-            .wait_signal => {
-                saw_wait_signal = true;
-                try std.testing.expectEqualStrings("approved", node.label);
-            },
-            .return_response => saw_return = true,
-            else => {},
-        }
-    }
-    try std.testing.expect(saw_branch);
-    try std.testing.expect(saw_step);
-    try std.testing.expect(saw_wait_signal);
-    try std.testing.expect(saw_return);
-    try std.testing.expect(contract.durable.workflow.edges.items.len >= 3);
 }
 
 test "runCheckOnlyFromSource: helper reaching outside its Effects ceiling gets ZTS503" {
@@ -5804,61 +4935,6 @@ test "appendExportCapsuleDiagnostics: the docs mode asks only for a Proof capsul
     try std.testing.expect(saw_610);
 }
 
-test "buildTestContractForSource marks durable workflow partial for dynamic signal name" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { run, waitSignal } from "zttp:durable";
-        \\
-        \\function handler(req) {
-        \\  return run("job:123", () => {
-        \\    const signalName = req.method;
-        \\    const payload = waitSignal(signalName);
-        \\    return Response.json(payload);
-        \\  });
-        \\}
-    ;
-
-    var contract = try buildTestContractForSource(allocator, source, "durable-partial.ts", null);
-    defer contract.deinit(allocator);
-
-    try std.testing.expect(contract.durable.used);
-    try std.testing.expect(contract.durable.signals.dynamic);
-    try std.testing.expectEqual(handler_contract.DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
-
-    var saw_dynamic_signal = false;
-    for (contract.durable.workflow.nodes.items) |node| {
-        if (node.kind != .wait_signal) continue;
-        saw_dynamic_signal = true;
-        try std.testing.expectEqualStrings("<dynamic signal>", node.label);
-    }
-    try std.testing.expect(saw_dynamic_signal);
-}
-
-test "buildTestContractForSource extracts scope metadata and clears retry safety" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { scope, ensure } from "zttp:scope";
-        \\
-        \\function handler(req) {
-        \\  return scope("outer", () => {
-        \\    ensure(() => {});
-        \\    return scope("inner", () => {
-        \\      return Response.json({ ok: true });
-        \\    });
-        \\  });
-        \\}
-    ;
-
-    var contract = try buildTestContractForSource(allocator, source, "scope.ts", null);
-    defer contract.deinit(allocator);
-
-    try std.testing.expect(contract.scope.used);
-    try std.testing.expectEqual(@as(u32, 2), contract.scope.max_depth);
-    try std.testing.expect(!contract.properties.?.retry_safe);
-    try std.testing.expect(handler_contract.containsString(contract.scope.names.items, "outer"));
-    try std.testing.expect(handler_contract.containsString(contract.scope.names.items, "inner"));
-}
-
 test "runCheckOnly keeps mirrored properties aligned with finalized fault coverage" {
     const source =
         \\import { jwtVerify } from "zttp:auth";
@@ -6117,49 +5193,6 @@ test "check still stops before the verifier when a computed stage has an error" 
     try std.testing.expect(!result.verify_ran);
 }
 
-test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
-    const source =
-        \\function Page(): JSX.Element {
-        \\    return <main><h1>zttp</h1></main>;
-        \\}
-        \\
-        \\function handler(req: Request): Proof<Response, "state_isolated"> {
-        \\    if (req.path === "/") {
-        \\        return Response.html(renderToString(<Page />));
-        \\    }
-        \\    return Response.text("Not Found", { status: 404 });
-        \\}
-    ;
-
-    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.tsx", .{
-        .json_mode = true,
-    });
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
-    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
-}
-
-test "runCheckOnlyFromSource reports malformed TSX at the authored tag" {
-    const source =
-        \\function Page(): JSX.Element {
-        \\    return <main><h1>zttp</h1></section>;
-        \\}
-    ;
-    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "view.tsx", .{
-        .json_mode = true,
-    });
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
-    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-    const diagnostic = result.json_diagnostics.items[0];
-    try std.testing.expectEqualStrings("ZTS033", diagnostic.code);
-    try std.testing.expectEqualStrings("view.tsx", diagnostic.file);
-    try std.testing.expectEqual(@as(u32, 2), diagnostic.line);
-    try std.testing.expectEqual(@as(u32, 31), diagnostic.column);
-}
-
 test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
     const allocator = std.testing.allocator;
     const source =
@@ -6180,23 +5213,101 @@ test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
     try std.testing.expect(result.totalErrors() > 0);
 }
 
-test "runCheckOnlyFromSource refuses JavaScript extensions with ZTS052" {
+test "runCheckOnlyFromSource refuses unsupported source extensions with ZTS052" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.js", .{
+    for ([_][]const u8{ "handler.js", "handler.tsx" }) |filename| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, filename, .{
+            .json_mode = true,
+        });
+        defer result.deinit(allocator);
+
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings("ZTS052", result.json_diagnostics.items[0].code);
+        try std.testing.expectEqualStrings(filename, result.json_diagnostics.items[0].file);
+        try std.testing.expect(result.contract == null);
+    }
+}
+
+test "runCheckOnlyFromSource refuses raw JSX in TypeScript with ZTS002" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  return Response.html(<main>hello</main>);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
         .json_mode = true,
     });
-    defer result.deinit(allocator);
+    defer result.deinit(std.testing.allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
     try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-    try std.testing.expectEqualStrings("ZTS052", result.json_diagnostics.items[0].code);
-    try std.testing.expectEqualStrings("handler.js", result.json_diagnostics.items[0].file);
+    try std.testing.expectEqualStrings("ZTS002", result.json_diagnostics.items[0].code);
     try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource treats declared comptime as an ordinary function" {
+    const source =
+        \\function comptime(value: string): string { return value; }
+        \\function handler(req: Request): Response {
+        \\  return Response.text(comptime("ready"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+test "runCheckOnlyFromSource refuses unbound comptime and resource through ZTS629" {
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        ambient: []const u8,
+    }{
+        .{
+            .name = "comptime.ts",
+            .source =
+            \\function handler(req: Request): Response {
+            \\  return Response.text(String(comptime("ready")));
+            \\}
+            ,
+            .ambient = "comptime",
+        },
+        .{
+            .name = "resource.ts",
+            .source =
+            \\function handler(req: Request): Response {
+            \\  return Response.text(String(resource("item")));
+            \\}
+            ,
+            .ambient = "resource",
+        },
+    };
+
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, case.name, .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+
+        const diagnostic = for (result.json_diagnostics.items) |candidate| {
+            if (std.mem.eql(u8, candidate.code, "ZTS629")) break candidate;
+        } else return error.TestExpectedEqual;
+        var expected_message: [96]u8 = undefined;
+        const message = try std.fmt.bufPrint(&expected_message, "unpublished ambient global '{s}'", .{case.ambient});
+        try std.testing.expectEqualStrings(message, diagnostic.message);
+        try std.testing.expect(result.contract == null);
+    }
 }
 
 test "runCheckOnlyFromSource refuses legacy zttp types import with ZTS053" {
@@ -6786,30 +5897,6 @@ test "runCheckOnlyFromSource repairs raw fetchSync through zttp fetch" {
     );
 }
 
-test "runCheckOnlyFromSource composes zttp fetch through durable steps" {
-    const source =
-        \\import { run, step } from "zttp:durable";
-        \\import { fetch } from "zttp:fetch";
-        \\structural DurableProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
-        \\function handler(req: Request): DurableProof<Response> {
-        \\  const key = req.headers.get("idempotency-key") ?? "order";
-        \\  return run(key, () => {
-        \\    const reservation = step("reserve", () => fetch("https://inventory.internal/reserve"));
-        \\    const charge = step("charge", () => fetch("https://payments.internal/charge"));
-        \\    return Response.json({ reserved: reservation.status, charged: charge.status });
-        \\  });
-        \\}
-    ;
-
-    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
-        .json_mode = true,
-    });
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
-    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
-}
-
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =
@@ -6826,33 +5913,6 @@ test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
     try std.testing.expectEqualStrings("deterministic", contract.declared_specs.items[0]);
     try std.testing.expectEqual(@as(usize, 0), contract.spec_diagnostics.items.len);
-}
-
-test "runCheckOnlyFromSource: TSX lowering preserves a handler Proof alias" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\structural Guardrails<T> = Proof<T, "deterministic">;
-        \\function Page(): JSX.Element {
-        \\  return (
-        \\    <html>
-        \\      <body>ready</body>
-        \\    </html>
-        \\  );
-        \\}
-        \\function handler(req: Request): Guardrails<Response> {
-        \\  return Response.html(renderToString(<Page />));
-        \\}
-    ;
-    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "declared-only.tsx", .{
-        .json_mode = true,
-    });
-    defer result.deinit(allocator);
-
-    const contract = result.contract orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
-    try std.testing.expectEqualStrings("deterministic", contract.declared_specs.items[0]);
-    try std.testing.expect(!contract.declared_specs_implicit);
-    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
 }
 
 test "runCheckOnlyFromSource: explicit unknown Spec suppresses defaults and emits ZTS502" {
@@ -6918,25 +5978,6 @@ test "compileHandler honors a registered partner manifest" {
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.idempotent);
-}
-
-test "buildTestContractForSource rejects scope and durable together" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { scope } from "zttp:scope";
-        \\import { run } from "zttp:durable";
-        \\
-        \\function handler(req) {
-        \\  return run("job:123", () => {
-        \\    return scope("inner", () => Response.json({ ok: true }));
-        \\  });
-        \\}
-    ;
-
-    try std.testing.expectError(
-        error.ScopeDurableUnsupported,
-        buildTestContractForSource(allocator, source, "scope-durable.ts", null),
-    );
 }
 
 test "contract policy validation checks zttp:sql queries against schema" {
@@ -7176,76 +6217,6 @@ test "contract-only extraction without TypeMap preserves verifier properties" {
     try std.testing.expect(!props.optional_safe);
 }
 
-test "buildServiceTypeContextFromContracts: errdefer ladder closes every failure path" {
-    // Walk FailingAllocator.fail_index forward through the function's
-    // allocation sequence. testing.allocator catches any leak and Zig's
-    // runtime safety catches the original bug (deinit called on
-    // uninitialized ServiceResponseVariant slots when the populate loop
-    // failed past index 0). Mirrors the Runtime.create equivalent in
-    // `packages/zts/src/pool.zig`.
-    const allocator = std.testing.allocator;
-
-    // Build a minimal HandlerContract with one route carrying TWO responses.
-    // Two responses is the smallest input that exposes the bug: a failure
-    // while populating responses[1] leaves responses[1] uninitialized but
-    // responses[0] live, so the unwind path has to distinguish them.
-    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "h.ts"));
-    defer contract.deinit(allocator);
-
-    var route: handler_contract.ApiRouteInfo = .{
-        .method = try allocator.dupe(u8, "GET"),
-        .path = try allocator.dupe(u8, "/items"),
-        .request_schema_refs = .empty,
-        .request_schema_dynamic = false,
-        .requires_bearer = false,
-        .requires_jwt = false,
-    };
-    try route.responses.append(allocator, .{
-        .status = 200,
-        .content_type = try allocator.dupe(u8, "application/json"),
-        .schema = .{ .inline_json = try allocator.dupe(u8, "{}") },
-    });
-    try route.responses.append(allocator, .{
-        .status = 500,
-        .content_type = try allocator.dupe(u8, "text/plain"),
-        .schema = .none,
-    });
-    try contract.api.routes.append(allocator, route);
-
-    var handlers = try allocator.alloc(system_linker.SystemConfig.HandlerEntry, 1);
-    handlers[0] = .{
-        .name = try allocator.dupe(u8, "svc"),
-        .path = try allocator.dupe(u8, "h.ts"),
-        .base_url = try allocator.dupe(u8, "http://localhost"),
-    };
-    var config: system_linker.SystemConfig = .{ .version = 1, .handlers = handlers };
-    defer config.deinit(allocator);
-
-    var contracts_arr = [_]HandlerContract{contract};
-    const contracts: []const HandlerContract = &contracts_arr;
-
-    // Find the ceiling allocation count via a successful run.
-    var ceiling: usize = 0;
-    {
-        var probe = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
-        var ctx = try buildServiceTypeContextFromContracts(probe.allocator(), &config, contracts);
-        ceiling = probe.alloc_index;
-        ctx.deinit(probe.allocator());
-    }
-
-    var fail_at: usize = 0;
-    while (fail_at < ceiling) : (fail_at += 1) {
-        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_at });
-        const result = buildServiceTypeContextFromContracts(failing.allocator(), &config, contracts);
-        if (result) |ok| {
-            var ok_mut = ok;
-            ok_mut.deinit(failing.allocator());
-        } else |err| {
-            try std.testing.expectEqual(error.OutOfMemory, err);
-        }
-    }
-}
-
 test "writeBytecodeArray emits zig-fmt stable rows" {
     const allocator = std.testing.allocator;
 
@@ -7302,7 +6273,7 @@ test {
 // ---------------------------------------------------------------------------
 // Serialized-bytecode goldens
 //
-// The four contract goldens pin what the analyzer SAYS about a handler. Nothing
+// The contract goldens pin what the analyzer SAYS about a handler. Nothing
 // pinned what the compiler EMITS for one, which is the artifact the product
 // signs and ships. These do.
 //
@@ -7310,18 +6281,16 @@ test {
 // approaches were tried and rejected first: `@embedFile` with a relative path is
 // rejected by Zig ("embed of file outside package path"), and injecting the
 // fixtures as anonymous build imports broke every OTHER test root that includes
-// this file - system_rollout.zig and canonicalize.zig among them - because those
-// roots have no such import. `zig build test-precompile` was green while
-// `zig build test` was not.
+// this file because those roots have no such import. `zig build
+// test-precompile` was green while `zig build test` was not.
 //
-// Inline sources are chosen to cover four codegen shapes: plain control flow and
-// arithmetic, virtual-module imports, JSX, and a durable workflow with nested
-// closures.
+// Inline sources cover plain control flow, arithmetic, and virtual-module
+// imports.
 //
 // To regenerate after a DELIBERATE codegen change: run the test, read the actual
 // hash it prints, and paste it in. There is no update script on purpose - a hash
 // change should cost a moment's thought about why the bytes moved. Verified
-// capable of failing: renumbering `push_const` in bytecode.zig drifts all four.
+// capable of failing: renumbering `push_const` in bytecode.zig drifts both.
 // ---------------------------------------------------------------------------
 
 const bytecode_golden_cases = [_]struct {
@@ -7363,138 +6332,14 @@ const bytecode_golden_cases = [_]struct {
         ,
         .sha256 = "b47edaefb4ef8f663a35872a28c823bc7e5982845cacb9381314db971f4030e2",
     },
-    .{
-        .name = "jsx",
-        .source =
-        \\function handler(req: Request): Response {
-        \\    const title = "hello";
-        \\    return Response.html(<div class="page"><h1>{title}</h1></div>);
-        \\}
-        ,
-        .sha256 = "8e6ae8bdd4eac68f31b5858a23c731e55796aa0c91575411a8903c2a5c63bf45",
-    },
-    .{
-        .name = "durable workflow",
-        .source =
-        \\import { run, step } from "zttp:durable";
-        \\
-        \\function handler(req: Request): unknown {
-        \\    return run("order:42", () => {
-        \\        const draft = step("createDraft", () => {
-        \\            return { id: 42, status: "draft" };
-        \\        });
-        \\        return Response.json({ id: draft.id });
-        \\    });
-        \\}
-        ,
-        .sha256 = "d0f3192b21758b1a6bc5568d40e86baae68d38889e798117f26729af1222c43f",
-    },
 };
-
-fn hashProofU32(hasher: *std.crypto.hash.sha2.Sha256, value: u32) void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &bytes, value, .little);
-    hasher.update(&bytes);
-}
-
-fn hashProofI32(hasher: *std.crypto.hash.sha2.Sha256, value: i32) void {
-    var bytes: [4]u8 = undefined;
-    std.mem.writeInt(i32, &bytes, value, .little);
-    hasher.update(&bytes);
-}
-
-fn proofEvidenceDigest(evidence: *const zts.ProofEvidence) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("zttp-test-proof-evidence-v1");
-    hashProofU32(&hasher, evidence.proof.handler_function orelse std.math.maxInt(u32));
-    hashProofU32(&hasher, @intCast(evidence.proof.nodes.len));
-    for (evidence.proof.nodes) |node| {
-        hashProofU32(&hasher, node.id);
-        hashProofU32(&hasher, @intFromEnum(node.tag));
-        hashProofU32(&hasher, node.parent);
-        hashProofU32(&hasher, node.first_child);
-        hashProofU32(&hasher, node.child_count);
-        hasher.update(&node.digest);
-        hashProofU32(&hasher, node.source);
-        hashProofU32(&hasher, node.aux);
-    }
-    hashProofU32(&hasher, @intCast(evidence.total.len));
-    for (evidence.total) |value| hasher.update(if (value) "\x01" else "\x00");
-    hashProofU32(&hasher, @intCast(evidence.declared.len));
-    for (evidence.declared) |value| hashProofU32(&hasher, value);
-    hashProofU32(&hasher, @intCast(evidence.emissions.len));
-    for (evidence.emissions) |emission| {
-        hashProofU32(&hasher, emission.function_ordinal);
-        hashProofU32(&hasher, emission.scope);
-        hashProofU32(&hasher, emission.node);
-        hashProofU32(&hasher, emission.code_start);
-        hashProofU32(&hasher, emission.code_len);
-    }
-    hashProofU32(&hasher, @intCast(evidence.jumps.len));
-    for (evidence.jumps) |jump| {
-        hashProofU32(&hasher, jump.scope);
-        hashProofU32(&hasher, jump.node);
-        hashProofU32(&hasher, jump.instruction_offset);
-        hashProofU32(&hasher, jump.target_node);
-        hashProofU32(&hasher, jump.target_offset);
-    }
-    hashProofU32(&hasher, @intCast(evidence.rewrites.len));
-    for (evidence.rewrites) |rewrite| {
-        hashProofU32(&hasher, @intFromEnum(rewrite.kind));
-        hashProofU32(&hasher, rewrite.before_offset);
-        hashProofU32(&hasher, rewrite.before_len);
-        hashProofU32(&hasher, rewrite.after_offset);
-        hashProofU32(&hasher, rewrite.after_len);
-        hashProofI32(&hasher, rewrite.delta);
-    }
-    hashProofU32(&hasher, evidence.pre_optimization_len);
-    hashProofU32(&hasher, evidence.final_len);
-    return hasher.finalResult();
-}
-
-test "fixed metadata keeps bytecode and proof evidence frozen" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\const builtAt: string = comptime(__BUILD_TIME__);
-        \\const commit: string = comptime(__GIT_COMMIT__);
-        \\function handler(req: Request): Response {
-        \\  if (req.method === "GET") return Response.text(builtAt);
-        \\  return Response.text(commit);
-        \\}
-    ;
-    var compiled = try compileHandler(allocator, source, "shared-analysis-frozen.ts", .{
-        .emit_contract = true,
-        .emit_proof_evidence = true,
-        .build_time = "2026-10-11T00:00:00Z",
-        .git_commit = "38a0782f",
-    });
-    defer compiled.deinit(allocator);
-
-    var bytecode_digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(compiled.bytecode, &bytecode_digest, .{});
-    const proof = compiled.proof_evidence orelse return error.MissingProofEvidence;
-    const proof_digest = proofEvidenceDigest(&proof);
-    const bytecode_hex = std.fmt.bytesToHex(bytecode_digest, .lower);
-    const proof_hex = std.fmt.bytesToHex(proof_digest, .lower);
-    try std.testing.expectEqualStrings(
-        "607923b6251f133a04f1277bec4b962d43f04b83855c7570b9e50042cd83e6e7",
-        &bytecode_hex,
-    );
-    try std.testing.expectEqualStrings(
-        "4fad5bf350094942445238ae83d7b1036adfe87860ffea378e476a3d29133556",
-        &proof_hex,
-    );
-}
 
 test "serialized bytecode matches the committed goldens" {
     const allocator = std.testing.allocator;
     var drifted: usize = 0;
 
     for (bytecode_golden_cases) |case| {
-        // The extension selects the TypeScript or TSX frontend, so derive it
-        // from the case rather than fixing one path for every golden.
-        const filename = if (std.mem.eql(u8, case.name, "jsx")) "golden.tsx" else "golden.ts";
-        var compiled = compileHandler(allocator, case.source, filename, .{}) catch |err| {
+        var compiled = compileHandler(allocator, case.source, "golden.ts", .{}) catch |err| {
             std.debug.print("\nbytecode golden: {s} failed to compile: {t}\n", .{ case.name, err });
             return err;
         };
@@ -7511,7 +6356,7 @@ test "serialized bytecode matches the committed goldens" {
 
         if (!std.mem.eql(u8, case.sha256, &actual)) {
             // Report every drifting fixture before failing. A gate that names one
-            // when four moved costs a full cycle per fixture.
+            // when both moved costs a full cycle per fixture.
             std.debug.print(
                 "\nbytecode golden drift: {s}\n  expected {s}\n  actual   {s}\n  ({d} bytes)\n",
                 .{ case.name, case.sha256, actual, compiled.bytecode.len },
@@ -7666,392 +6511,6 @@ test "a named intersection member is checked, like the inline spelling" {
     // return to the fail-open visible.
     try std.testing.expectEqual(@as(u32, 1), inlined.type_errors);
     try std.testing.expectEqual(@as(u32, 1), named.type_errors);
-}
-
-// ---------------------------------------------------------------------------
-// The consumer declaration carried into the check and the build (M4 T4 U3)
-// ---------------------------------------------------------------------------
-
-const declared_leak_handler =
-    \\import { fetch } from "zttp:fetch";
-    \\function handler(req: Request): Response {
-    \\  const r = fetch("https://api.example.com/customers/1");
-    \\  const body = r.json();
-    \\  return Response.json({ t: body.customer.tax_id });
-    \\}
-    \\
-;
-
-const declared_sibling_handler =
-    \\import { fetch } from "zttp:fetch";
-    \\function handler(req: Request): Response {
-    \\  const r = fetch("https://api.example.com/customers/1");
-    \\  const body = r.json();
-    \\  return Response.json({ n: body.customer.name });
-    \\}
-    \\
-;
-
-const tax_id_declaration =
-    \\{"version":1,"classifications":[
-    \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":true,"reason":"Tax identifier."}]}
-;
-
-/// A declaration and a handler written to a temporary directory, the
-/// declaration loaded from a test file.
-const DeclaredFixture = struct {
-    tmp: std.testing.TmpDir,
-    handler_path: [:0]u8,
-    declaration: zts.declaration.Declaration,
-
-    fn init(handler_source: []const u8, declaration_json: []const u8) !DeclaredFixture {
-        const allocator = std.testing.allocator;
-        var tmp = std.testing.tmpDir(.{});
-        errdefer tmp.cleanup();
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = handler_source });
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "declaration.json", .data = declaration_json });
-        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
-        errdefer allocator.free(handler_path);
-        const declaration_path = try tmp.dir.realPathFileAlloc(std.testing.io, "declaration.json", allocator);
-        defer allocator.free(declaration_path);
-        const declaration = try loadDeclarationFile(allocator, declaration_path, null);
-        return .{ .tmp = tmp, .handler_path = handler_path, .declaration = declaration };
-    }
-
-    fn deinit(self: *DeclaredFixture) void {
-        self.declaration.deinit();
-        std.testing.allocator.free(self.handler_path);
-        self.tmp.cleanup();
-    }
-};
-
-test "check with a declaration refuses a declared secret with ZTS400 and reports it matched" {
-    const allocator = std.testing.allocator;
-    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
-    defer fixture.deinit();
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
-        .json_mode = true,
-        .declaration = &fixture.declaration,
-    });
-    defer result.deinit(allocator);
-
-    var saw_zts400 = false;
-    for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS400")) saw_zts400 = true;
-    }
-    try std.testing.expect(saw_zts400);
-    const contract = &result.contract.?;
-    try std.testing.expect(!contract.properties.?.no_secret_leakage);
-    try std.testing.expectEqual(@as(usize, 1), contract.classifications.items.len);
-    const entry = contract.classifications.items[0];
-    try std.testing.expectEqualStrings("fetch:api.example.com", entry.source);
-    try std.testing.expectEqualStrings("customer.tax_id", entry.path);
-    try std.testing.expect(entry.required);
-    try std.testing.expectEqual(handler_contract.ClassificationStatus.matched, entry.status);
-    try std.testing.expectEqual(@as(u32, 0), result.classificationErrors());
-
-    // `zts check --json` carries the report in the proof object.
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try json_diag.writeErrorJson(&out.writer, contract, result.json_diagnostics.items, null, null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(),
-        \\"classifications":[{"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":true,"status":"matched"}]
-    ) != null);
-}
-
-test "check without a declaration admits the same read and writes no classifications key" {
-    const allocator = std.testing.allocator;
-    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
-    defer fixture.deinit();
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{ .json_mode = true });
-    defer result.deinit(allocator);
-    const contract = &result.contract.?;
-    try std.testing.expect(contract.properties.?.no_secret_leakage);
-    try std.testing.expectEqual(@as(usize, 0), contract.classifications.items.len);
-
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try json_diag.writeErrorJson(&out.writer, contract, result.json_diagnostics.items, null, null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "classifications") == null);
-}
-
-test "a required entry on a host the handler never fetches refuses the build and fails the check" {
-    const allocator = std.testing.allocator;
-    const declaration_json =
-        \\{"version":1,"classifications":[
-        \\ {"source":"fetch:billing.example.com","path":"card.token","label":"credential","required":true,"reason":"Card token."}]}
-    ;
-    var fixture = try DeclaredFixture.init(declared_sibling_handler, declaration_json);
-    defer fixture.deinit();
-
-    try std.testing.expectError(
-        error.RequiredClassificationAbsent,
-        compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
-    );
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
-        .json_mode = true,
-        .declaration = &fixture.declaration,
-    });
-    defer result.deinit(allocator);
-    const entry = result.contract.?.classifications.items[0];
-    try std.testing.expectEqualStrings("fetch:billing.example.com", entry.source);
-    try std.testing.expectEqual(handler_contract.ClassificationStatus.absent, entry.status);
-    try std.testing.expectEqual(@as(u32, 1), result.classificationErrors());
-    try std.testing.expect(result.totalErrors() >= 1);
-}
-
-// The declaration ceiling (M4 T5b U2): a breach refuses the build with
-// `error.CeilingBreached` and counts as a check error.
-
-const ceiling_plain_handler =
-    \\function handler(req: Request): Response {
-    \\  return Response.json({ ok: true });
-    \\}
-    \\
-;
-
-const ceiling_log_handler =
-    \\import { logInfo } from "zttp:log";
-    \\function handler(req: Request): Response {
-    \\  logInfo("served", { path: "/" });
-    \\  return Response.json({ ok: true });
-    \\}
-    \\
-;
-
-const boundary_ceiling_declaration =
-    \\{"version":2,"ceiling":{"profile":"boundary","exclude":[]}}
-;
-
-/// The breach reasons `check` reports for a handler, in check order.
-fn checkCeilingReasons(result: *const CheckResult, out: []handler_contract.CeilingBreachReason) ![]handler_contract.CeilingBreachReason {
-    const contract = if (result.contract) |*c| c else return error.TestMissingContract;
-    const report = if (contract.ceiling) |*r| r else return error.TestMissingCeiling;
-    const ceiling = report.asCeiling();
-    var it = handler_contract.ceilingBreaches(contract, &ceiling);
-    var n: usize = 0;
-    while (it.next()) |breach| {
-        out[n] = breach.reason();
-        n += 1;
-    }
-    return out[0..n];
-}
-
-test "a boundary ceiling refuses a handler that imports zttp:fetch and fails the check" {
-    const allocator = std.testing.allocator;
-    var fixture = try DeclaredFixture.init(declared_sibling_handler, boundary_ceiling_declaration);
-    defer fixture.deinit();
-
-    try std.testing.expectError(
-        error.CeilingBreached,
-        compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
-    );
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
-        .json_mode = true,
-        .declaration = &fixture.declaration,
-    });
-    defer result.deinit(allocator);
-    var buf: [8]handler_contract.CeilingBreachReason = undefined;
-    const reasons = try checkCeilingReasons(&result, &buf);
-    // `zttp:fetch` needs `runtime_callback` and `network`, neither inside
-    // `boundary`, and its egress also costs `read_only`.
-    try std.testing.expectEqualSlices(handler_contract.CeilingBreachReason, &.{ .capability_outside_profile, .capability_outside_profile, .read_only_required }, reasons);
-    try std.testing.expectEqual(@as(u32, 3), result.ceilingErrors());
-    try std.testing.expect(result.totalErrors() >= 3);
-
-    // Control: the same handler without the declaration builds.
-    var undeclared = try compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{});
-    defer undeclared.deinit(allocator);
-    try std.testing.expectEqual(@as(?handler_contract.CeilingReport, null), undeclared.contract.?.ceiling);
-}
-
-test "a module the declaration excludes refuses the build" {
-    const allocator = std.testing.allocator;
-    const declaration_json =
-        \\{"version":2,"ceiling":{"profile":"adapter","exclude":["zttp:fetch"]}}
-    ;
-    var fixture = try DeclaredFixture.init(declared_sibling_handler, declaration_json);
-    defer fixture.deinit();
-
-    try std.testing.expectError(
-        error.CeilingBreached,
-        compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
-    );
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
-        .json_mode = true,
-        .declaration = &fixture.declaration,
-    });
-    defer result.deinit(allocator);
-    var buf: [8]handler_contract.CeilingBreachReason = undefined;
-    const reasons = try checkCeilingReasons(&result, &buf);
-    try std.testing.expectEqualSlices(handler_contract.CeilingBreachReason, &.{.module_excluded_by_declaration}, reasons);
-    try std.testing.expectEqual(@as(u32, 1), result.ceilingErrors());
-}
-
-test "a handler inside its ceiling builds and its contract carries the ceiling report" {
-    const allocator = std.testing.allocator;
-    var fixture = try DeclaredFixture.init(ceiling_plain_handler, boundary_ceiling_declaration);
-    defer fixture.deinit();
-
-    var compiled = try compileHandler(allocator, ceiling_plain_handler, fixture.handler_path, .{ .declaration = &fixture.declaration });
-    defer compiled.deinit(allocator);
-    const contract = &compiled.contract.?;
-    const report = contract.ceiling orelse return error.TestMissingCeiling;
-    try std.testing.expectEqualStrings("boundary", report.profile.name);
-    try std.testing.expect(contract.properties.?.read_only);
-
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try writeContractJson(contract, &out.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ceiling\": { \"profile\": \"boundary\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true") != null);
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
-        .json_mode = true,
-        .declaration = &fixture.declaration,
-    });
-    defer result.deinit(allocator);
-    try std.testing.expectEqual(@as(u32, 0), result.ceilingErrors());
-}
-
-test "a boundary ceiling refuses a handler inside its categories that is not read_only" {
-    const allocator = std.testing.allocator;
-    var fixture = try DeclaredFixture.init(ceiling_log_handler, boundary_ceiling_declaration);
-    defer fixture.deinit();
-
-    try std.testing.expectError(
-        error.CeilingBreached,
-        compileHandler(allocator, ceiling_log_handler, fixture.handler_path, .{ .declaration = &fixture.declaration }),
-    );
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
-        .json_mode = true,
-        .declaration = &fixture.declaration,
-    });
-    defer result.deinit(allocator);
-    // `zttp:log` needs only `clock` and `stderr`, both inside `boundary`, and
-    // `logInfo` writes, so read_only is the one breach.
-    var buf: [8]handler_contract.CeilingBreachReason = undefined;
-    const reasons = try checkCeilingReasons(&result, &buf);
-    try std.testing.expectEqualSlices(handler_contract.CeilingBreachReason, &.{.read_only_required}, reasons);
-    try std.testing.expectEqual(@as(u32, 1), result.ceilingErrors());
-
-    // Control: `adapter` does not require read_only and admits the handler.
-    const adapter_json =
-        \\{"version":2,"ceiling":{"profile":"adapter","exclude":[]}}
-    ;
-    var adapter = try DeclaredFixture.init(ceiling_log_handler, adapter_json);
-    defer adapter.deinit();
-    var compiled = try compileHandler(allocator, ceiling_log_handler, adapter.handler_path, .{ .declaration = &adapter.declaration });
-    defer compiled.deinit(allocator);
-    try std.testing.expectEqualStrings("adapter", compiled.contract.?.ceiling.?.profile.name);
-}
-
-test "the build enforces a declared secret and reports it matched" {
-    const allocator = std.testing.allocator;
-    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
-    defer fixture.deinit();
-
-    var compiled = try compileHandler(allocator, declared_leak_handler, fixture.handler_path, .{ .declaration = &fixture.declaration });
-    defer compiled.deinit(allocator);
-    const contract = &compiled.contract.?;
-    try std.testing.expect(!contract.properties.?.no_secret_leakage);
-    try std.testing.expectEqual(handler_contract.ClassificationStatus.matched, contract.classifications.items[0].status);
-
-    // Control: the same build without the declaration proves the property.
-    var undeclared = try compileHandler(allocator, declared_leak_handler, fixture.handler_path, .{});
-    defer undeclared.deinit(allocator);
-    try std.testing.expect(undeclared.contract.?.properties.?.no_secret_leakage);
-    try std.testing.expectEqual(@as(usize, 0), undeclared.contract.?.classifications.items.len);
-}
-
-test "an optional entry the analysis never saw passes the build and reports absent" {
-    const allocator = std.testing.allocator;
-    const declaration_json =
-        \\{"version":1,"classifications":[
-        \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"secret","required":false,"reason":"Tax identifier."}]}
-    ;
-    var fixture = try DeclaredFixture.init(declared_sibling_handler, declaration_json);
-    defer fixture.deinit();
-
-    var compiled = try compileHandler(allocator, declared_sibling_handler, fixture.handler_path, .{ .declaration = &fixture.declaration });
-    defer compiled.deinit(allocator);
-    const contract = &compiled.contract.?;
-    try std.testing.expect(contract.properties.?.no_secret_leakage);
-    try std.testing.expectEqual(@as(usize, 1), contract.classifications.items.len);
-    try std.testing.expect(!contract.classifications.items[0].required);
-    try std.testing.expectEqual(handler_contract.ClassificationStatus.absent, contract.classifications.items[0].status);
-
-    // The contract written for the artifact carries the report.
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try writeContractJson(contract, &out.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"status\": \"absent\"") != null);
-}
-
-test "a declaration file the loader refuses names the reason and the entry" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const Case = struct { json: []const u8, reason: zts.declaration.Refusal, entry: ?u32 };
-    const cases = [_]Case{
-        .{
-            .json =
-            \\{"version":1,"classifications":[
-            \\ {"source":"fetch:api.example.com","path":"customer.tax_id","label":"validated","required":true,"reason":"r"}]}
-            ,
-            .reason = .label_unsupported,
-            .entry = 0,
-        },
-        // C4: an empty label file must fail.
-        .{ .json = "{\"version\":1,\"classifications\":[]}", .reason = .classifications_empty, .entry = null },
-    };
-    for (cases) |case| {
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "declaration.json", .data = case.json });
-        const path = try tmp.dir.realPathFileAlloc(std.testing.io, "declaration.json", allocator);
-        defer allocator.free(path);
-        var refusal: DeclarationRefusal = undefined;
-        try std.testing.expectError(error.DeclarationRefused, loadDeclarationFile(allocator, path, &refusal));
-        try std.testing.expectEqual(case.reason, refusal.reason);
-        try std.testing.expectEqual(case.entry, refusal.entry);
-    }
-}
-
-test "check follows a declared field through an imported helper and reports it matched" {
-    const allocator = std.testing.allocator;
-    const handler_source =
-        \\import { taxId } from "./dep.ts";
-        \\function handler(req: Request): Response {
-        \\  return Response.json({ t: taxId() });
-        \\}
-        \\
-    ;
-    var fixture = try DeclaredFixture.init(handler_source, tax_id_declaration);
-    defer fixture.deinit();
-    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data =
-        \\import { fetch } from "zttp:fetch";
-        \\export function taxId(): string {
-        \\  const r = fetch("https://api.example.com/customers/1");
-        \\  return r.json().customer.tax_id;
-        \\}
-        \\
-    });
-
-    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
-        .json_mode = true,
-        .declaration = &fixture.declaration,
-    });
-    defer result.deinit(allocator);
-    const contract = &result.contract.?;
-    try std.testing.expect(!contract.properties.?.no_secret_leakage);
-    try std.testing.expectEqual(handler_contract.ClassificationStatus.matched, contract.classifications.items[0].status);
-    try std.testing.expectEqual(@as(u32, 0), result.classificationErrors());
 }
 
 test "check keeps typed imported builtin methods deterministic" {
@@ -8370,35 +6829,6 @@ test "an imported helper reads the authorization header of the request it is pas
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
     try std.testing.expect(!result.contract.?.properties.?.no_credential_leakage);
-}
-
-test "a declaration cannot ride the multi-module build path, which runs no flow check" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const entry_source =
-        \\import { name } from "./dep.ts";
-        \\function handler(req: Request): Response {
-        \\  return Response.text(name());
-        \\}
-        \\
-    ;
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
-    defer allocator.free(entry_path);
-
-    var fixture = try DeclaredFixture.init(declared_leak_handler, tax_id_declaration);
-    defer fixture.deinit();
-
-    // The control proves the dependency is missing. The declaration path must refuse before the graph read.
-    try std.testing.expectError(
-        error.ImportFileNotFound,
-        compileHandler(allocator, entry_source, entry_path, .{}),
-    );
-    try std.testing.expectError(
-        error.DeclarationNotEnforced,
-        compileHandler(allocator, entry_source, entry_path, .{ .declaration = &fixture.declaration }),
-    );
 }
 
 /// Exercise the public check pipeline. The census below counts properties only
@@ -8738,35 +7168,6 @@ test "a sibling that exports a failable builtin as a value blocks fault_covered"
 
     try std.testing.expect(!try faultCovered(&result));
     try std.testing.expectEqualStrings("fetch in ./dep.ts", try faultCauseSnippet(&result));
-}
-
-test "a tsx sibling that fetches blocks fault_covered" {
-    var fixture = try SiblingFixture.init(
-        \\import { fetch } from "zttp:fetch";
-        \\import { view } from "./view.tsx";
-        \\function handler(req: Request): Response {
-        \\  const res = fetch("https://api.example.com/a");
-        \\  if (!res.ok) {
-        \\    return Response.json({ error: "upstream" }, { status: 502 });
-        \\  }
-        \\  return Response.html(view());
-        \\}
-        \\
-    );
-    defer fixture.deinit();
-    try fixture.add("view.tsx",
-        \\import { fetch } from "zttp:fetch";
-        \\export function view(): string {
-        \\  const res = fetch("https://api.example.com/b");
-        \\  return renderToString(<p>{res.body}</p>);
-        \\}
-        \\
-    );
-    var result = try fixture.check();
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expect(!try faultCovered(&result));
-    try std.testing.expectEqualStrings("fetch in ./view.tsx", try faultCauseSnippet(&result));
 }
 
 test "a sibling that does not exist blocks fault_covered" {
@@ -9180,4 +7581,94 @@ test "ImportedFile without a reader reads the working tree" {
 
     var missing: ImportedFile = undefined;
     try std.testing.expectError(error.Unreadable, missing.load(std.testing.allocator, null, "/nonexistent/zttp-u7/lib.ts"));
+}
+
+test "precompile refuses every retired module before replacing generated output" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { specifier: []const u8, symbol: []const u8 }{
+        .{ .specifier = "zttp:durable", .symbol = "run" },
+        .{ .specifier = "zttp:workflow", .symbol = "call" },
+        .{ .specifier = "zttp:queue", .symbol = "send" },
+        .{ .specifier = "zttp:scope", .symbol = "scope" },
+        .{ .specifier = "zttp:io", .symbol = "parallel" },
+        .{ .specifier = "zttp:service", .symbol = "serviceCall" },
+        .{ .specifier = "zttp:ledger", .symbol = "balance" },
+        .{ .specifier = "zttp:tool", .symbol = "toolInput" },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "import {{ {s} }} from \"{s}\";\n" ++
+                "function handler(req: Request): Response {{ return Response.text(\"ok\"); }}\n",
+            .{ case.symbol, case.specifier },
+        );
+        defer allocator.free(source);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = source });
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "embedded_handler.zig",
+            .data = "sentinel",
+        });
+        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+        defer allocator.free(handler_path);
+        const output_path = try tmp.dir.realPathFileAlloc(
+            std.testing.io,
+            "embedded_handler.zig",
+            allocator,
+        );
+        defer allocator.free(output_path);
+
+        try std.testing.expectError(
+            error.UnknownVirtualModule,
+            runCompileWithArgs(allocator, &.{ "--contract", handler_path, output_path }),
+        );
+        const output = try zts.file_io.readFile(allocator, output_path, 64);
+        defer allocator.free(output);
+        try std.testing.expectEqualStrings("sentinel", output);
+    }
+}
+
+test "the analyzer refuses every retired module with ZTS206" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { module: []const u8, symbol: []const u8 }{
+        .{ .module = "zttp:durable", .symbol = "run" },
+        .{ .module = "zttp:workflow", .symbol = "call" },
+        .{ .module = "zttp:queue", .symbol = "send" },
+        .{ .module = "zttp:scope", .symbol = "scope" },
+        .{ .module = "zttp:io", .symbol = "parallel" },
+        .{ .module = "zttp:service", .symbol = "serviceCall" },
+        .{ .module = "zttp:ledger", .symbol = "balance" },
+        .{ .module = "zttp:tool", .symbol = "toolInput" },
+    };
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(allocator, "import {{ {s} }} from \"{s}\";\n" ++
+            "function handler(req: Request): Response {{ return Response.text(\"ready\"); }}\n", .{ case.symbol, case.module });
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        const diagnostic = result.json_diagnostics.items[0];
+        try std.testing.expectEqualStrings("ZTS206", diagnostic.code);
+        const message = try std.fmt.allocPrint(allocator, "unknown virtual module '{s}'", .{case.module});
+        defer allocator.free(message);
+        try std.testing.expectEqualStrings(message, diagnostic.message);
+        try std.testing.expect(result.contract == null);
+    }
+}
+
+test "ordinary calls and explicit HTML rendering remain accepted" {
+    const source =
+        \\function title(value: string): string { return value; }
+        \\function handler(req: Request): Response {
+        \\  return Response.html(renderToString(h("main", null, title("ready"))));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }

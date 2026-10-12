@@ -32,12 +32,6 @@ pub const contract_json_writer = @import("contract_json_writer.zig");
 /// Reads a `HandlerContract` back from contract.json.
 pub const contract_json_parser = @import("contract_json_parser.zig");
 
-/// The `system.json` manifest of a linked bundle, and its parser.
-pub const system_config = @import("system_config.zig");
-
-/// Types describing a service call's request and response shapes.
-pub const service_types = @import("service_types.zig");
-
 test {
     @import("std").testing.refAllDecls(@This());
 }

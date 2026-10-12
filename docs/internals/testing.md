@@ -32,7 +32,6 @@ there without a row here fails `zig build test-docs-drift`:
 |---|---|
 | `test-precompile` | `packages/tools/src/precompile.zig` |
 | `test-canonicalize` | `packages/tools/src/canonicalize.zig` |
-| `test-rollout` | `packages/tools/src/system_rollout.zig` |
 | `test-expert` | `packages/tools/src/expert.zig` |
 | `test-zts-cli` | `packages/tools/src/zts_cli.zig` |
 | `test-deploy-manifest` | `packages/tools/src/deploy_manifest.zig` |
@@ -99,7 +98,7 @@ The same expert suite checks all 13 journal event kinds, exact reconstructed
 entries and projections, invalid identity transitions, legacy payloads,
 consumer-specific acceptance, and allocation cleanup. Transaction tests cover
 all 32 marker combinations, existing and absent target states, conflict and
-read-error precedence, durable effect faults, recovery retries, and receipt
+read-error precedence, effect faults, recovery retries, and receipt
 acknowledgement. Pure planner tests check exact actions and reject incomplete
 plan publication. These matrices test named behaviors; they are not source
 coverage or a power-loss simulation.
@@ -142,7 +141,7 @@ schema bytes, raw JSON retention, dynamic inputs, and JSON binding behavior.
 `std.testing.fuzz`, plus small PRNG stress loops and nesting generators. Set
 `ZTTP_FUZZ_ITERATIONS` to a positive integer to raise the stress iteration
 count for a manual run; the gate uses the defaults in that file.
-`test-precompile` also mutates every `.ts` and `.tsx` file under `tests/corpus`
+`test-precompile` also mutates every `.ts` file under `tests/corpus`
 and `examples` in `packages/tools/src/pipeline_mutation_tests.zig`. Each
 mutant must give a result or a listed error, diagnostic positions inside the
 mutant, and identical output on a second run. `ZTTP_FUZZ_ITERATIONS` sets the
@@ -153,9 +152,7 @@ mutants per input there, and the default is 4.
 builtin export and runs the real path generator and fault checker over it. An
 export with a `failure_severity` must show a failure fork, a failing stub, and
 one covered site. An export with a forkable return, or a response record that
-declares an `ok: boolean` field, and no severity is a finding too. An I/O export
-that returns an opaque `.object` with no signature (`parallel`, `follow`, `saga`,
-`fanout`) cannot be forked at all, so it has a row of its own. Each finding
+declares an `ok: boolean` field, and no severity is a finding too. Each finding
 needs one row in `allowed_rows` in that file, with a mechanism and a reason, and
 a row for a finding that is gone fails, so the list only shrinks. The gate
 asserts a floor on its rows, prints the counts per verdict on
@@ -167,8 +164,8 @@ The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
 `test-docs-drift`, `test-doc-links`, `test-diagnostic-corpus`, `test-flow-census`,
-`test-convergence-emitter`,
-`test-production-branch-metric`, `test-comptime-cli-matrix`,
+`test-convergence-emitter`, `test-native-gates`,
+`test-production-branch-metric`,
 `test-generic-intersection-cli-matrix`.
 
 `test-diagnostic-corpus` pins the output of the default check over the cases
@@ -270,8 +267,8 @@ in `scripts/manual-scripts.allow` saying why a developer runs it by hand. It
 found `scripts/test-zruntime.sh`, which invoked `zig test` on
 `packages/runtime/src/zruntime.zig`, a file deleted in the monorepo
 restructure, and which nothing had called since; the real path is
-`zig build test-zruntime`. Three scripts are declared manual.
-One configures a machine, one runs expert qualification, and one regenerates a gated document.
+`zig build test-zruntime`. The manual allowlist names scripts that require
+operator action and explains each exception.
 
 The build-step form of the same question is `zig build test-step-coverage`,
 which lives in `build/step_coverage.zig` because only a build can answer it. A named step is
@@ -285,10 +282,8 @@ For five shell gates, the entry point can invoke the same script directly. The w
 directory is read rather than listed, so a workflow added later becomes a
 coverage source without anyone remembering this gate.
 
-Twelve steps are declared manual in `scripts/manual-steps.allow`.
-They cover two interactive runs, one server, three measurements, and one model run.
-They also cover one MLX run, two release operations, one mutation probe, and one regeneration step.
-Both directions are enforced. A row for an automated step fails the same gate.
+`scripts/manual-steps.allow` declares the manual build steps. Both directions
+are enforced. A row for an automated step fails the same gate.
 
 Four floors sit under it, because a coverage check over an empty input reports
 that everything is covered: the CI workflow read must find at least one file,
@@ -346,7 +341,7 @@ repository has no profile producer or coverage artifacts to feed them.
 Do not infer source coverage from test counts or from
 [`docs/coverage.md`](../coverage.md), which measures expert replay diagnostics.
 Until Zig supplies a stable producer for normal test binaries, a high-risk
-change to the contract decoder, compile-time evaluator, server lifecycle, or
+change to the contract decoder, server lifecycle, or
 verifier must instead add an explicit behavior matrix and demonstrate that the
 matrix fails under a deliberate mutation of each changed decision family.
 Reassess this limitation when the pinned Zig toolchain changes.

@@ -27,10 +27,6 @@ const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
 const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
-const in_process_dispatch = @import("in_process_dispatch.zig");
-const SystemRuntime = in_process_dispatch.SystemRuntime;
-const actor_queue = @import("actor_queue.zig");
-const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const artifact_graph = @import("artifact_graph.zig");
@@ -1081,10 +1077,8 @@ pub const ServerConfig = struct {
     /// means "use the policy derived from the contract properties".
     lifecycle_override: ?contract_runtime.PoolingPolicy = null,
 
-    /// The composition edge. Everything that executes a handler without
-    /// serving HTTP - durable recovery and scheduling, replay, handler tests -
-    /// takes this projection rather than the whole config, so the serving
-    /// surface stays out of their import graph.
+    /// Replay and handler tests use this projection instead of the full server
+    /// configuration. This keeps the serving surface out of their import graph.
     pub fn executionSpec(self: *const ServerConfig) execution_spec.ExecutionSpec {
         return .{ .handler = self.handler, .runtime_config = self.runtime_config };
     }
@@ -1182,15 +1176,6 @@ pub const Server = struct {
     /// `attestation_headers`. Null on unattested builds; the route falls
     /// through to the normal handler path.
     well_known_doc: ?attest_well_known.Doc,
-    /// Co-located sub-handler registry for in-process `zttp:workflow.call`,
-    /// built from `--system <manifest>` in `start()`. Each pooled orchestrator
-    /// runtime references it via `RuntimeConfig.system_registry`. Null when no
-    /// `--system` bundle is loaded. Deinitialised after the main pool so no
-    /// in-flight orchestrator can still dispatch into it.
-    system_runtime: ?SystemRuntime = null,
-    /// Process-owned in-memory actor queue for opt-in `zttp:queue` delivery.
-    /// Deinitialised after handler pools so no runtime can hold a queue pointer.
-    actor_queue: ?actor_queue.ActorQueue = null,
     const Self = @This();
     const IoBackend = Io.Threaded;
 
@@ -1210,7 +1195,6 @@ pub const Server = struct {
             .inline_code => |code| .{ code, "<inline>" },
             .file_path => |path| blk: {
                 const source = try readFilePosix(allocator, path, 10 * 1024 * 1024);
-                // JSX transformation is now handled by the parser via filename detection
                 break :blk .{ source, path };
             },
             .embedded_bytecode => |bytecode| blk: {
@@ -1262,10 +1246,6 @@ pub const Server = struct {
         if (self.pool) |*p| p.deinit();
         // Pool drained: no runtime can still be writing to the incident log fd.
         if (self.incident_log_fd) |fd| std.Io.Threaded.closeFd(fd);
-        // After the main pool: in-flight orchestrators (which dispatch into the
-        // registry) are gone, so its sub-pools are safe to tear down.
-        if (self.system_runtime) |*sr| sr.deinit();
-        if (self.actor_queue) |*q| q.deinit();
         if (self.proof_cache) |*pc| pc.deinit();
         self.clearProofChecked();
         if (self.contract) |*c| c.deinit();
@@ -1315,11 +1295,8 @@ pub const Server = struct {
         // The certificate described the artifact that was replaced. A live swap
         // therefore drops the promotion rather than carrying it across: the new
         // handler has not been checked by anything, and the proof cache,
-        // unbounded reuse, and the durable-workflow guarantees all go with it.
+        // unbounded reuse also goes with it.
         self.clearProofChecked();
-        if (self.pool) |*pool| {
-            pool.setDurableWorkflowProperties(.{});
-        }
 
         // Always rebuild: even if eligibility is unchanged, cached responses
         // are from the old handler and must not be served after a swap.
@@ -1354,9 +1331,6 @@ pub const Server = struct {
             self.contract = null;
         }
         self.clearProofChecked();
-        if (self.pool) |*pool| {
-            pool.setDurableWorkflowProperties(.{});
-        }
         if (self.proof_cache) |*pc| {
             pc.deinit();
             self.proof_cache = null;
@@ -1406,14 +1380,6 @@ pub const Server = struct {
         if (!std.mem.eql(u8, claims.core_profile_id, contract.source_identity.core_profile.id())) return false;
         if (!hexHashMatches(claims.core_grammar_sha256, contract.source_identity.core_grammar_hash)) return false;
         if (!hexHashMatches(claims.semantics_sha256, contract.source_identity.semantics_hash)) return false;
-        if (contract.source_identity.frontend) |frontend| {
-            const claim_profile = claims.frontend_profile_id orelse return false;
-            const claim_grammar = claims.frontend_grammar_sha256 orelse return false;
-            if (!std.mem.eql(u8, claim_profile, frontend.profile.id())) return false;
-            if (!hexHashMatches(claim_grammar, frontend.grammar_hash)) return false;
-        } else if (claims.frontend_profile_id != null or claims.frontend_grammar_sha256 != null) {
-            return false;
-        }
         return true;
     }
 
@@ -1527,9 +1493,7 @@ pub const Server = struct {
     /// carry a certificate this consumer accepts. Anything else refuses to
     /// serve. Dev, live reload, and `-Dhandler` builds carry no artifact and no
     /// certificate; they run with no promotion at all, which means no proof
-    /// response cache, no unbounded runtime reuse, no result-safety shortcut,
-    /// and no durable-workflow guarantees. That is the same rule stated from
-    /// the other side, not an exemption.
+    /// response cache, no unbounded runtime reuse, and no result-safety shortcut.
     fn acceptEmbeddedCertificate(self: *Self) !void {
         const validated = if (self.contract) |*contract| contract else null;
         const is_production_artifact = switch (self.config.handler) {
@@ -1684,10 +1648,6 @@ pub const Server = struct {
             .semantics_hash = runtime_contract.source_identity.semantics_hash,
         };
         if (runtime_contract.capabilities) |caps| identity.capability_hash = caps.hash;
-        if (runtime_contract.source_identity.frontend) |frontend| {
-            identity.frontend_profile_id = frontend.profile.id();
-            identity.frontend_grammar_hash = frontend.grammar_hash;
-        }
         return identity;
     }
 
@@ -1734,11 +1694,6 @@ pub const Server = struct {
             std.log.info("Security events -> {s}", .{path});
         }
 
-        if (self.config.runtime_config.workflow_queue_enabled) {
-            if (self.config.runtime_config.durable_oplog_dir == null) return error.WorkflowQueueRequiresDurable;
-            if (self.config.runtime_config.system_config_path == null) return error.WorkflowQueueRequiresSystem;
-        }
-
         // Parse embedded contract (if present), then promote to Validated before
         // prewarming the handler pool. This rejects artifact hash drift before
         // appended bytecode is loaded into any runtime.
@@ -1771,8 +1726,6 @@ pub const Server = struct {
                     ),
                     error.CoreGrammarHashMismatch,
                     error.SemanticsHashMismatch,
-                    error.SourceFrontendMismatch,
-                    error.FrontendGrammarHashMismatch,
                     => std.log.err(
                         "sandbox: source profile drift - rebuild the handler contract against this runtime",
                         .{},
@@ -1803,7 +1756,6 @@ pub const Server = struct {
         // is proven not to need. That is only sound on a proof-checked
         // contract; an integrity-bound one has made a claim nobody checked.
         if (self.proof_checked) |*contract| {
-            pool_rt_config.durable_workflow_properties = enforcedDurableWorkflowProperties(contract);
             pool_rt_config.handler_proof = .{
                 .optional_safe = contract.properties.optional_safe,
                 .result_safe = contract.properties.result_safe,
@@ -1819,36 +1771,6 @@ pub const Server = struct {
                 break :fd_blk null;
             };
             pool_rt_config.incident_log_fd = self.incident_log_fd;
-        }
-
-        if (pool_rt_config.queue_actor_enabled and pool_rt_config.queue_system == null) {
-            self.actor_queue = actor_queue.ActorQueue.init(
-                self.allocator,
-                pool_rt_config.queue_capacity,
-                pool_rt_config.queue_lease_ms,
-            );
-            pool_rt_config.queue_system = @ptrCast(&self.actor_queue.?);
-            std.log.info("Actor queue: in-memory mailboxes capacity={d} lease_ms={d}", .{
-                pool_rt_config.queue_capacity,
-                pool_rt_config.queue_lease_ms,
-            });
-        }
-
-        // Build the in-process sub-handler registry from `--system <manifest>`
-        // and point every pooled orchestrator runtime at it. The same manifest
-        // also drives `zttp:service` (HTTP) wiring; here it backs the
-        // in-process `zttp:workflow.call` path.
-        if (pool_rt_config.system_config_path) |system_path| {
-            self.system_runtime = try in_process_dispatch.SystemRuntime.buildFromSystemConfig(
-                self.allocator,
-                system_path,
-                pool_rt_config,
-                self.config.pool_size,
-            );
-            pool_rt_config.system_registry = @ptrCast(&self.system_runtime.?);
-            std.log.info("Workflow registry: {d} co-located handlers from {s}", .{
-                self.system_runtime.?.targets.items.len, system_path,
-            });
         }
 
         // Either a checked source-policy contract or an accepted deployed
@@ -2141,7 +2063,7 @@ pub const Server = struct {
         }
         // Drain: wait up to grace_ms for active JS executions to finish.
         // std.time.sleep/milliTimestamp do not exist in Zig 0.16; poll with
-        // std.c.nanosleep (same pattern as fetchWithRetry in modules/net/fetch.zig).
+        // std.c.nanosleep is the portable wait used by this test server.
         if (self.pool) |*p| {
             var waited_ms: u32 = 0;
             while (p.getInUse() > 0 and waited_ms < grace_ms) {
@@ -2521,19 +2443,6 @@ const StaticFileCache = struct {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Durable workflow properties enforced for a served contract: the pool
-/// always enforces the retry/idempotency proof regardless of what the
-/// contract's own `enforced` bit says. Shared by the initial pool-init path
-/// and the live-swap path (`updateContract`) so the derivation can't drift
-/// between the two.
-fn enforcedDurableWorkflowProperties(
-    contract: *const contract_runtime.ProofCheckedContract,
-) contract_runtime.DurableWorkflowProperties {
-    var workflow_properties = contract.durable_workflow;
-    workflow_properties.enforced = true;
-    return workflow_properties;
-}
 
 fn requiresRuntimePolicyIndex(configured_contract: bool, accepted_artifact: bool) bool {
     return configured_contract or accepted_artifact;
@@ -3731,47 +3640,6 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     const wrong_grammar = std.fmt.bytesToHex([_]u8{0x55} ** 32, .lower);
     claims.core_grammar_sha256 = &wrong_grammar;
     try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
-}
-
-test "attestation source identity binds the optional TSX frontend" {
-    const source_identity = engine.sourceIdentityForPath("handler.tsx");
-    const core_grammar_hex = std.fmt.bytesToHex(source_identity.core_grammar_hash, .lower);
-    const semantics_hex = std.fmt.bytesToHex(source_identity.semantics_hash, .lower);
-    const frontend_grammar_hex = std.fmt.bytesToHex(source_identity.frontend.?.grammar_hash, .lower);
-    var live = RuntimeContract{
-        .env_vars = &.{},
-        .env_dynamic = false,
-        .routes = &.{},
-        .routes_dynamic = false,
-        .properties = .{},
-        .source_identity = source_identity,
-        .source_is_tsx = true,
-        .allocator = std.testing.allocator,
-    };
-    var claims = attest_envelope.Claims{
-        .contract_sha256 = "0" ** 64,
-        .bytecode_sha256 = "0" ** 64,
-        .policy_sha256 = "0" ** 64,
-        .capability_hash = "0" ** 64,
-        .core_profile_id = source_identity.core_profile.id(),
-        .core_grammar_sha256 = &core_grammar_hex,
-        .semantics_sha256 = &semantics_hex,
-        .frontend_profile_id = source_identity.frontend.?.profile.id(),
-        .frontend_grammar_sha256 = &frontend_grammar_hex,
-        .compiler_version = "test",
-        .signed_at_unix = 0,
-        .property_summary = "",
-        .guarded_categories = "",
-        .routes_count = 0,
-    };
-
-    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
-    claims.frontend_profile_id = null;
-    claims.frontend_grammar_sha256 = null;
-    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
-
-    live.source_identity = engine.sourceIdentityForPath("handler.ts");
-    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
 }
 
 test "bytecodeMatchesClaim binds attestation to the running bytecode (fail-closed)" {

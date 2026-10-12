@@ -19,9 +19,8 @@ The agent's job is narrow:
 2. Propose an edit in response to user intent.
 3. Prove the edit passes every compiler rule before it lands.
 
-Step three is the moat. The agent runs `edit_simulate` in-process
-before any apply, and `verify_paths` + `zts_expert_review_patch` with `diff_only` after
-apply. The model cannot emit text that bypasses the check.
+Step three is the compiler gate. The agent runs `edit_simulate` before each apply.
+The model cannot emit text that bypasses this check.
 
 ## Where it lives
 
@@ -130,12 +129,6 @@ repairs. It calls `pi_repair_plan`, dry-runs repair intents through
 `edit_simulate` reports zero new violations. The model must still propose
 those bytes through `propose_change_set`, which owns the vetoed write path.
 
-### Post-apply verification (`loop.zig:postApplyCheck`)
-
-After an edit lands, `verify_paths` and `zts_expert_review_patch` with `diff_only` run
-against the touched file. The loop logs any new violation that should
-have been caught by the veto as a regression signal.
-
 ### Project context (`context/project_context.zig`)
 
 Walks cwd upward to `.git/` (inclusive). At each level reads `AGENTS.md`
@@ -205,8 +198,7 @@ Natural-language lines go to the model; slash commands route to local
 compiler tools, session management, skills, templates, and ledger export.
 Non-interactive integrations use `--print` or `--mode json`.
 
-Proof deltas and witness details are persisted as session events. Inspect
-them with `/ledger export <path>`, `zttp ledger`, or `/witnesses <handler.ts>`.
+Proof deltas remain in session events. Inspect them with `/ledger export <path>` or `zttp ledger`.
 
 ### Backends
 

@@ -201,21 +201,16 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
     var files_written: usize = 0;
     errdefer rollbackScaffoldFiles(io, paths[0..files_written]);
 
-    try writeProjectFile(allocator, paths[0], switch (template) {
-        .basic, .api => defaultManifest,
-        .htmx => htmxManifest,
-    });
+    try writeProjectFile(allocator, paths[0], defaultManifest);
     files_written += 1;
     try writeProjectFile(allocator, paths[1], switch (template) {
         .basic => basicHandler,
         .api => apiHandler,
-        .htmx => htmxHandler,
     });
     files_written += 1;
     try writeProjectFile(allocator, paths[2], switch (template) {
         .basic => basicTests,
         .api => apiTests,
-        .htmx => htmxTests,
     });
     files_written += 1;
     try writeProjectFile(allocator, paths[3], gitignoreSource);
@@ -223,7 +218,6 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
     try writeProjectFile(allocator, paths[4], switch (template) {
         .basic => basicReadme,
         .api => apiReadme,
-        .htmx => htmxReadme,
     });
     files_written += 1;
     try writeProjectFile(allocator, paths[5], "");
@@ -413,7 +407,7 @@ fn printInitExpertHandoff(name: []const u8) void {
 
 pub fn printInitHelp() void {
     const help =
-        \\zttp init <name> [--template basic|api|htmx] [--expert]
+        \\zttp init <name> [--template basic|api] [--expert]
         \\zttp init --extension <name>
         \\
         \\Create a new zttp project or extension directory.
@@ -424,8 +418,7 @@ pub fn printInitHelp() void {
         \\
         \\Project files (default):
         \\  zttp.json
-        \\  src/handler.ts     (basic/api)
-        \\  src/handler.tsx    (htmx)
+        \\  src/handler.ts
         \\  tests/handler.test.jsonl
         \\  public/
         \\  .gitignore
@@ -434,7 +427,6 @@ pub fn printInitHelp() void {
         \\Project templates:
         \\  basic   Proof-focused starter for the default dev loop
         \\  api     JSON health and echo endpoints
-        \\  htmx    TSX page and HTMX fragment
         \\
         \\Extension files (--extension):
         \\  zttp-module.json     proof metadata for the partner module
@@ -457,14 +449,13 @@ pub fn printInitHelp() void {
 fn handlerPathForTemplate(template: Template) []const u8 {
     return switch (template) {
         .basic, .api => "src/handler.ts",
-        .htmx => "src/handler.tsx",
     };
 }
 
 fn starterPathForTemplate(template: Template) []const u8 {
     return switch (template) {
         .api => "/health",
-        .basic, .htmx => "/",
+        .basic => "/",
     };
 }
 
@@ -482,14 +473,6 @@ const defaultManifest =
     \\{
     \\  "entry": "src/handler.ts",
     \\  "port": 3000
-    \\}
-;
-
-const htmxManifest =
-    \\{
-    \\  "entry": "src/handler.tsx",
-    \\  "port": 3000,
-    \\  "staticDir": "public"
     \\}
 ;
 
@@ -542,45 +525,6 @@ const apiHandler =
     \\}
 ;
 
-const htmxHandler =
-    \\
-    \\// Author-declared guardrails. Declaring an explicit Spec scopes the proof
-    \\// to these properties; without it every supported spec is active and the
-    \\// proof cannot be discharged. Run `zttp check` to see them proven at
-    \\// compile time.
-    \\structural Guardrails<T> = Proof<T,
-    \\    | "deterministic"
-    \\    | "no_secret_leakage"
-    \\    | "injection_safe"
-    \\>;
-    \\
-    \\function Page(): JSX.Element {
-    \\    return (
-    \\        <html>
-    \\            <body>
-    \\                <h1>zttp</h1>
-    \\                <button hx-get="/fragment" hx-target="#slot" hx-swap="innerHTML">
-    \\                    Load fragment
-    \\                </button>
-    \\                <div id="slot">ready</div>
-    \\            </body>
-    \\        </html>
-    \\    );
-    \\}
-    \\
-    \\function handler(req: Request): Guardrails<Response> {
-    \\    if (req.method === "GET" && req.path === "/") {
-    \\        return Response.html(renderToString(<Page />));
-    \\    }
-    \\
-    \\    if (req.method === "GET" && req.path === "/fragment") {
-    \\        return Response.html("<p>loaded</p>");
-    \\    }
-    \\
-    \\    return Response.text("Not Found", { status: 404 });
-    \\}
-;
-
 const basicTests =
     \\{"type":"test","name":"root renders greeting html"}
     \\{"type":"request","method":"GET","url":"/?probe=1","headers":{},"body":null}
@@ -591,12 +535,6 @@ const apiTests =
     \\{"type":"test","name":"health returns ok"}
     \\{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
     \\{"type":"expect","status":200,"body":"{\"ok\":true}"}
-;
-
-const htmxTests =
-    \\{"type":"test","name":"root renders html"}
-    \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
-    \\{"type":"expect","status":200,"bodyContains":"zttp"}
 ;
 
 const gitignoreSource =
@@ -649,33 +587,6 @@ const apiReadme =
     \\
     \\       curl http://127.0.0.1:3000/health
     \\       curl -X POST http://127.0.0.1:3000/echo -d 'hello'
-    \\
-    \\3. Run the fixture:
-    \\
-    \\       zttp test
-    \\
-    \\4. Deploy locally (builds the binary and records the proof ledger entry):
-    \\
-    \\       zttp deploy
-    \\
-    \\## More
-    \\
-    \\- `zttp expert` - interactive compiler-in-the-loop agent
-    \\- `zttp help --all` - advanced commands
-;
-
-const htmxReadme =
-    \\# zttp HTMX app
-    \\
-    \\## Quick start
-    \\
-    \\1. Start the TSX/HTMX dev loop:
-    \\
-    \\       zttp dev
-    \\
-    \\2. Edit `src/handler.tsx`, then open the page:
-    \\
-    \\       http://127.0.0.1:3000/
     \\
     \\3. Run the fixture:
     \\
@@ -869,10 +780,6 @@ test "validateProjectName rejects paths and shell-confusing names" {
 test "init --extension scaffolds a manifest the parser accepts" {
     const testing = std.testing;
 
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
@@ -891,7 +798,7 @@ test "init --extension scaffolds a manifest the parser accepts" {
         "demoext/README.md",
     };
     for (expected) |path| {
-        try std.Io.Dir.access(std.Io.Dir.cwd(), io, path, .{});
+        try std.Io.Dir.access(std.Io.Dir.cwd(), testing.io, path, .{});
     }
 
     const manifest_bytes = try zts.file_io.readFile(testing.allocator, "demoext/zttp-module.json", 256 * 1024);
@@ -1121,10 +1028,6 @@ test "initCommand --expert scaffolds and asks the dispatcher to enter expert mod
 test "initCommand writes template-specific starter README files" {
     const testing = std.testing;
 
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
@@ -1132,21 +1035,9 @@ test "initCommand writes template-specific starter README files" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try scaffoldProject(testing.allocator, "api-demo", .api);
-    try scaffoldProject(testing.allocator, "htmx-demo", .htmx);
 
     const api_readme = try zts.file_io.readFile(testing.allocator, "api-demo/README.md", 64 * 1024);
     defer testing.allocator.free(api_readme);
-    const htmx_readme = try zts.file_io.readFile(testing.allocator, "htmx-demo/README.md", 64 * 1024);
-    defer testing.allocator.free(htmx_readme);
-    const htmx_manifest = try zts.file_io.readFile(testing.allocator, "htmx-demo/zttp.json", 64 * 1024);
-    defer testing.allocator.free(htmx_manifest);
-
     try testing.expect(std.mem.indexOf(u8, api_readme, "# zttp API app") != null);
     try testing.expect(std.mem.indexOf(u8, api_readme, "curl http://127.0.0.1:3000/health") != null);
-    try testing.expect(std.mem.indexOf(u8, htmx_readme, "# zttp HTMX app") != null);
-    try testing.expect(std.mem.indexOf(u8, htmx_readme, "src/handler.tsx") != null);
-    try testing.expect(std.mem.indexOf(u8, htmx_readme, "zttp test") != null);
-    try testing.expect(std.mem.indexOf(u8, htmx_manifest, "\"entry\": \"src/handler.tsx\"") != null);
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "htmx-demo/src/handler.tsx", .{});
-    try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "htmx-demo/src/handler.ts", .{}));
 }

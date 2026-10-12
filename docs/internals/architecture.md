@@ -84,39 +84,25 @@ model-call seam, so TTY, print, JSON, and resumed sessions use one policy.
 ## Execution State Ownership
 
 Each `Context` owns the authorization scope for its current native-module call
-and the structured-I/O collector used by `parallel()` and `race()`. Nested calls
-replace these borrowed scopes and restore their parent on return, so alternating
-contexts on one worker thread cannot share ambient authority or collection
-state. A panicked runtime is quarantined, and `Context.deinit` clears both
-scopes before module-state destructors run.
+Nested calls replace this borrowed scope and restore the parent on return.
+Alternating contexts on one worker thread cannot share ambient authority.
+A panicked runtime is quarantined. `Context.deinit` clears the scope before
+module-state destructors run.
 
 JSON object-shape entries contain pool-local hidden-class indexes. Their cache
 therefore belongs to `HiddenClassPool` and has the same lifetime as the indexes
 it stores, rather than the lifetime of a worker thread.
-
-Actor-style handler communication is opt-in. With `--actor-queue`, the server
-creates a process-owned `ActorQueue` and passes it through `RuntimeConfig` to
-each pooled runtime. `zttp:queue` serializes payloads to queue-owned JSON,
-`receive()` moves a message into an in-flight table, and `ack()`/`nack()`
-complete or retry delivery. This keeps queued messages outside the JS heap, so
-handler reset, timeout invalidation, and panic quarantine do not drop retained
-messages. Pending and leased messages count against the actor mailbox capacity;
-dead-lettered messages are retained separately and release their mailbox slot.
-Normal HTTP ingress still uses the direct `handler(req)` path unless a handler
-explicitly imports and uses `zttp:queue`.
 
 ## Compiler Pipeline
 
 For a handler source file:
 
 1. Strip supported TypeScript syntax.
-2. For `.tsx`, lower the `zts-tsx-1` surface to ordinary `h(...)` calls and
-   compose its source map with the stripping map.
-3. Parse only the restricted TypeScript core grammar.
-4. Resolve imports, including `zttp:*` virtual modules.
-5. Run type, path, Result/optional, state-isolation, flow, and spec checks.
-6. Extract a handler contract and module capability surface.
-7. Emit bytecode and optional artifacts such as contract JSON and generated
+2. Parse only the restricted TypeScript core grammar.
+3. Resolve imports, including `zttp:*` virtual modules.
+4. Run type, path, Result/optional, state-isolation, flow, and spec checks.
+5. Extract a handler contract and module capability surface.
+6. Emit bytecode and optional artifacts such as contract JSON and generated
    tests.
 
 Unsupported language features fail before runtime. See
@@ -131,7 +117,7 @@ partial output on refusal or failure. Each caller still recognizes
 
 ### Analysis passes
 
-Step 5 is implemented as four independent IR walkers, each traversing the same
+Step 4 is implemented as four independent IR walkers, each traversing the same
 IR tree with its own `switch` over node tags rather than through a shared
 visitor framework:
 
@@ -244,8 +230,8 @@ Startup runs four stages before a handler pool exists, in this order:
    runtime.
 
 Only a `ProofCheckedContract` drives the proof response cache, unbounded runtime
-reuse, the result and optional safety shortcuts, and the durable-workflow
-guarantees. `ValidatedRuntimeContract` - integrity without acceptance - drives
+reuse, and the result and optional safety shortcuts.
+`ValidatedRuntimeContract` - integrity without acceptance - drives
 env validation and route pre-filtering and nothing that is unsound if a compiler
 claim is wrong. A dev server, a live-reload swap, and a `-Dhandler` build have
 no artifact and no certificate, so they get no promotion at all.

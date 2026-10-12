@@ -12,15 +12,11 @@
 //! - If pool.trace_mutex is held when a panic fires inside the trace recorder,
 //!   subsequent trace writes will deadlock. Window is microseconds; acceptable.
 //! - If rt.deinit() itself panics during quarantine, the current recovery
-//!   frame is already popped, so the panic unwinds to the enclosing frame (a
-//!   nested in-process dispatch) or aborts via defaultPanic when none remains
-//!   (fail-closed).
+//!   frame is already popped, so the panic unwinds to an enclosing frame or
+//!   aborts through defaultPanic when no enclosing frame remains.
 //!
-//! NESTING: frames form a per-thread stack. An in-process sub-handler dispatch
-//! (zttp:workflow.call) arms its own frame on top of the orchestrator's, so a
-//! sub-handler panic longjmps to the sub frame and surfaces as
-//! error.HandlerPanicked to the orchestrator, leaving the orchestrator's outer
-//! frame armed. Without the stack, nested arming would assert/abort.
+//! NESTING: frames form a per-thread stack. A nested guarded call can arm a
+//! frame without replacing its caller's frame.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -51,8 +47,8 @@ pub const Frame = struct {
     jb: c.jmp_buf,
     msg_buf: [256]u8 = undefined,
     msg_len: usize = 0,
-    /// Enclosing frame, if this one was armed inside another guarded handler
-    /// (nested in-process dispatch). Restored on disarm / panic-pop.
+    /// Enclosing frame, if this one was armed inside another guarded call.
+    /// Restored on disarm or panic-pop.
     prev: ?*Frame = null,
 
     pub fn message(self: *const Frame) []const u8 {
@@ -63,9 +59,7 @@ pub const Frame = struct {
 threadlocal var active_frame: ?*Frame = null;
 
 /// Arm a recovery frame for the current thread, pushing it onto the per-thread
-/// stack. Nested arming is supported: an orchestrator handler can dispatch a
-/// co-located sub-handler in-process (zttp:workflow.call), and the sub-call
-/// arms its own frame on top of the orchestrator's.
+/// stack. A nested guarded call arms its frame on top of the caller's frame.
 pub fn arm(f: *Frame) void {
     f.msg_len = 0;
     f.prev = active_frame;

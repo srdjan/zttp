@@ -564,8 +564,7 @@ pub fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
 }
 
 fn isDiagnosticResult(result: transcript_mod.OwnedToolResult) bool {
-    if (std.mem.eql(u8, result.tool_name, "zts_expert_review_patch") or
-        std.mem.eql(u8, result.tool_name, "zts_check")) return true;
+    if (std.mem.eql(u8, result.tool_name, "zts_check")) return true;
     return !result.ok and
         std.mem.eql(u8, result.tool_name, "propose_change_set") and
         std.mem.startsWith(u8, result.llm_text, loop.veto_reject_preamble);
@@ -689,39 +688,6 @@ test "runCase scores a clean first draft as a veto pass" {
     try testing.expect(r.draft_quality.firstAttemptGreen());
     try testing.expect(r.applied);
     try testing.expect(r.passed_criterion);
-    try testing.expect(r.failingCode() == null);
-}
-
-test "runCase scores a clean workflow first draft as a veto pass" {
-    const workflow_handler =
-        \\import { run } from "zttp:durable";
-        \\import { call } from "zttp:workflow";
-        \\
-        \\function handler(req: Request): Proof<Response, "state_isolated" | "result_safe" | "optional_safe" | "input_validated" | "pii_contained" | "injection_safe" | "canonical"> {
-        \\  const key = req.headers.get("idempotency-key") ?? "workflow-demo";
-        \\  return run(key, () => {
-        \\    const res = call("greet", { method: "GET", path: "/workflow" });
-        \\    return Response.json({ ok: true, childStatus: res.status });
-        \\  });
-        \\}
-    ;
-    var client: ScriptedClient = .{ .reply = .{ .response = .{ .change_set = .{
-        .file = "handler.ts",
-        .content = workflow_handler,
-    } } } };
-    const case: CodegenCase = .{
-        .name = "queued-workflow",
-        .prompt = "Create a durable workflow handler that calls a greet child handler via workflow.call",
-        .expected_kind = .workflow_authoring,
-        .criterion = .raw_first_draft_veto,
-    };
-    var registry: registry_mod.Registry = .{};
-    defer registry.deinit(testing.allocator);
-    const r = try runCase(testing.allocator, case, client.asClient(), &registry);
-    try testing.expect(r.routed);
-    try testing.expect(r.draft_quality.rawFirstDraftVetoPass());
-    try testing.expect(r.draft_quality.firstAttemptGreen());
-    try testing.expect(r.applied);
     try testing.expect(r.failingCode() == null);
 }
 

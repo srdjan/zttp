@@ -482,26 +482,18 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zts_expert_verify_paths",
         "zts_expert_canonicalize",
         "zts_expert_normalize",
-        "zts_expert_review_patch",
         "zts_expert_prove_patch",
-        "zts_expert_system_proof",
         "zts_expert_verify_modules",
         "workspace_list_files",
         "workspace_read_file",
         "workspace_search_text",
         "zts_check",
-        "zig_build_step",
-        "zig_test_step",
         "workspace_gen_tests",
         "pi_goal_check",
         "pi_repair_plan",
         "pi_apply_repair_plan",
         "zts_expert_ast_rewrite",
         "pi_specs_status",
-        "pi_witnesses",
-        "pi_remember_fact",
-        "pi_recall_facts",
-        "pi_extension_catalog",
         "zts_expert_fill_hole",
     };
 
@@ -536,7 +528,7 @@ test "buildRegistry omits writers and retired duplicate routes from model tools"
     }
 }
 
-test "every model tool declares an explicit context policy with all policy classes represented" {
+test "every model tool declares an explicit context policy" {
     var reg = try buildRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
@@ -553,7 +545,8 @@ test "every model tool declares an explicit context policy with all policy class
     }
     try testing.expect(exact > 0);
     try testing.expect(replayable > 0);
-    try testing.expect(digest > 0);
+    // The removed memory and witness tools owned the digest policy.
+    try testing.expectEqual(@as(usize, 0), digest);
 }
 
 fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator, needle: []const u8) !void {

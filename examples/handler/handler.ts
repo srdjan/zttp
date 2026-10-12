@@ -2,10 +2,7 @@
 //
 // Ambient `Proof<T, P>` is a phantom marker the verifier reads off the return
 // type and discharges against the inferred
-// HandlerProperties. The compiler emits ZTS500 if any declared spec
-// does not hold. Witnesses for failing counterexample-rich specs
-// persist to .zttp/witnesses/ so future builds replay them.
-
+// HandlerProperties. The compiler emits ZTS500 if a declared spec does not hold.
 
 structural Guardrails<T> = Proof<T,
     | "injection_safe"

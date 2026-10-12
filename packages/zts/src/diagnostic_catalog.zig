@@ -17,7 +17,6 @@ const type_checker = @import("type_checker.zig");
 
 pub const ParserKind = engine.parser.ErrorKind;
 pub const StripKind = engine.stripper.StripDiagnosticKind;
-pub const PrepareSourceKind = engine.source_frontend.PrepareDiagnosticKind;
 pub const SpecKind = contracts.handler_contract.SpecDiagnostic.Kind;
 pub const PolicyCategory = engine.handler_policy.PolicyCategory;
 pub const PolicyViolationKind = engine.handler_policy.ViolationKind;
@@ -25,7 +24,6 @@ pub const PolicyViolationKind = engine.handler_policy.ViolationKind;
 pub const Producer = enum {
     compiler_driver,
     parser,
-    tsx_frontend,
     type_stripper,
     boolean_checker,
     type_checker,
@@ -53,7 +51,6 @@ pub const Family = enum {
     untrusted_input_flow,
     proof_contract,
     capability_control,
-    workflow_durability,
     canonical_form,
     fault_handling,
     system_contract,
@@ -106,12 +103,6 @@ pub const SemanticsKind = enum {
     unbalanced_lowering,
     lowering_divergence,
     refinement_divergence,
-    smt_counterexample,
-    smt_unencodable,
-    excluded_law_holds,
-    audit_solver_error,
-    audit_inconclusive,
-    smt_unproven,
 
     pub fn code(self: SemanticsKind) []const u8 {
         return semanticsCode(self);
@@ -169,15 +160,6 @@ pub fn parserCode(kind: ParserKind) []const u8 {
         .non_ascii_identifier => "ZTS046",
         .missing_semicolon => "ZTS047",
         .misplaced_default_arm => "ZTS062",
-    };
-}
-
-pub fn prepareSourceCode(kind: PrepareSourceKind) []const u8 {
-    return switch (kind) {
-        .mismatched_tag => "ZTS033",
-        .invalid_attribute => "ZTS034",
-        .unclosed_element => "ZTS035",
-        .expression_expected => "ZTS036",
     };
 }
 
@@ -312,11 +294,8 @@ pub fn specCode(kind: SpecKind) []const u8 {
         .budget_exceeded => "ZTS506",
         .helper_budget_exceeded => "ZTS607",
         .missing_proof_capsule_export => "ZTS508",
-        .workflow_call_in_step => "ZTS509",
-        .saga_step_missing_compensate => "ZTS510",
         .effect_ceiling_not_literal => "ZTS511",
         .effect_row_lower_bound => "ZTS512",
-        .tool_catalog_refused => "ZTS513",
         .schema_not_compilable => "ZTS514",
     };
 }
@@ -354,12 +333,6 @@ pub fn semanticsCode(kind: SemanticsKind) []const u8 {
         .unbalanced_lowering => "ZTS752",
         .lowering_divergence => "ZTS753",
         .refinement_divergence => "ZTS754",
-        .smt_counterexample => "ZTS755",
-        .smt_unencodable => "ZTS756",
-        .excluded_law_holds => "ZTS757",
-        .audit_solver_error => "ZTS758",
-        .audit_inconclusive => "ZTS759",
-        .smt_unproven => "ZTS760",
     };
 }
 
@@ -388,10 +361,6 @@ fn parserMetadata(kind: ParserKind) Metadata {
         },
         .risk = .correctness,
     };
-}
-
-fn prepareSourceMetadata(kind: PrepareSourceKind) Metadata {
-    return .{ .code = prepareSourceCode(kind), .family = .syntax, .risk = .correctness };
 }
 
 fn stripMetadata(kind: StripKind) Metadata {
@@ -491,7 +460,6 @@ fn specMetadata(kind: SpecKind) Metadata {
         .helper_budget_exceeded,
         .effect_ceiling_not_literal,
         .effect_row_lower_bound,
-        .tool_catalog_refused,
         => true,
         else => false,
     };
@@ -505,9 +473,7 @@ fn specMetadata(kind: SpecKind) Metadata {
             .helper_budget_exceeded,
             .effect_ceiling_not_literal,
             .effect_row_lower_bound,
-            .tool_catalog_refused,
             => .capability_control,
-            .workflow_call_in_step, .saga_step_missing_compensate => .workflow_durability,
             else => .proof_contract,
         },
         .risk = if (capability) .security_critical else switch (kind) {
@@ -548,7 +514,6 @@ fn enumEntries(
 
 const driver_entries = enumEntries(DriverKind, .compiler_driver, driverMetadata);
 const parser_entries = enumEntries(ParserKind, .parser, parserMetadata);
-const prepare_source_entries = enumEntries(PrepareSourceKind, .tsx_frontend, prepareSourceMetadata);
 const strip_entries = enumEntries(StripKind, .type_stripper, stripMetadata);
 const boolean_entries = enumEntries(bool_checker.DiagnosticKind, .boolean_checker, booleanMetadata);
 const type_entries = enumEntries(type_checker.DiagnosticKind, .type_checker, typeMetadata);
@@ -560,7 +525,7 @@ const spec_entries = enumEntries(SpecKind, .spec_discharge, specMetadata);
 const policy_entries = enumEntries(PolicyKind, .capability_policy, policyMetadata);
 const semantics_entries = enumEntries(SemanticsKind, .semantics_conformance, semanticsMetadata);
 
-const total_count = driver_entries.len + parser_entries.len + prepare_source_entries.len +
+const total_count = driver_entries.len + parser_entries.len +
     strip_entries.len + boolean_entries.len + type_entries.len + virtual_import_entries.len +
     verifier_entries.len + flow_entries.len + strict_entries.len + spec_entries.len +
     policy_entries.len + semantics_entries.len;
@@ -571,7 +536,6 @@ pub const all_entries: [total_count]Entry = blk: {
     for (.{
         driver_entries,
         parser_entries,
-        prepare_source_entries,
         strip_entries,
         boolean_entries,
         type_entries,

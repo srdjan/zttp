@@ -152,7 +152,7 @@ pub fn prepare(
 }
 
 fn isSupportedSourcePath(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".ts") or std.mem.endsWith(u8, path, ".tsx");
+    return std.mem.endsWith(u8, path, ".ts");
 }
 
 fn requireExistingParent(io: std.Io, path: []const u8) !void {
@@ -224,7 +224,7 @@ test "prepare owns ordered present and absent baselines" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
     const root = try rootPath(testing.allocator, &tmp);
     defer testing.allocator.free(root);
-    const tail = [_]turn.Change{.{ .file = "src/b.tsx", .content = "new" }};
+    const tail = [_]turn.Change{.{ .file = "src/b.ts", .content = "new" }};
 
     var prepared = try prepare(testing.allocator, root, .{
         .file = "src/a.ts",
@@ -236,7 +236,7 @@ test "prepare owns ordered present and absent baselines" {
     try testing.expectEqual(@as(usize, 2), prepared.changes.len);
     try testing.expectEqualStrings("old", prepared.changes[0].baseline.bytes().?);
     try testing.expect(prepared.changes[1].baseline == .absent);
-    try testing.expectEqualStrings("src/b.tsx", prepared.changes[1].authored_path);
+    try testing.expectEqualStrings("src/b.ts", prepared.changes[1].authored_path);
 }
 
 test "prepare rejects duplicate aliases no-ops and unsupported targets" {
@@ -260,6 +260,10 @@ test "prepare rejects duplicate aliases no-ops and unsupported targets" {
     try testing.expectError(error.UnsupportedSourceTarget, prepare(testing.allocator, root, .{
         .file = "zttp.json",
         .content = "{}",
+    }));
+    try testing.expectError(error.UnsupportedSourceTarget, prepare(testing.allocator, root, .{
+        .file = "src/component.tsx",
+        .content = "export const component = <main />;",
     }));
     try testing.expectError(error.MissingTargetParent, prepare(testing.allocator, root, .{
         .file = "missing/a.ts",

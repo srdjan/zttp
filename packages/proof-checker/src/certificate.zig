@@ -1315,7 +1315,7 @@ test "retired graph member kinds are refused as unknown" {
     const graph_section = testSection(bytes, .graph);
     const first_record = graph_section.payload + 4;
 
-    for ([_]u16{ 17, 18, 19, 20 }) |retired_kind| {
+    for ([_]u16{ 10, 17, 18, 19, 20 }) |retired_kind| {
         var changed: [4096]u8 = undefined;
         @memcpy(changed[0..bytes.len], bytes);
         std.mem.writeInt(u16, changed[first_record..][0..2], retired_kind, .little);

@@ -49,7 +49,7 @@
 //!
 //! The scratch directory is under `$TMPDIR`, because import probes need real
 //! files and the working tree must stay clean. The check runs with
-//! `persist_witnesses = false` and reads no `zttp.json`.
+//! The check reads no `zttp.json`.
 //!
 //! `-- --list` prints one line per probe: its name, expected verdict, observed
 //! verdict, outcome, and diagnostic codes. It changes no verdict.
@@ -113,12 +113,11 @@ pub const Failure = struct {
 
 pub const CheckFn = *const fn (gpa: std.mem.Allocator, source: []const u8, handler_path: []const u8) anyerror!precompile.CheckResult;
 
-/// The same call `zts check --json` makes, with witness persistence off and no
-/// policy, declaration, schema or system path.
+/// The same call `zts check --json` makes with no
+/// policy, declaration, or schema path.
 fn defaultCheck(gpa: std.mem.Allocator, source: []const u8, handler_path: []const u8) anyerror!precompile.CheckResult {
     return precompile.runCheckOnlyFromSourceWithOptions(gpa, source, handler_path, .{
         .json_mode = true,
-        .persist_witnesses = false,
     });
 }
 

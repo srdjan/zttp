@@ -20,7 +20,7 @@ Each row pairs a refused construct with the boundary it protects.
 | `for...in` | prototype-chain iteration and non-deterministic order | deterministic iteration and shape-stable access | use 'for (const k of Object.keys(obj))' |
 | `try/catch` | hidden exceptional control flow | Result narrowing and exhaustive path enumeration | use Result types and check .ok |
 | `throw` | hidden exceptional control flow | Result narrowing and exhaustive return analysis | return an error Response |
-| `async/await` | ambient scheduling and non-deterministic interleavings | deterministic effect boundary and replayable I/O | use fetch() from zttp:fetch, or parallel()/race() from zttp:io |
+| `async/await` | ambient scheduling and non-deterministic interleavings | deterministic effect boundary and replayable I/O | use fetch() from zttp:fetch |
 | `new` | constructor dispatch and hidden initialization effects | explicit factory call sites and visible effects | use factory functions or object literals |
 | `this` | dynamic receiver binding | static call-graph and visible data flow | use explicit parameter passing |
 | `== / !=` | implicit coercion paths | sound type-directed comparison | use === / !== |
@@ -56,7 +56,7 @@ reach clients through the version-2 `restrictions` operation.
 | `distinct type` declaration | one closed data and module model | `language_simplicity` | `ZTS051` |
 | `\|>`, `pipe()`, `guard()` | one spelling for calling a function | `language_simplicity` | `ZTS001` |
 | object methods, getters, setters | explicit functions and effects | `language_simplicity` | `ZTS001` |
-| `.js` and `.jsx` source files | one typed core and one explicit TSX frontend | `language_simplicity` | `ZTS052` |
+| `.js`, `.jsx`, and `.tsx` source files | one TypeScript source frontend | `language_simplicity` | `ZTS052` |
 | `zttp:types` import | proof and effect witnesses are ambient type names | `language_simplicity` | `ZTS053` |
 | default parameter | one explicit absence branch in the function body | `language_simplicity` | `ZTS054` |
 | optional parameter shorthand | one spelling for undefined absence | `language_simplicity` | `ZTS055` |
@@ -125,7 +125,7 @@ Per-restriction rationale, one sentence each.
 - **`distinct type` declaration** - write `nominal Name = string;`
 - **`\|>`, `pipe()`, `guard()`** - write the call directly; run guards by explicit early return
 - **object methods, getters, setters** - language-simplicity choice
-- **`.js` and `.jsx` source files** - source identity must select either the TypeScript core or the versioned TSX lowering frontend
+- **`.js`, `.jsx`, and `.tsx` source files** - source identity admits only TypeScript source
 - **`zttp:types` import** - remove the import and write `Proof<T, P>` or `Effects<T, R>` directly
 - **default parameter** - accept `T \| undefined` and resolve the default at the start of the body
 - **optional parameter shorthand** - write `name: T \| undefined`

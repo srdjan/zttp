@@ -44,7 +44,6 @@ pub const status_check = @import("status_check.zig");
 pub const severity_census = @import("severity_census.zig");
 pub const behavior_canonical = @import("behavior_canonical.zig");
 pub const proof_trace = @import("proof_trace.zig");
-pub const witness_corpus = @import("witness_corpus.zig");
 pub const spec_discharge = @import("spec_discharge.zig");
 pub const property_diagnostics = @import("property_diagnostics.zig");
 pub const diagnostic_catalog = @import("diagnostic_catalog.zig");
@@ -52,7 +51,6 @@ pub const diagnostic_projection = @import("diagnostic_projection.zig");
 
 pub const ambient_names = @import("ambient_names.zig");
 pub const grammar_registry = @import("grammar_registry.zig");
-pub const tsx_frontend_registry = @import("tsx_frontend_registry.zig");
 pub const source_identity = @import("source_identity.zig");
 pub const rule_registry = @import("rule_registry.zig");
 pub const idiom_registry = @import("idiom_registry.zig");
@@ -70,7 +68,6 @@ pub const semantics_corpus = @import("semantics_corpus.zig");
 pub const semantics_render = @import("semantics_render.zig");
 
 pub const pipeline = @import("pipeline.zig");
-pub const system_linker = @import("system_linker.zig");
 pub const sql_analysis = @import("sql_analysis.zig");
 pub const api_schema = @import("api_schema.zig");
 

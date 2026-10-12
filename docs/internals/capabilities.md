@@ -15,7 +15,7 @@ Read this end-to-end before adding a new virtual module.
 | `random` | Hosted OS-seeded cryptographically secure randomness (UUID generation, nanoid, jitter). |
 | `crypto` | Cryptographic primitives (HMAC, hash functions, constant-time comparison, JWT sign/verify). |
 | `stderr` | Writing to the process stderr stream for diagnostic output. |
-| `runtime_callback` | Invoking the host runtime back into JS (scope lifecycle hooks, durable oplog replay, I/O dispatch, service routing). |
+| `runtime_callback` | Invoking a checked host runtime service from a native module. |
 | `sqlite` | Opening and querying the embedded SQLite connection. |
 | `filesystem` | Reading files from disk outside the sandbox root (service contracts, request fixtures). |
 | `network` | Making outbound network calls. |
@@ -53,7 +53,7 @@ const token = mb.pushActiveModuleContext(ctx, binding.specifier, binding.require
 defer mb.popActiveModuleContext(token);
 ```
 
-Production code uses this pattern for service-state installation before the wrapped entry point. Most module calls rely on the resolver-installed wrapper.
+Most module calls rely on the resolver-installed wrapper.
 
 The extension SDK and runtime bridge are revision-locked. Native extensions must rebuild against the `zttp-sdk` revision that matches their target runtime. Handle-bound crypto operations use distinct symbol names, so an extension that references either changed operation fails at link time instead of calling through an incompatible native ABI.
 
@@ -66,20 +66,12 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 | `zttp:auth` | `crypto`, `clock` | JWT sign/verify, bearer parsing, timing-safe equality, HMAC webhook verification. |
 | `zttp:cache` | `clock`, `policy_check` | TTL expiry requires clock; `policy_check` consults the handler's cache-namespace policy. |
 | `zttp:crypto` | `crypto` | SHA256, HMAC, base64. |
-| `zttp:durable` | `runtime_callback` | Replay and live execution dispatch back into the runtime for oplog replay and signal wake-ups. |
 | `zttp:env` | `env`, `policy_check` | Normalizes and checks the key before reading `getenv`. |
 | `zttp:fetch` | `network`, `runtime_callback` | Checks the normalized endpoint before DNS and the resolved address scope before connecting. |
 | `zttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
-| `zttp:io` | `runtime_callback` | `parallel()` and `race()` schedule outbound fetches through the runtime's I/O collector. |
-| `zttp:ledger` | `sqlite`, `crypto` | Compiler metadata remains until Phase 3. Runtime execution is unavailable. |
 | `zttp:log` | `clock`, `stderr` | Timestamped log emission. |
-| `zttp:queue` | `runtime_callback` | Mailbox send, lease, ack, nack, and reply dispatch through the server-owned actor queue. |
 | `zttp:ratelimit` | `clock` | Token bucket expiry. |
-| `zttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
-| `zttp:service` | `network`, `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
 | `zttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
-| `zttp:tool` | `runtime_callback` | Compiler metadata remains until Phase 3. Runtime execution is unavailable. |
-| `zttp:workflow` | `runtime_callback` | `call`, `follow`, `fanout`, and `saga` dispatch to co-located sub-handlers through the runtime. |
 
 ### Modules that declare no capabilities
 

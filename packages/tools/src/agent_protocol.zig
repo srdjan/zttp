@@ -89,8 +89,8 @@ pub const operations = [_]OperationSpec{
         "idioms",                  "limits",                "module_catalog",
         "deferred_sections",       "validators",            "verifiers",
         "ambient_names",           "type_serialization",    "grammar",
-        "source_frontends",        "examples",              "module_examples",
-        "decisions",
+        "examples",                "module_examples",       "decisions",
+        "source_frontends",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -459,7 +459,7 @@ pub fn handleRequest(
                 },
                 error.UnsupportedSourceExtension => .{
                     .code = .unsupported_source_extension,
-                    .message = "input.file must use the .ts or .tsx extension",
+                    .message = "input.file must use the .ts extension",
                     .field = "input.file",
                 },
                 error.GraphTooLarge => .{
@@ -744,38 +744,6 @@ fn writeOperationCatalog(json: *std.json.Stringify, include_payload_fields: bool
     try json.endArray();
 }
 
-fn writeSourceFrontends(json: *std.json.Stringify, include_grammar: bool) !void {
-    const frontend_hash = zts.tsxFrontendGrammarHash();
-    const core_hash = zts.grammarHash();
-    try json.beginArray();
-    try json.beginObject();
-    try json.objectField("profile_id");
-    try json.write(zts.TsxFrontendCatalog.profile_id);
-    try json.objectField("grammar_hash");
-    try json.write(&frontend_hash);
-    try json.objectField("target_profile_id");
-    try json.write(agent_identity.profile_id);
-    try json.objectField("target_grammar_hash");
-    try json.write(&core_hash);
-    try json.objectField("lowering_target");
-    try json.write(zts.TsxFrontendCatalog.lowering_target);
-    if (include_grammar) {
-        try json.objectField("grammar");
-        try json.beginArray();
-        for (zts.TsxFrontendCatalog.productions()) |production| {
-            try json.beginObject();
-            try json.objectField("name");
-            try json.write(production.name);
-            try json.objectField("rhs");
-            try json.write(production.rhs);
-            try json.endObject();
-        }
-        try json.endArray();
-    }
-    try json.endObject();
-    try json.endArray();
-}
-
 fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     try json.beginObject();
     try json.objectField("view");
@@ -798,8 +766,6 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(&moduleMetadata.builtinRegistryHash());
     try json.objectField("example_registry_hash");
     try json.write(&example_registry.catalogHash());
-    try json.objectField("source_frontends");
-    try writeSourceFrontends(json, false);
     try json.objectField("operations");
     try writeOperationCatalog(json, false);
     try json.objectField("full_meta_request");
@@ -824,15 +790,11 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
 ///
 /// Discovery published a name, an effect, and (since parameter names landed)
 /// what each argument means - and nothing at all about the return. A model had
-/// no way to learn that `sqlMany` answers an array rather than a Result, and
-/// three corpus cases failed the same way because of it: sql-users, jwt-auth
-/// and workflow-queued-call each read `.ok` and `.value` off a value that has
-/// neither, which the compiler proved safe and the runtime faulted on.
+/// no way to learn that `sqlMany` answers an array rather than a Result.
 ///
 /// The declared signature wins when an export has one, because that is what the
-/// checker enforces - `zttp:workflow.call` and `zttp:fetch` both answer a
-/// Response and both advertised `object` until now. Everything else renders the
-/// coarse kind through the same `jsTypeName` the rest of the surface uses.
+/// checker enforces. Everything else renders the coarse kind through the same
+/// `jsTypeName` that the rest of the surface uses.
 ///
 /// This is deliberately NOT the `returns` field in `zts modules --json`, which
 /// stays a `ReturnKind` name: `module_manifest.zig:267` parses that one back
@@ -914,6 +876,11 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.objectField("grammar_hash");
     try json.write(&zts.grammarHash());
 
+    // Keep the metadata field while the supported frontend catalog is empty.
+    try json.objectField("source_frontends");
+    try json.beginArray();
+    try json.endArray();
+
     try json.objectField("operations");
     try writeOperationCatalog(json, true);
 
@@ -930,9 +897,6 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(&moduleMetadata.builtinRegistryHash());
     try json.objectField("example_registry_hash");
     try json.write(&example_registry.catalogHash());
-    try json.objectField("source_frontends");
-    try writeSourceFrontends(json, true);
-
     try json.objectField("severities");
     try json.beginObject();
     try json.objectField("set");
@@ -1828,7 +1792,6 @@ fn runVerify(
         precompile.runCheckOnlyWithOptions(allocator, abs, .{
             .json_mode = true,
             .sql_schema_path = null,
-            .system_path = null,
         })) catch |err| switch (err) {
         // Every property is undecided rather than false: the analysis never
         // ran, and reporting `analyzer_not_proved` would claim a verdict nothing
@@ -2006,7 +1969,6 @@ fn runCheck(
     var result = precompile.runCheckOnlyWithOptions(allocator, abs, .{
         .json_mode = true,
         .sql_schema_path = null,
-        .system_path = null,
     }) catch |err| switch (err) {
         // The v1 path reports this as a ZTS700 diagnostic rather than a crash;
         // the v2 wire keeps it a diagnostic too, so the two surfaces agree on
@@ -2698,12 +2660,6 @@ test "meta bootstrap view is bounded and routes to full discovery" {
     try testing.expectEqualStrings(&zts.idiomTableHash(), payload.get("idiom_table_hash").?.string);
     try testing.expectEqualStrings(&zts.restrictionMatrixHash(), payload.get("restriction_matrix_hash").?.string);
     try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);
-    const frontend = payload.get("source_frontends").?.array.items[0].object;
-    try testing.expectEqualStrings(zts.TsxFrontendCatalog.profile_id, frontend.get("profile_id").?.string);
-    try testing.expectEqualStrings(&zts.tsxFrontendGrammarHash(), frontend.get("grammar_hash").?.string);
-    try testing.expectEqualStrings(&zts.grammarHash(), frontend.get("target_grammar_hash").?.string);
-    try testing.expect(frontend.get("grammar") == null);
-
     const ops = payload.get("operations").?.array;
     try testing.expectEqual(operations.len, ops.items.len);
     const full = payload.get("full_meta_request").?.object;
@@ -3414,12 +3370,8 @@ test "modules describes imports in full and keeps every other module choosable" 
     try testing.expect(saw_unimported);
 }
 
-// Three corpus cases failed the same way - sql-users, jwt-auth and
-// workflow-queued-call each read `.ok` and `.value` off a value that has
-// neither - and discovery published no return type for any export, so the model
-// had nothing to read. Asserted on the values, not on the field's presence: a
-// test that only checked `returns` existed would pass on the `object` that
-// taught nothing.
+// Discovery must publish the return type for each export. Assert the value,
+// because a field-presence test would pass on the unhelpful `object` value.
 test "module discovery says what each export answers with" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -3444,7 +3396,6 @@ test "module discovery says what each export answers with" {
     const payload = parsed.value.object.get("payload").?.object;
 
     var saw_optional = false;
-    var saw_declared = false;
     for (payload.get("builtins").?.array.items) |module| {
         const m = module.object;
         const spec = m.get("specifier").?.string;
@@ -3460,21 +3411,10 @@ test "module discovery says what each export answers with" {
                 saw_optional = true;
                 try testing.expectEqualStrings("string?", returns);
             }
-
-            // A declared signature wins over the kind, because that is what the
-            // checker enforces. `call` answered `object` here until now while
-            // returning a Response, which is what taught a draft to read `.ok`.
-            if (std.mem.eql(u8, spec, "zttp:workflow") and std.mem.eql(u8, name, "call")) {
-                saw_declared = true;
-                try testing.expect(std.mem.indexOf(u8, returns, "status: number") != null);
-                try testing.expect(!std.mem.eql(u8, returns, "object"));
-            }
         }
     }
-    // The floor: a payload that stopped carrying either export would satisfy
-    // every assertion above by never running one.
+    // The floor prevents success when the payload stops carrying the export.
     try testing.expect(saw_optional);
-    try testing.expect(saw_declared);
 }
 
 test "a file-bound operation binds the graph digest, not the context-free one" {
@@ -3665,8 +3605,6 @@ test "check on a clean handler succeeds with no diagnostics" {
     try testing.expect(contract_body == .object);
     const contract_version = contract_body.object.get("version") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 2), contract_version.integer);
-    try testing.expect(contract_body.object.get("service_calls") != null);
-    try testing.expect(contract_body.object.get("serviceCalls") == null);
 }
 
 test "check payload reports guarded categories separately from properties" {
@@ -5061,7 +4999,7 @@ test "every published example exercises the form it names" {
     // the form, and from the source only for the three that leave no trace.
     const a = testing.allocator;
     for (&example_registry.examples) |entry| {
-        var strip_result = try zts.strip(a, entry.source, .{ .enable_comptime = true, .comptime_env = .{} });
+        var strip_result = try zts.strip(a, entry.source, .{});
         defer strip_result.deinit();
 
         var parser = try zts.parser.JsParser.init(a, strip_result.code);
@@ -5203,31 +5141,6 @@ test "meta publishes section 8's grammar production for production, in order" {
         try testing.expectEqualStrings(p.enforcement.id(), row.get("enforcement").?.string);
     }
     try testing.expectEqualStrings("Module", rows.items[0].object.get("name").?.string);
-}
-
-test "meta publishes the TSX frontend grammar bound to its core target" {
-    const a = testing.allocator;
-    var raw: []u8 = undefined;
-    var parsed = try metaPayload(a, &raw);
-    defer a.free(raw);
-    defer parsed.deinit();
-
-    const payload = parsed.value.object.get("payload").?.object;
-    const frontends = payload.get("source_frontends").?.array;
-    try testing.expectEqual(@as(usize, 1), frontends.items.len);
-    const frontend = frontends.items[0].object;
-    try testing.expectEqualStrings(zts.TsxFrontendCatalog.profile_id, frontend.get("profile_id").?.string);
-    try testing.expectEqualStrings(&zts.tsxFrontendGrammarHash(), frontend.get("grammar_hash").?.string);
-    try testing.expectEqualStrings(agent_identity.profile_id, frontend.get("target_profile_id").?.string);
-    try testing.expectEqualStrings(&zts.grammarHash(), frontend.get("target_grammar_hash").?.string);
-    try testing.expectEqualStrings(zts.TsxFrontendCatalog.lowering_target, frontend.get("lowering_target").?.string);
-
-    const rows = frontend.get("grammar").?.array;
-    try testing.expectEqual(zts.TsxFrontendCatalog.productions().len, rows.items.len);
-    for (rows.items, zts.TsxFrontendCatalog.productions()) |item, production| {
-        try testing.expectEqualStrings(production.name, item.object.get("name").?.string);
-        try testing.expectEqualStrings(production.rhs, item.object.get("rhs").?.string);
-    }
 }
 
 test "a production that over-admits says which rule refuses the excess" {

@@ -1,6 +1,6 @@
 //! Shared loader for `ExecutionSpec.handler` sources.
 //!
-//! Replay, handler-test, and durable-recovery runners share this loader so
+//! Replay and handler-test runners share this loader so
 //! the embedded_bytecode and appended_payload branches are declared once.
 //! Callers own their diagnostics on the error path.
 

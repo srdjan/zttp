@@ -36,22 +36,21 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# The count measured on 2026-08-10, after the SQL handler stopped being skipped.
-MIN_CHECKED=58
+# The retained Phase 3 run measured 33 checked and printed sources.
+MIN_CHECKED=33
 
 # The canonical formatter fails closed and widens construct by construct, so a
 # file it refuses is named here rather than passing as though it were printed.
 # This is a ceiling, not a floor: the number may fall as coverage widens and
-# must never rise. Measured on 2026-08-11 - the five JSX and TSX sources, which
-# a bare tokenizer run cannot read.
-MAX_REFUSED=5
+# must never rise. The retained Phase 3 run refused no source.
+MAX_REFUSED=0
 
 # The ceiling above is counted by grepping stderr for one literal string, and a
 # ceiling on a count that stopped being produced is satisfied by silence: a
 # renamed message, or a formatter that stopped running at all, would report
 # zero refusals and pass. MIN_PRINTED is the floor under it - the files that
 # actually came back printed and reformatted.
-MIN_PRINTED=53
+MIN_PRINTED=33
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
@@ -92,12 +91,8 @@ while IFS= read -r -d '' file; do
 
   # Pass 2: normalize that output into `twice`. Keep the extension so the
   # stripper picks the same mode for both passes.
-  case "$file" in
-    *.tsx) ext=tsx ;;
-    *) ext=ts ;;
-  esac
-  cp "$work/once" "$work/pass1.$ext"
-  if ! "$ZTS" normalize "$work/pass1.$ext" "${schema_args[@]+"${schema_args[@]}"}" > "$work/twice" 2>/dev/null; then
+  cp "$work/once" "$work/pass1.ts"
+  if ! "$ZTS" normalize "$work/pass1.ts" "${schema_args[@]+"${schema_args[@]}"}" > "$work/twice" 2>/dev/null; then
     echo "FAIL $file: normalize refused its own output" >&2
     failed=$((failed + 1))
     continue
@@ -111,7 +106,7 @@ while IFS= read -r -d '' file; do
   fi
 
   checked=$((checked + 1))
-done < <(git ls-files -z 'examples/*.ts' 'examples/*.tsx' 'examples/**/*.ts' 'examples/**/*.tsx')
+done < <(git ls-files -z 'examples/*.ts' 'examples/**/*.ts')
 
 if [ "$failed" -gt 0 ]; then
   echo "normalize idempotence: $failed FAILED ($checked ok, $skipped skipped)" >&2

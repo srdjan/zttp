@@ -363,8 +363,6 @@ fn verifySemantics(
                 .core_grammar_hash = view.source_identity.core_grammar_hash,
                 .semantics_hash = view.source_identity.semantics_hash,
                 .capability_hash = if (view.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
-                .frontend_profile_id = if (view.source_identity.frontend) |f| f.profile.id() else null,
-                .frontend_grammar_hash = if (view.source_identity.frontend) |f| f.grammar_hash else null,
             };
         }
     }
@@ -563,6 +561,7 @@ fn refuseRetiredContract(
 ) !void {
     var contract = zts.handler_contract.parseFromJson(allocator, contract_bytes) catch |err| switch (err) {
         error.OutOfMemory => return err,
+        error.UnsupportedRuntimeAuthority => return err,
         else => return,
     };
     defer contract.deinit(allocator);
@@ -797,6 +796,28 @@ test "bundle manifest accepts only supported names and lowercase digests" {
 
 const test_chdir = @import("../proof_ledger.zig").chdirTmpForTest;
 
+const retired_raw_contracts = [_][]const u8{
+    "{\"modules\":[],\"durable\":{\"used\":true}}",
+    "{\"modules\":[],\"scope\":{\"used\":true}}",
+    "{\"modules\":[],\"serviceCalls\":[{}]}",
+    "{\"modules\":[],\"workflowCalls\":[{}]}",
+    "{\"modules\":[],\"sagas\":[{}]}",
+};
+
+fn writeRetiredModuleContract(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    module: []const u8,
+) !void {
+    var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    try contract.modules.append(allocator, try allocator.dupe(u8, module));
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    try zts.writeContractJson(&contract, &json.writer);
+    try zts.file_io.writeFile(allocator, path, json.written());
+}
+
 fn predecessorArtifact(allocator: std.mem.Allocator) ![]u8 {
     const base = "test-runtime";
     const payload = "predecessor-payload";
@@ -814,38 +835,68 @@ fn predecessorArtifact(allocator: std.mem.Allocator) ![]u8 {
     return artifact;
 }
 
-test "bundle creation refuses a retired contract before creating output" {
+test "bundle creation refuses every retired module before creating output" {
     const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try test_chdir(&tmp);
-    defer allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
+    const retired = [_][]const u8{
+        "zttp:durable",
+        "zttp:workflow",
+        "zttp:queue",
+        "zttp:scope",
+        "zttp:io",
+        "zttp:service",
+        "zttp:ledger",
+        "zttp:tool",
+    };
+    for (retired) |module| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const old_cwd = try test_chdir(&tmp);
+        defer allocator.free(old_cwd);
+        defer std.Io.Threaded.chdir(old_cwd) catch {};
+        try writeRetiredModuleContract(allocator, "contract.json", module);
 
-    const handler_path = try allocator.dupe(u8, "handler.ts");
-    var contract = zts.handler_contract.emptyContract(handler_path);
-    defer contract.deinit(allocator);
-    try contract.modules.ensureUnusedCapacity(allocator, 1);
-    contract.modules.appendAssumeCapacity(try allocator.dupe(u8, "zttp:ledger"));
-    var json: std.Io.Writer.Allocating = .init(allocator);
-    defer json.deinit();
-    try zts.writeContractJson(&contract, &json.writer);
-    try zts.file_io.writeFile(allocator, "contract.json", json.written());
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(allocator);
+        defer err.deinit();
+        try std.testing.expectError(error.UnsupportedRuntimeAuthority, writeBundle(
+            allocator,
+            .{ .contract_path = "contract.json", .out_dir = "bundle" },
+            &out.writer,
+            &err.writer,
+        ));
+        try std.testing.expectError(
+            error.FileNotFound,
+            std.Io.Dir.cwd().access(std.testing.io, "bundle", .{}),
+        );
+    }
+}
 
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    var err: std.Io.Writer.Allocating = .init(allocator);
-    defer err.deinit();
-    try std.testing.expectError(error.UnsupportedRuntimeAuthority, writeBundle(
-        allocator,
-        .{ .contract_path = "contract.json", .out_dir = "bundle" },
-        &out.writer,
-        &err.writer,
-    ));
-    try std.testing.expectError(
-        error.FileNotFound,
-        std.Io.Dir.cwd().access(std.testing.io, "bundle", .{}),
-    );
+test "bundle creation refuses raw retired contract obligations before creating output" {
+    const allocator = std.testing.allocator;
+    for (retired_raw_contracts) |contract| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const old_cwd = try test_chdir(&tmp);
+        defer allocator.free(old_cwd);
+        defer std.Io.Threaded.chdir(old_cwd) catch {};
+        try zts.file_io.writeFile(allocator, "contract.json", contract);
+
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(allocator);
+        defer err.deinit();
+        try std.testing.expectError(error.UnsupportedRuntimeAuthority, writeBundle(
+            allocator,
+            .{ .contract_path = "contract.json", .out_dir = "bundle" },
+            &out.writer,
+            &err.writer,
+        ));
+        try std.testing.expectError(
+            error.FileNotFound,
+            std.Io.Dir.cwd().access(std.testing.io, "bundle", .{}),
+        );
+    }
 }
 
 test "bundle refuses a current-format artifact whose payload checksum fails, instead of bundling it as hash-only" {
@@ -1285,41 +1336,76 @@ test "verify passes a bundle written by writeBundle" {
     try std.testing.expect(std.mem.indexOf(u8, text, "Proof:     not checked") != null);
 }
 
-test "bundle verification refuses retired contract facts" {
+test "bundle verification refuses every retired module" {
     const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try test_chdir(&tmp);
-    defer allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-    try ensureDir(allocator, "bundle");
+    const retired = [_][]const u8{
+        "zttp:durable",
+        "zttp:workflow",
+        "zttp:queue",
+        "zttp:scope",
+        "zttp:io",
+        "zttp:service",
+        "zttp:ledger",
+        "zttp:tool",
+    };
+    for (retired) |module| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const old_cwd = try test_chdir(&tmp);
+        defer allocator.free(old_cwd);
+        defer std.Io.Threaded.chdir(old_cwd) catch {};
+        try ensureDir(allocator, "bundle");
+        try writeRetiredModuleContract(allocator, "bundle/handler.contract.json", module);
+        const json = try zts.file_io.readFile(allocator, "bundle/handler.contract.json", 1024 * 1024);
+        defer allocator.free(json);
+        const sha = sha256Hex(json);
+        const manifest = try std.fmt.allocPrint(
+            allocator,
+            "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}",
+            .{sha},
+        );
+        defer allocator.free(manifest);
+        try zts.file_io.writeFile(allocator, "bundle/bundle.json", manifest);
 
-    const handler_path = try allocator.dupe(u8, "handler.ts");
-    var contract = zts.handler_contract.emptyContract(handler_path);
-    defer contract.deinit(allocator);
-    try contract.modules.ensureUnusedCapacity(allocator, 1);
-    contract.modules.appendAssumeCapacity(try allocator.dupe(u8, "zttp:tool"));
-    var json: std.Io.Writer.Allocating = .init(allocator);
-    defer json.deinit();
-    try zts.writeContractJson(&contract, &json.writer);
-    try zts.file_io.writeFile(allocator, "bundle/handler.contract.json", json.written());
-    const sha = sha256Hex(json.written());
-    const manifest = try std.fmt.allocPrint(
-        allocator,
-        "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}",
-        .{sha},
-    );
-    defer allocator.free(manifest);
-    try zts.file_io.writeFile(allocator, "bundle/bundle.json", manifest);
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(allocator);
+        defer err.deinit();
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            verify(allocator, "bundle", false, &out.writer, &err.writer),
+        );
+    }
+}
 
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    var err: std.Io.Writer.Allocating = .init(allocator);
-    defer err.deinit();
-    try std.testing.expectError(
-        error.UnsupportedRuntimeAuthority,
-        verify(allocator, "bundle", false, &out.writer, &err.writer),
-    );
+test "bundle verification refuses raw retired contract obligations" {
+    const allocator = std.testing.allocator;
+    for (retired_raw_contracts) |contract| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const old_cwd = try test_chdir(&tmp);
+        defer allocator.free(old_cwd);
+        defer std.Io.Threaded.chdir(old_cwd) catch {};
+        try ensureDir(allocator, "bundle");
+        try zts.file_io.writeFile(allocator, "bundle/handler.contract.json", contract);
+        const sha = sha256Hex(contract);
+        const manifest = try std.fmt.allocPrint(
+            allocator,
+            "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}",
+            .{sha},
+        );
+        defer allocator.free(manifest);
+        try zts.file_io.writeFile(allocator, "bundle/bundle.json", manifest);
+
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        var err: std.Io.Writer.Allocating = .init(allocator);
+        defer err.deinit();
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            verify(allocator, "bundle", false, &out.writer, &err.writer),
+        );
+    }
 }
 
 test "verify hashes a component larger than one read buffer" {

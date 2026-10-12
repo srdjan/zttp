@@ -106,22 +106,6 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
             printDoctorSkip("sqlite", "not configured");
         }
 
-        if (try cfg.resolvedDurableDir(allocator)) |durable_dir| {
-            defer allocator.free(durable_dir);
-            std.debug.print("[info] durable  {s}\n", .{durable_dir});
-        } else {
-            printDoctorSkip("durable", "not configured");
-        }
-
-        if (try cfg.resolvedSystemPath(allocator)) |system_path| {
-            defer allocator.free(system_path);
-            const ok = doctorPathExists(io, system_path);
-            if (!ok) failures += 1;
-            printDoctorPath("system", system_path, ok);
-        } else {
-            printDoctorSkip("system", "not configured");
-        }
-
         if (cfg.outbound_hosts.len > 1) {
             std.debug.print("[fail] outbound multiple outboundHosts are configured; current runtime accepts one\n", .{});
             return error.UnsupportedMultipleOutboundHosts;
@@ -176,8 +160,8 @@ pub fn printDoctorHelp() void {
         \\runtime options that affect local development.
         \\
         \\Checks:
-        \\  manifest, entry, capability policy, static directory, system file,
-        \\  tests fixture, sqlite/durable settings, outbound HTTP configuration,
+        \\  manifest, entry, capability policy, static directory, tests fixture,
+        \\  SQLite settings, outbound HTTP configuration,
         \\  and the default expert model provider.
         \\
         \\Examples:
@@ -194,13 +178,10 @@ pub fn runDoctorAnalyzerForProject(
     entry: []const u8,
     sqlite_path: ?[]const u8,
 ) !precompile.CheckResult {
-    const system_for_check = try cfg.resolvedSystemPath(allocator);
-    defer if (system_for_check) |path| allocator.free(path);
     const policy_source = try cfg.readPolicySource(allocator);
     defer if (policy_source) |source| allocator.free(source);
     return try precompile.runCheckOnlyWithOptions(allocator, entry, .{
         .sql_schema_path = sqlite_path,
-        .system_path = system_for_check,
         .policy_source = policy_source,
     });
 }
@@ -224,10 +205,8 @@ pub fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []c
     if (check.verify_errors > 0) std.debug.print("{s}verify   {d} error(s)\n", .{ prefix, check.verify_errors });
     if (check.flow_errors > 0) std.debug.print("{s}flow     {d} error(s)\n", .{ prefix, check.flow_errors });
     if (check.policy_errors > 0) std.debug.print("{s}policy   {d} error(s)\n", .{ prefix, check.policy_errors });
-    const declared_errors = check.classificationErrors();
-    if (declared_errors > 0) std.debug.print("{s}declared {d} required classification(s) never seen\n", .{ prefix, declared_errors });
     const spec_errors = check.totalErrors() -|
-        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors + declared_errors);
+        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors);
     if (spec_errors > 0) std.debug.print("{s}spec     {d} error(s)\n", .{ prefix, spec_errors });
 }
 

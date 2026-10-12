@@ -13,7 +13,6 @@ test_filters: []const []const u8,
 perf_histogram_enabled: bool,
 strip_enabled: bool,
 precompile: PrecompileOptions,
-git_commit_sha: ?[]const u8,
 
 zts_dep: *std.Build.Dependency,
 zts_mod: *std.Build.Module,
@@ -39,7 +38,6 @@ pub const PrecompileOptions = struct {
     contract_enabled: bool,
     sql_schema_path: ?[]const u8,
     policy_path: ?[]const u8,
-    system_path: ?[]const u8,
 };
 
 pub fn init(b: *std.Build) Context {
@@ -127,7 +125,6 @@ pub fn init(b: *std.Build) Context {
         .contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false,
         .sql_schema_path = b.option([]const u8, "sql-schema", "SQLite schema snapshot (.sqlite) or schema SQL file for zttp:sql validation"),
         .policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers"),
-        .system_path = b.option([]const u8, "system", "System definition file for cross-handler contract linking"),
     };
 
     // Consumer acceptance kernel. Each function enables runtime safety with
@@ -170,11 +167,6 @@ pub fn init(b: *std.Build) Context {
         .perf_histogram_enabled = perf_histogram_enabled,
         .strip_enabled = strip_enabled,
         .precompile = precompile,
-        // Capture git commit for reproducible build metadata. Failure to read
-        // git is non-fatal: the precompile binary falls back to the sentinel
-        // "unknown", so tarball builds and CI environments without a .git
-        // directory still produce a well-formed `__GIT_COMMIT__` substitution.
-        .git_commit_sha = detectGitCommit(b),
         .zts_dep = zts_dep,
         .zts_mod = zts_dep.module("zts"),
         .zts_host_mod = zts_host_dep.module("zts"),
@@ -230,26 +222,4 @@ pub fn attachEmbeddedHandlerStub(
             .{ .name = "zts", .module = zts_module },
         },
     });
-}
-
-/// Run `git rev-parse --short=12 HEAD` once at configure time so the
-/// precompile binary can stamp embedded handlers with a real commit hash.
-/// Returns null on any failure (missing git, detached worktree, snapshot
-/// tarball with no .git directory). The caller treats null as "fall back to
-/// the precompile sentinel" rather than failing the build.
-fn detectGitCommit(b: *std.Build) ?[]const u8 {
-    const result = std.process.run(b.allocator, b.graph.io, .{
-        .argv = &.{ "git", "rev-parse", "--short=12", "HEAD" },
-        .cwd = if (b.build_root.path) |p| .{ .path = p } else .inherit,
-    }) catch return null;
-    defer b.allocator.free(result.stdout);
-    defer b.allocator.free(result.stderr);
-
-    switch (result.term) {
-        .exited => |code| if (code != 0) return null,
-        else => return null,
-    }
-    const trimmed = std.mem.trim(u8, result.stdout, " \t\r\n");
-    if (trimmed.len == 0) return null;
-    return b.allocator.dupe(u8, trimmed) catch null;
 }

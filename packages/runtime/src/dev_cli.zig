@@ -44,8 +44,6 @@ test {
     _ = @import("build_command.zig");
     _ = @import("dev_command.zig");
     _ = @import("cli_help.zig");
-    _ = @import("workflow_queue_cli.zig");
-    _ = @import("durable_dead_runs_cli.zig");
     // cli_auth and verify_cli are likewise only reached via main's dispatch;
     // reference them so their tests (API-key store 0600 perms/masking, and the
     // Ed25519 verifier arg parsing incl. trust-key validation) actually run.
@@ -201,16 +199,6 @@ fn cmdServe(ctx: cli_help.Ctx) anyerror!void {
         std.debug.print("serve: {s}. Run `zttp serve --help` for usage.\n", .{@errorName(err)});
         std.process.exit(1);
     };
-    return;
-}
-
-fn cmdWorkflowQueue(ctx: cli_help.Ctx) anyerror!void {
-    try runtime_cli.workflowQueueCommand(ctx.allocator, ctx.args);
-    return;
-}
-
-fn cmdDurable(ctx: cli_help.Ctx) anyerror!void {
-    try runtime_cli.durableCommand(ctx.allocator, ctx.args);
     return;
 }
 
@@ -407,11 +395,9 @@ fn cmdHelp(ctx: cli_help.Ctx) anyerror!void {
 
 const commands = [_]cli_help.Command{
     .{ .name = "auth", .run = cmdAuth, .section = .credentials, .args = "[deepseek|status|revoke]", .blurb = "Manage cloud-provider keys for expert" },
-    .{ .name = "init", .run = cmdInit, .section = .core, .args = "<name> [--template basic|api|htmx]", .blurb = "Create a project" },
+    .{ .name = "init", .run = cmdInit, .section = .core, .args = "<name> [--template basic|api]", .blurb = "Create a project" },
     .{ .name = "dev", .run = cmdDev, .section = .core, .args = "[handler.ts]", .blurb = "Run locally, watch and prove on save" },
     .{ .name = "serve", .run = cmdServe, .section = .run_and_inspect, .args = "[handler.ts]", .blurb = "Run a handler without watch or proof" },
-    .{ .name = "workflow-queue", .run = cmdWorkflowQueue, .section = .run_and_inspect, .args = "[list|show|replay|discard] --durable <DIR>", .blurb = "Inspect workflow queue dead letters" },
-    .{ .name = "durable", .run = cmdDurable, .section = .run_and_inspect, .args = "dead-runs [list|show|replay|discard] --durable <DIR>", .blurb = "Inspect durable runs that permanently failed recovery" },
     .{ .name = "doctor", .run = cmdDoctor, .section = .run_and_inspect, .args = "[path]", .blurb = "Check project readiness" },
     .{ .name = "test", .run = cmdTest, .section = .core, .args = "[tests.jsonl]", .blurb = "Run handler tests" },
     .{ .name = "compile", .run = cmdCompile, .section = .package, .args = "<handler.ts> -o <bin>", .blurb = "Build a binary from an explicit path" },

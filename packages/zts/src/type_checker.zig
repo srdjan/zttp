@@ -25,7 +25,6 @@ const type_pool_mod = @import("type_pool.zig");
 const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
 const abi_types = @import("abi_types.zig");
-const service_types_mod = @import("zts-contracts").service_types;
 const match_analysis_mod = @import("match_analysis.zig");
 const ir_json_literal = @import("ir_json_literal.zig");
 
@@ -38,7 +37,6 @@ const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const null_type_idx = type_pool_mod.null_type_idx;
 const TypeEnv = type_env_mod.TypeEnv;
-const ServiceTypeContext = service_types_mod.ServiceTypeContext;
 
 /// Max union members tracked during type inference (member access, return types, etc.).
 /// The width of this file's stack scratch buffers when collecting branch types
@@ -130,7 +128,6 @@ pub const TypeChecker = struct {
     ir_view: IrView,
     atoms: ?*context.AtomTable,
     env: *TypeEnv,
-    service_type_context: ?*const ServiceTypeContext,
     diagnostics: std.ArrayListUnmanaged(Diagnostic),
     compiled_schemas: std.ArrayListUnmanaged(CompiledSchemaType),
 
@@ -194,14 +191,12 @@ pub const TypeChecker = struct {
         ir_view: IrView,
         atoms: ?*context.AtomTable,
         env: *TypeEnv,
-        service_type_context: ?*const ServiceTypeContext,
     ) TypeChecker {
         return .{
             .allocator = allocator,
             .ir_view = ir_view,
             .atoms = atoms,
             .env = env,
-            .service_type_context = service_type_context,
             .diagnostics = .empty,
             .compiled_schemas = .empty,
             .binding_types = .empty,
@@ -728,18 +723,10 @@ pub const TypeChecker = struct {
                     if (self.current_return_type != null_type_idx) {
                         const inferred = self.inferType(ret_val);
                         if (inferred != null_type_idx and !self.env.isAssignableTo(inferred, self.current_return_type)) {
-                            // Point at the line the author has to edit. When the
-                            // returned call takes its type from a callback -
-                            // `run(key, cb)` is `<T>(string, () => T) -> T` -
-                            // this statement's type IS the callback's, so the
-                            // mismatch is real here but the fix is inside the
-                            // callback. Reporting the outer line sent a model
-                            // rewriting it for four roundtrips.
-                            const reported = self.callbackReturnNode(ret_val) orelse node;
                             self.addDiagnostic(.{
                                 .severity = .err,
                                 .kind = .return_type_mismatch,
-                                .node = reported,
+                                .node = node,
                                 .message = "return type does not match declared return type",
                                 .help = "the enclosing function's declared return type is what this value must match; " ++
                                     "when it comes back from a virtual-module call, wrap it rather than returning it directly",
@@ -1294,251 +1281,6 @@ pub const TypeChecker = struct {
             .{ .name_start = err_name.start, .name_len = err_name.len, .type_idx = pool.idx_string, .optional = true },
             .{ .name_start = errs_name.start, .name_len = errs_name.len, .type_idx = pool.idx_unknown, .optional = true },
         });
-    }
-
-    const ParsedServiceRoute = @import("system_linker.zig").ParsedServiceRoute;
-    const parseServiceRoute = @import("system_linker.zig").parseServiceRoute;
-
-    const ServiceCallInitInfo = struct {
-        path_params: std.ArrayList([]const u8) = .empty,
-        query_keys: std.ArrayList([]const u8) = .empty,
-        header_keys: std.ArrayList([]const u8) = .empty,
-        path_params_dynamic: bool = false,
-        query_dynamic: bool = false,
-        header_dynamic: bool = false,
-        has_body: bool = false,
-        body_dynamic: bool = false,
-
-        fn deinit(self: *ServiceCallInitInfo, allocator: std.mem.Allocator) void {
-            self.path_params.deinit(allocator);
-            self.query_keys.deinit(allocator);
-            self.header_keys.deinit(allocator);
-        }
-    };
-
-    fn extractServiceObjectKeys(
-        self: *const TypeChecker,
-        node_idx: NodeIndex,
-        target: *std.ArrayList([]const u8),
-        dynamic_flag: *bool,
-    ) void {
-        const tag = self.ir_view.getTag(node_idx) orelse {
-            dynamic_flag.* = true;
-            return;
-        };
-        if (tag != .object_literal) {
-            dynamic_flag.* = true;
-            return;
-        }
-
-        const obj = self.ir_view.getObject(node_idx) orelse {
-            dynamic_flag.* = true;
-            return;
-        };
-        var i: u16 = 0;
-        while (i < obj.properties_count) : (i += 1) {
-            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-            const key = self.getObjectPropertyKey(prop.key) orelse {
-                dynamic_flag.* = true;
-                continue;
-            };
-            target.append(self.allocator, key) catch @constCast(self).markAllocationFailure();
-        }
-    }
-
-    fn extractServiceCallInitInfo(self: *const TypeChecker, call: Node.CallExpr) ServiceCallInitInfo {
-        var info = ServiceCallInitInfo{};
-        if (call.args_count <= 2) return info;
-
-        const init_idx = self.ir_view.getListIndex(call.args_start, 2);
-        const tag = self.ir_view.getTag(init_idx) orelse {
-            info.path_params_dynamic = true;
-            info.query_dynamic = true;
-            info.header_dynamic = true;
-            info.body_dynamic = true;
-            return info;
-        };
-        if (tag == .lit_null or tag == .lit_undefined) return info;
-        if (tag != .object_literal) {
-            info.path_params_dynamic = true;
-            info.query_dynamic = true;
-            info.header_dynamic = true;
-            info.body_dynamic = true;
-            return info;
-        }
-
-        const obj = self.ir_view.getObject(init_idx) orelse return info;
-        var i: u16 = 0;
-        while (i < obj.properties_count) : (i += 1) {
-            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-            const key = self.getObjectPropertyKey(prop.key) orelse continue;
-
-            if (std.mem.eql(u8, key, "params")) {
-                self.extractServiceObjectKeys(prop.value, &info.path_params, &info.path_params_dynamic);
-            } else if (std.mem.eql(u8, key, "query")) {
-                self.extractServiceObjectKeys(prop.value, &info.query_keys, &info.query_dynamic);
-            } else if (std.mem.eql(u8, key, "headers")) {
-                self.extractServiceObjectKeys(prop.value, &info.header_keys, &info.header_dynamic);
-            } else if (std.mem.eql(u8, key, "body")) {
-                const body_tag = self.ir_view.getTag(prop.value) orelse {
-                    info.has_body = true;
-                    info.body_dynamic = true;
-                    continue;
-                };
-                if (body_tag == .lit_null or body_tag == .lit_undefined) continue;
-                info.has_body = true;
-                if (body_tag != .lit_string and body_tag != .object_literal and body_tag != .array_literal) {
-                    info.body_dynamic = true;
-                }
-            }
-        }
-        return info;
-    }
-
-    const containsString = json_utils.containsString;
-
-    fn addAllocatedDiagnostic(
-        self: *TypeChecker,
-        kind: DiagnosticKind,
-        node: NodeIndex,
-        comptime fmt: []const u8,
-        args: anytype,
-    ) void {
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch {
-            self.markAllocationFailure();
-            return;
-        };
-        self.addDiagnostic(.{
-            .severity = .err,
-            .kind = kind,
-            .node = node,
-            .message = msg,
-            .help = null,
-            .allocated = true,
-        });
-    }
-
-    fn validateServiceCallAgainstRoute(
-        self: *TypeChecker,
-        node: NodeIndex,
-        call: Node.CallExpr,
-        route: *const service_types_mod.RouteInfo,
-    ) void {
-        var init_info = self.extractServiceCallInitInfo(call);
-        defer init_info.deinit(self.allocator);
-
-        for (route.required_path_params) |name| {
-            if (init_info.path_params_dynamic) {
-                self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove path param '{s}'", .{name});
-                return;
-            }
-            if (!containsString(init_info.path_params.items, name)) {
-                self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing path param '{s}'", .{name});
-                return;
-            }
-        }
-
-        if (!route.request_dynamic) {
-            for (route.required_query_params) |name| {
-                if (init_info.query_dynamic) {
-                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove query param '{s}'", .{name});
-                    return;
-                }
-                if (!containsString(init_info.query_keys.items, name)) {
-                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing query param '{s}'", .{name});
-                    return;
-                }
-            }
-
-            for (route.required_header_params) |name| {
-                if (init_info.header_dynamic) {
-                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove header '{s}'", .{name});
-                    return;
-                }
-                if (!containsString(init_info.header_keys.items, name)) {
-                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing header '{s}'", .{name});
-                    return;
-                }
-            }
-
-            if (route.requires_body) {
-                if (init_info.body_dynamic) {
-                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall cannot prove request body presence", .{});
-                    return;
-                }
-                if (!init_info.has_body) {
-                    self.addAllocatedDiagnostic(.arg_type_mismatch, node, "serviceCall is missing required request body", .{});
-                    return;
-                }
-            }
-        }
-    }
-
-    fn buildServiceResponseMember(
-        self: *const TypeChecker,
-        response: service_types_mod.ResponseVariant,
-    ) TypeIndex {
-        const pool = self.env.pool;
-        const status_name = pool.addName(self.allocator, "status");
-        const ok_name = pool.addName(self.allocator, "ok");
-        const json_name = pool.addName(self.allocator, "json");
-        const text_name = pool.addName(self.allocator, "text");
-        const headers_name = pool.addName(self.allocator, "headers");
-
-        const status_int: i16 = @intCast(@min(response.status, std.math.maxInt(i16)));
-        const status_type = pool.addLiteralNumber(self.allocator, status_int);
-        const ok_type = pool.addLiteralBool(self.allocator, response.status >= 200 and response.status < 300);
-        const json_return_type = blk: {
-            if (response.dynamic) break :blk pool.idx_unknown;
-            if (response.content_type) |content_type| {
-                if (!std.mem.startsWith(u8, content_type, "application/json")) break :blk pool.idx_unknown;
-            } else {
-                break :blk pool.idx_unknown;
-            }
-            if (response.schema_json) |schema_json| {
-                break :blk @constCast(self).schemaJsonToType(schema_json) catch {
-                    @constCast(self).markAllocationFailure();
-                    break :blk pool.idx_unknown;
-                };
-            }
-            break :blk pool.idx_unknown;
-        };
-        const json_fn = pool.addFunction(self.allocator, &.{}, json_return_type);
-        const text_fn = pool.addFunction(self.allocator, &.{}, pool.idx_string);
-
-        return pool.addRecord(self.allocator, &.{
-            .{ .name_start = status_name.start, .name_len = status_name.len, .type_idx = status_type, .optional = false },
-            .{ .name_start = ok_name.start, .name_len = ok_name.len, .type_idx = ok_type, .optional = false },
-            .{ .name_start = json_name.start, .name_len = json_name.len, .type_idx = json_fn, .optional = false },
-            .{ .name_start = text_name.start, .name_len = text_name.len, .type_idx = text_fn, .optional = false },
-            .{ .name_start = headers_name.start, .name_len = headers_name.len, .type_idx = pool.idx_unknown, .optional = false },
-        });
-    }
-
-    fn inferServiceCallType(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
-        const service_context = self.service_type_context orelse return null_type_idx;
-        if (call.args_count < 2) return null_type_idx;
-
-        const service_node = self.ir_view.getListIndex(call.args_start, 0);
-        const route_node = self.ir_view.getListIndex(call.args_start, 1);
-        const service_name = self.getLiteralString(service_node) orelse return null_type_idx;
-        const route_pattern = self.getLiteralString(route_node) orelse return null_type_idx;
-        const parsed = parseServiceRoute(route_pattern) orelse return null_type_idx;
-        const route = service_context.lookupRoute(service_name, parsed.method, parsed.path) orelse return null_type_idx;
-        if (route.responses.len == 0) return null_type_idx;
-
-        var member_types: [MAX_UNION_MEMBERS]TypeIndex = undefined;
-        var count: usize = 0;
-        for (route.responses) |response| {
-            if (count >= member_types.len) break;
-            member_types[count] = self.buildServiceResponseMember(response);
-            count += 1;
-        }
-        if (count == 0) return null_type_idx;
-        if (count == 1) return member_types[0];
-        return self.env.pool.addUnion(self.allocator, member_types[0..count]);
     }
 
     // -------------------------------------------------------------------
@@ -2497,7 +2239,7 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
 
         return switch (bin.op) {
-            // Loose equality belongs only to the comptime expression profile.
+            // Loose equality belongs only to the internal kernel expression profile.
             // Fail closed if such an IR node reaches normal type analysis.
             .loose_eq, .loose_neq => null_type_idx,
             .strict_eq, .strict_neq, .lt, .lte, .gt, .gte => pool.idx_boolean,
@@ -2679,61 +2421,6 @@ pub const TypeChecker = struct {
             if (param.type_idx != first_param.type_idx) return false;
         }
         return info.ret == first_info.ret;
-    }
-
-    /// The return inside a callback this call takes its type from, when there
-    /// is one.
-    ///
-    /// Only the location moves - never whether the diagnostic fires. A call
-    /// whose signature reads its return type from a callback argument
-    /// (`returns_from_param`, rendered as `<T>(.., () => T) -> T`) makes the
-    /// caller's return type equal to the callback's, so the statement that
-    /// mismatches and the statement that must change are different lines.
-    ///
-    /// Returns null for anything that is not a call whose declared return type
-    /// is read from a function argument, which leaves every other mismatch
-    /// reported exactly where it was.
-    ///
-    /// Carrying a lambda is not that condition. `mapResult(r, (v) => ...)`
-    /// declares `.returns = .result`, so its mismatch is at the outer return
-    /// and an edit inside the callback cannot fix it. Reading only the argument
-    /// tags relocated those too - the same wrong-attribution defect this
-    /// function exists to remove, for every higher-order helper.
-    fn callbackReturnNode(self: *const TypeChecker, expr: NodeIndex) ?NodeIndex {
-        if (self.ir_view.getTag(expr) != .call) return null;
-        const call = self.ir_view.getCall(expr) orelse return null;
-
-        // `applyReturnFromParam` renders `returns_from_param` as a signature
-        // whose return type is a type variable and whose named argument is
-        // `() => T`. That shape, not the presence of a lambda, is what makes
-        // the caller's return type equal to the callback's.
-        if (self.ir_view.getTag(call.callee) != .identifier) return null;
-        const callee_binding = self.ir_view.getBinding(call.callee) orelse return null;
-        const sig = self.callableSignatureForBinding(callee_binding) orelse return null;
-        if (self.env.pool.getTag(sig.return_type) != .t_generic_param) return null;
-
-        for (0..call.args_count) |i| {
-            const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
-            const arg_tag = self.ir_view.getTag(arg) orelse continue;
-            if (arg_tag != .arrow_function and arg_tag != .function_expr) continue;
-            if (i >= sig.param_count) continue;
-            const param_type = sig.param_types[i];
-            if (self.env.pool.getTag(param_type) != .t_function) continue;
-            if (self.env.pool.getFunctionInfo(param_type).ret != sig.return_type) continue;
-            const func = self.ir_view.getFunction(arg) orelse continue;
-
-            // An expression-bodied arrow has no return statement; the body is
-            // the returned value, so that is the line to name.
-            const body_tag = self.ir_view.getTag(func.body) orelse continue;
-            if (body_tag != .block) return func.body;
-
-            const block = self.ir_view.getBlock(func.body) orelse continue;
-            for (0..block.stmts_count) |s| {
-                const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(s));
-                if (self.ir_view.getTag(stmt) == .return_stmt) return stmt;
-            }
-        }
-        return null;
     }
 
     fn inferMemberAccessType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
@@ -2941,18 +2628,12 @@ pub const TypeChecker = struct {
         // keeps checking. Inferring `unknown` instead would make every hole a
         // second diagnostic on top of the one that says the hole is there.
         if (std.mem.eql(u8, name, "hole")) return self.env.pool.idx_never;
-        if (std.mem.eql(u8, name, "serviceCall")) {
-            const service_call_type = self.inferServiceCallType(call);
-            if (service_call_type != null_type_idx) return service_call_type;
-        }
         if (std.mem.eql(u8, name, "validateJson") or
             std.mem.eql(u8, name, "validateObject") or
             std.mem.eql(u8, name, "coerceJson") or
             std.mem.eql(u8, name, "decodeJson") or
             std.mem.eql(u8, name, "decodeForm") or
-            std.mem.eql(u8, name, "decodeQuery") or
-            // zttp:tool (M4 T7): the schema name is argument 0 here too.
-            std.mem.eql(u8, name, "toolInput"))
+            std.mem.eql(u8, name, "decodeQuery"))
         {
             if (call.args_count > 0) {
                 const schema_node = self.ir_view.getListIndex(call.args_start, 0);
@@ -4125,23 +3806,6 @@ pub const TypeChecker = struct {
         else
             null;
 
-        if (unbound_name) |name| if (std.mem.eql(u8, name, "serviceCall")) {
-            const service_context = self.service_type_context orelse return;
-            if (call.args_count >= 2) {
-                const service_node = self.ir_view.getListIndex(call.args_start, 0);
-                const route_node = self.ir_view.getListIndex(call.args_start, 1);
-                if (self.getLiteralString(service_node)) |service_name| {
-                    if (self.getLiteralString(route_node)) |route_pattern| {
-                        if (parseServiceRoute(route_pattern)) |parsed| {
-                            if (service_context.lookupRoute(service_name, parsed.method, parsed.path)) |route| {
-                                self.validateServiceCallAgainstRoute(node, call, route);
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
         // A `zttp:*` export is identified by the import that names it, not by
         // its local name, so an alias and a same-named export of another module
         // each answer to their own declared parameter count. Every call supplies
@@ -4526,6 +4190,32 @@ fn bindingKey(binding: ir.BindingRef) u64 {
         @as(u64, binding.slot);
 }
 
+test "TypeChecker init and deinit" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    var node_list = ir.NodeList.init(allocator);
+    defer node_list.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+
+    _ = try node_list.add(.{
+        .tag = .program,
+        .loc = .{ .line = 1, .column = 1, .offset = 0 },
+        .data = .{ .binary = .{ .op = .add, .left = null_node, .right = null_node } },
+    });
+
+    const view = ir.IrView.fromNodeList(&node_list, &constants);
+    var checker = TypeChecker.init(allocator, view, null, &env);
+    defer checker.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), checker.diagnostics.items.len);
+}
+
 test "TypeChecker fails closed when binding analysis cannot allocate" {
     const allocator = std.testing.allocator;
     var parser = try @import("zts-engine").parser.JsParser.init(allocator, "let count = 1;");
@@ -4539,7 +4229,7 @@ test "TypeChecker fails closed when binding analysis cannot allocate" {
     defer env.deinit();
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var checker = TypeChecker.init(failing.allocator(), view, null, &env, null);
+    var checker = TypeChecker.init(failing.allocator(), view, null, &env);
     defer checker.deinit();
     try std.testing.expectError(error.OutOfMemory, checker.check(root));
 }
@@ -4557,7 +4247,7 @@ test "TypeChecker fails closed when diagnostic storage cannot allocate" {
     defer env.deinit();
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var checker = TypeChecker.init(failing.allocator(), view, null, &env, null);
+    var checker = TypeChecker.init(failing.allocator(), view, null, &env);
     defer checker.deinit();
     checker.addDiagnostic(.{
         .severity = .err,
@@ -4580,7 +4270,7 @@ test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    var checker = TypeChecker.init(allocator, view, null, &env);
     defer checker.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
@@ -4609,7 +4299,7 @@ test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    var checker = TypeChecker.init(allocator, view, null, &env);
     defer checker.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
@@ -4620,7 +4310,31 @@ test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
 }
 
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
-    try checkTypedSourceWithServiceContext(source, null, expect_errors, expect_warnings);
+    const allocator = std.testing.allocator;
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    defer checker.deinit();
+    const errors = try checker.check(root);
+    try std.testing.expectEqual(expect_errors, errors);
+    if (expect_warnings) |expected| {
+        var warnings: u32 = 0;
+        for (checker.getDiagnostics()) |diagnostic| {
+            if (diagnostic.severity == .warning) warnings += 1;
+        }
+        try std.testing.expectEqual(expected, warnings);
+    }
 }
 
 /// `checkTypedSource` plus the text of the diagnostic it expects. A count alone
@@ -4647,7 +4361,7 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
 
     const errors = try checker.check(root);
@@ -4686,7 +4400,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
     _ = try checker.check(root);
 
@@ -4757,7 +4471,7 @@ test "ternary join: never on one side is removed" {
     defer constants.deinit();
     const view = ir.IrView.fromNodeList(&node_list, &constants);
 
-    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    var checker = TypeChecker.init(allocator, view, null, &env);
     defer checker.deinit();
 
     // Step 1, both directions, plus the both-never case.
@@ -4988,7 +4702,7 @@ test "the join asks for structural identity, not the same pool index" {
     defer constants.deinit();
     const view = ir.IrView.fromNodeList(&node_list, &constants);
 
-    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    var checker = TypeChecker.init(allocator, view, null, &env);
     defer checker.deinit();
 
     // Step 2. Two branches that each build `{ id: string }` hold different
@@ -5066,193 +4780,6 @@ test "normalization does not drop a branded or obligation-carrying member" {
     try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(pool.addUnion(allocator, &.{ carried, pool.idx_string })).len);
 }
 
-fn checkTypedSourceWithServiceContext(
-    source: []const u8,
-    service_type_context: ?*const ServiceTypeContext,
-    expect_errors: u32,
-    expect_warnings: ?u32,
-) !void {
-    const allocator = std.testing.allocator;
-
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
-    defer parser.deinit();
-
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
-    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
-
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, service_type_context);
-    defer checker.deinit();
-
-    const errors = try checker.check(root);
-    try std.testing.expectEqual(expect_errors, errors);
-
-    if (expect_warnings) |w| {
-        var warning_count: u32 = 0;
-        for (checker.getDiagnostics()) |diag| {
-            if (diag.severity == .warning) warning_count += 1;
-        }
-        try std.testing.expectEqual(w, warning_count);
-    }
-}
-
-const RawTestResponse = struct {
-    status: u16,
-    content_type: ?[]const u8 = "application/json",
-    schema_json: ?[]const u8 = null,
-    dynamic: bool = false,
-};
-
-fn makeTestServiceContext(
-    allocator: std.mem.Allocator,
-    required_path_params: []const []const u8,
-    responses: []const RawTestResponse,
-) !ServiceTypeContext {
-    const routes = try allocator.alloc(service_types_mod.RouteInfo, 1);
-    errdefer allocator.free(routes);
-
-    const path_params = try allocator.alloc([]const u8, required_path_params.len);
-    errdefer allocator.free(path_params);
-    for (required_path_params, 0..) |name, i| {
-        path_params[i] = try allocator.dupe(u8, name);
-    }
-
-    const query_params = try allocator.alloc([]const u8, 0);
-    const header_params = try allocator.alloc([]const u8, 0);
-
-    const route_responses = try allocator.alloc(service_types_mod.ResponseVariant, responses.len);
-    errdefer allocator.free(route_responses);
-    for (responses, 0..) |response, i| {
-        route_responses[i] = .{
-            .status = response.status,
-            .content_type = if (response.content_type) |content_type|
-                try allocator.dupe(u8, content_type)
-            else
-                null,
-            .schema_json = if (response.schema_json) |schema_json|
-                try allocator.dupe(u8, schema_json)
-            else
-                null,
-            .dynamic = response.dynamic,
-        };
-    }
-
-    routes[0] = .{
-        .service_name = try allocator.dupe(u8, "users"),
-        .handler_path = try allocator.dupe(u8, "users.ts"),
-        .method = try allocator.dupe(u8, "GET"),
-        .path = try allocator.dupe(u8, "/api/users/:id"),
-        .required_path_params = path_params,
-        .required_query_params = query_params,
-        .required_header_params = header_params,
-        .request_dynamic = false,
-        .response_dynamic = false,
-        .requires_body = false,
-        .responses = route_responses,
-    };
-
-    return .{ .routes = routes };
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-test "TypeChecker init and deinit" {
-    const allocator = std.testing.allocator;
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-
-    // Create a minimal IR using NodeList
-    var node_list = ir.NodeList.init(allocator);
-    defer node_list.deinit();
-    var constants = ir.ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    // Add a program node with an empty block
-    _ = node_list.add(.{
-        .tag = .program,
-        .loc = .{ .line = 1, .column = 1, .offset = 0 },
-        .data = .{ .binary = .{ .op = .add, .left = null_node, .right = null_node } },
-    }) catch {};
-
-    const view = ir.IrView.fromNodeList(&node_list, &constants);
-
-    var checker = TypeChecker.init(allocator, view, null, &env, null);
-    defer checker.deinit();
-
-    try std.testing.expectEqual(@as(usize, 0), checker.diagnostics.items.len);
-}
-
-test "TypeChecker infers serviceCall json payload with system context" {
-    var service_context = try makeTestServiceContext(
-        std.testing.allocator,
-        &.{"id"},
-        &.{
-            .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}" },
-        },
-    );
-    defer service_context.deinit(std.testing.allocator);
-
-    try checkTypedSourceWithServiceContext(
-        \\const user = serviceCall("users", "GET /api/users/:id", {
-        \\  params: { id: "123" }
-        \\});
-        \\const status: number = user.status;
-        \\const payload = user.json();
-        \\const id: string = payload.id;
-    , &service_context, 0, 0);
-}
-
-test "TypeChecker rejects serviceCall missing required path param" {
-    var service_context = try makeTestServiceContext(
-        std.testing.allocator,
-        &.{"id"},
-        &.{
-            .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}" },
-        },
-    );
-    defer service_context.deinit(std.testing.allocator);
-
-    try checkTypedSourceWithServiceContext(
-        \\const user = serviceCall("users", "GET /api/users/:id", {});
-        \\const payload = user.json();
-    , &service_context, 1, 0);
-}
-
-test "TypeChecker requires narrowing before multi-status serviceCall json" {
-    var service_context = try makeTestServiceContext(
-        std.testing.allocator,
-        &.{"id"},
-        &.{
-            .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}" },
-            .{ .status = 404, .schema_json = "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}" },
-        },
-    );
-    defer service_context.deinit(std.testing.allocator);
-
-    try checkTypedSourceWithServiceContext(
-        \\const user = serviceCall("users", "GET /api/users/:id", {
-        \\  params: { id: "123" }
-        \\});
-        \\const payload = user.json();
-    , &service_context, 2, 0);
-}
-
 test "TypeChecker proves literal union match exhaustiveness" {
     try checkTypedSource(
         \\const value: "a" | "b" = "a";
@@ -5322,7 +4849,7 @@ fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_fol
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
     checker.strict_checker_follows = strict_follows;
     _ = try checker.check(root);
@@ -5733,14 +5260,6 @@ test "TypeChecker: user function aliases carry the function signature" {
     , 2, 0);
 }
 
-test "TypeChecker: genuine module calls retain module argument checking" {
-    try checkTypedSource(
-        \\import { request } from "zttp:queue";
-        \\request("worker", {});
-        \\request("worker");
-    , 1, 0);
-}
-
 test "TypeChecker: a function and an arrow on one line keep separate signatures" {
     // Annotations were filed under the line they sit on, so the arrow's
     // parameter merged into `bump`'s signature and `bump([1, 2])` was refused
@@ -5909,31 +5428,6 @@ test "TypeChecker: a module export is called with its declared arguments" {
         \\  return Response.text(sha256("a"));
         \\}
     , 0, 0);
-}
-
-test "TypeChecker: signalAt takes the payload its native reads" {
-    // The native reads `args[3]` as a payload and the shipped example passes
-    // four arguments, so the declaration has four parameters, three required.
-    try checkTypedSource(
-        \\import { signalAt } from "zttp:durable";
-        \\function handler(req: Request): Response {
-        \\  const a = signalAt("k", "n", 1);
-        \\  const b = signalAt("k", "n", 1, { ok: true });
-        \\  return Response.json({ a: a, b: b });
-        \\}
-    , 0, 0);
-    try checkTypedSourceSaying(
-        \\import { signalAt } from "zttp:durable";
-        \\function handler(req: Request): Response {
-        \\  return Response.json({ a: signalAt("k", "n", 1, {}, 5) });
-        \\}
-    , 1, "expected 4, got 5");
-    try checkTypedSourceSaying(
-        \\import { signalAt } from "zttp:durable";
-        \\function handler(req: Request): Response {
-        \\  return Response.json({ a: signalAt("k", "n") });
-        \\}
-    , 1, "expected 3, got 2");
 }
 
 test "TypeChecker: a call with exactly the declared arguments is accepted" {
@@ -6347,7 +5841,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
@@ -6493,7 +5987,7 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
     _ = try checker.check(root);
 
@@ -7226,109 +6720,6 @@ test "the request readers are typed, and their parameter is a Request" {
     );
 }
 
-test "the encodability rule generalizes to a module payload" {
-    // The same rule at a second site, which is the check that it is a rule
-    // rather than a special case for `Response.json`. A queue payload and a
-    // response body are serialized by the same encoder, so they answer the
-    // same question - and the diagnostic names which site asked it.
-    //
-    // `request` rather than `send`: two modules export a `send`, and
-    // `populateModuleTypes` keys its signature map by bare name, so
-    // `zttp:websocket.send` overwrites `zttp:queue.send` and a call to either
-    // is checked against the other's parameters. That collision is real and
-    // predates this rule; naming it here keeps the test measuring the rule.
-    try checkTypedSourceSaying(
-        \\import { request } from "zttp:queue";
-        \\import { encodeUtf8 } from "zttp:bytes";
-        \\function handler(req: Request): Response {
-        \\    const r = request("worker", { raw: encodeUtf8("hi") });
-        \\    return Response.json({ ok: r.ok });
-        \\}
-    ,
-        1,
-        "zttp:queue.request cannot encode this payload",
-    );
-
-    // The other half: an encodable payload passes, so the rule is usable
-    // rather than merely strict.
-    try checkTypedSource(
-        \\import { request } from "zttp:queue";
-        \\function handler(req: Request): Response {
-        \\    const r = request("worker", { id: "a", n: 1, flags: [true, false] });
-        \\    return Response.json({ ok: r.ok });
-        \\}
-    ,
-        0,
-        null,
-    );
-}
-
-test "the encodability rule follows the import, not the local spelling" {
-    // A bare-name lookup was wrong in both directions: an alias never matched,
-    // so the check was skipped under `import { request as publish }`; and a
-    // handler's own function of the same name did match, so a local was
-    // checked against a module export's declaration.
-    try checkTypedSourceSaying(
-        \\import { request as publish } from "zttp:queue";
-        \\import { encodeUtf8 } from "zttp:bytes";
-        \\function handler(req: Request): Response {
-        \\    const r = publish("jobs", { raw: encodeUtf8("x") });
-        \\    return Response.json({ ok: r.ok });
-        \\}
-    ,
-        1,
-        "zttp:queue.request cannot encode this payload",
-    );
-
-    // A local function that happens to share the name is not the export.
-    try checkTypedSource(
-        \\import { encodeUtf8 } from "zttp:bytes";
-        \\function request(target: string, payload: unknown): number {
-        \\    return 1;
-        \\}
-        \\function handler(req: Request): Response {
-        \\    return Response.json({ n: request("jobs", { raw: encodeUtf8("x") }) });
-        \\}
-    ,
-        0,
-        null,
-    );
-}
-
-test "a message id is not an actor name" {
-    // `ack(id)` and `send(target, payload)` both took a bare string, so the
-    // one confusion the queue ABI invites - settling a message with the actor
-    // name you just sent to - was unsayable in the types. `MessageId` is a
-    // brand over string, so a literal is refused.
-    try checkTypedSourceSaying(
-        \\import { ack } from "zttp:queue";
-        \\function handler(req: Request): Response {
-        \\    const done = ack("worker");
-        \\    return Response.json({ ok: done.ok });
-        \\}
-    ,
-        1,
-        "expected MessageId",
-    );
-
-    // The id a caller actually has comes out of a `Result` whose value types
-    // as nothing, so the checker admits it for want of information rather
-    // than for want of a brand. Recorded, because it is the half that does
-    // not hold yet and it needs phase 7's parameterized `Result`.
-    try checkTypedSource(
-        \\import { receive, ack } from "zttp:queue";
-        \\function handler(req: Request): Response {
-        \\    const r = receive("main");
-        \\    if (!r.ok) return Response.json({ ok: false });
-        \\    const done = ack(r.value.id);
-        \\    return Response.json({ ok: done.ok });
-        \\}
-    ,
-        0,
-        null,
-    );
-}
-
 test "Response.json refuses a payload JSON cannot carry" {
     // The failure exists today and has nowhere to go: `http.zig` calls
     // `valueToJsonString` with `try`, so a function-valued field throws, and
@@ -7743,63 +7134,6 @@ test "a predicate whose body calls a function installs no guard" {
     );
 }
 
-test "a return mismatch through a callback points at the callback's return" {
-    // Measured on workflow-queued-call, which never applied an edit in any of
-    // four recorded runs. `run(key, cb)` is typed `<T>(string, () => T) -> T`,
-    // so the outer return's type IS the callback's, and the diagnostic landed
-    // on the outer `return run(...)` line while the line the author has to edit
-    // is the callback's return. The model spent four roundtrips rewriting the
-    // line it was pointed at.
-    //
-    // The original repro used `return call(...)`, which stopped being a
-    // mismatch once `zttp:workflow.call` declared its real Response return.
-    // The attribution defect is independent of that case, so the repro is now
-    // a plain wrong-typed return rather than one that depends on a binding.
-    //
-    // Asserted on the reported line, not merely on the error count: the count
-    // was already right, and pointing at the wrong line is the whole defect.
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { run } from "zttp:durable";
-        \\export function handler(req: Request): Response {
-        \\  return run("k", () => {
-        \\    return "not a response";
-        \\  });
-        \\}
-    ;
-
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
-    defer parser.deinit();
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
-    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
-
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
-    defer checker.deinit();
-    _ = try checker.check(root);
-
-    var saw = false;
-    for (checker.getDiagnostics()) |diag| {
-        if (diag.kind != .return_type_mismatch) continue;
-        saw = true;
-        const loc = ir_view.getLoc(diag.node) orelse return error.TestExpectedLocation;
-        // Line 4 is the callback's return; line 3 is `return run(...)`.
-        try std.testing.expectEqual(@as(u32, 4), loc.line);
-        // And it must say what to do, not only that something is wrong.
-        try std.testing.expect(diag.help != null);
-    }
-    try std.testing.expect(saw);
-}
-
 test "a call that merely carries a callback keeps its mismatch at the outer return" {
     // The counterpart to the test above, and the boundary the relocation must
     // respect. `apply` declares `string`, not a type read from its argument, so
@@ -7833,7 +7167,7 @@ test "a call that merely carries a callback keeps its mismatch at the outer retu
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
     _ = try checker.check(root);
 

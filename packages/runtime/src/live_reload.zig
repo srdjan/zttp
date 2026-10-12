@@ -65,8 +65,6 @@ pub const LiveReloadConfig = struct {
     poll_interval_ms: i64 = 250,
     /// SQL schema path for contract extraction
     sql_schema_path: ?[]const u8 = null,
-    /// system.json path for service linking
-    system_path: ?[]const u8 = null,
     /// Capability policy resolved from the nearest zttp.json. Each candidate
     /// reload reads this path again so a policy edit takes effect immediately.
     policy_path: ?[]const u8 = null,
@@ -225,7 +223,6 @@ pub const LiveReloadState = struct {
             .{
                 .sql_schema_path = self.config.sql_schema_path,
                 .json_mode = true,
-                .system_path = self.config.system_path,
                 .skip_contract = skip_contract,
                 .policy_source = policy_source,
             },
@@ -256,14 +253,12 @@ pub const LiveReloadState = struct {
         const proof_trace_json = result.proof_trace_json;
         result.proof_trace_json = null;
         const failure_stage = firstFailingStage(&result);
-        const pinned_regressions = result.pinned_witness_regressions;
         result.deinit(self.allocator);
 
         return .{
             .contract = contract,
             .errors = errors,
             .failure_stage = failure_stage,
-            .pinned_regressions = pinned_regressions,
             .diagnostics = diagnostics,
             .proof_trace_json = proof_trace_json,
             .configured_policy = configured_policy,
@@ -274,7 +269,6 @@ pub const LiveReloadState = struct {
         contract: ?HandlerContract,
         errors: u32,
         failure_stage: []const u8,
-        pinned_regressions: usize,
         diagnostics: []Diagnostic,
         proof_trace_json: ?[]u8 = null,
         configured_policy: ?HandlerPolicy = null,
@@ -344,9 +338,6 @@ pub const LiveReloadState = struct {
             });
             printDiagnosticLines(analysis.diagnostics, new_code);
             printReload("Next: fix the {s} diagnostic above; the previous handler is still serving.\n", .{analysis.failure_stage});
-            if (analysis.pinned_regressions > 0) {
-                printReload("[witnesses] {d} pinned witness(es) re-fired - regression of a previously defended pattern.\n", .{analysis.pinned_regressions});
-            }
             return;
         }
 
@@ -354,10 +345,6 @@ pub const LiveReloadState = struct {
             std.fs.path.basename(self.handler_path),
             elapsed_ms,
         });
-
-        if (analysis.pinned_regressions > 0) {
-            printReload("[witnesses] {d} pinned witness(es) re-fired during analysis.\n", .{analysis.pinned_regressions});
-        }
 
         if (self.config.prove) {
             var new_contract = analysis.contract orelse {
@@ -381,13 +368,6 @@ pub const LiveReloadState = struct {
                         new_contract.deinit(self.allocator);
                         return;
                     }
-                }
-
-                if (new_contract.durable.used) {
-                    printProve("Handler uses durable execution. Live swap refused.\n", .{});
-                    printProve("Restart the server to apply changes.\n", .{});
-                    new_contract.deinit(self.allocator);
-                    return;
                 }
 
                 var diff = contract_diff.diffContracts(
@@ -1095,17 +1075,46 @@ test "a swap that would strand a guard is refused from either side" {
     try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, &contract, true));
 }
 
-test "a retired authority candidate cannot replace the serving generation" {
+test "every retired module candidate leaves the serving generation active" {
     const allocator = std.testing.allocator;
-    const path = try allocator.dupe(u8, "handler.ts");
-    var contract = zts.handler_contract.emptyContract(path);
-    defer contract.deinit(allocator);
-    try contract.modules.append(allocator, try allocator.dupe(u8, "zttp:tool"));
+    const retired = [_][]const u8{
+        "zttp:durable",
+        "zttp:workflow",
+        "zttp:queue",
+        "zttp:scope",
+        "zttp:io",
+        "zttp:service",
+        "zttp:ledger",
+        "zttp:tool",
+    };
+    for (retired) |module| {
+        var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+        defer contract.deinit(allocator);
+        try contract.modules.append(allocator, try allocator.dupe(u8, module));
+        // doSwap checks this result before it calls reloadHandler or rotates
+        // either retained code generation.
+        try std.testing.expectEqual(
+            SwapRefusal.candidate_uses_retired_authority,
+            swapRefusal(false, &contract, true),
+        );
+    }
+}
 
-    try std.testing.expectEqual(
-        SwapRefusal.candidate_uses_retired_authority,
-        swapRefusal(false, &contract, true),
-    );
+test "retired contract obligations cannot reach the live reload pool" {
+    const allocator = std.testing.allocator;
+    const contracts = [_][]const u8{
+        "{\"modules\":[],\"durable\":{\"used\":true}}",
+        "{\"modules\":[],\"scope\":{\"used\":true}}",
+        "{\"modules\":[],\"serviceCalls\":[{}]}",
+        "{\"modules\":[],\"workflowCalls\":[{}]}",
+        "{\"modules\":[],\"sagas\":[{}]}",
+    };
+    for (contracts) |json| {
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            zts.handler_contract.parseFromJson(allocator, json),
+        );
+    }
 }
 
 test "live reload builds a contract in every mode" {

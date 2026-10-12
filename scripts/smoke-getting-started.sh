@@ -19,7 +19,6 @@ DEPLOY_PORT=$((DEV_PORT + 1))
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zttp-getting-started.XXXXXX")
 APP_NAME="my-app"
 APP_DIR="$TMP_DIR/$APP_NAME"
-HTMX_DIR="$TMP_DIR/htmx-app"
 
 cleanup() {
     pkill -f "zttp.*--port $DEV_PORT" 2>/dev/null || true
@@ -97,10 +96,10 @@ deploy_body=$(wait_for_http "http://127.0.0.1:$DEPLOY_PORT/health" 25) || fail "
 printf '%s' "$deploy_body" | grep -q '"ok":true' || fail "unexpected deploy artifact body: $deploy_body"
 stop_bg "$DEPLOY_PID" "$APP_DIR/.zttp/deploy/$APP_NAME"
 
-step "htmx scaffold uses tsx"
-(cd "$TMP_DIR" && "$ZTTP" init htmx-app --template htmx >/dev/null) || fail "init htmx"
-[ -f "$HTMX_DIR/src/handler.tsx" ] || fail "htmx missing src/handler.tsx"
-[ ! -f "$HTMX_DIR/src/handler.ts" ] || fail "htmx should not write src/handler.ts"
-(cd "$HTMX_DIR" && "$ZTTP" test >/dev/null) || fail "htmx test"
+step "retired htmx scaffold refuses without creating a project"
+if (cd "$TMP_DIR" && "$ZTTP" init htmx-app --template htmx >/dev/null 2>&1); then
+    fail "init accepted the retired htmx template"
+fi
+[ ! -e "$TMP_DIR/htmx-app" ] || fail "refused template created a project"
 
 step "PASS: getting started guide commands work"

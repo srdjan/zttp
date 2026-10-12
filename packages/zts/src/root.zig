@@ -92,7 +92,6 @@ pub const http = engine.http;
 pub const bytes = engine.bytes;
 pub const stripper = engine.stripper;
 pub const printer = engine.printer;
-pub const comptime_eval = engine.comptime_eval;
 pub const bytecode_cache = engine.bytecode_cache;
 pub const bytecode_opt = engine.bytecode_opt;
 pub const arena = engine.arena;
@@ -106,7 +105,6 @@ pub const flow_checker = compiler.flow_checker;
 pub const path_generator = compiler.path_generator;
 pub const counterexample = compiler.counterexample;
 pub const proof_trace = compiler.proof_trace;
-pub const witness_corpus = compiler.witness_corpus;
 pub const repair_plan = compiler.repair_plan;
 pub const json_utils = base.json_utils;
 pub const behavior_canonical = compiler.behavior_canonical;
@@ -122,18 +120,10 @@ pub const identifier = base.identifier;
 /// The supported guard surface mirrored for the compiler.
 pub const guard_catalog = base.guard_catalog;
 pub const route_match = base.route_match;
-/// The closed tool schema subset, its canonical form, and the streaming
-/// validator (M4 T2 and T3).
-pub const tool_schema = base.tool_schema;
-/// The consumer declaration loader and its closed refusal set (M4 T4).
-pub const declaration = base.declaration;
-/// The capability profiles a declaration ceiling names (M4 T5b).
-pub const capability_profiles = base.capability_profiles;
 pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;
 pub const type_key = compiler.type_key;
 pub const type_env = compiler.type_env;
-pub const service_types = contracts.service_types;
 pub const type_checker = compiler.type_checker;
 pub const strict_checker = compiler.strict_checker;
 pub const effect_inference = compiler.effect_inference;
@@ -143,7 +133,6 @@ pub const trace = engine.trace;
 pub const file_io = engine.file_io;
 pub const module_slots = base.module_slots;
 pub const contract_diff = compiler.contract_diff;
-pub const system_linker = compiler.system_linker;
 pub const rule_registry = compiler.rule_registry;
 pub const idiom_registry = compiler.idiom_registry;
 pub const restriction_registry = compiler.restriction_registry;
@@ -225,7 +214,6 @@ pub const StripResult = stripper.StripResult;
 pub const StripOptions = stripper.StripOptions;
 pub const StripDiagnostic = stripper.StripDiagnostic;
 pub const StripDiagnosticKind = stripper.StripDiagnosticKind;
-pub const ComptimeEnv = stripper.ComptimeEnv;
 /// The text a diagnostic is rendered against, plus the mapping that moves a
 /// position from the stripped parse back into it. A consumer that reports a
 /// position to a human or to a repair needs this, not the stripped text.
@@ -237,13 +225,8 @@ pub const ParseError = parser.ParseError;
 pub const strip = stripper.strip;
 pub const SourceKind = engine.source_frontend.SourceKind;
 pub const PrepareSourceError = engine.source_frontend.PrepareError;
-pub const PrepareSourceDiagnostic = engine.source_frontend.PrepareDiagnostic;
-pub const PrepareSourceDiagnosticKind = engine.source_frontend.PrepareDiagnosticKind;
 pub const PreparedSource = engine.source_frontend.PreparedSource;
 pub const classifySourcePath = engine.source_frontend.classifyPath;
-pub const ComptimeEvaluator = comptime_eval.ComptimeEvaluator;
-pub const ComptimeValue = comptime_eval.ComptimeValue;
-pub const emitLiteral = comptime_eval.emitLiteral;
 
 /// Return the borrowed contents of a 1-based source line without its newline.
 /// Empty input and the empty line after a trailing newline are not lines.
@@ -297,7 +280,6 @@ pub const BytecodeVerifier = bytecode_verifier;
 pub const ContractBuilder = contract_builder.ContractBuilder;
 pub const HandlerContract = handler_contract.HandlerContract;
 pub const CoreProfile = handler_contract.CoreProfile;
-pub const SourceFrontendProfile = handler_contract.SourceFrontendProfile;
 pub const SourceIdentity = handler_contract.SourceIdentity;
 
 /// What a build proved about a handler: pure, read-only, stateless, retry-safe,
@@ -307,23 +289,6 @@ pub const SourceIdentity = handler_contract.SourceIdentity;
 /// reached `handler_contract` for it before it had a curated name.
 pub const HandlerProperties = handler_contract.HandlerProperties;
 
-/// The HS256 bearer verifier a tool handler's runtime runs before any JS value
-/// exists (M4 T5 design note, section 4). One function and its closed refusal
-/// enum; the caller supplies the HMAC and the clock, so nothing here reaches a
-/// capability.
-pub const Hs256 = struct {
-    pub const verify = engine.jwt_auth.verifyHs256;
-    pub const Mac = engine.jwt_auth.Hs256Mac;
-    pub const MacError = engine.jwt_auth.MacError;
-    pub const VerifyError = engine.jwt_auth.VerifyError;
-    pub const Refusal = engine.jwt_auth.VerifyRefusal;
-    pub const Claims = engine.jwt_auth.Claims;
-    pub const Result = engine.jwt_auth.VerifyResult;
-};
-
-/// The export grant of the tool a request is served for, as the engine reads
-/// it from the context (M4 T5 design note, section 6).
-pub const ToolGrant = context.ToolGrant;
 pub const ContractProof = struct {
     pub const Level = contract_diff.ProofLevel;
 
@@ -539,28 +504,7 @@ pub fn semanticsHash() [64]u8 {
     return compiler.semantics.semanticsHash();
 }
 
-/// The optional TSX source frontend. Its grammar hash includes the core grammar
-/// hash, so a lowered-source cache cannot survive a target-core change.
-pub const TsxFrontendCatalog = struct {
-    pub const profile_id = compiler.tsx_frontend_registry.profile_id;
-    pub const lowering_target = compiler.tsx_frontend_registry.lowering_target;
-    pub const Production = compiler.tsx_frontend_registry.Production;
-
-    pub fn productions() []const Production {
-        return &compiler.tsx_frontend_registry.productions;
-    }
-
-    pub fn findByName(name: []const u8) ?*const Production {
-        return compiler.tsx_frontend_registry.findByName(name);
-    }
-};
-
-pub fn tsxFrontendGrammarHash() [64]u8 {
-    return compiler.tsx_frontend_registry.grammarHash();
-}
-
-/// Exact compiler identity for a source path. `.ts` binds only the core;
-/// `.tsx` additionally binds the lowering frontend.
+/// Exact compiler identity for a source path.
 pub fn sourceIdentityForPath(path: []const u8) SourceIdentity {
     return compiler.source_identity.forPath(path);
 }
@@ -572,8 +516,6 @@ pub fn sourceCacheKey(source: []const u8, path: []const u8) bytecode_cache.Cache
         .core_profile_id = identity.core_profile.id(),
         .core_grammar_hash = identity.core_grammar_hash,
         .semantics_hash = identity.semantics_hash,
-        .frontend_profile_id = if (identity.frontend) |frontend| frontend.profile.id() else null,
-        .frontend_grammar_hash = if (identity.frontend) |frontend| frontend.grammar_hash else null,
     });
 }
 
@@ -589,29 +531,15 @@ test "stable GrammarCatalog exposes the productions and their enforcement points
     try std.testing.expectEqualStrings(&compiler.semantics.semanticsHash(), &semanticsHash());
 }
 
-test "stable TSX frontend catalog binds its grammar identity" {
-    try std.testing.expectEqualStrings("zts-tsx-1", TsxFrontendCatalog.profile_id);
-    try std.testing.expect(TsxFrontendCatalog.findByName("TsxElement") != null);
-    try std.testing.expectEqualStrings(
-        &compiler.tsx_frontend_registry.grammarHash(),
-        &tsxFrontendGrammarHash(),
-    );
-}
-
-test "stable source identity follows the source frontend" {
+test "stable source identity uses core grammar and semantics" {
     const ts = sourceIdentityForPath("handler.ts");
-    try std.testing.expect(ts.frontend == null);
     try std.testing.expect(ts.isStamped());
 
-    const tsx = sourceIdentityForPath("handler.tsx");
-    try std.testing.expectEqual(SourceFrontendProfile.tsx_1, tsx.frontend.?.profile);
-    try std.testing.expect(tsx.isStamped());
-
     const source = "export function handler() { return true; }";
-    try std.testing.expect(!std.mem.eql(
+    try std.testing.expect(std.mem.eql(
         u8,
         &sourceCacheKey(source, "handler.ts"),
-        &sourceCacheKey(source, "handler.tsx"),
+        &sourceCacheKey(source, "other.ts"),
     ));
 }
 
@@ -742,13 +670,6 @@ pub const analyzeSqlStatement = sql_analysis.analyzeStatement;
 
 /// Render a module semantics spec as TypeScript.
 pub const renderSpecTs = semantics_render.renderSpecTs;
-
-/// Parse a multi-handler system configuration from its on-disk form.
-pub const parseSystemConfig = system_linker.parseSystemConfig;
-
-/// How much of a linked system is proven. Qualified to keep it distinct from
-/// `ContractProof.Level`, which grades a single handler's contract.
-pub const SystemProofLevel = system_linker.ProofLevel;
 
 /// The registry of installed extension manifests. `Registry` alone is too
 /// generic for a surface this small, so the curated name says which registry.

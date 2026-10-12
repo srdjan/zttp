@@ -29,7 +29,7 @@ pub const propose_change_set: Definition = .{
         "\"description\":\"Ordered complete source-file replacements.\"," ++
         "\"items\":{\"type\":\"object\",\"additionalProperties\":false," ++
         "\"properties\":{" ++
-        "\"file\":{\"type\":\"string\",\"description\":\"Workspace-relative .ts or .tsx path.\"}," ++
+        "\"file\":{\"type\":\"string\",\"description\":\"Workspace-relative .ts path.\"}," ++
         "\"content\":{\"type\":\"string\",\"description\":\"Full source bytes after the change.\"}" ++
         "},\"required\":[\"file\",\"content\"]}}" ++
         "}," ++

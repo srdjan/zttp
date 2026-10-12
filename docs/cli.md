@@ -28,7 +28,7 @@ zttp <command> --help
 The default help shows the day-to-day workflow:
 
 ```bash
-zttp init <name> [--template basic|api|htmx]
+zttp init <name> [--template basic|api]
 zttp dev [handler.ts]
 zttp test [tests.jsonl]
 zttp expert
@@ -72,10 +72,6 @@ Common `dev` and `serve` flags:
 | `--replay <file>` | Replay recorded traces. |
 | `--test <file>` | Run JSONL handler tests. |
 | `--sqlite <file>` | SQLite database for `zttp:sql`. |
-| `--durable <dir>` | Durable workflow oplog directory. |
-| `--system <file>` | Handler bundle manifest: the `zttp:service` HTTP registry and the `zttp:workflow` in-process sub-handler registry. An optional `entry` field names the bundle's single external HTTP entry point, validated by `zttp link`. Workflow startup fails if a local handler path is unreadable. |
-| `--workflow-queue` | Persist durable workflow `call`, `follow`, and `fanout` child dispatch through the workflow queue. Requires `--durable <dir>` and `--system <file>`. |
-| `--actor-queue` | Enable process-local in-memory mailboxes for `zttp:queue`. |
 | `--outbound-http` / `--outbound-host <host>` | Enable outbound HTTP. The host allowlist matches on host only, not port. |
 | `--outbound-timeout-ms <ms>` | Outbound fetch deadline in milliseconds (default 10000). Must be greater than 0. One budget covers the connect, the TLS handshake, and the exchange; name resolution is not bounded. Implies `--outbound-http`. |
 | `--outbound-max-response <size>` | Outbound response body cap (default 1m). Implies `--outbound-http`. |
@@ -113,9 +109,8 @@ planned to add this endpoint.
 ## Inspect The Project
 
 `zttp doctor` validates the project discovered from the current directory, a
-handler path, or a `zttp.json` path, and prints a checklist for the manifest,
-entry, capability policy, static directory, system file, test fixture, sqlite
-and durable settings, and outbound HTTP configuration:
+handler path, or a `zttp.json` path. It checks the manifest, entry, capability
+policy, static directory, test fixture, SQLite settings, and outbound HTTP configuration:
 
 ```bash
 zttp doctor
@@ -218,36 +213,6 @@ endpoint does not return the artifact, so the command reports provenance only
 and says so; its JSON carries `"assurance": "provenance_only"`. Proof and policy
 acceptance are established against the artifact, with `zttp proofs verify`.
 
-`zttp verify --json` includes durable workflow receipt fields when a build was
-attested with a workflow contract: `durableWorkflowProofLevel`,
-`durableWorkflowRetrySafe`, `durableWorkflowIdempotent`, and
-`durableWorkflowFaultCovered`.
-
-Workflow queue dead-letter commands:
-
-```bash
-zttp workflow-queue list --durable <dir>
-zttp workflow-queue show --durable <dir> <item-id>
-zttp workflow-queue replay --durable <dir> <item-id>
-zttp workflow-queue discard --durable <dir> <item-id>
-```
-
-These commands inspect the persisted queue used by `--workflow-queue`; they do
-not operate on the in-memory actor queue from `zttp:queue`.
-
-Durable-run dead-letter commands (a sibling surface: these inspect runs that
-permanently failed crash recovery, not queued child dispatch):
-
-```bash
-zttp durable dead-runs list --durable <dir>
-zttp durable dead-runs show --durable <dir> <id>
-zttp durable dead-runs replay --durable <dir> <id>
-zttp durable dead-runs discard --durable <dir> <id>
-```
-
-See [Durable Workflows](durable-workflows.md#durable-run-recovery-and-dead-letters)
-for the quarantine/restart/replay/discard semantics.
-
 Expert-session ledgers (`zttp` only; `zts ledger` prints a pointer and exits
 non-zero):
 
@@ -299,8 +264,6 @@ command registry:
 ```bash
 zttp check [handler.ts] [--json] [--contract] [--types]
 zttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
-zttp link <system.json>
-zttp rollout <old-system.json> <new-system.json>
 zttp edit-simulate [handler.ts] [--before old.ts]
 zttp gen-tests [handler.ts] [-o output.jsonl]
 zttp canonicalize <file> --json
@@ -363,7 +326,7 @@ as `default:` rather than `when _:`.
 
 | Code | Rule | Canonical form |
 |---|---|---|
-| ZTS602 | Dynamic capability access | A configured policy can cover computed env keys, egress endpoints, and cache namespaces as residual guards. The diagnostic names the guard kind, required section, assurance consequence, and `zttp check <handler.ts> --contract`. Computed SQL names, route paths, service names, and unguarded exports remain literal-only and explain why no policy edit applies. |
+| ZTS602 | Dynamic capability access | A configured policy can cover computed env keys, egress endpoints, and cache namespaces as residual guards. The diagnostic names the guard kind, required section, assurance consequence, and `zttp check <handler.ts> --contract`. Computed SQL names, route paths, and unguarded exports remain literal-only. |
 | ZTS604 | Avoidable `let` | Use `const` unless the binding is reassigned. |
 | ZTS605 | Dynamic computed property access | Use a typed field, a literal key, or narrow the object before indexing. |
 | ZTS608 | Reused arrow helper | Give reusable helpers named function declarations; keep arrows for callbacks. |
@@ -415,7 +378,7 @@ declaration prints as written - the formatter lays out code, not types.
 The formatter fails closed. A construct it does not cover leaves the file in
 the layout its author wrote, `normalize` says so on stderr, and `--write`
 declines rather than write bytes that claim a canonical form they do not have.
-JSX and TSX are the current refusal.
+`.jsx` and `.tsx` inputs refuse at the source boundary, so `normalize` does not accept them.
 
 Canonical code reduces the number of equivalent shapes the analyzer and the
 expert agent must handle. A handler with no ZTS6xx errors carries the

@@ -10,24 +10,9 @@ const allocFloat = h.allocFloat;
 /// When trace recording is active, the result is recorded as an I/O call
 /// so replay can reproduce the exact timestamp.
 /// When replay is active, the recorded timestamp is returned instead.
-/// When durable mode is active, replays from oplog or records with write-ahead.
 pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
-
-    // Durable mode: replay from oplog or execute and persist
-    if (ctx.getModuleState(trace_mod.DurableState, trace_mod.DURABLE_STATE_SLOT)) |durable| {
-        if (durable.replayNext("builtin", "Date.now")) |entry| {
-            return trace_mod.jsonToJSValue(ctx, entry.result_json);
-        }
-        // Live phase: get real time, persist, return
-        const ms = compat.realtimeNowMs() catch return value.JSValue.undefined_val;
-        const result = allocFloat(ctx, @floatFromInt(ms));
-        durable.persistIO("builtin", "Date.now", ctx, &.{}, result) catch |err| {
-            return trace_mod.throwDurablePersistenceError(ctx, err);
-        };
-        return result;
-    }
 
     // Replay mode: return recorded timestamp
     if (ctx.getModuleState(trace_mod.ReplayState, trace_mod.REPLAY_STATE_SLOT)) |state| {

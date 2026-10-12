@@ -31,9 +31,6 @@ pub const std_options: std.Options = .{
 const Fixture = struct {
     name: []const u8,
     source: []const u8,
-    /// Fixtures containing TSX are lowered through the same source frontend as
-    /// `.tsx` handlers before the core parser sees them.
-    jsx: bool = false,
 };
 
 const fixtures = [_]Fixture{
@@ -140,8 +137,8 @@ const fixtures = [_]Fixture{
 
     // The four fixtures above are plain functions, objects, arrays, and
     // for-of loops. The four below exist because that shape leaves whole
-    // front-end paths unexercised - JSX children and attributes, explicit text
-    // joins, import specifiers, and member/optional chains - so
+    // front-end paths unexercised - nested HTML calls, explicit text joins,
+    // import specifiers, and member/optional chains - so
     // parser work on those paths measured as exactly zero.
     .{
         .name = "explicit_text_joins",
@@ -190,14 +187,13 @@ const fixtures = [_]Fixture{
         ,
     },
     .{
-        .name = "jsx_component",
-        .jsx = true,
+        .name = "html_component",
         .source =
         \\function Row(props) {
-        \\  return <li className="row" id={props.name}>{props.name}: {props.score}</li>;
+        \\  return h("li", { className: "row", id: props.name }, props.name, ": ", props.score);
         \\}
         \\function Header(props) {
-        \\  return <h1 className="title">{props.text}</h1>;
+        \\  return h("h1", { className: "title" }, props.text);
         \\}
         \\function handler(req) {
         \\  const users = [
@@ -205,12 +201,12 @@ const fixtures = [_]Fixture{
         \\    { name: "bob", score: 20 },
         \\    { name: "carol", score: 30 },
         \\  ];
-        \\  const rows = users.map((u) => <Row name={u.name} score={u.score} />);
+        \\  const rows = users.map((u) => h(Row, { name: u.name, score: u.score }));
         \\  return Response.html(
-        \\    <div className="page">
-        \\      <Header text="scores" />
-        \\      <ul className="list">{rows}</ul>
-        \\    </div>
+        \\    renderToString(h("div", { className: "page" },
+        \\      h(Header, { text: "scores" }),
+        \\      h("ul", { className: "list" }, rows)
+        \\    ))
         \\  );
         \\}
         ,
@@ -290,7 +286,7 @@ const CompileStats = struct {
     bytecode_len: u64,
 };
 
-fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !CompileStats {
+fn compileOnce(backing: std.mem.Allocator, source: []const u8) !CompileStats {
     var parser_counting = CountingAlloc{ .backing = backing };
     var codegen_counting = CountingAlloc{ .backing = backing };
     const parser_alloc = parser_counting.allocator();
@@ -299,7 +295,7 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !Compi
     var prepared = try zq.PreparedSource.init(
         parser_alloc,
         source,
-        if (jsx) "benchmark.tsx" else "benchmark.ts",
+        "benchmark.ts",
         .{},
     );
     defer prepared.deinit();
@@ -411,7 +407,7 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result
     }.mk;
 
     // One warm compile to surface parse errors before timing.
-    const warm = compileOnce(allocator, fx.source, fx.jsx) catch |err| {
+    const warm = compileOnce(allocator, fx.source) catch |err| {
         return fail(fx, iterations, 0, 0, 0, 0, @errorName(err));
     };
 
@@ -423,7 +419,7 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result
     var total_cg_bytes: u64 = 0;
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
-        const s = compileOnce(allocator, fx.source, fx.jsx) catch |err| {
+        const s = compileOnce(allocator, fx.source) catch |err| {
             return fail(fx, iterations, total_bytes, total_cg_bytes, warm.ir_nodes, warm.bytecode_len, @errorName(err));
         };
         total_bytes += s.bytes;
@@ -508,7 +504,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // A fixture that stops parsing is a front-end regression, so exit non-zero
     // after reporting it. Without this the failure is only a line of text and
     // `zig build compile-bench` still succeeds, which would let a break on the
-    // JSX, template, import, or member-chain paths pass unnoticed.
+    // HTML, template, import, or member-chain paths pass unnoticed.
     for (results) |r| {
         if (!r.success) std.process.exit(1);
     }

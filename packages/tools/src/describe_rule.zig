@@ -217,7 +217,7 @@ const TypeCheckerRule = struct {
     description: []const u8,
     /// What to do about it. Optional because a description that already says
     /// the fix needs no second sentence - but a rule a model provably could not
-    /// act on needs one. ZTS204 is the measured case: workflow-queued-call
+    /// act on needs one. ZTS204 is a measured case:
     /// never applied an edit in four recorded runs, cycling on a mismatch whose
     /// diagnostic said only that it was wrong.
     help: ?[]const u8 = null,

@@ -15,7 +15,7 @@ const name = "pi_repair_plan";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "repair-plan",
-    .effect = .persist_agent_state,
+    .effect = .read_workspace,
     .context_policy = .exact,
     .model_exposure = .visible,
     .description =
@@ -91,25 +91,20 @@ pub fn execute(
     };
     defer allocator.free(source);
 
-    return planFromSource(allocator, source, args[0], args[1..], true);
+    return planFromSource(allocator, source, args[0], args[1..]);
 }
 
 /// Run handler verification + property-witness analysis over an in-memory
 /// source snapshot and return the typed repair-plan JSON. `rel_path` is the
-/// workspace-relative handler path used only to key the witness corpus; the
+/// workspace-relative handler path used for source preparation; the
 /// `source` bytes (not the file on disk at `rel_path`) are analyzed, so a
 /// draft that has not been written yet can still be planned. `goal_args` are
 /// goal name strings; an empty slice means the default supported goal set.
-/// `persist_witnesses` controls whether materialised witnesses are written to
-/// the on-disk corpus: the tool path persists, but the in-loop auto-repair
-/// feedback lane passes false so computing retry guidance stays side-effect
-/// free (no cwd-relative writes).
 pub fn planFromSource(
     allocator: std.mem.Allocator,
     source: []const u8,
     rel_path: []const u8,
     goal_args: []const []const u8,
-    persist_witnesses: bool,
 ) anyerror!registry_mod.ToolResult {
     var goals: std.ArrayListUnmanaged(counterexample.PropertyTag) = .empty;
     defer goals.deinit(allocator);
@@ -124,7 +119,7 @@ pub fn planFromSource(
         }
     }
 
-    var prepared = zts.PreparedSource.init(allocator, source, rel_path, .{ .comptime_env = .{} }) catch |e| {
+    var prepared = zts.PreparedSource.init(allocator, source, rel_path, .{}) catch |e| {
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": TypeScript strip failed: {s}\n", .{@errorName(e)});
     };
     defer prepared.deinit();
@@ -183,26 +178,10 @@ pub fn planFromSource(
     }
     try w.writeAll("],\"witnesses\":[");
 
-    // Persist materialised witnesses into the on-disk corpus. The corpus
-    // is keyed by the workspace-relative handler path (rel_path) so the
-    // same handler maps to the same directory across tool invocations.
-    // Failures here are non-fatal: the repair plan still surfaces, just
-    // without persistence.
-    const corpus_dir = if (persist_witnesses)
-        (zts.witness_corpus.corpusDir(allocator, rel_path) catch null)
-    else
-        null;
-    defer if (corpus_dir) |d| allocator.free(d);
-    if (corpus_dir) |d| {
-        zts.witness_corpus.ensureCorpusDir(allocator, d, rel_path) catch {};
-    }
-
     var first_witness = true;
     var witness_index: usize = 0;
     for (checker.getDiagnostics()) |diag| {
-        // Share the projection with the compiler's own witness persistence, so
-        // a repair plan and the on-disk corpus never disagree about what a
-        // diagnostic's witness contains.
+        // Use the shared diagnostic projection for counterexample generation.
         const projection = zts.DiagnosticProjection.projectFlowWitness(diag, ir_view) orelse continue;
         if (!goalRequested(goals.items, projection.property)) continue;
         var witness = zts.solveCounterexample(allocator, .{
@@ -214,13 +193,6 @@ pub fn planFromSource(
             .io_calls = projection.io_calls,
         }) catch continue;
         defer witness.deinit(allocator);
-
-        if (corpus_dir) |d| {
-            if (zts.witness_corpus.persist(allocator, d, witness)) |pres| {
-                var owned = pres;
-                owned.deinit(allocator);
-            } else |_| {}
-        }
 
         if (!first_witness) try w.writeByte(',');
         first_witness = false;
@@ -508,7 +480,7 @@ test "planFromSource plans repairs from an in-memory draft" {
         \\  return Response.json({ data: data });
         \\}
     ;
-    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{}, false);
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer result.deinit(testing.allocator);
     // The draft accesses result.value without checking result.ok: a failure
     // with a concrete check_result_before_value repair template.
@@ -526,26 +498,12 @@ test "planFromSource preserves a local optional binding name in its repair" {
         \\  return Response.json({ appName: appName });
         \\}
     ;
-    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{}, false);
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (appName === undefined)") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (value === undefined)") == null);
-}
-
-test "planFromSource prepares TSX before analysis" {
-    const source =
-        \\export function handler(req: Request): Response {
-        \\  const view = <div />;
-        \\  return Response.text("ok");
-        \\}
-    ;
-    var result = try planFromSource(std.testing.allocator, source, "handler.tsx", &.{}, false);
-    defer result.deinit(std.testing.allocator);
-
-    try std.testing.expect(std.mem.indexOf(u8, result.llm_text, "parse failed") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.llm_text, "\"policy_hash\"") != null);
 }
 
 test "an unreadable path is reported as the caller wrote it, not as an absolute path" {
@@ -571,7 +529,7 @@ test "an unreadable path is reported as the caller wrote it, not as an absolute 
     try testing.expect(std.mem.indexOf(u8, result.llm_text, tree.abs_path) == null);
 }
 
-test "a persisting plan reads the same from two different workspaces" {
+test "a repair plan reads the same from two different workspaces" {
     // The flow recorder captures this tool's result into a transcript and
     // replays it from a fresh directory. Any part of the output that depends on
     // where the run lives makes the replayed transcript differ from the
@@ -596,13 +554,13 @@ test "a persisting plan reads the same from two different workspaces" {
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
     try std.Io.Threaded.chdir(first_tree.abs_path);
-    var first = try planFromSource(testing.allocator, source, "handler.ts", &.{}, true);
+    var first = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer first.deinit(testing.allocator);
     const first_text = try testing.allocator.dupe(u8, first.llm_text);
     defer testing.allocator.free(first_text);
 
     try std.Io.Threaded.chdir(second_tree.abs_path);
-    var second = try planFromSource(testing.allocator, source, "handler.ts", &.{}, true);
+    var second = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer second.deinit(testing.allocator);
 
     try testing.expectEqualStrings(first_text, second.llm_text);

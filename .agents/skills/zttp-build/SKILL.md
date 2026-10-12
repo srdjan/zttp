@@ -21,9 +21,9 @@ zig build -Doptimize=ReleaseFast              # Release build
 ## Handler precompilation
 
 ```bash
-zig build -Dhandler=handler.jsx               # Precompile handler into zttp
-zig build -Dhandler=handler.jsx -Dverify      # Verify at compile time
-zig build -Dhandler=handler.jsx -Dcontract    # Emit contract.json
+zig build -Dhandler=handler.ts               # Precompile handler into zttp
+zig build -Dhandler=handler.ts -Dverify      # Verify at compile time
+zig build -Dhandler=handler.ts -Dcontract    # Emit contract.json
 ```
 
 ## Run

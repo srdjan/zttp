@@ -77,7 +77,6 @@ tools contract_diff
 # The routed-property census iterates the flow PropertyTag enum so a new
 # property cannot silently omit its direct and routed rejection probes.
 tools counterexample
-tools declaration
 tools file_io
 tools handler_contract
 tools handler_policy
@@ -92,11 +91,8 @@ tools property_diagnostics
 tools semantics
 tools semantics_check
 tools semantics_corpus
-tools service_types
 tools spec_discharge
 tools sqlite
-tools system_linker
-tools witness_corpus
 
 # pi
 pi contract_diff
@@ -108,7 +104,6 @@ pi flow_checker
 pi guard_catalog
 pi parser
 pi repair_plan
-pi witness_corpus
 
 # proof-review
 proof-review file_io

@@ -39,22 +39,13 @@ const ported = struct {
 // module invocation — they can't go through the SDK's handle-gated
 // setModuleState and stay on this side of the peer-package boundary.
 const sql_mod = @import("modules/data/sql.zig");
-const ledger_mod = @import("modules/data/ledger.zig");
-const service_mod = @import("modules/net/service.zig");
 const fetch_mod = @import("modules/net/fetch.zig");
-const tool_mod = @import("modules/http/tool.zig");
 
-// Coupled to zts internals: io installs Context-owned state read by fetchSync;
-// scope manipulates GC roots directly. durable is pending further work.
+// These modules use engine-owned values and context state.
 const collections_mod = @import("modules/data/collections.zig");
 const bytes_mod = @import("modules/data/bytes_mod.zig");
 const json_mod = @import("modules/data/json_mod.zig");
 const result_mod = @import("modules/data/result_mod.zig");
-const io_mod = @import("modules/workflow/io.zig");
-const scope_mod = @import("modules/workflow/scope.zig");
-const durable_mod = @import("modules/workflow/durable.zig");
-const workflow_mod = @import("modules/workflow/workflow.zig");
-const queue_mod = @import("modules/workflow/queue.zig");
 
 /// All in-tree virtual module bindings, in registration order.
 pub const builtins = [_]ModuleBinding{
@@ -70,12 +61,6 @@ pub const builtins = [_]ModuleBinding{
     json_mod.binding,
     result_mod.binding,
     sql_mod.binding,
-    ledger_mod.binding,
-    io_mod.binding,
-    scope_mod.binding,
-    durable_mod.binding,
-    workflow_mod.binding,
-    queue_mod.binding,
     ported.url,
     ported.id,
     ported.http,
@@ -83,9 +68,7 @@ pub const builtins = [_]ModuleBinding{
     ported.text,
     ported.time,
     ported.ratelimit,
-    service_mod.binding,
     fetch_mod.binding,
-    tool_mod.binding,
     ported.sse,
 };
 
@@ -114,12 +97,6 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:json", .module_path = "packages/zts/src/modules/data/json_mod.zig", .spec_path = "packages/modules/module-specs/data/json.json" },
     .{ .specifier = "zttp:result", .module_path = "packages/zts/src/modules/data/result_mod.zig", .spec_path = "packages/modules/module-specs/data/result.json" },
     .{ .specifier = "zttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/modules/module-specs/data/sql.json" },
-    .{ .specifier = "zttp:ledger", .module_path = "packages/modules/src/data/ledger.zig", .spec_path = "packages/modules/module-specs/data/ledger.json" },
-    .{ .specifier = "zttp:io", .module_path = "packages/zts/src/modules/workflow/io.zig", .spec_path = "packages/modules/module-specs/workflow/io.json" },
-    .{ .specifier = "zttp:scope", .module_path = "packages/zts/src/modules/workflow/scope.zig", .spec_path = "packages/modules/module-specs/workflow/scope.json" },
-    .{ .specifier = "zttp:durable", .module_path = "packages/zts/src/modules/workflow/durable.zig", .spec_path = "packages/modules/module-specs/workflow/durable.json" },
-    .{ .specifier = "zttp:workflow", .module_path = "packages/zts/src/modules/workflow/workflow.zig", .spec_path = "packages/modules/module-specs/workflow/workflow.json" },
-    .{ .specifier = "zttp:queue", .module_path = "packages/zts/src/modules/workflow/queue.zig", .spec_path = "packages/modules/module-specs/workflow/queue.json" },
     .{ .specifier = "zttp:url", .module_path = "packages/modules/src/http/url.zig", .spec_path = "packages/modules/module-specs/http/url.json" },
     .{ .specifier = "zttp:id", .module_path = "packages/modules/src/platform/id.zig", .spec_path = "packages/modules/module-specs/platform/id.json" },
     .{ .specifier = "zttp:http", .module_path = "packages/modules/src/http/http_mod.zig", .spec_path = "packages/modules/module-specs/http/http-mod.json" },
@@ -127,9 +104,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:text", .module_path = "packages/modules/src/platform/text.zig", .spec_path = "packages/modules/module-specs/platform/text.json" },
     .{ .specifier = "zttp:time", .module_path = "packages/modules/src/platform/time.zig", .spec_path = "packages/modules/module-specs/platform/time.json" },
     .{ .specifier = "zttp:ratelimit", .module_path = "packages/modules/src/data/ratelimit.zig", .spec_path = "packages/modules/module-specs/data/ratelimit.json" },
-    .{ .specifier = "zttp:service", .module_path = "packages/modules/src/net/service.zig", .spec_path = "packages/modules/module-specs/net/service.json" },
     .{ .specifier = "zttp:fetch", .module_path = "packages/modules/src/net/fetch.zig", .spec_path = "packages/modules/module-specs/net/fetch.json" },
-    .{ .specifier = "zttp:tool", .module_path = "packages/modules/src/http/tool.zig", .spec_path = "packages/modules/module-specs/http/tool.json" },
     .{ .specifier = "zttp:sse", .module_path = "packages/modules/src/net/sse.zig", .spec_path = "packages/modules/module-specs/net/sse.json" },
 };
 
@@ -213,7 +188,6 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zttp:cache") != null);
     try std.testing.expect(fromSpecifier("zttp:url") != null);
     try std.testing.expect(fromSpecifier("zttp:id") != null);
-    try std.testing.expect(fromSpecifier("zttp:queue") != null);
     try std.testing.expect(fromSpecifier("zttp:sse") != null);
     try std.testing.expect(fromSpecifier("zttp-ext:math") == null);
     try std.testing.expect(fromSpecifier("zttp:unknown") == null);
@@ -231,20 +205,6 @@ test "findExport finds known module export" {
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("zttp:crypto", result.?.binding.specifier);
     try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
-}
-
-test "zttp:io parallel/race return objects, not strings" {
-    // parallel always returns a JS array -> .object. race can return undefined
-    // (no-winner / response-build-failure path) -> .optional_object, so callers
-    // must narrow before use. Pins both copies (binding + io.json) against drift
-    // back to .string (and race against drift to non-optional .object).
-    const parallel = findExport("zttp:io", "parallel");
-    try std.testing.expect(parallel != null);
-    try std.testing.expectEqual(mb.ReturnKind.object, parallel.?.func.returns);
-
-    const race = findExport("zttp:io", "race");
-    try std.testing.expect(race != null);
-    try std.testing.expectEqual(mb.ReturnKind.optional_object, race.?.func.returns);
 }
 
 test "findFunction finds result-producing functions" {
@@ -285,17 +245,8 @@ test "failure_severity annotations on failable functions" {
     // cacheSet returns false on bad arguments, a clock error, or capacity
     // exceeded, and a failed write can leave an earlier value in place.
     try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("cacheSet").?.func.failure_severity);
-    // signal and signalAt return false when the target run does not exist.
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("signal").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("signalAt").?.func.failure_severity);
-
-    // Upstream: a non-2xx answer or refusal from a service the handler calls.
-    // callTool reports a tool failure inside a 2xx agent stream, so it is not
-    // critical.
+    // Upstream: a non-2xx answer from an external endpoint.
     try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("fetch").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("serviceCall").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("callTool").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("call").?.func.failure_severity);
 
     // None: functions that always succeed
     try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("sha256").?.func.failure_severity);
@@ -338,21 +289,8 @@ test "module capability annotations cover audited helper-enforced built-ins" {
     try std.testing.expect(bindingHasCapability(sql_binding, .sqlite));
     try std.testing.expect(bindingHasCapability(sql_binding, .policy_check));
 
-    const io_binding = fromSpecifier("zttp:io").?;
-    try std.testing.expect(bindingHasCapability(io_binding, .runtime_callback));
-
-    const durable_binding = fromSpecifier("zttp:durable").?;
-    try std.testing.expect(bindingHasCapability(durable_binding, .runtime_callback));
-
-    const queue_binding = fromSpecifier("zttp:queue").?;
-    try std.testing.expect(bindingHasCapability(queue_binding, .runtime_callback));
-
     const ratelimit_binding = fromSpecifier("zttp:ratelimit").?;
     try std.testing.expect(bindingHasCapability(ratelimit_binding, .clock));
-
-    const service_binding = fromSpecifier("zttp:service").?;
-    try std.testing.expect(bindingHasCapability(service_binding, .filesystem));
-    try std.testing.expect(bindingHasCapability(service_binding, .runtime_callback));
 
     const url_binding = fromSpecifier("zttp:url").?;
     try std.testing.expectEqual(@as(usize, 0), url_binding.required_capabilities.len);

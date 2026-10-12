@@ -203,7 +203,7 @@ test "single proposal becomes an ordered change set" {
         .id = "toolu_changes",
         .name = tool_name,
         .args_json =
-        \\{"changes":[{"file":"src/a.ts","content":"a"},{"file":"src/b.tsx","content":"b"}]}
+        \\{"changes":[{"file":"src/a.ts","content":"a"},{"file":"src/b.ts","content":"b"}]}
         ,
         .reasoning_content = "opaque continuation",
     }};
@@ -212,7 +212,7 @@ test "single proposal becomes an ordered change set" {
         .change_set => |set| {
             try testing.expectEqual(@as(usize, 2), set.len());
             try testing.expectEqualStrings("src/a.ts", set.at(0).file);
-            try testing.expectEqualStrings("src/b.tsx", set.at(1).file);
+            try testing.expectEqualStrings("src/b.ts", set.at(1).file);
             try testing.expectEqualStrings("opaque continuation", set.reasoning_content.?);
         },
         else => return error.TestFailed,

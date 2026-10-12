@@ -886,7 +886,7 @@ test "writeProofCardFrame: renders Counterexample block with suggestion and key 
         .column = 9,
         .snippet = "Date.now()",
         .handler_path = "src/handler.ts",
-        .suggestion = "remove Date.now() / Math.random() / performance.now() or move the call inside a `durable.step`.",
+        .suggestion = "remove Date.now() / Math.random() / performance.now() or pass a stable value into the handler.",
     };
 
     var aw = std.Io.Writer.Allocating.init(allocator);

@@ -8,7 +8,8 @@ Shared domain vocabulary for this project: entities, named processes, and status
 The single function a deployed program exposes, taking a request and returning a response. It is the unit the compiler proves: properties, capabilities, and declared obligations are all stated about a Handler, and helpers it calls are judged by what they contribute to it.
 
 ### Handler Contract
-The compiler-produced record of a Handler's discovered routes, effects, Capabilities, API shape, proof results, and integrity hashes. It is the shared boundary carried from analysis into serialization, attestation, runtime policy, and system linking.
+The compiler produces this record from a Handler. The record contains routes, effects, Capabilities, API shape, proof results, and integrity hashes.
+The record passes from analysis into serialization, attestation, and runtime policy.
 
 A decoded Handler Contract is input claimed by its serialized source, not a fresh proof created by decoding. Consumers must preserve that distinction when using its fields for verification or authority.
 
@@ -109,8 +110,7 @@ does not make either reference real.
 ### Proof-checked contract
 A handler contract an acceptance has promoted. Only this drives behavior that is
 unsound if a compiler claim is wrong - the proof response cache, unbounded
-runtime reuse, the result and optional safety shortcuts, the durable-workflow
-guarantees. Promotion copies only properties that cleared the active consumer
+runtime reuse, and the result and optional safety shortcuts. Promotion copies only properties that cleared the active consumer
 policy; unrelated or below-floor compiler claims remain false. Its counterpart,
 the integrity-bound contract, says only that the contract describes the artifact
 that was loaded, which makes its claims readable but checks none of them.
@@ -153,7 +153,7 @@ A position where a value leaves the program, such as a response body, a log, or 
 
 A Sink is judged only inside a function the analysis walks. A Sink in a function that no Analysis root reaches costs nothing, so the Property it should have cost is reported as held.
 
-A write that stays inside the platform - the durable store, a queue, the cache, SQL, or another handler - is not a Sink. Its readers, and the results of a call to another handler, carry the label that means "could not follow" instead, so a stored or returned value that comes back cannot help prove a Property.
+A write that stays inside the platform - the cache or SQL - is not a Sink. Its readers carry the label that means "could not follow". A stored value that returns cannot help prove a Property.
 
 ### Analysis root
 A function that a property analysis walks from its first statement as a place where request data enters user code: the Handler, and every function the Handler can dispatch to indirectly, such as each route of a literal routing table.
@@ -164,7 +164,7 @@ A Property holds for a program only when every Analysis root is walked. An indir
 A kind of authority a function reaches for: reading the clock, drawing randomness, reading configuration, writing to storage, talking to the network. Capabilities are declared per module export and enforced where the call happens, so authority is visible in the contract rather than discovered at runtime.
 
 ### Execution Context
-The isolated engine state that owns a JavaScript stack, globals, module state, runtime policy, the authorization for its current native-module call, and any structured-I/O collection scope active for that execution.
+The isolated engine state owns a JavaScript stack, globals, module state, runtime policy, and authorization for its current native-module call.
 
 ### Active module scope
 The module identity and declared Capabilities authorized for the native-module call currently executing inside one Execution Context.

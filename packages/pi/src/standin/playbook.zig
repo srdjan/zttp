@@ -275,7 +275,7 @@ fn renderTestGeneration(allocator: std.mem.Allocator, parsed: request.ParsedRequ
                 allocator,
                 "The requested JSONL test change was not proposed. The aggregate " ++
                     "`propose_change_set` transaction is source-only and accepts complete " ++
-                    "`.ts` or `.tsx` replacements; it cannot authorize a `.jsonl` write. " ++
+                    "`.ts` replacements; it cannot authorize a `.jsonl` write. " ++
                     "The existing test file was left unchanged. Add a dedicated " ++
                     "compiler-owned JSONL validator and transaction proof before enabling this write.",
             );
@@ -915,7 +915,7 @@ fn findFile(ask: []const u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, ask, " \t\r\n`\"'(),;");
     while (words.next()) |raw| {
         const word = std.mem.trimEnd(u8, raw, ".!?");
-        if (std.mem.endsWith(u8, word, ".ts") or std.mem.endsWith(u8, word, ".tsx")) {
+        if (std.mem.endsWith(u8, word, ".ts")) {
             return word;
         }
     }

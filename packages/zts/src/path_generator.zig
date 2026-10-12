@@ -646,10 +646,9 @@ pub const PathGenerator = struct {
             });
         }
 
-        // A failable import used as a value, not called: `const f = jwtVerify`,
-        // or `parallel([jwtVerify])`. The call it makes later has a callee the
-        // walk cannot resolve to the module, so no path records it. Imports are
-        // globals, so a local or a parameter never matches.
+        // A failable import used as a value can later be called through an
+        // alias. The walk cannot resolve that callee to the module, so no path
+        // records it. Imports are globals, so a local or parameter never matches.
         for (0..ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             if (ir_view.getTag(idx) != .identifier) continue;
@@ -2619,9 +2618,7 @@ pub const PathGenerator = struct {
             (std.mem.eql(u8, meta.func, "validateJson") or
                 std.mem.eql(u8, meta.func, "validateObject") or
                 std.mem.eql(u8, meta.func, "coerceJson"));
-        // zttp:tool (M4 T7) names its schema in argument 0 as well.
-        const tool_input = std.mem.eql(u8, meta.module, "tool") and std.mem.eql(u8, meta.func, "toolInput");
-        if (!validates and !tool_input) return null;
+        if (!validates) return null;
         if (call.args_count == 0) return null;
 
         const schema_name_node = self.ir_view.getListIndex(call.args_start, 0);
@@ -2835,9 +2832,7 @@ pub fn isOkRecordExport(allocator: std.mem.Allocator, func: *const mb.FunctionBi
 /// Whether the export is forked by `x.ok` on its result because it declares an
 /// `ok: boolean` response record. The rule reads the parsed return type, not the
 /// signature text: `returnsOkRecord` resolves it through the type environment.
-/// The caller applies it only to exports with a failure severity, so
-/// `zttp:workflow` `call`, which declares the same record with severity `.none`,
-/// adds no fork.
+/// The caller applies it only to exports with a failure severity.
 fn declaresOkRecord(allocator: std.mem.Allocator, func: *const mb.FunctionBinding) error{OutOfMemory}!bool {
     const sig = func.signature orelse return false;
     return returnsOkRecord(allocator, sig.returns);
@@ -4298,7 +4293,7 @@ test "returnsOkRecord reads the parsed return type, not the text" {
     }
 }
 
-test "fetch, fetchWithRetry, serviceCall, and workflow call fork on ok" {
+test "fetch and fetchWithRetry fork on ok" {
     const allocator = std.testing.allocator;
     const fetch_source =
         \\import { fetch } from "zttp:fetch";
@@ -4316,36 +4311,13 @@ test "fetch, fetchWithRetry, serviceCall, and workflow call fork on ok" {
         \\  return Response.text("ok");
         \\}
     ;
-    const workflow_source =
-        \\import { call } from "zttp:workflow";
-        \\function handler(req) {
-        \\  const res = call("worker", {});
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
-        \\  return Response.text("ok");
-        \\}
-    ;
-
-    const service_source =
-        \\import { serviceCall } from "zttp:service";
-        \\function handler(req) {
-        \\  const res = serviceCall("users", "GET /api/users", {});
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
-        \\  return Response.text("ok");
-        \\}
-    ;
-
     var fetch_fixture = try generateFixture(allocator, fetch_source);
     defer fetch_fixture.deinit();
     var retry_fixture = try generateFixture(allocator, retry_source);
     defer retry_fixture.deinit();
-    var workflow_fixture = try generateFixture(allocator, workflow_source);
-    defer workflow_fixture.deinit();
-    var service_fixture = try generateFixture(allocator, service_source);
-    defer service_fixture.deinit();
-
     // Each export declares the `ok` record with a severity: two paths, and each
     // carries one I/O constraint on its call.
-    for ([_]*PathGeneratorFixture{ &fetch_fixture, &retry_fixture, &workflow_fixture, &service_fixture }) |fixture| {
+    for ([_]*PathGeneratorFixture{ &fetch_fixture, &retry_fixture }) |fixture| {
         const tests = fixture.generator.getTests();
         try std.testing.expectEqual(@as(usize, 2), tests.len);
         for (tests) |test_case| try std.testing.expectEqual(@as(usize, 1), test_case.constraints.len);

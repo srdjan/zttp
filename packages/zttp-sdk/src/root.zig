@@ -54,8 +54,6 @@ pub const writeStderr = capability.writeStderr;
 pub const StateDeinitFn = context.StateDeinitFn;
 pub const getAllocator = context.getAllocator;
 pub const getModuleState = context.getModuleState;
-pub const activeToolInputSchema = context.activeToolInputSchema;
-pub const activeAgentPrompt = context.activeAgentPrompt;
 pub const setModuleState = context.setModuleState;
 
 pub const Sha256Digest = crypto.Sha256Digest;
@@ -108,7 +106,6 @@ pub const SqliteError = sqlite.SqliteError;
 pub const allowsSqlQuery = sqlite.allowsSqlQuery;
 pub const allowsSqlWrite = sqlite.allowsSqlWrite;
 pub const sqliteOpen = sqlite.sqliteOpen;
-pub const ledgerOpen = sqlite.ledgerOpen;
 pub const sqliteClose = sqlite.sqliteClose;
 pub const sqliteChanges = sqlite.sqliteChanges;
 pub const sqliteLastInsertRowId = sqlite.sqliteLastInsertRowId;

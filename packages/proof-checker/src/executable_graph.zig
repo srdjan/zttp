@@ -37,8 +37,7 @@ pub const MemberKind = enum(u16) {
     runtime_policy_bytes = 8,
     /// The core source profile identity.
     source_profile_core = 9,
-    /// The frontend source profile identity, when the handler used one.
-    source_profile_frontend = 10,
+    // Wire ordinal 10 is retired.
     /// The core grammar identity.
     core_grammar = 11,
     /// The semantics registry identity.
@@ -85,7 +84,6 @@ pub const MemberKind = enum(u16) {
             .constant_pool,
             .module_identity,
             .native_module_identity,
-            .source_profile_frontend,
             // Present only when the handler has guarded operations. An artifact
             // with none must not be forced to commit an empty plan, because an
             // empty plan and no plan are the same statement and one of them
@@ -400,7 +398,7 @@ test "semantics is required and the residual plan is optional" {
 test "member kind wire decoding is closed" {
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(0));
     try testing.expectEqual(@as(?MemberKind, .residual_plan), MemberKind.fromWire(16));
-    for ([_]u16{ 17, 18, 19, 20 }) |retired_kind| {
+    for ([_]u16{ 10, 17, 18, 19, 20 }) |retired_kind| {
         try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(retired_kind));
     }
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(21));

@@ -472,7 +472,7 @@ test "an empty tool result still sends a non-empty content field" {
     defer transcript.deinit(ta);
     try transcript.append(ta, .{ .tool_result = .{
         .tool_use_id = "call_2",
-        .tool_name = "zig_build_step",
+        .tool_name = "zts_expert_query",
         .ok = true,
         .llm_text = "",
     } });

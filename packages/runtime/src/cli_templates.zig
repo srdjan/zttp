@@ -5,18 +5,17 @@
 
 const std = @import("std");
 
-pub const Template = enum { basic, api, htmx };
+pub const Template = enum { basic, api };
 
 pub fn parseTemplate(name: []const u8) ?Template {
     if (std.mem.eql(u8, name, "basic")) return .basic;
     if (std.mem.eql(u8, name, "api")) return .api;
-    if (std.mem.eql(u8, name, "htmx")) return .htmx;
     return null;
 }
 
 test "parseTemplate accepts v1 templates only" {
     try std.testing.expectEqual(Template.basic, parseTemplate("basic").?);
     try std.testing.expectEqual(Template.api, parseTemplate("api").?);
-    try std.testing.expectEqual(Template.htmx, parseTemplate("htmx").?);
+    try std.testing.expect(parseTemplate("unknown") == null);
     try std.testing.expect(parseTemplate("react") == null);
 }

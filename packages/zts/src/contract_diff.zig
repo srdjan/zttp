@@ -267,10 +267,6 @@ pub const ContractDiff = struct {
     /// A WebSocket event export (onOpen/onMessage/onClose/onError) was removed:
     /// a live capability disappeared, which is breaking. Added exports are
     /// additive (tracked separately).
-    /// A durable step was removed or reordered (breaking - durable replay is
-    /// position-sensitive) or purely appended (additive).
-    durable_steps_breaking: bool = false,
-    durable_steps_added: bool = false,
     cost_class_old: ?handler_contract.BoundClass = null,
     cost_class_new: ?handler_contract.BoundClass = null,
 
@@ -364,9 +360,6 @@ pub const ContractDiff = struct {
         if (self.costWidenedToUnbounded()) return .breaking;
         if (self.costWidened()) has_added = true;
         // A removed WebSocket event export is a removed live capability.
-        // A removed/reordered durable step changes recovery semantics.
-        if (self.durable_steps_breaking) return .breaking;
-        if (self.durable_steps_added) has_added = true;
 
         for (self.routes.items) |r| {
             if (r.status == .removed) return .breaking;
@@ -724,8 +717,6 @@ pub fn diffContracts(
         .behavior_diff = behavior_diff,
         .routes_became_dynamic = (new.api.routes_dynamic and !old.api.routes_dynamic) or
             (new.api.schemas_dynamic and !old.api.schemas_dynamic),
-        .durable_steps_breaking = durableStepsChange(old.durable.steps.items, new.durable.steps.items) == .breaking,
-        .durable_steps_added = durableStepsChange(old.durable.steps.items, new.durable.steps.items) == .added,
         .cost_class_old = old_cost_class,
         .cost_class_new = new_cost_class,
     };
@@ -1198,18 +1189,6 @@ fn compareRequestBodies(
     return .unchanged;
 }
 
-/// Classify a durable step-list change. Durable replay is position-sensitive,
-/// so only a pure append (old is an in-order prefix of new) is additive; a
-/// removal, reorder, or mid-sequence insertion changes recovery semantics and
-/// is breaking.
-fn durableStepsChange(old_steps: []const []const u8, new_steps: []const []const u8) enum { unchanged, added, breaking } {
-    if (new_steps.len < old_steps.len) return .breaking;
-    for (old_steps, 0..) |step, i| {
-        if (!std.mem.eql(u8, step, new_steps[i])) return .breaking;
-    }
-    return if (new_steps.len > old_steps.len) .added else .unchanged;
-}
-
 /// Resolve a schema ref name to its JSON definition in `schemas`, or null.
 fn resolveRefSchema(schemas: []const handler_contract.ApiSchemaInfo, ref: []const u8) ?[]const u8 {
     for (schemas) |s| {
@@ -1610,17 +1589,6 @@ fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = handler_contract.emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = handler_contract.emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -2159,52 +2127,6 @@ test "diffContracts route surface going dynamic is breaking" {
     defer diff.deinit(allocator);
 
     try std.testing.expectEqual(Classification.breaking, diff.classify());
-}
-
-test "diffContracts removing a durable step is breaking" {
-    // Durable replay is position-sensitive: a removed (or reordered) step
-    // changes recovery semantics, so it must not read as equivalent.
-    const allocator = std.testing.allocator;
-
-    var old = try makeTestContract(allocator);
-    defer old.deinit(allocator);
-    old.durable.used = true;
-    try old.durable.steps.append(allocator, try allocator.dupe(u8, "charge"));
-    try old.durable.steps.append(allocator, try allocator.dupe(u8, "ship"));
-    try old.durable.steps.append(allocator, try allocator.dupe(u8, "notify"));
-
-    var new = try makeTestContract(allocator);
-    defer new.deinit(allocator);
-    new.durable.used = true;
-    try new.durable.steps.append(allocator, try allocator.dupe(u8, "charge"));
-    try new.durable.steps.append(allocator, try allocator.dupe(u8, "notify"));
-
-    var diff = try diffContracts(allocator, &old, &new);
-    defer diff.deinit(allocator);
-
-    try std.testing.expectEqual(Classification.breaking, diff.classify());
-}
-
-test "diffContracts appending a durable step is additive" {
-    const allocator = std.testing.allocator;
-
-    var old = try makeTestContract(allocator);
-    defer old.deinit(allocator);
-    old.durable.used = true;
-    try old.durable.steps.append(allocator, try allocator.dupe(u8, "charge"));
-    try old.durable.steps.append(allocator, try allocator.dupe(u8, "ship"));
-
-    var new = try makeTestContract(allocator);
-    defer new.deinit(allocator);
-    new.durable.used = true;
-    try new.durable.steps.append(allocator, try allocator.dupe(u8, "charge"));
-    try new.durable.steps.append(allocator, try allocator.dupe(u8, "ship"));
-    try new.durable.steps.append(allocator, try allocator.dupe(u8, "notify"));
-
-    var diff = try diffContracts(allocator, &old, &new);
-    defer diff.deinit(allocator);
-
-    try std.testing.expectEqual(Classification.additive, diff.classify());
 }
 
 test "diffContracts changing a shared ref schema shape is breaking" {

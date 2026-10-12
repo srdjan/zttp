@@ -17,33 +17,22 @@ Use `zttp modules --json` for the live export list from the built binary.
 | `zttp:collections` | `dictEmpty`, `dictFromEntries`, `dictGet`, `dictSet`, `dictRemove`, `dictHas`, `dictEntries`, `dictMapValues`, `dictFilter`, `dictFold` | none |
 | `zttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` | `crypto` |
 | `zttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` | none |
-| `zttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` | `runtime_callback` |
 | `zttp:env` | `env` | `env`, `policy_check` |
 | `zttp:fetch` | `fetch`, `fetchWithRetry` | `network`, `runtime_callback` |
 | `zttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` | none |
 | `zttp:id` | `uuid`, `ulid`, `nanoid` | `clock`, `random` |
-| `zttp:io` | `parallel`, `race` | `runtime_callback` |
 | `zttp:json` | `parseJson`, `parseJsonBytes`, `stringifyJson` | none |
-| `zttp:ledger` | `post`, `balance` | `sqlite`, `crypto` |
 | `zttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
-| `zttp:queue` | `send`, `request`, `receive`, `ack`, `nack`, `reply` | `runtime_callback` |
 | `zttp:ratelimit` | `rateCheck`, `rateReset` | `clock` |
 | `zttp:result` | `ok`, `err`, `mapResult`, `mapError`, `andThen`, `orElse`, `unwrapOr`, `collectAll` | none |
 | `zttp:router` | `routerMatch` | none |
-| `zttp:scope` | `scope`, `using`, `ensure` | `runtime_callback` |
-| `zttp:service` | `serviceCall` | `network`, `filesystem`, `runtime_callback` |
 | `zttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` | `sqlite`, `policy_check` |
 | `zttp:sse` | `sseEvents` | none |
 | `zttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` | none |
 | `zttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` | none |
-| `zttp:tool` | `toolCatalog`, `toolInput`, `agentPrompt`, `callTool` | `runtime_callback` |
 | `zttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` | none |
 | `zttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
-| `zttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |
 <!-- END GENERATED: module catalog -->
-
-The compiler keeps the `zttp:ledger` and `zttp:tool` rows until Phase 3.
-The runtime refuses a handler that imports either module.
 
 ## Common Usage
 
@@ -74,13 +63,7 @@ durability boundary need configuration:
 |---|---|
 | `zttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. |
 | `zttp:sql` | Run with `--sqlite <file>` for execution. Use `--sql-schema <schema.sql>` or `-Dsql-schema=<schema.sql>` for schema validation. |
-| `zttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. Durable fetch also needs `--durable <dir>`. |
-| `zttp:service` | Run with `--system <file>` or set `"system"` in `zttp.json`. |
-| `zttp:workflow` | Run with `--system <file>`: the orchestrator dispatches to co-located sub-handlers in-process. Every local handler path in the manifest must be readable at startup. Durable `call`/`saga`/`fanout`/`follow` replay also needs `--durable <dir>`. Add `--workflow-queue` to force durable top-level `call`, `follow`, and `fanout` child dispatch through the persisted queue; `saga()` is rejected in that mode because step closures would hide direct dispatch inside the flat oplog. Dead letters stay under `<durable>/workflow-queue/dead` until `zttp workflow-queue replay` or `discard`. |
-| `zttp:queue` | Run with `--actor-queue` for server-owned in-memory actor mailboxes. Exports `send`, `request`, `receive`, `ack`, `nack`, and `reply`; all return `Result` objects. Messages own JSON snapshots of payloads and remain retained until ack, requeue, or dead-lettering, but the current backend is not durable across process restart. This is separate from the persisted workflow queue used by `--workflow-queue`. |
-| `zttp:durable` | Run with `--durable <dir>`. Durable workflow proof properties appear under `durable.workflow.properties` in `contract.json` and under `durableWorkflow*` fields in proof receipts. |
-| `zttp:ledger` | Runtime execution is unavailable. The compiler binding remains until Phase 3. |
-| `zttp:tool` | Runtime execution is unavailable. The compiler binding remains until Phase 3. |
+| `zttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. |
 | `zttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
 
 ## Effects
@@ -92,7 +75,7 @@ properties and runtime policy.
 |---|---|---|
 | `none` | Pure or analysis-only operation. | `sha256`, `routerMatch`, `parseCookies`, `decodeJson` |
 | `read` | Reads runtime state without mutating it. | `env`, `cacheGet`, `cacheStats`, `sqlOne`, `sqlMany` |
-| `write` | Mutates state, performs I/O, or schedules runtime callbacks. | `fetch`, `serviceCall`, `sqlExec`, `cacheSet`, `parallel`, `run`, `send`, `logInfo` |
+| `write` | Mutates state, performs I/O, or schedules runtime callbacks. | `fetch`, `sqlExec`, `cacheSet`, `logInfo` |
 
 `fetchWithRetry(url, init?, retryOptions?)` accepts `maxRetries`,
 `baseDelayMs`, `maxDelayMs`, and `retryOn`. To keep synchronous retry sleeps

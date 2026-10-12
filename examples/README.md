@@ -1,127 +1,52 @@
 # Examples
 
-Handler files grouped by what they demonstrate. The compiler treats every
-example as a complete program: parse, contract, verify, then run. Each
-`.test.jsonl` file beside a handler is replayable through `zttp test`.
-Workflow examples use live server checks in `scripts/test-examples.sh` because
-they exercise real durable state, signals, and the persisted workflow queue.
+The examples demonstrate ordinary TypeScript handlers and retained virtual modules.
+Each adjacent `.test.jsonl` file contains requests and expected responses for `zttp test`.
+`scripts/test-examples.sh` checks runtime responses and the advertised static checks.
 
 ## Start here
 
-These three handlers, in order, are the shortest path to seeing what makes zttp different from a Node runtime.
+[handler/spec-guardrails.ts](handler/spec-guardrails.ts) declares four proof properties on its return type.
+The compiler checks determinism, idempotence, secret leakage, and injection safety.
+A call to `Date.now()` prevents the determinism proof.
 
-1. **[handler/spec-guardrails.ts](handler/spec-guardrails.ts)** - the magnet, in 24 lines. The handler declares `Proof<T, "deterministic" | "idempotent" | "no_secret_leakage" | "injection_safe">` on its return type and the compiler discharges all four. Try editing it: drop a `Date.now()` into the body and watch `-deterministic` light up in the proof card with a `Why:` row. Wrap it in `step("ts", () => Date.now())` from `zttp:durable` and the chip flips back green.
+[handler/handler.ts](handler/handler.ts) shows routes and an explicit `Proof<T, P>` declaration.
+[handler/secret-leak.ts](handler/secret-leak.ts) deliberately returns a secret and demonstrates the ZTS400 refusal.
 
-2. **[handler/handler-full.tsx](handler/handler-full.tsx)** - the same shape, with branches. JSX rendering, multiple routes, and Result handling across a fuller handler. It returns a plain `Response` (no `Proof<T, P>`), so it does not declare proof obligations; read it after the guardrails example to see the routing surface scale up, then compare with [handler/handler.ts](handler/handler.ts), which carries the `Proof<T, P>` declaration.
+## Handler groups
 
-3. **[handler/secret-leak.ts](handler/secret-leak.ts)** - see a proof reject your code. Reads `env("SECRET_KEY")` and tries to ship it back in the response body. The flow analyzer catches it before runtime and emits ZTS400. This is the most concrete demo of "the compiler proves what your code is."
+`handler/` contains proof declarations, effect budgets, local imports, and runtime language probes.
+[handler/handler-with-imports.ts](handler/handler-with-imports.ts) imports local helper files.
+[handler/sugar.ts](handler/sugar.ts) shows callbacks, array operations, and `Object.keys`.
+[handler/effects-capsule.ts](handler/effects-capsule.ts) demonstrates effect budgets and diagnostics ZTS610 and ZTS623.
+[handler/spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) deliberately fails its declared idempotence proof.
 
-After those, the shortest durable workflow path is
-**[workflow/dsl-orchestrator.ts](workflow/dsl-orchestrator.ts)**. Read its
-proof receipt first, then run it with `--durable` and `--workflow-queue` to see
-one stable run key, one queued child boundary, and one inspectable recovery
-surface.
+`routing/` contains branching, pattern matching, and early-return guards.
+`modules/` contains handlers that use several virtual modules.
+`fetch/` contains outbound HTTP examples that require explicit allowed hosts.
+[fetch/webhook.ts](fetch/webhook.ts) forwards a POST request through `zttp:fetch`.
 
-## By category
+`patterns/` maps TypeScript patterns to the supported language described in [the TypeScript guide](../docs/typescript.md).
+`sql/` contains a tagged SQL query handler and its schema.
+`autoloop/` contains a deliberately failing handler for agent repair.
+The autoloop example is illustrative and does not enter the example gate.
 
-### handler/
-
-The core shape of a zttp handler. Start with the three above, then:
-
-- [handler.ts](handler/handler.ts) - the canonical TS handler with `Proof<T, P>`.
-- [handler.tsx](handler/handler.tsx) - the same shape in TSX.
-- [handler-with-imports.ts](handler/handler-with-imports.ts) - importing multiple virtual modules.
-- [sugar.ts](handler/sugar.ts) - the small syntactic conveniences the model-minimal profile keeps: arrow callbacks, array HOFs, and `Object.keys`. Compound assignment is not one of them, so the counter update is written in full.
-- [effects-capsule.ts](handler/effects-capsule.ts) - `Effects<T, "...">` as a handler budget, and the decidable rule for where a helper ceiling goes (ZTS610 and ZTS623).
-- [feature-probes.ts](handler/feature-probes.ts) - exact-output probes for runtime language features tracked in the feature matrix.
-- [spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) - a deliberately failing `Proof<T, P>` for the discharge diagnostics path.
-
-### jsx/
-
-JSX without a build step. Use `renderToString(<Component />)` to produce HTML.
-
-- [jsx-simple.tsx](jsx/jsx-simple.tsx) - one component, one route.
-- [jsx-component.tsx](jsx/jsx-component.tsx) - components composing other components.
-- [jsx-ssr.tsx](jsx/jsx-ssr.tsx) - full server-side rendering pattern.
-
-### routing/
-
-Branch on `req.method` and `req.path`. No external router needed.
-
-- [router.ts](routing/router.ts) - the bare branching style.
-- [match-handler.ts](routing/match-handler.ts) - `match` expression for cleaner exhaustiveness.
-- [guard-flow.ts](routing/guard-flow.ts) - guards run in order by explicit early return.
-- [api-surface.ts](routing/api-surface.ts) - declaring a larger API as a flat object.
-
-### modules/
-
-Calling into the virtual modules (the in-binary stdlib that replaces npm).
-
-- [modules.ts](modules/modules.ts) - imports a handful of modules and uses them in one handler.
-- [modules_all.ts](modules/modules_all.ts) - touches several representative virtual modules so the contract extractor exercises auth, validation, cache, and crypto bindings.
-
-### fetch/
-
-Outbound HTTP through the `zttp:fetch` module. Start these examples
-with an explicit outbound host allow-list.
-
-- [weather-forecasts.ts](fetch/weather-forecasts.ts) - calls the keyless Open-Meteo API and parses the JSON response.
-- [webhook.ts](fetch/webhook.ts) - durable POST forwarding with idempotency-key replay.
-
-### Advanced surfaces
-
-- **durable/** - `run`, `step`, `waitSignal` from `zttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts) (illustrative; the gated durable coverage lives in `workflow/`, run live by `scripts/test-examples.sh`).
-- **workflow/** - start with [dsl-orchestrator.ts](workflow/dsl-orchestrator.ts) for the embedded workflow DSL path, then use the primitive fixtures for `call`, `fanout`, `follow`, durable workflow queue, signal resume, timeout, and dead-letter replay. See [../docs/durable-workflows.md](../docs/durable-workflows.md).
-- **parallel/** - `parallel` from `zttp:io`; both handlers must pass strict
-  `check --types` in `scripts/test-examples.sh`.
-- **hypermedia/** - [order.ts](hypermedia/order.ts) declares one resource with `resource(data, affordances)` and serves HAL-JSON or an HTMX fragment from the same affordance set, chosen by `Accept` and `HX-Request`.
-- **patterns/** - the TypeScript canon mapped onto the zts subset, one file per pattern. These are the targets of the table in [../docs/typescript.md](../docs/typescript.md#typescript-patterns-in-the-zts-subset).
-- **sql/** - the `sql` tagged template from `zttp:sql`.
-- **system/** - the cross-handler linking story. The example suite links both
-  manifests and rejects handler compilation failures or unresolved links.
-- **autoloop/** - the agent autoloop demo (`zttp expert`); the handler deliberately fails a proof so the agent has something to repair (illustrative; not in the gated example suite).
-
-## Running an example
+## Run an example
 
 ```bash
-zig build run -- examples/handler/spec-guardrails.ts -p 3000             # serve
+zig build run -- examples/handler/spec-guardrails.ts -p 3000
 zig build cli -- serve examples/handler/spec-guardrails.ts -p 3000 --watch --prove
-zts check examples/handler/spec-guardrails.ts                          # verify once
+zts check examples/handler/spec-guardrails.ts
+zttp test examples/handler/handler-ts.test.jsonl
 ```
 
-### A note on `zttp check` and these examples
+`zttp check` runs the strict analyzer.
+Without an explicit `Proof<T, P>`, the analyzer requires all seventeen default specification names.
+A minimal example can therefore fail strict checking while passing its expected runtime responses.
+The example gate checks these responses separately from proof discharge.
+Pattern and SQL examples also run their advertised static checks.
 
-`zttp check` (equivalently `zts check`) runs the strict analyzer. Its
-default is to demand a *fully discharged* handler: when a handler declares no
-`Proof<T, P>` on its return type, the verifier must prove the entire default
-profile, which is all seventeen v1 spec names in
-`packages/zts/src/spec_discharge.zig`, and emits **ZTS500** if any member does
-not hold. Many examples here are intentionally minimal -
-they exist to show one feature (a route, a module import, a JSX component) and
-deliberately do *not* carry a `Proof<T, P>`, so they exit non-zero under `check`.
-That is expected for those files: the example test harness
-(`scripts/test-examples.sh`) replays each `.test.jsonl` for observable
-behavior, which is a separate gate from the strict `check` discharge. The
-pattern, parallel, SQL, and system examples also run their advertised static
-checks because compiler output is part of what they demonstrate.
-Workflow fixtures in `examples/workflow/` run as live server checks because the
-JSONL replay runner intentionally stubs virtual-module I/O and creates a fresh
-runtime per test case.
-
-The canonical example that declares and fully discharges a `Proof<T, P>` - and so
-passes strict `check` cleanly - is [handler/handler.ts](handler/handler.ts).
-[handler/spec-guardrails.ts](handler/spec-guardrails.ts) also declares a
-`Proof<T, P>` and is the magnet to edit interactively under `zttp dev`.
-[handler/spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) declares a
-`Proof<T, P>` it cannot hold *on purpose*, to exercise the ZTS500 discharge
-diagnostic.
-
-## Diagnosing failures
-
-Every `.test.jsonl` next to a handler is a replayable assertion. Run them with `zttp test`:
-
-```bash
-zttp test examples/handler/handler.test.jsonl
-```
-
-When verification fails on an unsupported language feature, the terminal shows the framed restriction block (`why` / `buys` / `try`). See `zts restrictions` for the full table of language cuts and the proofs they unlock.
+The JSONL runner substitutes virtual-module I/O and creates a fresh runtime for each request.
+The runner proves only the responses covered by the adjacent assertions.
+Unsupported language diagnostics include the restriction, its reason, and a supported alternative.
+`zts restrictions` lists the complete restrictions.

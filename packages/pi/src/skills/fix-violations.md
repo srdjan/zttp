@@ -8,6 +8,6 @@ Work through every compiler violation in the current handler file systematically
 3. For verifier/property failures, call `pi_repair_plan`.
 4. For semantic proof repairs, use `pi_goal_candidate` to get verified `proposed_content` before drafting the edit.
 5. For canonical ZTS6xx slips, obtain exact bound candidates from `zts_expert_canonicalize`, pass the selected candidates unchanged to `pi_apply_repair_plan`, and apply only its verified `proposed_content`.
-6. After the edit lands, rely on the loop's post-apply `verify_paths` and `review_patch --diff-only` checks.
+6. After the edit lands, rely on the loop's post-apply `verify_paths` check.
 
 Do not introduce new violations while fixing existing ones. If a repair intent is unsupported, make the smallest manual edit that closes the reported diagnostic or witness.

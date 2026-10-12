@@ -81,6 +81,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
         const status: TestStatus = if (test_fn.func()) |_| .pass else |err| switch (err) {
             error.SkipZigTest => .skip,
             else => fail: {
+                std.debug.print("test-cli: FAIL [{d}/{d}] {s}: {s}\n", .{
+                    index + 1, test_fns.len, test_fn.name, @errorName(err),
+                });
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpErrorReturnTrace(trace);
                 }

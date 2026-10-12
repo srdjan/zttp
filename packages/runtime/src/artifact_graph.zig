@@ -53,8 +53,6 @@ pub const Inputs = struct {
     core_grammar_hash: [32]u8,
     semantics_hash: [32]u8,
     capability_hash: [32]u8,
-    frontend_profile_id: ?[]const u8 = null,
-    frontend_grammar_hash: ?[32]u8 = null,
     /// Digest of the canonical proof IR the certificate carries. Absent for an
     /// artifact built without one; the acceptance kernel refuses such an
     /// artifact for production, and says which member was missing.
@@ -78,8 +76,6 @@ pub const Identity = struct {
     core_grammar_hash: [32]u8 = [_]u8{0} ** 32,
     semantics_hash: [32]u8 = [_]u8{0} ** 32,
     capability_hash: [32]u8 = [_]u8{0} ** 32,
-    frontend_profile_id: ?[]const u8 = null,
-    frontend_grammar_hash: ?[32]u8 = null,
 };
 
 /// Read the identity out of a compile-time handler contract.
@@ -91,10 +87,6 @@ pub fn identityFromContract(contract: *const zts.HandlerContract) Identity {
         .semantics_hash = contract.source_identity.semantics_hash,
     };
     if (contract.capabilities) |caps| identity.capability_hash = caps.hash;
-    if (contract.source_identity.frontend) |frontend| {
-        identity.frontend_profile_id = frontend.profile.id();
-        identity.frontend_grammar_hash = frontend.grammar_hash;
-    }
     return identity;
 }
 
@@ -130,8 +122,6 @@ pub fn fromArtifact(inputs: ArtifactInputs) Inputs {
         .core_grammar_hash = inputs.identity.core_grammar_hash,
         .semantics_hash = inputs.identity.semantics_hash,
         .capability_hash = inputs.identity.capability_hash,
-        .frontend_profile_id = inputs.identity.frontend_profile_id,
-        .frontend_grammar_hash = inputs.identity.frontend_grammar_hash,
         .proof_ir_digest = inputs.proof_ir_digest,
         .proof_certificate_digest = inputs.proof_certificate_digest,
         .residual_plan_digest = inputs.residual_plan_digest,
@@ -223,13 +213,6 @@ pub fn build(
     try collector.add(.runtime_policy_bytes, 0, inputs.policy_section_digest);
 
     try collector.add(.source_profile_core, 0, digestOf(inputs.core_profile_id));
-    if (inputs.frontend_profile_id) |id| {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(id);
-        hasher.update("\x00");
-        hasher.update(&(inputs.frontend_grammar_hash orelse [_]u8{0} ** 32));
-        try collector.add(.source_profile_frontend, 0, hasher.finalResult());
-    }
     try collector.add(.core_grammar, 0, inputs.core_grammar_hash);
     try collector.add(.semantics, 0, inputs.semantics_hash);
     try collector.add(.capability_matrix, 0, inputs.capability_hash);
@@ -371,14 +354,11 @@ test "the inventory covers every executable and authority-bearing member" {
     for (members) |member| seen.insert(member.kind);
 
     // Every kind a production artifact must commit, plus the ones this fixture
-    // exercises. The frontend profile is genuinely absent here.
+    // exercises.
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);
-        // The frontend profile is genuinely absent for a `.ts` handler, and the
-        // residual plan is absent until a handler has a guarded operation. Both
-        // are named rather than skipped by a wildcard, so a member kind that
-        // stops being produced for any other reason fails here.
-        if (kind == .source_profile_frontend or kind == .residual_plan) continue;
+        // The residual plan is absent until a handler has a guarded operation.
+        if (kind == .residual_plan) continue;
         try testing.expect(seen.contains(kind));
     }
 
@@ -464,7 +444,7 @@ test "mutating any member class moves the root" {
         }.f },
         .{ .name = "source profile", .apply = struct {
             fn f(i: *Inputs) void {
-                i.core_profile_id = "zts-tsx-1";
+                i.core_profile_id = "zts-model-mutated";
             }
         }.f },
         .{ .name = "proof ir", .apply = struct {

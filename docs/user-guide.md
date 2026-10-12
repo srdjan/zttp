@@ -1,6 +1,6 @@
 # User Guide
 
-zttp runs TypeScript and TSX HTTP handlers from a single Zig
+zttp runs TypeScript HTTP handlers from a single Zig
 binary. The language surface is intentionally restricted so the compiler can
 prove handler properties before and during local development.
 
@@ -30,7 +30,7 @@ cd my-app
 zttp dev
 ```
 
-The scaffold writes `zttp.json`, `src/handler.ts` or `src/handler.tsx`, and
+The scaffold writes `zttp.json`, `src/handler.ts`, and
 starter tests. `zttp dev` reads the project config, starts the local server,
 watches the handler, and prints a proof card on every save.
 
@@ -159,10 +159,9 @@ zts supports a practical server-side TypeScript subset and rejects constructs th
 weaken analysis. Commonly rejected constructs include `var`, `while`, `class`,
 `try/catch`, implicit globals, and unsupported module forms.
 
-Handler files use `.ts`. A handler containing JSX uses `.tsx` and enters the
-versioned TSX frontend. `.js`, `.jsx`, and unknown file extensions are refused
-with ZTS052 so source identity always selects one explicit frontend. Inline
-`-e` snippets remain virtual source and do not claim a file extension.
+Handler files use `.ts`. `.js`, `.jsx`, `.tsx`, and unknown file extensions
+are refused with ZTS052. Inline `-e` snippets remain virtual source and do not
+claim a file extension.
 
 Use:
 
@@ -245,167 +244,21 @@ References:
 - [Canonicalize And Normalize](cli.md#canonicalize-and-normalize)
 - [Sound Mode](typescript.md#sound-mode)
 
-## JSX And TSX
+## HTML Rendering
 
-TSX handlers can render server-side HTML without a build step.
-
-```tsx
-function Page(props) {
-    return (
-        <html>
-            <body><h1>{props.title}</h1></body>
-        </html>
-    );
-}
-
-function handler(req: Request): Response {
-    return Response.html(renderToString(<Page title="Hello" />));
-}
-```
-
-Use the `htmx` template for an HTML-first scaffold:
-
-```bash
-zttp init htmx-app --template htmx
-cd htmx-app
-zttp dev
-```
-
-See `examples/jsx/` and `examples/handler/handler-full.tsx`.
-
-## Hypermedia Resources
-
-`resource(data, affordances)` is a global that returns one value the runtime
-renders two ways, chosen by the request's `Accept` header. Services that ask for
-`application/hal+json` (or `application/json`) receive a HAL document; browsers
-that ask for `text/html` receive HTML. This is the v1 beta hypermedia primitive:
-one affordance declaration drives both HAL for services and HTMX controls for
-users.
+Use `h` and `renderToString` to build HTML without JSX.
 
 ```ts
 function handler(req: Request): Response {
-    const order = { id: 42, total: 1999, status: "pending" };
-    return resource(order, {
-        self: { href: "/orders/42" },
-        pay: { href: "/orders/42/pay", method: "POST", title: "Pay now",
-               target: "#order", swap: "outerHTML" },
-        cancel: { href: "/orders/42", method: "DELETE", title: "Cancel" },
-    });
+    const page = h("h1", {}, "Hello");
+    return Response.html(renderToString(page));
 }
 ```
-
-Each affordance is keyed by its link relation. `href` is required; `method`,
-`title`, `target`, `swap`, and `fields` are optional. An affordance with no
-`method` (or `GET`/`HEAD`) is a navigation link; any other method is a write
-action.
-
-The rendering follows from the affordance shape:
-
-| Accept | Output |
-|---|---|
-| `application/hal+json` or `application/json` | HAL: data plus `_links` (navigation) and `_templates` (write actions, with `fields` as `properties`). |
-| `text/html` with `HX-Request: true` | An HTMX fragment: a `<dl>` of the scalar data, then `<a>` links and `<button hx-post>`/`hx-delete` controls carrying `hx-target`/`hx-swap`. |
-| `text/html` without `HX-Request` | The same fragment wrapped in a full page that loads htmx. |
-
-```bash
-zttp serve examples/hypermedia/order.ts -p 3000
-curl -H 'Accept: application/hal+json' http://127.0.0.1:3000/orders/42
-curl -H 'Accept: text/html' -H 'HX-Request: true' http://127.0.0.1:3000/orders/42
-```
-
-See `examples/hypermedia/order.ts`.
-
-## Workflow Orchestration
-
-`zttp:workflow` dispatches from a top-level orchestrator to co-located
-handlers loaded from `--system <file>`. The system manifest is strict for
-workflow use: every local handler `path` must be readable at startup, and
-relative paths use the same rule as the proof tools: a path that exists from the
-current working directory is used as-is, otherwise it is resolved from the
-manifest directory.
-
-```ts
-import { call, fanout, follow, saga } from "zttp:workflow";
-```
-
-`call(name, init?)` dispatches by handler name. `follow(resource, rel, init?)`
-resolves a `resource()` affordance by relation and dispatches by the proven
-bundle route. `fanout(calls)` aggregates multiple co-located calls in declaration
-order. `saga(steps)` runs durable do/compensate steps.
-
-Inside `run()` from `zttp:durable`, workflow dispatches snapshot plain
-`{status, headers, body}` records into the oplog and rebuild real `Response`
-objects during replay, so completed child calls are not re-dispatched. Existing
-oplogs use the internal `workflow.parallel#N` key for `fanout()` records for
-compatibility.
-
-Queue-mediated workflow dispatch is opt-in with `--workflow-queue` and requires
-both `--durable <dir>` and `--system <file>`. In that mode, durable top-level
-`call`, `follow`, and `fanout` write child requests to `<durable>/workflow-queue`
-before dispatch, lease queued items while they run, and write completed response
-parts under `done/` before the parent durable step result is persisted. If the
-process stops before the parent step completes, durable recovery re-enters the
-run and resumes from the queue result or retries the leased item after its lease
-expires. Child handlers should be idempotent because a process crash after a
-child side effect but before its queue result is written can re-run that child.
-`saga()` is not supported with `--workflow-queue`; keep queue-mediated handler
-communication at top-level durable `call`, `follow`, or `fanout` boundaries.
-
-The analyzer records durable workflow proof properties separately from the
-handler-wide property chips. Receipts, deploy manifests, and proof traces expose
-`durableWorkflowProofLevel`, `durableWorkflowRetrySafe`,
-`durableWorkflowIdempotent`, `durableWorkflowFaultCovered`, and
-`proofTrace.durable_workflow_*` so replay guarantees are visible in the same
-artifacts you already inspect. See [Durable Workflows](durable-workflows.md) and
-[First Durable Workflow](tutorials/first-durable-workflow.md).
-
-## Actor Queues
-
-`zttp:queue` provides opt-in in-process actor mailboxes for handlers that need
-to exchange work without sharing JS runtime state. Enable the server-owned
-in-memory queue with `--actor-queue`.
-
-```ts
-import { send, request, receive, ack, nack, reply } from "zttp:queue";
-
-function handler(req) {
-  const sent = send("worker", { kind: "resize", image: "hero.jpg" });
-  if (!sent.ok) return Response.json({ error: sent.error }, { status: 503 });
-
-  const inbox = receive("worker");
-  if (!inbox.ok) return Response.json({ error: inbox.error }, { status: 503 });
-  if (inbox.value === undefined) return Response.json({ queued: sent.value });
-
-  const msg = inbox.value;
-  const done = ack(msg.id);
-  return Response.json({ id: msg.id, payload: msg.payload, acked: done.ok });
-}
-```
-
-`send(target, payload)` stores a JSON snapshot of `payload` and returns
-`Result<string>` with the message id. `request(target, payload)` also sets the
-current actor as the reply target. `receive(actor?)` leases one message and
-returns a `Result` whose `.value` is `undefined` when no message is available;
-the default actor is `main`. A leased message
-stays retained until `ack(id)` deletes it or `nack(id, reason?)` requeues it.
-After the configured attempt limit, `nack()` moves the message to the in-memory
-dead-letter set and releases the actor mailbox slot; dead letters are retained
-outside mailbox capacity. `reply(id, payload)` sends a high-priority response to
-the original message's reply actor and sets `correlationId`.
-
-The current backend is process-local memory. It survives handler VM reset,
-timeout invalidation, and panic quarantine because payloads are owned by the
-queue, not the JS heap. It does not survive process restart; use
-`--workflow-queue` for the existing durable workflow child-dispatch queue.
-
 ## Virtual Modules
 
 Virtual modules are native Zig APIs exposed through `import { ... } from
 "zttp:*"`. The current module list and runtime requirements are in
 [Virtual Modules](virtual-modules/README.md).
-
-The compiler still exposes `zttp:ledger` and `zttp:tool` until Phase 3.
-The runtime refuses handlers that use either module.
 
 Common runtime flags:
 
@@ -413,10 +266,6 @@ Common runtime flags:
 |---|---|
 | SQLite queries | `--sqlite <file>` |
 | Outbound HTTP | `--outbound-http` or `--outbound-host <host>` |
-| Durable workflows | `--durable <dir>` |
-| Service registry and in-process workflow bundle | `--system <file>` |
-| Queue-mediated durable workflow dispatch | `--workflow-queue` |
-| In-memory actor mailboxes | `--actor-queue` |
 | Skip env startup check in development | `--no-env-check` |
 
 ## Compile-Time Proofs
@@ -455,28 +304,7 @@ zttp test
 zttp serve --test tests/handler.test.jsonl src/handler.ts
 ```
 
-Ordinary fixtures use `test`, `request`, optional `io`, and `expect` rows. A
-durable workflow fixture can opt into one shared scenario backend by making a
-`runtime` row the first row:
-
-```jsonl
-{"type":"runtime","durable":true,"workflowQueue":false}
-{"type":"test","name":"the order completes"}
-{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"order-1"},"body":null}
-{"type":"expect","status":201}
-{"type":"expect-run","runKey":"order-1","complete":true}
-{"type":"expect-event","runKey":"order-1","kind":"step_start","name":"reserve"}
-{"type":"expect-event","runKey":"order-1","kind":"step_result","name":"reserve","resultContains":"reserved"}
-{"type":"expect-signals","count":0}
-```
-
-Scenario tests share a private durable store but create a fresh handler and
-replay state for every request. Assertion rows are strict: every run needs at
-least one ordered event, queue mode needs `expect-queue` evidence and a system
-manifest, and malformed, duplicate, extra, or unconsumed evidence fails the
-fixture. Supported event kinds are `step_start`, `step_result`, `wait_signal`,
-and `resume_signal`.
-
+Ordinary fixtures use `test`, `request`, optional `io`, and `expect` rows.
 Record and replay handler I/O:
 
 ```bash
@@ -535,8 +363,8 @@ policy acceptance are established against the artifact itself, which is what
 because they are separate answers: matching hashes say the bundle holds the
 bytes the manifest names, and nothing more.
 
-Proof acceptance is also what unlocks the proof response cache, unbounded
-runtime reuse, and the durable-workflow guarantees. A dev server has no
+Proof acceptance is also what unlocks the proof response cache and unbounded
+runtime reuse. A dev server has no
 artifact and no certificate, so it runs without them; that is deliberate, not a
 gap. See [docs/verification.md](verification.md) for what each assurance grade
 means and for the list of edges the consumer discloses rather than checks.
@@ -596,31 +424,8 @@ path, query, or fragment. Zttp checks `/health` and `/v1/models` before creating
 a session, but it never starts, stops, or replaces the server. It does not retry
 through another provider after a local failure.
 
-The local adapter was tested with MLX-LM 0.31.3 and model revision
-`b372ebbb518c0e81617e25d8824427dd9ee1f08c`. The model has a 131,072-token
-context window; zttp requests at most 8,192 output tokens and otherwise uses the
-model-shipped generation defaults.
-
-### Qualifying an expert model
-
-Model qualification is a repository maintenance operation, not a runtime
-setting. Run it only after the compiler, persona, protocol, and static tool
-catalog are frozen. `scripts/qualify-expert.sh` performs three complete live
-19-case runs, retains failures in the denominator, and emits a report that
-binds the exact model, runtime, request limits, source revision, prompt,
-provider serialization, compiler identities, and evaluation cohorts.
-
-The quality bar is 19/19 final green, 18/18 runtime intents, at least 14/19 raw
-first-draft passes, median round trips no higher than four, and no empty,
-timeout, decode, provider, or internal failures in each run. A local run also
-requires model artifact, quantization, chat-template, serving-argument,
-hardware, OS, and peak-memory evidence. See
-[Recording the codegen cassettes](internals/cassette-recording.md) for the exact
-command and environment.
-
-Qualification is report-only. It neither promotes cassettes nor changes the
-LFM local-provider default or the DeepSeek product default. A passing candidate
-report is input to a separate product decision.
+The parked local recordings are historical. They do not establish current
+replay compatibility or current model quality.
 
 ### How a turn runs
 
@@ -638,12 +443,9 @@ report is input to a separate product decision.
 6. The host rechecks the full read set and commits under a workspace lock and
    crash-recovery journal. The agent never writes source files itself.
 
-The static model prefix contains 21 tools. The six schema-v2 discovery views
-and four focused compiler projections share the `zts_expert_query` ADT;
-normalization, proof, repair, and change-set application remain distinct
-authorities. Exact provider serialization is pinned in tests: 11,775 bytes for the
-DeepSeek/local chat shape. The pre-cutover prefix was 20,177 bytes, so every
-supported provider stays beyond the 40% reduction gate.
+The discovery views and focused compiler projections share the
+`zts_expert_query` operation union. Normalization, proof, repair, and change-set
+application remain distinct authorities. Tests pin the exact provider serialization.
 
 ### Context compaction
 

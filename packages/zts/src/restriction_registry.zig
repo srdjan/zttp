@@ -196,7 +196,7 @@ pub const entries = [_]RestrictionEntry{
         .boundary = "deterministic replay and finite scheduler state",
         .nature = .essential,
         .note = "ambient scheduling produces interleavings the replay log cannot reproduce.",
-        .alternative = "use fetch() from zttp:fetch, or parallel()/race() from zttp:io",
+        .alternative = "use fetch() from zttp:fetch",
         .failure_class = "ambient scheduling and non-deterministic interleavings",
         .proof_unlocked = "deterministic effect boundary and replayable I/O",
         // Measured: `export async function handler` is rejected by the parser's
@@ -489,12 +489,12 @@ pub const entries = [_]RestrictionEntry{
         .enforced_by = &.{"ZTS001"},
     },
     .{
-        .id = "restriction.javascript-source-extension",
-        .feature = "`.js` and `.jsx` source files",
-        .boundary = "one typed core and one explicit TSX frontend",
+        .id = "restriction.unsupported-source-extension",
+        .feature = "`.js`, `.jsx`, and `.tsx` source files",
+        .boundary = "one TypeScript source frontend",
         .nature = .language_simplicity,
-        .note = "source identity must select either the TypeScript core or the versioned TSX lowering frontend",
-        .alternative = "rename the handler to .ts, or use .tsx when JSX lowering is required",
+        .note = "source identity admits only TypeScript source",
+        .alternative = "rename the handler to .ts and replace JSX with ordinary TypeScript expressions",
         .enforced_by = &.{"ZTS052"},
     },
     .{

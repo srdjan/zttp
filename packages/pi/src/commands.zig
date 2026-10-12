@@ -32,9 +32,6 @@ pub const command_table = [_]CommandRow{
     .{ .slash = null, .explicit = "verify-modules", .tool = "zts_expert_verify_modules", .takes_trailing_args = true },
     .{ .slash = "/check", .explicit = "check", .tool = "zts_check", .takes_trailing_args = true },
     .{ .slash = "/specs", .explicit = null, .tool = "pi_specs_status", .takes_trailing_args = true },
-    .{ .slash = "/witnesses", .explicit = null, .tool = "pi_witnesses", .takes_trailing_args = true },
-    .{ .slash = "/build", .explicit = null, .tool = "zig_build_step", .takes_trailing_args = true },
-    .{ .slash = "/test", .explicit = null, .tool = "zig_test_step", .takes_trailing_args = true },
 };
 
 pub fn lookup(argv: []const []const u8) ?LocalCommand {
@@ -69,18 +66,7 @@ pub fn lookup(argv: []const []const u8) ?LocalCommand {
         return null;
     }
 
-    return parseZigBuild(argv);
-}
-
-fn parseZigBuild(argv: []const []const u8) ?LocalCommand {
-    if (argv.len < 3) return null;
-    if (!std.mem.eql(u8, argv[0], "zig")) return null;
-    if (!std.mem.eql(u8, argv[1], "build")) return null;
-    const step = argv[2];
-    if (std.mem.eql(u8, step, "test") or std.mem.startsWith(u8, step, "test-")) {
-        return .{ .tool_name = "zig_test_step", .args = argv[2..3] };
-    }
-    return .{ .tool_name = "zig_build_step", .args = argv[2..3] };
+    return null;
 }
 
 pub fn isQuit(name: []const u8) bool {
@@ -158,21 +144,6 @@ test "lookup explicit zts meta returns the tagged query" {
 test "lookup unknown slash returns null" {
     const argv = [_][]const u8{"/unknown"};
     try testing.expect(lookup(&argv) == null);
-}
-
-test "lookup zig build test-zts returns zig_test_step" {
-    const argv = [_][]const u8{ "zig", "build", "test-zts" };
-    const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zig_test_step", cmd.tool_name);
-    try testing.expectEqual(@as(usize, 1), cmd.args.len);
-    try testing.expectEqualStrings("test-zts", cmd.args[0]);
-}
-
-test "lookup zig build my-step routes to zig_build_step" {
-    const argv = [_][]const u8{ "zig", "build", "my-step" };
-    const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zig_build_step", cmd.tool_name);
-    try testing.expectEqualStrings("my-step", cmd.args[0]);
 }
 
 test "lookup /rule forwards trailing args" {

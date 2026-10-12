@@ -32,7 +32,8 @@ An applied edit or a relative veto pass alone does not qualify.
 
 ## Holdout boundary
 
-These tasks are separate from the existing 19-case recorded corpus, product examples, persona, skills, and stand-in playbooks.
+These tasks are separate from the recorded codegen corpus, product examples,
+persona, skills, and stand-in playbooks.
 Reference source stays outside the model's isolated workspace.
 Acceptance checks are added only after the agent turn has ended.
 This is a repository holdout; it makes no claim about what the provider saw during training.

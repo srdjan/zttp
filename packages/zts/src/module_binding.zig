@@ -46,10 +46,7 @@ pub const capabilityHash = capabilities.capabilityHash;
 pub const wrapModuleFn = capabilities.wrapModuleFn;
 pub const wrapNativeFnWithCapabilities = capabilities.wrapNativeFnWithCapabilities;
 pub const wrapModuleFnWithCapabilities = capabilities.wrapModuleFnWithCapabilities;
-pub const wrapNativeFnWithToolGrant = capabilities.wrapNativeFnWithToolGrant;
-pub const checkToolGrant = capabilities.checkToolGrant;
-pub const ToolGrantError = capabilities.ToolGrantError;
-pub const ToolGrant = context.ToolGrant;
+pub const wrapNativeFnWithCapabilityCeiling = capabilities.wrapNativeFnWithCapabilityCeiling;
 pub const checkCapabilityCeiling = capabilities.checkCapabilityCeiling;
 pub const CapabilityCeilingError = capabilities.CapabilityCeilingError;
 pub const CapabilityCeiling = context.CapabilityCeiling;
@@ -73,9 +70,6 @@ pub const runtimeCallbackCapabilityChecked = capabilities.runtimeCallbackCapabil
 pub const getRuntimeCallbackStateChecked = capabilities.getRuntimeCallbackStateChecked;
 pub const allowSdkFilePath = capabilities.allowSdkFilePath;
 pub const allowSdkSqlitePath = capabilities.allowSdkSqlitePath;
-pub const installProtectedLedgerPath = capabilities.installProtectedLedgerPath;
-pub const validateLedgerOutputPath = capabilities.validateLedgerOutputPath;
-pub const validateLedgerOutputDirectory = capabilities.validateLedgerOutputDirectory;
 pub const readFileChecked = capabilities.readFileChecked;
 pub const readEnvForActiveModule = capabilities.readEnvForActiveModule;
 pub const readEnvChecked = capabilities.readEnvChecked;
@@ -596,7 +590,7 @@ test "SDK filesystem reads require canonical allowlist entry" {
     const ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    const token = pushActiveModuleContext(ctx, "zttp:service", &.{.filesystem});
+    const token = pushActiveModuleContext(ctx, "partner:filesystem", &.{.filesystem});
     defer popActiveModuleContext(token);
 
     try std.testing.expectError(

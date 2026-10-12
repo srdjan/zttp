@@ -109,11 +109,9 @@ pub const Resolver = struct {
         return self.resolveDispatchDepth(allocator, callee, 0);
     }
 
-    /// Resolve one catalog route key to the function held by the stable
-    /// `routerMatch` table. The tool catalog uses the same `METHOD /path`
-    /// spelling as the table. A non-null result can still be unresolved: that
-    /// means a matching function was found, but another table shape or later
-    /// mutation prevents the caller from treating the answer as closed.
+    /// Resolve one route key to the function held by the stable `routerMatch`
+    /// table. A non-null result can still be unresolved. A matching function
+    /// exists, but another table shape or later mutation keeps the set open.
     pub fn resolveRouteKey(
         self: *const Resolver,
         allocator: std.mem.Allocator,

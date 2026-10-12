@@ -3,7 +3,7 @@
 //! This module provides a modern JavaScript parser with:
 //! - Proper closure/upvalue support for nested functions
 //! - Full template literal interpolation
-//! - Core syntax only; `.tsx` is lowered by `source_frontend` first
+//! - Core syntax only; JSX is unsupported
 //! - Better error messages with source locations
 //!
 //! Usage:

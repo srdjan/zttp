@@ -17,16 +17,14 @@ const source_frontend = @import("../source_frontend.zig");
 const file_io = @import("../file_io.zig");
 
 /// Parse `source` and report how many statements it terminated by insertion.
-fn insertionsIn(allocator: std.mem.Allocator, source: []const u8, is_ts: bool, is_tsx: bool) !struct {
+fn insertionsIn(allocator: std.mem.Allocator, source: []const u8, is_ts: bool) !struct {
     insertions: u32,
     after_rbrace: u32,
     first_line: u32,
 } {
-    const path = if (is_tsx) "census.tsx" else if (is_ts) "census.ts" else "<census>";
-    var prepared = source_frontend.PreparedSource.init(allocator, source, path, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-    }) catch return .{ .insertions = 0, .after_rbrace = 0, .first_line = 0 };
+    const path = if (is_ts) "census.ts" else "<census>";
+    var prepared = source_frontend.PreparedSource.init(allocator, source, path, .{}) catch
+        return .{ .insertions = 0, .after_rbrace = 0, .first_line = 0 };
     defer prepared.deinit();
 
     var p = try parser.JsParser.init(allocator, prepared.parserInput());
@@ -50,30 +48,20 @@ test "census: how many tracked statements rely on automatic semicolon insertion"
     // found nothing would report zero reliance, which is the answer this
     // census must never invent.
     const paths = [_][]const u8{
-        "examples/autoloop/handler.ts",
-        "examples/durable/approval.ts",
         "examples/fetch/weather-app.ts",
         "examples/fetch/weather-forecasts.ts",
         "examples/fetch/webhook.ts",
         "examples/handler/effects-capsule.ts",
         "examples/handler/feature-probes.ts",
-        "examples/handler/handler-full.tsx",
         "examples/handler/handler-with-imports.ts",
         "examples/handler/handler.ts",
-        "examples/handler/handler.tsx",
         "examples/handler/secret-leak.ts",
         "examples/handler/spec-fails-idempotent.ts",
         "examples/handler/spec-guardrails.ts",
         "examples/handler/sugar.ts",
         "examples/handler/utils.ts",
-        "examples/hypermedia/order.ts",
-        "examples/jsx/jsx-component.tsx",
-        "examples/jsx/jsx-simple.tsx",
-        "examples/jsx/jsx-ssr.tsx",
         "examples/modules/modules.ts",
         "examples/modules/modules_all.ts",
-        "examples/parallel/parallel-simple.ts",
-        "examples/parallel/parallel.ts",
         "examples/patterns/annotate-not-assert.ts",
         "examples/patterns/bytes-boundary.ts",
         "examples/patterns/derive-types.ts",
@@ -90,24 +78,6 @@ test "census: how many tracked statements rely on automatic semicolon insertion"
         "examples/routing/match-handler.ts",
         "examples/routing/router.ts",
         "examples/sql/sql-crud.ts",
-        "examples/system/gateway-static.ts",
-        "examples/system/gateway.ts",
-        "examples/system/orders.ts",
-        "examples/system/users.ts",
-        "examples/workflow/dsl-orchestrator.ts",
-        "examples/workflow/durable-orchestrator.ts",
-        "examples/workflow/entry-orchestrator.ts",
-        "examples/workflow/fanout-orchestrator.ts",
-        "examples/workflow/follow-orchestrator.ts",
-        "examples/workflow/greet.ts",
-        "examples/workflow/inventory.ts",
-        "examples/workflow/orchestrator.ts",
-        "examples/workflow/queued-fanout-orchestrator.ts",
-        "examples/workflow/queued-orchestrator.ts",
-        "examples/workflow/saga-orchestrator.ts",
-        "examples/workflow/scope-orchestrator.ts",
-        "examples/workflow/timeout-orchestrator.ts",
-        "examples/workflow/wait-signal-orchestrator.ts",
     };
 
     var total: u32 = 0;
@@ -119,8 +89,7 @@ test "census: how many tracked statements rely on automatic semicolon insertion"
         defer allocator.free(source);
         files_read += 1;
 
-        const is_tsx = std.mem.endsWith(u8, path, ".tsx");
-        const measured = try insertionsIn(allocator, source, std.mem.endsWith(u8, path, ".ts"), is_tsx);
+        const measured = try insertionsIn(allocator, source, std.mem.endsWith(u8, path, ".ts"));
         if (measured.insertions > 0) {
             files_with_insertions += 1;
             std.debug.print(
@@ -139,10 +108,8 @@ test "census: how many tracked statements rely on automatic semicolon insertion"
     // Two floors, both on the INPUT rather than on the answer.
     //
     // The corpus: a census that read no files would print zero reliance and
-    // mean nothing. 58 files are tracked; the count is asserted low enough to
-    // survive a file being added or removed and high enough to catch a walk
-    // that stopped finding them.
-    try std.testing.expect(files_read >= 50);
+    // mean nothing. The explicit list must contain every retained example.
+    try std.testing.expectEqual(paths.len, files_read);
 
     // The instrument: a counter wired to nothing would also print zero. This
     // source terminates no statement with a semicolon, so a working counter
@@ -153,7 +120,7 @@ test "census: how many tracked statements rely on automatic semicolon insertion"
         \\function f() { return a + b }
         \\const c = f()
     ;
-    const probe = try insertionsIn(allocator, unterminated, false, false);
+    const probe = try insertionsIn(allocator, unterminated, false);
     std.debug.print(
         "[asi-census] instrument check: {d} insertions on 4 unterminated statements\n",
         .{probe.insertions},

@@ -61,14 +61,9 @@ pub fn renderFromSource(
     // `validateSqlContract` return `MissingSqlSchema` for every handler
     // importing `zttp:sql`, and the error left the tool as a bare error string
     // - so the one hole the model asked about never came back with a frame.
-    // Both paths come from one walk: resolving them separately walked the same
-    // ancestors and parsed the same zttp.json twice per render.
-    // `try`, not a swallow: this tool publishes an `ok` verdict, and a verdict
-    // computed without the system manifest because zttp.json failed to read is
-    // the fail-open class AGENTS.md documents.
+    // Both paths come from one walk, which avoids duplicate manifest reads.
     var project_paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, source_path);
     defer project_paths.deinit(allocator);
-    const system_path = project_paths.system;
     const sql_schema_path = project_paths.sqlite;
     // The analyzer's own failures are results, not Zig errors leaving the tool.
     // `MissingSqlSchema` used to escape `execute` and reach the autoloop as an
@@ -80,7 +75,6 @@ pub fn renderFromSource(
         .{
             .sql_schema_path = sql_schema_path,
             .json_mode = true,
-            .system_path = system_path,
         },
     ) catch |err| {
         return registry_mod.ToolResult.errFmt(
@@ -214,48 +208,6 @@ test "in-process publisher fails closed when a contract has verification errors"
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"holes\":[{") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[{") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "ZTS500") != null);
-}
-
-test "in-process publisher preserves discovered system service-call analysis" {
-    var tmp = try IsolatedTmp.init(testing.allocator, "holes-system-context");
-    defer tmp.cleanup(testing.allocator);
-
-    try tmp.writeFile(testing.allocator, "zttp.json", "{\"system\":\"system.json\"}\n");
-    try tmp.writeFile(testing.allocator, "system.json",
-        \\{
-        \\  "version": 1,
-        \\  "handlers": [
-        \\    { "name": "gateway", "path": "gateway.ts" },
-        \\    { "name": "users", "path": "users.ts" }
-        \\  ]
-        \\}
-    );
-    try tmp.writeFile(testing.allocator, "users.ts",
-        \\import { routerMatch } from "zttp:router";
-        \\function getUser(req: Request): Response { return Response.json({ id: req.params.id }); }
-        \\const routes = { "GET /users/:id": getUser };
-        \\function handler(req: Request): Response {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) { req.params = found.params; return found.handler(req); }
-        \\  return Response.json({ error: "not found" }, { status: 404 });
-        \\}
-    );
-    const gateway_source =
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const user = serviceCall("users", "GET /users/:id", {});
-        \\  return hole();
-        \\}
-    ;
-    try tmp.writeFile(testing.allocator, "gateway.ts", gateway_source);
-    const gateway_path = try tmp.childPath(testing.allocator, "gateway.ts");
-    defer testing.allocator.free(gateway_path);
-
-    var result = try renderFromSource(testing.allocator, gateway_source, gateway_path, "gateway.ts");
-    defer result.deinit(testing.allocator);
-
-    try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "serviceCall is missing path param 'id'") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[{") != null);
 }
 
 test "in-process publisher answers a zttp:sql handler with a result, not a Zig error" {

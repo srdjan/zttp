@@ -2,39 +2,22 @@
 /// Context.module_state is a fixed-size [16]?ModuleStateEntry array.
 /// Each slot is reserved for a specific subsystem to avoid collisions.
 pub const Slot = enum(u4) {
-    durable = 0,
-    durable_api = 1,
     sql = 2,
     replay = 3,
     validate = 4,
     cache = 5,
-    io = 6,
     trace = 7,
     ratelimit = 8,
-    service = 9,
-    scope = 10,
     fetch = 11,
-    tool = 12,
-    workflow = 13,
-    queue = 14,
-    ledger = 15,
 };
 
 pub fn ownerSpecifier(slot: usize) ?[]const u8 {
     return switch (slot) {
-        @intFromEnum(Slot.durable), @intFromEnum(Slot.durable_api) => "zttp:durable",
         @intFromEnum(Slot.sql) => "zttp:sql",
         @intFromEnum(Slot.validate) => "zttp:validate",
         @intFromEnum(Slot.cache) => "zttp:cache",
-        @intFromEnum(Slot.io) => "zttp:io",
         @intFromEnum(Slot.ratelimit) => "zttp:ratelimit",
-        @intFromEnum(Slot.service) => "zttp:service",
-        @intFromEnum(Slot.scope) => "zttp:scope",
         @intFromEnum(Slot.fetch) => "zttp:fetch",
-        @intFromEnum(Slot.tool) => "zttp:tool",
-        @intFromEnum(Slot.workflow) => "zttp:workflow",
-        @intFromEnum(Slot.queue) => "zttp:queue",
-        @intFromEnum(Slot.ledger) => "zttp:ledger",
         else => null,
     };
 }
@@ -64,10 +47,14 @@ test "module state slots are owned by one active module specifier" {
     try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.validate), "zttp:decode"));
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.sql), "zttp:decode"));
     try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.cache), "zttp:decode"));
-    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.queue), "zttp:queue"));
-    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.tool), "zttp:tool"));
-    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.tool), "zttp:fetch"));
     try testing.expect(ownerSpecifier(@intFromEnum(Slot.replay)) == null);
-    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.ledger), "zttp:ledger"));
-    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.ledger), "zttp:sql"));
+    try testing.expect(ownerSpecifier(0) == null);
+    try testing.expect(ownerSpecifier(1) == null);
+    try testing.expect(ownerSpecifier(6) == null);
+    try testing.expect(ownerSpecifier(9) == null);
+    try testing.expect(ownerSpecifier(10) == null);
+    try testing.expect(ownerSpecifier(12) == null);
+    try testing.expect(ownerSpecifier(13) == null);
+    try testing.expect(ownerSpecifier(14) == null);
+    try testing.expect(ownerSpecifier(15) == null);
 }

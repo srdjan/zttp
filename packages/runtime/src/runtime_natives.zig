@@ -211,7 +211,7 @@ pub fn splitPathAndQuery(url: []const u8) struct {
 /// Parsed request target for a recorded or synthetic request: req.path split
 /// from the query string, plus the parsed req.query params and their backing
 /// storage. Every recorded-request consumer (test runner, replay runner,
-/// durable recovery, intent assertions) builds an HttpRequestView from a raw
+/// replay and intent assertions) builds an HttpRequestView from a raw
 /// URL; without this split, zruntime falls back to the full url for req.path
 /// (keeping the "?query" suffix) and req.query is empty - diverging from the
 /// live server and causing false replay regressions on unchanged handlers.

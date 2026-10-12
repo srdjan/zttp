@@ -75,84 +75,6 @@ pub fn wrapNativeFnWithCapabilities(
     }.call;
 }
 
-/// The named denial a module call gets when the tool the request is served for
-/// does not hold the export in its grant.
-pub const ToolGrantError = error{ToolGrantDenied};
-
-/// Refuse `specifier`.`export_name` when the active tool or agent grant lacks
-/// it. A handler whose contract declares an agent also refuses a missing grant,
-/// except for `routerMatch`, which dispatch needs before it selects a route.
-/// A denial is recorded in the security event stream, naming the module and
-/// the export (both compile-time identities, never request data).
-pub fn checkToolGrant(ctx: *const context.Context, specifier: []const u8, export_name: []const u8) ToolGrantError!void {
-    const grant = ctx.active_tool_grant orelse {
-        if (!ctx.contract_has_agent or isRouterMatch(specifier, export_name)) return;
-        if (!builtin.is_test) std.log.err(
-            "tool grant: {s}.{s} has no grant in a handler that declares an agent; call refused",
-            .{ specifier, export_name },
-        );
-        security_events.emitGlobal(security_events.SecurityEvent.initPolicyDenied(
-            specifier,
-            "call",
-            "export",
-            export_name,
-            "tool_grant_missing",
-            ctx.policy_generation,
-        ));
-        return error.ToolGrantDenied;
-    };
-    if (grant.allows(grant.context, specifier, export_name)) return;
-    if (!builtin.is_test) std.log.err(
-        "tool grant: {s}.{s} is outside the served tool's reachable exports; call refused",
-        .{ specifier, export_name },
-    );
-    security_events.emitGlobal(security_events.SecurityEvent.initPolicyDenied(
-        specifier,
-        "call",
-        "export",
-        export_name,
-        "tool_grant",
-        ctx.policy_generation,
-    ));
-    return error.ToolGrantDenied;
-}
-
-fn isRouterMatch(specifier: []const u8, export_name: []const u8) bool {
-    return std.mem.eql(u8, specifier, "zttp:router") and
-        std.mem.eql(u8, export_name, "routerMatch");
-}
-
-test "an agent contract refuses a null grant except for routerMatch" {
-    const allocator = std.testing.allocator;
-    var gc_state = try gc.GC.init(allocator, .{});
-    defer gc_state.deinit();
-    const ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // A handler without an agent preserves the ambient module-call behavior.
-    try checkToolGrant(ctx, "zttp:crypto", "sha256");
-
-    ctx.contract_has_agent = true;
-    try checkToolGrant(ctx, "zttp:router", "routerMatch");
-
-    try security_events.initGlobal(allocator, 4);
-    defer security_events.deinitGlobal();
-    try std.testing.expectError(
-        error.ToolGrantDenied,
-        checkToolGrant(ctx, "zttp:crypto", "sha256"),
-    );
-
-    const stream = security_events.getGlobal() orelse return error.TestUnexpectedResult;
-    var events: [1]security_events.SecurityEvent = undefined;
-    try std.testing.expectEqual(@as(usize, 1), stream.drain(&events));
-    try std.testing.expectEqual(security_events.SecurityEventKind.policy_denied, events[0].kind);
-    try std.testing.expectEqualStrings("zttp:crypto", events[0].moduleSlice());
-    try std.testing.expectEqualStrings("call", events[0].actionSlice());
-    try std.testing.expectEqualStrings("export", events[0].resourceKindSlice());
-    try std.testing.expectEqualStrings("sha256", events[0].resourceIdSlice());
-    try std.testing.expectEqualStrings("tool_grant_missing", events[0].detailSlice());
-}
-
 /// The named denial a module call gets when the accepted capability ceiling
 /// excludes its module or does not admit a capability it requires.
 pub const CapabilityCeilingError = error{CapabilityCeilingDenied};
@@ -201,22 +123,17 @@ pub fn checkCapabilityCeiling(
     }
 }
 
-/// Wrap an export so it runs only inside the active tool's grant (M4 T5
-/// design note, section 6) and inside the accepted capability ceiling (M4 T5b
-/// design note, section 8). It is the outermost wrapper of every virtual
-/// module export, so both checks run before any capability scope is pushed and
-/// before the export does anything. `required_capabilities` is the list the
-/// capability scope pushes for the export: the binding's module-level list.
-pub fn wrapNativeFnWithToolGrant(
+/// Wrap an export so it runs only inside the accepted capability ceiling. The
+/// check runs before any capability scope is pushed and before the export does
+/// anything. `required_capabilities` is the binding's module-level list.
+pub fn wrapNativeFnWithCapabilityCeiling(
     comptime inner: object.NativeFn,
     comptime specifier: []const u8,
-    comptime export_name: []const u8,
     comptime required_capabilities: []const ModuleCapability,
 ) object.NativeFn {
     return struct {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-            try checkToolGrant(ctx, specifier, export_name);
             try checkCapabilityCeiling(ctx, specifier, required_capabilities);
             return inner(ctx_ptr, this, args);
         }
@@ -479,117 +396,6 @@ pub fn allowSdkSqlitePath(ctx: *context.Context, path: []const u8) !void {
     try ctx.allowSdkSqlitePathCanonical(canonical);
 }
 
-/// Host-only installation, before any module is invoked. A generation cannot
-/// redirect an installed ledger to a different store.
-pub fn installProtectedLedgerPath(ctx: *context.Context, path: []const u8) !void {
-    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
-    errdefer ctx.allocator.free(canonical);
-    if (ctx.protected_ledger_path) |existing| {
-        if (!std.mem.eql(u8, existing, canonical)) return error.LedgerStoreMismatch;
-        ctx.allocator.free(canonical);
-        return;
-    }
-    ctx.protected_ledger_path = canonical;
-}
-
-/// Host outputs must not share the protected database or its SQLite sidecars.
-pub fn validateLedgerOutputPath(allocator: std.mem.Allocator, ledger_path: []const u8, output_path: []const u8) !void {
-    const ledger = try canonicalizeCreatablePath(allocator, ledger_path);
-    defer allocator.free(ledger);
-    const output = try canonicalizeCreatablePath(allocator, output_path);
-    defer allocator.free(output);
-    for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
-        // Reserve ASCII case variants even before a store or sidecar exists.
-        // realpath cannot normalize the basename of a future file.
-        if (output.len == ledger.len + suffix.len and
-            std.ascii.eqlIgnoreCase(output[0..ledger.len], ledger) and std.ascii.eqlIgnoreCase(output[ledger.len..], suffix))
-            return error.ProtectedLedgerPath;
-    }
-}
-
-/// Durable output names depend on requests. Exclude the whole output tree.
-pub fn validateLedgerOutputDirectory(allocator: std.mem.Allocator, ledger_path: []const u8, output_dir: []const u8) !void {
-    const ledger = try canonicalizeCreatablePath(allocator, ledger_path);
-    defer allocator.free(ledger);
-    const directory = try canonicalizeCreatablePath(allocator, output_dir);
-    defer allocator.free(directory);
-    for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
-        const protected = try std.mem.concat(allocator, u8, &.{ ledger, suffix });
-        defer allocator.free(protected);
-        if (std.ascii.eqlIgnoreCase(protected, directory) or
-            (protected.len > directory.len and std.ascii.eqlIgnoreCase(protected[0..directory.len], directory) and
-                (std.mem.endsWith(u8, directory, "/") or protected[directory.len] == '/')))
-            return error.ProtectedLedgerPath;
-    }
-}
-
-fn ledgerSqlAuthorizer(_: ?*anyopaque, action: c_int, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8, _: [*c]const u8) callconv(.c) c_int {
-    // ATTACH (including VACUUM INTO) otherwise bypasses the checked open path.
-    return if (action == sqlite_runtime.c.SQLITE_ATTACH) sqlite_runtime.c.SQLITE_DENY else sqlite_runtime.c.SQLITE_OK;
-}
-
-fn protectSqliteConnection(db: *sqlite_runtime.Db) !void {
-    if (sqlite_runtime.c.sqlite3_set_authorizer(db.handle, ledgerSqlAuthorizer, null) != sqlite_runtime.c.SQLITE_OK)
-        return error.SqliteOpenFailed;
-}
-
-pub fn openLedgerDbChecked(ctx: *context.Context) !sqlite_runtime.Db {
-    try sqliteCapabilityChecked(ctx);
-    if (!std.mem.eql(u8, currentActiveModuleSpecifier(ctx), "zttp:ledger")) return error.LedgerModuleRequired;
-    const path = ctx.protected_ledger_path orelse return error.LedgerNotConfigured;
-    var db = try sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, path);
-    errdefer db.close();
-    try protectSqliteConnection(&db);
-    return db;
-}
-
-test "protected ledger rejects generic opens and attachment bypasses" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const ledger_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/ledger.db", .{tmp.sub_path});
-    defer allocator.free(ledger_path);
-    const other_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/other.db", .{tmp.sub_path});
-    defer allocator.free(other_path);
-    var gc_state = try gc.GC.init(allocator, .{});
-    defer gc_state.deinit();
-    const ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-    try allowSdkSqlitePath(ctx, ledger_path);
-    try allowSdkSqlitePath(ctx, other_path);
-    try installProtectedLedgerPath(ctx, ledger_path);
-    const token = pushActiveModuleContext(ctx, "zttp:sql", &.{.sqlite});
-    defer popActiveModuleContext(token);
-    try std.testing.expectError(error.SqlitePathNotAllowed, openSqliteDbChecked(ctx, ledger_path));
-    try std.testing.expectError(error.LedgerModuleRequired, openLedgerDbChecked(ctx));
-    var other = try openSqliteDbChecked(ctx, other_path);
-    defer other.close();
-    try std.testing.expectError(error.SqlitePrepareFailed, other.prepare("ATTACH ':memory:' AS bypass"));
-    const ledger_token = pushActiveModuleContext(ctx, "zttp:ledger", &.{.sqlite});
-    defer popActiveModuleContext(ledger_token);
-    var ledger_db = try openLedgerDbChecked(ctx);
-    defer ledger_db.close();
-    try ledger_db.exec(allocator, "CREATE TABLE boundary_probe(value INTEGER)");
-    try allowSdkFilePath(ctx, ledger_path);
-    const file_token = pushActiveModuleContext(ctx, "zttp:other", &.{.filesystem});
-    defer popActiveModuleContext(file_token);
-    try std.testing.expectError(error.FilePathNotAllowed, readFileChecked(ctx, ledger_path, 1024));
-    for ([_][]const u8{ "-wal", "-shm", "-journal" }) |suffix| {
-        const name = try std.fmt.allocPrint(allocator, "ledger.db{s}", .{suffix});
-        defer allocator.free(name);
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = "protected sidecar" });
-        const path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ ledger_path, suffix });
-        defer allocator.free(path);
-        try allowSdkFilePath(ctx, path);
-        try allowSdkSqlitePath(ctx, path);
-        try std.testing.expectError(error.FilePathNotAllowed, readFileChecked(ctx, path, 1024));
-        const sql_token = pushActiveModuleContext(ctx, "zttp:sql", &.{.sqlite});
-        defer popActiveModuleContext(sql_token);
-        try std.testing.expectError(error.SqlitePathNotAllowed, openSqliteDbChecked(ctx, path));
-    }
-    try std.testing.expectError(error.LedgerStoreMismatch, installProtectedLedgerPath(ctx, other_path));
-}
-
 pub fn readFileChecked(
     ctx: *context.Context,
     path: []const u8,
@@ -650,10 +456,7 @@ pub fn openSqliteDbChecked(
     const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
     defer ctx.allocator.free(canonical);
     if (!ctx.allowsSdkSqlitePathCanonical(canonical)) return error.SqlitePathNotAllowed;
-    var db = try sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, canonical);
-    errdefer db.close();
-    if (ctx.protected_ledger_path != null) try protectSqliteConnection(&db);
-    return db;
+    return sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, canonical);
 }
 
 pub fn hmacSha256ForActiveModule(
@@ -1082,7 +885,7 @@ test "active module authorization is scoped to its Context" {
     try std.testing.expect(!hasCapability(handle_a, .clock));
     try std.testing.expect(hasCapability(handle_b, .random));
 
-    const next_token_a = pushActiveModuleContext(ctx_a, "zttp:service", &.{.stderr});
+    const next_token_a = pushActiveModuleContext(ctx_a, "partner:stderr", &.{.stderr});
     try std.testing.expect(hasCapability(handle_a, .stderr));
     try std.testing.expect(hasCapability(handle_b, .random));
 

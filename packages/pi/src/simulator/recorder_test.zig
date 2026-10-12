@@ -10,10 +10,13 @@ const runner_mod = @import("runner.zig");
 const capture_sink = @import("../providers/capture_sink.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
+const agent = @import("../agent.zig");
+const compaction = @import("../compaction.zig");
 const context_budget = @import("../context_budget.zig");
 const model_client = @import("model_client.zig");
 const local_client = @import("../providers/local/client.zig");
 const model_request = @import("../providers/model_request.zig");
+const models = @import("../providers/models.zig");
 const loop = @import("../loop.zig");
 const registry_mod = @import("../registry/registry.zig");
 const transcript_mod = @import("../transcript.zig");
@@ -24,9 +27,63 @@ const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("../test_support/cwd.zig").cwdPathAlloc;
 
-const deepseek_text_response =
-    "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"hello world\"}}]," ++
-    "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
+const compaction_tool_result_bytes = 64 * 1024;
+const compaction_model_response_bytes = 40 * 1024;
+
+const deepseek_large_context_call_response =
+    "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{" ++
+    "\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{" ++
+    "\"id\":\"call_large_context\",\"type\":\"function\",\"function\":{" ++
+    "\"name\":\"large_context\",\"arguments\":\"{}\"}}]}}]," ++
+    "\"usage\":{\"prompt_tokens\":379,\"completion_tokens\":2}}";
+
+const valid_compaction_summary =
+    "## Goal\nContinue the recorded flow\n\n" ++
+    "## Constraints & Preferences\n- Preserve exact replay identity\n\n" ++
+    "## Progress\n### Done\n- [x] Read deterministic context\n\n" ++
+    "### In Progress\n- [ ] Continue the next turn\n\n" ++
+    "### Blocked\n- None\n\n" ++
+    "## Key Decisions\n- The host owns compaction checkpoints\n\n" ++
+    "## Next Steps\n1. Continue the flow\n\n" ++
+    "## Critical Context\n- Stable entry IDs remain authoritative";
+
+fn renderDeepSeekTextResponse(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+    prompt_tokens: u64,
+) ![]u8 {
+    var response = TextBuffer.init(allocator);
+    errdefer response.deinit();
+    const writer = response.writer();
+    try writer.writeAll("{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{" ++
+        "\"role\":\"assistant\",\"content\":");
+    try std.json.Stringify.value(content, .{}, writer);
+    try writer.writeAll("}}],\"usage\":{\"prompt_tokens\":");
+    try writer.print("{d}", .{prompt_tokens});
+    try writer.writeAll(",\"completion_tokens\":2}}");
+    return response.toOwnedSlice();
+}
+
+fn largeContextExecute(
+    allocator: std.mem.Allocator,
+    _: []const []const u8,
+) anyerror!registry_mod.ToolResult {
+    const result = try allocator.alloc(u8, compaction_tool_result_bytes);
+    @memset(result, 'x');
+    return .{ .ok = true, .llm_text = result };
+}
+
+const large_context_tool: registry_mod.ToolDef = .{
+    .name = "large_context",
+    .label = "Large context",
+    .description = "Return deterministic context for compaction coverage",
+    .effect = .analyze,
+    .context_policy = .exact,
+    .model_exposure = .visible,
+    .input_schema = "{}",
+    .decode_json = registry_mod.helpers.decodeNoArgs,
+    .execute = largeContextExecute,
+};
 
 const deterministic_handler =
     "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
@@ -266,6 +323,49 @@ test "local client failure records diagnostics through the flow recorder" {
 const CapturingClient = struct {
     config: model_request.Config,
     capture: *capture_sink.CaptureSink,
+    large_model_text: []const u8,
+    normal_cursor: usize = 0,
+    summary_calls: usize = 0,
+
+    const normal_response_count: usize = 3;
+    const ResponsePlan = union(enum) {
+        fixed: []const u8,
+        text: []const u8,
+    };
+
+    fn requestWithConfig(
+        self: *CapturingClient,
+        arena: std.mem.Allocator,
+        config: model_request.Config,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+        plan: ResponsePlan,
+    ) !loop.ModelCallResult {
+        var snapshot = try model_request.createSnapshot(arena, .{
+            .config = config,
+            .transcript = transcript,
+            .extra_user_text = extra_user_text,
+        });
+        defer snapshot.deinit(arena);
+        _ = try model_client.prepareSnapshot(arena, &snapshot);
+        const raw_response = switch (plan) {
+            .fixed => |response| response,
+            .text => |content| try renderDeepSeekTextResponse(
+                arena,
+                content,
+                snapshot.budget.?.tokens.total,
+            ),
+        };
+        try self.capture.record(&snapshot, raw_response);
+        const bytes = try cassette_record.serializeCassette(arena, raw_response, .{
+            .provider = .deepseek,
+            .scenario = "recorded-two-turn",
+            .stream = false,
+            .model = config.model,
+        });
+        const cassette = try cassette_client.loadCassetteFromBytes(arena, bytes, null);
+        return cassette_client.replay(arena, cassette);
+    }
 
     fn requestFn(
         context: *anyopaque,
@@ -274,26 +374,55 @@ const CapturingClient = struct {
         extra_user_text: ?[]const u8,
     ) anyerror!loop.ModelCallResult {
         const self: *CapturingClient = @ptrCast(@alignCast(context));
-        var snapshot = try model_request.createSnapshot(arena, .{
-            .config = self.config,
-            .transcript = transcript,
-            .extra_user_text = extra_user_text,
-        });
-        defer snapshot.deinit(arena);
-        _ = try model_client.prepareSnapshot(arena, &snapshot);
-        try self.capture.record(&snapshot, deepseek_text_response);
-        const bytes = try cassette_record.serializeCassette(arena, deepseek_text_response, .{
-            .provider = .deepseek,
-            .scenario = "recorded-two-turn",
-            .stream = false,
-            .model = self.config.model,
-        });
-        const cassette = try cassette_client.loadCassetteFromBytes(arena, bytes, null);
-        return cassette_client.replay(arena, cassette);
+        const plan: ResponsePlan = switch (self.normal_cursor) {
+            0 => .{ .fixed = deepseek_large_context_call_response },
+            1 => .{ .text = self.large_model_text },
+            2 => .{ .text = "hello world" },
+            else => return error.CassetteSequenceExhausted,
+        };
+        const result = try self.requestWithConfig(
+            arena,
+            self.config,
+            transcript,
+            extra_user_text,
+            plan,
+        );
+        self.normal_cursor += 1;
+        return result;
     }
 
     fn asModelClient(self: *CapturingClient) loop.ModelClient {
         return .{ .context = self, .request_fn = requestFn };
+    }
+
+    fn summarizeFn(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        request: compaction.SummaryRequest,
+    ) anyerror!compaction.SummaryResponse {
+        const self: *CapturingClient = @ptrCast(@alignCast(context));
+        var transcript: transcript_mod.Transcript = .{};
+        defer transcript.deinit(arena);
+        try transcript.append(arena, .{ .user_text = request.user_prompt });
+        var config = self.config;
+        config.system_prompt = request.system_prompt;
+        config.tools_json = null;
+        config.max_output_tokens = request.max_output_tokens;
+        config.purpose = .summarization;
+        config.cache_policy = .disabled;
+        const result = try self.requestWithConfig(
+            arena,
+            config,
+            &transcript,
+            null,
+            .{ .text = valid_compaction_summary },
+        );
+        self.summary_calls += 1;
+        return .{ .response = result.reply.response, .usage = result.usage };
+    }
+
+    fn asSummarizer(self: *CapturingClient) compaction.Summarizer {
+        return .{ .context = self, .summarize_fn = summarizeFn };
     }
 };
 
@@ -454,7 +583,7 @@ test "simulator recorder skips agent scratch but still refuses undeclared source
     );
 }
 
-test "simulator recorder promotes and replays a complete two-Turn flow" {
+test "simulator recorder promotes and replays a compacted two-Turn flow" {
     var tree = try IsolatedTmp.init(testing.allocator, "flow-recorder");
     defer tree.cleanup(testing.allocator);
     try tree.mkdir(testing.allocator, "workspace");
@@ -480,13 +609,23 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
     );
     defer testing.allocator.free(case_abs);
 
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, large_context_tool);
+    var tools_buffer = TextBuffer.init(testing.allocator);
+    defer tools_buffer.deinit();
+    try deepseek_client.writeToolsArray(tools_buffer.writer(), &registry);
     const request_config: model_request.Config = .{
         .provider = .deepseek,
         .stream = false,
         .model = "deepseek-v4-flash",
         .max_output_tokens = 8192,
         .system_prompt = "persona",
+        .tools_json = tools_buffer.written(),
     };
+    const large_model_text = try testing.allocator.alloc(u8, compaction_model_response_bytes);
+    defer testing.allocator.free(large_model_text);
+    @memset(large_model_text, 'y');
     var progress_probe: ProgressProbe = .{};
     defer progress_probe.deinit();
     var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
@@ -500,39 +639,65 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
     defer recorder.deinit();
     try recorder.captureInitialWorkspace(workspace_abs);
     var sink = recorder.captureSink();
-    var client = CapturingClient{ .config = request_config, .capture = &sink };
-    var registry: registry_mod.Registry = .{};
-    defer registry.deinit(testing.allocator);
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(testing.allocator);
+    var client = CapturingClient{
+        .config = request_config,
+        .capture = &sink,
+        .large_model_text = large_model_text,
+    };
+    const selected_model = try models.resolveForProvider(.deepseek, request_config.model);
+    var session = agent.AgentSession.initControlled(testing.allocator, selected_model, request_config);
+    defer session.deinit(testing.allocator);
+    var controller: agent.RequestController = .{
+        .allocator = testing.allocator,
+        .session = &session,
+        .raw_client = client.asModelClient(),
+        .summarizer = client.asSummarizer(),
+    };
+    const transcript = &session.transcript;
 
     for ([_][]const u8{ "hello", "again" }, 0..) |prompt, turn_index| {
         try recorder.beginTurn(prompt, transcript.len(), .approve);
         const result = try loop.runTurnWith(
             testing.allocator,
-            client.asModelClient(),
+            controller.asModelClient(),
             &registry,
-            &transcript,
+            transcript,
             prompt,
             .{ .workspace_root = workspace_abs, .turn_timeout_ms = 0 },
         );
-        try recorder.finishTurn(result, &transcript);
+        try recorder.finishTurn(result, transcript);
         if (turn_index == 0) try recorder.captureTurnWorkspace(workspace_abs);
     }
     try recorder.captureExpectedWorkspace(workspace_abs);
+    try testing.expectEqual(@as(usize, CapturingClient.normal_response_count), client.normal_cursor);
+    try testing.expectEqual(@as(usize, 1), client.summary_calls);
+    try testing.expect(transcript.projection != null);
 
-    try testing.expectEqual(@as(usize, 2), progress_probe.events.items.len);
+    const expected_purposes = [_]model_request.Purpose{
+        .normal,
+        .normal,
+        .summarization,
+        .normal,
+    };
+    const expected_turns = [_]u32{ 0, 0, 1, 1 };
+    const expected_turn_calls = [_]u32{ 0, 1, 0, 1 };
+    try testing.expectEqual(expected_purposes.len, progress_probe.events.items.len);
     for (progress_probe.events.items, 0..) |event, index| switch (event) {
         .model_call_completed => |completed| {
             try testing.expectEqual(index, completed.global_call_index);
-            try testing.expectEqual(@as(u32, @intCast(index)), completed.turn_index);
-            try testing.expectEqual(@as(u32, 0), completed.turn_call_index);
-            try testing.expectEqual(model_request.Purpose.normal, completed.purpose);
-            try testing.expectEqual(request_config.max_output_tokens, completed.output_limit_tokens);
+            try testing.expectEqual(expected_turns[index], completed.turn_index);
+            try testing.expectEqual(expected_turn_calls[index], completed.turn_call_index);
+            try testing.expectEqual(expected_purposes[index], completed.purpose);
+            if (completed.purpose == .normal) {
+                try testing.expectEqual(request_config.max_output_tokens, completed.output_limit_tokens);
+            }
             try testing.expect(completed.estimated_input_tokens >= completed.logical_input_tokens);
-            try testing.expectEqual(@as(u64, 1), completed.reported_input_tokens);
-            try testing.expectEqual(@as(u64, 1), completed.logical_input_tokens);
-            try testing.expectEqual(context_budget.InputObservationSource.provider_reported, completed.input_observation_source);
+            try testing.expect(completed.reported_input_tokens > 0);
+            try testing.expectEqual(completed.reported_input_tokens, completed.logical_input_tokens);
+            try testing.expectEqual(
+                context_budget.InputObservationSource.provider_reported,
+                completed.input_observation_source,
+            );
             try testing.expectEqual(@as(u64, 2), completed.output_tokens);
             try testing.expect(completed.wire_bytes > 0);
         },
@@ -578,16 +743,22 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
                 flow_case.manifest.turns[0].raw_first_draft_veto_pass,
             );
             try testing.expectEqual(@as(?bool, false), flow_case.manifest.turns[0].first_attempt_green);
-            try testing.expectEqual(@as(usize, 2), flow_case.trace.model_calls.len);
+            try testing.expectEqual(expected_purposes.len, flow_case.trace.model_calls.len);
+            var stored_projection_cut = false;
             for (flow_case.trace.model_calls) |checkpoint| {
                 try testing.expect(checkpoint.request_budget != null);
-                try testing.expectEqual(@as(?u64, 1), checkpoint.normalized_input_tokens);
+                try testing.expect((checkpoint.normalized_input_tokens orelse 0) > 0);
                 try testing.expect(checkpoint.request_budget.?.bytes.wire > 0);
+                stored_projection_cut = stored_projection_cut or
+                    checkpoint.projection_first_kept_entry_id != null;
             }
+            try testing.expect(stored_projection_cut);
             var runner = runner_mod.Runner.init(testing.allocator, flow_case, &registry, request_config);
             const replay = try runner.run();
             try testing.expectEqual(@as(usize, 2), replay.turns);
-            try testing.expectEqual(@as(usize, 2), replay.model_calls);
+            try testing.expect(replay.complete_consumption);
+            try testing.expectEqual(flow_case.trace.model_calls.len, replay.model_calls);
+            try testing.expectEqual(replay.expected_model_calls, replay.model_calls);
         },
     }
 }

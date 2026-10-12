@@ -68,8 +68,6 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
         .state_deinit = binding.state_deinit,
         .contract_section = binding.contract_section,
         .sandboxable = binding.sandboxable,
-        .comptime_only = binding.comptime_only,
-        .self_managed_io = binding.self_managed_io,
     };
 }
 
@@ -137,9 +135,6 @@ fn adaptFunctionBinding(
         .replay_pure = binding.replay_pure,
         .contract_extractions = &contract_extractions,
         .contract_flags = .{
-            .sets_scope_used = binding.contract_flags.sets_scope_used,
-            .sets_durable_used = binding.contract_flags.sets_durable_used,
-            .sets_durable_timers = binding.contract_flags.sets_durable_timers,
             .sets_bearer_auth = binding.contract_flags.sets_bearer_auth,
             .sets_jwt_auth = binding.contract_flags.sets_jwt_auth,
         },

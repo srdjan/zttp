@@ -6,8 +6,8 @@
 //! stages in one pass. The golden corpus pins what it says about 129 well-formed
 //! files. This file pins what it does with a damaged one.
 //!
-//! The inputs are the `.ts` and `.tsx` files under `tests/corpus` and
-//! `examples`, read from the repository when the test runs. Each file yields a
+//! The inputs are the `.ts` files under `tests/corpus` and `examples`. The test
+//! reads each file from the repository. Each file yields a
 //! fixed number of mutants from a PRNG seeded by the file path, so a failure
 //! reproduces from the path and the mutant index alone. The mutation kinds
 //! rotate in a fixed order: a bit flip, a byte deletion, a byte insertion from a
@@ -45,7 +45,7 @@ const precompile = @import("precompile.zig");
 
 /// The errors the check may return for source text alone. The list comes from
 /// reading `runCheckOnPreparedSource` and the calls it makes with no schema,
-/// system file, policy, or declaration in `CheckOptions`:
+/// policy or declaration in `CheckOptions`:
 ///
 ///   OutOfMemory             any allocation can fail.
 ///   TypePoolCapacityExceeded  `pipeline.resolve` and `TypeEnvStorage.init` raise
@@ -55,17 +55,13 @@ const precompile = @import("precompile.zig");
 ///                           a type name the pass cannot bind.
 ///   MissingSqlSchema        `validateSqlContractNative` raises it for a `sql`
 ///                           query when `sql_schema_path` is null.
-///   ScopeDurableUnsupported `buildContractWithPolicy` raises it for a handler
-///                           that uses both `zttp:scope` and `zttp:durable`.
-///
 /// Every other name in the check's inferred error set comes from a file, a
-/// policy, a declaration, or a system config, and none of those is supplied.
+/// policy, or a declaration, and none of those is supplied.
 const allowed_errors = [_]anyerror{
     error.OutOfMemory,
     error.TypePoolCapacityExceeded,
     error.UnresolvedTypeBinding,
     error.MissingSqlSchema,
-    error.ScopeDurableUnsupported,
 };
 
 fn isAllowedError(err: anyerror) bool {
@@ -274,7 +270,7 @@ const InputRoot = struct {
     /// Directory relative to the repository root, which is the working
     /// directory of every `zig build` test step.
     dir: []const u8,
-    /// Files with a `.ts` or `.tsx` extension below `dir`. The test fails when
+    /// Files with a `.ts` extension below `dir`. The test fails when
     /// fewer are found. Raise it in the commit that adds files, to the count the
     /// test finds. A retired feature can remove its own input with a measured census.
     floor: usize,
@@ -282,8 +278,8 @@ const InputRoot = struct {
 
 const input_roots = [_]InputRoot{
     .{ .dir = "tests/corpus", .floor = 129 },
-    // Phase 2 removes examples/tools/tools.ts. All 60 retained sources remain inputs.
-    .{ .dir = "examples", .floor = 60 },
+    // Measured from the retained source tree by the unfiltered Phase 3 run.
+    .{ .dir = "examples", .floor = 33 },
 };
 
 const max_file_bytes = 1024 * 1024;
@@ -291,10 +287,10 @@ const max_file_bytes = 1024 * 1024;
 const InputError = error{InputsBelowFloor};
 
 fn isSourcePath(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".ts") or std.mem.endsWith(u8, path, ".tsx");
+    return std.mem.endsWith(u8, path, ".ts");
 }
 
-/// The `.ts` and `.tsx` paths below `dir_path`, relative to the working
+/// The `.ts` paths below `dir_path`, relative to the working
 /// directory and sorted. The caller frees each path and the slice.
 fn discoverSources(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8) ![][]u8 {
     var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
@@ -380,7 +376,6 @@ const Outcome = union(enum) {
 fn runOnce(gpa: std.mem.Allocator, source: []const u8, path: []const u8) !Outcome {
     var result = precompile.runCheckOnlyFromSourceWithOptions(gpa, source, path, .{
         .json_mode = true,
-        .persist_witnesses = false,
     }) catch |err| return .{ .err = err };
     defer result.deinit(gpa);
     return .{ .result = .{
@@ -521,7 +516,7 @@ test "pipeline mutation: an empty input directory is below the floor" {
     try requireFloor(0, 0);
 }
 
-test "pipeline mutation: discovery keeps only ts and tsx sources" {
+test "pipeline mutation: discovery keeps only ts sources" {
     const gpa = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -535,9 +530,8 @@ test "pipeline mutation: discovery keeps only ts and tsx sources" {
 
     const paths = try discoverSources(gpa, std.testing.io, path);
     defer freeSources(gpa, paths);
-    try std.testing.expectEqual(@as(usize, 2), paths.len);
+    try std.testing.expectEqual(@as(usize, 1), paths.len);
     try std.testing.expect(std.mem.endsWith(u8, paths[0], "/a.ts"));
-    try std.testing.expect(std.mem.endsWith(u8, paths[1], "/sub/b.tsx"));
 }
 
 fn diagnosticAt(line: u32, column: u32) precompile.json_diag.JsonDiagnostic {
@@ -726,7 +720,6 @@ test "pipeline regression: a guarded verifyWebhookSignature call keeps fault_cov
     ;
     var result = try precompile.runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
         .json_mode = true,
-        .persist_witnesses = false,
     });
     defer result.deinit(std.testing.allocator);
 

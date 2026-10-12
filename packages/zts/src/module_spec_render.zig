@@ -467,13 +467,6 @@ test "renders the four optional export fields only when present" {
     try testing.expect(std.mem.indexOf(u8, auth, "\"argumentShape\": \"empty_string_literal\"") != null);
     try testing.expect(std.mem.indexOf(u8, auth, "\"failureSeverity\": \"critical\"") != null);
 
-    // argPosition is emitted when non-zero and omitted when zero. durable's
-    // `signal` has one extraction of each.
-    const durable = try renderBySpecifier(a, "zttp:durable");
-    defer a.free(durable);
-    try testing.expect(std.mem.indexOf(u8, durable, "\"argPosition\": 1") != null);
-    try testing.expect(std.mem.indexOf(u8, durable, "\"argPosition\": 0") == null);
-
     // flag_only is never projected, whatever the binding says.
     for (builtin_modules.builtins, builtin_modules.builtin_governance_entries) |binding, gov| {
         const out = try renderModuleSpec(a, binding, gov.module_path);

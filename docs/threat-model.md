@@ -11,8 +11,7 @@ repository is in scope.
 - Request data crossing the HTTP boundary: method, path, headers, query, and
   body.
 - Runtime capabilities exposed through `zttp:*` modules: env, outbound HTTP,
-  cache namespaces, SQLite queries, filesystem-backed durable state,
-  clock/random/stderr, and runtime callbacks.
+  cache namespaces, SQLite queries, clock, randomness, stderr, and callbacks.
 - Local credentials used by hosted deploy commands when those commands are
   enabled.
 

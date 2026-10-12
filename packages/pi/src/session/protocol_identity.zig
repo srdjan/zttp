@@ -27,7 +27,6 @@ pub fn current(
     const schema_hash = zts_cli.agent_protocol.schemaHash();
     const policy_hash = zts.policyHash();
     const grammar_hash = zts.grammarHash();
-    const tsx_grammar_hash = zts.tsxFrontendGrammarHash();
     const semantics_hash = zts.semanticsHash();
     const diagnostic_hash = zts.diagnosticCatalogHash();
     const idiom_hash = zts.idiomTableHash();
@@ -41,7 +40,6 @@ pub fn current(
     hasher.field("agent-schema", &schema_hash);
     hasher.field("policy", &policy_hash);
     hasher.field("grammar", &grammar_hash);
-    hasher.field("tsx-grammar", &tsx_grammar_hash);
     hasher.field("semantics", &semantics_hash);
     hasher.field("diagnostics", &diagnostic_hash);
     hasher.field("idioms", &idiom_hash);

@@ -1,4 +1,4 @@
-//! Deterministic security cohort for expert qualification.
+//! Deterministic security cohort for expert evaluation.
 //!
 //! These are compiler probes, not model-authoring prompts. Every adversarial
 //! row names the exact diagnostic it must trigger. Every positive row names an

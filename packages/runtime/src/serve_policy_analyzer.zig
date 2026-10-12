@@ -9,13 +9,11 @@ pub fn validateConfiguredPolicy(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
     sql_schema_path: ?[]const u8,
-    system_path: ?[]const u8,
     policy_source: []const u8,
 ) !CheckedPolicy {
     var result = try precompile.runCheckOnlyWithOptions(allocator, handler_path, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = true,
-        .system_path = system_path,
         .policy_source = policy_source,
     });
     defer result.deinit(allocator);

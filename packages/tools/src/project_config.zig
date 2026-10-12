@@ -14,8 +14,6 @@ pub const ProjectConfig = struct {
     /// Path to the capability-policy JSON this project's handlers are checked
     /// against. Resolved like `sqlite`: relative to the manifest directory.
     policy: ?[]const u8 = null,
-    durable_dir: ?[]const u8 = null,
-    system: ?[]const u8 = null,
     outbound_http: bool = false,
     outbound_hosts: []const []const u8 = &.{},
 
@@ -27,8 +25,6 @@ pub const ProjectConfig = struct {
         if (self.static_dir) |path| allocator.free(path);
         if (self.sqlite) |path| allocator.free(path);
         if (self.policy) |path| allocator.free(path);
-        if (self.durable_dir) |path| allocator.free(path);
-        if (self.system) |path| allocator.free(path);
         for (self.outbound_hosts) |host| allocator.free(host);
         allocator.free(self.outbound_hosts);
     }
@@ -66,16 +62,6 @@ pub const ProjectConfig = struct {
         const path = try self.resolvedPolicyPath(allocator) orelse return null;
         defer allocator.free(path);
         return try zts.file_io.readFile(allocator, path, 1024 * 1024);
-    }
-
-    pub fn resolvedDurableDir(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
-        const path = self.durable_dir orelse return null;
-        return try self.resolvePath(allocator, path);
-    }
-
-    pub fn resolvedSystemPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
-        const path = self.system orelse return null;
-        return try self.resolvePath(allocator, path);
     }
 };
 
@@ -134,6 +120,18 @@ pub fn loadAbsolute(
     }
 
     const root_dir_src = std.fs.path.dirname(manifest_path) orelse return error.InvalidProjectConfig;
+    const automatic_system_path = try std.fs.path.resolve(allocator, &.{ root_dir_src, "system.json" });
+    defer allocator.free(automatic_system_path);
+    if (std.Io.Dir.accessAbsolute(io, automatic_system_path, .{})) |_| {
+        if (!@import("builtin").is_test) {
+            std.debug.print("Project uses retired runtime authority: {s}\n", .{retired_authority.Feature.system_config.sentence()});
+        }
+        return error.UnsupportedRuntimeAuthority;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+
     const entry = try dupStringField(allocator, obj, "entry", "src/handler.ts");
     const host = try dupStringField(allocator, obj, "host", "127.0.0.1");
 
@@ -146,8 +144,6 @@ pub fn loadAbsolute(
         .static_dir = try dupOptionalStringField(allocator, obj, "staticDir"),
         .sqlite = try dupOptionalStringField(allocator, obj, "sqlite"),
         .policy = try dupOptionalStringField(allocator, obj, "policy"),
-        .durable_dir = try dupOptionalStringField(allocator, obj, "durableDir"),
-        .system = try dupOptionalStringField(allocator, obj, "system"),
         .outbound_http = try parseBoolField(obj, "outboundHttp", false),
         .outbound_hosts = try dupStringArrayField(allocator, obj, "outboundHosts"),
     };
@@ -157,14 +153,6 @@ pub fn loadAbsolute(
         defer allocator.free(public_path);
         if (std.Io.Dir.accessAbsolute(io, public_path, .{})) |_| {
             config.static_dir = try allocator.dupe(u8, "public");
-        } else |_| {}
-    }
-
-    if (config.system == null) {
-        const system_path = try std.fs.path.resolve(allocator, &.{ config.root_dir, "system.json" });
-        defer allocator.free(system_path);
-        if (std.Io.Dir.accessAbsolute(io, system_path, .{})) |_| {
-            config.system = try allocator.dupe(u8, "system.json");
         } else |_| {}
     }
 
@@ -376,6 +364,10 @@ test "project discovery rejects every retired authority configuration" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     const manifests = [_][]const u8{
+        "{\"durableDir\":\".zttp/durable\"}",
+        "{\"durableDir\":null}",
+        "{\"system\":\"system.json\"}",
+        "{\"system\":null}",
         "{\"declaration\":\"declaration.json\"}",
         "{\"declaration\":null}",
         "{\"invariants\":\"invariant.json\",\"ledger\":\"ledger.db\"}",
@@ -403,4 +395,22 @@ test "project discovery rejects every retired authority configuration" {
             try std.testing.expectEqual(error.UnsupportedRuntimeAuthority, err);
         }
     }
+}
+
+test "project discovery refuses automatic system configuration" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "system.json",
+        .data = "{\"version\":1,\"handlers\":[]}",
+    });
+    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", allocator);
+    defer allocator.free(manifest);
+    try std.testing.expectError(
+        error.UnsupportedRuntimeAuthority,
+        discover(allocator, io, manifest),
+    );
 }

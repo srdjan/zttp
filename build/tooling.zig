@@ -1,12 +1,15 @@
 //! Repository-only executables and their tests: release provenance, coverage
 //! union, the release passport, the branch metric,
-//! the stand-in author, expert qualification, and the reach measurement. None
+//! the stand-in author, native gates, and the reach measurement. None
 //! of them is installed.
 
 const std = @import("std");
 const Context = @import("Context.zig");
 
 pub const Result = struct {
+    repo_gate_exe: *std.Build.Step.Compile,
+    zts_graph_gate_exe: *std.Build.Step.Compile,
+    native_gate_test_step: *std.Build.Step,
     evidence_marker_tests: *std.Build.Step.Compile,
     evidence_publish_exe: *std.Build.Step.Compile,
     run_evidence_publish_tests: *std.Build.Step.Run,
@@ -23,6 +26,26 @@ pub fn add(ctx: Context) Result {
     const test_filters = ctx.test_filters;
     const zts_host_mod = ctx.zts_host_mod;
     const pi_host_dep = ctx.pi_host_dep;
+
+    const repo_gate_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/repo_gate.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const repo_gate_exe = b.addExecutable(.{ .name = "repo-gate", .root_module = repo_gate_mod });
+    const repo_gate_tests = b.addTest(.{ .root_module = repo_gate_mod });
+    const run_repo_gate_tests = b.addRunArtifact(repo_gate_tests);
+    const graph_gate_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/zts_graph_gate.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const zts_graph_gate_exe = b.addExecutable(.{ .name = "zts-graph-gate", .root_module = graph_gate_mod });
+    const graph_gate_tests = b.addTest(.{ .root_module = graph_gate_mod });
+    const run_graph_gate_tests = b.addRunArtifact(graph_gate_tests);
+    const native_gate_test_step = b.step("test-native-gates", "Run native repository gate tests");
+    native_gate_test_step.dependOn(&run_repo_gate_tests.step);
+    native_gate_test_step.dependOn(&run_graph_gate_tests.step);
 
     // Release evidence parsing and rendering stay in repository-only native
     // commands. The publication shells keep the stable entry-point names.
@@ -166,28 +189,10 @@ pub fn add(ctx: Context) Result {
     const standin_step = b.step("zttp-standin", "Run the deterministic playbook server");
     standin_step.dependOn(&standin_cmd.step);
 
-    // Repository-only expert qualification decision. It consumes exactly
-    // three report-only live-run records and never edits the model registry.
-    const expert_qualification_mod = b.createModule(.{
-        .root_source_file = pi_host_dep.path("src/expert_qualification.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    const expert_qualification_exe = b.addExecutable(.{
-        .name = "expert-qualification",
-        .root_module = expert_qualification_mod,
-    });
-    const expert_qualification_cmd = b.addRunArtifact(expert_qualification_exe);
-    expert_qualification_cmd.has_side_effects = true;
-    if (b.args) |args| expert_qualification_cmd.addArgs(args);
-    const expert_qualification_step = b.step(
-        "expert-qualification",
-        "Assess three report-only expert qualification runs",
-    );
-    expert_qualification_step.dependOn(&expert_qualification_cmd.step);
-
     return .{
+        .repo_gate_exe = repo_gate_exe,
+        .zts_graph_gate_exe = zts_graph_gate_exe,
+        .native_gate_test_step = native_gate_test_step,
         .evidence_marker_tests = evidence_marker_tests,
         .evidence_publish_exe = evidence_publish_exe,
         .run_evidence_publish_tests = run_evidence_publish_tests,

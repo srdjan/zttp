@@ -5,7 +5,6 @@ pub const Options = struct {
     prove: bool = false,
     force_swap: bool = false,
     sql_schema_path: ?[]const u8 = null,
-    system_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
 };
 

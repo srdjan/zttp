@@ -16,7 +16,7 @@ idiomatic way to do it": the table becomes an idiom table, non-idiomatic
 spellings stay legal and advisory, and idiom becomes machine-discoverable
 because an agent-first language cannot inherit idiom from a community
 (Section 4.2). Revision 5 records the direct `zts-model-1` cutover: the
-model-minimal core grammar, the separate `zts-tsx-1` frontend, complete
+model-minimal core grammar, complete
 reachable-node and opcode classification, and artifact-bound source-profile
 identity. Revision 6 records the shipped artifact certificate and independent
 consumer, including the current `trusted` weakest edge and the properties
@@ -58,8 +58,8 @@ The design priority is:
 
 ZTS is not a TypeScript compatibility profile. It is a distinct constrained
 language that reuses familiar TypeScript lexical and layout conventions when
-they preserve one clear meaning. A `.ts` or `.tsx` transport does not imply
-that arbitrary TypeScript is accepted.
+they preserve one clear meaning. A `.ts` transport does not imply that
+arbitrary TypeScript is accepted.
 
 This profile therefore makes five decisions:
 
@@ -88,7 +88,7 @@ This profile therefore makes five decisions:
 | Added type syntax | Bounded generic parameters with `extends` |
 | Added type capability | Sound function generics and contractive recursive aliases |
 | Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes`, `HtmlNode` |
-| Added concurrency model | None; retain explicit `parallel` and `race` |
+| Added concurrency model | None |
 | Added error channel | None; errors remain ordinary tagged values. `Result` combinators are effect-row polymorphic, not a new channel |
 | Agent-only source notation | None; machine metadata remains separate JSON |
 | Agent protocol | Versioned discovery, diagnostics, repair simulation and application, normalization, and verification |
@@ -123,11 +123,8 @@ checker bypasses or routine native extensions:
 
 - HTTP and JSON APIs, including validation, authentication, CRUD, caching,
   SQL, and outbound calls
-- server-rendered HTML and TSX components
+- server-rendered HTML through explicit constructors
 - WebSocket and event handlers
-- queue consumers and producers
-- durable workflows and scheduled jobs
-- explicit parallel and racing I/O
 - pure collection, text, tree, and domain algorithms
 - reusable application modules with typed public contracts
 
@@ -147,8 +144,6 @@ target class compile, run, and verify without:
 
 - `unknown` used to launder a known type
 - undocumented syntax or behavior that an agent must infer from examples
-- parser-specific source rewrites such as reversing an ordinary comparison in
-  TSX
 - native modules introduced only to compensate for a language gap
 - unchecked dynamic property access
 - trapping operations on attacker-controlled input
@@ -168,8 +163,7 @@ this revision:
 - text construction uses double-quoted literals, explicit `String(value)`
   conversion, and string-array `join`;
 - `Proof<T, P>` and `Effects<T, R>` are ambient checker types;
-- `.ts` is the core source form, while `.tsx` is lowered by the independently
-  identified `zts-tsx-1` frontend before core parsing;
+- `.ts` is the source form;
 - version-2 agent discovery, diagnostics, bound repair, normalization, and
   verification publish the profile and its hashes;
 - contracts, caches, receipts, attestations, capsules, and Pi repair evidence
@@ -532,12 +526,9 @@ The full `meta` payload MUST also publish:
   exact grammar it describes,
 - `grammar`: the machine-readable productions of Section 8, member for
   member, registry-generated and drift-gated,
-- `source_frontends`: each optional authored-syntax frontend with its profile
-  identifier, grammar hash, target core profile and grammar hash, lowering
-  target, and machine-readable productions,
 - `examples`: one canonical minimal example per admitted surface form,
   registry-generated, so an agent can learn ZTS-specific syntax (`match`,
-  `nominal`, `assert`, `comptime()`, `parallel`) without hidden
+  `nominal`, and `assert`) without hidden
   instructions,
 - `ambient_names`: the closed table of ambient type and value names from
   Section 6,
@@ -875,9 +866,7 @@ The profile permits:
 - string-array `.join("")` for text construction
 - `??` and `?.`
 - pure boolean conditional expressions
-- `comptime()` over closed, pure expressions
 - `match` expressions
-- TSX expressions
 
 The profile excludes:
 
@@ -1230,10 +1219,8 @@ value type `T`; proof properties and inferred effects are tracked separately
 by the checker.
 
 On a function return, `Effects<T, R>` declares an effect ceiling. The checker
-requires the inferred row of the body to be a subset of `R`, while callers
-receive a value of type `T` and the inferred effect row. Thus `parallel`
-returns its tuple value directly, even when a containing function declares an
-`Effects<tuple, row>` return contract.
+requires the inferred row of the body to be a subset of `R`. Callers receive
+a value of type `T` and the inferred effect row.
 
 When to declare the ceiling is a decidable rule, not a style choice: an
 exported function with a nonempty inferred effect row MUST declare an
@@ -1288,70 +1275,10 @@ The type layer is not part of the executable semantic kernel. It has its own
 soundness obligation: well-typed surface programs elaborate to well-formed
 core programs without erased annotations being used as runtime evidence.
 
-### 5.8 JSX and TSX
+### 5.8 HTML construction
 
-TSX is the optional, versioned `zts-tsx-1` source frontend. JSX tokens are not
-part of the core grammar. A `.tsx` source is type-stripped, lowered to ordinary
-core calls, and only then parsed by the target core profile. A `.ts` source
-that contains raw JSX is rejected.
-
-The frontend identity publishes its own grammar hash together with the target
-core profile and grammar hash. A cached lowering is reusable only when all of
-those identities match.
-
-- `HtmlNode` is an opaque immutable virtual-node type.
-- `HtmlChild` is `HtmlNode | string | number | boolean | null | undefined |
-  readonly HtmlChild[]`.
-- Components are named functions.
-- Props are fixed records.
-- A component returns `HtmlNode`.
-- Children are finite arrays of `HtmlChild`.
-- Rendered text is escaped by default.
-- Raw HTML requires an explicit capability-reviewed API.
-- An expression container is copied as an expression into the lowered core.
-  Ordinary `<`, `<=`, `>`, and `>=` expressions inside it therefore retain
-  their core meaning. Reversing a comparison to avoid a frontend ambiguity is
-  not conforming source.
-- JSX spread follows the same one-leading-base rule as record spread.
-
-JSX introduces no component lifecycle, ambient state, hooks, class
-components, or hidden effect scheduling.
-
-The surface elaborates through the ambient `h` constructor:
-
-```text
-<div a={x}>text {y}</div>  => h("div", { "a": x }, "text", y)
-<Component />              => h(Component, null)
-<>a {b}</>                  => h(null, null, "a", b)
-```
-
-The constructor has the equivalent typed surface:
-
-```ts
-structural HtmlChild =
-  | HtmlNode
-  | string
-  | number
-  | boolean
-  | null
-  | undefined
-  | readonly HtmlChild[];
-
-structural Component<P> = (
-  props: P & { readonly children?: readonly HtmlChild[] },
-) => HtmlNode;
-```
-
-`h` is a variadic ambient intrinsic with the conceptual signature
-`(string | Component<P> | null, P | null, HtmlChild_0, ..., HtmlChild_n) ->
-HtmlNode`. Its variadic tail is an intrinsic contract, not a source-declarable
-rest parameter. `renderToString(HtmlNode) -> string` is the corresponding
-renderer. `null`, `undefined`, and boolean children render no text. Nested
-child arrays flatten in source order. A numeric child is rendered by the
-versioned TSX frontend using the same deterministic formatting contract as
-`String` (Section 5.4).
-Text and attribute values are escaped.
-
+`h` and `renderToString` remain ambient HTML helpers. Source uses ordinary
+function calls. Raw JSX and `.tsx` source are outside the profile.
 ## 6. Application data abstractions
 
 The data values in this section are pure and immutable. An operation itself
@@ -1505,8 +1432,8 @@ Section 4.2.1 row's precondition holds.
 Construction has one idiomatic form per input shape, separated by duplicate
 handling rather than by the shape of the source data:
 
-- `comptime(dictFromEntries([...]))` from a literal entry list, where a
-  duplicate fails the build.
+- `dictFromEntries([...])` from a literal entry list, where the caller handles
+  a duplicate-key error.
 - `dictFromEntries(entries)` whenever an array of key-value tuples is
   available, including one produced by a `map`, and a duplicate key is an
   error the caller handles.
@@ -1518,9 +1445,8 @@ The two runtime forms are therefore never interchangeable: they differ on
 duplicate keys, so choosing between them is a semantic decision about the
 data, not a spelling choice.
 
-A static table uses `comptime(dictFromEntries([...]))` over a literal entry
-list: the duplicate-key check is discharged at compile time, the expression
-fails the build on a duplicate, and its type is the plain `Dict<K, V>`.
+A static table uses `dictFromEntries([...])` over a literal entry list. The
+caller handles a duplicate-key error explicitly.
 
 `DictKey` is a checker-recognized generic bound, not a source alias. It accepts
 `string`, `number`, or a `nominal` type over one of those bases. Nominal keys
@@ -1679,7 +1605,7 @@ yields a position, `some` when it yields a boolean flag starting `false`, and
 carries other work, per-element effects, or more than one evolving
 accumulator.
 
-## 7. Effects and structured concurrency
+## 7. Effects and capabilities
 
 The executable language has no ambient I/O. External behavior enters through
 named capability modules.
@@ -1698,63 +1624,15 @@ Every exported module function has a machine-readable contract containing:
 - publisher or isolation identity
 
 Application-facing capability names remain explicit, including environment,
-clock, random, crypto, logging, storage, filesystem, network, policy,
-WebSocket, queue, and durable-workflow effects.
+clock, random, crypto, logging, storage, filesystem, network, policy, and
+WebSocket effects.
 
 Ambient `Date.now`, `performance.now`, random-number generation, console
 output, filesystem access, and network access are excluded from the advanced
 canonical profile. Their named modules make authority and replay inputs
 visible.
 
-### 7.1 Structured I/O
-
-`parallel` and `race` are explicit effect operations, not Promise emulation.
-
-```ts
-import { parallel } from "zttp:io";
-import type { FetchError } from "zttp:fetch";
-
-function loadUser(): Result<User, FetchError> { ... }
-function loadOrders(): Result<readonly Order[], FetchError> { ... }
-
-function loadBoth(): readonly [
-  Result<User, FetchError>,
-  Result<readonly Order[], FetchError>,
-] {
-  const [user, orders] = parallel([loadUser, loadOrders]);
-  return [user, orders];
-}
-```
-
-The call sits inside a function body: module initialization MUST be pure
-(Section 5.1), so an effect operation never runs at module top level.
-
-Rules:
-
-- The task list is a finite tuple of named zero-argument functions.
-- The result preserves tuple position and each task's precise result type.
-- The combined effect row is the union of task effects.
-- Replay order, cancellation, timeout, and loser cleanup are part of the
-  module contract.
-- `race` returns a tagged union synthesized from the task tuple. For tasks
-  returning `A`, `B`, and `C`, its type is
-  `{ winner: 0; value: A } | { winner: 1; value: B } |
-  { winner: 2; value: C }`.
-- The winner is the first completion event in the governed runtime log.
-  Simultaneous completions choose the lowest tuple index. Replay uses the
-  recorded winner and ordering.
-- Losing tasks are canceled, their cleanup completes, and those events enter
-  the trace before `race` returns.
-- There is no user-visible Promise, microtask queue, detached task, or
-  implicit scheduler.
-- `parallel` and `race` are checker-intrinsic special forms. Their result
-  types are synthesized per call site from the task tuple and are not
-  expressible in the admitted type grammar, which has no variadic or mapped
-  types. The module registry represents each with a declared special-form
-  role whose contract schema `meta` publishes; they are not ordinary typed
-  exports.
-
-### 7.2 Minimum application ABI
+### 7.1 Minimum application ABI
 
 The profile is not application-complete if its framework modules expose
 `object`, `unknown`, or an untagged failure where the application knows a more
@@ -1829,60 +1707,6 @@ structural WebSocketHandler<E> = (
 The runtime executes returned commands at the effect boundary. Broadcast,
 attachment, and auto-response APIs use the same `SocketId`, payload, and
 typed-error contracts.
-
-#### Queue
-
-```ts
-nominal MessageId = string;
-nominal ReceiptId = string;
-
-structural QueueMessage<T> = {
-  readonly id: MessageId;
-  readonly receipt: ReceiptId;
-  readonly attempt: number;
-  readonly payload: T;
-};
-
-structural QueueDecision =
-  | { kind: "ack"; receipt: ReceiptId }
-  | { kind: "retry"; receipt: ReceiptId; afterMs: number; reason: string }
-  | { kind: "dead-letter"; receipt: ReceiptId; reason: string };
-
-structural QueueHandler<T, E> = (
-  message: QueueMessage<T>,
-) => Result<QueueDecision, E>;
-
-send<T>(queue: string, payload: T): Result<MessageId, QueueError>
-```
-
-`send<T>` requires a statically JSON-encodable payload. A consumer returns a
-`QueueDecision` through `QueueHandler`. Delivery attempt, retry delay,
-idempotency key, and acknowledgement semantics are explicit in the module
-contract and replay trace.
-
-#### Durable workflow
-
-```ts
-run<I, O, E>(
-  id: string,
-  input: I,
-  body: (input: I) => Result<O, E>,
-): Result<O, E | DurableError>
-
-step<O, E>(
-  name: string,
-  body: () => Result<O, E>,
-): Result<O, E | StepError>
-```
-
-Inputs and outputs MUST be statically serializable. Workflow bodies and step
-bodies are named functions. The contract defines retry, timeout, cancellation,
-signal, compensation, versioning, and replay behavior. A replayed step returns
-its recorded typed result without silently running its effect twice.
-
-These are minimum type shapes, not a requirement that every module use these
-exact source names. The versioned registry binds each concrete exported name
-to one of the specified roles.
 
 ## 8. Compact grammar
 
@@ -2031,7 +1855,7 @@ Parentheses override precedence. An `LValue` cannot contain an
 optional-chain suffix.
 
 The complete parser specification must also define numeric literals, string
-escapes, Unicode identifiers, templates, patterns, and TSX without relying on
+escapes, Unicode identifiers, templates, and patterns without relying on
 JavaScript as an implicit specification. It MUST implement the explicit
 semicolon rule from Section 5.5 and has no automatic semicolon insertion.
 
@@ -2060,8 +1884,6 @@ The advanced surface is intentionally richer than the executable kernel.
 | `Result` | tagged record union |
 | `Result` combinator | one ordered call plus a branch on the tag |
 | `Dict` | immutable intrinsic with specified ordering and equality |
-| TSX | `h(tag, props, ...children)` calls emitted by `zts-tsx-1` |
-| `parallel` / `race` | explicit structured-effect operation |
 
 Each elaboration is validated independently. A surface form does not need its
 own SMT theory when its elaboration theorem reduces it to already specified
@@ -2087,10 +1909,9 @@ The kernel needs only:
 - conditional branch and jump
 - explicit halt and resource fault
 - capability call
-- structured parallel and race operation
 
 `match`, `for...of`, conditional expressions, optional access, default
-parameters, spread, destructuring, TSX, `Result`, and higher-order array
+parameters, spread, destructuring, `Result`, and higher-order array
 methods are surface or library constructs, not distinct semantic foundations.
 
 ### 10.2 Machine state
@@ -2228,7 +2049,7 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | unary `+` | visible numeric conversion | replaced by an admitted boundary parser when the input is text |
 | optional call | explicit absence branch before invocation | check for `undefined`, then call directly |
 | optional computed access | explicit absence branch before dynamic indexed access | check for `undefined`, then use indexed access |
-| `.js` and `.jsx` source files | one typed core and one explicit TSX frontend | language-simplicity choice; use `.ts` or `.tsx` |
+| `.js`, `.jsx`, and `.tsx` source files | one typed core source form | language-simplicity choice; use `.ts` |
 
 Non-idiomatic spellings are absent from this matrix by design. They are not
 restrictions and eliminate no failure class: Section 4.2.1 supersedes them
@@ -2415,8 +2236,8 @@ The advanced profile is ready to ship only when all gates are true.
   getters, and setters are rejected before IR construction rather than
   accepted and then omitted.
 - Generic functions instantiate soundly and never fall back to `unknown`.
-- `Result`, `Dict`, recursive aliases, `null`, `Bytes`, higher-order arrays,
-  and structured-I/O tuples are fully typed.
+- `Result`, `Dict`, recursive aliases, `null`, `Bytes`, and higher-order arrays
+  are fully typed.
 - The version-2 agent envelope, complete module-graph identity, atomic repair
   application, and unified property verification operation are implemented.
 - The `meta` payload publishes the grammar productions, canonical per-form
@@ -2511,8 +2332,6 @@ The corpus MUST include:
 - recursive JSON or tree data,
 - keyed aggregation with `Dict`,
 - typed validation failure with `Result`,
-- typed parallel I/O,
-- a TSX comparison using normal source order,
 - mutation during `for...of` proving snapshot behavior,
 - accepted structural recursion and a rejected or unproved non-decreasing
   recursion case.
@@ -2566,8 +2385,7 @@ status and priorities.
 - static named modules
 - structural aliases, unions, intersections, literals, readonly, optionals, nominal
   types, guards, utility types, and proof/effect capsules
-- TSX as pure elaboration
-- explicit capability modules and structured I/O
+- explicit capability modules
 - familiar TypeScript lexical conventions and human-readable block structure
 - a machine-readable idiom registry, published with a table hash and reachable
   through `describe-rule --idioms`, so idiom is discoverable rather than
@@ -2740,7 +2558,6 @@ input.
 ```ts
 import { env } from "zttp:env";
 import { fetch } from "zttp:fetch";
-import { parallel } from "zttp:io";
 import { err } from "zttp:result";
 import type { FetchError } from "zttp:fetch";
 
@@ -2748,39 +2565,16 @@ structural LoadError =
   | FetchError
   | { kind: "missing-config"; name: string };
 
-function loadUser(): Result<Response, LoadError> {
+export function loadUser(): Effects<Result<Response, LoadError>, "env" | "network"> {
   const url = env("USER_URL");
   if (url === undefined) {
     return err({ kind: "missing-config", name: "USER_URL" });
   }
   return fetch(url, {});
 }
-
-function loadOrders(): Result<Response, LoadError> {
-  const url = env("ORDER_URL");
-  if (url === undefined) {
-    return err({ kind: "missing-config", name: "ORDER_URL" });
-  }
-  return fetch(url, {});
-}
-
-export function loadDashboard(): Effects<
-  readonly [
-    Result<Response, LoadError>,
-    Result<Response, LoadError>,
-  ],
-  "env" | "network"
-> {
-  return parallel([loadUser, loadOrders]);
-}
 ```
 
-The tuple remains typed. The effect ceiling remains visible, and its
-placement follows the decidable rule of Section 5.7: `loadDashboard` is
-exported with a nonempty effect row, so it declares the ceiling; `loadUser`
-and `loadOrders` are module-internal, so they do not. `Effects` is ambient
-and needs no import. No Promise or ambient scheduler enters the program.
-
+The effect ceiling remains visible. `Effects` is ambient and needs no import.
 ### 16.5 Familiar pure shorthand
 
 ```ts

@@ -959,7 +959,7 @@ fn writeBanner(allocator: std.mem.Allocator, session: *const agent.AgentSession)
 /// banner can nudge a user who launched expert outside a project.
 fn workspaceHasHandler(allocator: std.mem.Allocator) bool {
     const candidates = [_][]const u8{
-        "zttp.json", "src/handler.ts", "handler.ts", "src/handler.tsx", "handler.tsx",
+        "zttp.json", "src/handler.ts", "handler.ts",
     };
     for (candidates) |path| {
         if (zts.file_io.fileExists(allocator, path)) return true;
@@ -1480,14 +1480,12 @@ fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
 const testing = std.testing;
 const query_tool_mod = @import("tools/zts_expert_query.zig");
 const check_tool_mod = @import("tools/zts_check.zig");
-const test_tool_mod = @import("tools/zig_test_step.zig");
 
 fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
     try reg.register(allocator, query_tool_mod.tool);
     try reg.register(allocator, check_tool_mod.tool);
-    try reg.register(allocator, test_tool_mod.tool);
     return reg;
 }
 

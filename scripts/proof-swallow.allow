@@ -20,13 +20,11 @@ packages/zts/src/contract_builder.zig extractSchemaJson catch-return
 # Diagnostic prose only. The fallback returns the base message without the
 # parenthesised reason; the diagnostic still fires, with the same kind, at the
 # same node. No analysis result reads this string.
-packages/zts/src/flow_checker.zig messageWithReason catch-return
 
 # A fetch URL that std.Uri cannot parse is answered `.unknown`, which makes the
 # response come from "any declared fetch host": every fetch classification then
 # applies by path and reports indeterminate. The swallow widens the labels a
 # value carries; it cannot remove one.
-packages/zts/src/flow_checker.zig literalUrlHost catch-return
 
 # `ensureHealthy` is the checker's poison check, not an error being dropped:
 # the pool has already recorded a failure, and returning early stops work that
@@ -99,10 +97,6 @@ packages/runtime/src/proof_activation.zig accept catch-switch
 # getOrPutDuped releases its new key and propagates the allocation error.
 # Query parameter decode failures mark the extraction dynamic.
 packages/zts/src/contract_builder.zig normalizeEndpoint catch-value
-packages/zts/src/contract_builder.zig readAgentProvider catch-block
-packages/zts/src/contract_builder.zig checkToolScope catch-switch
-packages/zts/src/contract_builder.zig checkToolFetchCall catch-multiline
-packages/zts/src/contract_builder.zig checkAgentFetchCall catch-multiline
 packages/zts/src/contract_builder.zig getOrPutDuped catch-block
 packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block
 
@@ -135,8 +129,6 @@ packages/zts/src/flow_checker.zig walkStmt catch-poison
 # Route resolution errors set allocation poison or return unknown-route
 # labels; a clean route cannot be inferred from the partial target list.
 packages/zts/src/flow_checker.zig routerDispatchLabels catch-block
-packages/zts/src/flow_checker.zig scanListedToolRoutes catch-block
-packages/zts/src/flow_checker.zig scanListedToolRoutes catch-poison
 packages/zts/src/flow_checker.zig scanRouteFunctionRoots catch-block
 
 # Binding a function or record to a parameter for one call site allocates a map
@@ -172,7 +164,6 @@ packages/zts/src/flow_checker.zig trackModuleCallInit catch-block
 packages/zts/src/flow_checker.zig trackModuleCallInit catch-poison
 
 # Message formatting failure keeps the original diagnostic and its kind.
-packages/zts/src/flow_checker.zig messageWithReason catch-block
 
 # HandlerVerifier checks allocation_failed before it returns a verdict. Its
 # fact, import, walk, and diagnostic catches only defer that failure.
@@ -189,7 +180,6 @@ packages/zts/src/intent_extractor.zig collectAssertions catch-switch
 # TypeChecker and its TypeEnv report allocation poison through ensureHealthy
 # before a build can use the inferred types. Local unknown/null values below
 # are temporary results while the poisoned checker unwinds.
-packages/zts/src/type_checker.zig addAllocatedDiagnostic catch-block
 packages/zts/src/type_checker.zig addDiagnostic catch-block
 packages/zts/src/type_checker.zig admitOneTypePredicate catch-poison
 packages/zts/src/type_checker.zig bindCallableMetadata catch-block
@@ -197,9 +187,7 @@ packages/zts/src/type_checker.zig bindForOfElement catch-poison
 packages/zts/src/type_checker.zig bindPatternBindings catch-poison
 packages/zts/src/type_checker.zig bindVarDeclaration catch-block
 packages/zts/src/type_checker.zig bindVarDeclaration catch-poison
-packages/zts/src/type_checker.zig buildServiceResponseMember catch-block
 packages/zts/src/type_checker.zig endNarrowScope catch-poison
-packages/zts/src/type_checker.zig extractServiceObjectKeys catch-poison
 packages/zts/src/type_checker.zig inferObjectLiteralType catch-block
 packages/zts/src/type_checker.zig pushActiveDeclared catch-poison
 packages/zts/src/type_checker.zig putNarrowed catch-poison
@@ -240,7 +228,6 @@ packages/zts/src/type_checker.zig reportIfUnencodable catch-value
 
 # TypeEnv.ensureHealthy and TypePool.ensureHealthy reject their recorded
 # allocation failure before their types can support a verdict.
-packages/zts/src/type_env.zig adoptParserEdits catch-block
 packages/zts/src/type_env.zig findNonContractiveAliases catch-poison
 packages/zts/src/type_env.zig instantiateCompositeMembers catch-block
 packages/zts/src/type_env.zig internName catch-block
@@ -289,7 +276,6 @@ packages/zts/src/flow_checker.zig scanImports catch-poison@2
 packages/zts/src/flow_checker.zig trackResultBinding catch-poison@2
 packages/zts/src/flow_checker.zig walkStmt catch-poison@2
 packages/zts/src/flow_checker.zig walkStmt catch-poison@3
-packages/zts/src/flow_checker.zig walkStmt catch-poison@4
 
 # The extra verifier catches record poison; verify checks it before it returns.
 packages/zts/src/handler_verifier.zig scanImports catch-poison@2

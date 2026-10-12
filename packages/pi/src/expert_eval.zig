@@ -46,11 +46,11 @@ pub const cases = [_]EvalCase{
         .note_must_contain = "pi_goal_candidate",
     },
     .{
-        .name = "workflow-authoring",
+        .name = "retired-workflow-authoring",
         .prompt = "Create a durable workflow handler that dispatches a greet child handler with workflow.call",
-        .expected_kind = .workflow_authoring,
-        .expected_confidence = .high,
-        .note_must_contain = "ZTS509",
+        .expected_kind = .unknown,
+        .expected_confidence = .low,
+        .note_must_contain = "",
     },
     .{
         .name = "violation-fix",
@@ -106,15 +106,25 @@ test "static expert eval routes common ZigTS coding asks" {
         const hint = expert_workflow.classify(case.prompt);
         try testing.expectEqual(case.expected_kind, hint.kind);
         try testing.expectEqual(case.expected_confidence, hint.confidence);
-        const note = (try expert_workflow.renderSystemNote(testing.allocator, hint)) orelse return error.MissingWorkflowNote;
+        const maybe_note = try expert_workflow.renderSystemNote(testing.allocator, hint);
+        if (case.expected_kind == .unknown) {
+            try testing.expect(maybe_note == null);
+            continue;
+        }
+        const note = maybe_note orelse return error.MissingWorkflowNote;
         defer testing.allocator.free(note);
         try testing.expect(std.mem.indexOf(u8, note, case.note_must_contain) != null);
     }
 }
 
-test "static expert eval summary is fully routed without model calls" {
+test "static expert eval summary distinguishes supported and retired asks without model calls" {
     const summary = summarize();
     try testing.expectEqual(cases.len, summary.total);
-    try testing.expectEqual(cases.len, summary.routed);
+    var expected_routed: usize = 0;
+    for (cases) |case| {
+        if (case.expected_kind != .unknown) expected_routed += 1;
+    }
+    try testing.expect(expected_routed > 0);
+    try testing.expectEqual(expected_routed, summary.routed);
     try testing.expect(summary.high_confidence >= 4);
 }

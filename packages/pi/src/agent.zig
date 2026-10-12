@@ -4764,6 +4764,8 @@ test "initFromEnvWithSessionConfig refuses a drifted protocol without restamping
     defer allocator.free(sessions_dir);
     var env_override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
+    var api_override = try EnvOverride.unset(allocator, "DEEPSEEK_API_KEY");
+    defer api_override.restore(allocator);
 
     const ws_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });
     defer allocator.free(ws_dir);
@@ -4806,9 +4808,15 @@ test "initFromEnvWithSessionConfig refuses a drifted protocol without restamping
         .model = original.model,
     });
 
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
     try testing.expectError(
         error.SessionProtocolMismatch,
-        initFromEnvWithSessionConfig(allocator, null, .{ .resume_latest = true }),
+        initFromEnvWithSessionConfig(allocator, &registry, .{
+            .resume_latest = true,
+            .no_context_files = true,
+            .provider = .deepseek,
+        }),
     );
 
     var post = try session_events.readMeta(allocator, captured_meta_path);

@@ -4,7 +4,7 @@
 
 Range version: `step-6-v2`
 
-Range hash: `9fcc8fe3af9c6e99e2181f46ac2abad8ba570efa7e363f80fb5969e7b3961764`
+Range hash: `cf2b4d7aa2e49f672cabdda30b314fe0a5f16c8d37470227de6bb72a8798a68a`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -87,7 +87,6 @@ These kinds stay outside the range on purpose. They are what the negative corpus
 - `unknown`
 - `handler_scaffold`
 - `spec_goal`
-- `workflow_authoring`
 - `sql_feature`
 - `auth_jwt`
 
@@ -150,9 +149,6 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `credential-in-egress-headers` | `ZTS405` | model_retry |
 | `credential-in-egress-body` | `ZTS408` | model_retry |
 | `unvalidated-input-in-html` | `ZTS407` | model_retry |
-| `workflow-call-in-step` | `ZTS509` | model_retry |
-| `saga-step-no-compensate` | `ZTS510` | model_retry |
-| `tool-catalog-missing-byte-bound` | `ZTS513` | model_retry |
 | `validate-closed-schema` | `ZTS514` | model_retry |
 | `dict-entry-round-trip` | `ZTS627` | model_retry |
 | `dict-entries-reduce` | `ZTS628` | model_retry |

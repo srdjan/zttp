@@ -23,8 +23,6 @@ const contract_types = @import("contract_types.zig");
 // Re-exports from contract_types.zig
 pub const HandlerLoc = contract_types.HandlerLoc;
 pub const CoreProfile = contract_types.CoreProfile;
-pub const SourceFrontendProfile = contract_types.SourceFrontendProfile;
-pub const SourceFrontendIdentity = contract_types.SourceFrontendIdentity;
 pub const SourceIdentity = contract_types.SourceIdentity;
 pub const PropertyCause = contract_types.PropertyCause;
 pub const PropertyProvenance = contract_types.PropertyProvenance;
@@ -34,15 +32,6 @@ pub const EgressInfo = contract_types.EgressInfo;
 pub const CacheInfo = contract_types.CacheInfo;
 pub const SqlQueryInfo = contract_types.SqlQueryInfo;
 pub const SqlInfo = contract_types.SqlInfo;
-pub const DurableKeyInfo = contract_types.DurableKeyInfo;
-pub const DurableWorkflowProofLevel = contract_types.DurableWorkflowProofLevel;
-pub const DurableWorkflowNodeKind = contract_types.DurableWorkflowNodeKind;
-pub const DurableWorkflowNode = contract_types.DurableWorkflowNode;
-pub const DurableWorkflowEdge = contract_types.DurableWorkflowEdge;
-pub const DurableWorkflowProperties = contract_types.DurableWorkflowProperties;
-pub const DurableWorkflow = contract_types.DurableWorkflow;
-pub const DurableInfo = contract_types.DurableInfo;
-pub const ScopeInfo = contract_types.ScopeInfo;
 pub const ApiSchemaInfo = contract_types.ApiSchemaInfo;
 pub const ApiRequestInfo = contract_types.ApiRequestInfo;
 pub const ApiAuthInfo = contract_types.ApiAuthInfo;
@@ -63,8 +52,6 @@ pub const RateLimitInfo = contract_types.RateLimitInfo;
 pub const IntentInfo = contract_types.IntentInfo;
 pub const IntentAssertion = contract_types.IntentAssertion;
 pub const IntentExpectedHeader = contract_types.IntentExpectedHeader;
-pub const SagaStep = contract_types.SagaStep;
-pub const SagaCallInfo = contract_types.SagaCallInfo;
 pub const SpecDiagnostic = contract_types.SpecDiagnostic;
 pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
@@ -74,40 +61,6 @@ pub const BoundClass = contract_types.BoundClass;
 pub const BoundProvenance = contract_types.BoundProvenance;
 pub const CostEntry = contract_types.CostEntry;
 pub const CostEnvelope = contract_types.CostEnvelope;
-pub const ServiceCallInfo = contract_types.ServiceCallInfo;
-pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
-pub const EmittedAffordance = contract_types.EmittedAffordance;
-pub const ToolEntry = contract_types.ToolEntry;
-pub const ToolExport = contract_types.ToolExport;
-pub const AgentLimits = contract_types.AgentLimits;
-pub const AgentEntry = contract_types.AgentEntry;
-pub const max_agent_endpoint_bytes = contract_types.max_agent_endpoint_bytes;
-pub const max_agent_rounds = contract_types.max_agent_rounds;
-pub const max_agent_tool_calls = contract_types.max_agent_tool_calls;
-pub const max_agent_argument_bytes = contract_types.max_agent_argument_bytes;
-pub const max_agent_result_bytes = contract_types.max_agent_result_bytes;
-pub const max_agent_turn_deadline_ms = contract_types.max_agent_turn_deadline_ms;
-pub const max_agent_provider_request_bytes = contract_types.max_agent_provider_request_bytes;
-pub const ToolAuth = contract_types.ToolAuth;
-/// Credential references (M4 T6): the canonical type and its loader.
-pub const credential_ref = contract_types.credential_ref;
-pub const CredentialRef = contract_types.CredentialRef;
-pub const ToolCredential = contract_types.ToolCredential;
-pub const CredentialBreachReason = contract_types.CredentialBreachReason;
-pub const CredentialBreach = contract_types.CredentialBreach;
-pub const firstCredentialBreach = contract_types.firstCredentialBreach;
-pub const CredentialRefusal = contract_types.CredentialRefusal;
-pub const firstCredentialRefusal = contract_types.firstCredentialRefusal;
-pub const ClassificationReport = contract_types.ClassificationReport;
-pub const ClassificationLabel = contract_types.ClassificationLabel;
-pub const ClassificationStatus = contract_types.ClassificationStatus;
-pub const firstRequiredAbsent = contract_types.firstRequiredAbsent;
-pub const CeilingReport = contract_types.CeilingReport;
-pub const CeilingBreachReason = contract_types.CeilingBreachReason;
-pub const CeilingBreach = contract_types.CeilingBreach;
-pub const CeilingBreaches = contract_types.CeilingBreaches;
-pub const ceilingBreaches = contract_types.ceilingBreaches;
-pub const firstCeilingBreach = contract_types.firstCeilingBreach;
 pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 // `computeCapabilityMatrix` is NOT re-exported: it resolves specifiers
 // through the linked module registry, so it lives in `builtin_modules.zig`
@@ -145,7 +98,6 @@ pub fn extractHost(url: []const u8) []const u8 {
     if (end <= start) return "";
     return url[start..end];
 }
-
 // Re-exports from contract_json_parser.zig and contract_json_writer.zig
 pub const parseFromJson = contract_json_parser.parseFromJson;
 pub const writeContractJson = contract_json_writer.writeContractJson;
@@ -174,17 +126,6 @@ pub fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -253,31 +194,6 @@ pub fn mergeModuleContract(
         try appendSqlQuery(allocator, &target.sql.queries, query);
     }
     target.sql.dynamic = target.sql.dynamic or source.sql.dynamic;
-
-    target.scope.used = target.scope.used or source.scope.used;
-    for (source.scope.names.items) |name| {
-        try appendUniqueString(allocator, &target.scope.names, name, false);
-    }
-    target.scope.dynamic = target.scope.dynamic or source.scope.dynamic;
-    target.scope.max_depth = @max(target.scope.max_depth, source.scope.max_depth);
-
-    target.durable.used = target.durable.used or source.durable.used;
-    for (source.durable.keys.literal.items) |key| {
-        try appendUniqueString(allocator, &target.durable.keys.literal, key, false);
-    }
-    target.durable.keys.dynamic = target.durable.keys.dynamic or source.durable.keys.dynamic;
-    for (source.durable.steps.items) |step| {
-        try appendUniqueString(allocator, &target.durable.steps, step, false);
-    }
-    target.durable.timers = target.durable.timers or source.durable.timers;
-    for (source.durable.signals.literal.items) |signal| {
-        try appendUniqueString(allocator, &target.durable.signals.literal, signal, false);
-    }
-    target.durable.signals.dynamic = target.durable.signals.dynamic or source.durable.signals.dynamic;
-    for (source.durable.producer_keys.literal.items) |key| {
-        try appendUniqueString(allocator, &target.durable.producer_keys.literal, key, false);
-    }
-    target.durable.producer_keys.dynamic = target.durable.producer_keys.dynamic or source.durable.producer_keys.dynamic;
 
     for (source.api.schemas.items) |schema| {
         try upsertApiSchema(allocator, &target.api.schemas, schema.name, schema.schema_json);
@@ -459,159 +375,7 @@ test "parseFromJson minimal" {
     try std.testing.expectEqual(@as(u32, 1), contract.handler.line);
     try std.testing.expectEqual(@as(usize, 0), contract.routes.items.len);
     try std.testing.expect(!contract.env.dynamic);
-    try std.testing.expect(!contract.durable.used);
     try std.testing.expect(contract.verification == null);
-}
-
-test "parseFromJson with data" {
-    const allocator = std.testing.allocator;
-    const json =
-        \\{
-        \\  "version": 2,
-        \\  "handler": { "path": "handler.ts", "line": 5, "column": 2 },
-        \\  "routes": [
-        \\    { "pattern": "/health", "type": "exact", "field": "path", "status": 200, "contentType": "application/json", "aot": true },
-        \\    { "pattern": "/api", "type": "prefix", "field": "path", "status": 200, "contentType": "application/json", "aot": true }
-        \\  ],
-        \\  "modules": ["zttp:env"],
-        \\  "functions": {},
-        \\  "env": { "literal": ["JWT_SECRET", "API_KEY"], "dynamic": false },
-        \\  "egress": { "endpoints": ["api.stripe.com"], "dynamic": true },
-        \\  "cache": { "namespaces": ["sessions"], "dynamic": false },
-        \\  "api": {},
-        \\  "verification": {
-        \\    "exhaustiveReturns": true,
-        \\    "resultsSafe": true,
-        \\    "unreachableCode": false,
-        \\    "bytecodeVerified": true
-        \\  },
-        \\  "aot": null
-        \\}
-    ;
-
-    var contract = try parseFromJson(allocator, json);
-    defer contract.deinit(allocator);
-
-    try std.testing.expectEqualStrings("handler.ts", contract.handler.path);
-    try std.testing.expectEqual(@as(u32, 5), contract.handler.line);
-    try std.testing.expectEqual(@as(usize, 2), contract.routes.items.len);
-    try std.testing.expectEqualStrings("/health", contract.routes.items[0].pattern);
-    try std.testing.expectEqualStrings("exact", contract.routes.items[0].route_type);
-    try std.testing.expectEqualStrings("/api", contract.routes.items[1].pattern);
-    try std.testing.expectEqualStrings("prefix", contract.routes.items[1].route_type);
-    try std.testing.expectEqual(@as(usize, 2), contract.env.literal.items.len);
-    try std.testing.expectEqualStrings("JWT_SECRET", contract.env.literal.items[0]);
-    try std.testing.expectEqualStrings("API_KEY", contract.env.literal.items[1]);
-    try std.testing.expect(!contract.env.dynamic);
-    try std.testing.expectEqual(@as(usize, 1), contract.egress.endpoints.items.len);
-    try std.testing.expect(contract.egress.dynamic);
-    try std.testing.expectEqual(@as(usize, 1), contract.cache.namespaces.items.len);
-    try std.testing.expect(!contract.durable.used);
-    try std.testing.expect(contract.verification != null);
-    try std.testing.expect(contract.verification.?.exhaustive_returns);
-    try std.testing.expect(contract.verification.?.bytecode_verified);
-}
-
-test "parseFromJson roundtrip" {
-    const allocator = std.testing.allocator;
-
-    // Create a contract, serialize it, parse it back, verify fields match
-    const path = try allocator.dupe(u8, "test.ts");
-    var env_lit: std.ArrayList([]const u8) = .empty;
-    try env_lit.append(allocator, try allocator.dupe(u8, "SECRET"));
-    var service_calls: std.ArrayList(ServiceCallInfo) = .empty;
-    try service_calls.append(allocator, .{
-        .service = try allocator.dupe(u8, "users"),
-        .route_pattern = try allocator.dupe(u8, "GET /api/users/:id"),
-        .path_params = .{ .complete = blk: {
-            var params: std.ArrayList([]const u8) = .empty;
-            try params.append(allocator, try allocator.dupe(u8, "id"));
-            break :blk params;
-        } },
-        .query_keys = .{ .complete = blk: {
-            var keys: std.ArrayList([]const u8) = .empty;
-            try keys.append(allocator, try allocator.dupe(u8, "expand"));
-            break :blk keys;
-        } },
-        .header_keys = .{ .complete = blk: {
-            var keys: std.ArrayList([]const u8) = .empty;
-            try keys.append(allocator, try allocator.dupe(u8, "x-auth"));
-            break :blk keys;
-        } },
-        .body = .none,
-    });
-    var workflow_calls: std.ArrayList(WorkflowCallInfo) = .empty;
-    try workflow_calls.append(allocator, .{
-        .target = try allocator.dupe(u8, "billing"),
-        .route_pattern = try allocator.dupe(u8, "POST /charge"),
-    });
-
-    var original = HandlerContract{
-        .handler = .{ .path = path, .line = 10, .column = 5 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = env_lit, .dynamic = true },
-        .egress = .{ .endpoints = .empty, .dynamic = false },
-        .service_calls = service_calls,
-        .workflow_calls = workflow_calls,
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = emptySqlInfo(),
-        .durable = .{
-            .used = true,
-            .keys = .{ .literal = .empty, .dynamic = true },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = true,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 1,
-        },
-        .api = emptyApiInfo(),
-        .verification = .{
-            .exhaustive_returns = true,
-            .results_safe = false,
-            .unreachable_code = false,
-            .bytecode_verified = true,
-        },
-        .aot = null,
-    };
-    defer original.deinit(allocator);
-
-    // Serialize
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-    try writeContractJson(&original, &aw.writer);
-    output = aw.toArrayList();
-
-    // Parse back
-    var parsed = try parseFromJson(allocator, output.items);
-    defer parsed.deinit(allocator);
-
-    try std.testing.expectEqualStrings("test.ts", parsed.handler.path);
-    try std.testing.expectEqual(@as(u32, 10), parsed.handler.line);
-    try std.testing.expectEqual(@as(usize, 1), parsed.env.literal.items.len);
-    try std.testing.expectEqualStrings("SECRET", parsed.env.literal.items[0]);
-    try std.testing.expect(parsed.env.dynamic);
-    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items.len);
-    try std.testing.expectEqualStrings("users", parsed.service_calls.items[0].service);
-    try std.testing.expectEqualStrings("GET /api/users/:id", parsed.service_calls.items[0].route_pattern);
-    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items[0].path_params.items().len);
-    try std.testing.expectEqualStrings("id", parsed.service_calls.items[0].path_params.items()[0]);
-    try std.testing.expectEqual(@as(usize, 1), parsed.workflow_calls.items.len);
-    try std.testing.expectEqualStrings("billing", parsed.workflow_calls.items[0].target);
-    try std.testing.expectEqualStrings("POST /charge", parsed.workflow_calls.items[0].route_pattern);
-    try std.testing.expect(!parsed.workflow_calls.items[0].dynamic);
-    try std.testing.expect(parsed.durable.used);
-    try std.testing.expect(parsed.durable.keys.dynamic);
-    try std.testing.expect(parsed.scope.used);
-    try std.testing.expectEqual(@as(u32, 1), parsed.scope.max_depth);
-    try std.testing.expect(parsed.verification != null);
-    try std.testing.expect(parsed.verification.?.exhaustive_returns);
-    try std.testing.expect(!parsed.verification.?.results_safe);
-    try std.testing.expect(parsed.verification.?.bytecode_verified);
 }
 
 test "parseFromJson roundtrip preserves declared specs and diagnostics" {
@@ -652,17 +416,6 @@ test "parseFromJson roundtrip preserves declared specs and diagnostics" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -697,83 +450,6 @@ test "parseFromJson roundtrip preserves declared specs and diagnostics" {
     try std.testing.expectEqualStrings("stamp", parsed.spec_diagnostics.items[3].function.?);
 }
 
-test "parseFromJson roundtrip preserves sagas" {
-    const allocator = std.testing.allocator;
-
-    var static_steps: std.ArrayList(SagaStep) = .empty;
-    try static_steps.append(allocator, .{ .name = try allocator.dupe(u8, "reserve"), .has_compensate = true });
-    try static_steps.append(allocator, .{ .name = try allocator.dupe(u8, "ship"), .has_compensate = false });
-
-    var sagas: std.ArrayList(SagaCallInfo) = .empty;
-    try sagas.append(allocator, .{
-        .steps = static_steps,
-        .dynamic = false,
-        .source_line = 7,
-        .source_column = 10,
-    });
-    try sagas.append(allocator, .{
-        .steps = .empty,
-        .dynamic = true,
-        .source_line = 20,
-        .source_column = 3,
-    });
-
-    var original = HandlerContract{
-        .handler = .{ .path = try allocator.dupe(u8, "saga.ts"), .line = 1, .column = 0 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .endpoints = .empty, .dynamic = false },
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
-        .api = emptyApiInfo(),
-        .verification = null,
-        .aot = null,
-        .sagas = sagas,
-    };
-    defer original.deinit(allocator);
-
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-    try writeContractJson(&original, &aw.writer);
-    output = aw.toArrayList();
-
-    var parsed = try parseFromJson(allocator, output.items);
-    defer parsed.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 2), parsed.sagas.items.len);
-
-    const first = parsed.sagas.items[0];
-    try std.testing.expect(!first.dynamic);
-    try std.testing.expectEqual(@as(u32, 7), first.source_line);
-    try std.testing.expectEqual(@as(u32, 10), first.source_column);
-    try std.testing.expectEqual(@as(usize, 2), first.steps.items.len);
-    try std.testing.expectEqualStrings("reserve", first.steps.items[0].name);
-    try std.testing.expect(first.steps.items[0].has_compensate);
-    try std.testing.expectEqualStrings("ship", first.steps.items[1].name);
-    try std.testing.expect(!first.steps.items[1].has_compensate);
-    // "ship" is the last step, so it's allowed to omit compensate.
-    try std.testing.expect(first.compensationProven());
-
-    const second = parsed.sagas.items[1];
-    try std.testing.expect(second.dynamic);
-    try std.testing.expectEqual(@as(usize, 0), second.steps.items.len);
-    try std.testing.expect(!second.compensationProven());
-}
-
 test "parseFromJson roundtrip preserves partner extensions section" {
     const allocator = std.testing.allocator;
 
@@ -804,17 +480,6 @@ test "parseFromJson roundtrip preserves partner extensions section" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -869,17 +534,6 @@ test "parseFromJson roundtrip preserves partner contract_section field" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -906,196 +560,6 @@ test "parseFromJson roundtrip preserves partner contract_section field" {
         "stripe",
         parsed_stripe.contract_section orelse return error.MissingContractSection,
     );
-}
-
-test "parseFromJson roundtrip preserves dynamic service call keys" {
-    const allocator = std.testing.allocator;
-
-    const path = try allocator.dupe(u8, "dynamic.ts");
-    var service_calls: std.ArrayList(ServiceCallInfo) = .empty;
-    try service_calls.append(allocator, .{
-        .service = try allocator.dupe(u8, "search"),
-        .route_pattern = try allocator.dupe(u8, "GET /search"),
-        .path_params = .{ .complete = .empty },
-        .query_keys = .dynamic,
-        .header_keys = .dynamic,
-        .body = .none,
-    });
-
-    var original = HandlerContract{
-        .handler = .{ .path = path, .line = 1, .column = 1 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .endpoints = .empty, .dynamic = false },
-        .service_calls = service_calls,
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
-        .api = emptyApiInfo(),
-        .verification = null,
-        .aot = null,
-    };
-    defer original.deinit(allocator);
-
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-    try writeContractJson(&original, &aw.writer);
-    output = aw.toArrayList();
-
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"queryDynamic\": true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"headerDynamic\": true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "queryKeysDynamic") == null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "headerKeysDynamic") == null);
-
-    var parsed = try parseFromJson(allocator, output.items);
-    defer parsed.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), parsed.service_calls.items.len);
-    try std.testing.expect(parsed.service_calls.items[0].query_keys.isDynamic());
-    try std.testing.expect(parsed.service_calls.items[0].header_keys.isDynamic());
-}
-
-test "parseFromJson roundtrip preserves durable workflow" {
-    const allocator = std.testing.allocator;
-
-    var workflow_nodes: std.ArrayList(DurableWorkflowNode) = .empty;
-    try workflow_nodes.append(allocator, .{
-        .id = try allocator.dupe(u8, "n1"),
-        .kind = .step,
-        .label = try allocator.dupe(u8, "charge"),
-        .detail = try allocator.dupe(u8, "timeoutMs=1000"),
-    });
-    try workflow_nodes.append(allocator, .{
-        .id = try allocator.dupe(u8, "n2"),
-        .kind = .return_response,
-        .label = try allocator.dupe(u8, "Response 202"),
-        .status = 202,
-    });
-
-    var workflow_edges: std.ArrayList(DurableWorkflowEdge) = .empty;
-    try workflow_edges.append(allocator, .{
-        .from = try allocator.dupe(u8, "start"),
-        .to = try allocator.dupe(u8, "n1"),
-    });
-    try workflow_edges.append(allocator, .{
-        .from = try allocator.dupe(u8, "n1"),
-        .to = try allocator.dupe(u8, "n2"),
-        .condition = try allocator.dupe(u8, "then@4:7"),
-    });
-
-    var workflow_reasons: std.ArrayList([]const u8) = .empty;
-    try workflow_reasons.append(allocator, try allocator.dupe(u8, "complete durable workflow graph uses stable keys"));
-
-    const path = try allocator.dupe(u8, "workflow.ts");
-
-    var original = HandlerContract{
-        .handler = .{ .path = path, .line = 3, .column = 1 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .endpoints = .empty, .dynamic = false },
-        .service_calls = .empty,
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = emptySqlInfo(),
-        .durable = .{
-            .used = true,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-            .workflow = .{
-                .workflow_id = try allocator.dupe(u8, "workflow.ts:handler:4:10"),
-                .proof_level = .complete,
-                .properties = .{
-                    .retry_safe = true,
-                    .idempotent = true,
-                    .fault_covered = true,
-                    .reasons = workflow_reasons,
-                },
-                .nodes = workflow_nodes,
-                .edges = workflow_edges,
-            },
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
-        .api = emptyApiInfo(),
-        .verification = null,
-        .aot = null,
-    };
-    defer original.deinit(allocator);
-
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-    try writeContractJson(&original, &aw.writer);
-    output = aw.toArrayList();
-
-    var parsed = try parseFromJson(allocator, output.items);
-    defer parsed.deinit(allocator);
-
-    try std.testing.expectEqualStrings("workflow.ts:handler:4:10", parsed.durable.workflow.workflow_id.?);
-    try std.testing.expectEqual(DurableWorkflowProofLevel.complete, parsed.durable.workflow.proof_level);
-    try std.testing.expect(parsed.durable.workflow.properties.retry_safe);
-    try std.testing.expect(parsed.durable.workflow.properties.idempotent);
-    try std.testing.expect(parsed.durable.workflow.properties.fault_covered);
-    try std.testing.expectEqualStrings("complete durable workflow graph uses stable keys", parsed.durable.workflow.properties.reasons.items[0]);
-    try std.testing.expectEqual(@as(usize, 2), parsed.durable.workflow.nodes.items.len);
-    try std.testing.expectEqual(DurableWorkflowNodeKind.step, parsed.durable.workflow.nodes.items[0].kind);
-    try std.testing.expectEqualStrings("charge", parsed.durable.workflow.nodes.items[0].label);
-    try std.testing.expectEqualStrings("timeoutMs=1000", parsed.durable.workflow.nodes.items[0].detail.?);
-    try std.testing.expectEqual(@as(u16, 202), parsed.durable.workflow.nodes.items[1].status.?);
-    try std.testing.expectEqual(@as(usize, 2), parsed.durable.workflow.edges.items.len);
-    try std.testing.expectEqualStrings("then@4:7", parsed.durable.workflow.edges.items[1].condition.?);
-}
-
-test "parseFromJson defaults missing durable workflow properties to false" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\{
-        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
-        \\  "routes": [],
-        \\  "modules": [],
-        \\  "functions": [],
-        \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"endpoints": [], "dynamic": false},
-        \\  "cache": {"namespaces": [], "dynamic": false},
-        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
-        \\  "durable": {
-        \\    "used": true,
-        \\    "keys": {"literal": [], "dynamic": false},
-        \\    "steps": [],
-        \\    "timers": false,
-        \\    "signals": {"literal": [], "dynamic": false},
-        \\    "producerKeys": {"literal": [], "dynamic": false},
-        \\    "workflow": {"workflowId": null, "proofLevel": "none", "nodes": [], "edges": []}
-        \\  },
-        \\  "scope": {"used": false, "names": [], "dynamic": false, "maxDepth": 0},
-        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [], "schemasDynamic": false, "routesDynamic": false}
-        \\}
-    ;
-    var parsed = try parseFromJson(allocator, source);
-    defer parsed.deinit(allocator);
-
-    try std.testing.expect(!parsed.durable.workflow.properties.retry_safe);
-    try std.testing.expect(!parsed.durable.workflow.properties.idempotent);
-    try std.testing.expect(!parsed.durable.workflow.properties.fault_covered);
-    try std.testing.expectEqual(@as(usize, 0), parsed.durable.workflow.properties.reasons.items.len);
 }
 
 test "parseFromJson roundtrip preserves api route response schema" {
@@ -1166,17 +630,6 @@ test "parseFromJson roundtrip preserves api route response schema" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -1249,17 +702,6 @@ test "writeContractJson minimal" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -1277,119 +719,11 @@ test "writeContractJson minimal" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 24") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"workflowCalls\": []") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"affordances\": []") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"durable\": {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"scope\": {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"workflowCalls\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api\": {") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"verification\": null") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"properties\": null") != null);
-}
-
-test "writeContractJson with data" {
-    const allocator = std.testing.allocator;
-
-    const path = try allocator.dupe(u8, "handler.ts");
-
-    var modules: std.ArrayList([]const u8) = .empty;
-    const mod_str = try allocator.dupe(u8, "zttp:auth");
-    try modules.append(allocator, mod_str);
-
-    var func_names: std.ArrayList([]const u8) = .empty;
-    const fn_str = try allocator.dupe(u8, "jwtVerify");
-    try func_names.append(allocator, fn_str);
-
-    var functions: std.ArrayList(HandlerContract.FunctionEntry) = .empty;
-    const func_mod = try allocator.dupe(u8, "zttp:auth");
-    try functions.append(allocator, .{
-        .module = func_mod,
-        .names = func_names,
-    });
-
-    var env_lit: std.ArrayList([]const u8) = .empty;
-    const env_str = try allocator.dupe(u8, "JWT_SECRET");
-    try env_lit.append(allocator, env_str);
-
-    var hosts: std.ArrayList([]const u8) = .empty;
-    const host_str = try allocator.dupe(u8, "api.example.com");
-    try hosts.append(allocator, host_str);
-
-    var namespaces: std.ArrayList([]const u8) = .empty;
-    const ns_str = try allocator.dupe(u8, "sessions");
-    try namespaces.append(allocator, ns_str);
-
-    var schemas: std.ArrayList(ApiSchemaInfo) = .empty;
-    try schemas.append(allocator, .{
-        .name = try allocator.dupe(u8, "user"),
-        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
-    });
-
-    var request_schema_refs: std.ArrayList([]const u8) = .empty;
-    try request_schema_refs.append(allocator, try allocator.dupe(u8, "user"));
-
-    var durable_keys: std.ArrayList([]const u8) = .empty;
-    try durable_keys.append(allocator, try allocator.dupe(u8, "order:123"));
-
-    var durable_steps: std.ArrayList([]const u8) = .empty;
-    try durable_steps.append(allocator, try allocator.dupe(u8, "charge"));
-
-    var contract = HandlerContract{
-        .handler = .{ .path = path, .line = 20, .column = 1 },
-        .routes = .empty,
-        .modules = modules,
-        .functions = functions,
-        .env = .{ .literal = env_lit, .dynamic = false },
-        .egress = .{ .endpoints = hosts, .dynamic = true },
-        .cache = .{ .namespaces = namespaces, .dynamic = false },
-        .sql = emptySqlInfo(),
-        .durable = .{
-            .used = true,
-            .keys = .{ .literal = durable_keys, .dynamic = false },
-            .steps = durable_steps,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
-        .api = .{
-            .schemas = schemas,
-            .requests = .{ .schema_refs = request_schema_refs, .dynamic = false },
-            .auth = .{ .bearer = true, .jwt = true },
-            .routes = .empty,
-            .schemas_dynamic = false,
-            .routes_dynamic = false,
-        },
-        .verification = .{
-            .exhaustive_returns = true,
-            .results_safe = true,
-            .unreachable_code = false,
-        },
-        .aot = .{ .pattern_count = 3, .has_default = true },
-    };
-    defer contract.deinit(allocator);
-
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-
-    try writeContractJson(&contract, &aw.writer);
-    output = aw.toArrayList();
-
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"zttp:auth\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"jwtVerify\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"JWT_SECRET\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"api.example.com\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"sessions\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"order:123\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"charge\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"schemaRefs\": [\"user\"]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"bearer\": true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"exhaustiveReturns\": true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"patternCount\": 3") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"dynamic\": true") != null);
 }
 
 test "behaviors serialization roundtrip" {
@@ -1640,17 +974,6 @@ test "intent assertions roundtrip through writer and parser" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -1743,17 +1066,6 @@ test "intent absent roundtrips as null" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -1790,17 +1102,6 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
         .egress = .{ .endpoints = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -1838,561 +1139,4 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
     try std.testing.expectEqualSlices(u8, &written_caps.hash, &parsed_caps.hash);
     try std.testing.expect(parsed_caps.has(.clock));
     try std.testing.expect(parsed_caps.has(.crypto));
-}
-
-// ---------------------------------------------------------------------------
-// Tool catalog (M4 T2)
-// ---------------------------------------------------------------------------
-
-const tool_schema_for_tests = @import("zts-base").tool_schema;
-
-const tool_input_schema =
-    \\{"type":"object","additionalProperties":false,"required":["id"],
-    \\ "properties":{"id":{"type":"string","maxLength":8,"description":"café \"quoted\""},
-    \\  "tags":{"type":"array","maxItems":2,"items":{"type":"string","maxLength":3}}}}
-;
-const tool_output_schema =
-    \\{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","maxLength":16}}}
-;
-
-fn toolCatalogFixture(allocator: std.mem.Allocator) !HandlerContract {
-    var contract = contract_types.emptyContract(try allocator.dupe(u8, "tool.ts"));
-    errdefer contract.deinit(allocator);
-    var entry = contract_types.ToolEntry{
-        .name = &.{},
-        .route = &.{},
-        .description = &.{},
-        .input_schema_name = &.{},
-        .input_schema_json = &.{},
-        .output_schema_name = &.{},
-        .output_schema_json = &.{},
-        .max_input_bytes = 4096,
-    };
-    errdefer entry.deinit(allocator);
-    entry.name = try allocator.dupe(u8, "lookupOrder");
-    entry.route = try allocator.dupe(u8, "POST /tools/lookup-order");
-    entry.description = try allocator.dupe(u8, "Return one order.\nIt belongs to the caller.");
-    entry.input_schema_name = try allocator.dupe(u8, "LookupOrderInput");
-    entry.input_schema_json = try allocator.dupe(u8, tool_input_schema);
-    entry.output_schema_name = try allocator.dupe(u8, "LookupOrderOutput");
-    entry.output_schema_json = try allocator.dupe(u8, tool_output_schema);
-    entry.scope_tenant = try allocator.dupe(u8, "id");
-    const exports = [_][2][]const u8{ .{ "zttp:fetch", "fetch" }, .{ "zttp:validate", "validateJson" } };
-    for (exports) |pair| {
-        const module = try allocator.dupe(u8, pair[0]);
-        errdefer allocator.free(module);
-        const name = try allocator.dupe(u8, pair[1]);
-        errdefer allocator.free(name);
-        try entry.reachable_exports.append(allocator, .{ .module = module, .name = name });
-    }
-    try contract.tools.append(allocator, entry);
-    return contract;
-}
-
-fn expectToolEntriesEqual(want: contract_types.ToolEntry, got: contract_types.ToolEntry) !void {
-    try std.testing.expectEqualStrings(want.name, got.name);
-    try std.testing.expectEqualStrings(want.route, got.route);
-    try std.testing.expectEqualStrings(want.description, got.description);
-    try std.testing.expectEqualStrings(want.input_schema_name, got.input_schema_name);
-    try std.testing.expectEqualStrings(want.input_schema_json, got.input_schema_json);
-    try std.testing.expectEqualStrings(want.output_schema_name, got.output_schema_name);
-    try std.testing.expectEqualStrings(want.output_schema_json, got.output_schema_json);
-    try std.testing.expectEqual(want.max_input_bytes, got.max_input_bytes);
-    try expectOptionalStringEqual(want.scope_tenant, got.scope_tenant);
-    try expectOptionalStringEqual(want.scope_subject, got.scope_subject);
-    try std.testing.expectEqual(want.reachable_exports.items.len, got.reachable_exports.items.len);
-    for (want.reachable_exports.items, got.reachable_exports.items) |w, g| {
-        try std.testing.expectEqualStrings(w.module, g.module);
-        try std.testing.expectEqualStrings(w.name, g.name);
-    }
-}
-
-fn expectOptionalStringEqual(want: ?[]const u8, got: ?[]const u8) !void {
-    const w = want orelse return std.testing.expect(got == null);
-    try std.testing.expectEqualStrings(w, got orelse return error.TestExpectedEqual);
-}
-
-test "tool catalog survives a v1 and a v2 round trip byte for byte" {
-    const allocator = std.testing.allocator;
-    var original = try toolCatalogFixture(allocator);
-    defer original.deinit(allocator);
-
-    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        defer out.deinit();
-        try write(&original, &out.writer);
-        var parsed = try parseFromJson(allocator, out.written());
-        defer parsed.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 1), parsed.tools.items.len);
-        try expectToolEntriesEqual(original.tools.items[0], parsed.tools.items[0]);
-    }
-}
-
-test "the tool auth names survive a v1 and a v2 round trip, and their absence writes nothing" {
-    const allocator = std.testing.allocator;
-    var original = try toolCatalogFixture(allocator);
-    defer original.deinit(allocator);
-
-    var without: std.Io.Writer.Allocating = .init(allocator);
-    defer without.deinit();
-    try writeContractJson(&original, &without.writer);
-    try std.testing.expect(std.mem.indexOf(u8, without.written(), "toolAuth") == null);
-
-    const auth = ToolAuth{ .key_env = "ZTTP_TOOL_KEY", .tenant_claim = "org" };
-    original.tool_auth = try auth.dupe(allocator);
-    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        defer out.deinit();
-        try write(&original, &out.writer);
-        var parsed = try parseFromJson(allocator, out.written());
-        defer parsed.deinit(allocator);
-        const got = parsed.tool_auth orelse return error.TestExpectedToolAuth;
-        try std.testing.expectEqualStrings("ZTTP_TOOL_KEY", got.key_env);
-        try std.testing.expectEqualStrings("org", got.tenant_claim);
-    }
-
-    // Half an auth object, or an empty name, is not something the build writes.
-    const partial = "{\"version\": 19, \"handler\": {\"path\": \"t.ts\"}, \"toolAuth\": {\"keyEnv\": \"K\"}}";
-    try std.testing.expectError(error.InvalidToolAuth, parseFromJson(allocator, partial));
-    const empty = "{\"version\": 19, \"handler\": {\"path\": \"t.ts\"}, \"toolAuth\": {\"keyEnv\": \"K\", \"tenantClaim\": \"\"}}";
-    try std.testing.expectError(error.InvalidToolAuth, parseFromJson(allocator, empty));
-}
-
-test "credential references survive a v1 and a v2 round trip, and their absence writes nothing" {
-    const allocator = std.testing.allocator;
-    var original = try toolCatalogFixture(allocator);
-    defer original.deinit(allocator);
-
-    var without: std.Io.Writer.Allocating = .init(allocator);
-    defer without.deinit();
-    try writeContractJson(&original, &without.writer);
-    try std.testing.expect(std.mem.indexOf(u8, without.written(), "credentials") == null);
-
-    var config = try std.json.parseFromSlice(std.json.Value, allocator,
-        \\{"weather": {"env": "WEATHER_KEY", "endpoint": "https://api.weather.example", "header": "Authorization",
-        \\  "scheme": "Bearer", "methods": ["POST", "GET"], "paths": ["/v1/forecast", "/v1/alerts"]},
-        \\ "local": {"env": "LOCAL_KEY", "endpoint": "http://127.0.0.1:9000", "header": "x-api-key",
-        \\  "methods": ["GET"], "paths": ["/"]}}
-    , .{});
-    defer config.deinit();
-    original.credentials = (try credential_ref.parseConfig(allocator, config.value)).ok;
-
-    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        defer out.deinit();
-        try write(&original, &out.writer);
-        try std.testing.expect(std.mem.indexOf(u8, out.written(), "WEATHER_KEY") != null);
-        var parsed = try parseFromJson(allocator, out.written());
-        defer parsed.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 2), parsed.credentials.len);
-        for (original.credentials, parsed.credentials) |want, got| {
-            try std.testing.expectEqualStrings(want.name, got.name);
-            try std.testing.expectEqualStrings(want.env, got.env);
-            try std.testing.expectEqualStrings(want.endpoint, got.endpoint);
-            try std.testing.expectEqualStrings(want.header, got.header);
-            try std.testing.expectEqual(want.scheme == null, got.scheme == null);
-            if (want.scheme) |s| try std.testing.expectEqualStrings(s, got.scheme.?);
-            try std.testing.expectEqual(want.methods, got.methods);
-            try std.testing.expectEqual(want.paths.len, got.paths.len);
-            for (want.paths, got.paths) |wp, gp| try std.testing.expectEqualStrings(wp, gp);
-        }
-    }
-
-    // Each of these is a reference the build could not have written.
-    const prefix = "{\"version\": 22, \"handler\": {\"path\": \"t.ts\"}, \"credentials\": ";
-    const refused = [_][]const u8{
-        prefix ++ "[]}",
-        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
-        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"X\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
-        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"http://a.example:80\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
-        prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"paths\": [\"/\"]}]}",
-        prefix ++ "[{\"name\": \"b\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}," ++
-            "{\"name\": \"a\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
-        prefix ++ "[{\"name\": \"a\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}," ++
-            "{\"name\": \"a\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}",
-    };
-    for (refused) |text| {
-        try std.testing.expectError(error.InvalidCredentialRefs, parseFromJson(allocator, text));
-    }
-    const accepted = prefix ++ "[{\"name\": \"w\", \"env\": \"K\", \"endpoint\": \"https://a.example:443\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}]}";
-    var parsed = try parseFromJson(allocator, accepted);
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 1), parsed.credentials.len);
-}
-
-test "a tool's credentials survive a v1 and a v2 round trip, and a non-canonical list is refused" {
-    const allocator = std.testing.allocator;
-    var original = try toolCatalogFixture(allocator);
-    defer original.deinit(allocator);
-
-    var without: std.Io.Writer.Allocating = .init(allocator);
-    defer without.deinit();
-    try writeContractJson(&original, &without.writer);
-    try std.testing.expect(std.mem.indexOf(u8, without.written(), "\"credentials\"") == null);
-
-    const pairs = [_][2][]const u8{
-        .{ "billing", "https://billing.example:8443" },
-        .{ "weather", "https://api.weather.example:443" },
-    };
-    for (pairs) |pair| {
-        const name = try allocator.dupe(u8, pair[0]);
-        errdefer allocator.free(name);
-        const endpoint_text = try allocator.dupe(u8, pair[1]);
-        errdefer allocator.free(endpoint_text);
-        try original.tools.items[0].credentials.append(allocator, .{ .name = name, .endpoint = endpoint_text });
-    }
-
-    var written: std.Io.Writer.Allocating = .init(allocator);
-    defer written.deinit();
-    inline for (.{ writeContractJson, writeContractJsonV2 }, 0..) |write, write_index| {
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        defer out.deinit();
-        try write(&original, &out.writer);
-        var parsed = try parseFromJson(allocator, out.written());
-        defer parsed.deinit(allocator);
-        const got = parsed.tools.items[0].credentials.items;
-        try std.testing.expectEqual(pairs.len, got.len);
-        for (pairs, got) |want, cred| {
-            try std.testing.expectEqualStrings(want[0], cred.name);
-            try std.testing.expectEqualStrings(want[1], cred.endpoint);
-        }
-        if (write_index == 0) try written.writer.writeAll(out.written());
-    }
-
-    // Swap the order, drop the port, and empty a name: each is something the
-    // build does not write.
-    const text = written.written();
-    const mutations = [_][2][]const u8{
-        .{ "{ \"name\": \"billing\"", "{ \"name\": \"zzz\"" },
-        .{ "https://api.weather.example:443", "https://api.weather.example" },
-        .{ "{ \"name\": \"weather\"", "{ \"name\": \"\"" },
-    };
-    for (mutations) |m| {
-        const at = std.mem.indexOf(u8, text, m[0]) orelse return error.TestMutationTargetMissing;
-        const mutated = try std.mem.concat(allocator, u8, &.{ text[0..at], m[1], text[at + m[0].len ..] });
-        defer allocator.free(mutated);
-        try std.testing.expectError(error.InvalidToolCatalog, parseFromJson(allocator, mutated));
-    }
-}
-
-test "tool schema bytes and validator verdicts agree after a round trip" {
-    const allocator = std.testing.allocator;
-    var original = try toolCatalogFixture(allocator);
-    defer original.deinit(allocator);
-
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try writeContractJson(&original, &out.writer);
-    var parsed = try parseFromJson(allocator, out.written());
-    defer parsed.deinit(allocator);
-
-    var before = try tool_schema_for_tests.compile(allocator, original.tools.items[0].input_schema_json);
-    defer before.deinit();
-    var after = try tool_schema_for_tests.compile(allocator, parsed.tools.items[0].input_schema_json);
-    defer after.deinit();
-
-    const corpus = [_][]const u8{
-        "{\"id\":\"a1\"}",
-        "{\"id\":\"a1\",\"tags\":[\"x\",\"yz\"]}",
-        "{\"id\":\"a1\",\"id\":\"a2\"}",
-        "{\"id\":\"a1\",\"extra\":1}",
-        "{\"tags\":[]}",
-        "{\"id\":\"123456789\"}",
-        "{\"id\":\"a1\",\"tags\":[\"a\",\"b\",\"c\"]}",
-    };
-    var accepted: usize = 0;
-    var refused: usize = 0;
-    for (corpus) |input| {
-        const want = try tool_schema_for_tests.validate(allocator, &before, input, 4096);
-        const got = try tool_schema_for_tests.validate(allocator, &after, input, 4096);
-        try std.testing.expectEqualDeep(want, got);
-        switch (want) {
-            .ok => accepted += 1,
-            .refused => refused += 1,
-        }
-    }
-    // Floor: the corpus holds both verdicts, so agreement is not vacuous.
-    try std.testing.expectEqual(@as(usize, 2), accepted);
-    try std.testing.expectEqual(@as(usize, 5), refused);
-}
-
-fn toolCatalogJson(comptime tools: []const u8) []const u8 {
-    return "{\"version\": 19, \"handler\": {\"path\": \"tool.ts\"}, \"tools\": [" ++ tools ++ "]}";
-}
-
-const good_schema_field =
-    \\{"name": "In", "json": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}"}
-;
-
-fn toolJson(comptime name: []const u8, comptime route: []const u8, comptime max_bytes: []const u8, comptime input: []const u8, comptime exports: []const u8) []const u8 {
-    return "{\"name\": \"" ++ name ++ "\", \"route\": \"" ++ route ++ "\", \"description\": \"d\", " ++
-        "\"inputSchema\": " ++ input ++ ", \"outputSchema\": " ++ good_schema_field ++ ", " ++
-        max_bytes ++ "\"reachableExports\": [" ++ exports ++ "]}";
-}
-
-test "tool catalog projection accepts a well-formed entry" {
-    var contract = try parseFromJson(std.testing.allocator, toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, ", good_schema_field, "")));
-    defer contract.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), contract.tools.items.len);
-    try std.testing.expectEqual(@as(u32, 16), contract.tools.items[0].max_input_bytes);
-}
-
-test "tool catalog projection refuses a catalog the build could not have written" {
-    const ok_bytes = "\"maxInputBytes\": 16, ";
-    const cases = [_][]const u8{
-        // Empty name and empty route.
-        toolCatalogJson(toolJson("", "POST /a", ok_bytes, good_schema_field, "")),
-        toolCatalogJson(toolJson("a", "", ok_bytes, good_schema_field, "")),
-        // Duplicate name, then duplicate route.
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "") ++ ", " ++ toolJson("a", "POST /b", ok_bytes, good_schema_field, "")),
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "") ++ ", " ++ toolJson("b", "POST /a", ok_bytes, good_schema_field, "")),
-        // An escaped spelling of a name already present is the same name.
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "") ++ ", " ++ toolJson("\\u0061", "POST /b", ok_bytes, good_schema_field, "")),
-        // Byte bound missing, zero, and above the ceiling.
-        toolCatalogJson(toolJson("a", "POST /a", "", good_schema_field, "")),
-        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 0, ", good_schema_field, "")),
-        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 1048577, ", good_schema_field, "")),
-        // A schema outside the subset (an open object), and one with no name.
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, "{\"name\": \"In\", \"json\": \"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}\"}", "")),
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, "{\"name\": \"\", \"json\": \"{\\\"type\\\":\\\"object\\\",\\\"additionalProperties\\\":false,\\\"properties\\\":{}}\"}", "")),
-        // Reachable exports out of order, duplicated, and with an empty name.
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:validate\", \"name\": \"validateJson\"}, {\"module\": \"zttp:fetch\", \"name\": \"fetch\"}")),
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:fetch\", \"name\": \"fetch\"}, {\"module\": \"zttp:fetch\", \"name\": \"fetch\"}")),
-        toolCatalogJson(toolJson("a", "POST /a", ok_bytes, good_schema_field, "{\"module\": \"zttp:fetch\", \"name\": \"\"}")),
-        // A scope that binds nothing, and one that binds an empty field name.
-        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, \"scope\": {}, ", good_schema_field, "")),
-        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, \"scope\": {\"tenant\": \"\"}, ", good_schema_field, "")),
-        toolCatalogJson(toolJson("a", "POST /a", "\"maxInputBytes\": 16, \"scope\": {\"tenant\": \"id\", \"subject\": \"\"}, ", good_schema_field, "")),
-    };
-    for (cases, 0..) |json, i| {
-        const result = parseFromJson(std.testing.allocator, json);
-        if (result) |parsed| {
-            var owned = parsed;
-            owned.deinit(std.testing.allocator);
-            std.debug.print("case {d} was accepted: {s}\n", .{ i, json });
-            return error.TestExpectedRefusal;
-        } else |err| try std.testing.expectEqual(error.InvalidToolCatalog, err);
-    }
-}
-
-fn classificationFixture(allocator: std.mem.Allocator) !HandlerContract {
-    var contract = contract_types.emptyContract(try allocator.dupe(u8, "declared.ts"));
-    errdefer contract.deinit(allocator);
-    const rows = [_]struct { source: []const u8, path: []const u8, label: ClassificationLabel, required: bool, status: ClassificationStatus }{
-        .{ .source = "fetch:api.example.com", .path = "customer.tax_id", .label = .secret, .required = true, .status = .matched },
-        .{ .source = "fetch:api.example.com", .path = "customer.card", .label = .secret, .required = false, .status = .indeterminate },
-        .{ .source = "service:billing", .path = "card.token", .label = .credential, .required = false, .status = .absent },
-    };
-    for (rows) |row| {
-        const source = try allocator.dupe(u8, row.source);
-        errdefer allocator.free(source);
-        const path = try allocator.dupe(u8, row.path);
-        errdefer allocator.free(path);
-        try contract.classifications.append(allocator, .{
-            .source = source,
-            .path = path,
-            .label = row.label,
-            .required = row.required,
-            .status = row.status,
-        });
-    }
-    return contract;
-}
-
-test "classification report survives a v1 and a v2 round trip" {
-    const allocator = std.testing.allocator;
-    var original = try classificationFixture(allocator);
-    defer original.deinit(allocator);
-
-    inline for (.{ writeContractJson, writeContractJsonV2 }) |write| {
-        var out: std.Io.Writer.Allocating = .init(allocator);
-        defer out.deinit();
-        try write(&original, &out.writer);
-        var parsed = try parseFromJson(allocator, out.written());
-        defer parsed.deinit(allocator);
-        try std.testing.expectEqual(original.classifications.items.len, parsed.classifications.items.len);
-        for (original.classifications.items, parsed.classifications.items) |want, got| {
-            try std.testing.expectEqualStrings(want.source, got.source);
-            try std.testing.expectEqualStrings(want.path, got.path);
-            try std.testing.expectEqual(want.label, got.label);
-            try std.testing.expectEqual(want.required, got.required);
-            try std.testing.expectEqual(want.status, got.status);
-        }
-
-        // Written again, the parsed contract gives the same classifications
-        // section. The comparison is scoped to it: a contract carrying no
-        // capability matrix gains the empty-set hash on a trip, which is a
-        // property of that section, not of this one.
-        var again: std.Io.Writer.Allocating = .init(allocator);
-        defer again.deinit();
-        try write(&parsed, &again.writer);
-        // Floor: the section exists and holds the fixture's rows.
-        try std.testing.expect(std.mem.indexOf(u8, classificationsSection(out.written()), "customer") != null);
-        try std.testing.expectEqualStrings(classificationsSection(out.written()), classificationsSection(again.written()));
-    }
-}
-
-test "a contract with no declaration writes an empty classifications array" {
-    const allocator = std.testing.allocator;
-    var contract = contract_types.emptyContract(try allocator.dupe(u8, "plain.ts"));
-    defer contract.deinit(allocator);
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try writeContractJson(&contract, &out.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"classifications\": [],") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"version\": 24,") != null);
-}
-
-test "a contract with no ceiling writes ceiling null and reads it back as null" {
-    const allocator = std.testing.allocator;
-    var contract = contract_types.emptyContract(try allocator.dupe(u8, "plain.ts"));
-    defer contract.deinit(allocator);
-    var out: std.Io.Writer.Allocating = .init(allocator);
-    defer out.deinit();
-    try writeContractJson(&contract, &out.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"ceiling\": null,") != null);
-    var parsed = try parseFromJson(allocator, out.written());
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqual(@as(?CeilingReport, null), parsed.ceiling);
-}
-
-test "the ceiling report round-trips through contract.json, version 1 and version 2" {
-    const allocator = std.testing.allocator;
-    const capability_profiles = @import("zts-base").capability_profiles;
-    var contract = contract_types.emptyContract(try allocator.dupe(u8, "ceiling.ts"));
-    defer contract.deinit(allocator);
-    // The parser recomputes the matrix hash, so the original carries the hash
-    // of its empty matrix and the rewritten bytes can be compared whole.
-    contract.capabilities = .{ .hash = module_authorization.capabilityHash(&.{}) };
-    contract.ceiling = try CeilingReport.fromCeiling(allocator, .{
-        .profile = capability_profiles.findProfile("ledger").?,
-        .exclude = &.{ "zttp:fetch", "zttp:sql" },
-    });
-
-    var v1: std.Io.Writer.Allocating = .init(allocator);
-    defer v1.deinit();
-    try writeContractJson(&contract, &v1.writer);
-    const expected =
-        "\"ceiling\": { \"profile\": \"ledger\", \"categories\": [\"env\", \"clock\", \"random\", \"crypto\", \"stderr\", \"policy_check\", \"sqlite\"], " ++
-        "\"excludedModules\": [\"zttp:cache\", \"zttp:fetch\", \"zttp:ratelimit\", \"zttp:sql\"], \"requiresReadOnly\": false },";
-    try std.testing.expect(std.mem.indexOf(u8, v1.written(), expected) != null);
-
-    var parsed = try parseFromJson(allocator, v1.written());
-    defer parsed.deinit(allocator);
-    const report = parsed.ceiling orelse return error.TestMissingCeiling;
-    try std.testing.expectEqualStrings("ledger", report.profile.name);
-    try std.testing.expectEqual(@as(usize, 1), report.exclude.len);
-    try std.testing.expectEqualStrings("zttp:fetch", report.exclude[0]);
-
-    var again: std.Io.Writer.Allocating = .init(allocator);
-    defer again.deinit();
-    try writeContractJson(&parsed, &again.writer);
-    try std.testing.expectEqualStrings(v1.written(), again.written());
-
-    var v2: std.Io.Writer.Allocating = .init(allocator);
-    defer v2.deinit();
-    try contract_json_writer.writeContractJsonV2(&contract, &v2.writer);
-    try std.testing.expect(std.mem.indexOf(u8, v2.written(), "\"excluded_modules\": [") != null);
-    try std.testing.expect(std.mem.indexOf(u8, v2.written(), "\"requires_read_only\": false") != null);
-    var parsed_v2 = try parseFromJson(allocator, v2.written());
-    defer parsed_v2.deinit(allocator);
-    var from_v2: std.Io.Writer.Allocating = .init(allocator);
-    defer from_v2.deinit();
-    try writeContractJson(&parsed_v2, &from_v2.writer);
-    // A version 2 document keeps its version, so compare the ceiling line.
-    try std.testing.expectEqualStrings(ceilingLine(v1.written()), ceilingLine(from_v2.written()));
-}
-
-/// The `ceiling` entry as written, from its key to the end of its line.
-fn ceilingLine(json: []const u8) []const u8 {
-    const start = std.mem.indexOf(u8, json, "\"ceiling\"") orelse return "";
-    const end = std.mem.indexOfScalarPos(u8, json, start, '\n') orelse json.len;
-    return json[start..end];
-}
-
-fn ceilingJson(comptime body: []const u8) []const u8 {
-    return "{\"version\": 22, \"handler\": {\"path\": \"ceiling.ts\"}, \"ceiling\": " ++ body ++ "}";
-}
-
-test "ceiling projection refuses a report the build could not have written" {
-    const boundary_categories = "[\"env\", \"clock\", \"random\", \"crypto\", \"stderr\", \"policy_check\"]";
-    const cases = [_][]const u8{
-        // An unknown profile, and a missing field of each kind.
-        ceilingJson("{\"profile\": \"store\", \"categories\": [], \"excludedModules\": [], \"requiresReadOnly\": false}"),
-        ceilingJson("{\"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
-        ceilingJson("{\"profile\": \"boundary\", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"requiresReadOnly\": true}"),
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"]}"),
-        // Categories and requiresReadOnly that differ from the profile.
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": [\"env\", \"network\"], \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": false}"),
-        // A profile exclusion left out, an unsorted list, a repeat, and a non-module.
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\"], \"requiresReadOnly\": true}"),
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:ratelimit\", \"zttp:cache\"], \"requiresReadOnly\": true}"),
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
-        ceilingJson("{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"fetch\", \"zttp:cache\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}"),
-    };
-    for (cases, 0..) |json, i| {
-        const result = parseFromJson(std.testing.allocator, json);
-        if (result) |parsed| {
-            var owned = parsed;
-            owned.deinit(std.testing.allocator);
-            std.debug.print("case {d} was accepted: {s}\n", .{ i, json });
-            return error.TestExpectedRefusal;
-        } else |err| try std.testing.expectEqual(error.InvalidCeilingReport, err);
-    }
-
-    // Control: the same shape as the build writes it is accepted.
-    var accepted = try parseFromJson(std.testing.allocator, ceilingJson(
-        "{\"profile\": \"boundary\", \"categories\": " ++ boundary_categories ++ ", \"excludedModules\": [\"zttp:cache\", \"zttp:fetch\", \"zttp:ratelimit\"], \"requiresReadOnly\": true}",
-    ));
-    defer accepted.deinit(std.testing.allocator);
-    const report = accepted.ceiling orelse return error.TestMissingCeiling;
-    try std.testing.expectEqualStrings("boundary", report.profile.name);
-    try std.testing.expectEqual(@as(usize, 1), report.exclude.len);
-    try std.testing.expectEqualStrings("zttp:fetch", report.exclude[0]);
-}
-
-fn classificationJson(comptime row: []const u8) []const u8 {
-    return "{\"version\": 22, \"handler\": {\"path\": \"declared.ts\"}, \"classifications\": [" ++ row ++ "]}";
-}
-
-test "classification projection refuses a report the build could not have written" {
-    const cases = [_][]const u8{
-        // A status and a label outside the closed sets.
-        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"seen\"}"),
-        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"validated\", \"required\": true, \"status\": \"matched\"}"),
-        // Missing status, label, and required.
-        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"required\": true}"),
-        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"required\": true, \"status\": \"matched\"}"),
-        classificationJson("{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"status\": \"matched\"}"),
-        // A source that names no source kind, a bare prefix, and an empty path.
-        classificationJson("{\"source\": \"api.example.com\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"matched\"}"),
-        classificationJson("{\"source\": \"fetch:\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"matched\"}"),
-        classificationJson("{\"source\": \"service:billing\", \"path\": \"\", \"label\": \"secret\", \"required\": true, \"status\": \"matched\"}"),
-    };
-    for (cases, 0..) |json, i| {
-        const result = parseFromJson(std.testing.allocator, json);
-        if (result) |parsed| {
-            var owned = parsed;
-            owned.deinit(std.testing.allocator);
-            std.debug.print("case {d} was accepted: {s}\n", .{ i, json });
-            return error.TestExpectedRefusal;
-        } else |err| try std.testing.expectEqual(error.InvalidClassificationReport, err);
-    }
-
-    // Control: the same shape with closed values is accepted.
-    var accepted = try parseFromJson(std.testing.allocator, classificationJson(
-        "{\"source\": \"fetch:h\", \"path\": \"a\", \"label\": \"secret\", \"required\": true, \"status\": \"absent\"}",
-    ));
-    defer accepted.deinit(std.testing.allocator);
-    try std.testing.expectEqual(ClassificationStatus.absent, accepted.classifications.items[0].status);
-    try std.testing.expectEqual(@as(?usize, 0), firstRequiredAbsent(accepted.classifications.items));
-}
-
-/// The `classifications` array as written, from its key to its closing bracket.
-fn classificationsSection(json: []const u8) []const u8 {
-    const start = std.mem.indexOf(u8, json, "\"classifications\"") orelse return "";
-    const end = std.mem.indexOfPos(u8, json, start, "]") orelse return json[start..];
-    return json[start .. end + 1];
 }

@@ -37,7 +37,6 @@ pub const stripper = @import("stripper.zig");
 pub const source_frontend = @import("source_frontend.zig");
 pub const printer = @import("printer.zig");
 pub const node_types = @import("node_types.zig");
-pub const comptime_eval = @import("comptime.zig");
 pub const bytecode_cache = @import("bytecode_cache.zig");
 pub const bytecode_opt = @import("bytecode_opt.zig");
 pub const translation_witness = @import("translation_witness.zig");
@@ -54,8 +53,7 @@ pub const builtin_modules = @import("builtin_modules.zig");
 pub const security_events = @import("security_events.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const modules = @import("modules/root.zig");
-/// The pure HS256 bearer verifier (M4 T5). The runtime calls it before a tool
-/// handler runs; `zttp:auth`'s `jwtVerify` wraps the same function.
+/// Shared HS256 parsing and verification for the retained `zttp:auth` module.
 pub const jwt_auth = @import("zttp-modules").security.auth;
 
 test {

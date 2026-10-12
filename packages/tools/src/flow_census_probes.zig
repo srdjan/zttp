@@ -708,25 +708,6 @@ const t_import2 =
     \\  @USE{helper(s)}USE@
     \\}
 ;
-const t_parallel_cb =
-    \\@PRE@
-    \\import { parallel } from "zttp:io";
-    \\function handler(req: Request): Claim<Response> {
-    \\  const s = @SRC@;
-    \\  const results = parallel([(): @RT@ => { const x = s; @BODY@ }]);
-    \\  return Response.json({ ok: 1 });
-    \\}
-;
-const t_durable_run_cb =
-    \\@PRE@
-    \\import { run } from "zttp:durable";
-    \\function handler(req: Request): Claim<Response> {
-    \\  const s = @SRC@;
-    \\  const out = run("job:1", (): @RT@ => { const x = s; @BODY@ });
-    \\  return Response.json({ ok: 1 });
-    \\}
-;
-
 const all_labels = [_]Label{ .secret, .credential, .user_input, .clean };
 const env_labels = [_]Label{ .secret, .clean };
 /// The kinds whose unresolved call can only fail closed take no clean label:
@@ -794,8 +775,6 @@ const specs = [_]Spec{
         .template = t_import2,
         .libs = &.{ .{ .suffix = "a", .template = t_import2_lib_a }, .{ .suffix = "b", .template = t_import2_lib_b } },
     },
-    .{ .name = "parallel_cb", .group = .extended, .sinks = &effect_sinks, .template = t_parallel_cb },
-    .{ .name = "durable_run_cb", .group = .extended, .sinks = &effect_sinks, .template = t_durable_run_cb },
 };
 
 fn contains(comptime T: type, haystack: []const T, needle: T) bool {
@@ -865,7 +844,6 @@ const hand_header =
     \\import { fetch } from "zttp:fetch";
     \\import { mask, escapeHtml } from "zttp:text";
     \\import { schemaCompile, validateJson } from "zttp:validate";
-    \\import { parallel } from "zttp:io";
 ;
 
 const Hand = struct {
@@ -1050,23 +1028,6 @@ const hand_written = [_]Hand{
         \\function handler(req: Request): Claim<Response> {
         \\  const t = env("API_TOKEN") ?? "";
         \\  const rs = [fetch("https://api.example.com/x", { method: "POST", body: t })];
-        \\  return Response.json({ ok: 1 });
-        \\}
-        ,
-    },
-    .{
-        .name = "x12_parallel_callback_logs_secret",
-        .property = .no_secret_leakage,
-        .expect = .refuse,
-        .reason = "the parallel callback logs a secret it reads itself (ZTS402)",
-        .body =
-        \\function work(): unknown {
-        \\  const t = env("API_TOKEN") ?? "";
-        \\  logInfo(t, { n: 1 });
-        \\  return fetch("https://api.example.com/x", {});
-        \\}
-        \\function handler(req: Request): Claim<Response> {
-        \\  const results = parallel([work]);
         \\  return Response.json({ ok: 1 });
         \\}
         ,
@@ -1272,20 +1233,6 @@ const hand_written = [_]Hand{
         \\}
         ,
     },
-    .{
-        .name = "x26_workflow_call_echo_returned",
-        .property = .no_secret_leakage,
-        .expect = .refuse_or_unprove,
-        .reason = "a secret passed to a sub-handler through workflow.call can come back in the result; the result is another execution's value, so the walk can only fail closed",
-        .body =
-        \\import { call } from "zttp:workflow";
-        \\function handler(req: Request): Claim<Response> {
-        \\  const t = env("API_TOKEN") ?? "";
-        \\  const res = call("echo", { method: "POST", path: "/echo", body: t });
-        \\  return Response.json({ k: res.text() });
-        \\}
-        ,
-    },
 };
 
 /// Every probe of the census, in a fixed order. All memory comes from `a`.
@@ -1338,8 +1285,9 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
 /// Raise a floor in the commit that adds probes, to the count the gate prints.
 /// Never lower one to make a deletion pass.
 pub const minimum_matrix: usize = 504;
-pub const minimum_extended: usize = 246;
-pub const minimum_hand: usize = 26;
+// Measured by the unfiltered Phase 3 census; every retained probe matched.
+pub const minimum_extended: usize = 206;
+pub const minimum_hand: usize = 24;
 /// The fewest probes a (label, sink) column holds: the 18 research kinds.
 pub const minimum_per_column: usize = 18;
 

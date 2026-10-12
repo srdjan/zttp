@@ -168,7 +168,6 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .handler_path = opts.handler_path,
         .output_path = opts.output_path,
         .sql_schema_path = compile_context.sql_schema_path,
-        .system_path = compile_context.system_path,
         .policy = compile_context.policyPtr(),
         .attest_requested = opts.attest_requested,
     });
@@ -176,7 +175,6 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
 
 const ProjectCompileContext = struct {
     sql_schema_path: ?[]u8 = null,
-    system_path: ?[]u8 = null,
     policy: ?zts.HandlerPolicy = null,
 
     fn init(
@@ -187,7 +185,6 @@ const ProjectCompileContext = struct {
         errdefer context.deinit(allocator);
 
         context.sql_schema_path = try project.resolvedSqlitePath(allocator);
-        context.system_path = try project.resolvedSystemPath(allocator);
         const policy_source = project.readPolicySource(allocator) catch |err| {
             std.debug.print(
                 "Configured capability policy '{s}' could not be loaded: {s}\n",
@@ -212,7 +209,6 @@ const ProjectCompileContext = struct {
 
     fn deinit(self: *ProjectCompileContext, allocator: std.mem.Allocator) void {
         if (self.sql_schema_path) |path| allocator.free(path);
-        if (self.system_path) |path| allocator.free(path);
         if (self.policy) |*policy| policy.deinit(allocator);
         self.* = .{};
     }
@@ -224,7 +220,7 @@ const ProjectCompileContext = struct {
 
 /// Resolve project-owned analysis inputs for an explicit handler path. A
 /// handler outside a project remains a supported standalone compile, while a
-/// handler below zttp.json must use the same schema, system, and capability
+/// handler below zttp.json must use the same schema and capability
 /// policy as `build` and `deploy --local`.
 fn discoverExplicitCompileContext(
     allocator: std.mem.Allocator,
@@ -379,7 +375,6 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         .handler_path = artifact.handler_path,
         .output_path = artifact.output_path,
         .sql_schema_path = artifact.compile_context.sql_schema_path,
-        .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
         .attest_requested = opts.attest_requested,
     });
@@ -490,7 +485,6 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .handler_path = artifact.handler_path,
         .output_path = artifact.output_path,
         .sql_schema_path = artifact.compile_context.sql_schema_path,
-        .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
@@ -596,14 +590,6 @@ const ArtifactTailCapabilities = struct {
 fn retiredArtifactFeature(input: ArtifactTailInput) ?retired_authority.Feature {
     var facts: retired_authority.Facts = .{};
     if (input.contract) |contract| facts = retired_authority.contractFacts(contract);
-    if (input.proof_evidence) |evidence| {
-        for (evidence.proof.nodes) |node| {
-            if (node.tag == .ledger_call) {
-                facts.ledger_module = true;
-                break;
-            }
-        }
-    }
     return retired_authority.first(facts);
 }
 
@@ -850,9 +836,7 @@ pub const BuildRequest = struct {
     /// the nearest zttp.json; standalone `compile` leaves them null only when
     /// no project manifest exists above the explicit handler.
     sql_schema_path: ?[]const u8 = null,
-    system_path: ?[]const u8 = null,
     policy: ?*const zts.HandlerPolicy = null,
-    protected_ledger_path: ?[]const u8 = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
     /// set to the project name on the `deploy --local` path.
@@ -904,7 +888,6 @@ const BuildCompileInput = struct {
     source: []const u8,
     handler_path: []const u8,
     sql_schema_path: ?[]const u8,
-    system_path: ?[]const u8,
     policy: ?*const zts.HandlerPolicy,
 };
 
@@ -918,7 +901,6 @@ fn compileCapability(
         .emit_contract = true,
         .emit_proof_evidence = true,
         .sql_schema_path = input.sql_schema_path,
-        .system_path = input.system_path,
         .policy = if (input.policy) |policy| policy.* else null,
     });
 }
@@ -959,13 +941,6 @@ fn runBuild(
     request: BuildRequest,
     caps: BuildCapabilities,
 ) !BuildReceipt {
-    if (request.protected_ledger_path) |ledger| {
-        try zts.module_binding.validateLedgerOutputPath(allocator, ledger, request.output_path);
-        if (request.sql_schema_path) |sql| try zts.module_binding.validateLedgerOutputPath(allocator, ledger, sql);
-        if (request.ledger_service_name != null) {
-            try zts.module_binding.validateLedgerOutputPath(allocator, ledger, proof_ledger.ledgerPath());
-        }
-    }
     const handler_path = request.handler_path;
     const output_path = request.output_path;
     const ledger_service_name = request.ledger_service_name;
@@ -990,7 +965,6 @@ fn runBuild(
         .source = source,
         .handler_path = handler_path,
         .sql_schema_path = request.sql_schema_path,
-        .system_path = request.system_path,
         .policy = request.policy,
     }) catch |err| {
         // precompile already prints per-error lines to stderr; only surface
@@ -1482,38 +1456,6 @@ test "an artifact whose bytecode cannot be walked is refused rather than half-co
     try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
 }
 
-test "a ledger proof node refuses artifact construction before serialization" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { balance } from "zttp:ledger";
-        \\function handler(req: Request): Response {
-        \\  const result = balance("main", "USD", "asset:cash");
-        \\  return Response.json({ ok: result.ok });
-        \\}
-    ;
-    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
-        .emit_contract = true,
-        .emit_proof_evidence = true,
-    });
-    defer compiled.deinit(allocator);
-    const contract = &(compiled.contract orelse return error.TestUnexpectedResult);
-    const evidence = &(compiled.proof_evidence orelse return error.TestUnexpectedResult);
-
-    var probe = ArtifactTailProbe{};
-    try std.testing.expectError(error.UnsupportedRuntimeAuthority, writeArtifactTail(allocator, .{
-        .runtime_binary = "runtime",
-        .output_path = "artifact.bin",
-        .attest_requested = true,
-        .bytecode = compiled.bytecode,
-        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-        .contract = contract,
-        .proof_evidence = evidence,
-    }, probe.capabilities()));
-    try std.testing.expectEqual(@as(usize, 0), probe.serialize_calls);
-    try std.testing.expectEqual(@as(usize, 0), probe.sign_calls);
-    try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
-}
-
 test "the certificate names the exact policy the artifact carries" {
     const allocator = std.testing.allocator;
 
@@ -1661,74 +1603,6 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
             std.debug.print("obligation {s} has no evidence\n", .{obligation.property.name()});
             return err;
         };
-    }
-}
-
-test "ledger proof calls are refused before certificate construction" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { balance } from "zttp:ledger";
-        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
-        \\  const current = balance("main", "USD", "cash");
-        \\  return Response.json({ ok: current.ok });
-        \\}
-    ;
-    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
-        .emit_contract = true,
-        .emit_proof_evidence = true,
-    });
-    defer compiled.deinit(allocator);
-    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
-    const contract = compiled.contract orelse return error.TestUnexpectedResult;
-
-    try std.testing.expectError(error.UnsupportedRuntimeAuthority, proof_certificate.build(allocator, .{
-        .evidence = &evidence,
-        .properties = dischargedProperties(&contract),
-        .artifact = .{ .bytecode = compiled.bytecode, .policy_section_digest = [_]u8{0} ** 32 },
-        .contract_digest = [_]u8{0} ** 32,
-    }));
-}
-
-test "ledger operations do not erase secret labels" {
-    const allocator = std.testing.allocator;
-    const sources = [_][]const u8{
-        \\import { env } from "zttp:env";
-        \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
-        \\  const secret = env("API_KEY") ?? "";
-        \\  return Response.text(secret);
-        \\}
-        ,
-        \\import { env } from "zttp:env";
-        \\import { post } from "zttp:ledger";
-        \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
-        \\  const secret = env("API_KEY") ?? "";
-        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: secret, entries: [] });
-        \\  if (!result.ok) return Response.text(result.error);
-        \\  return Response.text(result.value);
-        \\}
-        ,
-        \\import { balance } from "zttp:ledger";
-        \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
-        \\  const result = balance("main", "USD", "cash");
-        \\  if (!result.ok) return Response.text(result.error);
-        \\  return Response.text(result.value);
-        \\}
-        ,
-    };
-
-    for (sources) |source| {
-        var checked = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
-            .json_mode = true,
-        });
-        defer checked.deinit(allocator);
-        try std.testing.expect(checked.flow_errors > 0);
-        var saw_secret_diagnostic = false;
-        for (checked.json_diagnostics.items) |diagnostic| {
-            if (std.mem.indexOf(u8, diagnostic.message, "secret data flows into response body") != null) {
-                saw_secret_diagnostic = true;
-            }
-        }
-        try std.testing.expect(saw_secret_diagnostic);
     }
 }
 
@@ -2123,8 +1997,6 @@ const LoadedArtifact = struct {
                 .core_grammar_hash = view.source_identity.core_grammar_hash,
                 .semantics_hash = view.source_identity.semantics_hash,
                 .capability_hash = if (view.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
-                .frontend_profile_id = if (view.source_identity.frontend) |f| f.profile.id() else null,
-                .frontend_grammar_hash = if (view.source_identity.frontend) |f| f.grammar_hash else null,
             },
         };
     }
@@ -2524,15 +2396,6 @@ fn emptyProbeContract(allocator: std.mem.Allocator) !zts.HandlerContract {
         .egress = .{ .endpoints = .empty, .urls = .empty, .dynamic = false },
         .cache = .{ .namespaces = .empty, .dynamic = false },
         .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-            .timers = false,
-            .signals = .{ .literal = .empty, .dynamic = false },
-            .producer_keys = .{ .literal = .empty, .dynamic = false },
-        },
-        .scope = .{ .used = false, .names = .empty, .dynamic = false, .max_depth = 0 },
         .api = .{
             .schemas = .empty,
             .requests = .{ .schema_refs = .empty, .dynamic = false },
@@ -2574,7 +2437,6 @@ const BuildProbe = struct {
     tail_saw_contract: bool = false,
     tail_saw_attest: bool = false,
     compile_saw_sql_schema: bool = false,
-    compile_saw_system: bool = false,
     compile_saw_policy: bool = false,
     ledger_service: ?[]const u8 = null,
     ledger_sha_hex: ?[64]u8 = null,
@@ -2597,7 +2459,6 @@ const BuildProbe = struct {
         const self = of(context);
         self.compile_calls += 1;
         self.compile_saw_sql_schema = input.sql_schema_path != null;
-        self.compile_saw_system = input.system_path != null;
         self.compile_saw_policy = input.policy != null;
         if (self.compile_error) |err| return err;
         const bytecode = try allocator.dupe(u8, self.bytecode);
@@ -2663,19 +2524,46 @@ const BuildProbe = struct {
     }
 };
 
-test "a retired module refuses a build before runtime resolution or artifact output" {
-    var probe = BuildProbe{ .retired_module = "zttp:tool" };
-    try std.testing.expectError(error.UnsupportedRuntimeAuthority, runBuild(std.testing.allocator, .{
-        .handler_path = "handler.ts",
-        .output_path = "artifact.bin",
-        .attest_requested = true,
-    }, probe.capabilities()));
+test "every retired module refuses a build before replacing artifact output" {
+    const allocator = std.testing.allocator;
+    const retired = [_][]const u8{
+        "zttp:durable",
+        "zttp:workflow",
+        "zttp:queue",
+        "zttp:scope",
+        "zttp:io",
+        "zttp:service",
+        "zttp:ledger",
+        "zttp:tool",
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output_path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
+    defer allocator.free(output_path);
+    const artifact_path = try std.fs.path.join(allocator, &.{ output_path, "artifact.bin" });
+    defer allocator.free(artifact_path);
 
-    try std.testing.expectEqual(@as(usize, 1), probe.compile_calls);
-    try std.testing.expectEqual(@as(usize, 0), probe.resolve_calls);
-    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
-    try std.testing.expectEqual(@as(usize, 0), probe.codesign_calls);
-    try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
+    for (retired) |module| {
+        try tmp.dir.writeFile(std.testing.io, .{
+            .sub_path = "artifact.bin",
+            .data = "sentinel",
+        });
+        var probe = BuildProbe{ .retired_module = module };
+        try std.testing.expectError(error.UnsupportedRuntimeAuthority, runBuild(allocator, .{
+            .handler_path = "handler.ts",
+            .output_path = artifact_path,
+            .attest_requested = true,
+        }, probe.capabilities()));
+
+        try std.testing.expectEqual(@as(usize, 1), probe.compile_calls);
+        try std.testing.expectEqual(@as(usize, 0), probe.resolve_calls);
+        try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+        try std.testing.expectEqual(@as(usize, 0), probe.codesign_calls);
+        try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
+        const output = try zts.file_io.readFile(allocator, artifact_path, 64);
+        defer allocator.free(output);
+        try std.testing.expectEqualStrings("sentinel", output);
+    }
 }
 
 test "a deploy build signs, codesigns, and records one ledger row" {
@@ -2685,7 +2573,6 @@ test "a deploy build signs, codesigns, and records one ledger row" {
         .handler_path = "handler.ts",
         .output_path = ".zttp/deploy/demo",
         .sql_schema_path = "schema.sql",
-        .system_path = "system.json",
         .policy = &policy,
         .ledger_service_name = "demo",
         .attest_requested = true,
@@ -2697,7 +2584,6 @@ test "a deploy build signs, codesigns, and records one ledger row" {
     try std.testing.expectEqual(@as(usize, 1), probe.codesign_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.ledger_calls);
     try std.testing.expect(probe.compile_saw_sql_schema);
-    try std.testing.expect(probe.compile_saw_system);
     try std.testing.expect(probe.compile_saw_policy);
     try std.testing.expect(probe.tail_saw_contract);
     try std.testing.expect(probe.tail_saw_attest);
@@ -2794,7 +2680,6 @@ test "explicit compile discovers and enforces project capability policy" {
         .source = source,
         .handler_path = handler_path,
         .sql_schema_path = context.sql_schema_path,
-        .system_path = context.system_path,
         .policy = policy,
     }));
 }
@@ -2819,7 +2704,6 @@ test "project build compiler enforces configured capability policy" {
         .source = source,
         .handler_path = "handler.ts",
         .sql_schema_path = null,
-        .system_path = null,
         .policy = &policy,
     }));
 }

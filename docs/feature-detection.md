@@ -6,7 +6,7 @@ This document catalogs all unsupported JavaScript and TypeScript features detect
 
 zttp validates in three layers:
 
-1. **TypeScript Stripper** (`packages/zts/src/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax that only exists in type positions
+1. **TypeScript Stripper** (`packages/zts/src/stripper.zig`): Runs first for `.ts` files and catches unsupported syntax in type positions.
 2. **Parser** (`packages/zts/src/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
 3. **Strict checker** (`packages/zts/src/strict_checker.zig`): Runs after parsing on `zttp check` and `zttp verify-paths`, and enforces the [canonical profile](#canonical-profile-strict-checker)
 
@@ -39,7 +39,7 @@ Each of these was accepted silently before and is now refused with a location.
 | `0x`, `0b`, `0o` with no digits | ZTS012 | Write the digits |
 | `1e`, `1e+` with no exponent digits | ZTS012 | Write the exponent |
 | `0755` - a legacy octal literal | ZTS012 | `0o755` for octal, or drop the leading zero for decimal |
-| A character above ASCII outside a string or comment | ZTS046 | The message names the first such character by code point (`U+2212 MINUS SIGN is not ASCII`) and the span covers that character alone. A lookalike gets its ASCII spelling in the suggestion: U+2212, U+2013, U+2014 (`-`), U+201C, U+201D (`"`), U+2018, U+2019 (`'`), U+00A0, U+3000 (a space), U+FEFF (delete it), U+00D7 (`*`), U+2026 (`...`). Inside an identifier the text says so and gives the rule: letters, digits, `_` and `$`. Invalid UTF-8 is reported as the byte. TSX text content never reaches this rule: the frontend lowers it to string literals before the core tokenizer runs |
+| A character above ASCII outside a string or comment | ZTS046 | The message names the first character by code point. The span covers that character alone. Suggestions give an ASCII replacement for recognized lookalikes. Invalid UTF-8 is reported as the byte. |
 | A statement with no `;` | ZTS047 | Write the terminator; this profile has no automatic semicolon insertion |
 
 The last one is a statement-termination rule rather than a lexical one. It has
@@ -104,7 +104,6 @@ The parser supports ES6 `import`/`export` syntax for built-in virtual modules
 | `import { schemaCompile, validateJson } from "zttp:validate"` | Validation module imports |
 | `import { decodeJson, decodeForm } from "zttp:decode"` | Typed ingress module imports |
 | `import { cacheGet, cacheSet } from "zttp:cache"` | Cache module imports |
-| `import { run, step } from "zttp:durable"` | Durable execution imports |
 | `import { charge } from "zttp-ext:stripe"` | Registered extension imports |
 
 ### Supported Export Forms
@@ -314,15 +313,6 @@ Declaration destructuring, including renamed bindings, is outside the core
 profile. Bind the source to one name and read fields or indexed elements with
 explicit `const` declarations.
 
-## Workflow Proof Guardrails
-
-These diagnostics are not JavaScript feature cuts. They reject workflow shapes
-that would otherwise look durable while losing a runtime guarantee.
-
-| Code | Rule | Supported shape |
-|------|------|-----------------|
-| `ZTS509` | `workflow.call`, `saga`, `fanout`, or `follow` inside a `durable.step()` callback | move the workflow call to durable depth 0 inside `durable.run()` |
-
 ## Error Message Pattern
 
 All error messages follow a consistent format:
@@ -383,6 +373,6 @@ Runtime checks should only exist as defensive programming (e.g., `UnimplementedO
 
 ### Why Move Detection to the Parser?
 
-Before consolidation, features like `class` and `enum` were split between the stripper and parser. Moving all keyword-level detection to the parser gives accepted `.ts` inputs one diagnostic path with source context and underlines. `.js` and `.jsx` are rejected earlier at the source-frontend boundary with ZTS052.
+Before consolidation, features like `class` and `enum` were split between the stripper and parser. The parser now gives accepted `.ts` inputs one diagnostic path. `.js`, `.jsx`, and `.tsx` are rejected earlier with ZTS052.
 
 The features remaining in the stripper are `any` type detection (because `any` only appears in type annotation positions that are stripped before the parser runs) and `as`/`satisfies` assertion rejection (because these are type-position syntax that the parser never sees).

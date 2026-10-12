@@ -2060,8 +2060,8 @@ fn ambientGlobalHelp(name: []const u8) []const u8 {
 /// it.
 ///
 /// The second is the surface the catalog deliberately does not carry and the
-/// runtime still cannot decide: a service call, a registered SQL statement, the
-/// raw `fetchSync`. Those are named here because they are rejections the
+/// runtime still cannot decide: a registered SQL statement and raw `fetchSync`.
+/// Those are named here because they are rejections the
 /// catalog will never justify, and they stay rejections after the classifier
 /// starts admitting the families it does carry.
 fn missingSectionHelp(kind: guard_catalog.Kind) []const u8 {
@@ -2076,22 +2076,18 @@ fn missingSectionHelp(kind: guard_catalog.Kind) []const u8 {
 /// A surface no policy edit reaches, and why, so the author does not go looking
 /// for a section to add.
 fn unguardedSurfaceHelp(module: []const u8, name: []const u8) []const u8 {
-    if (std.mem.eql(u8, module, "zttp:service")) {
-        return "a service name selects which handler runs, which no capability policy section decides; use a literal service name";
-    }
     if (std.mem.eql(u8, module, "zttp:sql") and std.mem.eql(u8, name, "sql")) {
         return "registering a computed SQL statement is a different question from executing a named query, and no policy section decides it; register literal statements";
     }
     if (std.mem.eql(u8, module, "zttp:fetch") and std.mem.eql(u8, name, "fetchSync")) {
         return "fetchSync is outside the guarded egress surface; use fetch or fetchWithRetry with a literal URL";
     }
-    return "no policy section decides this resource at run time, so no policy edit makes it checkable; use a literal env key, cache namespace, SQL query name, egress URL, route path, or service name";
+    return "no policy section decides this resource at run time; use a literal env key, cache namespace, SQL query name, egress URL, or route path";
 }
 
 fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
     if (guard_catalog.lookup(module, name, 0) != null) return 0;
     if (std.mem.eql(u8, module, "zttp:fetch") and std.mem.eql(u8, name, "fetchSync")) return 0;
-    if (std.mem.eql(u8, module, "zttp:service") and std.mem.eql(u8, name, "serviceCall")) return 0;
     if (std.mem.eql(u8, module, "zttp:sql")) return 0;
     if (std.mem.eql(u8, module, "zttp:cache")) return 0;
     return null;
@@ -2409,7 +2405,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
     var env = TypeEnv.init(testing.allocator, &pool);
     defer env.deinit();
     env.populateFromTypeMap(&stripped.type_map);
-    var tc = TypeChecker.init(testing.allocator, view, null, &env, null);
+    var tc = TypeChecker.init(testing.allocator, view, null, &env);
     defer tc.deinit();
     _ = try tc.check(root);
     var checker = StrictChecker.init(testing.allocator, view, null, &env, &tc);
@@ -2512,7 +2508,7 @@ fn checkSourceTyped(source: []const u8) !*TypedHarness {
     const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
     h.env = TypeEnv.init(testing.allocator, &h.pool);
-    h.tc = TypeChecker.init(testing.allocator, view, null, &h.env, null);
+    h.tc = TypeChecker.init(testing.allocator, view, null, &h.env);
     _ = try h.tc.check(root);
     h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);
     _ = try h.checker.check(root);
@@ -2571,7 +2567,7 @@ fn checkStrippedWithSections(
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
     h.env = TypeEnv.init(testing.allocator, &h.pool);
     h.env.populateFromTypeMap(&h.stripped.type_map);
-    h.tc = TypeChecker.init(testing.allocator, view, null, &h.env, null);
+    h.tc = TypeChecker.init(testing.allocator, view, null, &h.env);
     _ = try h.tc.check(root);
     h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);
     h.checker.policy_sections = policy_sections;

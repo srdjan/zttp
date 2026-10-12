@@ -1,5 +1,5 @@
 //! Fuzz and stress tests for the source frontends: the tokenizer, the
-//! TypeScript stripper, the TSX lowerer, and the parser.
+//! TypeScript stripper and parser.
 //!
 //! The contract these tests pin is narrower than "the frontend is correct".
 //! For any input, each stage must return a result or a typed error. It must
@@ -11,12 +11,9 @@
 //!              token span lies inside the source and starts at or after the
 //!              end of the previous token. Line and column match a recount
 //!              from the bytes. A save and restore replays the same tokens.
-//!   stripper   returns a result or a StripError. A result keeps the length of
-//!              the source unless a span edit says otherwise, and its type map,
-//!              diagnostics, and span edits stay inside both texts. A refusal
-//!              carries a diagnostic inside the source.
-//!   lowerer    returns a result or InvalidTsx with a diagnostic inside the
-//!              source. A source without `<` comes back unchanged.
+//!   stripper   returns a result or a StripError. A result keeps the source
+//!              length. Its type map and diagnostics stay inside the source.
+//!              A refusal carries a diagnostic inside the source.
 //!   parser     returns a program or an error from a closed set. A refusal has
 //!              recorded errors, and each recorded span lies inside the input.
 //!
@@ -34,7 +31,6 @@ const builtin = @import("builtin");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const parse_mod = @import("../parser/parse.zig");
 const stripper = @import("../stripper.zig");
-const tsx_lowerer = @import("../tsx_lowerer.zig");
 const source_frontend = @import("../source_frontend.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
@@ -308,22 +304,7 @@ fn checkStripWith(allocator: std.mem.Allocator, src: []const u8, base: stripper.
     defer result.deinit();
     stats.ok += 1;
 
-    if (result.span_edits.len == 0 and !options.collect_all_diagnostics) {
-        // Stripping is offset-preserving unless a span edit says otherwise.
-        try std.testing.expectEqual(src.len, result.code.len);
-    }
-    var prev_stripped_end: u32 = 0;
-    var prev_source_end: u32 = 0;
-    for (result.span_edits) |edit| {
-        try std.testing.expect(edit.stripped_start <= edit.stripped_end);
-        try std.testing.expect(edit.stripped_end <= result.code.len);
-        try std.testing.expect(edit.source_start <= edit.source_end);
-        try std.testing.expect(edit.source_end <= src.len);
-        try std.testing.expect(edit.stripped_start >= prev_stripped_end);
-        try std.testing.expect(edit.source_start >= prev_source_end);
-        prev_stripped_end = edit.stripped_end;
-        prev_source_end = edit.source_end;
-    }
+    if (!options.collect_all_diagnostics) try std.testing.expectEqual(src.len, result.code.len);
     for (result.type_map.entries.items) |entry| {
         try std.testing.expect(entry.source_start <= entry.source_end);
         try std.testing.expect(entry.source_end <= src.len);
@@ -345,8 +326,6 @@ fn checkStripWith(allocator: std.mem.Allocator, src: []const u8, base: stripper.
 
 const strip_variants = [_]struct { name: []const u8, options: stripper.StripOptions }{
     .{ .name = "default", .options = .{} },
-    .{ .name = "tsx_mode", .options = .{ .tsx_mode = true } },
-    .{ .name = "comptime", .options = .{ .enable_comptime = true, .comptime_env = .{} } },
     .{ .name = "collect_all_diagnostics", .options = .{ .collect_all_diagnostics = true } },
 };
 
@@ -356,43 +335,6 @@ fn checkStripper(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !
             std.debug.print("stripper variant {s} failed\n", .{variant.name});
             return err;
         };
-    }
-}
-
-// ----------------------------------------------------------------------------
-// TSX lowerer contract
-// ----------------------------------------------------------------------------
-
-fn checkLowerer(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
-    var diag: ?tsx_lowerer.Diagnostic = null;
-    var result = tsx_lowerer.lower(allocator, src, &diag) catch |err| switch (err) {
-        error.OutOfMemory => return,
-        error.SourceTooLarge => return error.UnexpectedSourceTooLarge,
-        error.InvalidTsx => {
-            stats.rejected += 1;
-            const d = diag orelse return error.InvalidTsxWithoutDiagnostic;
-            try expectPositionInside(src, d.line, d.column);
-            stats.located += 1;
-            return;
-        },
-    };
-    defer result.deinit();
-    stats.ok += 1;
-
-    var prev_stripped_end: u32 = 0;
-    var prev_source_end: u32 = 0;
-    for (result.span_edits) |edit| {
-        try std.testing.expect(edit.stripped_start <= edit.stripped_end);
-        try std.testing.expect(edit.stripped_end <= result.code.len);
-        try std.testing.expect(edit.source_start <= edit.source_end);
-        try std.testing.expect(edit.source_end <= src.len);
-        try std.testing.expect(edit.stripped_start >= prev_stripped_end);
-        try std.testing.expect(edit.source_start >= prev_source_end);
-        prev_stripped_end = edit.stripped_end;
-        prev_source_end = edit.source_end;
-    }
-    if (std.mem.indexOfScalar(u8, src, '<') == null) {
-        try std.testing.expectEqualStrings(src, result.code);
     }
 }
 
@@ -434,7 +376,7 @@ fn checkParseInput(
 ) !void {
     var parser = (switch (mode) {
         .program => Parser.init(allocator, input),
-        .expression => Parser.initExpression(allocator, input, .comptime_expression),
+        .expression => Parser.initExpression(allocator, input, .kernel_expression),
     }) catch |err| switch (err) {
         error.OutOfMemory => return,
     };
@@ -476,7 +418,7 @@ fn checkExpression(allocator: std.mem.Allocator, src: []const u8, stats: *Stats)
     try checkParseInput(allocator, src, .expression, null, stats);
 }
 
-/// The path real sources take: strip, lower TSX, then parse the result.
+/// The path real sources take: strip TypeScript, then parse the result.
 fn checkPipelineAs(allocator: std.mem.Allocator, src: []const u8, path: []const u8, options: stripper.StripOptions, stats: *Stats) !void {
     var prepared = source_frontend.PreparedSource.init(allocator, src, path, options) catch |err| switch (err) {
         error.OutOfMemory => return,
@@ -491,15 +433,13 @@ fn checkPipelineAs(allocator: std.mem.Allocator, src: []const u8, path: []const 
 
 fn checkPipeline(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
     try checkPipelineAs(allocator, src, "fuzz.ts", .{}, stats);
-    try checkPipelineAs(allocator, src, "fuzz.tsx", .{}, stats);
-    try checkPipelineAs(allocator, src, "fuzz.tsx", .{ .enable_comptime = true, .comptime_env = .{} }, stats);
 }
 
 // ----------------------------------------------------------------------------
 // Targets
 // ----------------------------------------------------------------------------
 
-const Target = enum { tokenizer, stripper, lowerer, parser, expression, pipeline };
+const Target = enum { tokenizer, stripper, parser, expression, pipeline };
 
 fn checkOne(target: Target, src: []const u8, stats: *Stats) !void {
     const allocator = std.testing.allocator;
@@ -509,7 +449,6 @@ fn checkOne(target: Target, src: []const u8, stats: *Stats) !void {
     switch (target) {
         .tokenizer => try checkTokenizer(src, stats),
         .stripper => try checkStripper(allocator, src, stats),
-        .lowerer => try checkLowerer(allocator, src, stats),
         .parser => try checkParser(allocator, src, stats),
         .expression => try checkExpression(allocator, src, stats),
         .pipeline => try checkPipeline(allocator, src, stats),
@@ -783,14 +722,6 @@ const value_shapes = [_]Shape{
     .{ .name = "member chain", .prefix = "const x = a", .open = ".b", .core = "", .close = "", .suffix = ";" },
 };
 
-const jsx_shapes = [_]Shape{
-    .{ .name = "element", .open = "<a>", .core = "x", .close = "</a>" },
-    .{ .name = "expression", .open = "<a>{", .core = "x", .close = "}</a>" },
-    .{ .name = "attribute", .open = "<a b={", .core = "x", .close = "}/>" },
-    .{ .name = "fragment", .open = "<>", .core = "x", .close = "</>" },
-    .{ .name = "call in expression", .open = "<a>{f(", .core = "x", .close = ")}</a>" },
-};
-
 /// Past every documented limit, far enough that a recursion with no guard
 /// would overflow the native stack.
 const very_deep = 20_000;
@@ -909,46 +840,17 @@ test "nesting: the parser expression profile refuses nesting past 64" {
         for ([_]usize{ 1, 8 }) |depth| {
             var source = try buildNested(allocator, shape, depth);
             defer source.deinit(allocator);
-            var parser = try Parser.initExpression(allocator, source.items, .comptime_expression);
+            var parser = try Parser.initExpression(allocator, source.items, .kernel_expression);
             defer parser.deinit();
             _ = try parser.parseExpressionOnly();
         }
         for ([_]usize{ 65, 600, very_deep }) |depth| {
             var source = try buildNested(allocator, shape, depth);
             defer source.deinit(allocator);
-            var parser = try Parser.initExpression(allocator, source.items, .comptime_expression);
+            var parser = try Parser.initExpression(allocator, source.items, .kernel_expression);
             defer parser.deinit();
             try std.testing.expectError(error.ParseError, parser.parseExpressionOnly());
             try std.testing.expect(parserNestingTooDeep(&parser));
-        }
-    }
-}
-
-// The lowerer limit is 64 levels of element nesting, and 64 levels of elements
-// nested through expressions.
-test "nesting: the TSX lowerer refuses nesting past 64" {
-    const allocator = std.testing.allocator;
-    for (jsx_shapes) |shape| {
-        // Elements nested directly obey the element limit exactly.
-        const direct = std.mem.eql(u8, shape.name, "element") or std.mem.eql(u8, shape.name, "fragment");
-        if (direct) {
-            var at_limit = try buildNested(allocator, shape, 64);
-            defer at_limit.deinit(allocator);
-            var ok = try tsx_lowerer.lower(allocator, at_limit.items, null);
-            ok.deinit();
-        }
-        for ([_]usize{ 1, 8 }) |depth| {
-            var source = try buildNested(allocator, shape, depth);
-            defer source.deinit(allocator);
-            var ok = try tsx_lowerer.lower(allocator, source.items, null);
-            ok.deinit();
-        }
-        for ([_]usize{ 65, 600, very_deep }) |depth| {
-            var source = try buildNested(allocator, shape, depth);
-            defer source.deinit(allocator);
-            var diag: ?tsx_lowerer.Diagnostic = null;
-            try std.testing.expectError(error.InvalidTsx, tsx_lowerer.lower(allocator, source.items, &diag));
-            try std.testing.expect(diag != null);
         }
     }
 }
@@ -1008,16 +910,9 @@ fn oomStage(allocator: std.mem.Allocator, target: Target, variant: usize, src: [
             };
             result.deinit();
         },
-        .lowerer => {
-            var result = tsx_lowerer.lower(allocator, src, null) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.Refused,
-            };
-            result.deinit();
-        },
         .parser => try oomParse(allocator, src),
         .pipeline => {
-            var prepared = source_frontend.PreparedSource.init(allocator, src, "fuzz.tsx", .{}) catch |err| switch (err) {
+            var prepared = source_frontend.PreparedSource.init(allocator, src, "fuzz.ts", .{}) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 else => return error.Refused,
             };
@@ -1083,7 +978,7 @@ test "allocation failure: no frontend stage leaks or reports success after a fai
     var allocations: usize = 0;
     for (seeds) |seed| {
         if (seed.len > oom_seed_limit) continue;
-        for ([_]Target{ .stripper, .lowerer, .parser, .pipeline }) |target| {
+        for ([_]Target{ .stripper, .parser, .pipeline }) |target| {
             const variants: usize = if (target == .stripper) strip_variants.len else 1;
             for (0..variants) |variant| {
                 allocations += sweepAllocationFailures(target, variant, seed) catch |err| {
@@ -1094,7 +989,7 @@ test "allocation failure: no frontend stage leaks or reports success after a fai
             }
         }
     }
-    try std.testing.expect(runs >= 4 * 20);
+    try std.testing.expect(runs >= 3 * 20);
     try std.testing.expect(allocations >= runs);
 }
 
@@ -1115,13 +1010,6 @@ test "fuzz: stripper holds its contract on every seed" {
     try std.testing.expect(stats.located > 0);
 }
 
-test "fuzz: TSX lowerer holds its contract on every seed" {
-    const stats = try runSeeds(.lowerer);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
-    try std.testing.expect(stats.located > 0);
-}
-
 test "fuzz: parser holds its contract on every seed" {
     const stats = try runSeeds(.parser);
     try std.testing.expect(stats.ok > 0);
@@ -1136,7 +1024,7 @@ test "fuzz: parser expression profile holds its contract on every seed" {
     try std.testing.expect(stats.located > 0);
 }
 
-test "fuzz: strip, lower, and parse pipeline holds its contract on every seed" {
+test "fuzz: strip and parse pipeline holds its contract on every seed" {
     const stats = try runSeeds(.pipeline);
     try std.testing.expect(stats.ok > 0);
     try std.testing.expect(stats.rejected > 0);
@@ -1159,12 +1047,6 @@ test "stress: stripper holds its contract on generated input" {
     try std.testing.expect(stats.rejected > 0);
 }
 
-test "stress: TSX lowerer holds its contract on generated input" {
-    const stats = try runStress(.lowerer, 0x70C3_0003, 1500);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
-}
-
 test "stress: parser holds its contract on generated input" {
     const stats = try runStress(.parser, 0x70C3_0004, 1000);
     try std.testing.expect(stats.ok > 0);
@@ -1176,7 +1058,7 @@ test "stress: parser expression profile holds its contract on generated input" {
     try std.testing.expect(stats.rejected > 0);
 }
 
-test "stress: strip, lower, and parse pipeline holds its contract on generated input" {
+test "stress: strip and parse pipeline holds its contract on generated input" {
     const stats = try runStress(.pipeline, 0x70C3_0006, 200);
     try std.testing.expect(stats.ok > 0);
     try std.testing.expect(stats.rejected > 0);

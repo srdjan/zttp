@@ -8,8 +8,6 @@ const zq = @import("zts");
 const compat = zq.compat;
 
 const contract_runtime = @import("contract_runtime.zig");
-const durable_store_mod = @import("durable_store.zig");
-const durable_fetch = @import("durable_fetch.zig");
 const http_types = @import("http_types.zig");
 const embedded_handler = @import("embedded_handler");
 
@@ -616,14 +614,6 @@ pub const HandlerPool = struct {
 
     pub fn setPoolingPolicy(self: *Self, policy: contract_runtime.PoolingPolicy) void {
         self.pooling_policy = policy;
-    }
-
-    pub fn setDurableWorkflowProperties(self: *Self, properties: runtime_config_mod.DurableWorkflowProperties) void {
-        self.runtime_init_mutex.lock();
-        self.config.durable_workflow_properties = properties;
-        self.runtime_init_mutex.unlock();
-
-        _ = self.reload_generation.fetchAdd(1, .acq_rel);
     }
 
     fn emitRuntimeEvent(kind: zq.security_events.SecurityEventKind, detail: []const u8) void {

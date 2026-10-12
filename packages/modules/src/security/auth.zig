@@ -167,9 +167,8 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 }
 
 // ---------------------------------------------------------------------------
-// Shared HS256 pieces. `jwtVerifyImpl` (the handler export) and `verifyHs256`
-// (the pure verifier the runtime calls before a tool handler runs) share the
-// token split, the header check, the signature check, and the time checks.
+// Shared HS256 pieces. `jwtVerifyImpl` and `verifyHs256` share the token
+// split, the header check, the signature check, and the time checks.
 // They differ in the claims parse: `jwtVerify` hands the payload to the JS
 // JSON parser and returns the claims object without requiring any claim,
 // while `verifyHs256` parses with `std.json`, refuses duplicate keys, and
@@ -233,9 +232,9 @@ pub fn checkNbf(now_s: i64, nbf: f64) error{ InvalidTimeClaim, NotYetValid }!voi
 // verifyHs256 - the pure verifier.
 //
 // It reaches no capability itself. The HMAC comes from the caller through
-// `Hs256Mac`: the runtime supplies std's HMAC-SHA256, and module code
-// supplies `moduleMac(handle)`, which routes through the capability-checked
-// `sdk.hmacSha256`. This keeps the file free of direct crypto, as
+// `Hs256Mac`: callers supply the HMAC. Module code uses `moduleMac(handle)`,
+// which routes through the capability-checked `sdk.hmacSha256`. This keeps
+// the file free of direct crypto, as
 // `scripts/check-capability-helpers.sh` requires of every virtual module.
 // The clock is the `now_s` argument for the same reason.
 // ---------------------------------------------------------------------------

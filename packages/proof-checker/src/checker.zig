@@ -1810,7 +1810,7 @@ test "current behavior accepts two residual-plan graph members with a nonzero or
     var ordinary = try test_support.buildGuarded();
     var ordinary_members: [11]graph.Member = undefined;
     @memcpy(ordinary_members[0..ordinary.members.len], &ordinary.members);
-    ordinary_members[10] = .{ .kind = .source_profile_frontend, .ordinal = 0, .digest = test_support.digest(0x79) };
+    ordinary_members[10] = .{ .kind = .native_module_identity, .ordinal = 0, .digest = test_support.digest(0x79) };
     const ordinary_parts = ordinary.parts();
     ordinary.len = try encodeBoundTestParts(&ordinary.buffer, ordinary_parts, &ordinary_members);
     var ordinary_inputs = ordinary.inputs();

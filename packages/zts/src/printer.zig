@@ -51,9 +51,6 @@ pub const Error = error{ UnprintableConstruct, OutOfMemory };
 /// the file alone; widening coverage is driven by which of these the corpus
 /// produces.
 pub const Refusal = enum {
-    /// Authored TSX is lowered before core parsing. This source-preserving
-    /// printer has no TSX grammar, so it cannot safely re-tokenize element text.
-    jsx_source,
     /// A CR in the source. Line endings are LF here and a printer that
     /// normalized them would be rewriting bytes it was not asked about.
     carriage_return,
@@ -78,7 +75,6 @@ pub const Refusal = enum {
 
     pub fn text(self: Refusal) []const u8 {
         return switch (self) {
-            .jsx_source => "JSX source",
             .carriage_return => "CRLF line ending",
             .invalid_token => "invalid token",
             .unsupported_token => "unsupported token",
@@ -92,8 +88,6 @@ pub const Refusal = enum {
 };
 
 pub const Options = struct {
-    /// True for `.tsx` sources, which are refused.
-    jsx: bool = false,
     /// The soft target. A line with no break point may exceed it.
     width: u32 = 80,
     /// Set to the reason when the printer refuses.
@@ -1645,7 +1639,6 @@ fn printInto(
     options: Options,
     self_check: bool,
 ) Error![]const u8 {
-    if (options.jsx) return refuse(options, .jsx_source);
     if (std.mem.indexOfScalar(u8, source, '\r') != null) {
         return refuse(options, .carriage_return);
     }
@@ -1883,13 +1876,6 @@ test "a trailing comment after the last element stays on its line" {
         \\
     ;
     try expectPrints(source, source);
-}
-
-test "a JSX source is refused" {
-    var got: Refusal = undefined;
-    const result = print(testing.allocator, "const x = 1;\n", .{ .jsx = true, .reason_out = &got });
-    try testing.expectError(error.UnprintableConstruct, result);
-    try testing.expectEqual(Refusal.jsx_source, got);
 }
 
 test "a comment above a declaration keeps its line" {

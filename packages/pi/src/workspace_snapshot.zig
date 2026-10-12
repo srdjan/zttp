@@ -102,7 +102,6 @@ pub const Snapshot = struct {
             }
             try captureDiscoveryAbsences(allocator, &entries, prepared.project_root, change.resolved_path);
         }
-        try captureNamedAbsence(allocator, &entries, prepared.project_root, "system.json");
         try captureNamedAbsence(allocator, &entries, prepared.project_root, "zttp.json");
         try captureConfiguredInputs(
             allocator,
@@ -252,7 +251,7 @@ fn isExcludedName(name: []const u8) bool {
 }
 
 fn isProofInput(name: []const u8) bool {
-    const extensions = [_][]const u8{ ".ts", ".tsx", ".js", ".jsx", ".json", ".sql", ".sqlite", ".sqlite3", ".db" };
+    const extensions = [_][]const u8{ ".ts", ".js", ".json", ".sql", ".sqlite", ".sqlite3", ".db" };
     for (extensions) |extension| if (std.mem.endsWith(u8, name, extension)) return true;
     return false;
 }
@@ -330,7 +329,7 @@ fn captureConfiguredInputs(
         defer allocator.free(path);
         try captureConfiguredPath(allocator, io, entries, project_root, path, total_bytes);
     }
-    if (try config.resolvedSystemPath(allocator)) |path| {
+    if (try config.resolvedPolicyPath(allocator)) |path| {
         defer allocator.free(path);
         try captureConfiguredPath(allocator, io, entries, project_root, path, total_bytes);
     }
@@ -414,7 +413,7 @@ test "snapshot materializes one baseline and aggregate candidate overlay" {
     defer testing.allocator.free(root_z);
     const root = try testing.allocator.dupe(u8, root_z);
     defer testing.allocator.free(root);
-    const tail = [_]@import("turn.zig").Change{.{ .file = "src/new.tsx", .content = "new-file" }};
+    const tail = [_]@import("turn.zig").Change{.{ .file = "src/new.ts", .content = "new-file" }};
     var prepared = try change_set.prepare(testing.allocator, root, .{
         .file = "src/a.ts",
         .content = "new-a",
@@ -432,7 +431,7 @@ test "snapshot materializes one baseline and aggregate candidate overlay" {
     defer testing.allocator.free(baseline_a);
     const candidate_a = try candidate.pathFor(testing.allocator, "src/a.ts");
     defer testing.allocator.free(candidate_a);
-    const candidate_new = try candidate.pathFor(testing.allocator, "src/new.tsx");
+    const candidate_new = try candidate.pathFor(testing.allocator, "src/new.ts");
     defer testing.allocator.free(candidate_new);
     const before = try zts.file_io.readFile(testing.allocator, baseline_a, 64);
     defer testing.allocator.free(before);
@@ -464,16 +463,16 @@ test "snapshot recheck detects changed and newly created proof inputs" {
     try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
 }
 
-test "snapshot captures configured proof inputs regardless of extension" {
+test "snapshot captures configured SQL and policy inputs regardless of extension" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(testing.io, "src");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "schema.custom", .data = "exact-schema" });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handlers.custom", .data = "{\"handlers\":[]}" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "policy.custom", .data = "{\"profiles\":[]}" });
     try tmp.dir.writeFile(testing.io, .{
         .sub_path = "zttp.json",
-        .data = "{\"entry\":\"src/a.ts\",\"sqlite\":\"schema.custom\",\"system\":\"handlers.custom\"}",
+        .data = "{\"entry\":\"src/a.ts\",\"sqlite\":\"schema.custom\",\"policy\":\"policy.custom\"}",
     });
     const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
     defer testing.allocator.free(root_z);
@@ -485,13 +484,13 @@ test "snapshot captures configured proof inputs regardless of extension" {
     defer snapshot.deinit(testing.allocator);
 
     var saw_schema = false;
-    var saw_system = false;
+    var saw_policy = false;
     for (snapshot.entries) |entry| {
         if (std.mem.eql(u8, entry.relative_path, "schema.custom")) saw_schema = entry.state == .present;
-        if (std.mem.eql(u8, entry.relative_path, "handlers.custom")) saw_system = entry.state == .present;
+        if (std.mem.eql(u8, entry.relative_path, "policy.custom")) saw_policy = entry.state == .present;
     }
     try testing.expect(saw_schema);
-    try testing.expect(saw_system);
+    try testing.expect(saw_policy);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "schema.custom", .data = "changed-schema" });
     try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
 }

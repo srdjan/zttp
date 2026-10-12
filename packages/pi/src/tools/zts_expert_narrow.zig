@@ -38,9 +38,7 @@ pub fn run(
     };
     defer allocator.free(source);
 
-    var prepared = zts.PreparedSource.init(allocator, source, path, .{
-        .comptime_env = .{},
-    }) catch |e| {
+    var prepared = zts.PreparedSource.init(allocator, source, path, .{}) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": TypeScript strip failed: {s}\n",

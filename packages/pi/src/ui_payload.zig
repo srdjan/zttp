@@ -368,31 +368,6 @@ pub const ProveSummary = struct {
     }
 };
 
-pub const SystemProofSummary = struct {
-    system_path: []u8,
-    proof_level: []u8,
-    all_links_resolved: bool,
-    all_responses_covered: bool,
-    payload_compatible: bool,
-    injection_safe: bool,
-    no_secret_leakage: bool,
-    no_credential_leakage: bool,
-    retry_safe: bool,
-    fault_covered: bool,
-    state_isolated: bool,
-    max_system_io_depth: ?u32 = null,
-    dynamic_links: u32,
-    warnings: [][]u8,
-
-    pub fn clone(self: SystemProofSummary, allocator: std.mem.Allocator) !SystemProofSummary {
-        return payload_memory.cloneOwned(SystemProofSummary, self, allocator);
-    }
-
-    pub fn deinit(self: *SystemProofSummary, allocator: std.mem.Allocator) void {
-        payload_memory.freeOwned(SystemProofSummary, self, allocator);
-    }
-};
-
 /// One virtual-module call in a witness's IO stub script. Mirrors
 /// `zts.counterexample.IoStubEntry` but holds owned strings so the body can
 /// outlive the analyzer that produced it.
@@ -1506,34 +1481,6 @@ fn parseProveSummary(allocator: std.mem.Allocator, value_opt: ?std.json.Value) !
                 .recommendation = try allocator.dupe(u8, getString(obj, "recommendation") orelse ""),
                 .counterexample = counterexample,
                 .laws_used = laws_used,
-            };
-        },
-        else => error.InvalidUiPayload,
-    };
-}
-
-fn parseSystemProofSummary(allocator: std.mem.Allocator, value_opt: ?std.json.Value) !?SystemProofSummary {
-    const value = value_opt orelse return null;
-    return switch (value) {
-        .null => null,
-        .object => |obj| blk: {
-            const warnings = try parseStringArrayField(allocator, obj.get("warnings"));
-            errdefer freeStringSlice(allocator, warnings);
-            break :blk .{
-                .system_path = try allocator.dupe(u8, getString(obj, "system_path") orelse return error.InvalidUiPayload),
-                .proof_level = try allocator.dupe(u8, getString(obj, "proof_level") orelse return error.InvalidUiPayload),
-                .all_links_resolved = getBoolOrDefault(obj, "all_links_resolved", false),
-                .all_responses_covered = getBoolOrDefault(obj, "all_responses_covered", false),
-                .payload_compatible = getBoolOrDefault(obj, "payload_compatible", false),
-                .injection_safe = getBoolOrDefault(obj, "injection_safe", false),
-                .no_secret_leakage = getBoolOrDefault(obj, "no_secret_leakage", false),
-                .no_credential_leakage = getBoolOrDefault(obj, "no_credential_leakage", false),
-                .retry_safe = getBoolOrDefault(obj, "retry_safe", false),
-                .fault_covered = getBoolOrDefault(obj, "fault_covered", false),
-                .state_isolated = getBoolOrDefault(obj, "state_isolated", false),
-                .max_system_io_depth = try getOptionalUnsignedValue(obj.get("max_system_io_depth")),
-                .dynamic_links = @intCast(getUnsignedOrDefault(obj, "dynamic_links", 0)),
-                .warnings = warnings,
             };
         },
         else => error.InvalidUiPayload,

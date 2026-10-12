@@ -15,17 +15,7 @@ pub const module_graph = @import("internal/module_graph.zig");
 pub const compiler = @import("internal/compiler.zig");
 
 pub const sql = @import("data/sql.zig");
-pub const ledger = @import("data/ledger.zig");
-
-pub const io = @import("workflow/io.zig");
-pub const scope = @import("workflow/scope.zig");
-pub const durable = @import("workflow/durable.zig");
-pub const workflow = @import("workflow/workflow.zig");
-pub const queue = @import("workflow/queue.zig");
-
-pub const service = @import("net/service.zig");
 pub const fetch = @import("net/fetch.zig");
-pub const tool = @import("http/tool.zig");
 
 pub const ModuleExport = resolver.ModuleExport;
 pub const ResolveResult = resolver.ResolveResult;
@@ -38,9 +28,7 @@ pub const resolve = resolver.resolve;
 pub const registerVirtualModule = resolver.registerVirtualModule;
 pub const registerVirtualModuleTraced = resolver.registerVirtualModuleTraced;
 pub const registerVirtualModuleReplay = resolver.registerVirtualModuleReplay;
-pub const registerVirtualModuleDurable = resolver.registerVirtualModuleDurable;
 pub const registerVirtualModuleReplayWithOuter = resolver.registerVirtualModuleReplayWithOuter;
-pub const registerVirtualModuleDurableWithOuter = resolver.registerVirtualModuleDurableWithOuter;
 pub const validateImports = resolver.validateImports;
 // `populateModuleTypes` moved to `module_types.zig`. It fills a TypeEnv from
 // the module bindings and is called only by the type checker, the handler

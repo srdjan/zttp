@@ -27,8 +27,8 @@
 #   universe_below_floor  the catalog holds fewer codes than the floor
 #
 # The list only ratchets down. A row is a claim that the DEFAULT in-process
-# check cannot produce the code: the gate supplies no policy, no SQL schema, no
-# system file and no declaration, and its source is a string, not a file. The
+# check cannot produce the code: the gate supplies no policy or SQL schema,
+# and its source is a string, not a file. The
 # reason states that MECHANISM. "Not written yet" is not a mechanism: write the
 # case.
 #
@@ -43,7 +43,7 @@
 # --- Driver codes: emitted outside the in-process check call ---------------
 
 ZTS000 I/O failure: needs a missing or unreadable file, which an in-process source string cannot express; only the CLI drivers emit it
-ZTS052 needs a .js, .jsx or unknown extension; the corpus admits only .ts and .tsx files, and the gate refuses any other file as unexpected_file
+ZTS052 needs a non-.ts extension; the corpus admits only .ts files and refuses other files as unexpected_file
 ZTS700 emitted by the CLI and agent-protocol drivers when zttp:sql is used without --sql-schema; the in-process check takes no schema option and never reaches that code
 
 # --- Parser kinds with no producer on the default path ---------------------
@@ -104,9 +104,3 @@ ZTS751 produced by the semantics-conformance producer (spec-check and module-spe
 ZTS752 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
 ZTS753 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
 ZTS754 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
-ZTS755 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
-ZTS756 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
-ZTS757 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
-ZTS758 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
-ZTS759 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
-ZTS760 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record

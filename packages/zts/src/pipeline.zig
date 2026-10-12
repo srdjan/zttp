@@ -46,7 +46,6 @@ const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_map_mod = @import("zts-base").type_map;
 const guard_catalog = @import("zts-base").guard_catalog;
-const service_types_mod = @import("zts-contracts").service_types;
 const modules_mod = @import("zts-engine").modules;
 const module_types_mod = @import("module_types.zig");
 const abi_types_mod = @import("abi_types.zig");
@@ -71,7 +70,6 @@ const AtomTable = context_mod.AtomTable;
 const TypeEnv = type_env_mod.TypeEnv;
 const TypePool = type_pool_mod.TypePool;
 const TypeMap = type_map_mod.TypeMap;
-const ServiceTypeContext = service_types_mod.ServiceTypeContext;
 const HandlerContract = handler_contract_mod.HandlerContract;
 const VerificationInfo = handler_contract_mod.VerificationInfo;
 const ContractBuilder = contract_builder_mod.ContractBuilder;
@@ -120,7 +118,6 @@ pub const ResolveOptions = struct {
     /// When non-null, runs the TypeChecker as part of resolution. The pointed-to
     /// TypeEnv must outlive the returned ResolvedModule.
     type_env: ?*TypeEnv = null,
-    service_type_context: ?*const ServiceTypeContext = null,
     /// Default-on strict ZigTS profile (ZTS6xx). Type-directed rules run when
     /// type context exists; syntax/profile rules still run for untyped sources.
     strict: bool = true,
@@ -245,7 +242,6 @@ pub fn resolve(
             parsed.ir_view,
             parsed.atoms,
             env,
-            opts.service_type_context,
         );
         errdefer tc.deinit();
         // The strict checker reports a match that is not exhaustive as ZTS603,
@@ -344,7 +340,6 @@ pub const CheckedModule = struct {
         for (opts.imported_fn_summaries) |*entry| {
             flow.setFileFunctionSummary(entry.slot, &entry.summary);
         }
-        if (opts.declaration) |decl| try flow.setDeclaration(decl);
 
         return .{
             .resolved = resolved,
@@ -394,15 +389,10 @@ pub const CheckedModule = struct {
         return error_count;
     }
 
-    pub fn runFlow(
-        self: *CheckedModule,
-        handler_func: NodeIndex,
-        accepted_tools: ?[]const handler_contract_mod.ToolEntry,
-    ) !u32 {
+    pub fn runFlow(self: *CheckedModule, handler_func: NodeIndex) !u32 {
         if (self.flow_state != .ready) return error.PassAlreadyRun;
         self.flow_state = .attempted;
 
-        if (accepted_tools) |tools| try self.flow_checker.setAcceptedToolCatalog(tools);
         const error_count = try self.flow_checker.check(handler_func);
         if (self.resolved.type_checker) |*tc| try tc.ensureHealthy();
         self.flow_error_count = error_count;
@@ -431,9 +421,6 @@ pub const CheckOptions = struct {
     /// Cross-file helper sink summaries. Empty means every such call is treated
     /// as untraceable, which is the conservative direction, not the neutral one.
     imported_fn_summaries: []const ImportedFnSummary = &.{},
-    /// The consumer's declared classifications (M4 T4). Borrowed: it must
-    /// outlive the returned `CheckedModule`, whose flow checker reads it.
-    declaration: ?*const @import("zts-base").declaration.Declaration = null,
 };
 
 pub fn check(
@@ -445,7 +432,7 @@ pub fn check(
     var checked = try CheckedModule.init(allocator, resolved, opts);
     errdefer checked.deinit();
     _ = try checked.runVerifier(handler_func);
-    _ = try checked.runFlow(handler_func, null);
+    _ = try checked.runFlow(handler_func);
     return checked;
 }
 
@@ -509,12 +496,8 @@ pub const ExtractContractOptions = struct {
     has_default_response: bool = false,
     verification: ?VerificationInfo = null,
     type_map: ?*const TypeMap = null,
-    service_type_context: ?*const ServiceTypeContext = null,
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
     type_check: ContractTypeCheckFn = runContractTypeCheck,
-    build_time: ?[]const u8 = null,
-    git_commit: []const u8 = "unknown",
-    version: ?[]const u8 = null,
     read_file: ?modules_mod.module_graph.ReadFileFn = null,
     /// Shared import index for this compile. When set, `ContractBuilder` reads
     /// it instead of building an identical private one. Same lifetime rule as
@@ -652,7 +635,6 @@ pub const ModuleContractAnalysis = struct {
         }
         self.resolved = try resolve(self.allocator, self.parsed, .{
             .type_env = self.type_env_storage.envPtr(),
-            .service_type_context = self.opts.service_type_context,
             .strict = self.opts.strict,
             .module_facts = resolution_facts,
         });
@@ -680,7 +662,6 @@ pub const ModuleContractAnalysis = struct {
             self.parsed.ir_view,
             self.parsed.atoms,
             self.type_env_storage.envPtr().?,
-            self.opts.service_type_context,
         );
         const checker = &self.standalone_checker.?;
         _ = try checker.check(self.parsed.root);
@@ -816,7 +797,6 @@ pub fn extractContractFromParsed(
         parsed.ir_view,
         parsed.atoms,
         &type_env,
-        opts.service_type_context,
     );
     defer type_checker.deinit();
     _ = try opts.type_check(&type_checker, parsed.root);
@@ -870,7 +850,7 @@ fn buildContractOn(
     );
 }
 
-/// Strip TypeScript/TSX when needed, parse and resolve the source, then return
+/// Strip TypeScript when needed, parse and resolve the source, then return
 /// an owned handler contract. The caller must deinit the returned contract.
 pub fn extractContract(
     allocator: std.mem.Allocator,
@@ -878,26 +858,7 @@ pub fn extractContract(
     filename: []const u8,
     opts: ExtractContractOptions,
 ) !HandlerContract {
-    const source_kind = source_frontend_mod.classifyPath(filename);
-    var timestamp_buf: [24]u8 = undefined;
-    const build_time: ?[]const u8 = if (opts.build_time) |provided|
-        provided
-    else if (source_kind.isTyped())
-        formatIsoTimestamp(&timestamp_buf, blk: {
-            const milliseconds = compat_mod.realtimeNowMs() catch break :blk 0;
-            break :blk @divTrunc(milliseconds, 1000);
-        })
-    else
-        null;
-    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, filename, .{
-        .enable_comptime = true,
-        .comptime_env = .{
-            .build_time = build_time,
-            .git_commit = opts.git_commit,
-            .version = opts.version,
-            .env_vars = null,
-        },
-    });
+    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, filename, .{});
     defer frontend.deinit();
 
     var atoms = AtomTable.init(allocator);
@@ -944,7 +905,6 @@ pub fn extractContract(
 
     var resolved = try resolve(allocator, parsed, .{
         .type_env = type_env_storage.envPtr(),
-        .service_type_context = opts.service_type_context,
         .strict = opts.strict,
         .module_facts = &module_facts,
     });
@@ -1128,7 +1088,7 @@ fn graphCallbackModule(type_checker: *const TypeChecker) ?GraphCallbackModule {
         if (std.mem.eql(u8, module_name, "zttp:sql")) return .shared;
         if (std.mem.eql(u8, module_name, "zttp:env")) return .left;
         if (std.mem.eql(u8, module_name, "zttp:cache")) return .right;
-        if (std.mem.eql(u8, module_name, "zttp:durable")) return .entry;
+        if (std.mem.eql(u8, module_name, "zttp:fetch")) return .entry;
     }
     return null;
 }
@@ -1247,7 +1207,7 @@ test "explicit type session extraction uses the completed caller session" {
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
     try storage.init(allocator, null);
-    var type_checker = TypeChecker.init(allocator, view, null, storage.envPtr().?, null);
+    var type_checker = TypeChecker.init(allocator, view, null, storage.envPtr().?);
     defer type_checker.deinit();
     _ = try type_checker.check(parsed.root);
 
@@ -1551,7 +1511,7 @@ test "CheckedModule runs verifier and flow independently or together" {
 
     var flow_only = try CheckedModule.init(allocator, &resolved, .{});
     defer flow_only.deinit();
-    try testing.expectEqual(@as(u32, 0), try flow_only.runFlow(handler_func, null));
+    try testing.expectEqual(@as(u32, 0), try flow_only.runFlow(handler_func));
     try testing.expect(!flow_only.verifierCompleted());
     try testing.expect(flow_only.flowCompleted());
 
@@ -1579,9 +1539,9 @@ test "CheckedModule rejects completed and failed pass retries" {
     var completed = try CheckedModule.init(allocator, &resolved, .{});
     defer completed.deinit();
     _ = try completed.runVerifier(handler_func);
-    _ = try completed.runFlow(handler_func, null);
+    _ = try completed.runFlow(handler_func);
     try testing.expectError(error.PassAlreadyRun, completed.runVerifier(handler_func));
-    try testing.expectError(error.PassAlreadyRun, completed.runFlow(handler_func, null));
+    try testing.expectError(error.PassAlreadyRun, completed.runFlow(handler_func));
 
     var verifier_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var failed_verifier = try CheckedModule.init(verifier_failing.allocator(), &resolved, .{});
@@ -1594,9 +1554,9 @@ test "CheckedModule rejects completed and failed pass retries" {
     var flow_failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var failed_flow = try CheckedModule.init(flow_failing.allocator(), &resolved, .{});
     defer failed_flow.deinit();
-    try testing.expectError(error.OutOfMemory, failed_flow.runFlow(handler_func, null));
+    try testing.expectError(error.OutOfMemory, failed_flow.runFlow(handler_func));
     try testing.expect(flow_failing.has_induced_failure);
-    try testing.expectError(error.PassAlreadyRun, failed_flow.runFlow(handler_func, null));
+    try testing.expectError(error.PassAlreadyRun, failed_flow.runFlow(handler_func));
     try testing.expect(!failed_flow.flowCompleted());
 }
 
@@ -1639,7 +1599,7 @@ test "flow projection requires completion and preserves leaking and safe results
     defer leaking.deinit();
 
     try testing.expectError(error.FlowNotCompleted, completedFlowProperties(&leaking));
-    _ = try leaking.runFlow(leaking_handler, null);
+    _ = try leaking.runFlow(leaking_handler);
     try testing.expect(!(try completedFlowProperties(&leaking)).no_secret_leakage);
 
     const safe_source = "function handler(req) { return Response.json({ value: 'safe' }); }\n";
@@ -1653,94 +1613,8 @@ test "flow projection requires completion and preserves leaking and safe results
         return error.HandlerNotFound;
     var safe = try CheckedModule.init(allocator, &safe_resolved, .{});
     defer safe.deinit();
-    _ = try safe.runFlow(safe_handler, null);
+    _ = try safe.runFlow(safe_handler);
     try testing.expect((try completedFlowProperties(&safe)).no_secret_leakage);
-}
-
-test "accepted tool catalog is installed before the flow walk" {
-    const allocator = testing.allocator;
-    const source =
-        \\import { routerMatch } from "zttp:router";
-        \\import { callTool, toolCatalog } from "zttp:tool";
-        \\import { fetch } from "zttp:fetch";
-        \\function clean(req) { return Response.json({ ok: true }); }
-        \\function tainted(req) { return Response.json({ url: req.url }); }
-        \\function assistant(req) {
-        \\  const result = callTool("call-1", "clean", "{}");
-        \\  fetch("https://api.example.com/collect", { body: result.value });
-        \\  return Response.json({ ok: true });
-        \\}
-        \\const routes = { "POST /clean": clean, "POST /tainted": tainted, "POST /agent": assistant };
-        \\toolCatalog({
-        \\  clean: { route: "POST /clean", description: "clean", input: "In", output: "Out", maxInputBytes: 64 },
-        \\  assistant: { route: "POST /agent", description: "agent", maxInputBytes: 64, agent: {
-        \\    tools: ["clean"], provider: { endpoint: "https://api.example.com", credential: "provider" },
-        \\    limits: { rounds: 1, toolCalls: 1, toolCallsPerRound: 1, argumentBytes: 64, resultBytes: 64, turnDeadlineMs: 1000, providerRequestBytes: 64 }
-        \\  } }
-        \\});
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({});
-        \\  return found.handler(req);
-        \\}
-    ;
-    var parsed_state = try parseSourceForTest(allocator, source);
-    defer parsed_state.js_parser.deinit();
-    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
-    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-    var resolved = try resolve(allocator, parsed, .{ .strict = false });
-    defer resolved.deinit();
-    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
-        return error.HandlerNotFound;
-
-    var fallback = try CheckedModule.init(allocator, &resolved, .{});
-    defer fallback.deinit();
-    _ = try fallback.runFlow(handler_func, null);
-    try testing.expect((try completedFlowProperties(&fallback)).injection_safe);
-
-    var agent_tools: std.ArrayList([]const u8) = .empty;
-    defer agent_tools.deinit(allocator);
-    try agent_tools.append(allocator, "tainted");
-    const accepted = [_]handler_contract_mod.ToolEntry{
-        .{
-            .name = "tainted",
-            .route = "POST /tainted",
-            .description = "tainted",
-            .input_schema_name = "In",
-            .input_schema_json = "{}",
-            .output_schema_name = "Out",
-            .output_schema_json = "{}",
-            .max_input_bytes = 64,
-        },
-        .{
-            .name = "assistant",
-            .route = "POST /agent",
-            .description = "agent",
-            .input_schema_name = "",
-            .input_schema_json = "",
-            .output_schema_name = "",
-            .output_schema_json = "",
-            .max_input_bytes = 64,
-            .agent = .{
-                .tools = agent_tools,
-                .provider_endpoint = "https://api.example.com",
-                .provider_credential = "provider",
-                .limits = .{
-                    .rounds = 1,
-                    .tool_calls = 1,
-                    .tool_calls_per_round = 1,
-                    .argument_bytes = 64,
-                    .result_bytes = 64,
-                    .turn_deadline_ms = 1000,
-                    .provider_request_bytes = 64,
-                },
-            },
-        },
-    };
-    var catalog = try CheckedModule.init(allocator, &resolved, .{});
-    defer catalog.deinit();
-    _ = try catalog.runFlow(handler_func, &accepted);
-    try testing.expect(!(try completedFlowProperties(&catalog)).injection_safe);
 }
 
 test "pipeline.resolve runs BoolChecker on clean source" {
@@ -1754,65 +1628,6 @@ test "pipeline.resolve runs BoolChecker on clean source" {
     defer resolved.deinit();
 
     try testing.expectEqual(@as(u32, 0), resolved.bool_error_count);
-    try testing.expectEqual(@as(u32, 0), resolved.typeErrorCount());
-    try testing.expectEqual(@as(usize, 0), resolved.typeDiagnostics().len);
-}
-
-test "contract schema inference does not leak branch-insensitive service response errors" {
-    const allocator = testing.allocator;
-    const source =
-        \\import { serviceCall } from "zttp:service";
-        \\const user = serviceCall("users", "GET /api/users/:id", {
-        \\  params: { id: "123" }
-        \\});
-        \\if (user.status === 200) {
-        \\  const payload = user.json();
-        \\}
-    ;
-
-    var parsed_state = try parseSourceForTest(allocator, source);
-    defer parsed_state.js_parser.deinit();
-    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
-    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-
-    var type_map = TypeMap.init(source);
-    defer type_map.deinit(allocator);
-    var storage: TypeEnvStorage = .{};
-    defer storage.deinit(allocator);
-    try storage.init(allocator, &type_map);
-
-    var responses = [_]service_types_mod.ResponseVariant{
-        .{ .status = 200, .schema_json = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}", .dynamic = true },
-        .{ .status = 404, .content_type = "application/json", .schema_json = "{\"type\":\"object\",\"properties\":{\"error\":{\"type\":\"string\"}},\"required\":[\"error\"]}" },
-    };
-    var routes = [_]service_types_mod.RouteInfo{.{
-        .service_name = "users",
-        .handler_path = "users.ts",
-        .method = "GET",
-        .path = "/api/users/:id",
-        .required_path_params = &.{"id"},
-        .required_query_params = &.{},
-        .required_header_params = &.{},
-        .response_dynamic = true,
-        .responses = &responses,
-    }};
-    const service_context = ServiceTypeContext{ .routes = &routes };
-
-    var resolved = try resolve(allocator, parsed, .{
-        .type_env = storage.envPtr(),
-        .service_type_context = &service_context,
-    });
-    defer resolved.deinit();
-    try testing.expectEqual(@as(u32, 0), resolved.typeErrorCount());
-    try testing.expectEqual(@as(usize, 0), resolved.typeDiagnostics().len);
-
-    var contract = try extractContractFromParsed(allocator, parsed, "gateway.ts", .{
-        .type_map = &type_map,
-        .service_type_context = &service_context,
-        .resolved = &resolved,
-    });
-    defer contract.deinit(allocator);
-
     try testing.expectEqual(@as(u32, 0), resolved.typeErrorCount());
     try testing.expectEqual(@as(usize, 0), resolved.typeDiagnostics().len);
 }
@@ -1894,29 +1709,10 @@ test "extractContract strips TypeScript and honors strict opt out" {
 
     var contract = try extractContract(testing.allocator, source, "handler.ts", .{
         .strict = false,
-        .version = "test",
     });
     defer contract.deinit(testing.allocator);
 
     try testing.expectEqualStrings("handler.ts", contract.handler.path);
-}
-
-test "extractContract parses TSX" {
-    const source =
-        \\function handler(req: Request): Response {
-        \\  const body = <main>ok</main>;
-        \\  _ = body;
-        \\  return Response.text("ok");
-        \\}
-    ;
-
-    var contract = try extractContract(testing.allocator, source, "handler.tsx", .{
-        .strict = false,
-        .version = "test",
-    });
-    defer contract.deinit(testing.allocator);
-
-    try testing.expectEqualStrings("handler.tsx", contract.handler.path);
 }
 
 test "extractContract rejects boolean diagnostics with strict disabled" {
@@ -1929,7 +1725,6 @@ test "extractContract rejects boolean diagnostics with strict disabled" {
         error.SoundModeViolation,
         extractContract(testing.allocator, source, "handler.ts", .{
             .strict = false,
-            .version = "test",
         }),
     );
 }
@@ -2005,7 +1800,7 @@ test "extractContract preserves graph callback order and merged contract bytes" 
     const source =
         \\import { left } from "./left.ts";
         \\import { right } from "./right.ts";
-        \\import { sleep } from "zttp:durable";
+        \\import { fetch } from "zttp:fetch";
         \\function handler(req: Request): Response {
         \\  left();
         \\  right();
@@ -2015,9 +1810,6 @@ test "extractContract preserves graph callback order and merged contract bytes" 
     const options = ExtractContractOptions{
         .strict = false,
         .type_check = recordGraphContractTypeCheck,
-        .build_time = "2026-10-11T16:08:00Z",
-        .git_commit = "baseline",
-        .version = "baseline",
         .read_file = readGraphBaselineFile,
     };
 
@@ -2048,9 +1840,6 @@ test "extractContract preserves graph callback order and merged contract bytes" 
 
     var default_contract = try extractContract(allocator, source, "/baseline/entry.ts", .{
         .strict = false,
-        .build_time = "2026-10-11T16:08:00Z",
-        .git_commit = "baseline",
-        .version = "baseline",
         .read_file = readGraphBaselineFile,
     });
     defer default_contract.deinit(allocator);
@@ -2103,7 +1892,6 @@ test "extractContract merges capabilities from relative imports" {
 
     var contract = try extractContract(allocator, source, entry_path, .{
         .strict = false,
-        .version = "test",
         .read_file = file_io.readFileForModuleGraph,
     });
     defer contract.deinit(allocator);
@@ -2120,7 +1908,6 @@ test "extractContract merges capabilities from relative imports" {
         error.SoundModeViolation,
         extractContract(allocator, source, entry_path, .{
             .strict = false,
-            .version = "test",
             .read_file = file_io.readFileForModuleGraph,
         }),
     );
@@ -2132,7 +1919,6 @@ test "extractContract merges capabilities from relative imports" {
     );
     var non_strict_contract = try extractContract(allocator, source, entry_path, .{
         .strict = false,
-        .version = "test",
         .read_file = file_io.readFileForModuleGraph,
     });
     non_strict_contract.deinit(allocator);
@@ -2140,7 +1926,6 @@ test "extractContract merges capabilities from relative imports" {
         error.SoundModeViolation,
         extractContract(allocator, source, entry_path, .{
             .strict = true,
-            .version = "test",
             .read_file = file_io.readFileForModuleGraph,
         }),
     );
@@ -2233,7 +2018,7 @@ fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8, typ
     var checked = try CheckedModule.init(allocator, &resolved, .{});
     defer checked.deinit();
     _ = try checked.runVerifier(handler_func);
-    _ = try checked.runFlow(handler_func, null);
+    _ = try checked.runFlow(handler_func);
 
     const type_checker = if (resolved.type_checker) |*checker| checker else return error.TypeCheckerMissing;
     var contract = try extractContractFromTypeSession(

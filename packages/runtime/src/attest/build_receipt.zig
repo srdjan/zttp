@@ -106,16 +106,6 @@ fn buildJwsWithKey(
     );
     const core_grammar_hex = std.fmt.bytesToHex(contract.source_identity.core_grammar_hash, .lower);
     const semantics_hex = std.fmt.bytesToHex(contract.source_identity.semantics_hash, .lower);
-    var frontend_grammar_hex: [64]u8 = undefined;
-    const frontend_profile_id: ?[]const u8 = if (contract.source_identity.frontend) |frontend|
-        frontend.profile.id()
-    else
-        null;
-    const frontend_grammar_sha256: ?[]const u8 = if (contract.source_identity.frontend) |frontend| blk: {
-        frontend_grammar_hex = std.fmt.bytesToHex(frontend.grammar_hash, .lower);
-        break :blk &frontend_grammar_hex;
-    } else null;
-
     // Name every field. HandlerProperties defaults the six flow and isolation
     // fields to true, so relying on the defaults here would put proof chips
     // for properties the contract never asserted into a signed claim.
@@ -148,17 +138,11 @@ fn buildJwsWithKey(
         .core_profile_id = contract.source_identity.core_profile.id(),
         .core_grammar_sha256 = &core_grammar_hex,
         .semantics_sha256 = &semantics_hex,
-        .frontend_profile_id = frontend_profile_id,
-        .frontend_grammar_sha256 = frontend_grammar_sha256,
         .compiler_version = compiler_version_tag,
         .signed_at_unix = @divTrunc(proof_ledger.defaultNowMs(), std.time.ms_per_s),
         .property_summary = property_summary,
         .guarded_categories = guarded_categories,
         .routes_count = @intCast(contract.api.routes.items.len),
-        .durable_workflow_proof_level = contract.durable.workflow.proof_level.toString(),
-        .durable_workflow_retry_safe = contract.durable.workflow.properties.retry_safe,
-        .durable_workflow_idempotent = contract.durable.workflow.properties.idempotent,
-        .durable_workflow_fault_covered = contract.durable.workflow.properties.fault_covered,
     };
 
     var env = try envelope.sign(allocator, claims, key_pair);
@@ -195,9 +179,9 @@ test "an all-zero capabilityHash means absent, and a present matrix never produc
     // envelope round-trip tests rather than here.
 }
 
-test "build receipt refuses unstamped contracts and signs exact source identity" {
+test "build receipt refuses unstamped contracts and signs core source identity" {
     const allocator = std.testing.allocator;
-    var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.tsx"));
+    var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
     defer contract.deinit(allocator);
     const key_pair = try envelope.keyPairFromSeed([_]u8{0x41} ** Ed25519.KeyPair.seed_length);
 
@@ -227,12 +211,9 @@ test "build receipt refuses unstamped contracts and signs exact source identity"
 
     const core_grammar_hex = std.fmt.bytesToHex(contract.source_identity.core_grammar_hash, .lower);
     const semantics_hex = std.fmt.bytesToHex(contract.source_identity.semantics_hash, .lower);
-    const frontend_grammar_hex = std.fmt.bytesToHex(contract.source_identity.frontend.?.grammar_hash, .lower);
     try std.testing.expectEqualStrings(contract.source_identity.core_profile.id(), verified.claims.core_profile_id);
     try std.testing.expectEqualStrings(&core_grammar_hex, verified.claims.core_grammar_sha256);
     try std.testing.expectEqualStrings(&semantics_hex, verified.claims.semantics_sha256);
-    try std.testing.expectEqualStrings(contract.source_identity.frontend.?.profile.id(), verified.claims.frontend_profile_id.?);
-    try std.testing.expectEqualStrings(&frontend_grammar_hex, verified.claims.frontend_grammar_sha256.?);
     try std.testing.expectEqualStrings("", verified.claims.guarded_categories);
     // The receipt carries the executable-graph root it was handed, not a
     // recomputation of its own: the signer commits, the consumer checks.

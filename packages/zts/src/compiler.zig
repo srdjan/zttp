@@ -1,12 +1,6 @@
 //! Single-file compilation entry points.
 //!
 //! `compile` and `compileWithOptions` turn source into bytecode for one file.
-//!
-//! The parallel multi-file driver that once lived here (a `Compiler` struct, a
-//! `CompileUnit` list, and a shared `ThreadSafeInternPool`) was removed during
-//! the reset: it had no caller anywhere in the repository, and its only
-//! importer used these two functions. See
-//! pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md.
 
 const std = @import("std");
 const parser = @import("zts-engine").parser;
@@ -116,10 +110,6 @@ pub fn compileWithOptions(
 // ============================================================================
 // Tests
 // ============================================================================
-
-// The three tests that exercised the removed parallel driver went with it.
-// These two assert language behavior, not driver mechanics, so they are kept
-// and rewritten against `compile`.
 
 test "compile rejects object declaration destructuring" {
     const allocator = std.testing.allocator;

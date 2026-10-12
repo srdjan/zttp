@@ -166,7 +166,7 @@ source span. The code set is closed and published in `meta.payload.error_codes`.
 | `project_root_unresolvable` | `project_root` does not resolve to an existing directory |
 | `path_outside_project_root` | a request path escapes the root |
 | `file_unreadable` | the entry file could not be read |
-| `unsupported_source_extension` | `input.file` does not use `.ts` or `.tsx` |
+| `unsupported_source_extension` | `input.file` does not use `.ts` |
 | `identity_mismatch` | an `expected` field is stale |
 | `internal_error` | a limit or fault inside the compiler |
 
@@ -253,9 +253,9 @@ to it in both directions, so an admitted form with no example fails and an
 example naming no admitted form fails. Each example is a whole handler rather
 than a snippet, is run through the same check `zts check` runs and must report
 nothing at any severity, and carries evidence that it exercises the form it
-names - a node tag or a type-map kind wherever either records the form, and a
-source match only for the pipe, `comptime()`, `readonly`, and template literal
-types, which leave no trace after parsing or stripping.
+names - a node tag or a type-map kind wherever either records the form.
+`readonly` and template literal types use a source match because stripping
+leaves no trace of them.
 
 Writing those examples found four defects, all now fixed: ZTS604 fired on every
 `let` in an exported function, an annotated `let` took its initializer's literal
@@ -269,7 +269,7 @@ type and value names a handler writes without importing them; every type row is
 resolved through the checker's own entry by a gate, so a published name is a
 name the compiler admits. Two names spec section 6 lists are absent, measured
 rather than assumed: `Result` is declared or imported rather than ambient, and
-`HtmlNode` exists nowhere in the compiler - JSX is typed through `h` and
+`HtmlNode` exists nowhere in the compiler. Manual HTML uses `h` and
 `renderToString`. `type_serialization` publishes the canonical type
 serialization's version, digest algorithm, and depth bound, which is what a
 client needs before it caches a type digest and compares it to a later one.

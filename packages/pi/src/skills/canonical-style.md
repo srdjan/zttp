@@ -172,5 +172,5 @@ Only flagged when `ready` is statically boolean: `x === true` is exactly `x` and
 
 1. Always consult live tools for rules and modules. Never answer language or module questions from memory: call `zts_expert_query` with `describe_rule`, `features`, or `modules`.
 2. Run `zts_expert_canonicalize` against any file you edit before claiming the edit is done. The veto path rejects anything that introduces new violations.
-3. For optimizations, call `zts_expert_query` with `effects` and `ratchet` first, then include the proof-card delta in the reply. The loop emits a system note if you skip this step.
+3. For optimizations, call `zts_expert_query` with `effects` first. Include the proof-card delta in the reply.
 4. When the user asks about syntax that is rejected, cite the ZTS code and the canonical form from this skill.

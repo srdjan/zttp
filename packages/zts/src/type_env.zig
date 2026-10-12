@@ -21,7 +21,6 @@ const parseTypeExpr = type_pool_mod.parseTypeExpr;
 const TypeMap = type_map_mod.TypeMap;
 const TypeMapKind = type_map_mod.TypeMapKind;
 const TypeMapEntry = type_map_mod.TypeMapEntry;
-const SpanEdit = type_map_mod.SpanEdit;
 
 /// The field name used to mark a record as the proof payload of an instantiated
 /// `Proof<T, P>` capsule. The verifier looks for records bearing this field
@@ -389,11 +388,6 @@ pub const TypeEnv = struct {
     /// Explicit call-site type arguments, keyed by the byte offset of the
     /// call's `(` in the stripped source.
     call_type_args: std.AutoHashMapUnmanaged(u32, CallTypeArgs),
-    /// How the parser's offsets map back to the stripped source the signature
-    /// offsets were recorded in. Empty unless TSX lowering changed the text
-    /// between the two. Owned.
-    parser_edits: []const SpanEdit = &.{},
-
     /// Alias names whose definition contains a cycle that no data constructor
     /// guards (spec 5.7). Filled once, after the type-namespace pass; read by
     /// the type checker at every site that resolves such a name.
@@ -511,7 +505,6 @@ pub const TypeEnv = struct {
         self.source_fn_sigs_by_name.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
         self.call_type_args.deinit(self.allocator);
-        if (self.parser_edits.len > 0) self.allocator.free(self.parser_edits);
         for (self.name_storage.items) |name| {
             self.allocator.free(name);
         }
@@ -526,7 +519,6 @@ pub const TypeEnv = struct {
     /// Processes entries in order: type aliases first, then interfaces,
     /// then variable/param/return annotations.
     pub fn populateFromTypeMap(self: *TypeEnv, tm: *const TypeMap) void {
-        self.adoptParserEdits(tm.parser_edits);
 
         // First pass: type aliases and interfaces (defines the type namespace)
         // Collect generic_params entries keyed by (name_start, name_end) for alias lookup.
@@ -1325,24 +1317,13 @@ pub const TypeEnv = struct {
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
     }
 
-    /// Keep a copy of the edits that map the parser's offsets back to the
-    /// stripped source. Replaces any earlier copy.
-    fn adoptParserEdits(self: *TypeEnv, edits: []const SpanEdit) void {
-        if (self.parser_edits.len > 0) self.allocator.free(self.parser_edits);
-        self.parser_edits = &.{};
-        if (edits.len == 0) return;
-        self.parser_edits = self.allocator.dupe(SpanEdit, edits) catch {
-            self.markAllocationFailure();
-            return;
-        };
-    }
-
     /// The key of the signature whose parameter list opens at `parser_offset`,
     /// an offset in the text the parser read. This is the offset of the same
     /// `(` in the stripped source, where the stripper recorded the signature.
     /// Two functions never share a key, whatever line or name they have.
     pub fn signatureKeyAt(self: *const TypeEnv, parser_offset: u32) u32 {
-        return type_map_mod.offsetThroughEdits(self.parser_edits, parser_offset);
+        _ = self;
+        return parser_offset;
     }
 
     /// Look up the signature whose parameter list opens at `parser_offset`.
@@ -3000,39 +2981,6 @@ test "readonly on an array alias survives to the resolved type" {
     try std.testing.expect(pool.isReadonlyArray(resolved));
     // The control: without the modifier the same alias stays mutable.
     try std.testing.expect(!pool.isReadonlyArray(env.resolveType("Items")));
-}
-
-test "a signature stays reachable by the parser's offset after TSX lowering" {
-    // Lowering `<ul>` into `h("ul", null, ` pushes the arrow's `(` to the right,
-    // so the offset the parser reports is not the offset the stripper recorded.
-    // The edits the type map keeps must undo that, or an annotated arrow that
-    // follows an element on its line loses its signature.
-    const allocator = std.testing.allocator;
-    const source = "const list = <ul>{xs.map((x: number): number => x)}</ul>;";
-    const engine = @import("zts-engine");
-    var prepared = try engine.source_frontend.PreparedSource.init(allocator, source, "view.tsx", .{});
-    defer prepared.deinit();
-
-    var parser = try engine.parser.JsParser.init(allocator, prepared.parserInput());
-    defer parser.deinit();
-    _ = try parser.parse();
-
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-    env.populateFromTypeMap(prepared.typeMap().?);
-
-    var arrow_offset: ?u32 = null;
-    for (parser.nodes.tags.items, 0..) |tag, idx| {
-        if (tag == .arrow_function) arrow_offset = parser.nodes.locs.items[idx].offset;
-    }
-    const offset = arrow_offset orelse return error.TestUnexpectedResult;
-    // The lowering really did move it.
-    try std.testing.expect(offset != std.mem.indexOf(u8, source, "(x:").?);
-    const sig = env.getFnSigAt(offset) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u8, 1), sig.param_count);
-    try std.testing.expect(sig.return_type != null_type_idx);
 }
 
 test "functions on one line and nested functions of one name keep separate signatures" {

@@ -112,13 +112,10 @@ round-trips, and intent pass are published per row and dated in
 hash it was measured under, and `zttp ledger stats` aggregates the same metrics per
 workspace.
 
-What is thin: six of the validator registry's fifteen repair intents grade as mechanical
-repairs, so most rewrites still ship as proposed refactors an outside client must judge
-for itself. The canonical formatter refuses JSX and TSX, five of the 58 corpus files, and
-a refused file keeps the layout its author wrote. The convergence corpus is 19 cases and
-the latest recording trips 3 of the compiler's 59 advertised rules. Across recordings
-of the same corpus it has ever tripped 6. The deterministic defect-seed suite verifies
-58 of 59 rules independently of model behavior, so those figures must remain separate.
+What is thin: some validator repair intents grade as mechanical repairs. Most
+rewrites remain proposed refactors that an outside client must judge.
+The current registry and corpus counts need measurement after the Phase 3 removal.
+Generated convergence and coverage pages remain the authority for published counts.
 
 Bounded provable-set reach is now measured. The first fresh DeepSeek run on 2026-09-21
 reached [8/8 reference-backed tasks](docs/provable-reach.md#first-full-measurement)
@@ -245,10 +242,8 @@ handlers. Feature parity with general-purpose runtimes is refused.
   verdict stays deterministic and total.
 - **Publishing unmeasured or stale numbers.** No number leaves the repo without a
   versioned eval behind it.
-- **A local-model training flywheel** - deferred, not refused. The narrow grammar is a
-  real reason to think a small model could author inside the fence, but that is a
-  hypothesis with no measurement behind it. Track 2 builds the gate that would decide
-  it.
+- **A local-model training flywheel** - deferred, not refused. The narrow grammar could
+  support a small model, but the current product has no measurement for that claim.
 - **The team / platform-owner persona as headline** - the trust artifacts they need
   ship and are on by default, but they stay a supporting feature.
 

@@ -1,8 +1,8 @@
 //! One canonical minimal example per admitted surface form.
 //!
 //! Spec 4.8 requires `meta.payload.examples` to publish these so an agent can
-//! learn the ZTS-specific spellings - `match`, `distinct type`, `assert`,
-//! `comptime()` - from the protocol rather than from hidden instructions.
+//! learn the ZTS-specific spellings from the protocol instead of hidden
+//! instructions.
 //!
 //! Two gates, both in `agent_protocol.zig` where the feature table and the
 //! checker both live. Completeness: the example set and
@@ -416,23 +416,6 @@ pub const examples = [_]Example{
         ,
     },
     .{
-        .feature = "comptime()",
-        .evidence = .{ .source_text = .{
-            .needle = "comptime(",
-            .reason = "the stripper folds the call to its value before the parser runs, so the tree holds the literal and no trace of the call",
-        } },
-        .source =
-        \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
-        \\
-        \\export function handler(req: Request): Guard<Response> {
-        \\  const seconds: number = comptime(60 * 60 * 24);
-        \\  return Response.json({ seconds: seconds });
-        \\}
-        \\
-        ,
-    },
-    .{
         .feature = "null",
         .evidence = .{ .node = .lit_null },
         .source =
@@ -529,56 +512,6 @@ pub const module_examples = [_]ModuleExample{
         \\    return Response.json({ error: "weather service unavailable" }, { status: 502 });
         \\  }
         \\  return Response.json(upstream.json());
-        \\}
-        \\
-        ,
-    },
-    .{
-        .name = "durable-wait-and-signal",
-        .purpose = "Use one idempotency key to park and resume a durable run through separate request paths.",
-        .modules = &.{"zttp:durable"},
-        .source =
-        \\
-        \\import { run, waitSignal, signal } from "zttp:durable";
-        \\
-        \\// `waitSignal` returns a payload some separate `signal` call wrote, so
-        \\// its provenance is unknowable to the checker and the binding declares
-        \\// `unknown`. Reaching the response with that clears the three
-        \\// properties the response sink decides - `no_secret_leakage`,
-        \\// `no_credential_leakage`, `deterministic` - and `idempotent` follows
-        \\// determinism, so none of the four are on this list. The presence test
-        \\// `approval !== undefined` does not narrow that: the checker unions
-        \\// labels through a comparison rather than treating it as a fact about
-        \\// the value. `retry_safe` still holds, which is the property this
-        \\// example is about.
-        \\structural ApprovalProof<T> = Proof<T,
-        \\  | "retry_safe"
-        \\  | "state_isolated"
-        \\  | "result_safe"
-        \\  | "optional_safe"
-        \\  | "input_validated"
-        \\  | "pii_contained"
-        \\  | "injection_safe"
-        \\  | "canonical"
-        \\  | "cost_bounded"
-        \\>;
-        \\
-        \\export function handler(req: Request): ApprovalProof<Response> {
-        \\  const key = req.headers.get("Idempotency-Key");
-        \\  if (key === undefined) {
-        \\    return Response.json({ error: "missing Idempotency-Key" }, { status: 400 });
-        \\  }
-        \\  if (req.method === "POST" && req.path === "/signal") {
-        \\    const delivered = signal(key, "approval", { approved: true });
-        \\    return Response.json({ delivered: delivered });
-        \\  }
-        \\  if (req.method !== "GET" || req.path !== "/wait") {
-        \\    return Response.json({ error: "not found" }, { status: 404 });
-        \\  }
-        \\  return run(key, () => {
-        \\    const approval = waitSignal("approval");
-        \\    return Response.json({ approved: approval !== undefined });
-        \\  });
         \\}
         \\
         ,

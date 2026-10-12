@@ -557,8 +557,6 @@ pub const BytecodeCache = struct {
         core_profile_id: []const u8,
         core_grammar_hash: [32]u8,
         semantics_hash: [32]u8,
-        frontend_profile_id: ?[]const u8 = null,
-        frontend_grammar_hash: ?[32]u8 = null,
     };
 
     allocator: std.mem.Allocator,
@@ -629,13 +627,6 @@ pub const BytecodeCache = struct {
         hashField(&hasher, identity.core_profile_id);
         hashField(&hasher, &identity.core_grammar_hash);
         hashField(&hasher, &identity.semantics_hash);
-        if (identity.frontend_profile_id) |profile_id| {
-            hasher.update("\x01");
-            hashField(&hasher, profile_id);
-            hashField(&hasher, &identity.frontend_grammar_hash.?);
-        } else {
-            hasher.update("\x00");
-        }
         return hasher.finalResult();
     }
 
@@ -833,11 +824,6 @@ test "BytecodeCache identity changes invalidate the same source" {
     var changed_semantics = base;
     changed_semantics.semantics_hash[0] ^= 0xff;
     try std.testing.expect(!std.mem.eql(u8, &key, &BytecodeCache.cacheKeyWithIdentity(source, changed_semantics)));
-
-    var frontend = base;
-    frontend.frontend_profile_id = "zts-tsx-1";
-    frontend.frontend_grammar_hash = [_]u8{0x33} ** 32;
-    try std.testing.expect(!std.mem.eql(u8, &key, &BytecodeCache.cacheKeyWithIdentity(source, frontend)));
 }
 
 test "BytecodeCache evicts oldest raw entry when bounded" {

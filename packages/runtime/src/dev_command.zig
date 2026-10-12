@@ -125,7 +125,6 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
     }
 
     const explicit_sqlite = optionValue(argv, "--sqlite");
-    const explicit_system = optionValue(argv, "--system");
 
     const discovered_sqlite = if (explicit_sqlite == null and project != null)
         try project.?.resolvedSqlitePath(allocator)
@@ -133,14 +132,7 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
         null;
     defer if (discovered_sqlite) |path| allocator.free(path);
 
-    const discovered_system = if (explicit_system == null and project != null)
-        try project.?.resolvedSystemPath(allocator)
-    else
-        null;
-    defer if (discovered_system) |path| allocator.free(path);
-
     const sqlite_path = explicit_sqlite orelse discovered_sqlite;
-    const system_path = explicit_system orelse discovered_system;
 
     var preflight_label: [64]u8 = undefined;
     const policy_source = try loadConfiguredPolicy(
@@ -152,7 +144,6 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
 
     var check = precompile.runCheckOnlyWithOptions(allocator, target, .{
         .sql_schema_path = sqlite_path,
-        .system_path = system_path,
         .policy_source = policy_source,
     }) catch |err| {
         if (!builtin.is_test) {
@@ -207,7 +198,6 @@ pub fn printDevHelp() void {
         \\  --no-prove            Watch and reload without contract proof gating
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --sqlite <FILE>       SQLite database for zttp:sql
-        \\  --system <FILE>       Handler bundle for zttp:service/workflow
         \\  --no-env-check        Skip startup env validation
         \\  --help                Show this help
         \\

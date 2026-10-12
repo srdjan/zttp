@@ -959,17 +959,6 @@ test "validate contract rejects disallowed literals" {
         .egress = .{ .endpoints = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
         .sql = contract_mod.emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = contract_mod.emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -1045,17 +1034,6 @@ test "contractToRuntimePolicy restricts static sections" {
         .egress = .{ .endpoints = hosts, .dynamic = false },
         .cache = .{ .namespaces = namespaces, .dynamic = false },
         .sql = contract_mod.emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = contract_mod.emptyApiInfo(),
         .verification = null,
         .aot = null,
@@ -1123,17 +1101,6 @@ test "a dynamic section denies everything unless a policy names it" {
         .egress = .{ .endpoints = .empty, .dynamic = false }, // static, empty
         .cache = .{ .namespaces = .empty, .dynamic = true }, // dynamic
         .sql = contract_mod.emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
         .api = contract_mod.emptyApiInfo(),
         .verification = null,
         .aot = null,

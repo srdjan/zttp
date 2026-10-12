@@ -3,8 +3,8 @@
 #
 # Regenerate the public-contract golden fixtures that `zig build
 # test-contract-golden` checks against. These pin the analyzer's observable
-# output across a handler set spanning distinct analysis paths (plain TS, JSX,
-# every virtual module, durable/workflow) plus the three enumeration commands.
+# output for ordinary TypeScript and retained virtual modules, plus three
+# enumeration commands.
 #
 # Their purpose is refactor safety: a change that claims to preserve behavior
 # must leave every byte here untouched. Run this ONLY after a DELIBERATE
@@ -33,13 +33,7 @@ echo ">> regenerating fixtures under $FIXTURES"
 # of the pinned contract (see build/goldens.zig), so capture stdout regardless.
 for pair in \
   "plain_ts.ts:plain_ts" \
-  "jsx.tsx:jsx" \
-  "modules_all.ts:modules_all" \
-  "durable_approval.ts:durable_approval" \
-  "tool_catalog.ts:tool_catalog" \
-  "tool_catalog_refused.ts:tool_catalog_refused" \
-  "tool_nominal_forged.ts:tool_nominal_forged" \
-  "tool_nominal_branded.ts:tool_nominal_branded"
+  "modules_all.ts:modules_all"
 do
   src="${pair%%:*}"
   base="${pair##*:}"
