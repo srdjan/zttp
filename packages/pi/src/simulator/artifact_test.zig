@@ -184,7 +184,7 @@ fn buildCase(mutation: Mutation) !Fixture {
             .local_runtime_name_only,
             .local_runtime_version_only,
             => .local,
-            else => .anthropic,
+            else => .deepseek,
         },
         .model = "fixture-model",
         .model_revision = switch (mutation) {

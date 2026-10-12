@@ -880,7 +880,7 @@ test "result run identity binds every report provenance class" {
     try std.testing.expect(id.eql(resultRun(base)));
 
     var changed = base;
-    changed.provider = .openai;
+    changed.provider = .local;
     try expectChanged(id, resultRun(changed));
     changed = base;
     changed.model = "different-model";

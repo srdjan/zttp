@@ -28,7 +28,7 @@ for filtered_var in ZTTP_CODEGEN_ONLY ZTTP_CODEGEN_LIMIT ZTTP_CODEGEN_TOOLS; do
 done
 
 case "$ZTTP_CODEGEN_PROVIDER" in
-  local|claude|openai|deepseek) ;;
+  local|deepseek) ;;
   *) fail "unsupported ZTTP_CODEGEN_PROVIDER: $ZTTP_CODEGEN_PROVIDER" ;;
 esac
 

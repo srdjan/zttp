@@ -87,22 +87,22 @@ test "bare launch resolves through the single global default authority" {
 
 test "stored identity wins over the global default" {
     const result = try resolve(.{ .stored = .{
-        .provider = "claude",
-        .model = "claude-sonnet-4-6",
+        .provider = "local",
+        .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
     } });
-    try std.testing.expectEqual(Provider.anthropic, result.provider);
-    try std.testing.expectEqualStrings("claude-sonnet-4-6", result.model.id);
+    try std.testing.expectEqual(Provider.local, result.provider);
+    try std.testing.expectEqualStrings("LiquidAI/LFM2.5-2.6B-MLX-8bit", result.model.id);
 }
 
 test "explicit provider and model override stored identity together" {
     const result = try resolve(.{
-        .launch_provider = .openai,
-        .launch_model = "gpt-4o-mini",
-        .stored = .{ .provider = "claude", .model = "claude-sonnet-4-6" },
+        .launch_provider = .local,
+        .launch_model = "mlx-community/Qwen3-8B-4bit",
+        .stored = .{ .provider = "deepseek", .model = "deepseek-v4-flash" },
     });
     try std.testing.expect(result.provider_overridden);
     try std.testing.expect(result.model_overridden);
-    try std.testing.expectEqual(Provider.openai, result.provider);
+    try std.testing.expectEqual(Provider.local, result.provider);
 }
 
 test "model never changes or infers provider" {
@@ -110,8 +110,8 @@ test "model never changes or infers provider" {
         .launch_model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
     }));
     try std.testing.expectError(error.ProviderMismatch, resolve(.{
-        .launch_provider = .anthropic,
-        .launch_model = "gpt-4o-mini",
+        .launch_provider = .local,
+        .launch_model = "deepseek-v4-flash",
     }));
 }
 
@@ -120,18 +120,18 @@ test "legacy stored identity requires an explicit provider then migrates" {
         .stored = .{ .provider = null, .model = null },
     }));
     const migrated = try resolve(.{
-        .launch_provider = .anthropic,
+        .launch_provider = .deepseek,
         .stored = .{ .provider = null, .model = null },
     });
-    try std.testing.expectEqualStrings("claude-sonnet-4-6", migrated.model.id);
+    try std.testing.expectEqualStrings("deepseek-v4-flash", migrated.model.id);
 }
 
 test "explicit provider change without a model uses that provider default" {
     const result = try resolve(.{
-        .launch_provider = .openai,
-        .stored = .{ .provider = "claude", .model = "claude-opus-4-8" },
+        .launch_provider = .local,
+        .stored = .{ .provider = "deepseek", .model = "deepseek-v4-pro" },
     });
-    try std.testing.expectEqualStrings("gpt-4o-mini", result.model.id);
+    try std.testing.expectEqualStrings("LiquidAI/LFM2.5-2.6B-MLX-8bit", result.model.id);
 }
 
 test "explicit provider recovers an invalid stored provider" {
@@ -146,4 +146,21 @@ test "explicit provider recovers an invalid stored provider" {
     try std.testing.expectError(error.InvalidStoredProvider, resolve(.{
         .stored = .{ .provider = "removed-provider", .model = "old-model" },
     }));
+}
+
+test "a session stored under a retired provider is refused unless a provider is chosen" {
+    // Sessions journaled under the removed Claude and OpenAI providers carry
+    // their old public names. They fail with the stored-provider error, and an
+    // explicit --provider recovers them, exactly like any unknown name.
+    inline for (.{ "claude", "openai" }) |name| {
+        try std.testing.expectError(error.InvalidStoredProvider, resolve(.{
+            .stored = .{ .provider = name, .model = "retired-model" },
+        }));
+        const recovered = try resolve(.{
+            .launch_provider = .deepseek,
+            .stored = .{ .provider = name, .model = "retired-model" },
+        });
+        try std.testing.expect(recovered.provider_overridden);
+        try std.testing.expectEqual(Provider.deepseek, recovered.provider);
+    }
 }

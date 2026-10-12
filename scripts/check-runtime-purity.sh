@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Assert the deployed runtime carries no expert-agent / model-provider surface.
 #
-# The pi package (the `zttp expert` agent) embeds the Anthropic/OpenAI HTTP
+# The pi package (the `zttp expert` agent) embeds the DeepSeek and local MLX HTTP
 # client host strings. Those markers must appear ONLY in the developer `zttp`
 # binary - never in the deployable `zttp-runtime` template, and never in the
 # pi-free `zts` analyzer binary. This turns "pi is not in the runtime" from an
@@ -24,15 +24,13 @@ zts_bin="$3"
 # packages/pi/src/providers/ must appear here: the floor below is per family, so
 # a family with no marker fails instead of being covered by a sibling's.
 #
-# The list once named only Anthropic and OpenAI - the two providers CLAUDE.md
-# forbids here - and omitted DeepSeek, which is the shipped default, and the
-# local MLX server. A single-marker floor was satisfied by the legacy strings,
-# so the gate printed "runtime purity OK" without ever asserting that the
-# provider a user actually gets is absent from the shipped binary.
+# The list once named only the Anthropic and OpenAI hosts and omitted DeepSeek,
+# which is the shipped default, and the local MLX server. A single-marker floor
+# was satisfied by the legacy strings, so the gate printed "runtime purity OK"
+# without ever asserting that the provider a user actually gets is absent from
+# the shipped binary. Those two providers were removed with their clients, so
+# their rows went with them.
 markers=(
-  "anthropic:api.anthropic.com"
-  "anthropic:anthropic-version"
-  "openai:api.openai.com"
   "deepseek:api.deepseek.com"
   "local:http://127.0.0.1:8080"
 )

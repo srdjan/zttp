@@ -7,23 +7,9 @@ const capture_sink = @import("capture_sink.zig");
 const model_request = @import("model_request.zig");
 const models = @import("models.zig");
 const local_client = @import("local/client.zig");
-const anthropic_client = @import("anthropic/client.zig");
-const openai_client = @import("openai/client.zig");
 const deepseek_client = @import("deepseek/client.zig");
 
-const anthropic_endpoint = (anthropic_client.Config{
-    .api_key = "",
-    .system_prompt = "",
-}).base_url;
-
 const LocalTransport = struct {
-    endpoint: []u8,
-    request_timeout_ms: ?u64 = null,
-    capture: ?*capture_sink.CaptureSink = null,
-};
-
-const AuthenticatedTransport = struct {
-    auth: []u8,
     endpoint: []u8,
     request_timeout_ms: ?u64 = null,
     capture: ?*capture_sink.CaptureSink = null,
@@ -39,8 +25,6 @@ const DeepSeekTransport = struct {
 
 const Transport = union(enum) {
     local: LocalTransport,
-    anthropic: AuthenticatedTransport,
-    openai: AuthenticatedTransport,
     deepseek: DeepSeekTransport,
 };
 
@@ -68,7 +52,7 @@ pub const ProviderBackend = struct {
         errdefer allocator.free(endpoint_owned);
         const auth_owned: ?[]u8 = switch (options.provider) {
             .local => null,
-            .anthropic, .openai, .deepseek => try allocator.dupe(
+            .deepseek => try allocator.dupe(
                 u8,
                 options.auth orelse unreachable,
             ),
@@ -81,23 +65,12 @@ pub const ProviderBackend = struct {
                 .provider = options.provider,
                 .model = model.id,
                 .max_output_tokens = model.request_policy.max_output_tokens,
-                .stream = switch (options.provider) {
-                    .local, .deepseek => false,
-                    .anthropic, .openai => true,
-                },
+                .stream = false,
                 .system_prompt = prompt_owned,
                 .tools_json = tools_owned,
             },
             .transport = switch (options.provider) {
                 .local => .{ .local = .{ .endpoint = endpoint_owned } },
-                .anthropic => .{ .anthropic = .{
-                    .auth = auth_owned orelse unreachable,
-                    .endpoint = endpoint_owned,
-                } },
-                .openai => .{ .openai = .{
-                    .auth = auth_owned orelse unreachable,
-                    .endpoint = endpoint_owned,
-                } },
                 .deepseek => .{ .deepseek = .{
                     .auth = auth_owned orelse unreachable,
                     .endpoint = endpoint_owned,
@@ -109,8 +82,6 @@ pub const ProviderBackend = struct {
     fn defaultEndpoint(provider: model_request.Provider) []const u8 {
         return switch (provider) {
             .local => local_client.default_base_url,
-            .anthropic => anthropic_endpoint,
-            .openai => openai_client.default_base_url,
             .deepseek => deepseek_client.default_base_url,
         };
     }
@@ -120,10 +91,6 @@ pub const ProviderBackend = struct {
         if (self.request_config.tools_json) |json| allocator.free(json);
         switch (self.transport) {
             .local => |transport| allocator.free(transport.endpoint),
-            .anthropic, .openai => |transport| {
-                allocator.free(transport.auth);
-                allocator.free(transport.endpoint);
-            },
             .deepseek => |transport| {
                 allocator.free(transport.auth);
                 allocator.free(transport.endpoint);
@@ -158,7 +125,6 @@ pub const ProviderBackend = struct {
     pub fn auth(self: *const ProviderBackend) ?[]const u8 {
         return switch (self.transport) {
             .local => null,
-            .anthropic, .openai => |transport| transport.auth,
             .deepseek => |transport| transport.auth,
         };
     }
@@ -197,14 +163,14 @@ pub const ProviderBackend = struct {
     pub fn stallTimeout(self: *const ProviderBackend) ?u64 {
         return switch (self.transport) {
             .deepseek => |transport| transport.stall_timeout_ms,
-            .local, .anthropic, .openai => null,
+            .local => null,
         };
     }
 
     pub fn setStallTimeout(self: *ProviderBackend, timeout_ms: ?u64) void {
         switch (self.transport) {
             .deepseek => |*transport| transport.stall_timeout_ms = timeout_ms,
-            .local, .anthropic, .openai => {},
+            .local => {},
         }
     }
 
@@ -234,8 +200,6 @@ pub const ProviderBackend = struct {
             inline else => |transport, tag| sendWithTransport(
                 switch (tag) {
                     .local => local_client.Client,
-                    .anthropic => anthropic_client.Client,
-                    .openai => openai_client.Client,
                     .deepseek => deepseek_client.Client,
                 },
                 transport,

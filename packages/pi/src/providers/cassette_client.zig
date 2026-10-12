@@ -1,7 +1,7 @@
 //! Deterministic model client backed by recorded provider cassettes.
 //!
 //! This is the replay half of the cassette harness. Live provider clients
-//! (`anthropic/client.zig`, `openai/client.zig`) open sockets and POST to
+//! (`local/client.zig`, `deepseek/client.zig`) open sockets and POST to
 //! real APIs; this client instead reads canned response bytes from a
 //! cassette file and feeds them through the same parser + assembler the
 //! live clients use. The `ModelClient` vtable is identical, so callers
@@ -9,13 +9,13 @@
 //!
 //! Cassette format (one JSONL file per scenario):
 //!
-//!     {"v":1,"provider":"anthropic","scenario":"text_simple","stream":true,"sse_path":"text_simple.sse.txt", ...}
-//!     {"v":1,"provider":"local","scenario":"tool_call","stream":false, ...}
-//!     {"v":1,"provider":"openai","scenario":"chat_completion","stream":false, ...}
+//!     {"v":1,"provider":"local","scenario":"tool_call","stream":false,"request_sha256":"...", ...}
+//!     {"v":1,"provider":"deepseek","scenario":"tool_call","stream":false, ...}
 //!     {"body":"<single-line JSON>"}            (non-streaming bodies inline)
 //!     {"sse":"event: ...\ndata: ...\n\n"}      (streaming bodies inline, one record per line)
 //!
-//! For streaming cassettes the body may also be parked in a sibling
+//! No surviving provider streams. The format still carries SSE lines, and the
+//! body may also be parked in a sibling
 //! `.sse.txt` file named via the `sse_path` header field; this keeps the
 //! cassette diff-readable on real-world streams that exceed a few hundred
 //! bytes per JSONL line.
@@ -25,11 +25,7 @@ const zts = @import("zts");
 const file_io = zts.file_io;
 const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
-const anthropic_sse_parser = @import("anthropic/sse_parser.zig");
-const anthropic_response_assembler = @import("anthropic/response_assembler.zig");
 const propose_change_set = @import("propose_change_set.zig");
-const openai_sse_parser = @import("openai/sse_parser.zig");
-const openai_response_assembler = @import("openai/response_assembler.zig");
 const local_client = @import("local/client.zig");
 const deepseek_client = @import("deepseek/client.zig");
 const models = @import("models.zig");
@@ -47,7 +43,6 @@ pub const CassetteError = error{
     UnsupportedProvider,
     SidecarNotFound,
     SidecarUnreadable,
-    NonStreamingOpenAINotSupported,
 };
 
 pub const Header = struct {
@@ -172,10 +167,6 @@ fn parseHeader(arena: std.mem.Allocator, line: []const u8) !Header {
     if (provider_value != .string) return CassetteError.MissingProvider;
     const provider: Provider = if (std.mem.eql(u8, provider_value.string, "local"))
         .local
-    else if (std.mem.eql(u8, provider_value.string, "anthropic"))
-        .anthropic
-    else if (std.mem.eql(u8, provider_value.string, "openai"))
-        .openai
     else if (std.mem.eql(u8, provider_value.string, "deepseek"))
         .deepseek
     else
@@ -263,29 +254,12 @@ pub fn replayObserved(
                 observed,
             );
         },
-        .anthropic => {
-            const event_list = try anthropic_sse_parser.parseAll(arena, cassette.body);
-            const outcome = try anthropic_response_assembler.assemble(arena, event_list);
-            const reply = try propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
-            return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
-        },
         .deepseek => {
             // DeepSeek supplies its own tool-call ids, so replay needs no
             // request digest the way the local adapter does: the recorded body
             // alone reproduces the live reply.
             if (cassette.header.stream) return CassetteError.InvalidCassette;
             return deepseek_client.decodeResponseObserved(arena, cassette.body, observed);
-        },
-        .openai => {
-            // The live OpenAI client only speaks the streaming Responses API
-            // (Slice E); a non-streaming cassette body has no parser to drive
-            // and would silently misframe through openai_sse_parser. Fail
-            // loudly so the recording side knows to re-record with stream=true.
-            if (!cassette.header.stream) return CassetteError.NonStreamingOpenAINotSupported;
-            const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
-            const outcome = try openai_response_assembler.assemble(arena, event_list);
-            const reply = try propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
-            return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
     };
 }
@@ -295,9 +269,6 @@ pub fn replayObserved(
 // -----------------------------------------------------------------------
 
 const testing = std.testing;
-
-const cassette_anthropic_text_simple = @embedFile("testdata/anthropic/text_simple.sse.txt");
-const cassette_openai_chat_completion = @embedFile("testdata/openai/chat_completion.jsonl");
 
 const cassette_local_tool_call =
     \\{"v":1,"provider":"local","scenario":"local-tool","stream":false,"model":"LiquidAI/LFM2.5-2.6B-MLX-8bit","request_sha256":"0000000000000000000000000000000000000000000000000000000000000000"}
@@ -356,41 +327,17 @@ test "replay: a streaming deepseek cassette is refused, not misframed" {
     }));
 }
 
-const cassette_openai_propose_change_set =
-    \\event: response.created
-    \\data: {"type":"response.created","response":{"id":"resp_edit","status":"in_progress"}}
-    \\
-    \\event: response.output_item.added
-    \\data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"propose_change_set","arguments":""}}
-    \\
-    \\event: response.function_call_arguments.delta
-    \\data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"ok\"}]}"}
-    \\
-    \\event: response.output_item.done
-    \\data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"propose_change_set","arguments":"{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"ok\"}]}"}}
-    \\
-    \\event: response.completed
-    \\data: {"type":"response.completed","response":{"id":"resp_edit","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}
-    \\
-    \\data: [DONE]
-;
+const zero_digest = "0000000000000000000000000000000000000000000000000000000000000000";
 
-test "loadCassetteFromBytes resolves an inline openai cassette" {
+test "replay: local cassette produces final_text reply and usage" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const cassette = try loadCassetteFromBytes(arena.allocator(), cassette_openai_chat_completion, null);
-    try testing.expectEqual(Provider.openai, cassette.header.provider);
-    try testing.expect(cassette.header.stream);
-    try testing.expect(cassette.body.len > 0);
-}
-
-test "replay: openai cassette produces final_text reply" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    const cassette = try loadCassetteFromBytes(arena.allocator(), cassette_openai_chat_completion, null);
-    const result = try replay(arena.allocator(), cassette);
+    const result = try replay(arena.allocator(), .{
+        .header = .{ .provider = .local, .stream = false, .request_sha256 = zero_digest },
+        .body = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"hello world\"}}]," ++
+            "\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3}}",
+    });
     switch (result.reply.response) {
         .final_text => |t| try testing.expectEqualStrings("hello world", t),
         else => return error.TestFailed,
@@ -399,13 +346,16 @@ test "replay: openai cassette produces final_text reply" {
     try testing.expectEqual(@as(u64, 3), result.usage.output_tokens);
 }
 
-test "replay: openai cassette remaps propose_change_set into a change set reply" {
+test "replay: local cassette remaps propose_change_set into a change set reply" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const result = try replay(arena.allocator(), .{
-        .header = .{ .provider = .openai, .stream = true },
-        .body = cassette_openai_propose_change_set,
+        .header = .{ .provider = .local, .stream = false, .request_sha256 = zero_digest },
+        .body = "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":null,\"tool_calls\":[" ++
+            "{\"type\":\"function\",\"function\":{\"name\":\"propose_change_set\"," ++
+            "\"arguments\":\"{\\\"changes\\\":[{\\\"file\\\":\\\"handler.ts\\\",\\\"content\\\":\\\"ok\\\"}]}\"}}]}}]," ++
+            "\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}",
     });
     switch (result.reply.response) {
         .change_set => |edit| {
@@ -416,26 +366,6 @@ test "replay: openai cassette remaps propose_change_set into a change set reply"
     }
 }
 
-test "replay: anthropic cassette streams SSE bytes through the live parser" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-
-    // Synthesize the cassette by stamping the sidecar bytes directly as
-    // the body; this exercises the same code path as `sse_path` resolution
-    // without touching the filesystem from inside the test.
-    const cassette: Cassette = .{
-        .header = .{ .provider = .anthropic, .stream = true },
-        .body = cassette_anthropic_text_simple,
-    };
-    const result = try replay(arena.allocator(), cassette);
-    switch (result.reply.response) {
-        .final_text => |t| try testing.expectEqualStrings("Hello, world!", t),
-        else => return error.TestFailed,
-    }
-    try testing.expectEqual(@as(u64, 12), result.usage.input_tokens);
-    try testing.expectEqual(@as(u64, 5), result.usage.output_tokens);
-}
-
 test "loadCassetteFromBytes rejects an empty cassette" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -444,19 +374,19 @@ test "loadCassetteFromBytes rejects an empty cassette" {
 
 test "loadCassetteFromBytes rejects path-like sidecars" {
     const cases = [_][]const u8{
-        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"../escape.sse.txt"}
+        \\{"v":1,"provider":"deepseek","stream":true,"sse_path":"../escape.sse.txt"}
         ,
-        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"/tmp/escape.sse.txt"}
+        \\{"v":1,"provider":"deepseek","stream":true,"sse_path":"/tmp/escape.sse.txt"}
         ,
-        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"nested/escape.sse.txt"}
+        \\{"v":1,"provider":"deepseek","stream":true,"sse_path":"nested/escape.sse.txt"}
         ,
-        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"nested\\escape.sse.txt"}
+        \\{"v":1,"provider":"deepseek","stream":true,"sse_path":"nested\\escape.sse.txt"}
         ,
-        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":""}
+        \\{"v":1,"provider":"deepseek","stream":true,"sse_path":""}
         ,
-        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":"."}
+        \\{"v":1,"provider":"deepseek","stream":true,"sse_path":"."}
         ,
-        \\{"v":1,"provider":"anthropic","stream":true,"sse_path":".."}
+        \\{"v":1,"provider":"deepseek","stream":true,"sse_path":".."}
         ,
     };
 
@@ -490,7 +420,7 @@ test "loadCassetteFromBytes flags missing body lines" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const raw =
-        \\{"v":1,"provider":"openai","stream":false}
+        \\{"v":1,"provider":"local","stream":false}
     ;
     try testing.expectError(CassetteError.MissingBody, loadCassetteFromBytes(arena.allocator(), raw, null));
 }

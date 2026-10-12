@@ -421,7 +421,7 @@ test "snapshot uses checkpoint summary and retained suffix without mutating raw 
 
 test "prepared snapshot clamps output to the model capacity left after input" {
     const testing = std.testing;
-    const system_prompt = try testing.allocator.alloc(u8, 500_000);
+    const system_prompt = try testing.allocator.alloc(u8, 350_000);
     defer testing.allocator.free(system_prompt);
     @memset(system_prompt, 'x');
     const wire_body = try testing.allocator.alloc(u8, system_prompt.len + 100);
@@ -431,9 +431,9 @@ test "prepared snapshot clamps output to the model capacity left after input" {
     defer transcript.deinit(testing.allocator);
     var snapshot = try createSnapshot(testing.allocator, .{
         .config = .{
-            .provider = .anthropic,
-            .model = "claude-sonnet-5",
-            .max_output_tokens = 64_000,
+            .provider = .local,
+            .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
+            .max_output_tokens = 8_192,
             .system_prompt = system_prompt,
         },
         .transcript = &transcript,
@@ -443,7 +443,7 @@ test "prepared snapshot clamps output to the model capacity left after input" {
     try snapshot.completePreparation(wire_body);
 
     try testing.expect(try snapshot.clampOutputToRemainingContext());
-    try testing.expect(snapshot.config.max_output_tokens < 64_000);
+    try testing.expect(snapshot.config.max_output_tokens < 8_192);
     try testing.expect(snapshot.config.max_output_tokens > 0);
     try testing.expect(snapshot.budget == null);
     try testing.expect(!before_hash.eql(snapshot.request_context_sha256));

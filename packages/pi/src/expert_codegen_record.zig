@@ -13,9 +13,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const zts_cli = @import("zts_cli");
-const anthropic_tools = @import("providers/anthropic/tools_schema.zig");
 const local = @import("providers/local/client.zig");
-const openai = @import("providers/openai/client.zig");
 const deepseek = @import("providers/deepseek/client.zig");
 const cassette_client = @import("providers/cassette_client.zig");
 const cassette_record = @import("providers/cassette_record.zig");
@@ -73,8 +71,6 @@ const CodegenResponseCapture = struct {
         try cassette_record.writeCassette(self.allocator, path, raw_response, .{
             .provider = switch (snapshot.config.provider) {
                 .local => .local,
-                .anthropic => .anthropic,
-                .openai => .openai,
                 .deepseek => .deepseek,
             },
             .scenario = self.scenario,
@@ -199,7 +195,6 @@ fn resolveCurrentCaseStepsForTest(
 /// cwd when the recorder runs via `zig build`). The retired Claude and OpenAI
 /// corpora are not here: they live at the `pre-rebase` tag.
 pub const local_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/local/codegen";
-pub const openai_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/openai/codegen";
 pub const deepseek_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/deepseek/codegen";
 
 // Runtime and evaluation defaults share one authority. The local cutover is a
@@ -210,8 +205,6 @@ pub const empirical_flow_root = flowRoot(headline_provider);
 fn flowRoot(provider: agent.Provider) []const u8 {
     return switch (provider) {
         .local => local_empirical_flow_root,
-        // Both retired providers have no corpus; G13d removes the members.
-        .anthropic, .openai => openai_empirical_flow_root,
         .deepseek => deepseek_empirical_flow_root,
     };
 }
@@ -224,8 +217,6 @@ fn recordingProvider() !agent.Provider {
 fn recordingAuthAvailable(provider: agent.Provider) bool {
     return switch (provider) {
         .local => true,
-        .anthropic => envValue("ANTHROPIC_API_KEY") != null,
-        .openai => envValue("OPENAI_API_KEY") != null,
         .deepseek => envValue("DEEPSEEK_API_KEY") != null,
     };
 }
@@ -258,10 +249,6 @@ fn recordingCommand(
 }
 
 test "recording remediation preserves the replay provider and requires the full corpus" {
-    const claude = try recordingCommand(testing.allocator, .anthropic);
-    defer testing.allocator.free(claude);
-    try testing.expect(std.mem.indexOf(u8, claude, "ZTTP_CODEGEN_PROVIDER=claude") != null);
-
     const local_full = try recordingCommand(testing.allocator, .local);
     defer testing.allocator.free(local_full);
     try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_PROVIDER=local") != null);
@@ -300,7 +287,7 @@ test "a declared runtime identity splits on the first at-sign" {
     try testing.expectError(error.MalformedRuntimeIdentity, declaredRuntimeFrom(.local, "rapid-mlx@"));
     try testing.expectError(
         error.RuntimeIdentityRequiresLocalProvider,
-        declaredRuntimeFrom(.anthropic, "rapid-mlx@0.12.11"),
+        declaredRuntimeFrom(.deepseek, "rapid-mlx@0.12.11"),
     );
     try testing.expect(try declaredRuntimeFrom(.local, null) == null);
 }
@@ -376,8 +363,6 @@ const ReplayRequestContext = struct {
         defer tools.deinit();
         switch (provider) {
             .local => try local.writeToolsArray(tools.writer(), registry),
-            .anthropic => try anthropic_tools.writeToolsArray(tools.writer(), registry),
-            .openai => try openai.writeToolsArray(tools.writer(), registry),
             .deepseek => try deepseek.writeToolsArray(tools.writer(), registry),
         }
         const tools_json = try tools.toOwnedSlice();
@@ -389,15 +374,12 @@ const ReplayRequestContext = struct {
             .config = .{
                 .provider = switch (provider) {
                     .local => .local,
-                    .anthropic => .anthropic,
-                    .openai => .openai,
                     .deepseek => .deepseek,
                 },
                 .model = selected_model.id,
                 .max_output_tokens = selected_model.request_policy.max_output_tokens,
-                // The two Chat Completions adapters are non-streaming; the two
-                // SSE adapters stream.
-                .stream = provider != .local and provider != .deepseek,
+                // Both Chat Completions adapters are non-streaming.
+                .stream = false,
                 .system_prompt = system_prompt,
                 .tools_json = tools_json,
             },
@@ -772,28 +754,19 @@ test "empirical recording requires declared intent to pass" {
     try requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.passed);
 }
 
-test "first attempt expectations are provider qualified" {
+test "first attempt expectation is the recorded value or none" {
     try testing.expectEqual(
         @as(?bool, false),
-        firstAttemptExpectation(.local, false, true),
+        firstAttemptExpectation(false),
     );
     try testing.expectEqual(
         @as(?bool, null),
-        firstAttemptExpectation(.local, null, true),
-    );
-    try testing.expectEqual(
-        @as(?bool, true),
-        firstAttemptExpectation(.anthropic, null, true),
+        firstAttemptExpectation(null),
     );
 }
 
-fn firstAttemptExpectation(
-    provider: agent.Provider,
-    recorded: ?bool,
-    claude_expectation: bool,
-) ?bool {
-    if (recorded) |expectation| return expectation;
-    return if (provider == .anthropic) claude_expectation else null;
+fn firstAttemptExpectation(recorded: ?bool) ?bool {
+    return recorded;
 }
 
 /// The headline model for the published convergence number.
@@ -2632,10 +2605,6 @@ fn classifyRecordingFailure(err: anyerror) RecordingFailureKind {
         error.MalformedToolCall,
         error.MalformedToolEnvelope,
         error.UnexpectedResponseShape,
-        error.MalformedSse,
-        error.MissingType,
-        error.UnknownEventType,
-        error.UnexpectedJsonShape,
         => .decode,
         error.IntentCheckUnavailable,
         error.RecordedIntentCheckFailed,
@@ -3049,8 +3018,6 @@ fn recordLiveCase(
         .evidence_class = .empirical_model,
         .provider = switch (context.provider) {
             .local => .local,
-            .anthropic => .anthropic,
-            .openai => .openai,
             .deepseek => .deepseek,
         },
         .model = context.model,
@@ -3126,7 +3093,7 @@ fn recordLiveCase(
         },
     );
     if (context.enforce_headline_ratchet) {
-        if (firstAttemptExpectation(context.provider, null, rc.expect_first_attempt_green)) |expected| {
+        if (firstAttemptExpectation(null)) |expected| {
             if (result.firstAttemptGreen() != expected) {
                 std.debug.print(
                     "[codegen-record] {s}: pinned first_attempt_green={} but fresh flow observed {}\n",
@@ -3698,7 +3665,7 @@ fn coverageBaseline(
             &deepseek_coverage_baseline
         else
             null,
-        .local, .anthropic, .openai => null,
+        .local => null,
     };
 }
 
@@ -4479,7 +4446,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
                 );
                 if (on_headline) return error.CassetteRatchetMismatch;
             }
-        } else if (firstAttemptExpectation(replay_provider, null, rc.expect_first_attempt_green)) |expected| {
+        } else if (firstAttemptExpectation(null)) |expected| {
             if (result.firstAttemptGreen() != expected) {
                 std.debug.print(
                     "[codegen-replay] {s}: expected first_attempt_green={} got {} (code {s}){s}\n",

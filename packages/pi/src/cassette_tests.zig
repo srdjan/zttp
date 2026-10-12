@@ -5,11 +5,8 @@
 comptime {
     _ = @import("providers/cassette_client.zig");
     _ = @import("providers/cassette_record.zig");
-    // Replay routes through both provider parsers; pull them in so any
+    // Replay routes through both provider decoders; pull them in so any
     // compile-time drift here surfaces inside the cassette step.
-    _ = @import("providers/anthropic/sse_parser.zig");
-    _ = @import("providers/anthropic/response_assembler.zig");
     _ = @import("providers/propose_change_set.zig");
-    _ = @import("providers/openai/client.zig");
     _ = @import("providers/deepseek/client.zig");
 }

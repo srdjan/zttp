@@ -81,7 +81,7 @@ ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=<provider> \
   zig build test-expert-app -Dtest-filter="record codegen baseline corpus"
 ```
 
-`<provider>` is `deepseek`, `local`, `claude`, or `openai`. It defaults to
+`<provider>` is `deepseek` or `local`. It defaults to
 `local` when unset, which is rarely what a hosted run intends, so set it
 explicitly.
 
@@ -90,7 +90,7 @@ explicitly.
 | Variable | Effect |
 |---|---|
 | `ZTTP_CODEGEN_RECORD=1` | Required. Without it the recording test skips. |
-| `ZTTP_CODEGEN_PROVIDER` | `deepseek`, `local`, `claude`, or `openai`. Defaults to `local`. |
+| `ZTTP_CODEGEN_PROVIDER` | `deepseek` or `local`. Defaults to `local`. |
 | `ZTTP_CODEGEN_MODEL` | Records against a model other than the provider default. |
 | `ZTTP_CODEGEN_ONLY` | Records one case by name and leaves every other cassette untouched. |
 | `ZTTP_CODEGEN_LIMIT` | Caps the case count, for a cheap small-scale validation before a full run. |
@@ -214,43 +214,12 @@ A failing local case is the measurement, not a reason to reach for a hosted
 model. Use the qualification wrapper for a candidate comparison. Use recording
 only when deliberately replacing a committed provider corpus.
 
-### Claude
-
-```bash
-export ANTHROPIC_API_KEY=...
-ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=claude \
-  zig build test-expert-app -Dtest-filter="record codegen baseline corpus"
-```
-
-Registered models: `claude-sonnet-4-6` (default), `claude-opus-4-8`,
-`claude-sonnet-5`, and `claude-haiku-4-5-20251001`.
-
-The Claude corpus is retired. Its flow artifacts and the flat pre-cutover
-cassettes live at the `pre-rebase` tag and are not re-recorded.
-
-### OpenAI
-
-```bash
-export OPENAI_API_KEY=...
-ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=openai \
-  zig build test-expert-app -Dtest-filter="record codegen baseline corpus"
-```
-
-Registered model: `gpt-4o-mini` (default). `ZTS_OPENAI_BASE_URL` may redirect
-the Responses API transport without changing provider or model identity. The
-off-registry `ZTS_OPENAI_MODEL` override is rejected; select a model with
-`ZTTP_CODEGEN_MODEL`.
-
-Artifacts: `packages/pi/src/simulator/testdata/empirical/openai/codegen/`.
-
 ## Which corpus this repository records
 
-This is a project rule, not a limit of the harness. All four providers work.
-
-DeepSeek is the one permitted remote provider and the headline. Local stays
-available and is preferred for everything that does not need to move the
-headline. The Claude and OpenAI corpora are pre-cutover baselines: they are
-measured, not ratcheted, and are not re-recorded here.
+DeepSeek is the one remote provider and the headline. Local stays available and
+is preferred for everything that does not need to move the headline. The Claude
+and OpenAI providers and their corpora were removed; they live at the
+`pre-rebase` tag and are not re-recorded.
 
 ## One case, or the whole corpus
 

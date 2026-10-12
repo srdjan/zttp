@@ -9,9 +9,9 @@
 const std = @import("std");
 
 /// Map an HTTP error status (and, for ambiguous 4xx, the error body) to a typed
-/// provider error. The body substrings cover both providers' conventions:
-/// Anthropic returns 400 "credit balance is too low"; OpenAI returns 429
-/// "insufficient_quota" and 400 "context_length_exceeded".
+/// provider error. The body substrings cover the conventions the providers use:
+/// a 400 "credit balance is too low", a 429 "insufficient_quota", and a 400
+/// "context_length_exceeded".
 pub fn classify(status_code: u16, body: []const u8) anyerror {
     return switch (status_code) {
         401, 403 => error.AuthFailed,
@@ -98,7 +98,7 @@ pub fn isTimeout(err: anyerror) bool {
 
 /// Open a provider connection with the shared connect timeout and idle-read
 /// guard, mapping a connect timeout to a clean `error.RequestTimedOut`. Both
-/// the Anthropic and OpenAI clients go through this so the timeout policy and
+/// the local and DeepSeek clients go through this so the timeout policy and
 /// the socket-option dance live in exactly one place. `explicit_port` is the
 /// URI's port, if any; otherwise the protocol default is used.
 pub fn connect(

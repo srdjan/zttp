@@ -127,10 +127,8 @@ const help_all_mid =
     \\
     \\Credentials:
     \\  zttp auth deepseek                   Store the default DeepSeek API key
-    \\  zttp auth claude                     Store an optional Anthropic API key
-    \\  zttp auth openai                     Store an optional OpenAI API key
     \\  zttp auth status                     Show which provider keys are configured
-    \\  zttp auth revoke <provider>          Remove a stored key (claude | openai | deepseek)
+    \\  zttp auth revoke <provider>          Remove a stored key (deepseek)
     \\
     \\Machine tools (JSON output for IDE and review-bot integrations):
     \\
@@ -199,7 +197,7 @@ const expert_help =
     \\Usage:
     \\  zttp expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
     \\                [--session-id <id> | --resume | --continue | --fork <id>]
-    \\                [--provider local|claude|openai|deepseek] [--model <id>]
+    \\                [--provider local|deepseek] [--model <id>]
     \\                [--tools minimal|full] [--no-context-files]
     \\  zttp expert --print <prompt> [--mode json]
     \\  zttp expert --handler <handler.ts> --goal <goals> [--max-iters N]
@@ -213,7 +211,7 @@ const expert_help =
     \\  --session-id <id>          resume or create a session with this id
     \\  --resume, --continue       resume the newest session for this cwd
     \\  --fork <session-id>        branch from an existing session
-    \\  --provider <name>          select local, claude, openai, or deepseek for this launch
+    \\  --provider <name>          select local or deepseek for this launch
     \\  --model <id>               select a model within the active provider
     \\  --tools minimal|full       select workspace-read-only or full tool preset
     \\  --print <prompt>           run a single non-interactive turn and exit
@@ -228,7 +226,7 @@ const expert_help =
     \\Examples:
     \\  zttp expert --resume
     \\  zttp expert --print "add a GET /health route" --mode json
-    \\  zttp expert --provider claude
+    \\  zttp expert --provider local
     \\  zttp expert --handler handler.ts --goal no_secret_leakage
     \\
     \\Model backend:
@@ -240,7 +238,6 @@ const expert_help =
     \\    zttp expert --provider local
     \\  ZTTP_MLX_BASE_URL can select another credential-free HTTP loopback root.
     \\  Zttp checks readiness but never starts, stops, or replaces the server.
-    \\  Claude and OpenAI require explicit --provider and their own keys.
     \\  --goal is compiler-only and rejects --provider and --model.
     \\
     \\For machine-facing compiler tooling, use direct commands such as:
@@ -325,7 +322,7 @@ test "expert help advertises documented modes" {
         "zttp expert --handler <handler.ts> --goal <goals>",
         "--tools minimal|full",
         "--no-context-files",
-        "--provider local|claude|openai|deepseek",
+        "--provider local|deepseek",
         "zttp expert --provider local",
         "--goal is compiler-only",
     }) |needle| {

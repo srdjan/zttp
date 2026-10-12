@@ -159,8 +159,8 @@ Start at the [Documentation Index](docs/README.md).
   [Roadmap](docs/roadmap.md), and
   [Architecture](docs/internals/architecture.md).
 - [Cassette Recording](docs/internals/cassette-recording.md) - how to
-  re-record the codegen corpus against DeepSeek (the default), a local MLX
-  server, Claude, or OpenAI, and how to republish
+  re-record the codegen corpus against DeepSeek (the default) or a local MLX
+  server, and how to republish
   [convergence](docs/convergence.md) and [coverage](docs/coverage.md) after.
 
 ## Contributing

@@ -496,7 +496,7 @@ Useful modes:
 zttp expert --resume
 zttp expert --yes
 zttp expert --no-edit
-zttp expert --provider claude --model claude-sonnet-4-6
+zttp expert --provider deepseek --model deepseek-v4-pro
 zttp expert --print "add a GET /health route"
 zttp expert --print "..." --mode json
 zttp expert --handler src/handler.ts --goal no_secret_leakage
@@ -509,7 +509,7 @@ zttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--fork <id>` | Branch a new session from an existing one. |
 | `--yes` | Apply every verified edit without prompting. |
 | `--no-edit` | Let the model read and analyze files but block all writes. |
-| `--provider <name>` | Select `local`, `claude`, `openai`, or `deepseek` for this launch. |
+| `--provider <name>` | Select `local` or `deepseek` for this launch. |
 | `--model <id>` | Start on a model registered for the active provider. |
 | `--tools minimal\|full` | Choose the tool preset. `full` is the default; `minimal` is workspace-read-only. |
 | `--no-session` | Do not persist this run to `~/.zttp/sessions`. |
@@ -549,8 +549,7 @@ the current DeepSeek default. `/model` lists only models for the active provider
 current one, and persists a valid change.
 
 The local model has a 131,072-token context and an 8,192-token request output
-budget. Claude defaults to `claude-sonnet-4-6`; OpenAI defaults to
-`gpt-4o-mini`; DeepSeek defaults to `deepseek-v4-flash`. `--goal` is
+budget. DeepSeek defaults to `deepseek-v4-flash`. `--goal` is
 compiler-only: it rejects `--provider` and `--model` and bypasses model
 readiness.
 
@@ -563,8 +562,12 @@ and a 384,000-token output ceiling; zttp asks for 8,192 output tokens per turn.
 A DeepSeek turn sends handler source to a third party, which the destination
 line under the banner states before the first turn.
 
-Optional cloud keys are stored in `~/.zttp/providers.json` with mode `0600`.
-Environment variables `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
-`DEEPSEEK_API_KEY` override stored values after their provider is selected.
+The optional DeepSeek key is stored in `~/.zttp/providers.json` with mode `0600`.
+The environment variable `DEEPSEEK_API_KEY` overrides the stored value after
+DeepSeek is selected. The Claude and OpenAI providers were removed, so `zttp auth
+claude` and `zttp auth openai` are refused. `zttp auth revoke claude` and
+`zttp auth revoke openai` still delete a key stored for them earlier. A session
+stored under either provider fails to resume with the stored-provider error until
+you pass `--provider local` or `--provider deepseek`.
 
 See [User Guide](user-guide.md) for the normal project flow.

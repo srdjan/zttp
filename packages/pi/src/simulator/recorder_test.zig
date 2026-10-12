@@ -19,26 +19,21 @@ const registry_mod = @import("../registry/registry.zig");
 const transcript_mod = @import("../transcript.zig");
 const app = @import("../app.zig");
 const expert_persona = @import("../expert_persona.zig");
-const openai_client = @import("../providers/openai/client.zig");
+const deepseek_client = @import("../providers/deepseek/client.zig");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("../test_support/cwd.zig").cwdPathAlloc;
 
-const openai_text_response =
-    "event: response.output_item.added\n" ++
-    "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" ++
-    "event: response.output_text.delta\n" ++
-    "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello world\"}\n\n" ++
-    "event: response.completed\n" ++
-    "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n" ++
-    "data: [DONE]\n\n";
+const deepseek_text_response =
+    "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"hello world\"}}]," ++
+    "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
 
 const deterministic_handler =
     "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
     "    return Response.json({ ok: true });\n" ++
     "}\n";
 
-fn renderOpenAiProposeChangeSetResponse(
+fn renderProposeChangeSetResponse(
     allocator: std.mem.Allocator,
     content: []const u8,
 ) ![]u8 {
@@ -54,32 +49,22 @@ fn renderOpenAiProposeChangeSetResponse(
     var response = TextBuffer.init(allocator);
     errdefer response.deinit();
     const writer = response.writer();
-    try writer.writeAll("event: response.created\n" ++
-        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_edit\",\"status\":\"in_progress\"}}\n\n" ++
-        "event: response.output_item.added\n" ++
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"propose_change_set\",\"arguments\":\"\"}}\n\n" ++
-        "event: response.function_call_arguments.delta\n" ++
-        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":");
+    try writer.writeAll("{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"role\":\"assistant\"," ++
+        "\"content\":null,\"tool_calls\":[{\"id\":\"call_edit\",\"type\":\"function\",\"function\":" ++
+        "{\"name\":\"propose_change_set\",\"arguments\":");
     try std.json.Stringify.value(arguments.written(), .{}, writer);
-    try writer.writeAll("}\n\n" ++
-        "event: response.output_item.done\n" ++
-        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"propose_change_set\",\"arguments\":");
-    try std.json.Stringify.value(arguments.written(), .{}, writer);
-    try writer.writeAll("}}\n\n" ++
-        "event: response.completed\n" ++
-        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_edit\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}\n\n" ++
-        "data: [DONE]\n\n");
+    try writer.writeAll("}}]}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}");
     return response.toOwnedSlice();
 }
 
 fn deterministicEditSteps(allocator: std.mem.Allocator) ![]const []const u8 {
-    const propose_change_set_response = try renderOpenAiProposeChangeSetResponse(allocator, deterministic_handler);
+    const propose_change_set_response = try renderProposeChangeSetResponse(allocator, deterministic_handler);
     const steps = try allocator.alloc([]const u8, 1);
     steps[0] = try cassette_record.serializeCassette(allocator, propose_change_set_response, .{
-        .provider = .openai,
+        .provider = .deepseek,
         .scenario = "recorder-edit-flow",
-        .stream = true,
-        .model = openai_client.default_model,
+        .stream = false,
+        .model = deepseek_client.default_model,
     });
     return steps;
 }
@@ -296,11 +281,11 @@ const CapturingClient = struct {
         });
         defer snapshot.deinit(arena);
         _ = try model_client.prepareSnapshot(arena, &snapshot);
-        try self.capture.record(&snapshot, openai_text_response);
-        const bytes = try cassette_record.serializeCassette(arena, openai_text_response, .{
-            .provider = .openai,
+        try self.capture.record(&snapshot, deepseek_text_response);
+        const bytes = try cassette_record.serializeCassette(arena, deepseek_text_response, .{
+            .provider = .deepseek,
             .scenario = "recorded-two-turn",
-            .stream = true,
+            .stream = false,
             .model = self.config.model,
         });
         const cassette = try cassette_client.loadCassetteFromBytes(arena, bytes, null);
@@ -349,15 +334,15 @@ test "simulator recorder validates and owns workspace capture allowlist" {
     try testing.expectError(error.UnsafePath, recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "unsafe-workspace-path",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
         .workspace_allowlist = &.{"../handler.ts"},
     }));
     try testing.expectError(error.DuplicateWorkspacePath, recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "duplicate-workspace-path",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
         .workspace_allowlist = &.{ "handler.ts", "handler.ts" },
     }));
 
@@ -365,8 +350,8 @@ test "simulator recorder validates and owns workspace capture allowlist" {
     var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "owned-workspace-path",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
         .workspace_allowlist = &.{mutable_path[0..]},
     });
     defer recorder.deinit();
@@ -398,8 +383,8 @@ test "simulator recorder rejects undeclared credential file before workspace rea
     var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "undeclared-credential",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
         .workspace_allowlist = &.{"handler.ts"},
     });
     defer recorder.deinit();
@@ -440,8 +425,8 @@ test "simulator recorder skips agent scratch but still refuses undeclared source
     var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "agent-scratch",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
         .workspace_allowlist = &.{"handler.ts"},
     });
     defer recorder.deinit();
@@ -458,8 +443,8 @@ test "simulator recorder skips agent scratch but still refuses undeclared source
     var strict = try recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "agent-scratch-strict",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
         .workspace_allowlist = &.{"handler.ts"},
     });
     defer strict.deinit();
@@ -496,8 +481,9 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
     defer testing.allocator.free(case_abs);
 
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .deepseek,
+        .stream = false,
+        .model = "deepseek-v4-flash",
         .max_output_tokens = 8192,
         .system_prompt = "persona",
     };
@@ -506,7 +492,7 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
     var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "recorded-two-turn",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
+        .provider = .deepseek,
         .model = request_config.model,
         .progress = progress_probe.observer(),
         .workspace_allowlist = &.{"handler.ts"},
@@ -618,11 +604,12 @@ test "simulator recorder captures approved and denied real edit flows" {
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
     var tools_buffer = TextBuffer.init(allocator);
     defer tools_buffer.deinit();
-    try openai_client.writeToolsArray(tools_buffer.writer(), &registry);
+    try deepseek_client.writeToolsArray(tools_buffer.writer(), &registry);
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = openai_client.default_model,
-        .max_output_tokens = 64_000,
+        .provider = .deepseek,
+        .stream = false,
+        .model = deepseek_client.default_model,
+        .max_output_tokens = 32_768,
         .system_prompt = system_prompt,
         .tools_json = tools_buffer.written(),
     };
@@ -645,7 +632,7 @@ test "simulator recorder captures approved and denied real edit flows" {
         var recorder = try recorder_mod.Recorder.init(allocator, .{
             .case_name = case_name,
             .evidence_class = .deterministic_harness,
-            .provider = .openai,
+            .provider = .deepseek,
             .model = request_config.model,
             .workspace_allowlist = &.{"handler.ts"},
         });
@@ -747,14 +734,14 @@ test "simulator runner preserves an approved edit into the next real Turn" {
         "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
         "    return Response.json({ ok: true, revision: 2 });\n" ++
         "}\n";
-    const second_response = try renderOpenAiProposeChangeSetResponse(allocator, second_handler);
+    const second_response = try renderProposeChangeSetResponse(allocator, second_handler);
     const steps = try allocator.alloc([]const u8, 2);
     steps[0] = one_turn_steps[0];
     steps[1] = try cassette_record.serializeCassette(allocator, second_response, .{
-        .provider = .openai,
+        .provider = .deepseek,
         .scenario = "recorder-edit-flow-second-turn",
-        .stream = true,
-        .model = openai_client.default_model,
+        .stream = false,
+        .model = deepseek_client.default_model,
     });
 
     var registry = try app.buildRegistry(allocator);
@@ -762,11 +749,12 @@ test "simulator runner preserves an approved edit into the next real Turn" {
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
     var tools_buffer = TextBuffer.init(allocator);
     defer tools_buffer.deinit();
-    try openai_client.writeToolsArray(tools_buffer.writer(), &registry);
+    try deepseek_client.writeToolsArray(tools_buffer.writer(), &registry);
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = openai_client.default_model,
-        .max_output_tokens = 64_000,
+        .provider = .deepseek,
+        .stream = false,
+        .model = deepseek_client.default_model,
+        .max_output_tokens = 32_768,
         .system_prompt = system_prompt,
         .tools_json = tools_buffer.written(),
     };
@@ -787,7 +775,7 @@ test "simulator runner preserves an approved edit into the next real Turn" {
     var recorder = try recorder_mod.Recorder.init(allocator, .{
         .case_name = "health-two-turn",
         .evidence_class = .deterministic_harness,
-        .provider = .openai,
+        .provider = .deepseek,
         .model = request_config.model,
         .workspace_allowlist = &.{"handler.ts"},
     });

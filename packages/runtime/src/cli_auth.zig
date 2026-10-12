@@ -26,14 +26,27 @@ const Provider = struct {
 };
 
 const providers = [_]Provider{
-    .{ .name = "anthropic", .env_var = "ANTHROPIC_API_KEY", .label = "claude" },
-    .{ .name = "openai", .env_var = "OPENAI_API_KEY", .label = "openai" },
     .{ .name = "deepseek", .env_var = "DEEPSEEK_API_KEY", .label = "deepseek" },
 };
 
 fn providerByLabel(label: []const u8) ?Provider {
     for (providers) |p| {
         if (std.mem.eql(u8, p.label, label)) return p;
+    }
+    return null;
+}
+
+/// Providers that were removed. A key stored for one of them stays in
+/// `~/.zttp/providers.json` until revoked, so `zttp auth revoke` still accepts
+/// these labels and removes the stored entry. Nothing else reads them.
+const retired_providers = [_]struct { label: []const u8, name: []const u8 }{
+    .{ .label = "claude", .name = "anthropic" },
+    .{ .label = "openai", .name = "openai" },
+};
+
+fn retiredByLabel(label: []const u8) ?Provider {
+    for (retired_providers) |p| {
+        if (std.mem.eql(u8, p.label, label)) return .{ .name = p.name, .env_var = "", .label = p.label };
     }
     return null;
 }
@@ -49,13 +62,13 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 
     const sub = argv[0];
-    if (std.mem.eql(u8, sub, "claude")) {
-        try authProviderSet(allocator, providerByLabel("claude").?, argv[1..]);
-        return;
-    }
-    if (std.mem.eql(u8, sub, "openai")) {
-        try authProviderSet(allocator, providerByLabel("openai").?, argv[1..]);
-        return;
+    if (retiredByLabel(sub)) |retired| {
+        std.debug.print(
+            "The {s} provider was removed. Use `zttp auth deepseek`, or `--provider local`.\n" ++
+                "To delete a key stored earlier, run `zttp auth revoke {s}`.\n",
+            .{ retired.label, retired.label },
+        );
+        return error.InvalidArgument;
     }
     if (std.mem.eql(u8, sub, "deepseek")) {
         try authProviderSet(allocator, providerByLabel("deepseek").?, argv[1..]);
@@ -67,11 +80,11 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
     if (std.mem.eql(u8, sub, "revoke")) {
         if (argv.len < 2) {
-            std.debug.print("zttp auth revoke requires a provider label, e.g. `zttp auth revoke claude`.\n", .{});
+            std.debug.print("zttp auth revoke requires a provider label, e.g. `zttp auth revoke deepseek`.\n", .{});
             return error.InvalidArgument;
         }
-        const provider = providerByLabel(argv[1]) orelse {
-            std.debug.print("Unknown provider: {s}. Known: claude, openai, deepseek.\n", .{argv[1]});
+        const provider = providerByLabel(argv[1]) orelse retiredByLabel(argv[1]) orelse {
+            std.debug.print("Unknown provider: {s}. Known: deepseek.\n", .{argv[1]});
             return error.InvalidArgument;
         };
         try authRevoke(allocator, provider);
@@ -88,20 +101,17 @@ pub fn printAuthHelp() void {
         \\zttp auth - store cloud-provider API keys for expert
         \\
         \\Usage:
-        \\  zttp auth claude              Prompt for an Anthropic API key and store it
-        \\  zttp auth openai              Prompt for an OpenAI API key and store it
         \\  zttp auth deepseek            Prompt for a DeepSeek API key and store it
         \\  zttp auth status              Show which providers are configured
-        \\  zttp auth revoke <provider>   Remove a stored key (claude | openai | deepseek)
+        \\  zttp auth revoke <provider>   Remove a stored key (deepseek; claude and openai remove
+        \\                                 keys stored before those providers were removed)
         \\
-        \\Claude remains the current bare-launch default. The local LFM provider
-        \\needs no key when selected with `--provider local`. OpenAI and DeepSeek
-        \\are explicit.
+        \\DeepSeek is the bare-launch default. The local LFM provider needs no key
+        \\when selected with `--provider local`.
         \\
         \\Storage: ~/.zttp/providers.json (mode 0600).
         \\
-        \\The CLI injects stored keys into ANTHROPIC_API_KEY / OPENAI_API_KEY /
-        \\DEEPSEEK_API_KEY at the start of `zttp expert`.
+        \\The CLI injects a stored key into DEEPSEEK_API_KEY at the start of `zttp expert`.
         \\Shell-set variables always win; the stored value only fills gaps.
         \\
     ;
@@ -141,16 +151,9 @@ fn authProviderSet(
     }
     if (!looksLikeApiKey(provider, key)) {
         std.debug.print(
-            "That does not look like a {s} key (expected at least 20 characters{s}).\n" ++
+            "That does not look like a {s} key (expected at least 20 characters).\n" ++
                 "Nothing saved. Re-run `zttp auth {s}` and try again.\n",
-            .{
-                provider.label,
-                if (std.mem.eql(u8, provider.name, "anthropic"))
-                    @as([]const u8, ", usually starting with sk-ant-")
-                else
-                    @as([]const u8, ""),
-                provider.label,
-            },
+            .{ provider.label, provider.label },
         );
         return error.InvalidKey;
     }
@@ -269,7 +272,7 @@ const Store = struct {
 
         var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch {
             // A corrupt file should not poison `zttp dev`. Treat it as empty
-            // so injection silently no-ops; the user can re-run `auth claude`
+            // so injection silently no-ops; the user can re-run `auth deepseek`
             // to rewrite it.
             return store;
         };
@@ -498,28 +501,15 @@ fn readSecretLine(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn looksLikeApiKey(provider: Provider, key: []const u8) bool {
-    if (key.len < 20) return false;
-    if (std.mem.eql(u8, provider.name, "anthropic")) {
-        // Real Anthropic console keys all start with `sk-ant-`. Refusing
-        // anything else catches the common paste-the-wrong-string mistake
-        // without locking out a future format change: if Anthropic ever
-        // ships a non-`sk-ant-` key, the user can set ANTHROPIC_API_KEY
-        // directly in their shell and skip this CLI.
-        return std.mem.startsWith(u8, key, "sk-ant-");
-    }
-    return true;
+    _ = provider;
+    return key.len >= 20;
 }
 
 fn maskKey(key: []const u8) [32]u8 {
     var out: [32]u8 = undefined;
     @memset(&out, ' ');
     const visible_tail = 4;
-    const prefix_len: usize = if (std.mem.startsWith(u8, key, "sk-ant-"))
-        7
-    else if (std.mem.startsWith(u8, key, "sk-"))
-        3
-    else
-        0;
+    const prefix_len: usize = if (std.mem.startsWith(u8, key, "sk-")) 3 else 0;
 
     var i: usize = 0;
     if (prefix_len > 0 and i + prefix_len < out.len) {
@@ -548,24 +538,24 @@ fn maskKey(key: []const u8) [32]u8 {
 // Tests
 // ---------------------------------------------------------------------------
 
-test "looksLikeApiKey: anthropic requires sk-ant- prefix and length" {
-    const anth = providerByLabel("claude").?;
-    try std.testing.expect(!looksLikeApiKey(anth, ""));
-    try std.testing.expect(!looksLikeApiKey(anth, "sk-ant-short"));
-    try std.testing.expect(!looksLikeApiKey(anth, "this-is-a-long-enough-string-but-no-prefix"));
-    try std.testing.expect(looksLikeApiKey(anth, "sk-ant-aaaaaaaaaaaaaaaa"));
+test "looksLikeApiKey: only checks length" {
+    const deepseek = providerByLabel("deepseek").?;
+    try std.testing.expect(!looksLikeApiKey(deepseek, "short"));
+    try std.testing.expect(looksLikeApiKey(deepseek, "anything-longer-than-twenty-chars"));
 }
 
-test "looksLikeApiKey: openai only checks length" {
-    const oai = providerByLabel("openai").?;
-    try std.testing.expect(!looksLikeApiKey(oai, "short"));
-    try std.testing.expect(looksLikeApiKey(oai, "anything-longer-than-twenty-chars"));
+test "retired providers are refused by label and still revocable" {
+    try std.testing.expect(providerByLabel("claude") == null);
+    try std.testing.expect(providerByLabel("openai") == null);
+    try std.testing.expectEqualStrings("anthropic", retiredByLabel("claude").?.name);
+    try std.testing.expectEqualStrings("openai", retiredByLabel("openai").?.name);
+    try std.testing.expect(retiredByLabel("deepseek") == null);
 }
 
 test "maskKey: redacts the middle, keeps prefix + tail" {
-    const masked = maskKey("sk-ant-1234567890abcd");
+    const masked = maskKey("sk-1234567890abcd");
     const trimmed = std.mem.trim(u8, masked[0..], " ");
-    try std.testing.expectEqualStrings("sk-ant-...abcd", trimmed);
+    try std.testing.expectEqualStrings("sk-...abcd", trimmed);
 }
 
 test "Store: set/get/has/remove round-trip in memory" {
@@ -573,13 +563,13 @@ test "Store: set/get/has/remove round-trip in memory" {
     var store: Store = .{ .allocator = allocator, .entries = .empty };
     defer store.deinit();
 
-    try std.testing.expect(!store.has("anthropic"));
-    try store.set("anthropic", "sk-ant-fixture");
-    try std.testing.expect(store.has("anthropic"));
-    try std.testing.expectEqualStrings("sk-ant-fixture", store.get("anthropic").?);
+    try std.testing.expect(!store.has("deepseek"));
+    try store.set("deepseek", "sk-fixture-key");
+    try std.testing.expect(store.has("deepseek"));
+    try std.testing.expectEqualStrings("sk-fixture-key", store.get("deepseek").?);
 
-    try store.remove("anthropic");
-    try std.testing.expect(!store.has("anthropic"));
+    try store.remove("deepseek");
+    try std.testing.expect(!store.has("deepseek"));
 }
 
 test "Store: save then load roundtrip via tmp HOME" {
@@ -602,13 +592,13 @@ test "Store: save then load roundtrip via tmp HOME" {
     {
         var store = try Store.load(allocator);
         defer store.deinit();
-        try store.set("anthropic", "sk-ant-roundtrip-test-value");
+        try store.set("deepseek", "sk-roundtrip-test-value");
         try store.save();
     }
 
     var loaded = try Store.load(allocator);
     defer loaded.deinit();
-    try std.testing.expectEqualStrings("sk-ant-roundtrip-test-value", loaded.get("anthropic").?);
+    try std.testing.expectEqualStrings("sk-roundtrip-test-value", loaded.get("deepseek").?);
 }
 
 test "writeProvidersFile re-tightens a pre-existing loose 0644 file to 0600" {

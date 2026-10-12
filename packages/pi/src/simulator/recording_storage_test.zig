@@ -96,7 +96,7 @@ fn promoteCollectedWithFault(
         .case_name = "approved-edit",
         .evidence_class = .deterministic_harness,
         .executable = true,
-        .provider = .anthropic,
+        .provider = .deepseek,
         .model = "fixture-model",
         .turns = &turns,
         .model_responses = &responses,

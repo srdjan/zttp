@@ -10,8 +10,6 @@ const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const chat_completions = @import("../providers/chat_completions.zig");
-const anthropic_client = @import("../providers/anthropic/client.zig");
-const openai_client = @import("../providers/openai/client.zig");
 const model_request = @import("../providers/model_request.zig");
 const context_budget = @import("../context_budget.zig");
 const compaction = @import("../compaction.zig");
@@ -420,18 +418,10 @@ pub fn prepareSnapshot(
     arena: std.mem.Allocator,
     snapshot: *model_request.ModelRequestSnapshot,
 ) ![]const u8 {
-    var body = switch (snapshot.config.provider) {
-        .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, snapshot),
-        .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, snapshot),
-        .openai => try openai_client.buildRequestBodyFromSnapshot(arena, snapshot),
-    };
+    var body = try chat_completions.buildRequestBodyFromSnapshot(arena, snapshot);
     try snapshot.completePreparation(body);
     if (try snapshot.clampOutputToRemainingContext()) {
-        body = switch (snapshot.config.provider) {
-            .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, snapshot),
-            .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, snapshot),
-            .openai => try openai_client.buildRequestBodyFromSnapshot(arena, snapshot),
-        };
+        body = try chat_completions.buildRequestBodyFromSnapshot(arena, snapshot);
         try snapshot.completePreparation(body);
     }
     try snapshot.requireHardAdmission();

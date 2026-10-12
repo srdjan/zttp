@@ -13,24 +13,31 @@ const models = @import("../providers/models.zig");
 const transcript_mod = @import("../transcript.zig");
 const turn = @import("../turn.zig");
 
-const openai_cassette = @embedFile("../providers/testdata/openai/chat_completion.jsonl");
+/// A synthetic non-streaming Chat Completions cassette. The local replay
+/// requires a `request_sha256` in the header, which `bindLocalCassette` adds.
+const local_cassette =
+    "{\"v\":1,\"provider\":\"local\",\"scenario\":\"chat_completion\",\"stream\":false," ++
+    "\"recorded_at\":\"2026-05-28T00:00:00Z\",\"synthetic\":true}\n" ++
+    "{\"body\":\"{\\\"choices\\\":[{\\\"finish_reason\\\":\\\"stop\\\"," ++
+    "\\\"message\\\":{\\\"content\\\":\\\"hello world\\\"}}]," ++
+    "\\\"usage\\\":{\\\"prompt_tokens\\\":12,\\\"completion_tokens\\\":3}}\"}\n";
 
-fn bindOpenAiCassette(
+fn bindLocalCassette(
     allocator: std.mem.Allocator,
     request_sha256: model_request.Sha256Hex,
 ) ![]u8 {
-    const newline = std.mem.indexOfScalar(u8, openai_cassette, '\n') orelse
+    const newline = std.mem.indexOfScalar(u8, local_cassette, '\n') orelse
         return error.MalformedTestCassette;
-    if (newline == 0 or openai_cassette[newline - 1] != '}') {
+    if (newline == 0 or local_cassette[newline - 1] != '}') {
         return error.MalformedTestCassette;
     }
     return std.fmt.allocPrint(
         allocator,
         "{s},\"request_sha256\":\"{s}\"{s}",
         .{
-            openai_cassette[0 .. newline - 1],
+            local_cassette[0 .. newline - 1],
             request_sha256.slice(),
-            openai_cassette[newline - 1 ..],
+            local_cassette[newline - 1 ..],
         },
     );
 }
@@ -57,8 +64,8 @@ test "canonical request snapshot covers every model-visible input" {
     defer arena.deinit();
     const snapshot = try model_request.createSnapshot(arena.allocator(), .{
         .config = .{
-            .provider = .openai,
-            .model = "gpt-test",
+            .provider = .local,
+            .model = "local-test",
             .max_output_tokens = 4096,
             .system_prompt = "persona",
             .tools_json = "[{\"name\":\"workspace_read\"}]",
@@ -76,8 +83,8 @@ test "canonical request snapshot covers every model-visible input" {
 
     const changed_policy = try model_request.createSnapshot(arena.allocator(), .{
         .config = .{
-            .provider = .openai,
-            .model = "gpt-test",
+            .provider = .local,
+            .model = "local-test",
             .max_output_tokens = 8192,
             .system_prompt = "persona",
             .tools_json = "[{\"name\":\"workspace_read\"}]",
@@ -90,8 +97,8 @@ test "canonical request snapshot covers every model-visible input" {
     try transcript.append(testing.allocator, .{ .model_text = "done" });
     const changed_transcript = try model_request.createSnapshot(arena.allocator(), .{
         .config = .{
-            .provider = .openai,
-            .model = "gpt-test",
+            .provider = .local,
+            .model = "local-test",
             .max_output_tokens = 4096,
             .system_prompt = "persona",
             .tools_json = "[{\"name\":\"workspace_read\"}]",
@@ -211,7 +218,7 @@ test "every provider preparation binds the exact serialized wire body" {
     defer transcript.deinit(testing.allocator);
     try transcript.append(testing.allocator, .{ .user_text = "inspect handler.ts" });
 
-    const providers = [_]models.Provider{ .local, .anthropic, .openai, .deepseek };
+    const providers = [_]models.Provider{ .local, .deepseek };
     for (providers) |provider| {
         const model = models.defaultForProvider(provider);
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -244,8 +251,8 @@ test "simulator client rejects a semantic mismatch without consuming the respons
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .local,
+        .model = local_client.default_model,
         .max_output_tokens = 8192,
         .system_prompt = "persona",
         .tools_json = null,
@@ -257,7 +264,7 @@ test "simulator client rejects a semantic mismatch without consuming the respons
     });
     _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
     const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
-    const bound_cassette = try bindOpenAiCassette(arena.allocator(), expected.wire_request_sha256.?);
+    const bound_cassette = try bindLocalCassette(arena.allocator(), expected.wire_request_sha256.?);
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
         .turn_index = 0,
@@ -271,8 +278,8 @@ test "simulator client rejects a semantic mismatch without consuming the respons
         .bytes = bound_cassette,
     }};
     var client = model_client.Client.init(.{
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .local,
+        .model = local_client.default_model,
         .checkpoints = &checkpoints,
         .responses = &responses,
         .fixtures = &fixtures,
@@ -321,8 +328,8 @@ test "simulator summarizer consumes a purpose-specific request checkpoint" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .local,
+        .model = local_client.default_model,
         .max_output_tokens = 8192,
         .system_prompt = "normal persona",
     };
@@ -346,7 +353,7 @@ test "simulator summarizer consumes a purpose-specific request checkpoint" {
     });
     _ = try model_client.prepareSnapshot(allocator, &snapshot);
     const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&snapshot)};
-    const bound_cassette = try bindOpenAiCassette(allocator, snapshot.wire_request_sha256.?);
+    const bound_cassette = try bindLocalCassette(allocator, snapshot.wire_request_sha256.?);
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
         .turn_index = 0,
@@ -360,7 +367,7 @@ test "simulator summarizer consumes a purpose-specific request checkpoint" {
         .bytes = bound_cassette,
     }};
     var client = model_client.Client.init(.{
-        .provider = .openai,
+        .provider = .local,
         .model = request_config.model,
         .evidence_class = .empirical_model,
         .checkpoints = &checkpoints,
@@ -370,7 +377,7 @@ test "simulator summarizer consumes a purpose-specific request checkpoint" {
     const normal_anchor: context_budget.InputAnchor = .{
         .usage = .{
             .epoch = .{
-                .provider = .openai,
+                .provider = .local,
                 .model = request_config.model,
                 .checkpoint_generation = 0,
             },
@@ -699,8 +706,8 @@ test "adversarial request mutations fail before releasing a response" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .local,
+        .model = local_client.default_model,
         .max_output_tokens = 8192,
         .system_prompt = "persona",
         .tools_json = "[{\"name\":\"workspace_read\"}]",
@@ -716,12 +723,12 @@ test "adversarial request mutations fail before releasing a response" {
         .turn_index = 0,
         .call_index = 0,
         .path = "responses/0.jsonl",
-        .sha256 = artifact.Sha256Hex.fromBytes(openai_cassette),
+        .sha256 = artifact.Sha256Hex.fromBytes(local_cassette),
     }};
     const fixtures = [_]artifact.LoadedFixture{.{
         .role = .response,
         .path = "responses/0.jsonl",
-        .bytes = openai_cassette,
+        .bytes = local_cassette,
     }};
 
     const transcript_mutations = [_]struct {
@@ -746,7 +753,7 @@ test "adversarial request mutations fail before releasing a response" {
             mutation.reorder,
         );
         var client = model_client.Client.init(.{
-            .provider = .openai,
+            .provider = .local,
             .model = request_config.model,
             .checkpoints = &checkpoints,
             .responses = &responses,
@@ -771,7 +778,7 @@ test "adversarial request mutations fail before releasing a response" {
         },
     }) |changed_config| {
         var client = model_client.Client.init(.{
-            .provider = .openai,
+            .provider = .local,
             .model = request_config.model,
             .checkpoints = &checkpoints,
             .responses = &responses,
@@ -792,8 +799,8 @@ test "simulator client maps malformed and unreadable response fixtures without a
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .local,
+        .model = local_client.default_model,
         .max_output_tokens = 8192,
         .system_prompt = "persona",
     };
@@ -803,10 +810,10 @@ test "simulator client maps malformed and unreadable response fixtures without a
     });
     _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
     const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
-    const malformed_sse = try std.fmt.allocPrint(
+    const malformed_body = try std.fmt.allocPrint(
         arena.allocator(),
-        "{{\"v\":1,\"provider\":\"openai\",\"stream\":true," ++
-            "\"request_sha256\":\"{s}\"}}\n{{\"sse\":\"not an SSE event\"}}",
+        "{{\"v\":1,\"provider\":\"local\",\"stream\":false," ++
+            "\"request_sha256\":\"{s}\"}}\n{{\"body\":\"not json\"}}",
         .{expected.wire_request_sha256.?.slice()},
     );
     const cases = [_]struct {
@@ -815,11 +822,11 @@ test "simulator client maps malformed and unreadable response fixtures without a
     }{
         .{ .bytes = "not-json\n", .failure = .malformed },
         .{
-            .bytes = "{\"v\":1,\"provider\":\"openai\",\"stream\":true,\"sse_path\":\"missing.sse.txt\"}\n",
+            .bytes = "{\"v\":1,\"provider\":\"deepseek\",\"stream\":true,\"sse_path\":\"missing.sse.txt\"}\n",
             .failure = .unreadable,
         },
         .{
-            .bytes = malformed_sse,
+            .bytes = malformed_body,
             .failure = .malformed,
         },
     };
@@ -838,8 +845,8 @@ test "simulator client maps malformed and unreadable response fixtures without a
             .bytes = case.bytes,
         }};
         var client = model_client.Client.init(.{
-            .provider = .openai,
-            .model = "gpt-4o-mini",
+            .provider = .local,
+            .model = local_client.default_model,
             .checkpoints = &checkpoints,
             .responses = &responses,
             .fixtures = &fixtures,

@@ -256,10 +256,8 @@ fn printDoctorExpertProvider(allocator: std.mem.Allocator) void {
     cli_auth.injectStoredProvidersIntoEnv(allocator);
     pi_app.checkDefaultProviderReadiness(allocator) catch |err| {
         std.debug.print("[info] expert   default provider not ready ({s})\n", .{@errorName(err)});
-        if (err == error.MissingAnthropicCredential) {
-            std.debug.print("       next     zttp auth claude\n", .{});
-        } else if (err == error.MissingOpenAICredential) {
-            std.debug.print("       next     zttp auth openai\n", .{});
+        if (err == error.MissingDeepSeekCredential) {
+            std.debug.print("       next     zttp auth deepseek\n", .{});
         } else {
             std.debug.print("       next     mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080\n", .{});
         }

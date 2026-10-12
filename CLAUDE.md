@@ -100,9 +100,9 @@ File identity selects the frontend: `.ts` enters the `zts-model-1` core and `.ts
 
 ## Models
 
-Two providers are permitted here: DeepSeek and a developer-managed local MLX-LM
-server. Do not record cassettes, run the convergence corpus, or drive the expert
-loop against Claude or OpenAI.
+Two providers exist here: DeepSeek and a developer-managed local MLX-LM server.
+The Claude and OpenAI providers were removed; their code, corpora, and fixtures
+live at the `pre-rebase` tag.
 
 Start the local server yourself when you want it:
 
@@ -113,11 +113,9 @@ mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
 `zttp expert --provider local` then selects it for a session, and
 `ZTTP_CODEGEN_PROVIDER=local` selects it for recording, which is the recorder's
 default when the variable is unset. Local recordings land under
-`packages/pi/src/simulator/testdata/empirical/local/codegen/`. The frozen Claude
-corpus is retired: it no longer exists on `main` and lives at the `pre-rebase`
-tag.
+`packages/pi/src/simulator/testdata/empirical/local/codegen/`.
 
-DeepSeek is the one permitted remote provider, added 2026-08-14 by explicit
+DeepSeek is the one remote provider, added 2026-08-14 by explicit
 decision. `--provider deepseek` runs the expert loop against it and
 `ZTTP_CODEGEN_PROVIDER=deepseek` records a corpus into
 `packages/pi/src/simulator/testdata/empirical/deepseek/codegen/`. Both need
@@ -129,8 +127,7 @@ DeepSeek is also the headline since 2026-08-14: `models.default_provider` is
 `headline_provider` derives from that same constant, so the ratchet and the
 published convergence number describe the model a user actually gets. The move
 waited on a complete 19-case corpus that replays 19/19 offline and a coverage
-baseline measured from it rather than borrowed. Claude and OpenAI corpora are
-now off-headline: measured, not ratcheted.
+baseline measured from it rather than borrowed.
 
 A DeepSeek turn is slower than a local one. `ZTTP_CODEGEN_TURN_TIMEOUT_MS`
 defaults to 3 minutes, which truncates the heavier cases; the corpus was

@@ -226,7 +226,7 @@ test "settings file overlays compaction values and rejects exact unknown key" {
     const path = try std.fs.path.join(allocator, &.{ root, "settings.json" });
     defer allocator.free(path);
     var value: Settings = .{};
-    const model = models.defaultForProvider(.anthropic);
+    const model = models.defaultForProvider(.deepseek);
     try testing.expect((try applyFile(allocator, path, model, &value)) == null);
     try testing.expect(!value.compaction.enabled);
     try testing.expectEqual(@as(u64, 30_000), value.compaction.max_input_tokens);
@@ -295,7 +295,7 @@ test "project compaction values overlay user values without resetting other keys
     defer allocator.free(user_path);
     const project_path = try std.fs.path.join(allocator, &.{ root, "project.json" });
     defer allocator.free(project_path);
-    const model = models.defaultForProvider(.anthropic);
+    const model = models.defaultForProvider(.deepseek);
     var value: Settings = .{};
 
     try testing.expect((try applyFile(allocator, user_path, model, &value)) == null);

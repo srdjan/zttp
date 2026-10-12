@@ -6,23 +6,17 @@ const std = @import("std");
 
 pub const Provider = enum {
     local,
-    anthropic,
-    openai,
     deepseek,
 
     pub fn publicName(self: Provider) []const u8 {
         return switch (self) {
             .local => "local",
-            .anthropic => "claude",
-            .openai => "openai",
             .deepseek => "deepseek",
         };
     }
 
     pub fn parsePublic(value: []const u8) ?Provider {
         if (std.mem.eql(u8, value, "local")) return .local;
-        if (std.mem.eql(u8, value, "claude")) return .anthropic;
-        if (std.mem.eql(u8, value, "openai")) return .openai;
         if (std.mem.eql(u8, value, "deepseek")) return .deepseek;
         return null;
     }
@@ -75,43 +69,6 @@ pub const registry = [_]Model{
         .display_name = "Qwen3 8B MLX 4-bit",
         .capabilities = .{ .context_window_tokens = 40_960, .max_output_tokens = 8_192 },
         .request_policy = .{ .max_output_tokens = 8_192 },
-    },
-    .{
-        .provider = .anthropic,
-        .id = "claude-opus-4-8",
-        .display_name = "Claude Opus 4.8",
-        .capabilities = .{ .context_window_tokens = 200_000, .max_output_tokens = 32_000 },
-        .request_policy = .{ .max_output_tokens = 32_000 },
-    },
-    .{
-        .provider = .anthropic,
-        .id = "claude-sonnet-5",
-        .display_name = "Claude Sonnet 5",
-        .capabilities = .{ .context_window_tokens = 200_000, .max_output_tokens = 64_000 },
-        .request_policy = .{ .max_output_tokens = 64_000 },
-    },
-    .{
-        .provider = .anthropic,
-        .id = "claude-sonnet-4-6",
-        .display_name = "Claude Sonnet 4.6",
-        .capabilities = .{ .context_window_tokens = 200_000, .max_output_tokens = 64_000 },
-        .request_policy = .{ .max_output_tokens = 64_000 },
-        .is_default = true,
-    },
-    .{
-        .provider = .anthropic,
-        .id = "claude-haiku-4-5-20251001",
-        .display_name = "Claude Haiku 4.5",
-        .capabilities = .{ .context_window_tokens = 200_000, .max_output_tokens = 8_192 },
-        .request_policy = .{ .max_output_tokens = 8_192 },
-    },
-    .{
-        .provider = .openai,
-        .id = "gpt-4o-mini",
-        .display_name = "GPT-4o mini",
-        .capabilities = .{ .context_window_tokens = 128_000, .max_output_tokens = 16_384 },
-        .request_policy = .{ .max_output_tokens = 8_192 },
-        .is_default = true,
     },
     .{
         // Capabilities are the published DeepSeek figures (1M context, 384K
@@ -208,30 +165,9 @@ test "registry ids and defaults are unique and provider-exact" {
     }
 }
 
-test "gpt-4o-mini capability and request policy remain distinct" {
-    const model = try resolveForProvider(.openai, "gpt-4o-mini");
-    try std.testing.expectEqual(@as(u32, 128_000), model.capabilities.context_window_tokens);
-    try std.testing.expectEqual(@as(u32, 16_384), model.capabilities.max_output_tokens);
-    try std.testing.expectEqual(@as(u32, 8_192), model.request_policy.max_output_tokens);
-    try std.testing.expect(findById("gpt-4o-mini-search-preview") == null);
-}
-
-test "Anthropic request policies preserve curated model budgets" {
-    const expected = [_]struct { id: []const u8, max_output_tokens: u32 }{
-        .{ .id = "claude-opus-4-8", .max_output_tokens = 32_000 },
-        .{ .id = "claude-sonnet-5", .max_output_tokens = 64_000 },
-        .{ .id = "claude-sonnet-4-6", .max_output_tokens = 64_000 },
-        .{ .id = "claude-haiku-4-5-20251001", .max_output_tokens = 8_192 },
-    };
-    for (expected) |entry| {
-        const model = try resolveForProvider(.anthropic, entry.id);
-        try std.testing.expectEqual(entry.max_output_tokens, model.request_policy.max_output_tokens);
-    }
-}
-
 test "provider resolution distinguishes unknown and cross-provider ids" {
-    try std.testing.expectError(error.UnknownModel, resolveForProvider(.openai, "gpt-4o-min"));
-    try std.testing.expectError(error.ProviderMismatch, resolveForProvider(.anthropic, "gpt-4o-mini"));
+    try std.testing.expectError(error.UnknownModel, resolveForProvider(.deepseek, "deepseek-v4-fast"));
+    try std.testing.expectError(error.ProviderMismatch, resolveForProvider(.local, "deepseek-v4-flash"));
 }
 
 test "DeepSeek rows carry the published limits and a deliberate request policy" {
@@ -244,7 +180,7 @@ test "DeepSeek rows carry the published limits and a deliberate request policy" 
     const pro = try resolveForProvider(.deepseek, "deepseek-v4-pro");
     try std.testing.expectEqual(@as(u32, 32_768), pro.request_policy.max_output_tokens);
     try std.testing.expect(!pro.is_default);
-    try std.testing.expectError(error.ProviderMismatch, resolveForProvider(.openai, "deepseek-v4-flash"));
+    try std.testing.expectError(error.ProviderMismatch, resolveForProvider(.local, "deepseek-v4-flash"));
 }
 
 test "local provider has exactly the pinned LFM default and request policy" {

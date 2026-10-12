@@ -35,8 +35,6 @@ pub fn checkLocalReadiness(allocator: std.mem.Allocator) !void {
 pub fn checkDefaultProviderReadiness(allocator: std.mem.Allocator) !void {
     switch (models_registry.default_provider) {
         .local => return checkLocalReadiness(allocator),
-        .anthropic => if (!envHasNonBlank("ANTHROPIC_API_KEY")) return error.MissingAnthropicCredential,
-        .openai => if (!envHasNonBlank("OPENAI_API_KEY")) return error.MissingOpenAICredential,
         .deepseek => if (!envHasNonBlank("DEEPSEEK_API_KEY")) return error.MissingDeepSeekCredential,
     }
 }
@@ -235,14 +233,11 @@ pub fn modeErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.ProviderMismatch => "error: --model is not available for the configured provider; model IDs do not switch providers\n",
         error.NoActiveProvider => "error: no active model provider\n",
-        error.MissingAnthropicCredential => "error: --provider claude requires ANTHROPIC_API_KEY or `zttp auth claude`\n",
-        error.MissingOpenAICredential => "error: --provider openai requires OPENAI_API_KEY or `zttp auth openai`\n",
         error.MissingDeepSeekCredential => "error: --provider deepseek requires DEEPSEEK_API_KEY or `zttp auth deepseek`\n",
         error.InvalidDeepSeekBaseUrl => "error: DEEPSEEK_BASE_URL must be an HTTPS root carrying no credential, such as https://api.deepseek.com\n",
         error.ProjectInstructionsTooLarge => "error: complete AGENTS.md/CLAUDE.md instructions do not fit Pi's 48 KiB system-prompt cap; reduce the applicable project instructions before launching\n",
         error.ProtectedPromptTooLarge => "error: Pi's protected expert prompt exceeds its 16 KiB safety gate; update the Pi build before launching\n",
-        error.UnsupportedOpenAIModelOverride => "error: ZTS_OPENAI_MODEL is no longer supported; use --provider openai --model <registered-id>\n",
-        error.LegacySessionIdentity => "error: this historical session has no provider identity; resume once with --provider local|claude|openai|deepseek and optional --model\n",
+        error.LegacySessionIdentity => "error: this historical session has no provider identity; resume once with --provider local|deepseek and optional --model\n",
         error.SchemaVersionUnsupported => "error: this session was journaled by an older schema that this build cannot read; its files are untouched under ~/.zttp/sessions, and a new session starts with `zttp expert`\n",
         error.SessionProtocolMismatch => "error: this session was created with a different expert persona, compiler protocol, or tool catalog; start a new session with `zttp expert` instead of replaying stale authority\n",
         error.InvalidStoredProvider => "error: the stored session provider is invalid; restart with --provider and optional --model to override it\n",
@@ -282,8 +277,8 @@ pub fn flagErrorMessage(err: anyerror) []const u8 {
         error.GoalRequiresHandler => "error: --goal requires --handler <path>\n",
         error.GoalConflictsWithPrint => "error: --goal cannot be combined with --print\n",
         error.MissingModelValue => "error: --model requires a model id value\n",
-        error.MissingProviderValue => "error: --provider requires local, claude, or openai\n",
-        error.UnsupportedProvider => "error: --provider only accepts local, claude, or openai\n",
+        error.MissingProviderValue => "error: --provider requires local or deepseek\n",
+        error.UnsupportedProvider => "error: --provider only accepts local or deepseek\n",
         error.UnknownModel => "error: --model has an unknown id; run /model in the expert REPL to list available models\n",
         error.GoalConflictsWithProviderOrModel => "error: --goal is compiler-only and cannot be combined with --provider or --model\n",
         else => "error: unexpected flag parse failure\n",
@@ -339,8 +334,7 @@ pub const ExpertFlags = struct {
     /// Handler path the autoloop operates on. Required whenever `goals` is
     /// set; ignored otherwise.
     handler: ?[]const u8 = null,
-    /// Launch-scoped provider override. The public Claude name maps to the
-    /// existing Anthropic adapter without changing its internal identity.
+    /// Launch-scoped provider override (`local` or `deepseek`).
     provider: ?models_registry.Provider = null,
     /// Launch-time model override (`--model <id>`). Parsing resolves a canonical
     /// registry id; session construction then checks it against the resolved
@@ -845,23 +839,17 @@ test "parseExpertFlags: --max-iters rejects non-numeric" {
 }
 
 test "parseExpertFlags: --model <id> two-argv form captures the canonical id" {
-    const argv = [_][]const u8{ "zts", "expert", "--model", "claude-haiku-4-5-20251001" };
+    const argv = [_][]const u8{ "zts", "expert", "--model", "deepseek-v4-pro" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.model != null);
-    try testing.expectEqualStrings("claude-haiku-4-5-20251001", flags.model.?);
+    try testing.expectEqualStrings("deepseek-v4-pro", flags.model.?);
 }
 
 test "parseExpertFlags: --model=<id> inline form captures the canonical id" {
-    const argv = [_][]const u8{ "zts", "expert", "--model=claude-sonnet-4-6" };
+    const argv = [_][]const u8{ "zts", "expert", "--model=deepseek-v4-flash" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.model != null);
-    try testing.expectEqualStrings("claude-sonnet-4-6", flags.model.?);
-}
-
-test "parseExpertFlags: --model accepts the registered OpenAI default" {
-    const argv = [_][]const u8{ "zts", "expert", "--model", "gpt-4o-mini" };
-    const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqualStrings("gpt-4o-mini", flags.model.?);
+    try testing.expectEqualStrings("deepseek-v4-flash", flags.model.?);
 }
 
 test "parseExpertFlags: --model defaults to null when absent" {
@@ -873,15 +861,16 @@ test "parseExpertFlags: --model defaults to null when absent" {
 test "parseExpertFlags: public provider names map to internal adapters" {
     const local = try parseExpertFlags(&.{ "--provider", "local" });
     try testing.expectEqual(models_registry.Provider.local, local.provider.?);
-    const claude = try parseExpertFlags(&.{"--provider=claude"});
-    try testing.expectEqual(models_registry.Provider.anthropic, claude.provider.?);
-    const openai = try parseExpertFlags(&.{ "--provider", "openai" });
-    try testing.expectEqual(models_registry.Provider.openai, openai.provider.?);
+    const deepseek = try parseExpertFlags(&.{"--provider=deepseek"});
+    try testing.expectEqual(models_registry.Provider.deepseek, deepseek.provider.?);
 }
 
 test "parseExpertFlags: provider rejects missing and unsupported values" {
     try testing.expectError(error.MissingProviderValue, parseExpertFlags(&.{"--provider"}));
     try testing.expectError(error.UnsupportedProvider, parseExpertFlags(&.{"--provider=anthropic"}));
+    // The retired public names are refused with the same error as any unknown name.
+    try testing.expectError(error.UnsupportedProvider, parseExpertFlags(&.{"--provider=claude"}));
+    try testing.expectError(error.UnsupportedProvider, parseExpertFlags(&.{ "--provider", "openai" }));
 }
 
 test "parseExpertFlags: compiler-only goal rejects provider and model flags" {
@@ -903,8 +892,9 @@ test "parseExpertFlags: --model with an unknown id errors UnknownModel" {
     try testing.expectError(error.UnknownModel, parseExpertFlags(argv[0..]));
 }
 
-test "parseExpertFlags: --model uses exact ids for specialized OpenAI models" {
-    const argv = [_][]const u8{ "zts", "expert", "--model", "gpt-4o-mini-search-preview" };
+test "parseExpertFlags: --model refuses the retired Claude and OpenAI ids" {
+    try testing.expectError(error.UnknownModel, parseExpertFlags(&.{ "--model", "claude-sonnet-4-6" }));
+    const argv = [_][]const u8{ "zts", "expert", "--model", "gpt-4o-mini" };
     try testing.expectError(error.UnknownModel, parseExpertFlags(argv[0..]));
 }
 

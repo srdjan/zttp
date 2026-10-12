@@ -1,4 +1,4 @@
-//! Expert loop driver. Pumps transcript state, Anthropic replies, compiler
+//! Expert loop driver. Pumps transcript state, provider replies, compiler
 //! veto results, and structured tool batches through `turn.TurnMachine`.
 
 const std = @import("std");
@@ -174,14 +174,6 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.ResponseTooLarge,
         error.TooManyToolCalls,
         => "The local MLX response exceeded zttp's bounded response limits. Narrow the request and retry.",
-        // SSE/stream decode failures from `providers/openai/sse_parser.zig`. A
-        // mangled or partial stream (often a proxy) otherwise prints a bare
-        // CamelCase name; collapse them all into one actionable line.
-        error.MalformedSse,
-        error.MissingType,
-        error.UnknownEventType,
-        error.UnexpectedJsonShape,
-        => "The provider response could not be parsed (possibly a proxy or partial stream). Try again.",
         else => null,
     };
 }
@@ -2510,21 +2502,6 @@ test "failed veto does not append a verified change-set receipt" {
             .verified_change_set => return error.TestFailed,
             else => {},
         }
-    }
-}
-
-test "providerErrorRemediation: SSE parse errors map to a non-empty actionable hint" {
-    // EXP-12: a proxy-mangled stream previously printed a bare CamelCase name.
-    const sse_errors = [_]anyerror{
-        error.MalformedSse,
-        error.MissingType,
-        error.UnknownEventType,
-        error.UnexpectedJsonShape,
-    };
-    for (sse_errors) |err| {
-        const hint = providerErrorRemediation(err) orelse return error.TestFailed;
-        try testing.expect(hint.len > 0);
-        try testing.expect(std.mem.indexOf(u8, hint, "could not be parsed") != null);
     }
 }
 

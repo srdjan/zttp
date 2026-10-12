@@ -1,7 +1,7 @@
 //! Turn state machine for the native coding-agent loop.
 //!
 //! Pure `(state, event) -> (state', action)`; no I/O, no allocator. The loop
-//! driver owns tool execution, Anthropic requests, retry prompt framing, and
+//! driver owns tool execution, provider requests, retry prompt framing, and
 //! transcript mutation. The machine only decides what happens next.
 
 const std = @import("std");

@@ -17,9 +17,6 @@ const loop = @import("loop.zig");
 const turn = @import("turn.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
-const anthropic_client = @import("providers/anthropic/client.zig");
-const tools_schema = @import("providers/anthropic/tools_schema.zig");
-const openai_client = @import("providers/openai/client.zig");
 const local_client = @import("providers/local/client.zig");
 const deepseek_client = @import("providers/deepseek/client.zig");
 const provider_backend = @import("providers/backend.zig");
@@ -107,7 +104,7 @@ pub const SessionConfig = struct {
 };
 
 const stub_reply_text =
-    "expert offline: no live model backend configured; set ANTHROPIC_API_KEY to enable expert mode";
+    "expert offline: no live model backend configured; set DEEPSEEK_API_KEY to enable expert mode";
 
 /// Deterministic internal client used by compiler-only and unit-test paths.
 const StubClient = struct {
@@ -216,24 +213,6 @@ pub const SessionMetrics = struct {
     }
 };
 
-/// Where to send OpenAI-shaped requests when the target is not OpenAI.
-///
-pub const OpenAiEndpoint = struct {
-    base_url: []const u8,
-};
-
-/// Read an endpoint override out of the environment, or null when
-/// `ZTS_OPENAI_BASE_URL` is unset - which is the hosted path, unchanged.
-///
-/// The slices borrow from the process environment, which outlives any session,
-/// and `initOpenAI` copies them anyway so one ownership rule covers both the
-/// env source and a caller-supplied literal.
-pub fn openAiEndpointFromEnv() !?OpenAiEndpoint {
-    if (envVar("ZTS_OPENAI_MODEL") != null) return error.UnsupportedOpenAIModelOverride;
-    const base_url = envVar("ZTS_OPENAI_BASE_URL") orelse return null;
-    return .{ .base_url = base_url };
-}
-
 /// Where the resolved session will send handler source.
 ///
 /// A `zttp expert` turn puts source on the wire whenever the model reads a
@@ -244,10 +223,6 @@ pub const Destination = union(enum) {
     /// Internal stub backend used by compiler-only and test paths.
     offline,
     local: []const u8,
-    anthropic,
-    openai_hosted,
-    /// `ZTS_OPENAI_BASE_URL` is set. Carries the value as given.
-    openai_custom: []const u8,
     /// DeepSeek, at its default root or at a `DEEPSEEK_BASE_URL` override.
     /// Carries the value as given. The endpoint policy requires HTTPS, so this
     /// is always a remote host.
@@ -259,8 +234,7 @@ pub const Destination = union(enum) {
     pub fn isLocal(self: Destination) bool {
         return switch (self) {
             .offline, .local => true,
-            .anthropic, .openai_hosted, .deepseek => false,
-            .openai_custom => |url| containsAny(url, &.{ "//127.0.0.1", "//localhost", "//[::1]", "//0.0.0.0" }),
+            .deepseek => false,
         };
     }
 };
@@ -270,21 +244,9 @@ pub fn destinationForSession(session: *const AgentSession) Destination {
         .stub => .offline,
         .provider => |backend| switch (backend.requestConfig().provider) {
             .local => .{ .local = backend.endpoint() },
-            .anthropic => .anthropic,
-            .openai => if (std.mem.eql(u8, backend.endpoint(), openai_client.default_base_url))
-                .openai_hosted
-            else
-                .{ .openai_custom = backend.endpoint() },
             .deepseek => .{ .deepseek = backend.endpoint() },
         },
     };
-}
-
-fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
-    for (needles) |needle| {
-        if (std.mem.indexOf(u8, haystack, needle) != null) return true;
-    }
-    return false;
 }
 
 pub const AgentSession = struct {
@@ -367,27 +329,6 @@ pub const AgentSession = struct {
         return session;
     }
 
-    /// Constructs an Anthropic session with owned request buffers.
-    pub fn initAnthropic(
-        allocator: std.mem.Allocator,
-        api_key: []const u8,
-        system_prompt: []const u8,
-        tools_json: ?[]const u8,
-    ) !AgentSession {
-        const model = models_registry.defaultForProvider(.anthropic);
-        return .{
-            .session_allocator = allocator,
-            .backend = .{ .provider = try provider_backend.ProviderBackend.init(allocator, .{
-                .provider = .anthropic,
-                .auth = api_key,
-                .system_prompt = system_prompt,
-                .tools_json = tools_json,
-            }) },
-            .resolved_provider = .anthropic,
-            .resolved_model = model,
-        };
-    }
-
     pub fn initLocal(
         allocator: std.mem.Allocator,
         system_prompt: []const u8,
@@ -408,36 +349,9 @@ pub const AgentSession = struct {
         };
     }
 
-    /// Constructs an OpenAI Responses API session. The backend copies the API
-    /// key, system prompt, tools, and optional endpoint. `tools_json` is the
-    /// Responses-API tools array produced by `openai_client.writeToolsArray`.
-    /// An endpoint override changes only the Responses API destination. The
-    /// active provider's registry-selected model remains authoritative.
-    pub fn initOpenAI(
-        allocator: std.mem.Allocator,
-        api_key: []const u8,
-        system_prompt: []const u8,
-        tools_json: ?[]const u8,
-        override: ?OpenAiEndpoint,
-    ) !AgentSession {
-        const model = models_registry.defaultForProvider(.openai);
-        return .{
-            .session_allocator = allocator,
-            .backend = .{ .provider = try provider_backend.ProviderBackend.init(allocator, .{
-                .provider = .openai,
-                .auth = api_key,
-                .system_prompt = system_prompt,
-                .tools_json = tools_json,
-                .endpoint = if (override) |endpoint| endpoint.base_url else null,
-            }) },
-            .resolved_provider = .openai,
-            .resolved_model = model,
-        };
-    }
-
     /// Constructs a DeepSeek Chat Completions session with owned request
-    /// buffers. `tools_json` is the OpenAI
-    /// function-calling array produced by `deepseek_client.writeToolsArray`.
+    /// buffers. `tools_json` is the function-calling
+    /// array produced by `deepseek_client.writeToolsArray`.
     pub fn initDeepSeek(
         allocator: std.mem.Allocator,
         api_key: []const u8,
@@ -971,28 +885,6 @@ fn initFromEnvWithPreparedResume(
                 defer allocator.free(tools_json);
                 break :blk try AgentSession.initLocal(allocator, system_prompt, tools_json, base_url);
             },
-            .anthropic => {
-                const api_key = envVar("ANTHROPIC_API_KEY") orelse return error.MissingAnthropicCredential;
-                const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
-                defer allocator.free(system_prompt);
-                const tools_json = try buildToolsJson(allocator, active_registry);
-                defer allocator.free(tools_json);
-                break :blk try AgentSession.initAnthropic(allocator, api_key, system_prompt, tools_json);
-            },
-            .openai => {
-                const api_key = envVar("OPENAI_API_KEY") orelse return error.MissingOpenAICredential;
-                const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
-                defer allocator.free(system_prompt);
-                const tools_json = try buildOpenAIToolsJson(allocator, active_registry);
-                defer allocator.free(tools_json);
-                break :blk try AgentSession.initOpenAI(
-                    allocator,
-                    api_key,
-                    system_prompt,
-                    tools_json,
-                    try openAiEndpointFromEnv(),
-                );
-            },
             .deepseek => {
                 const api_key = envVar("DEEPSEEK_API_KEY") orelse return error.MissingDeepSeekCredential;
                 const base_url = deepseek_client.effectiveBaseUrl(envVar("DEEPSEEK_BASE_URL"));
@@ -1269,20 +1161,6 @@ fn nowUnixMs() i64 {
     var ts: std.posix.timespec = undefined;
     _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
-fn buildToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
-    var buf = TextBuffer.init(allocator);
-    defer buf.deinit();
-    try tools_schema.writeToolsArray(buf.writer(), registry);
-    return try buf.toOwnedSlice();
-}
-
-fn buildOpenAIToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
-    var buf = TextBuffer.init(allocator);
-    defer buf.deinit();
-    try openai_client.writeToolsArray(buf.writer(), registry);
-    return try buf.toOwnedSlice();
 }
 
 fn buildLocalToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
@@ -2081,11 +1959,7 @@ fn requestBudgetForConfig(
         .use_projection_override = projection_override != null,
     });
     defer snapshot.deinit(allocator);
-    const body = switch (snapshot.config.provider) {
-        .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(allocator, &snapshot),
-        .openai => try openai_client.buildRequestBodyFromSnapshot(allocator, &snapshot),
-        .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(allocator, &snapshot),
-    };
+    const body = try chat_completions.buildRequestBodyFromSnapshot(allocator, &snapshot);
     defer allocator.free(body);
     try snapshot.completePreparation(body);
     if (require_hard_admission) try snapshot.requireHardAdmission();
@@ -2363,17 +2237,17 @@ test "startup completes workspace recovery before provider credential validation
     defer allocator.free(prior_cwd);
     try std.Io.Threaded.chdir(root);
     defer std.Io.Threaded.chdir(prior_cwd) catch {};
-    var credential = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    var credential = try EnvOverride.unset(allocator, "DEEPSEEK_API_KEY");
     defer credential.restore(allocator);
     var registry: Registry = .{};
     defer registry.deinit(allocator);
-    try testing.expectError(error.MissingAnthropicCredential, initFromEnvWithSessionConfig(
+    try testing.expectError(error.MissingDeepSeekCredential, initFromEnvWithSessionConfig(
         allocator,
         &registry,
         .{
             .no_session = true,
             .no_context_files = true,
-            .provider = .anthropic,
+            .provider = .deepseek,
         },
     ));
 
@@ -2660,27 +2534,6 @@ fn initLocalUnderAllocationFailure(allocator: std.mem.Allocator) !void {
     defer session.deinit(allocator);
 }
 
-fn initAnthropicUnderAllocationFailure(allocator: std.mem.Allocator) !void {
-    var session = try AgentSession.initAnthropic(
-        allocator,
-        "owned anthropic key",
-        "owned anthropic prompt",
-        "[{\"name\":\"anthropic_tool\",\"description\":\"d\",\"input_schema\":{}}]",
-    );
-    defer session.deinit(allocator);
-}
-
-fn initOpenAiUnderAllocationFailure(allocator: std.mem.Allocator) !void {
-    var session = try AgentSession.initOpenAI(
-        allocator,
-        "owned openai key",
-        "owned openai prompt",
-        "[{\"type\":\"function\",\"function\":{\"name\":\"openai_tool\"}}]",
-        .{ .base_url = "http://127.0.0.1:18081/v1/responses" },
-    );
-    defer session.deinit(allocator);
-}
-
 fn initDeepSeekUnderAllocationFailure(allocator: std.mem.Allocator) !void {
     var session = try AgentSession.initDeepSeek(
         allocator,
@@ -2694,8 +2547,6 @@ fn initDeepSeekUnderAllocationFailure(allocator: std.mem.Allocator) !void {
 
 test "provider constructors release every partial allocation" {
     try testing.checkAllAllocationFailures(testing.allocator, initLocalUnderAllocationFailure, .{});
-    try testing.checkAllAllocationFailures(testing.allocator, initAnthropicUnderAllocationFailure, .{});
-    try testing.checkAllAllocationFailures(testing.allocator, initOpenAiUnderAllocationFailure, .{});
     try testing.checkAllAllocationFailures(testing.allocator, initDeepSeekUnderAllocationFailure, .{});
 }
 
@@ -2720,65 +2571,6 @@ test "initLocal owns prompt tools and a non-default endpoint" {
     try testing.expectEqualStrings("local caller prompt", config.system_prompt);
     try testing.expectEqualStrings("[{\"name\":\"local-owned-tool\"}]", config.tools_json.?);
     try testing.expectEqualStrings("http://127.0.0.1:18082", session.backend.provider.endpoint());
-}
-
-test "initAnthropic owns auth prompt and non-null tools" {
-    const allocator = testing.allocator;
-    var session = blk: {
-        const key = try allocator.dupe(u8, "anthropic caller key");
-        defer allocator.free(key);
-        const prompt = try allocator.dupe(u8, "anthropic caller prompt");
-        defer allocator.free(prompt);
-        const tools = try allocator.dupe(u8, "[{\"name\":\"anthropic-owned-tool\"}]");
-        defer allocator.free(tools);
-        const owned = try AgentSession.initAnthropic(allocator, key, prompt, tools);
-        @memset(key, 'k');
-        @memset(prompt, 'p');
-        @memset(tools, 't');
-        break :blk owned;
-    };
-    defer session.deinit(allocator);
-
-    const config = try session.requestConfig();
-    try testing.expectEqualStrings("anthropic caller key", session.backend.provider.auth().?);
-    try testing.expectEqualStrings("anthropic caller prompt", config.system_prompt);
-    try testing.expectEqualStrings("[{\"name\":\"anthropic-owned-tool\"}]", config.tools_json.?);
-}
-
-test "initOpenAI owns auth prompt tools and a non-default endpoint" {
-    const allocator = testing.allocator;
-    var session = blk: {
-        const key = try allocator.dupe(u8, "openai caller key");
-        defer allocator.free(key);
-        const prompt = try allocator.dupe(u8, "openai caller prompt");
-        defer allocator.free(prompt);
-        const tools = try allocator.dupe(u8, "[{\"name\":\"openai-owned-tool\"}]");
-        defer allocator.free(tools);
-        const endpoint = try allocator.dupe(u8, "http://127.0.0.1:18083/v1/responses");
-        defer allocator.free(endpoint);
-        const owned = try AgentSession.initOpenAI(
-            allocator,
-            key,
-            prompt,
-            tools,
-            .{ .base_url = endpoint },
-        );
-        @memset(key, 'k');
-        @memset(prompt, 'p');
-        @memset(tools, 't');
-        @memset(endpoint, 'e');
-        break :blk owned;
-    };
-    defer session.deinit(allocator);
-
-    const config = try session.requestConfig();
-    try testing.expectEqualStrings("openai caller key", session.backend.provider.auth().?);
-    try testing.expectEqualStrings("openai caller prompt", config.system_prompt);
-    try testing.expectEqualStrings("[{\"name\":\"openai-owned-tool\"}]", config.tools_json.?);
-    try testing.expectEqualStrings(
-        "http://127.0.0.1:18083/v1/responses",
-        session.backend.provider.endpoint(),
-    );
 }
 
 test "initDeepSeek owns auth prompt tools and a non-default endpoint" {
@@ -2809,45 +2601,6 @@ test "initDeepSeek owns auth prompt tools and a non-default endpoint" {
         "https://deepseek-gateway.example/v1",
         session.backend.provider.endpoint(),
     );
-}
-
-test "initAnthropic dupes api_key and system_prompt, deinit releases both" {
-    var session = try AgentSession.initAnthropic(
-        testing.allocator,
-        "test-fixture-key",
-        "you are a zts expert",
-        "[{\"name\":\"zts_expert_meta\",\"description\":\"d\",\"input_schema\":{}}]",
-    );
-    defer session.deinit(testing.allocator);
-
-    try testing.expect(session.backend == .provider);
-    const config = try session.requestConfig();
-    try testing.expectEqual(Provider.anthropic, config.provider);
-    try testing.expectEqualStrings("test-fixture-key", session.backend.provider.auth().?);
-    try testing.expectEqualStrings("you are a zts expert", config.system_prompt);
-    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
-    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
-    try testing.expect(config.tools_json != null);
-}
-
-test "initOpenAI dupes api_key and system_prompt and routes through openai backend" {
-    var session = try AgentSession.initOpenAI(
-        testing.allocator,
-        "openai-fixture-key",
-        "you are a zts expert",
-        "[{\"type\":\"function\",\"function\":{\"name\":\"x\"}}]",
-        null,
-    );
-    defer session.deinit(testing.allocator);
-
-    try testing.expect(session.backend == .provider);
-    const config = try session.requestConfig();
-    try testing.expectEqual(Provider.openai, config.provider);
-    try testing.expectEqualStrings("openai-fixture-key", session.backend.provider.auth().?);
-    try testing.expectEqualStrings("you are a zts expert", config.system_prompt);
-    try testing.expectEqualStrings("gpt-4o-mini", config.model);
-    try testing.expectEqual(@as(u32, 8_192), config.max_output_tokens);
-    try testing.expectEqualStrings("openai", session.backendDescriptor().provider_label);
 }
 
 test "initDeepSeek dupes its owned bytes and routes through the deepseek backend" {
@@ -2908,56 +2661,13 @@ test "setModel moves a deepseek session between registered deepseek models only"
 
     try testing.expectError(
         error.ProviderMismatch,
-        session.setModel(testing.allocator, "gpt-4o-mini"),
+        session.setModel(testing.allocator, "LiquidAI/LFM2.5-2.6B-MLX-8bit"),
     );
     try testing.expectEqualStrings("deepseek-v4-pro", (try session.requestConfig()).model);
 }
 
-test "an endpoint override redirects the client without touching the hosted default" {
-    // A custom Responses-compatible endpoint changes transport location only.
-    // Model selection remains provider-scoped through the static registry.
-    var local = try AgentSession.initOpenAI(
-        testing.allocator,
-        "unused-by-a-local-server",
-        "p",
-        null,
-        .{ .base_url = "http://127.0.0.1:11434/v1/responses" },
-    );
-    defer local.deinit(testing.allocator);
-
-    try testing.expectEqualStrings("http://127.0.0.1:11434/v1/responses", local.backend.provider.endpoint());
-    const local_config = try local.requestConfig();
-    try testing.expectEqualStrings("gpt-4o-mini", local_config.model);
-    try testing.expectEqual(@as(u32, 8_192), local_config.max_output_tokens);
-
-    var hosted = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
-    defer hosted.deinit(testing.allocator);
-    const hosted_config = try hosted.requestConfig();
-    try testing.expectEqualStrings("gpt-4o-mini", hosted_config.model);
-    try testing.expectEqual(@as(u32, 8_192), hosted_config.max_output_tokens);
-}
-
-test "an endpoint that moves only the host keeps the registry model" {
-    // A proxy in front of OpenAI: the wire shape and the model are unchanged,
-    // only where the request goes. Forcing a model id here would silently
-    // replace one the caller never asked to change.
-    var session = try AgentSession.initOpenAI(
-        testing.allocator,
-        "k",
-        "p",
-        null,
-        .{ .base_url = "http://proxy.internal/v1/responses" },
-    );
-    defer session.deinit(testing.allocator);
-
-    try testing.expectEqualStrings("http://proxy.internal/v1/responses", session.backend.provider.endpoint());
-    const config = try session.requestConfig();
-    try testing.expectEqualStrings("gpt-4o-mini", config.model);
-    try testing.expectEqual(@as(u32, 8_192), config.max_output_tokens);
-}
-
 test "modelClient wraps the active backend with the normal request lifecycle" {
-    var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
+    var session = try AgentSession.initDeepSeek(testing.allocator, "k", "p", null, deepseek_client.default_base_url);
     defer session.deinit(testing.allocator);
 
     const mc = session.modelClient();
@@ -2965,54 +2675,55 @@ test "modelClient wraps the active backend with the normal request lifecycle" {
 }
 
 test "registry defaults match provider client model defaults" {
-    const anthropic_defaults = anthropic_client.Config{ .api_key = "", .system_prompt = "" };
-    const openai_defaults = openai_client.Config{ .api_key = "", .system_prompt = "" };
+    const local_defaults = local_client.Config{ .system_prompt = "" };
+    const deepseek_defaults = deepseek_client.Config{ .api_key = "", .system_prompt = "" };
     try testing.expectEqualStrings(
-        anthropic_defaults.model,
-        models_registry.defaultForProvider(.anthropic).id,
+        local_defaults.model,
+        models_registry.defaultForProvider(.local).id,
     );
     try testing.expectEqualStrings(
-        openai_defaults.model,
-        models_registry.defaultForProvider(.openai).id,
+        deepseek_defaults.model,
+        models_registry.defaultForProvider(.deepseek).id,
     );
 }
 
 test "setModel validates provider and commits model with request policy atomically" {
-    var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
+    var session = try AgentSession.initDeepSeek(testing.allocator, "k", "p", null, deepseek_client.default_base_url);
     defer session.deinit(testing.allocator);
 
-    try session.setModel(testing.allocator, "claude-sonnet-4-6");
+    try session.setModel(testing.allocator, "deepseek-v4-flash");
     var config = try session.requestConfig();
-    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
-    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
+    try testing.expectEqual(@as(u32, 32_768), config.max_output_tokens);
+    try testing.expectEqualStrings("deepseek-v4-flash", config.model);
 
     try testing.expectError(error.UnknownModel, session.setModel(testing.allocator, "some-unknown-model"));
     config = try session.requestConfig();
-    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
-    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
+    try testing.expectEqual(@as(u32, 32_768), config.max_output_tokens);
+    try testing.expectEqualStrings("deepseek-v4-flash", config.model);
 
-    try testing.expectError(error.ProviderMismatch, session.setModel(testing.allocator, "gpt-4o-mini"));
+    try testing.expectError(error.ProviderMismatch, session.setModel(testing.allocator, "LiquidAI/LFM2.5-2.6B-MLX-8bit"));
     config = try session.requestConfig();
-    try testing.expectEqual(@as(u32, 64_000), config.max_output_tokens);
-    try testing.expectEqualStrings("claude-sonnet-4-6", config.model);
+    try testing.expectEqual(@as(u32, 32_768), config.max_output_tokens);
+    try testing.expectEqualStrings("deepseek-v4-flash", config.model);
 }
 
 test "setModel rejects compaction tuples with no post-summary request capacity" {
-    var session = try AgentSession.initAnthropic(
+    var session = try AgentSession.initDeepSeek(
         testing.allocator,
         "k",
         "fixed prompt " ** 1_000,
         "[]",
+        deepseek_client.default_base_url,
     );
     defer session.deinit(testing.allocator);
     session.compaction_settings.max_input_tokens = 100;
 
     try testing.expectError(
         error.NoPostSummaryCapacity,
-        session.setModel(testing.allocator, "claude-sonnet-4-6"),
+        session.setModel(testing.allocator, "deepseek-v4-flash"),
     );
     try testing.expectEqualStrings(
-        models_registry.defaultForProvider(.anthropic).id,
+        models_registry.defaultForProvider(.deepseek).id,
         (try session.requestConfig()).model,
     );
 }
@@ -3055,11 +2766,12 @@ test "setModel persistence failure leaves the live model unchanged" {
         }
     };
 
-    var session = try AgentSession.initAnthropic(
+    var session = try AgentSession.initDeepSeek(
         testing.allocator,
         "failure-key",
         "failure prompt",
         "[{\"name\":\"failure-tool\"}]",
+        deepseek_client.default_base_url,
     );
     defer session.deinit(testing.allocator);
     var capture_marker: u8 = 0;
@@ -3068,22 +2780,22 @@ test "setModel persistence failure leaves the live model unchanged" {
         .record_fn = discardCapturedExchange,
     };
     try session.setCaptureSink(&capture);
-    session.last_normal_anchor = try testInputAnchor(.anthropic, "claude-sonnet-4-6");
-    session.compaction_bridge_anchor = try testInputAnchor(.anthropic, "claude-sonnet-4-6");
+    session.last_normal_anchor = try testInputAnchor(.deepseek, "deepseek-v4-flash");
+    session.compaction_bridge_anchor = try testInputAnchor(.deepseek, "deepseek-v4-flash");
     const previous_normal_anchor = session.last_normal_anchor;
     const previous_bridge_anchor = session.compaction_bridge_anchor;
     const previous_config = try session.requestConfig();
     try testing.expectEqualStrings(
-        "claude-sonnet-4-6",
+        "deepseek-v4-flash",
         session.currentModel() orelse return error.TestUnexpectedResult,
     );
 
     try testing.expectError(
         error.WriteFailure,
-        session.setModelWithRestamp(testing.allocator, "claude-opus-4-8", FailRestamp.run),
+        session.setModelWithRestamp(testing.allocator, "deepseek-v4-pro", FailRestamp.run),
     );
     try testing.expectEqualStrings(
-        "claude-sonnet-4-6",
+        "deepseek-v4-flash",
         session.currentModel() orelse return error.TestUnexpectedResult,
     );
     const current_config = try session.requestConfig();
@@ -3097,7 +2809,7 @@ test "setModel persistence failure leaves the live model unchanged" {
     try testing.expectEqualDeep(previous_normal_anchor, session.last_normal_anchor);
     try testing.expectEqualDeep(previous_bridge_anchor, session.compaction_bridge_anchor);
     try testing.expect(session.backend.provider.captureSink() == &capture);
-    try testing.expect(destinationForSession(&session) == .anthropic);
+    try testing.expect(destinationForSession(&session) == .deepseek);
 }
 
 test "setModel restamps before committing the full backend state" {
@@ -3177,27 +2889,27 @@ test "setModel restamps before committing the full backend state" {
     );
 }
 
-test "OpenAI and stub model selection respect backend provider state" {
-    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
-    defer openai.deinit(testing.allocator);
+test "DeepSeek and stub model selection respect backend provider state" {
+    var deepseek = try AgentSession.initDeepSeek(testing.allocator, "k", "p", null, deepseek_client.default_base_url);
+    defer deepseek.deinit(testing.allocator);
     try testing.expectEqual(
-        Provider.openai,
-        openai.activeProvider() orelse return error.TestUnexpectedResult,
+        Provider.deepseek,
+        deepseek.activeProvider() orelse return error.TestUnexpectedResult,
     );
-    try openai.setModel(testing.allocator, "gpt-4o-mini");
-    try testing.expectEqual(@as(u32, 8_192), (try openai.requestConfig()).max_output_tokens);
+    try deepseek.setModel(testing.allocator, "deepseek-v4-flash");
+    try testing.expectEqual(@as(u32, 32_768), (try deepseek.requestConfig()).max_output_tokens);
 
     var stub = AgentSession.initStub();
     defer stub.deinit(testing.allocator);
     try testing.expect(stub.activeProvider() == null);
-    try testing.expectError(error.NoActiveProvider, stub.setModel(testing.allocator, "gpt-4o-mini"));
+    try testing.expectError(error.NoActiveProvider, stub.setModel(testing.allocator, "LiquidAI/LFM2.5-2.6B-MLX-8bit"));
     try testing.expect(stub.currentModel() == null);
 }
 
 test "controlled model selection updates identity without changing request config" {
-    const model = models_registry.defaultForProvider(.anthropic);
+    const model = models_registry.defaultForProvider(.deepseek);
     var session = AgentSession.initControlled(testing.allocator, model, .{
-        .provider = .anthropic,
+        .provider = .deepseek,
         .model = model.id,
         .max_output_tokens = model.request_policy.max_output_tokens,
         .system_prompt = "controlled prompt",
@@ -3206,7 +2918,7 @@ test "controlled model selection updates identity without changing request confi
     defer session.deinit(testing.allocator);
     const previous = try session.requestConfig();
 
-    try session.setModel(testing.allocator, "claude-opus-4-8");
+    try session.setModel(testing.allocator, "deepseek-v4-pro");
 
     const current = try session.requestConfig();
     try testing.expectEqualStrings(previous.model, current.model);
@@ -3214,85 +2926,13 @@ test "controlled model selection updates identity without changing request confi
     try testing.expect(current.system_prompt.ptr == previous.system_prompt.ptr);
     try testing.expect(current.tools_json.?.ptr == previous.tools_json.?.ptr);
     try testing.expectEqualStrings(
-        "claude-opus-4-8",
+        "deepseek-v4-pro",
         session.currentModel() orelse return error.TestUnexpectedResult,
-    );
-}
-
-test "explicit Claude selects only the Anthropic credential" {
-    const allocator = testing.allocator;
-    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-key");
-    defer anthropic.restore(allocator);
-    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
-    defer openai.restore(allocator);
-
-    var registry: Registry = .{};
-    defer registry.deinit(allocator);
-    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
-        .no_session = true,
-        .no_context_files = true,
-        .provider = .anthropic,
-        .model = "claude-haiku-4-5-20251001",
-    });
-    defer session.deinit(allocator);
-    try testing.expectEqual(
-        Provider.anthropic,
-        session.activeProvider() orelse return error.TestUnexpectedResult,
-    );
-    try testing.expectEqualStrings(
-        "claude-haiku-4-5-20251001",
-        session.currentModel() orelse return error.TestUnexpectedResult,
-    );
-
-    try testing.expectError(
-        error.ProviderMismatch,
-        initFromEnvWithSessionConfig(allocator, &registry, .{
-            .no_session = true,
-            .no_context_files = true,
-            .provider = .anthropic,
-            .model = "gpt-4o-mini",
-        }),
-    );
-}
-
-test "explicit OpenAI selects only the OpenAI credential" {
-    const allocator = testing.allocator;
-    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-decoy");
-    defer anthropic.restore(allocator);
-    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
-    defer openai.restore(allocator);
-
-    var registry: Registry = .{};
-    defer registry.deinit(allocator);
-    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
-        .no_session = true,
-        .no_context_files = true,
-        .provider = .openai,
-        .model = "gpt-4o-mini",
-    });
-    defer session.deinit(allocator);
-    try testing.expectEqual(
-        Provider.openai,
-        session.activeProvider() orelse return error.TestUnexpectedResult,
-    );
-
-    try testing.expectError(
-        error.ProviderMismatch,
-        initFromEnvWithSessionConfig(allocator, &registry, .{
-            .no_session = true,
-            .no_context_files = true,
-            .provider = .openai,
-            .model = "claude-sonnet-4-6",
-        }),
     );
 }
 
 test "explicit DeepSeek selects only the DeepSeek credential" {
     const allocator = testing.allocator;
-    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-decoy");
-    defer anthropic.restore(allocator);
-    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-decoy");
-    defer openai.restore(allocator);
     var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "deepseek-key");
     defer deepseek.restore(allocator);
     var base_url = try EnvOverride.unset(allocator, "DEEPSEEK_BASE_URL");
@@ -3321,7 +2961,7 @@ test "explicit DeepSeek selects only the DeepSeek credential" {
             .no_session = true,
             .no_context_files = true,
             .provider = .deepseek,
-            .model = "claude-sonnet-4-6",
+            .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
         }),
     );
 }
@@ -3358,35 +2998,6 @@ test "a DeepSeek session refuses to launch without a key or over plain HTTP" {
     );
 }
 
-test "explicit cloud provider never borrows the other provider credential" {
-    const allocator = testing.allocator;
-    var registry: Registry = .{};
-    defer registry.deinit(allocator);
-
-    {
-        var anthropic = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
-        defer anthropic.restore(allocator);
-        var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-only");
-        defer openai.restore(allocator);
-        try testing.expectError(error.MissingAnthropicCredential, initFromEnvWithSessionConfig(
-            allocator,
-            &registry,
-            .{ .no_session = true, .no_context_files = true, .provider = .anthropic },
-        ));
-    }
-    {
-        var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-only");
-        defer anthropic.restore(allocator);
-        var openai = try EnvOverride.unset(allocator, "OPENAI_API_KEY");
-        defer openai.restore(allocator);
-        try testing.expectError(error.MissingOpenAICredential, initFromEnvWithSessionConfig(
-            allocator,
-            &registry,
-            .{ .no_session = true, .no_context_files = true, .provider = .openai },
-        ));
-    }
-}
-
 test "bare persisted session follows the global default regardless of cloud keys" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
@@ -3395,17 +3006,13 @@ test "bare persisted session follows the global default regardless of cloud keys
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions.restore(allocator);
-    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-decoy");
-    defer anthropic.restore(allocator);
-    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-decoy");
-    defer openai.restore(allocator);
 
     var session = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
     defer session.deinit(allocator);
     // Named rather than derived from `default_provider`: deriving both sides
     // would pass whatever the constant said, including a value nobody meant to
-    // ship. Anthropic and OpenAI keys are set here and no DeepSeek key is,
-    // which is the point - credentials never steer the default.
+    // ship. No DeepSeek key is set here, which is the point - credentials never
+    // steer the default.
     try testing.expectEqual(
         Provider.deepseek,
         session.activeProvider() orelse return error.TestUnexpectedResult,
@@ -3484,8 +3091,8 @@ test "resume fork override and model mutation preserve provider identity" {
     const source_id = blk: {
         var source = try initFromEnvWithSessionConfig(allocator, null, .{
             .no_context_files = true,
-            .provider = .anthropic,
-            .model = "claude-opus-4-8",
+            .provider = .deepseek,
+            .model = "deepseek-v4-pro",
         });
         defer source.deinit(allocator);
         try zts.file_io.writeFile(
@@ -3505,21 +3112,21 @@ test "resume fork override and model mutation preserve provider identity" {
         .resume_latest = true,
     });
     try testing.expectEqual(
-        Provider.anthropic,
+        Provider.deepseek,
         resumed.activeProvider() orelse return error.TestUnexpectedResult,
     );
     try testing.expectEqualStrings(
-        "claude-opus-4-8",
+        "deepseek-v4-pro",
         resumed.currentModel() orelse return error.TestUnexpectedResult,
     );
-    try resumed.setModel(allocator, "claude-sonnet-5");
+    try resumed.setModel(allocator, "deepseek-v4-flash");
     var mutated = try session_events.readMeta(
         allocator,
         resumed.meta_path orelse return error.TestUnexpectedResult,
     );
-    try testing.expectEqualStrings("claude", mutated.provider orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("deepseek", mutated.provider orelse return error.TestUnexpectedResult);
     try testing.expectEqualStrings(
-        "claude-sonnet-5",
+        "deepseek-v4-flash",
         mutated.model orelse return error.TestUnexpectedResult,
     );
     session_events.freeMeta(allocator, &mutated);
@@ -3531,11 +3138,11 @@ test "resume fork override and model mutation preserve provider identity" {
     });
     errdefer forked.deinit(allocator);
     try testing.expectEqual(
-        Provider.anthropic,
+        Provider.deepseek,
         forked.activeProvider() orelse return error.TestUnexpectedResult,
     );
     try testing.expectEqualStrings(
-        "claude-sonnet-5",
+        "deepseek-v4-flash",
         forked.currentModel() orelse return error.TestUnexpectedResult,
     );
     var fork_meta = try session_events.readMeta(
@@ -3544,7 +3151,7 @@ test "resume fork override and model mutation preserve provider identity" {
     );
     defer session_events.freeMeta(allocator, &fork_meta);
     try testing.expectEqualStrings(source_id, fork_meta.parent_id orelse return error.TestUnexpectedResult);
-    try testing.expectEqualStrings("claude", fork_meta.provider orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("deepseek", fork_meta.provider orelse return error.TestUnexpectedResult);
     forked.deinit(allocator);
 
     var overridden = try initFromEnvWithSessionConfig(allocator, null, .{
@@ -3691,8 +3298,8 @@ test "named session resume preserves transcript bytes and stored identity" {
     const source_id, const expected_events = blk: {
         var source = try initFromEnvWithSessionConfig(allocator, null, .{
             .no_context_files = true,
-            .provider = .anthropic,
-            .model = "claude-opus-4-8",
+            .provider = .deepseek,
+            .model = "deepseek-v4-pro",
         });
         defer source.deinit(allocator);
         const source_events_path = source.events_path orelse return error.TestUnexpectedResult;
@@ -3732,11 +3339,11 @@ test "named session resume preserves transcript bytes and stored identity" {
     try testing.expect(resumed.replay_next_turn);
     try testing.expectEqual(@as(usize, 1), resumed.transcript.len());
     try testing.expectEqual(
-        Provider.anthropic,
+        Provider.deepseek,
         resumed.activeProvider() orelse return error.TestUnexpectedResult,
     );
     try testing.expectEqualStrings(
-        "claude-opus-4-8",
+        "deepseek-v4-pro",
         resumed.currentModel() orelse return error.TestUnexpectedResult,
     );
 }
@@ -3886,24 +3493,6 @@ test "model-free legacy resume bypasses provider identity and preserves metadata
     try testing.expect(meta.model == null);
 }
 
-test "obsolete OpenAI model environment override is rejected" {
-    const allocator = testing.allocator;
-    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
-    defer openai.restore(allocator);
-    var endpoint = try EnvOverride.set(allocator, "ZTS_OPENAI_BASE_URL", "http://127.0.0.1:11434/v1/responses");
-    defer endpoint.restore(allocator);
-    var model = try EnvOverride.set(allocator, "ZTS_OPENAI_MODEL", "qwen2.5-coder:7b");
-    defer model.restore(allocator);
-    var registry: Registry = .{};
-    defer registry.deinit(allocator);
-
-    try testing.expectError(error.UnsupportedOpenAIModelOverride, initFromEnvWithSessionConfig(
-        allocator,
-        &registry,
-        .{ .no_session = true, .no_context_files = true, .provider = .openai },
-    ));
-}
-
 test "legacy resume migrates once and cross-provider rebuild is atomic" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
@@ -3948,14 +3537,14 @@ test "legacy resume migrates once and cross-provider rebuild is atomic" {
     var migrated = try initFromEnvWithSessionConfig(allocator, null, .{
         .no_context_files = true,
         .resume_latest = true,
-        .provider = .anthropic,
+        .provider = .deepseek,
     });
     defer migrated.deinit(allocator);
     var meta = try session_events.readMeta(allocator, meta_path);
     defer session_events.freeMeta(allocator, &meta);
-    try testing.expectEqualStrings("claude", meta.provider orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("deepseek", meta.provider orelse return error.TestUnexpectedResult);
     try testing.expectEqualStrings(
-        "claude-sonnet-4-6",
+        "deepseek-v4-flash",
         meta.model orelse return error.TestUnexpectedResult,
     );
 
@@ -3991,10 +3580,6 @@ test "rejected startup model creates no session state and frees owned buffers" {
 
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions.restore(allocator);
-    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-key");
-    defer anthropic.restore(allocator);
-    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
-    defer openai.restore(allocator);
     var registry: Registry = .{};
     defer registry.deinit(allocator);
 
@@ -4002,7 +3587,7 @@ test "rejected startup model creates no session state and frees owned buffers" {
         error.ProviderMismatch,
         initFromEnvWithSessionConfig(allocator, &registry, .{
             .no_context_files = true,
-            .model = "gpt-4o-mini",
+            .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
         }),
     );
 
@@ -4025,10 +3610,6 @@ test "unready explicit local provider has no filesystem or cloud fallback side e
     defer sessions.restore(allocator);
     var base = try EnvOverride.set(allocator, "ZTTP_MLX_BASE_URL", "http://127.0.0.1:1");
     defer base.restore(allocator);
-    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "must-not-be-used");
-    defer anthropic.restore(allocator);
-    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "must-not-be-used");
-    defer openai.restore(allocator);
     var registry: Registry = .{};
     defer registry.deinit(allocator);
 
@@ -4420,7 +4001,7 @@ const overflow_probe_tool: registry_mod.ToolDef = .{
 
 test "normal request lifecycle compacts above the soft limit before transport" {
     const allocator = testing.allocator;
-    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
     try session.transcript.append(allocator, .{ .user_text = "old request " ** 10_000 });
     try session.transcript.append(allocator, .{ .model_text = "old response " ** 10_000 });
@@ -4452,7 +4033,7 @@ test "normal request lifecycle compacts above the soft limit before transport" {
 
 test "normal request lifecycle compacts and retries only one overflowing call" {
     const allocator = testing.allocator;
-    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
     try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
     try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
@@ -4484,7 +4065,7 @@ test "normal request lifecycle compacts and retries only one overflowing call" {
 
 test "full turn overflow retries only the pending request after a completed tool effect" {
     const allocator = testing.allocator;
-    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
     try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
     try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
@@ -4542,7 +4123,7 @@ test "full turn overflow retries only the pending request after a completed tool
 
 test "normal request lifecycle surfaces a second overflow without another compaction" {
     const allocator = testing.allocator;
-    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
     try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
     try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
@@ -4570,7 +4151,7 @@ test "normal request lifecycle surfaces a second overflow without another compac
 
 test "normal request lifecycle keeps soft compaction off while hard admission remains" {
     const allocator = testing.allocator;
-    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var session = try AgentSession.initLocal(allocator, "test system", null, "http://127.0.0.1:8080");
     defer session.deinit(allocator);
     session.compaction_enabled = false;
     try session.transcript.append(allocator, .{ .user_text = "large current request " ** 10_000 });
@@ -4607,7 +4188,7 @@ test "normal request lifecycle keeps soft compaction off while hard admission re
 }
 
 test "compact preserves raw entries and installs one active projection" {
-    var session = try AgentSession.initAnthropic(testing.allocator, "test-key", "test system", null);
+    var session = try AgentSession.initDeepSeek(testing.allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(testing.allocator);
     try appendCompactableHistory(testing.allocator, &session);
     const before_len = session.transcript.len();
@@ -4644,7 +4225,7 @@ test "compact checkpoint survives immediate session close and resume" {
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions.restore(allocator);
-    var api_key = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-key");
+    var api_key = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
     defer api_key.restore(allocator);
     var registry: Registry = .{};
     defer registry.deinit(allocator);
@@ -4659,8 +4240,8 @@ test "compact checkpoint survives immediate session close and resume" {
     const source_projection: SourceProjection = blk: {
         var source = try initFromEnvWithSessionConfig(allocator, &registry, .{
             .no_context_files = true,
-            .provider = .anthropic,
-            .model = "claude-opus-4-8",
+            .provider = .deepseek,
+            .model = "deepseek-v4-pro",
         });
         defer source.deinit(allocator);
         try appendCompactableHistory(allocator, &source);
@@ -4677,8 +4258,8 @@ test "compact checkpoint survives immediate session close and resume" {
         try testing.expect(result == .compacted);
         var snapshot = try model_request.createSnapshot(allocator, .{
             .config = .{
-                .provider = .anthropic,
-                .model = "claude-opus-4-8",
+                .provider = .deepseek,
+                .model = "deepseek-v4-pro",
                 .max_output_tokens = 1024,
                 .system_prompt = "test system",
             },
@@ -4707,8 +4288,8 @@ test "compact checkpoint survives immediate session close and resume" {
 
     var resumed_snapshot = try model_request.createSnapshot(allocator, .{
         .config = .{
-            .provider = .anthropic,
-            .model = "claude-opus-4-8",
+            .provider = .deepseek,
+            .model = "deepseek-v4-pro",
             .max_output_tokens = 1024,
             .system_prompt = "test system",
         },
@@ -4720,7 +4301,7 @@ test "compact checkpoint survives immediate session close and resume" {
 }
 
 test "compact checkpoint write failure leaves the active projection unchanged" {
-    var session = try AgentSession.initAnthropic(testing.allocator, "test-key", "test system", null);
+    var session = try AgentSession.initDeepSeek(testing.allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(testing.allocator);
     try appendCompactableHistory(testing.allocator, &session);
     session.events_path = try testing.allocator.dupe(u8, "/nonexistent/zttp-events/checkpoint.jsonl");
@@ -4759,7 +4340,7 @@ const ToolCallingSummarizer = struct {
 test "compact fails closed on malformed tool-calling and provider-error summaries" {
     const allocator = testing.allocator;
 
-    var malformed_session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var malformed_session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer malformed_session.deinit(allocator);
     try appendCompactableHistory(allocator, &malformed_session);
     var malformed: TestSummarizer = .{ .response = "## Goal\nmissing required sections" };
@@ -4776,7 +4357,7 @@ test "compact fails closed on malformed tool-calling and provider-error summarie
     try testing.expect(malformed_session.transcript.projection == null);
     try testing.expectEqual(@as(u64, 100), malformed_session.summary_token_totals.input_tokens);
 
-    var tool_session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var tool_session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer tool_session.deinit(allocator);
     try appendCompactableHistory(allocator, &tool_session);
     var tool_context: u8 = 0;
@@ -4792,7 +4373,7 @@ test "compact fails closed on malformed tool-calling and provider-error summarie
     try testing.expectEqual(error.SummaryReturnedToolCall, tool_result.failed);
     try testing.expect(tool_session.transcript.projection == null);
 
-    var provider_session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var provider_session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer provider_session.deinit(allocator);
     try appendCompactableHistory(allocator, &provider_session);
     var provider: TestSummarizer = .{ .failure = error.TestSummaryProviderFailure };
@@ -4839,7 +4420,7 @@ const SplitSummarizer = struct {
 
 test "compact splits one oversized turn before a closed tool pair" {
     const allocator = testing.allocator;
-    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
     try session.transcript.append(allocator, .{ .user_text = "inspect and continue" });
     try session.transcript.append(allocator, .{ .model_text = "early work " ** 10_000 });
@@ -4960,7 +4541,7 @@ test "compact accounts for escaped tool reasoning before choosing a cut" {
 
 test "compact rejects an oversized standalone summary request before the effect" {
     const allocator = testing.allocator;
-    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    var session = try AgentSession.initLocal(allocator, "test system", null, "http://127.0.0.1:8080");
     defer session.deinit(allocator);
     const large = try allocator.alloc(u8, 400 * 1024);
     defer allocator.free(large);
@@ -5001,15 +4582,15 @@ test "fork copies raw ancestry and projection checkpoints before independent div
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions.restore(allocator);
-    var api_key = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-key");
+    var api_key = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
     defer api_key.restore(allocator);
     var registry: Registry = .{};
     defer registry.deinit(allocator);
 
     var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_context_files = true,
-        .provider = .anthropic,
-        .model = "claude-opus-4-8",
+        .provider = .deepseek,
+        .model = "deepseek-v4-pro",
     });
     defer session.deinit(allocator);
     var summarizer: TestSummarizer = .{};
@@ -5085,14 +4666,14 @@ test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only 
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
+    var api_override = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-fixture-key");
     defer api_override.restore(allocator);
 
     var registry: Registry = .{};
     defer registry.deinit(allocator);
     var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
-        .provider = .anthropic,
+        .provider = .deepseek,
     });
     defer session.deinit(allocator);
 
@@ -5119,7 +4700,7 @@ test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUD
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
+    var api_override = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-fixture-key");
     defer api_override.restore(allocator);
 
     var registry: Registry = .{};
@@ -5127,7 +4708,7 @@ test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUD
     var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
-        .provider = .anthropic,
+        .provider = .deepseek,
     });
     defer session.deinit(allocator);
 
@@ -5146,7 +4727,7 @@ test "initFromEnvWithSessionConfig stamps current policy_hash into meta.json" {
     defer allocator.free(sessions_dir);
     var env_override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
-    var api_override = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    var api_override = try EnvOverride.unset(allocator, "DEEPSEEK_API_KEY");
     defer api_override.restore(allocator);
 
     const ws_dir = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });
@@ -5233,41 +4814,6 @@ test "initFromEnvWithSessionConfig refuses a drifted protocol without restamping
     var post = try session_events.readMeta(allocator, captured_meta_path);
     defer session_events.freeMeta(allocator, &post);
     try testing.expectEqualStrings(drifted_protocol, post.protocol_hash);
-}
-
-test "a loopback endpoint override is reported as local, a remote one is not" {
-    const local_urls = [_][]const u8{
-        "http://127.0.0.1:11434/v1/responses",
-        "http://localhost:8080/v1/responses",
-        "http://[::1]:11434/v1/responses",
-    };
-    for (local_urls) |url| {
-        var session = try AgentSession.initOpenAI(
-            testing.allocator,
-            "test",
-            "test",
-            null,
-            .{ .base_url = url },
-        );
-        defer session.deinit(testing.allocator);
-        const dest = destinationForSession(&session);
-        try testing.expect(dest == .openai_custom);
-        try testing.expect(dest.isLocal());
-    }
-
-    // A proxy in front of a hosted provider is still off-machine, and the
-    // banner must not tell the user their source stays put.
-    var session = try AgentSession.initOpenAI(
-        testing.allocator,
-        "test",
-        "test",
-        null,
-        .{ .base_url = "https://proxy.example.com/v1/responses" },
-    );
-    defer session.deinit(testing.allocator);
-    const dest = destinationForSession(&session);
-    try testing.expect(dest == .openai_custom);
-    try testing.expect(!dest.isLocal());
 }
 
 test "gate log: a session turn carries its identity into the record" {

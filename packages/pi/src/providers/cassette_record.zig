@@ -155,7 +155,7 @@ pub fn serializeCassette(
 
 /// Write a captured body to disk as a cassette. Intermediate directories
 /// are created on demand. The caller chooses the path; convention is
-/// `packages/pi/src/providers/testdata/<provider>/<scenario>.jsonl`.
+/// `packages/pi/src/simulator/testdata/empirical/<provider>/codegen/<scenario>.jsonl`.
 pub fn writeCassette(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -167,7 +167,7 @@ pub fn writeCassette(
 
     // Parent dirs are the caller's responsibility; tests stage them via
     // `std.testing.tmpDir`, and the production recorder binary creates
-    // `packages/pi/src/providers/testdata/<provider>/` once on first use.
+    // `packages/pi/src/simulator/testdata/empirical/<provider>/codegen/` once on first use.
     try file_io.writeFile(allocator, path, serialized);
 }
 
@@ -175,8 +175,6 @@ fn writeHeaderLine(w: anytype, options: WriteOptions) !void {
     try w.writeAll("{\"v\":1,\"provider\":");
     try writeJsonString(w, switch (options.provider) {
         .local => "local",
-        .anthropic => "anthropic",
-        .openai => "openai",
         .deepseek => "deepseek",
     });
     try w.writeAll(",\"scenario\":");
@@ -247,11 +245,11 @@ const testing = std.testing;
 test "serializeCassette: non-streaming body emits header + single body line" {
     const body = "{\"id\":\"x\",\"choices\":[]}";
     const serialized = try serializeCassette(testing.allocator, body, .{
-        .provider = .openai,
+        .provider = .deepseek,
         .scenario = "smoke",
         .stream = false,
         .recorded_at = "2026-05-28T00:00:00Z",
-        .model = "gpt-4o-mini",
+        .model = "deepseek-v4-flash",
     });
     defer testing.allocator.free(serialized);
 
@@ -259,7 +257,7 @@ test "serializeCassette: non-streaming body emits header + single body line" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const cassette = try cassette_client.loadCassetteFromBytes(arena.allocator(), serialized, null);
-    try testing.expectEqual(cassette_client.Provider.openai, cassette.header.provider);
+    try testing.expectEqual(cassette_client.Provider.deepseek, cassette.header.provider);
     try testing.expect(!cassette.header.stream);
     try testing.expectEqualStrings(body, cassette.body);
 }
@@ -267,7 +265,7 @@ test "serializeCassette: non-streaming body emits header + single body line" {
 test "serializeCassette: streaming body splits SSE records one-per-line" {
     const sse = "event: ping\ndata: {\"type\":\"ping\"}\n\nevent: end\ndata: {\"type\":\"end\"}\n\n";
     const serialized = try serializeCassette(testing.allocator, sse, .{
-        .provider = .anthropic,
+        .provider = .deepseek,
         .scenario = "smoke_stream",
         .stream = true,
         .recorded_at = "2026-05-28T00:00:00Z",
@@ -277,7 +275,7 @@ test "serializeCassette: streaming body splits SSE records one-per-line" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const cassette = try cassette_client.loadCassetteFromBytes(arena.allocator(), serialized, null);
-    try testing.expectEqual(cassette_client.Provider.anthropic, cassette.header.provider);
+    try testing.expectEqual(cassette_client.Provider.deepseek, cassette.header.provider);
     try testing.expect(cassette.header.stream);
     try testing.expectEqualStrings(sse, cassette.body);
 }
@@ -293,7 +291,7 @@ test "writeCassette + loadCassetteFromPath: full disk round-trip" {
 
     const body = "{\"id\":\"x\",\"choices\":[{\"message\":{\"content\":\"hello\"}}]}";
     try writeCassette(testing.allocator, full_path, body, .{
-        .provider = .openai,
+        .provider = .deepseek,
         .scenario = "smoke",
         .stream = false,
     });
@@ -421,29 +419,20 @@ fn drainRequestHead(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io
 }
 
 test "round-trip: capture from local server, serialise, replay yields identical body" {
-    // OpenAI moved to the Responses API streaming endpoint (Slice E), so
-    // the round-trip exercises a minimal SSE stream rather than the old
-    // Chat Completions JSON envelope.
     const response_body =
-        "event: response.output_item.added\n" ++
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" ++
-        "event: response.output_text.delta\n" ++
-        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"hello world\"}\n\n" ++
-        "event: response.completed\n" ++
-        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n" ++
-        "data: [DONE]\n";
+        "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"hello world\"}}]," ++
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
 
-    var server = try LocalHttpServer.init(testing.allocator, response_body, "text/event-stream");
+    var server = try LocalHttpServer.init(testing.allocator, response_body, "application/json");
     try server.start();
     errdefer server.join() catch {};
 
-    const url = try server.url(testing.allocator, "/v1/responses");
+    const url = try server.url(testing.allocator, "/v1/chat/completions");
     defer testing.allocator.free(url);
 
     var captured = try capturePost(testing.allocator, url, &.{
-        .{ .name = "authorization", .value = "Bearer test-fixture-key" },
         .{ .name = "content-type", .value = "application/json" },
-    }, "{\"model\":\"gpt-4o-mini\",\"input\":[]}");
+    }, "{\"model\":\"test-model\",\"messages\":[]}");
     defer captured.deinit(testing.allocator);
 
     try testing.expectEqual(@as(u16, 200), captured.status);
@@ -458,9 +447,10 @@ test "round-trip: capture from local server, serialise, replay yields identical 
     defer testing.allocator.free(cassette_path);
 
     try writeCassette(testing.allocator, cassette_path, captured.body, .{
-        .provider = .openai,
+        .provider = .local,
         .scenario = "roundtrip",
-        .stream = true,
+        .stream = false,
+        .request_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
     });
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -468,7 +458,7 @@ test "round-trip: capture from local server, serialise, replay yields identical 
     const cassette = try cassette_client.loadCassetteFromPath(arena.allocator(), cassette_path);
     try testing.expectEqualStrings(captured.body, cassette.body);
 
-    // And the replay produces a valid ModelCallResult through the openai parser.
+    // And the replay produces a valid ModelCallResult through the local decoder.
     const result = try cassette_client.replay(arena.allocator(), cassette);
     switch (result.reply.response) {
         .final_text => |t| try testing.expectEqualStrings("hello world", t),

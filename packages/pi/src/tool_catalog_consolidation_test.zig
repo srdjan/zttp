@@ -2,16 +2,14 @@
 //!
 //! This compares the actual provider-visible JSON emitted from the live
 //! registry with the pre-consolidation discovery catalog. Source literal
-//! lengths are deliberately not used: provider framing and Anthropic's cache
-//! marker are part of the measured prefix.
+//! lengths are deliberately not used: provider framing is part of the measured
+//! prefix.
 
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const registry_mod = @import("registry/registry.zig");
 const tool_registry = @import("tool_registry.zig");
 const tool_catalog = @import("providers/tool_catalog.zig");
-const openai = @import("providers/openai/client.zig");
-const anthropic = @import("providers/anthropic/tools_schema.zig");
 const deepseek = @import("providers/deepseek/client.zig");
 const local = @import("providers/local/client.zig");
 
@@ -29,7 +27,7 @@ const legacy_query_names = [_][]const u8{
     "zts_expert_ratchet",
 };
 
-const ProviderProjection = enum { openai, anthropic, deepseek, local };
+const ProviderProjection = enum { deepseek, local };
 
 const ExpectedPrefix = struct {
     /// Exact pre-cutover provider bytes measured at `ede92d63`, before any
@@ -41,16 +39,6 @@ const ExpectedPrefix = struct {
 
 fn expectedPrefix(provider: ProviderProjection) ExpectedPrefix {
     return switch (provider) {
-        .openai => .{
-            .legacy_bytes = 19_722,
-            .live_bytes = 11_502,
-            .live_sha256 = "1515aa4db49bf7795ac004df02098782c153d1ef6dd7097e40424ff50d3ea3af",
-        },
-        .anthropic => .{
-            .legacy_bytes = 19_199,
-            .live_bytes = 11_203,
-            .live_sha256 = "f7aedefe8ee88d20435b5a4e793c28ec4993b1835ec036f84e30035d024e795e",
-        },
         .deepseek, .local => .{
             .legacy_bytes = 20_177,
             .live_bytes = 11_775,
@@ -67,8 +55,6 @@ fn serialize(
     var out = TextBuffer.init(allocator);
     defer out.deinit();
     switch (provider) {
-        .openai => try openai.writeToolsArray(out.writer(), registry),
-        .anthropic => try anthropic.writeToolsArray(out.writer(), registry),
         .deepseek => try deepseek.writeToolsArray(out.writer(), registry),
         .local => try local.writeToolsArray(out.writer(), registry),
     }

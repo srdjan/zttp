@@ -3,7 +3,7 @@
 The coding agent behind the `zttp expert` and `zttp ledger` CLI commands.
 Linked only into the developer `zttp` binary, never into the pi-free `zts`
 analyzer binary or the deployed `zttp-runtime`. Built in Zig against DeepSeek
-and local MLX Chat Completions, Anthropic Messages, and OpenAI Responses APIs,
+and local MLX Chat Completions APIs,
 driven by a pure turn state machine with a compiler-aware tool registry and a
 mandatory compile-check veto on every edit.
 
@@ -48,8 +48,6 @@ packages/pi/
       tool_catalog.zig    # provider-neutral ordered model-tool catalog
       chat_completions.zig # Chat Completions body writer shared by local and deepseek
       local/              # MLX-LM Chat Completions decoder, readiness
-      anthropic/          # request builder, SSE parser, response assembler, client
-      openai/             # Responses API request builder, SSE parser, response assembler, client
       deepseek/           # DeepSeek Chat Completions client, decoder, endpoint policy
     registry/
       tool.zig            # ToolDef + JSON decoders
@@ -219,14 +217,6 @@ loopback roots. Readiness checks call `/health` and `/v1/models`. The adapter
 prefers structured tool calls, strictly normalizes Liquid's raw tool envelope,
 discards reasoning fields, and never retries another provider.
 
-`providers/anthropic/` implements the Messages API with SSE streaming,
-ephemeral prompt caching on the system block, and usage token
-accounting (`input_tokens`, `output_tokens`, `cache_read_input_tokens`,
-`cache_creation_input_tokens`).
-
-`providers/openai/` implements the Responses API with SSE streaming and the
-same `turn.AssistantReply` boundary.
-
 `providers/deepseek/` implements the same non-streaming Chat Completions shape
 as the local adapter, over HTTPS with a bearer key. `providers/chat_completions.zig`
 holds the request body writer both share; what differs is the endpoint policy
@@ -236,8 +226,9 @@ tool-call ids, so replay needs no request digest, and it emits no raw tool
 envelope. `reasoning_content` and `reasoning` are discarded before capture.
 
 The static registry tags every model with its provider. Local defaults to
-`LiquidAI/LFM2.5-2.6B-MLX-8bit`, Anthropic to `claude-sonnet-4-6`, OpenAI to
-`gpt-4o-mini`, and DeepSeek to `deepseek-v4-flash`.
+`LiquidAI/LFM2.5-2.6B-MLX-8bit` and DeepSeek to `deepseek-v4-flash`. The Claude
+and OpenAI providers were removed; a session stored under either needs
+`--provider local` or `--provider deepseek` to resume.
 
 Provider resolution is explicit launch flags, stored resume or fork identity,
 then the current DeepSeek default. Cloud keys do not influence selection. New sessions
@@ -248,9 +239,7 @@ session unchanged.
 Model IDs select within the active provider and never change providers.
 `--model` and `/model` both use the same exact registry lookup.
 `/model` shows only the active provider's entries. A switch
-lasts for the current session and applies the registry request budget. The
-OpenAI entry records a 16,384-token output capability but keeps zttp's
-8,192-token request policy.
+lasts for the current session and applies the registry request budget.
 
 The model client is a vtable (`loop.ModelClient = {context, request_fn}`), so
 the loop stays provider-agnostic. `CannedClient` and `SequenceClient` exercise
@@ -272,7 +261,7 @@ to pi:
 --yes                    auto-approve all verified edits
 --no-edit                auto-reject all verified edits
 --tools {full,minimal}   tool preset (minimal = workspace read-only)
---provider <name>        local, claude, or openai for this launch
+--provider <name>        local or deepseek for this launch
 --model <id>             model registered for the active provider
 --print <prompt>         one-shot, rendered text to stdout
 --mode json              one-shot, NDJSON events to stdout (needs --print)
@@ -324,8 +313,8 @@ cassette no longer matches the live prompt or tool schemas. Editing
 description, or input schema makes every cassette stale at once. Re-recording
 is a live run and is documented in
 [Cassette Recording](../../docs/internals/cassette-recording.md), with the
-command for DeepSeek (the default provider and the headline), a local MLX
-server, Claude, and OpenAI.
+command for DeepSeek (the default provider and the headline) and a local MLX
+server.
 
 Add a skill:
 

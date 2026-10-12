@@ -415,7 +415,7 @@ fn cmdHelp(ctx: cli_help.Ctx) anyerror!void {
 }
 
 const commands = [_]cli_help.Command{
-    .{ .name = "auth", .run = cmdAuth, .section = .credentials, .args = "[claude|openai|status|revoke]", .blurb = "Manage cloud-provider keys for expert" },
+    .{ .name = "auth", .run = cmdAuth, .section = .credentials, .args = "[deepseek|status|revoke]", .blurb = "Manage cloud-provider keys for expert" },
     .{ .name = "init", .run = cmdInit, .section = .core, .args = "<name> [--template basic|api|htmx]", .blurb = "Create a project" },
     .{ .name = "dev", .run = cmdDev, .section = .core, .args = "[handler.ts]", .blurb = "Run locally, watch and prove on save" },
     .{ .name = "serve", .run = cmdServe, .section = .run_and_inspect, .args = "[handler.ts]", .blurb = "Run a handler without watch or proof" },

@@ -272,18 +272,19 @@ test "empty request and boundary classification stay explicit" {
 }
 
 test "provider usage normalization and exact usage selection are provider neutral" {
-    const anthropic_usage: turn.Usage = .{
+    const cached_usage: turn.Usage = .{
         .input_tokens = 3,
         .cache_read_input_tokens = 31_471,
         .cache_creation_input_tokens = 488,
     };
+    // Cache diagnostics are not added to the reported logical input.
     try testing.expectEqual(
-        @as(u64, 31_962),
-        try context_budget.normalizeLogicalInput(.anthropic, anthropic_usage),
+        @as(u64, 3),
+        try context_budget.normalizeLogicalInput(.deepseek, cached_usage),
     );
     try testing.expectEqual(
         @as(u64, 3),
-        try context_budget.normalizeLogicalInput(.deepseek, anthropic_usage),
+        try context_budget.normalizeLogicalInput(.local, cached_usage),
     );
 
     const epoch: context_budget.UsageEpoch = .{

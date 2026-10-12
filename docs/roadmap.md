@@ -157,10 +157,9 @@ it makes item 3 required rather than optional, because per-hole fill is the know
 shrink a task to small-model size.
 
 The dedicated local provider now covers the supported local-model path with MLX-LM
-Chat Completions. The OpenAI provider remains available for registered OpenAI models,
-and `ZTS_OPENAI_BASE_URL` may redirect its Responses API transport without changing
-provider or model identity. Model selection stays explicit through `--model`; the old
-off-registry `ZTS_OPENAI_MODEL` override is rejected.
+Chat Completions. The Claude and OpenAI providers were removed; DeepSeek and the
+local provider are the two that remain. Model selection stays explicit through
+`--model`.
 
 To run the supported local qualification, supply the exact artifact and serving
 provenance described in [the recording guide](internals/cassette-recording.md), then:

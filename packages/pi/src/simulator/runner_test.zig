@@ -8,24 +8,31 @@ const registry_mod = @import("../registry/registry.zig");
 const runner = @import("runner.zig");
 const transcript_mod = @import("../transcript.zig");
 
-const openai_cassette = @embedFile("../providers/testdata/openai/chat_completion.jsonl");
+/// A synthetic non-streaming Chat Completions cassette. The local replay
+/// requires a `request_sha256` in the header, which `bindLocalCassette` adds.
+const local_cassette =
+    "{\"v\":1,\"provider\":\"local\",\"scenario\":\"chat_completion\",\"stream\":false," ++
+    "\"recorded_at\":\"2026-05-28T00:00:00Z\",\"synthetic\":true}\n" ++
+    "{\"body\":\"{\\\"choices\\\":[{\\\"finish_reason\\\":\\\"stop\\\"," ++
+    "\\\"message\\\":{\\\"content\\\":\\\"hello world\\\"}}]," ++
+    "\\\"usage\\\":{\\\"prompt_tokens\\\":12,\\\"completion_tokens\\\":3}}\"}\n";
 
-fn bindOpenAiCassette(
+fn bindLocalCassette(
     allocator: std.mem.Allocator,
     request_sha256: model_request.Sha256Hex,
 ) ![]u8 {
-    const newline = std.mem.indexOfScalar(u8, openai_cassette, '\n') orelse
+    const newline = std.mem.indexOfScalar(u8, local_cassette, '\n') orelse
         return error.MalformedTestCassette;
-    if (newline == 0 or openai_cassette[newline - 1] != '}') {
+    if (newline == 0 or local_cassette[newline - 1] != '}') {
         return error.MalformedTestCassette;
     }
     return std.fmt.allocPrint(
         allocator,
         "{s},\"request_sha256\":\"{s}\"{s}",
         .{
-            openai_cassette[0 .. newline - 1],
+            local_cassette[0 .. newline - 1],
             request_sha256.slice(),
-            openai_cassette[newline - 1 ..],
+            local_cassette[newline - 1 ..],
         },
     );
 }
@@ -36,8 +43,8 @@ fn zeroDigest() artifact.Sha256Hex {
 
 test "flow runner continues a real multi-Turn transcript and preserves exact workspace bytes" {
     const request_config: model_request.Config = .{
-        .provider = .openai,
-        .model = "gpt-4o-mini",
+        .provider = .local,
+        .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
         .max_output_tokens = 8192,
         .system_prompt = "persona",
     };
@@ -59,11 +66,11 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
         .transcript = &expected_transcript,
     });
     _ = try model_client.prepareSnapshot(snapshot_arena.allocator(), &second_snapshot);
-    const first_cassette = try bindOpenAiCassette(
+    const first_cassette = try bindLocalCassette(
         snapshot_arena.allocator(),
         first_snapshot.wire_request_sha256.?,
     );
-    const second_cassette = try bindOpenAiCassette(
+    const second_cassette = try bindLocalCassette(
         snapshot_arena.allocator(),
         second_snapshot.wire_request_sha256.?,
     );
@@ -204,8 +211,8 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
             .case_name = "text-only",
             .evidence_class = .deterministic_harness,
             .executable = true,
-            .provider = .openai,
-            .model = "gpt-4o-mini",
+            .provider = .local,
+            .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
             .turns = &.{
                 .{
                     .index = 0,

@@ -873,8 +873,8 @@ means and for the list of edges the consumer discloses rather than checks.
 
 `zttp expert` is the compiler-in-the-loop coding agent. It proposes edits and
 routes every one through the same compiler checks before they land. DeepSeek is
-the current default. The developer-managed local MLX-LM provider, Claude, and
-OpenAI are available through explicit `--provider` selection.
+the current default. The developer-managed local MLX-LM provider is available
+through explicit `--provider local` selection.
 
 ### What a turn sends
 
@@ -969,10 +969,9 @@ report is input to a separate product decision.
 The static model prefix contains 21 tools. The six schema-v2 discovery views
 and four focused compiler projections share the `zts_expert_query` ADT;
 normalization, proof, repair, and change-set application remain distinct
-authorities. Exact provider serialization is pinned in tests: 11,502 bytes for
-OpenAI, 11,203 for Anthropic, and 11,775 for the DeepSeek/local chat shape.
-The pre-cutover prefixes were 19,722, 19,199, and 20,177 bytes respectively,
-so every supported provider stays beyond the 40% reduction gate.
+authorities. Exact provider serialization is pinned in tests: 11,775 bytes for the
+DeepSeek/local chat shape. The pre-cutover prefix was 20,177 bytes, so every
+supported provider stays beyond the 40% reduction gate.
 
 ### Context compaction
 
@@ -1025,12 +1024,11 @@ JSON reject the named file. Settings files cannot contain provider credentials.
 ```bash
 zttp expert                                      # current DeepSeek default
 zttp expert --provider local                     # local LFM
-zttp expert --provider openai                    # explicit OpenAI
 zttp expert --provider deepseek                  # explicit DeepSeek
 zttp expert --yes                                # apply edits without prompting
 zttp expert --no-edit                            # read-only analysis, no writes
 zttp expert --resume                             # continue last session
-zttp expert --provider claude --model claude-sonnet-4-6
+zttp expert --provider deepseek --model deepseek-v4-pro
 zttp expert --print "add a GET /health route"
 zttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
@@ -1049,8 +1047,7 @@ new session instead; old model reasoning is never silently restamped under the
 new protocol.
 
 `--model <id>` selects only within the active provider. It never infers or
-changes the provider. `/model` follows the same rule and persists the choice atomically. Claude defaults to `claude-sonnet-4-6`; OpenAI
-defaults to `gpt-4o-mini`; DeepSeek defaults to `deepseek-v4-flash`. The
+changes the provider. `/model` follows the same rule and persists the choice atomically. DeepSeek defaults to `deepseek-v4-flash`. The
 compiler-only `--goal` workflow rejects `--provider` and `--model` and does not
 check model readiness.
 
@@ -1065,10 +1062,13 @@ veto was not satisfied within the attempt budget, `3` a turn budget was
 exhausted (round-trips, tool calls, or the wall-clock limit), `4` an edit was
 verified but the approval prompt rejected it.
 
-`zttp auth claude`, `zttp auth openai`, and `zttp auth deepseek` store cloud keys
-in `~/.zttp/providers.json` with mode `0600`. A shell-set `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, or `DEEPSEEK_API_KEY` overrides the stored value, and the key
-is validated only after its cloud provider is resolved. `DEEPSEEK_BASE_URL`
+`zttp auth deepseek` stores the DeepSeek key in `~/.zttp/providers.json` with
+mode `0600`. A shell-set `DEEPSEEK_API_KEY` overrides the stored value, and the
+key is validated only after DeepSeek is resolved. The Claude and OpenAI
+providers were removed: `zttp auth claude` and `zttp auth openai` are refused,
+`zttp auth revoke claude` and `zttp auth revoke openai` delete a key stored for
+them earlier, and a session stored under either provider needs
+`--provider local` or `--provider deepseek` to resume. `DEEPSEEK_BASE_URL`
 points DeepSeek at another HTTPS root; plain HTTP is refused.
 
 When your request is ambiguous - the right edit depends on a choice you have not

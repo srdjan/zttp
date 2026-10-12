@@ -258,7 +258,7 @@ pub const Meta = struct {
     /// ("ask", "auto_approve", "auto_reject"). Written on first create; re-read
     /// on --resume so the policy persists across sessions without re-passing flags.
     approval_policy: ?[]const u8 = null,
-    /// Public provider identity ("local", "claude", or "openai"). Optional
+    /// Public provider identity ("local" or "deepseek"). Optional
     /// only while decoding sessions created before provider persistence.
     provider: ?[]const u8 = null,
     /// Exact provider-scoped model id. Optional only for historical metadata.

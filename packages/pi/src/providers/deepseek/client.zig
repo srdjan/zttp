@@ -1,9 +1,8 @@
 //! Non-streaming Chat Completions adapter for the DeepSeek API.
 //!
-//! DeepSeek serves an OpenAI-compatible `/chat/completions` endpoint, not the
-//! Responses API, so this is a sibling of `local/client.zig` rather than of
-//! `openai/client.zig`: the same request body, a different endpoint policy and
-//! a different decoder.
+//! DeepSeek serves an OpenAI-compatible `/chat/completions` endpoint, so this is
+//! a sibling of `local/client.zig`: the same request body, a different endpoint
+//! policy and a different decoder.
 //!
 //! Two things differ from the local adapter. The endpoint is remote, so the
 //! transport requires HTTPS and a bearer credential. And DeepSeek returns
@@ -727,7 +726,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
 
     // `http_errors.connect` pre-connects, which runs the TLS handshake before
     // `request()` would populate `now` and `ca_bundle` on its own. Scan the
-    // system trust store and stamp `now` here, as the Anthropic client does.
+    // system trust store and stamp `now` here.
     const now = std.Io.Clock.real.now(io);
     client.ca_bundle.rescan(arena, io, now) catch return error.CertificateBundleLoadFailure;
     client.now = now;

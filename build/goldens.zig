@@ -172,8 +172,7 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
         "--no-session",
     });
     goal_without_model.removeEnvironmentVariable("HOME");
-    goal_without_model.removeEnvironmentVariable("ANTHROPIC_API_KEY");
-    goal_without_model.removeEnvironmentVariable("OPENAI_API_KEY");
+    goal_without_model.removeEnvironmentVariable("DEEPSEEK_API_KEY");
     goal_without_model.setEnvironmentVariable("ZTTP_MLX_BASE_URL", "http://127.0.0.1:1");
     goal_without_model.expectExitCode(0);
     goal_without_model.expectStdOutMatch("autoloop verdict: achieved");
@@ -187,8 +186,6 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     init_preflight.addArgs(&.{ "init", "demo", "--expert" });
     init_preflight.setCwd(init_preflight_root.getDirectory());
     init_preflight.removeEnvironmentVariable("HOME");
-    init_preflight.removeEnvironmentVariable("ANTHROPIC_API_KEY");
-    init_preflight.removeEnvironmentVariable("OPENAI_API_KEY");
     init_preflight.removeEnvironmentVariable("DEEPSEEK_API_KEY");
     init_preflight.setEnvironmentVariable("ZTTP_MLX_BASE_URL", "http://127.0.0.1:1");
     init_preflight.expectExitCode(1);

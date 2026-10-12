@@ -74,8 +74,8 @@ and superseded execution records live in the `pre-rebase` git tag, under
 - [Test Steps](internals/testing.md) - what `zig build test` includes and
   excludes, and why the zruntime suite is standalone.
 - [Cassette Recording](internals/cassette-recording.md) - when a codegen
-  cassette goes stale, how to re-record the corpus against DeepSeek, a local
-  MLX server, Claude, or OpenAI, and how to republish the convergence and
+  cassette goes stale, how to re-record the corpus against DeepSeek or a local
+  MLX server, and how to republish the convergence and
   coverage pages.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.

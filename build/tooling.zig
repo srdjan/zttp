@@ -117,8 +117,8 @@ pub fn add(ctx: Context) Result {
     production_branch_metric_test_step.dependOn(&run_production_branch_metric_tests.step);
     production_branch_metric_test_step.dependOn(&production_branch_metric.run.step);
 
-    // Development-only deterministic author. It speaks the OpenAI Responses
-    // wire on loopback and is never part of the install step.
+    // Development-only deterministic author. It speaks non-streaming Chat
+    // Completions on loopback and is never part of the install step.
     const standin_mod = b.createModule(.{
         .root_source_file = pi_host_dep.path("src/standin_main.zig"),
         .target = b.graph.host,

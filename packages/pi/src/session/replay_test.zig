@@ -126,7 +126,7 @@ test "replay-safety: resumed session over mutated workspace does not rewrite fil
     defer env_override.restore(allocator);
 
     // Force the stub backend so live-client state never gets built.
-    var api_override = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    var api_override = try EnvOverride.unset(allocator, "DEEPSEEK_API_KEY");
     defer api_override.restore(allocator);
 
     // Workspace lives beside the sessions dir so the test stays inside the
@@ -233,7 +233,7 @@ test "replay-safety: /new starts a fresh session_id and fresh events.jsonl" {
     var env_override = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer env_override.restore(allocator);
 
-    var api_override = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    var api_override = try EnvOverride.unset(allocator, "DEEPSEEK_API_KEY");
     defer api_override.restore(allocator);
 
     const ws_dir_raw = try std.fs.path.join(allocator, &.{ tmp.abs_path, "ws" });

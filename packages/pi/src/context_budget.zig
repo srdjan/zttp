@@ -155,21 +155,13 @@ pub fn limitsForModel(provider: models.Provider, model_id: []const u8) ModelLimi
     };
 }
 
-/// Anthropic reports uncached, cache-read, and cache-created input as disjoint
-/// fields. Other providers already report their complete logical input in
-/// `input_tokens`, so their cache diagnostics must not be added a second time.
+/// Every surviving provider reports its complete logical input in
+/// `input_tokens`, so cache diagnostics must not be added a second time. The
+/// provider stays a parameter so a future provider that reports disjoint
+/// fields has one place to say so.
 pub fn normalizeLogicalInput(provider: models.Provider, usage: turn.Usage) BudgetError!u64 {
-    if (provider != .anthropic) return usage.input_tokens;
-    const input_and_read = try checkedAdd(
-        usage.input_tokens,
-        usage.cache_read_input_tokens,
-        error.TokenCountOverflow,
-    );
-    return checkedAdd(
-        input_and_read,
-        usage.cache_creation_input_tokens,
-        error.TokenCountOverflow,
-    );
+    _ = provider;
+    return usage.input_tokens;
 }
 
 /// Calibration is fail-closed: an estimate may not undercount. Its permitted

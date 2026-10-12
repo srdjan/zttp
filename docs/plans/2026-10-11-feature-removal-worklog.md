@@ -756,3 +756,71 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - Invariant 3: nothing changed under `tool_registry.zig`, `expert_persona.zig`, `skills/`, or `prompts/`.
 - Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 8: `git grep -n -E "providers/testdata/codegen|empirical/codegen|cassette_root|claude_empirical_flow_root|flat_cassette|CassetteSequenceClient|anthropic_coverage|legacyCoverageBaseline" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages` returns nothing outside `docs/plans/`.
+
+## G13d Claude and OpenAI providers
+
+### Stop condition: no enum member was kept
+
+No identity serializes the provider by integer ordinal. `providers/model_request.zig:328` and `expert_evidence_identity.zig:492` hash `@tagName(provider)`, simulator manifests and session meta store the public name, `session/protocol_identity.zig` hashes only the provider-neutral tool catalog, and a search of `providers/`, `session/`, `settings.zig`, `expert_evidence_identity.zig`, and `simulator/artifact*.zig` for `intFromEnum` and `enumFromInt` finds nothing provider-related. Removing `.anthropic` and `.openai` therefore did not shift `.local` or `.deepseek`. The DeepSeek and local replays stay green, `docs/coverage.json` and `docs/convergence.json` are unchanged, and the three identities equal their baselines. So both members are removed, not kept as unused tags.
+
+### Deleted
+
+- `packages/pi/src/providers/anthropic/` (10 files, 1,936 lines, 77,559 bytes, including four SSE cassettes and `tools_schema.zig`), `packages/pi/src/providers/openai/` (9 files, 1,633 lines, 67,851 bytes, five SSE cassettes), `providers/testdata/anthropic/` (2 files, 22 lines, 944 bytes), and `providers/testdata/openai/` (1 file, 2 lines, 731 bytes). Total 22 files, 3,593 lines, 147,085 bytes. `providers/testdata/` no longer exists.
+- `tools_schema.zig` had no surviving user: its importers were `agent.zig` (`buildToolsJson`, Anthropic arm only), `expert_codegen_record.zig` (Anthropic arm), and the Anthropic projection of `tool_catalog_consolidation_test.zig`. No part was moved.
+- The whole change against HEAD (`8ad7408e`) is 68 files, 495 insertions, 4,895 deletions.
+
+### Removed from surviving files
+
+- `providers/models.zig`: the `.anthropic` and `.openai` members, their `publicName` and `parsePublic` arms, and the five registry rows (four Claude models, `gpt-4o-mini`). `parsePublic("claude")` and `parsePublic("openai")` now return null.
+- `providers/backend.zig` (`AuthenticatedTransport`, the two union arms, the endpoint constants), `providers/cassette_client.zig` (the header arms, the replay arms, `NonStreamingOpenAINotSupported`), `providers/cassette_record.zig` (the header arms and the OpenAI recorder-lane test), `simulator/model_client.zig` (the two request-body arms), `context_budget.zig` (`normalizeLogicalInput` no longer sums Anthropic cache fields; the provider stays a parameter), `agent.zig` (`initAnthropic`, `initOpenAI`, `OpenAiEndpoint`, `openAiEndpointFromEnv`, `ZTS_OPENAI_BASE_URL` and `ZTS_OPENAI_MODEL`, the `Destination` members `anthropic`, `openai_hosted`, `openai_custom`, `containsAny`, both provider arms in `initFromEnvWithSessionConfig`, the two tool-JSON builders), `repl.zig` (the three destination banner arms), `app.zig` (credential checks, error messages), `loop.zig` (the SSE parse remediation arm, which only the OpenAI parser could produce), `expert_codegen_record.zig` (the arms, the key checks, `firstAttemptExpectation` is now `fn (recorded: ?bool)`), `tests.zig`, `cassette_tests.zig`.
+- `packages/runtime/src/cli_auth.zig`: the `claude` and `openai` rows and the `sk-ant-` prefix rule. `cli_help.zig`, `cli_doctor.zig`, and `dev_cli.zig` lose the `claude` and `openai` names; the doctor hint now names `zttp auth deepseek`.
+- `scripts/check-runtime-purity.sh`: the `anthropic` and `openai` marker families. The per-family floor would otherwise fail, because the dev binary no longer carries `api.anthropic.com`, `anthropic-version`, or `api.openai.com`. This is invariant 7 applied: the rows go with their whole subject. `scripts/qualify-expert.sh` accepts `local|deepseek`. `build/goldens.zig` drops two environment removals.
+
+### Fixture consumers rewritten
+
+- `cassette_client.zig`: the OpenAI fixture tests became local-cassette tests (`replay: local cassette produces final_text reply and usage`, `replay: local cassette remaps propose_change_set into a change set reply`). The sidecar-path and missing-body tests use `deepseek` and `local` headers.
+- `cassette_record.zig`: the round-trip test now serves a Chat Completions JSON body at `/v1/chat/completions`, writes a `local` cassette with a request digest, and replays it. The three serializer tests use `deepseek`.
+- `simulator/model_client_test.zig` and `simulator/runner_test.zig`: the embedded `providers/testdata/openai/chat_completion.jsonl` is a `local_cassette` constant with a bound `request_sha256`. Sessions use `.local` and `LiquidAI/LFM2.5-2.6B-MLX-8bit`. The malformed-fixture test uses a `deepseek` sidecar case and a `local` non-JSON body.
+- `simulator/recorder_test.zig`: DeepSeek responses (the DeepSeek decoder takes tool ids from the body, so no request digest is needed) and `.stream = false` on the request configs.
+- `tool_catalog_consolidation_test.zig`: the DeepSeek and local projection only (11,775 bytes, unchanged digest). `model_request.zig` clamp test: local provider, 350,000-byte prompt.
+- The `agent.zig` session-mechanics tests moved from `initAnthropic` to `initDeepSeek` with the equivalent DeepSeek model ids and limits. Two tests that need a 200k-or-smaller context window (`normal request lifecycle keeps soft compaction off while hard admission remains`, `compact rejects an oversized standalone summary request before the effect`) use `initLocal`, whose window is 131,072 tokens.
+
+### Tests deleted, and why
+
+Whole files: 65 tests in the deleted `.zig` files. Anthropic had 38 (client 5, request 11, response assembler 5, SSE parser 10, tools schema 7) and OpenAI had 27 (client 10, response assembler 6, SSE parser 11). Their subject was one provider's wire.
+
+Individually, each subject being Anthropic- or OpenAI-specific:
+- `agent.zig`: `initAnthropic owns auth prompt and non-null tools`; `initOpenAI owns auth prompt tools and a non-default endpoint`; `initAnthropic dupes api_key and system_prompt, deinit releases both`; `initOpenAI dupes api_key and system_prompt and routes through openai backend`; `an endpoint override redirects the client without touching the hosted default` and `an endpoint that moves only the host keeps the registry model` (both about the Responses endpoint override); `explicit Claude selects only the Anthropic credential`; `explicit OpenAI selects only the OpenAI credential`; `explicit cloud provider never borrows the other provider credential` (its two subjects were the two removed credentials); `obsolete OpenAI model environment override is rejected` (`ZTS_OPENAI_MODEL`); `a loopback endpoint override is reported as local, a remote one is not` (the `openai_custom` destination). The DeepSeek and local counterparts of each ownership, credential, and destination test already exist and stay. `OpenAI and stub model selection...` became `DeepSeek and stub model selection...`.
+- `app.zig`: `--model accepts the registered OpenAI default`; `--model uses exact ids for specialized OpenAI models` became `--model refuses the retired Claude and OpenAI ids`.
+- `cassette_client.zig`: `loadCassetteFromBytes resolves an inline openai cassette`, `replay: openai cassette produces final_text reply`, `replay: openai cassette remaps propose_change_set...`, `replay: anthropic cassette streams SSE bytes...` (the last two rewritten as local tests as listed above).
+- `models.zig`: `gpt-4o-mini capability and request policy remain distinct`, `Anthropic request policies preserve curated model budgets`.
+- `loop.zig`: `providerErrorRemediation: SSE parse errors map to a non-empty actionable hint` (only the removed OpenAI parser produced those errors).
+- `cli_auth.zig`: `looksLikeApiKey: anthropic requires sk-ant- prefix and length` and `looksLikeApiKey: openai only checks length` became `looksLikeApiKey: only checks length`; one test added, `retired providers are refused by label and still revocable`.
+- `expert_codegen_record.zig`: `first attempt expectations are provider qualified` became `first attempt expectation is the recorded value or none` (its Anthropic case is gone).
+- Added: `a session stored under a retired provider is refused unless a provider is chosen` (`selection.zig`).
+
+### Stored settings and sessions that name "claude" or "openai"
+
+- `settings.json` has no provider key (a settings file cannot contain provider identity), so it is unaffected.
+- A session whose meta names `claude` or `openai`: `parsePublic` returns null, so `selection.resolve` returns `error.InvalidStoredProvider` with the existing message ("the stored session provider is invalid; restart with --provider and optional --model to override it"). With `--provider local` or `--provider deepseek` it resolves, marks `provider_overridden`, and starts that provider's default model. The new selection test covers both paths. This was the existing behavior for an unknown provider; no new code path.
+- `zttp expert --provider claude` and `--provider openai` print `error: --provider only accepts local or deepseek` and exit as before for an unknown name.
+- `~/.zttp/providers.json` entries named `anthropic` or `openai` are never read by injection. `zttp auth claude` and `zttp auth openai` are refused with a message. `zttp auth revoke claude` and `zttp auth revoke openai` still delete a stored key, so no key is stranded. Checked by hand against a scratch `HOME`: refused, removed, and the `deepseek` entry untouched.
+- A cassette or manifest with provider `anthropic` or `openai` is refused with `UnsupportedProvider`.
+
+### Kept
+
+DeepSeek, local, `json_writer.zig`, `http_errors.zig`, `chat_completions.zig`, `capture_sink.zig`. The cassette format keeps its SSE line support (`stream` and `sse_path`) although no surviving provider streams; removing it is a separate decision.
+
+### Counts
+
+`test-expert-app` 965 of 966 passed (was 1046 of 1047), `test-cassette` 378/378 (was 425), `test-simulator` 846/846 (was 927), `test-standin` 56/56, `test-cli` 823 passed 1 skipped (a count that includes the pi and runtime tests it builds), `zig build test` 8921 of 8927 passed with 6 skipped (was 9130 of 9136).
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches, with output redirected.
+
+- Exit 0, unfiltered: `test-expert-app`, `test-cassette`, `test-simulator`, `test-standin` (56), `test-cli`, `test-convergence-emitter`, `test-agent-identity`, `test-module-boundary`, `test-docs-drift`, `test-doc-links`, `test-step-coverage`, `test-runtime-purity`, `test-script-reachability`, `test-release-check`, `test-evidence-marker`, `test-residual-guards-drift`, `zig build`, and `zig build test`. `zig fmt --check packages/pi/src packages/runtime/src build build.zig`: exit 0.
+- Invariant 2: no `coverage.json is stale`, no `response_order_mismatch`; the two `model_context_mismatch` lines in the `zig build test` log are the known negative tests. The replay still prints `19/19 case(s) replayed from a flow artifact`.
+- Invariant 3: nothing changed under `tool_registry.zig`, `expert_persona.zig`, `skills/`, or `prompts/`.
+- Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 8: `git grep -n -E "providers/anthropic|providers/openai|anthropic_client|openai_client|initOpenAI|initAnthropic|ZTS_OPENAI|OPENAI_API_KEY|ANTHROPIC_API_KEY|MissingAnthropicCredential|MissingOpenAICredential|UnsupportedOpenAIModelOverride|auth claude|auth openai|openai_custom|openai_hosted|OpenAiEndpoint|openAiEndpointFromEnv|tools_schema|\.anthropic\b|\.openai\b|Provider\.(anthropic|openai)" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md CONTRIBUTING.md .agents .github scripts build build.zig packages tooling` leaves two lines: the sentences in `docs/cli.md` and `docs/user-guide.md` that say `zttp auth claude` and `zttp auth openai` are refused. `docs/plans/`, `docs/solutions/`, `CHANGELOG.md`, and the historical rows of `docs/convergence.md` still name the old providers on purpose.

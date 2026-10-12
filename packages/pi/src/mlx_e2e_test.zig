@@ -89,10 +89,6 @@ test "local MLX expert flow" {
     defer allocator.free(sessions_dir);
     var sessions_env = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions_env.restore(allocator);
-    var anthropic_env = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
-    defer anthropic_env.restore(allocator);
-    var openai_env = try EnvOverride.unset(allocator, "OPENAI_API_KEY");
-    defer openai_env.restore(allocator);
 
     const saved_cwd = try cwdPathAlloc(allocator);
     defer allocator.free(saved_cwd);
