@@ -8,6 +8,11 @@ Decision 7 keeps `zts agent --stdin-json` with its determinism gate and module g
 The DeepSeek re-record in Phase 3 still needs a separate authorization.
 The tag `pre-rebase` marks `b33cac5c`, the full feature set before any removal.
 Phase 1 executes from `docs/plans/2026-10-11-feature-removal-phase-1.md`. That plan corrects several file lists below and moves every model-visible tool removal to Phase 3, because the tool catalog is part of the frozen replay identity.
+Phase 1 is complete. The owner selected Phase 2 execution through Decision 10 on 2026-10-12.
+The implementation plan is `docs/plans/2026-10-12-1109-refactor-feature-removal-phase-two-plan.md`.
+It corrects the Phase 2 sequence: runtime authority and artifact sections leave first; model-visible ledger and tool exports wait for Phase 3.
+Certificate schema 4 becomes 5 alongside payload format 6 becoming 7. The eight handler properties and residual guards remain.
+Decision 11 offers combined phases with recording authorization. No answer or provider authorization is presumed.
 
 Plan 003 kept every documented feature and changed only internal compiler boundaries.
 This proposal is different: the owner asked which features can go.
@@ -158,4 +163,4 @@ Correct the CLAUDE.md sentence about the single execution path once 1b lands.
 8. History. Option A: tag the current state as `pre-rebase`, then delete `docs/archive/` and completed plans. Option B: keep them in the tree. Recommendation: A.
 9. Coordination with plan 004, which another session is implementing now. Option A: finish the current 004 unit, pause 004, run Phases 1 to 3, then resume. Option B: run Phase 1 groups that do not touch `precompile.zig` in parallel with 004. Recommendation: A. The plan index forbids two overlapping plans at once.
 
-Next action: the owner answers decisions 1 to 9. Then the root session writes the Phase 1 implementation plan, has it validated, and dispatches it.
+Next action: the root session executes the selected Phase 2 implementation plan and records evidence in its companion worklog.
