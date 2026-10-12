@@ -2,11 +2,12 @@
 //!
 //! Aggregates all verification results into a single structured JSON report.
 //! Each optional section is only populated when the corresponding data is
-//! available (contract, manifest alignment, property expectations).
+//! available in the contract.
 //!
-//! Architecture: buildReport (contract + optional results) -> BuildReport -> writeReportJson
+//! Architecture: buildReport (contract + optional inputs) -> BuildReport -> writeReportJson
 //!
-//! Usage: called by precompile.zig when --report json is passed.
+//! No production caller remains: the `--report` precompile flag is gone. A test
+//! in precompile.zig and the tests below still exercise it.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -15,11 +16,6 @@ const HandlerContract = zts.HandlerContract;
 const HandlerProperties = handler_contract.HandlerProperties;
 const FaultCoverageInfo = handler_contract.FaultCoverageInfo;
 const ProofLevel = zts.ContractProof.Level;
-const manifest_alignment = @import("manifest_alignment.zig");
-const ManifestAlignment = manifest_alignment.ManifestAlignment;
-const AlignmentResult = manifest_alignment.AlignmentResult;
-const property_expectations = @import("property_expectations.zig");
-const ExpectationResult = property_expectations.ExpectationResult;
 
 const writeJsonString = handler_contract.writeJsonString;
 
@@ -35,8 +31,6 @@ pub const BuildReport = struct {
     properties: ?PropertiesSection = null,
     fault_coverage: ?FaultCoverageSection = null,
     flow_analysis: ?FlowAnalysisSection = null,
-    manifest_alignment: ?ManifestAlignmentSection = null,
-    property_expectations: ?PropertyExpectationsSection = null,
     integration: ?IntegrationSection = null,
     /// The P8 report (M4 T4), borrowed from the contract. Empty, and not
     /// written, when the build had no declaration.
@@ -79,33 +73,10 @@ pub const FlowAnalysisSection = struct {
     injection_safe: bool,
 };
 
-pub const ManifestAlignmentSection = struct {
-    overall: []const u8, // "pass", "warn", "fail"
-    sections: []const SectionResult,
-};
-
-pub const SectionResult = struct {
-    name: []const u8,
-    status: []const u8,
-    declared: u32,
-    matched: u32,
-};
-
-pub const PropertyExpectationsSection = struct {
-    passed: bool,
-    checked_routes: u32,
-    mismatches: u32,
-};
-
 pub const IntegrationSection = struct {
-    generator_pack: bool = false,
     sql_schema: bool = false,
-    manifest: bool = false,
-    property_expectations: bool = false,
     /// A consumer declaration was given (M4 T4).
     declaration: bool = false,
-    replay: bool = false,
-    fault_severity: bool = false,
 };
 
 // -------------------------------------------------------------------------
@@ -119,8 +90,6 @@ pub const IntegrationSection = struct {
 pub fn buildReport(
     allocator: std.mem.Allocator,
     contract: *const HandlerContract,
-    alignment: ?*const ManifestAlignment,
-    prop_result: ?*const ExpectationResult,
     integration_inputs: ?*const IntegrationSection,
     handler_path: []const u8,
 ) BuildReport {
@@ -168,19 +137,6 @@ pub fn buildReport(
         .injection_safe = p.injection_safe,
     } else null;
 
-    // Manifest alignment section
-    const manifest_alignment_section: ?ManifestAlignmentSection = if (alignment) |a|
-        buildAlignmentSection(allocator, a) catch null
-    else
-        null;
-
-    // Property expectations section
-    const property_expectations_section: ?PropertyExpectationsSection = if (prop_result) |r| .{
-        .passed = r.passed,
-        .checked_routes = r.checked_routes,
-        .mismatches = @intCast(r.mismatches.len),
-    } else null;
-
     const integration_section: ?IntegrationSection = if (integration_inputs) |inputs| inputs.* else null;
 
     return .{
@@ -190,8 +146,6 @@ pub fn buildReport(
         .properties = properties,
         .fault_coverage = fault_coverage,
         .flow_analysis = flow_analysis,
-        .manifest_alignment = manifest_alignment_section,
-        .property_expectations = property_expectations_section,
         .integration = integration_section,
         .classifications = contract.classifications.items,
     };
@@ -206,28 +160,6 @@ fn buildChecks(allocator: std.mem.Allocator, v: *const handler_contract.Verifica
     if (v.bytecode_verified) try checks.append(allocator, "bytecodeVerified");
 
     return try checks.toOwnedSlice(allocator);
-}
-
-fn buildAlignmentSection(
-    allocator: std.mem.Allocator,
-    alignment: *const ManifestAlignment,
-) !ManifestAlignmentSection {
-    var sections: std.ArrayList(SectionResult) = .empty;
-    errdefer sections.deinit(allocator);
-
-    for (alignment.results) |result| {
-        try sections.append(allocator, .{
-            .name = result.section,
-            .status = result.status.toString(),
-            .declared = result.declared_count,
-            .matched = result.matched_count,
-        });
-    }
-
-    return .{
-        .overall = alignment.overall.toString(),
-        .sections = try sections.toOwnedSlice(allocator),
-    };
 }
 
 // -------------------------------------------------------------------------
@@ -306,54 +238,11 @@ pub fn writeReportJson(writer: anytype, report: *const BuildReport) !void {
         try writer.writeAll("  }");
     }
 
-    // manifestAlignment (optional)
-    if (report.manifest_alignment) |ma| {
-        try writer.writeAll(",\n");
-        try writer.writeAll("  \"manifestAlignment\": {\n");
-        try writer.writeAll("    \"overall\": ");
-        try writeJsonString(writer, ma.overall);
-        try writer.writeAll(",\n");
-        try writer.writeAll("    \"sections\": [");
-        for (ma.sections, 0..) |section, i| {
-            if (i > 0) try writer.writeAll(",");
-            try writer.writeAll("\n      {\n");
-            try writer.writeAll("        \"name\": ");
-            try writeJsonString(writer, section.name);
-            try writer.writeAll(",\n");
-            try writer.writeAll("        \"status\": ");
-            try writeJsonString(writer, section.status);
-            try writer.writeAll(",\n");
-            try writer.print("        \"declared\": {d},\n", .{section.declared});
-            try writer.print("        \"matched\": {d}\n", .{section.matched});
-            try writer.writeAll("      }");
-        }
-        if (ma.sections.len > 0) {
-            try writer.writeAll("\n    ");
-        }
-        try writer.writeAll("]\n");
-        try writer.writeAll("  }");
-    }
-
-    // propertyExpectations (optional)
-    if (report.property_expectations) |pe| {
-        try writer.writeAll(",\n");
-        try writer.writeAll("  \"propertyExpectations\": {\n");
-        try writer.print("    \"passed\": {s},\n", .{if (pe.passed) "true" else "false"});
-        try writer.print("    \"checkedRoutes\": {d},\n", .{pe.checked_routes});
-        try writer.print("    \"mismatches\": {d}\n", .{pe.mismatches});
-        try writer.writeAll("  }");
-    }
-
     if (report.integration) |integration| {
         try writer.writeAll(",\n");
         try writer.writeAll("  \"integration\": {\n");
-        try writer.print("    \"generatorPack\": {s},\n", .{if (integration.generator_pack) "true" else "false"});
         try writer.print("    \"sqlSchema\": {s},\n", .{if (integration.sql_schema) "true" else "false"});
-        try writer.print("    \"manifest\": {s},\n", .{if (integration.manifest) "true" else "false"});
-        try writer.print("    \"propertyExpectations\": {s},\n", .{if (integration.property_expectations) "true" else "false"});
-        try writer.print("    \"declaration\": {s},\n", .{if (integration.declaration) "true" else "false"});
-        try writer.print("    \"replay\": {s},\n", .{if (integration.replay) "true" else "false"});
-        try writer.print("    \"faultSeverity\": {s}\n", .{if (integration.fault_severity) "true" else "false"});
+        try writer.print("    \"declaration\": {s}\n", .{if (integration.declaration) "true" else "false"});
         try writer.writeAll("  }");
     }
 
@@ -407,19 +296,12 @@ test "writeReportJson: minimal report" {
     try std.testing.expect(std.mem.indexOf(u8, json, "\"properties\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"faultCoverage\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"flowAnalysis\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"manifestAlignment\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"propertyExpectations\"") == null);
 }
 
 test "writeReportJson: full report" {
     const allocator = std.testing.allocator;
 
     const checks = [_][]const u8{ "exhaustiveReturns", "resultsSafe", "bytecodeVerified" };
-    const sections = [_]SectionResult{
-        .{ .name = "routes", .status = "pass", .declared = 3, .matched = 3 },
-        .{ .name = "env", .status = "warn", .declared = 2, .matched = 1 },
-    };
-
     const report = BuildReport{
         .handler = "app/handler.ts",
         .proof_level = "complete",
@@ -455,15 +337,6 @@ test "writeReportJson: full report" {
             .pii_contained = true,
             .injection_safe = true,
         },
-        .manifest_alignment = .{
-            .overall = "pass",
-            .sections = &sections,
-        },
-        .property_expectations = .{
-            .passed = true,
-            .checked_routes = 4,
-            .mismatches = 0,
-        },
     };
 
     var output: std.ArrayList(u8) = .empty;
@@ -498,16 +371,6 @@ test "writeReportJson: full report" {
     // Flow analysis
     try std.testing.expect(std.mem.indexOf(u8, json, "\"noSecretLeakage\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"injectionSafe\": true") != null);
-
-    // Manifest alignment
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"overall\": \"pass\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"routes\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"env\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"declared\": 3") != null);
-
-    // Property expectations
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"checkedRoutes\": 4") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"mismatches\": 0") != null);
 }
 
 test "writeReportJson: partial sections" {
@@ -547,8 +410,6 @@ test "writeReportJson: partial sections" {
     // Absent sections
     try std.testing.expect(std.mem.indexOf(u8, json, "\"properties\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"flowAnalysis\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"manifestAlignment\"") == null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"propertyExpectations\"") == null);
 }
 
 test "buildReport: from contract with verification and properties" {
@@ -584,7 +445,7 @@ test "buildReport: from contract with verification and properties" {
         .analysis_complete = true,
     };
 
-    const br = buildReport(allocator, &contract, null, null, null, "handler.ts");
+    const br = buildReport(allocator, &contract, null, "handler.ts");
     defer {
         if (br.verification) |v| allocator.free(v.checks);
     }
@@ -600,8 +461,6 @@ test "buildReport: from contract with verification and properties" {
     try std.testing.expectEqual(@as(u32, 2), br.fault_coverage.?.total_failable);
     try std.testing.expect(br.flow_analysis != null);
     try std.testing.expect(br.flow_analysis.?.injection_safe);
-    try std.testing.expect(br.manifest_alignment == null);
-    try std.testing.expect(br.property_expectations == null);
 }
 
 test "buildReport: fault coverage is clean only when the analysis is complete" {
@@ -616,13 +475,13 @@ test "buildReport: fault coverage is clean only when the analysis is complete" {
         .warnings = 0,
         .analysis_complete = false,
     };
-    try std.testing.expect(!buildReport(allocator, &contract, null, null, null, "h.ts").fault_coverage.?.clean);
+    try std.testing.expect(!buildReport(allocator, &contract, null, "h.ts").fault_coverage.?.clean);
 
     contract.fault_coverage.?.analysis_complete = true;
-    try std.testing.expect(buildReport(allocator, &contract, null, null, null, "h.ts").fault_coverage.?.clean);
+    try std.testing.expect(buildReport(allocator, &contract, null, "h.ts").fault_coverage.?.clean);
 
     contract.fault_coverage.?.unseen_calls = 1;
-    try std.testing.expect(!buildReport(allocator, &contract, null, null, null, "h.ts").fault_coverage.?.clean);
+    try std.testing.expect(!buildReport(allocator, &contract, null, "h.ts").fault_coverage.?.clean);
 }
 
 test "buildReport: minimal contract" {
@@ -631,7 +490,7 @@ test "buildReport: minimal contract" {
     var contract = emptyContract();
     defer contract.deinit(allocator);
 
-    const report = buildReport(allocator, &contract, null, null, null, "minimal.ts");
+    const report = buildReport(allocator, &contract, null, "minimal.ts");
 
     try std.testing.expectEqualStrings("minimal.ts", report.handler);
     try std.testing.expectEqualStrings("none", report.proof_level);

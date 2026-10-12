@@ -1,8 +1,8 @@
 //! Shared URL route pattern matching utilities.
 //!
 //! Provides parameter-aware path comparison where `:id` and `{id}` style
-//! segments are treated as equivalent wildcards. Used by fault coverage,
-//! manifest alignment, and property expectations.
+//! segments are treated as equivalent wildcards. Used by fault coverage, service
+//! types, and system linking.
 
 const std = @import("std");
 

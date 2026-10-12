@@ -784,7 +784,6 @@ under `tests/`.
 ```bash
 zttp test
 zttp serve --test tests/handler.test.jsonl src/handler.ts
-zig build -Dhandler=src/handler.ts -Dtest-file=tests/handler.test.jsonl
 ```
 
 Ordinary fixtures use `test`, `request`, optional `io`, and `expect` rows. A
@@ -814,7 +813,6 @@ Record and replay handler I/O:
 ```bash
 zttp serve --trace traces.jsonl src/handler.ts
 zttp serve --replay traces.jsonl src/handler.ts
-zig build -Dhandler=src/handler.ts -Dreplay=traces.jsonl
 ```
 
 Persisted counterexamples live in the witness corpus and can be inspected with

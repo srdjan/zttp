@@ -296,3 +296,64 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - `zig fmt --check build.zig build/ packages/ tooling/`: exit 0.
 - Invariant 4 after G5: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: nothing under `packages/pi` changed.
+
+## G6 Precompile options for external generators, and `prove`
+
+### Removed
+
+- `packages/tools/src/manifest_alignment.zig`, `property_expectations.zig`, `openapi_manifest.zig`, `sdk_codegen.zig`, `precompile_buildtime.zig`, `prove.zig`, `precompile_prove.zig`, and `prove_upgrade.zig`
+- The `zts prove` and `zttp prove` command (the row in `zts_cli.zig`; `zttp` reads the same registry). `prove-behavior` stays.
+- The build options `-Dmanifest`, `-Dexpect-properties`, `-Dgenerator-pack`, `-Dfault-severity`, `-Dreport`, `-Dopenapi`, `-Dsdk`, `-Dreplay`, `-Dtest-file`, `-Dprove`, and `-Dgenerate-tests`, with their `PrecompileOptions` fields in `build/Context.zig` and their forwarding in `build/artifacts.zig`.
+- The matching precompile flags `--manifest`, `--expect-properties`, `--generator-pack`, `--fault-severity`, `--report`, `--openapi`, `--sdk`, `--replay`, `--test-file`, `--prove`, and `--generate-tests` in `precompile_args.zig`. Each is now refused by name as `UnknownFlag`. A new test covers all eleven.
+- In `precompile.zig`: the generator-pack types and reader (`ResolvedGeneratorPack`, `dupJsonValue`, `resolveGeneratorPack`), the build-time replay and test blocks, the OpenAPI, SDK, prove, manifest-alignment, property-expectation, and report blocks of `runCompileWithArgs`, `writeSdkArtifact`, and three tests (`resolveGeneratorPack` twice, `writeSdkArtifact`). The usage line in the header lost the removed flags.
+- In `report.zig`: the manifest-alignment and property-expectations sections, the `alignment` and `prop_result` parameters of `buildReport`, and the integration flags that named removed options. Only `sql_schema` and `declaration` remain in `IntegrationSection`. `report.zig` stays as its own test root (`test-report`) and as the subject of one test in `precompile.zig`. It has no production caller now.
+- `test-manifest-alignment`, `test-openapi-manifest`, and `test-property-expectations` rows in `build/host_tests.zig` and `docs/internals/testing.md`.
+- The `.metadoor-*/` block in `.gitignore`, which only the generator pack consumed.
+- Docs: `CLAUDE.md`, the `zttp-build` skill, `docs/user-guide.md`, `examples/README.md`, `docs/verification.md` (the `-Dgenerate-tests` heading), `docs/consumer-contract.md` (`-Dreplay` became `--replay`), `docs/contracts-and-sandboxing.md` (the OpenAPI and SDK section, build-time replay, `-Dprove`, and the external enrichment flags are gone; the upgrade-verdict text stays, retitled "Upgrade Verdict"; `-Ddeclaration` stays under "Consumer declaration"), `docs/cli.md`, `docs/proofs-and-receipts.md`, `docs/internals/architecture.md`, `README.md`, `docs/README.md`, and the historical plan `docs/plans/2026-09-23-m4-t2-tool-catalog-design.md` (`pre-rebase:` citations).
+- Test help list in `cli_help.zig`: the `zttp prove` entry.
+- Comments: `upgrade_verifier.zig` now names `system_rollout.zig` as its caller. `route_match.zig` no longer names the deleted users.
+
+### Kept on purpose
+
+- `-Dhandler`, `-Dverify`, `-Dcontract`, `-Dpolicy`, `-Dsql-schema`, `-Dsystem`, `-Ddeclaration`, `gen-tests`, `prove-behavior`, and `upgrade_verifier.zig`.
+- `CompileOptions.generate_tests` in `compileHandler`. A test uses it and a contract build writes `handler.auto-tests.jsonl` through the same condition. Only the CLI flag went.
+- The runtime flags `--watch --prove`, `--replay`, `--test-file`, and `--trace` on `zttp serve` and `zttp dev`. They are runtime options, not precompile options.
+- `.gitignore` entries `proof.json` and `proof-report.txt` (outputs of the deleted `prove` command).
+- `consumer-contract.md:927` ("the build report" in a proposed requirement): it is spec text, not a flag.
+
+### Contract output unchanged
+
+The method is the G5 method. `zts compile --verify --contract <handler> <dir>/out.zig` and `zts check --json --contract <handler>` ran at HEAD (`525410b0`) before the edits and on the edited tree after them, for the same five handlers (`examples/handler/handler.ts`, `examples/routing/router.ts`, `examples/hypermedia/order.ts`, and the two scratch route handlers from G5). `cmp` shows `contract.json`, the routes section, `check.json`, `out.zig`, and `handler.auto-tests.jsonl` byte-identical for all five. Exit codes were equal before and after (compile 0 each; check 0 for `handler.ts`, 1 for the other four, as at HEAD).
+
+### Judgments the plan did not settle
+
+- The plan names `prove.zig` and the heading says `prove`. G6 removed the `prove` command row with the file. The command was documented in `docs/cli.md`, `docs/contracts-and-sandboxing.md`, and `docs/proofs-and-receipts.md`; those references changed.
+- `report.zig` imported two deleted modules, so G6 had to cut its manifest and property sections although the plan says to remove only the production output path. The remaining `buildReport` and `writeReportJson` serve tests only.
+- `.gitignore`: the plan names line 53, which is the generator-pack comment. G6 deleted the whole block (comment and `.metadoor-*/`).
+- `docs/contracts-and-sandboxing.md`: the upgrade-verdict prose describes live reload and `rollout`, so G6 kept it and retitled the section rather than deleting it.
+- `docs/verification.md`: the "Exhaustive Path Analysis" section describes `PathGenerator` and fault coverage, which a contract build still runs. G6 kept it and removed only the flag from the heading and first sentence. G6 also dropped the bullet "Build report alongside other PROVEN labels".
+
+### Dead code for G15
+
+- `contract_diff.writeProofJson`, `contract_diff.writeProofReport`, and their tests in `packages/zts/src/contract_diff.zig`: only `prove.zig` and `prove_upgrade.zig` called them.
+- `upgrade_verifier.writeUpgradeManifestJson` and `upgrade_verifier.writeUpgradeReport` (and their tests): same callers.
+- `zts.routePatternsMatch` and the `zts.pathsMatch` alias at `packages/zts/src/root.zig:727,731`: only `manifest_alignment.zig` used them outside their own test. They are curated public surface, so removal needs a decision.
+- `packages/tools/src/report.zig` as a whole (`buildReport`, `writeReportJson`, the section types) and `test-report`: no production caller. The plan keeps it while a test uses it (`precompile.zig`, "an incomplete fault analysis writes isCovered false and report clean false").
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "manifest_alignment|manifest-alignment|property_expectations|openapi_manifest|sdk_codegen|precompile_buildtime|precompile_prove|prove_upgrade|\bprove\.zig|-Dmanifest|-Dexpect-properties|-Dgenerator-pack|-Dfault-severity|-Dreport|-Dopenapi|-Dsdk|-Dreplay|-Dtest-file|-Dprove|-Dgenerate-tests|--generator-pack|--expect-properties|--fault-severity|--openapi|--sdk\b|--test-file|--generate-tests|test-property-expectations|test-manifest-alignment|test-openapi-manifest|zts prove\b|zttp prove\b|ResolvedGeneratorPack|resolveGeneratorPack|writeSdkArtifact|runProvePipeline|runBuildTimeReplay|runBuildTimeTests|writeBuildReport|generator pack" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling examples
+```
+
+Remaining hits: `pre-rebase:` citations in the m4-t2 design plan, plan text of this series, `.github/releases/v0.21.0-corrected.md` (release history), and the refusal test in `precompile_args.zig`, which names the removed flags on purpose.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `test-precompile`, `test-zts-cli`, `test-report`, `test-cli` (868 passed, 1 skipped, 0 failed; the G5 count), `test-contract-golden`, `test-examples`, `test-step-coverage`, `test-docs-drift`, `test-script-reachability`, `test-release-check`, `test-doc-links`, `test-module-boundary`, `test-zts-layering`, `test-runtime-purity`, `zig build test`, and `test-zruntime` (alone).
+- `zig fmt --check build.zig build/ packages/ tooling/` and `bash scripts/audit-docs.sh`: exit 0.
+- After the change `zts prove a b` prints "Unknown command: prove", `zts compile --openapi` prints "Unknown flag: --openapi", and `zig build -Dreplay=x` prints "invalid option: -Dreplay".
+- Invariant 4 after G6: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: nothing under `packages/pi` changed.

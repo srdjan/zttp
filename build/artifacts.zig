@@ -159,13 +159,6 @@ fn addPrecompileArgs(
     if (opts.verify_enabled) {
         run_precompile.addArg("--verify");
     }
-    if (opts.openapi_enabled) {
-        run_precompile.addArg("--openapi");
-    }
-    if (opts.sdk_target) |sdk| {
-        run_precompile.addArg("--sdk");
-        run_precompile.addArg(sdk);
-    }
     if (opts.sql_schema_path) |sql_schema| {
         run_precompile.addArg("--sql-schema");
         run_precompile.addArg(sql_schema);
@@ -181,44 +174,9 @@ fn addPrecompileArgs(
         run_precompile.addArg("--policy");
         run_precompile.addArg(policy);
     }
-    if (opts.replay_path) |rp| {
-        run_precompile.addArg("--replay");
-        run_precompile.addArg(rp);
-    }
-    if (opts.test_file_path) |tf| {
-        run_precompile.addArg("--test-file");
-        run_precompile.addArg(tf);
-    }
-    if (opts.prove_spec) |ps| {
-        run_precompile.addArg("--prove");
-        run_precompile.addArg(ps);
-    }
-    if (opts.generate_tests) {
-        run_precompile.addArg("--generate-tests");
-    }
-    if (opts.manifest_path) |mp| {
-        run_precompile.addArg("--manifest");
-        run_precompile.addArg(mp);
-    }
-    if (opts.expect_properties_path) |ep| {
-        run_precompile.addArg("--expect-properties");
-        run_precompile.addArg(ep);
-    }
     if (opts.declaration_path) |dl| {
         run_precompile.addArg("--declaration");
         run_precompile.addArg(dl);
-    }
-    if (opts.fault_severity_path) |fs| {
-        run_precompile.addArg("--fault-severity");
-        run_precompile.addArg(fs);
-    }
-    if (opts.generator_pack_path) |gp| {
-        run_precompile.addArg("--generator-pack");
-        run_precompile.addArg(gp);
-    }
-    if (opts.report_format) |rf| {
-        run_precompile.addArg("--report");
-        run_precompile.addArg(rf);
     }
     if (git_commit_sha) |sha| {
         run_precompile.addArg("--git-commit");

@@ -476,7 +476,7 @@ proof never changes the verdict.
 Only a critical lost proof makes the handler `breaking`. The critical set is
 `retry_safe`, `injection_safe`, `state_isolated`, `no_secret_leakage`,
 `no_credential_leakage`, `fault_covered`, `result_safe`, and `optional_safe`.
-The upgrade verifier behind `zttp prove` classifies the same eight as
+The upgrade verifier behind `zttp rollout` classifies the same eight as
 critical, because both read one table, `contract_diff.propertyLossSeverity`.
 Every other lost proof, for example `pure`, `read_only`, or `stateless`, is
 listed in the report and leaves the verdict as it was. A first log call or

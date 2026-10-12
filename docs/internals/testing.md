@@ -32,7 +32,6 @@ there without a row here fails `zig build test-docs-drift`:
 |---|---|
 | `test-precompile` | `packages/tools/src/precompile.zig` |
 | `test-canonicalize` | `packages/tools/src/canonicalize.zig` |
-| `test-property-expectations` | `packages/tools/src/property_expectations.zig` |
 | `test-rollout` | `packages/tools/src/system_rollout.zig` |
 | `test-expert` | `packages/tools/src/expert.zig` |
 | `test-zts-cli` | `packages/tools/src/zts_cli.zig` |
@@ -42,12 +41,10 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-module-graph-record` | `packages/tools/src/module_graph_record.zig` |
 | `test-agent-protocol` | `packages/tools/src/agent_protocol.zig` |
 | `test-module-audit` | `packages/tools/src/module_audit.zig` |
-| `test-manifest-alignment` | `packages/tools/src/manifest_alignment.zig` |
 | `test-smt-solver` | `packages/tools/src/smt_solver.zig` |
 | `test-verify-paths-core` | `packages/tools/src/verify_paths_core.zig` |
 | `test-report` | `packages/tools/src/report.zig` |
 | `test-project-config` | `packages/tools/src/project_config.zig` |
-| `test-openapi-manifest` | `packages/tools/src/openapi_manifest.zig` |
 | `test-vocab-envelope` | `packages/tools/src/vocab_envelope.zig` |
 | `test-instruction-counter` | `packages/tools/src/instruction_counter.zig` |
 | `test-expert-app` | `packages/pi/src/tests.zig` |

@@ -17,7 +17,6 @@ pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 pub const system_analysis = @import("system_analysis.zig");
 const json_diag = precompile.json_diag;
-const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");
 pub const system_build = @import("system_build.zig");
 const system_rollout = @import("system_rollout.zig");
@@ -58,7 +57,6 @@ pub const Command = struct {
 
 pub const commands = [_]Command{
     .{ .name = "check", .run = runCheckCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Run the analyzer once", .usage = "check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path]" },
-    .{ .name = "prove", .run = prove.runWithArgs, .category = .analyze, .args = "<old.json> <new.json>", .blurb = "Contract upgrade safety check", .usage = "prove <old-contract.json> <new-contract.json> [output-dir/]" },
     .{ .name = "mock", .run = mock.runWithArgs, .category = .analyze, .args = "<tests.jsonl>", .blurb = "Mock server from test fixtures", .usage = "mock <tests.jsonl> [--port PORT]" },
     .{ .name = "link", .run = system_build.runWithArgs, .category = .analyze, .args = "<system.json>", .blurb = "Cross-handler system linking", .usage = "link <system.json> [--output-dir <dir>]" },
     .{ .name = "gen-tests", .run = runGenTestsCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Generate a starter test fixture", .usage = "gen-tests [handler.ts] [-o output.jsonl]" },

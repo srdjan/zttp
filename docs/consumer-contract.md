@@ -715,7 +715,7 @@ properties: `no_secret_leakage`, `no_credential_leakage`, `injection_safe`,
 `input_validated`, and `pii_contained`. A handler that validates input, shapes data, and
 constructs a response is where those properties live. Both profiles also make a handler a
 deterministic function of its request and the virtual-module responses it received, which
-is what makes `--trace` and `-Dreplay` meaningful over either.
+is what makes `--trace` and `--replay` meaningful over either.
 
 A `boundary` handler is not a pure function of its request, and the document should not say
 so. It may read `env`, `clock` and `random`, and it may write to `stderr`. What `boundary`
@@ -777,7 +777,7 @@ address is refused before a socket is opened. The refusal is conditional on the 
 `link_local` is a configurable scope, so the check holds only where that scope is not
 permitted. The adapter is also a deterministic function of its
 request and the virtual-module responses it received, which is what lets `--trace` and
-`-Dreplay` reproduce a run. Replay reproduces the recorded wrapped-system response; it
+`--replay` reproduce a run. Replay reproduces the recorded wrapped-system response; it
 does not call the wrapped system again and establishes nothing about what that system
 would answer now.
 

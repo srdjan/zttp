@@ -27,21 +27,10 @@ pub const PrecompileOptions = struct {
     output_path: []const u8,
     emit_verify: bool = false,
     emit_contract: bool = false,
-    emit_openapi: bool = false,
-    sdk_target: ?[]const u8 = null,
     sql_schema_path: ?[]const u8 = null,
     system_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
-    replay_trace_path: ?[]const u8 = null,
-    test_file_path: ?[]const u8 = null,
-    prove_spec: ?[]const u8 = null,
-    generate_tests: bool = false,
-    manifest_path: ?[]const u8 = null,
-    expect_properties_path: ?[]const u8 = null,
     declaration_path: ?[]const u8 = null,
-    fault_severity_path: ?[]const u8 = null,
-    generator_pack_path: ?[]const u8 = null,
-    report_format: ?[]const u8 = null,
     /// ISO-8601 build timestamp injected as `__BUILD_TIME__` during TS strip.
     /// When null, compileHandler falls back to the wall clock at compile time.
     build_time: ?[]const u8 = null,
@@ -62,20 +51,8 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             opts.emit_verify = true;
             continue;
         }
-        if (std.mem.eql(u8, arg, "--generate-tests")) {
-            opts.generate_tests = true;
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--contract")) {
             opts.emit_contract = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--openapi")) {
-            opts.emit_openapi = true;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--sdk")) {
-            opts.sdk_target = try takeArg(&index, argv, "Missing target after --sdk (values: ts)");
             continue;
         }
         if (std.mem.eql(u8, arg, "--sql-schema")) {
@@ -90,40 +67,8 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             opts.policy_path = try takeArg(&index, argv, "Missing path after --policy");
             continue;
         }
-        if (std.mem.eql(u8, arg, "--replay")) {
-            opts.replay_trace_path = try takeArg(&index, argv, "Missing path after --replay");
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--test-file")) {
-            opts.test_file_path = try takeArg(&index, argv, "Missing path after --test-file");
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--prove")) {
-            opts.prove_spec = try takeArg(&index, argv, "Missing spec after --prove (format: contract.json or contract.json:traces.jsonl)");
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--manifest")) {
-            opts.manifest_path = try takeArg(&index, argv, "Missing path after --manifest");
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--expect-properties")) {
-            opts.expect_properties_path = try takeArg(&index, argv, "Missing path after --expect-properties");
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--declaration")) {
             opts.declaration_path = try takeArg(&index, argv, "Missing path after --declaration");
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--fault-severity")) {
-            opts.fault_severity_path = try takeArg(&index, argv, "Missing path after --fault-severity");
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--generator-pack")) {
-            opts.generator_pack_path = try takeArg(&index, argv, "Missing path after --generator-pack");
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--report")) {
-            opts.report_format = try takeArg(&index, argv, "Missing format after --report (values: json)");
             continue;
         }
         if (std.mem.eql(u8, arg, "--build-time")) {
@@ -157,7 +102,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] [--declaration declaration.json] [--module-manifest path] <handler.ts> <output.zig>\n";
+    const usage = "Usage: precompile [--verify] [--contract] [--sql-schema path] [--system path] [--policy policy.json] [--declaration declaration.json] [--module-manifest path] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
         errPrint(usage, .{});
         errPrint("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
@@ -273,6 +218,20 @@ test "parsePrecompileArgSlice refuses the deleted --data-labels flag as unknown"
     };
     for (shapes) |argv| {
         try std.testing.expectError(error.UnknownFlag, parsePrecompileArgSlice(argv));
+    }
+}
+
+test "parsePrecompileArgSlice refuses every removed external-generator flag as unknown" {
+    // The takers consume a value, so the value must not rescue the flag: each
+    // one is refused by name before `handler.ts` and `out.zig` are read.
+    const removed = [_][]const u8{
+        "--generate-tests", "--openapi",        "--sdk",      "--replay",
+        "--test-file",      "--prove",          "--manifest", "--expect-properties",
+        "--fault-severity", "--generator-pack", "--report",
+    };
+    for (removed) |flag| {
+        const argv = [_][]const u8{ flag, "value", "handler.ts", "out.zig" };
+        try std.testing.expectError(error.UnknownFlag, parsePrecompileArgSlice(&argv));
     }
 }
 

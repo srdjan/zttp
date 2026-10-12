@@ -151,7 +151,7 @@ Start at the [Documentation Index](docs/README.md).
 - [Virtual Modules](docs/virtual-modules/README.md) - complete current module
   list and runtime requirements.
 - [Contracts and Sandboxing](docs/contracts-and-sandboxing.md) - contract
-  extraction, runtime policy, replay, OpenAPI, SDK emit, and `Proof<T, P>`.
+  extraction, runtime policy, replay, and `Proof<T, P>`.
 - [Verification](docs/verification.md), [TypeScript](docs/typescript.md),
   [Sound Mode](docs/sound-mode.md), and
   [Restrictions to Proofs](docs/restrictions-to-proofs.md).

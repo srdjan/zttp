@@ -37,7 +37,6 @@ const host_test_roots = [_]HostTestRoot{
     // collected_via_named_module: canonicalize.zig is reached only through
     // the `zts_cli` module, so this root is what runs its tests.
     .{ .owner = .tools, .src = "src/canonicalize.zig", .step = "test-canonicalize", .desc = "Run canonicalize/normalize tool tests", .project_config = true },
-    .{ .owner = .tools, .src = "src/property_expectations.zig", .step = "test-property-expectations", .desc = "Run property expectations tool tests" },
     .{ .owner = .tools, .src = "src/system_rollout.zig", .step = "test-rollout", .desc = "Run rollout planner tests" },
     .{ .owner = .tools, .src = "src/expert.zig", .step = "test-expert", .desc = "Run zts expert v1 contract tripwires" },
     // collected_via_named_module: zts_cli.zig and the command files it
@@ -72,12 +71,10 @@ const host_test_roots = [_]HostTestRoot{
     // No new root is needed there: those three packages reach their files through
     // analyzed imports, not through named modules the way tools does.
     .{ .owner = .tools, .src = "src/module_audit.zig", .step = "test-module-audit", .desc = "Run module-contract audit tests", .project_config = true },
-    .{ .owner = .tools, .src = "src/manifest_alignment.zig", .step = "test-manifest-alignment", .desc = "Run manifest alignment tests", .project_config = true },
     .{ .owner = .tools, .src = "src/smt_solver.zig", .step = "test-smt-solver", .desc = "Run SMT solver harness tests", .project_config = true },
     .{ .owner = .tools, .src = "src/verify_paths_core.zig", .step = "test-verify-paths-core", .desc = "Run behavior-path verification core tests", .project_config = true },
     .{ .owner = .tools, .src = "src/report.zig", .step = "test-report", .desc = "Run analyzer report renderer tests", .project_config = true },
     .{ .owner = .tools, .src = "src/project_config.zig", .step = "test-project-config", .desc = "Run project config discovery tests" },
-    .{ .owner = .tools, .src = "src/openapi_manifest.zig", .step = "test-openapi-manifest", .desc = "Run OpenAPI manifest tests", .project_config = true },
     .{ .owner = .tools, .src = "src/vocab_envelope.zig", .step = "test-vocab-envelope", .desc = "Run published vocabulary envelope derivation tests" },
     .{ .owner = .tools, .src = "src/instruction_counter.zig", .step = "test-instruction-counter", .desc = "Run retired-instruction counter tests" },
     .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true, .needs_install = true },

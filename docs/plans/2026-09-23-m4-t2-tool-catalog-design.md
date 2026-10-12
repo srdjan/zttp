@@ -26,9 +26,9 @@ runtime path. C2 tests the validator through its public Zig API.
 ## 2. What exists today
 
 **No tool concept.** The contract has no tool, catalog, or route description.
-The only OpenAPI output is `packages/tools/src/openapi_manifest.zig:18`. It
-synthesizes response descriptions as `"HTTP N response"` (`:254`), and only
-`precompile --openapi` calls it (`precompile.zig:812-834`).
+The only OpenAPI output was `pre-rebase:packages/tools/src/openapi_manifest.zig:18`.
+It synthesized response descriptions as `"HTTP N response"` (`:254`), and only
+`precompile --openapi` called it (`pre-rebase:packages/tools/src/precompile.zig:812-834`).
 
 **Routes.** `routerMatch(routes, req)` is the only route source
 (`packages/modules/src/http/router.zig:11-21`). The builder reads an object

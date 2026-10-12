@@ -1,6 +1,6 @@
 ---
 name: zttp-build
-description: Use when running a zttp build beyond the everyday debug build and test suite - release builds, handler precompilation with -Dhandler/-Dverify/-Dcontract/-Dreplay/-Dtest-file, per-package test steps, filtered single tests, example handler tests, and benchmarks.
+description: Use when running a zttp build beyond the everyday debug build and test suite - release builds, handler precompilation with -Dhandler/-Dverify/-Dcontract, per-package test steps, filtered single tests, example handler tests, and benchmarks.
 ---
 
 # zttp build reference
@@ -24,8 +24,6 @@ zig build -Doptimize=ReleaseFast              # Release build
 zig build -Dhandler=handler.jsx               # Precompile handler into zttp
 zig build -Dhandler=handler.jsx -Dverify      # Verify at compile time
 zig build -Dhandler=handler.jsx -Dcontract    # Emit contract.json
-zig build -Dhandler=handler.jsx -Dreplay=traces.jsonl    # Replay-verify
-zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Handler tests at build time
 ```
 
 ## Run

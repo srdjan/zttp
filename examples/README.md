@@ -2,8 +2,7 @@
 
 Handler files grouped by what they demonstrate. The compiler treats every
 example as a complete program: parse, contract, verify, then run. Each
-`.test.jsonl` file beside a handler is replayable through `zttp mock`;
-build-time replay uses `zig build -Dhandler=<handler> -Dtest-file=<tests>`.
+`.test.jsonl` file beside a handler is replayable through `zttp mock`.
 Workflow examples use live server checks in `scripts/test-examples.sh` because
 they exercise real durable state, signals, and the persisted workflow queue.
 

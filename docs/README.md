@@ -34,7 +34,7 @@ and superseded execution records live in the `pre-rebase` git tag, under
 ## Reference
 
 - [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md) - handler
-  contracts, least-privilege runtime policy, OpenAPI/SDK emit, replay,
+  contracts, least-privilege runtime policy, replay,
   upgrade checks, and `Proof<T, P>`.
 - [Verification](verification.md) - compile-time handler checks.
 - [TypeScript](typescript.md) - type stripping, type checking, TSX, and

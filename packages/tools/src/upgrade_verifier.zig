@@ -8,7 +8,7 @@
 //! additive/breaking) by incorporating behavioral path comparison, property
 //! regressions with severity, and trace coverage gaps.
 //!
-//! Called by prove_upgrade.zig when behavioral data is available.
+//! Called by system_rollout.zig when behavioral data is available.
 
 const std = @import("std");
 const zts = @import("zts");

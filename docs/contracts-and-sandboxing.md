@@ -3,9 +3,9 @@
 The compiler extracts a contract claim from every handler. The claim
 describes what the compiler inferred before the handler runs. It is
 used to derive capability restrictions, compare versions across
-deployments, and emit public artifacts such as OpenAPI and TypeScript
-SDKs. In a deployed artifact, only properties accepted by the
-independent proof checker may authorize runtime optimizations.
+deployments, and feed the proof ledger. In a deployed artifact, only
+properties accepted by the independent proof checker may authorize runtime
+optimizations.
 
 ## Contract Manifest (`-Dcontract`)
 
@@ -164,10 +164,6 @@ won't boot" and "individual requests get rejected".
 - Explicit policy override validation against the contract when
   `-Dpolicy` is passed. A policy that admits capabilities the contract
   did not prove is rejected.
-- Replay regressions against `-Dreplay=traces.jsonl`.
-- Upgrade verdict against `-Dprove=old:traces` (when classified
-  `breaking`, the build fails unless `--force-swap` is on the eventual
-  runtime invocation).
 
 **Process startup** (once, when the self-extracting binary boots):
 - A `-Dhandler` build uses the comptime
@@ -399,53 +395,7 @@ refused with `CredentialReflected` before the tool can read the response. The
 runtime finds only the exact bytes of the value. It does not find an encoded
 echo, such as base64, a hash, or a compression that it does not decode.
 
-## OpenAPI and TypeScript SDK (`-Dopenapi`, `-Dsdk=ts`)
-
-The same proven route facts can be emitted as OpenAPI and as a
-generated TypeScript client:
-
-```bash
-zig build -Dhandler=examples/routing/api-surface.ts -Dcontract -Dopenapi -Dsdk=ts
-```
-
-This writes three sibling artifacts in `src/generated/`:
-
-- `contract.json`
-- `openapi.json`
-- `client.ts`
-
-The current API emitters include facts the compiler can prove without
-guessing:
-
-- route method and path
-- path, query, and header params reached through literal access
-- proven JSON request bodies from `validateJson(...)`, `coerceJson(...)`,
-  and `decodeJson(...)`
-- proven form request bodies from `decodeForm(...)`
-- typed query params from `decodeQuery(...)`
-- proven response variants, including multiple status codes when
-  statically visible
-- bearer auth metadata
-- `x-zttp-*` hints whenever part of the surface stays dynamic
-
-The generated SDK only exposes typed helpers for routes it can prove
-end to end. Everything else remains available through `requestRaw()`
-and is listed in `skippedOperations`.
-
-```ts
-import { createClient } from "./src/generated/client";
-
-const api = createClient({ baseUrl: "https://api.example.com" });
-
-const result = await api.postProfilesId({
-    params: { id: "user_123" },
-    query: { verbose: true },
-    body: { displayName: "Ada" },
-    headers: { "x-client-id": "cli-42" },
-});
-```
-
-## Deterministic Replay (`--trace`, `--replay`, `-Dreplay`)
+## Deterministic Replay (`--trace`, `--replay`)
 
 The restricted JS subset (no async, no exceptions, no side-effecting
 builtins) makes handlers deterministic pure functions of their request
@@ -470,24 +420,13 @@ zttp serve --replay traces.jsonl handler-v2.ts
 Reports identical, status-changed, and body-changed results with
 structured diffs.
 
-**Build-time replay** fails the build if regressions are detected:
+## Upgrade Verdict
 
-```bash
-zig build -Dhandler=handler-v2.ts -Dreplay=traces.jsonl
-```
-
-## Proven Evolution (`-Dprove`)
-
-Compare two handler versions and classify the upgrade:
-
-```bash
-zig build -Dhandler=handler-v2.ts -Dprove=old-contract.json:traces.jsonl
-```
-
-Two diff levels run against the old and new contracts. The surface
-diff compares I/O capabilities. The behavioral diff compares every
-execution path, matching by route and branching conditions, then
-classifying each as preserved, response-changed, removed, or added.
+Live reload (`--watch --prove`) and `zttp rollout` compare two handler
+versions and classify the upgrade. Two diff levels run against the old and
+new contracts. The surface diff compares I/O capabilities. The
+behavioral diff compares every execution path, matching by route and
+branching conditions, then classifying each as preserved, response-changed, removed, or added.
 
 Property regressions carry severity. Critical losses are `retry_safe`,
 `injection_safe`, `state_isolated`, `no_secret_leakage`,
@@ -506,14 +445,6 @@ The upgrade verdict combines these signals:
   lost
 - **needs_review**: structurally OK but warning-level regressions or
   significant coverage gaps
-
-Output: `proof.json` (machine-readable upgrade report),
-`proof-report.txt` (human-readable), and `upgrade-manifest.json`
-(verdict with full breakdown).
-
-The standalone `zts prove old.json new.json` CLI compares contracts
-without rebuilding (exit 0 for safe, 1 for breaking, 2 for
-needs_review).
 
 ## Proven Live Reload (`--watch --prove`)
 
@@ -593,41 +524,21 @@ enumeration is finite and exhaustive. Comparing two behavioral
 contracts shows which paths were preserved, which changed response
 codes, which were removed, and which are new.
 
-## External enrichment flags
+## Consumer declaration
 
-Five optional build flags accept external JSON files for
-cross-referencing against compiler-proven contracts. These work with
-any code generator or hand-written files; no specific tooling is
-required.
-
-- `-Dmanifest=<path>`: cross-references a declared manifest (routes,
-  SQL tables, env vars) against the handler contract. Errors on
-  declared items missing from code, warns on undeclared items found in
-  code. Emits `manifest-alignment.json`.
-- `-Dexpect-properties=<path>`: verifies handler-derived properties
-  (`state_isolated`, `injection_safe`, `read_only`, etc.) match
-  external expectations. Build fails on mismatches.
-- `-Ddeclaration=<path>`: gives the consumer declaration to the flow
-  check (`--declaration` on `zts compile` and `zts check`, or the
-  `declaration` key in `zttp.json`). Each classification assigns
-  `secret` or `credential` to a path in the value that a `fetch:<host>`
-  or `service:<name>` source returns. A declared value that reaches a
-  sink fails with ZTS400 to ZTS403. The contract records the status of
-  each entry (`matched`, `indeterminate`, or `absent`) in its
-  `classifications` section. A required entry that the analysis never
-  saw stops the build. The loader refuses a malformed file with a named
-  reason and the entry index. A version 2 declaration can also select a
-  capability `ceiling` (`boundary`, `adapter`, or `ledger`, with an
-  optional `exclude` list of modules). The build stops with a named
-  reason when a capability of the handler is outside the profile, when
-  an imported module is excluded, or when the profile requires
-  `read_only` and the handler does not prove it. The contract records
-  the applied ceiling in its `ceiling` section, or `null`.
-- `-Dfault-severity=<path>`: overrides fault severity classification at
-  the route level. A route declared "critical" elevates all failable
-  calls within it to critical severity for fault coverage diagnostics.
-- `-Dreport=json`: emits a structured JSON build report aggregating
-  verification, properties, fault coverage, flow analysis, manifest
-  alignment, and property expectations into `report.json`.
-
-All flags are optional and additive. Without them, nothing changes.
+`-Ddeclaration=<path>` gives the consumer declaration to the flow
+check (`--declaration` on `zts compile` and `zts check`, or the
+`declaration` key in `zttp.json`). Each classification assigns
+`secret` or `credential` to a path in the value that a `fetch:<host>`
+or `service:<name>` source returns. A declared value that reaches a
+sink fails with ZTS400 to ZTS403. The contract records the status of
+each entry (`matched`, `indeterminate`, or `absent`) in its
+`classifications` section. A required entry that the analysis never
+saw stops the build. The loader refuses a malformed file with a named
+reason and the entry index. A version 2 declaration can also select a
+capability `ceiling` (`boundary`, `adapter`, or `ledger`, with an
+optional `exclude` list of modules). The build stops with a named
+reason when a capability of the handler is outside the profile, when
+an imported module is excluded, or when the profile requires
+`read_only` and the handler does not prove it. The contract records
+the applied ceiling in its `ceiling` section, or `null`.

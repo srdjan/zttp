@@ -116,8 +116,8 @@ For a handler source file:
 4. Resolve imports, including `zttp:*` virtual modules.
 5. Run type, path, Result/optional, state-isolation, flow, and spec checks.
 6. Extract a handler contract and module capability surface.
-7. Emit bytecode and optional artifacts such as contract JSON, OpenAPI, SDK,
-   generated tests, or build reports.
+7. Emit bytecode and optional artifacts such as contract JSON and generated
+   tests.
 
 Unsupported language features fail before runtime. See
 [Feature Detection](../feature-detection.md) and
@@ -181,7 +181,6 @@ The same contract feeds:
 - proof ledger entries;
 - `zttp proofs gate`;
 - upgrade checks;
-- OpenAPI and SDK output;
 - runtime sandbox policy.
 
 ## Live Reload

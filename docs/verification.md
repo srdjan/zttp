@@ -626,9 +626,9 @@ boundaries:
 
 Both rely on the same property that makes verification tractable: the IR tree is the control flow graph, with no back-edges and no exceptions.
 
-## Exhaustive Path Analysis (-Dgenerate-tests)
+## Exhaustive Path Analysis
 
-The `-Dgenerate-tests=true` build option enables compile-time exhaustive path enumeration and fault coverage analysis.
+A contract build (`-Dcontract`) runs compile-time exhaustive path enumeration and fault coverage analysis.
 
 ### Path Generator
 
@@ -667,7 +667,6 @@ Results appear in:
 - `contract.json` under the `faultCoverage` section
 - `HandlerProperties.fault_covered` flag
 - Deployment manifest tags (`zttp:faultCovered`)
-- Build report alongside other PROVEN/--- labels
 
 ### Cost Envelope (Multiplicity)
 

@@ -4,7 +4,7 @@
 //! This eliminates runtime parsing overhead and removes the need for source files
 //! in deployment.
 //!
-//! Usage: precompile [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--prove spec] [--policy policy.json] <handler.ts> <output.zig>
+//! Usage: precompile [--verify] [--contract] [--sql-schema path] [--policy policy.json] <handler.ts> <output.zig>
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -22,11 +22,6 @@ const ServiceResponseVariant = zts.service_types.ResponseVariant;
 const system_linker = zts.system_linker;
 const handler_policy = zts.handler_policy;
 const HandlerPolicy = zts.HandlerPolicy;
-const manifest_alignment = @import("manifest_alignment.zig");
-const openapi_manifest = @import("openapi_manifest.zig");
-const sdk_codegen = @import("sdk_codegen.zig");
-const property_expectations = @import("property_expectations.zig");
-const prove_upgrade = @import("prove_upgrade.zig");
 const build_report = @import("report.zig");
 pub const json_diag = @import("json_diagnostics.zig");
 const sqlite = zts.sqlite;
@@ -51,16 +46,6 @@ const appendSpecDiagnosticsJson = check_mod.appendSpecDiagnosticsJson;
 pub const appendExportCapsuleDiagnostics = check_mod.appendExportCapsuleDiagnostics;
 const appendCanonicalPublicHelperDiagnostics = check_mod.appendCanonicalPublicHelperDiagnostics;
 const refreshSpecDiagnostics = check_mod.refreshSpecDiagnostics;
-
-const buildtime_mod = @import("precompile_buildtime.zig");
-const runBuildTimeReplay = buildtime_mod.runBuildTimeReplay;
-const runBuildTimeTests = buildtime_mod.runBuildTimeTests;
-
-const prove_mod = @import("precompile_prove.zig");
-const runProvePipeline = prove_mod.runProvePipeline;
-const runManifestAlignment = prove_mod.runManifestAlignment;
-const runPropertyExpectations = prove_mod.runPropertyExpectations;
-const writeBuildReport = prove_mod.writeBuildReport;
 
 /// Stderr diagnostic print. On freestanding/wasm there is no stderr and
 /// `std.debug.print` pulls a threaded IO stack that does not compile, so the
@@ -145,7 +130,7 @@ pub const CompiledHandler = struct {
     dep_bytecodes: ?[]const []const u8 = null,
     /// Contract manifest (when --contract is passed)
     contract: ?HandlerContract = null,
-    /// Generated test JSONL (when --generate-tests is passed)
+    /// Generated test JSONL (when a contract is emitted)
     generated_tests: ?[]const u8 = null,
     /// Counterexample tests for fault coverage violations (when violations exist)
     violations_jsonl: ?[]const u8 = null,
@@ -443,45 +428,6 @@ fn loadServiceTypeContextNative(
 
 /// Write a file synchronously using posix operations
 pub const writeFilePosix = util.writeFilePosix;
-
-const ResolvedGeneratorPack = struct {
-    sql_schema_path: ?[]const u8 = null,
-    manifest_path: ?[]const u8 = null,
-    expect_properties_path: ?[]const u8 = null,
-    replay_trace_path: ?[]const u8 = null,
-    fault_severity_path: ?[]const u8 = null,
-    report_format: ?[]const u8 = null,
-
-    fn deinit(self: *ResolvedGeneratorPack, allocator: std.mem.Allocator) void {
-        const owned = [_]?[]const u8{
-            self.sql_schema_path,
-            self.manifest_path,
-            self.expect_properties_path,
-            self.replay_trace_path,
-            self.fault_severity_path,
-            self.report_format,
-        };
-        for (owned) |value| {
-            if (value) |slice| allocator.free(slice);
-        }
-    }
-};
-
-fn dupJsonValue(
-    allocator: std.mem.Allocator,
-    obj: std.json.ObjectMap,
-    key: []const u8,
-    resolve_base: ?[]const u8,
-) !?[]const u8 {
-    const value = obj.get(key) orelse return null;
-    if (value != .string) return error.InvalidGeneratorPack;
-    if (resolve_base) |base_dir| {
-        if (!std.fs.path.isAbsolute(value.string)) {
-            return try std.fs.path.resolve(allocator, &.{ base_dir, value.string });
-        }
-    }
-    return try allocator.dupe(u8, value.string);
-}
 
 /// Deepest chain of imports that the cross-file walk follows: the handler's
 /// helper, the helper's own helper, and so on. A chain past this stays
@@ -920,40 +866,6 @@ fn mergeImportedClassificationStatus(contract: *HandlerContract, seen: []const h
     }
 }
 
-fn resolveGeneratorPack(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-) !ResolvedGeneratorPack {
-    const bytes = try readFilePosix(allocator, path, 1024 * 1024);
-    defer allocator.free(bytes);
-
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
-    defer parsed.deinit();
-
-    if (parsed.value != .object) return error.InvalidGeneratorPack;
-    const obj = parsed.value.object;
-    const base_dir = std.fs.path.dirname(path) orelse ".";
-
-    var result: ResolvedGeneratorPack = .{};
-    errdefer result.deinit(allocator);
-
-    result.sql_schema_path = try dupJsonValue(allocator, obj, "sqlSchema", base_dir);
-    result.manifest_path = try dupJsonValue(allocator, obj, "manifest", base_dir);
-    result.expect_properties_path = try dupJsonValue(allocator, obj, "expectProperties", base_dir);
-    // The `dataLabels` key fed a deleted mechanism (M4 T4). A pack that still
-    // names it expects labels to be enforced, so it is refused rather than
-    // read and ignored; the declaration replaces it (`--declaration`).
-    if (obj.get("dataLabels") != null) {
-        if (!builtin.is_test) debugPrint("Generator pack '{s}' names \"dataLabels\", which is removed; pass the consumer declaration with --declaration\n", .{path});
-        return error.InvalidGeneratorPack;
-    }
-    result.replay_trace_path = try dupJsonValue(allocator, obj, "replay", base_dir);
-    result.fault_severity_path = try dupJsonValue(allocator, obj, "faultSeverity", base_dir);
-    result.report_format = try dupJsonValue(allocator, obj, "report", null);
-
-    return result;
-}
-
 pub fn main(init: std.process.Init.Minimal) !void {
     var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
         if (builtin.mode == .Debug) .init else {};
@@ -972,7 +884,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    var opts = parsePrecompileArgSlice(argv) catch |err| {
+    const opts = parsePrecompileArgSlice(argv) catch |err| {
         if (err == error.MissingArgument) return;
         return err;
     };
@@ -995,33 +907,13 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     const registry_ptr: ?*const zts.ManifestRegistry =
         if (manifest_paths.len > 0) &manifest_registry else null;
 
-    var generator_pack: ?ResolvedGeneratorPack = null;
-    defer if (generator_pack) |*pack| pack.deinit(allocator);
-    if (opts.generator_pack_path) |pack_path| {
-        generator_pack = resolveGeneratorPack(allocator, pack_path) catch |err| {
-            debugPrint("Error resolving generator pack '{s}': {}\n", .{ pack_path, err });
-            return err;
-        };
-        if (opts.sql_schema_path == null) opts.sql_schema_path = generator_pack.?.sql_schema_path;
-        if (opts.manifest_path == null) opts.manifest_path = generator_pack.?.manifest_path;
-        if (opts.expect_properties_path == null) opts.expect_properties_path = generator_pack.?.expect_properties_path;
-        if (opts.replay_trace_path == null) opts.replay_trace_path = generator_pack.?.replay_trace_path;
-        if (opts.fault_severity_path == null) opts.fault_severity_path = generator_pack.?.fault_severity_path;
-        if (opts.report_format == null) opts.report_format = generator_pack.?.report_format;
-    }
-
     const handler_path_final = opts.handler_path;
     const output_path_final = opts.output_path;
     const emit_verify = opts.emit_verify;
     const emit_contract = opts.emit_contract;
-    const emit_openapi = opts.emit_openapi;
-    const sdk_target = opts.sdk_target;
     const sql_schema_path = opts.sql_schema_path;
     const system_path = opts.system_path;
     const policy_path = opts.policy_path;
-    const replay_trace_path = opts.replay_trace_path;
-    const test_file_path = opts.test_file_path;
-    const prove_spec = opts.prove_spec;
 
     // Read the handler source file (using posix for synchronous I/O)
     const source = readFilePosix(allocator, handler_path_final, 10 * 1024 * 1024) catch |err| {
@@ -1058,14 +950,11 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     debugPrint("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
     // Compile the handler to bytecode (+ optional verification + optional contract)
-    const generate_tests = opts.generate_tests;
-
     var compiled = compileHandler(allocator, source, handler_path_final, .{
         .emit_verify = emit_verify,
         .emit_contract = emit_contract,
         .policy = policy,
         .sql_schema_path = sql_schema_path,
-        .generate_tests = generate_tests,
         .system_path = system_path,
         .manifest_registry = registry_ptr,
         .build_time = opts.build_time,
@@ -1098,68 +987,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     }
 
     debugPrint("Generated bytecode: {d} bytes\n", .{compiled.bytecode.len});
-
-    // Run replay verification if --replay was passed.
-    // This replays recorded traces against the handler and fails the build
-    // if any regressions are detected.
-    if (replay_trace_path) |trace_path| {
-        const trace_source = readFilePosix(allocator, trace_path, 100 * 1024 * 1024) catch |err| {
-            debugPrint("Error reading trace file '{s}': {}\n", .{ trace_path, err });
-            return err;
-        };
-        defer allocator.free(trace_source);
-
-        const groups = zts.trace.parseTraceFile(allocator, trace_source) catch |err| {
-            debugPrint("Error parsing trace file '{s}': {}\n", .{ trace_path, err });
-            return err;
-        };
-        defer {
-            for (groups) |g| allocator.free(g.io_calls);
-            allocator.free(groups);
-        }
-
-        if (groups.len == 0) {
-            debugPrint("Warning: no traces found in '{s}'\n", .{trace_path});
-        } else {
-            debugPrint("Replaying {d} traces for regression verification...\n", .{groups.len});
-            const replay_result = runBuildTimeReplay(allocator, source, handler_path_final, groups) catch |err| {
-                debugPrint("Replay verification failed: {}\n", .{err});
-                return err;
-            };
-            debugPrint("Replay: {d}/{d} identical", .{ replay_result.pass, replay_result.total });
-            if (replay_result.fail > 0) {
-                debugPrint(", {d} REGRESSIONS DETECTED", .{replay_result.fail});
-            }
-            debugPrint("\n", .{});
-            if (replay_result.fail > 0) {
-                debugPrint("Build aborted: replay verification failed.\n", .{});
-                return error.ReplayVerificationFailed;
-            }
-        }
-    }
-
-    // Run handler tests if --test-file was passed.
-    if (test_file_path) |t_path| {
-        const test_source = readFilePosix(allocator, t_path, 100 * 1024 * 1024) catch |err| {
-            debugPrint("Error reading test file '{s}': {}\n", .{ t_path, err });
-            return err;
-        };
-        defer allocator.free(test_source);
-
-        const test_result = runBuildTimeTests(allocator, source, handler_path_final, test_source) catch |err| {
-            debugPrint("Build-time test execution failed: {}\n", .{err});
-            return err;
-        };
-        debugPrint("Tests: {d}/{d} passed", .{ test_result.pass, test_result.total });
-        if (test_result.fail > 0) {
-            debugPrint(", {d} FAILED", .{test_result.fail});
-        }
-        debugPrint("\n", .{});
-        if (test_result.fail > 0) {
-            debugPrint("Build aborted: handler tests failed.\n", .{});
-            return error.TestsFailed;
-        }
-    }
 
     // Write the output Zig file
     writeZigFile(output_path_final, compiled, policy, allocator) catch |err| {
@@ -1212,36 +1039,8 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
             debugPrint("Wrote contract manifest to: {s}\n", .{contract_path});
         }
 
-        if (emit_openapi) {
-            const openapi_path = deriveSiblingPath(allocator, output_path_final, "openapi.json") catch |err| {
-                debugPrint("Error deriving OpenAPI path: {}\n", .{err});
-                return err;
-            };
-            defer allocator.free(openapi_path);
-
-            var openapi_output: std.ArrayList(u8) = .empty;
-            defer openapi_output.deinit(allocator);
-            var openapi_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &openapi_output);
-
-            openapi_manifest.writeOpenApiJson(&openapi_aw.writer, contract, .{}) catch |err| {
-                debugPrint("Error serializing OpenAPI manifest: {}\n", .{err});
-                return err;
-            };
-            openapi_output = openapi_aw.toArrayList();
-
-            writeFilePosix(openapi_path, openapi_output.items, allocator) catch |err| {
-                debugPrint("Error writing OpenAPI file '{s}': {}\n", .{ openapi_path, err });
-                return err;
-            };
-
-            debugPrint("Wrote OpenAPI manifest to: {s}\n", .{openapi_path});
-        }
-
-        if (sdk_target) |target| {
-            try writeSdkArtifact(allocator, output_path_final, contract, target);
-        }
-
-        // Write generated tests if --generate-tests was passed
+        // Write the generated tests. A contract build always generates them
+        // to populate the behavioral paths.
         if (compiled.generated_tests) |tests_jsonl| {
             const tests_path = deriveSiblingPath(allocator, output_path_final, "handler.auto-tests.jsonl") catch |err| {
                 debugPrint("Error deriving test output path: {}\n", .{err});
@@ -1280,44 +1079,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         } else if (compiled.violations_summary) |summary| {
             // Violations from flow or verifier analysis (no counterexample JSONL).
             debugPrint("{s}", .{summary});
-        }
-
-        if (prove_spec) |spec| {
-            try runProvePipeline(allocator, spec, contract, source, handler_path_final, output_path_final);
-        }
-
-        var manifest_alignment_result = if (opts.manifest_path) |mpath|
-            try runManifestAlignment(allocator, mpath, contract)
-        else
-            null;
-        defer if (manifest_alignment_result) |*ma| ma.deinit(allocator);
-
-        var property_result = if (opts.expect_properties_path) |epath|
-            try runPropertyExpectations(allocator, epath, contract)
-        else
-            null;
-        defer if (property_result) |pr| allocator.free(pr.mismatches);
-
-        if (opts.report_format) |fmt| {
-            const integration_inputs = build_report.IntegrationSection{
-                .generator_pack = opts.generator_pack_path != null,
-                .sql_schema = opts.sql_schema_path != null,
-                .manifest = opts.manifest_path != null,
-                .property_expectations = opts.expect_properties_path != null,
-                .declaration = opts.declaration_path != null,
-                .replay = opts.replay_trace_path != null,
-                .fault_severity = opts.fault_severity_path != null,
-            };
-            try writeBuildReport(
-                allocator,
-                fmt,
-                contract,
-                if (manifest_alignment_result) |*ma| ma else null,
-                if (property_result) |*pr| pr else null,
-                &integration_inputs,
-                handler_path_final,
-                output_path_final,
-            );
         }
     }
 }
@@ -4333,41 +4094,6 @@ fn printSandboxSection(name: []const u8, items: []const []const u8, restricted: 
 /// Derive contract.json path from the output .zig path.
 const deriveSiblingPath = util.deriveSiblingPath;
 
-fn writeSdkArtifact(
-    allocator: std.mem.Allocator,
-    output_path: []const u8,
-    contract: *const HandlerContract,
-    sdk_target: []const u8,
-) !void {
-    if (!std.mem.eql(u8, sdk_target, "ts")) {
-        debugPrint("Unknown SDK target: {s} (supported: ts)\n", .{sdk_target});
-        return error.InvalidArgument;
-    }
-
-    const sdk_path = deriveSiblingPath(allocator, output_path, "client.ts") catch |err| {
-        debugPrint("Error deriving SDK path: {}\n", .{err});
-        return err;
-    };
-    defer allocator.free(sdk_path);
-
-    var sdk_output: std.ArrayList(u8) = .empty;
-    defer sdk_output.deinit(allocator);
-    var sdk_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &sdk_output);
-
-    sdk_codegen.writeTypeScriptClient(&sdk_aw.writer, allocator, contract, .{}) catch |err| {
-        debugPrint("Error serializing SDK artifact: {}\n", .{err});
-        return err;
-    };
-    sdk_output = sdk_aw.toArrayList();
-
-    writeFilePosix(sdk_path, sdk_output.items, allocator) catch |err| {
-        debugPrint("Error writing SDK file '{s}': {}\n", .{ sdk_path, err });
-        return err;
-    };
-
-    if (!builtin.is_test) debugPrint("Wrote TypeScript SDK to: {s}\n", .{sdk_path});
-}
-
 fn writeZigFile(
     path: []const u8,
     compiled: CompiledHandler,
@@ -7322,118 +7048,6 @@ test "runCheckOnly returns structured diagnostics for invalid virtual imports" {
     }
 }
 
-test "resolveGeneratorPack parses integration paths" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const pack_json =
-        \\{
-        \\  "sqlSchema": "schema.sql",
-        \\  "manifest": "governance-manifest.json",
-        \\  "expectProperties": "handler-properties.expected.json",
-        \\  "replay": "simulation-traces.jsonl",
-        \\  "faultSeverity": "fault-severity.json",
-        \\  "report": "json"
-        \\}
-    ;
-
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pack.json", .data = pack_json });
-
-    const allocator = std.testing.allocator;
-    const pack_path = try tmp.dir.realPathFileAlloc(std.testing.io, "pack.json", allocator);
-    defer allocator.free(pack_path);
-
-    var pack = try resolveGeneratorPack(allocator, pack_path);
-    defer pack.deinit(allocator);
-
-    try std.testing.expect(std.mem.endsWith(u8, pack.sql_schema_path.?, "/schema.sql"));
-    try std.testing.expect(std.mem.endsWith(u8, pack.manifest_path.?, "/governance-manifest.json"));
-    try std.testing.expectEqualStrings("json", pack.report_format.?);
-}
-
-test "resolveGeneratorPack refuses the removed dataLabels key" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "pack.json", .data = "{\"dataLabels\": \"data-labels.json\"}" });
-    const allocator = std.testing.allocator;
-    const pack_path = try tmp.dir.realPathFileAlloc(std.testing.io, "pack.json", allocator);
-    defer allocator.free(pack_path);
-    try std.testing.expectError(error.InvalidGeneratorPack, resolveGeneratorPack(allocator, pack_path));
-}
-
-test "writeSdkArtifact writes client sibling file" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    const allocator = std.testing.allocator;
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "embedded_handler.zig", .data = "" });
-    const output_path = try tmp.dir.realPathFileAlloc(std.testing.io, "embedded_handler.zig", allocator);
-    defer allocator.free(output_path);
-
-    var schemas: std.ArrayList(handler_contract.ApiSchemaInfo) = .empty;
-    try schemas.append(allocator, .{
-        .name = try allocator.dupe(u8, "health"),
-        .schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"ok\":{\"type\":\"boolean\"}},\"required\":[\"ok\"]}"),
-    });
-
-    var routes: std.ArrayList(handler_contract.ApiRouteInfo) = .empty;
-    try routes.append(allocator, .{
-        .method = try allocator.dupe(u8, "GET"),
-        .path = try allocator.dupe(u8, "/health"),
-        .request_schema_refs = .empty,
-        .request_schema_dynamic = false,
-        .requires_bearer = false,
-        .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_ref = try allocator.dupe(u8, "health"),
-        .response_schema_dynamic = false,
-    });
-
-    var contract = HandlerContract{
-        .handler = .{ .path = try allocator.dupe(u8, "health.ts"), .line = 1, .column = 1 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .endpoints = .empty, .dynamic = false },
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = handler_contract.emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
-        .api = .{
-            .schemas = schemas,
-            .requests = .{ .schema_refs = .empty, .dynamic = false },
-            .auth = .{ .bearer = false, .jwt = false },
-            .routes = routes,
-            .schemas_dynamic = false,
-            .routes_dynamic = false,
-        },
-        .verification = null,
-        .aot = null,
-    };
-    defer contract.deinit(allocator);
-
-    try writeSdkArtifact(allocator, output_path, &contract, "ts");
-
-    const client_path = try tmp.dir.realPathFileAlloc(std.testing.io, "client.ts", allocator);
-    defer allocator.free(client_path);
-    const bytes = try readFilePosix(allocator, client_path, 64 * 1024);
-    defer allocator.free(bytes);
-
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "async getHealth(") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "export type Health = {") != null);
-}
-
 test "compileHandler emits result_unsafe counterexample when jwtVerify result is unchecked" {
     const allocator = std.testing.allocator;
     // Handler accesses .value without checking .ok - triggers result_unsafe verification error
@@ -9362,7 +8976,7 @@ test "an incomplete fault analysis writes isCovered false and report clean false
     const fault_json = out.written()[fault_start..];
     try std.testing.expect(std.mem.indexOf(u8, fault_json, "\"isCovered\": false") != null);
 
-    const report = build_report.buildReport(allocator, contract, null, null, null, "looped.ts");
+    const report = build_report.buildReport(allocator, contract, null, "looped.ts");
     defer if (report.verification) |v| allocator.free(v.checks);
     try std.testing.expect(!report.fault_coverage.?.clean);
 }

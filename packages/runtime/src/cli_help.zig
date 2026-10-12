@@ -284,13 +284,12 @@ test "help --all surfaces the advanced commands" {
     var buf: [help_all_capacity]u8 = undefined;
     const help_all = renderHelpAll(&buf);
     inline for (.{
-        "zttp serve",        "zttp build",          "zttp compile",
-        "zttp doctor",       "zttp proofs",         "zttp check",
-        "zttp prove",        "zttp features",       "zttp modules",
-        "zttp restrictions", "zttp meta",           "zttp describe-rule",
-        "zttp verify-paths", "zttp verify-modules", "zttp edit-simulate",
-        "zttp review-patch", "zttp rollout",        "zttp workflow-queue",
-        "zttp durable",
+        "zttp serve",          "zttp build",          "zttp compile",
+        "zttp doctor",         "zttp proofs",         "zttp check",
+        "zttp features",       "zttp modules",        "zttp restrictions",
+        "zttp meta",           "zttp describe-rule",  "zttp verify-paths",
+        "zttp verify-modules", "zttp edit-simulate",  "zttp review-patch",
+        "zttp rollout",        "zttp workflow-queue", "zttp durable",
     }) |cmd| {
         try std.testing.expect(has(help_all, cmd));
     }

@@ -37,21 +37,10 @@ pub const PrecompileOptions = struct {
     handler_path: ?[]const u8,
     verify_enabled: bool,
     contract_enabled: bool,
-    openapi_enabled: bool,
-    sdk_target: ?[]const u8,
     sql_schema_path: ?[]const u8,
     policy_path: ?[]const u8,
     system_path: ?[]const u8,
-    replay_path: ?[]const u8,
-    test_file_path: ?[]const u8,
-    prove_spec: ?[]const u8,
-    generate_tests: bool,
-    manifest_path: ?[]const u8,
-    expect_properties_path: ?[]const u8,
     declaration_path: ?[]const u8,
-    fault_severity_path: ?[]const u8,
-    generator_pack_path: ?[]const u8,
-    report_format: ?[]const u8,
 };
 
 pub fn init(b: *std.Build) Context {
@@ -137,23 +126,10 @@ pub fn init(b: *std.Build) Context {
         .handler_path = b.option([]const u8, "handler", "Handler file to precompile (required)"),
         .verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false,
         .contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false,
-        .openapi_enabled = b.option(bool, "openapi", "Emit OpenAPI manifest (openapi.json)") orelse false,
-        .sdk_target = b.option([]const u8, "sdk", "Emit generated SDK artifact (values: ts)"),
         .sql_schema_path = b.option([]const u8, "sql-schema", "SQLite schema snapshot (.sqlite) or schema SQL file for zttp:sql validation"),
         .policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers"),
         .system_path = b.option([]const u8, "system", "System definition file for cross-handler contract linking"),
-        .replay_path = b.option([]const u8, "replay", "Replay trace file for regression verification at build time"),
-        .test_file_path = b.option([]const u8, "test-file", "Run handler tests from JSONL file at build time"),
-        .prove_spec = b.option([]const u8, "prove", "Prove upgrade safety (format: contract.json or contract.json:traces.jsonl)"),
-        .generate_tests = b.option(bool, "generate-tests", "Generate exhaustive test cases from path analysis") orelse false,
-
-        // External enrichment flags (optional, for cross-referencing with code generators)
-        .manifest_path = b.option([]const u8, "manifest", "External manifest JSON for cross-referencing against handler contract"),
-        .expect_properties_path = b.option([]const u8, "expect-properties", "Expected handler properties JSON for build-time verification"),
         .declaration_path = b.option([]const u8, "declaration", "Consumer declaration JSON whose classifications the flow check enforces (M4 T4)"),
-        .fault_severity_path = b.option([]const u8, "fault-severity", "External fault severity overrides JSON for coverage analysis"),
-        .generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/replay/report wiring"),
-        .report_format = b.option([]const u8, "report", "Emit structured build report (values: json)"),
     };
 
     // Consumer acceptance kernel. Each function enables runtime safety with
