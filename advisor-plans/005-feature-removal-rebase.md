@@ -12,7 +12,7 @@ Phase 1 is complete. The owner selected Phase 2 execution through Decision 10 on
 The implementation plan is `docs/plans/2026-10-12-1109-refactor-feature-removal-phase-two-plan.md`.
 It corrects the Phase 2 sequence: runtime authority and artifact sections leave first; model-visible ledger and tool exports wait for Phase 3.
 Certificate schema 4 becomes 5 alongside payload format 6 becoming 7. The eight handler properties and residual guards remain.
-Decision 11 offers combined phases with recording authorization. No answer or provider authorization is presumed.
+Decision 11 confirms retained compiler exports until Phase 3. Combined phases and DeepSeek recording remain outside this execution.
 
 Plan 003 kept every documented feature and changed only internal compiler boundaries.
 This proposal is different: the owner asked which features can go.

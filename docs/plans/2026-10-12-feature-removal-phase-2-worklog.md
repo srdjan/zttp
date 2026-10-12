@@ -6,6 +6,8 @@ The objective is to remove the tool-route, application-invariant, and consumer-d
 The origin is `advisor-plans/005-feature-removal-rebase.md`, Phase 2.
 The owner selected Decision 10, "Execute Phase 2", on 2026-10-12.
 That answer authorizes the selected removals and the artifact format change from 6 to 7.
+The owner selected Decision 11, "Retain exports until Phase 3", on 2026-10-12.
+That answer confirms the staged compiler boundary and excludes combined-phase execution or DeepSeek recording.
 Phase 1 is complete at baseline `76d38e68` on local `main`.
 The initial tree is clean. Thirty-three existing local commits remain unpublished.
 
@@ -31,8 +33,8 @@ Both source reports confirm an identity conflict in the origin's sequence.
 `builtinRegistryHash()` hashes the ledger and tool bindings. Expert recordings and session protocol identities carry that hash.
 Removing the tool rules also changes `policyHash`. The frozen corpus does not import either module, but the hashes still change.
 Decision 11 asks whether the owner selects retained compiler exports until Phase 3 or combined phases with authorized DeepSeek recording.
-Decision 11 remains unanswered. The main agent proceeds with the recommended safe staging boundary as an explicit planning assumption.
-No answer or recording authorization is inferred. The main agent will preserve the affected identities and call no provider.
+The main agent initially proceeded with the recommended safe staging boundary as an explicit planning assumption.
+The owner subsequently confirmed that boundary through Decision 11. The main agent will preserve the affected identities and call no provider.
 
 The kernel report requires certificate schema 4 to become 5 alongside payload format 6 to 7.
 The eight handler properties and the residual guard catalog remain separate from the three removed sections.
@@ -91,3 +93,17 @@ No product behavior changed before those baseline checks.
 During research, another session edited and committed `CLAUDE.md` and two project skills at `349c7049`.
 The main agent preserved those edits. They change no product source or reviewed dependency.
 Execution therefore starts from `349c7049`, with only this run's plan and worklog untracked before activation.
+
+## Execution checkpoint
+
+The activation commit is `da036156`. The tree was clean after activation.
+The offline baseline `zig build -j2` returned direct exit status 0.
+The current policy, built-in registry, and semantics identities match the Phase 1 baselines.
+The private execution directory holds the exact metadata output and model-visible source hashes.
+The unfiltered `test-expert-app` baseline returned direct exit status 0: 965 tests passed and one was skipped.
+Its log confirms all 19 frozen cases replayed from flow artifacts before any product edit.
+
+The U1 worker proposes `packages/tools/src/retired_authority.zig` as the one shared predicate.
+Precompile uses the helper directly. Runtime callers reach the same helper through the existing project-configuration surface.
+The predicate uses contract facts, proof evidence, and explicit configuration flags. It changes no compiler registry, rule, or binding.
+The main agent owns approval of any module-registration seam needed to deny replay substitution.
