@@ -55,7 +55,6 @@ const verify_script_markers = [_][]const u8{
     "zig build test",
     "zig build test-zruntime",
     "zig build -Doptimize=ReleaseFast",
-    "zig build wasm",
     "zig build smoke-v1",
     "zig build test-panic-isolation",
     "zig build test-cli -Dstudio",
@@ -704,7 +703,7 @@ test "release gate requirements require semantics and doctor wiring" {
         "zig build bench-check\nzig build release-check\ncontents: write\n";
     const verify_sh =
         "zig build test\nzig build test-zruntime\n" ++
-        "zig build -Doptimize=ReleaseFast\nzig build wasm\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
+        "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
         "zig build test-cli -Dstudio\n" ++
         "bash scripts/test-install-archive-safety.sh\n" ++
         "bash scripts/check-normalize-idempotent.sh\nbash scripts/check-idiom-table.sh\n" ++
@@ -949,7 +948,6 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\zig build test-zruntime
         \\zig build test-docs-drift test-doc-links
         \\zig build -Doptimize=ReleaseFast
-        \\zig build wasm
         \\zig build smoke-v1
         \\zig build test-panic-isolation
         \\zig build test-cli -Dstudio

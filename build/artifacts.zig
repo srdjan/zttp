@@ -112,15 +112,6 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     // stale installation left in zig-out by an earlier invocation.
     gates.meta_drift.addFileArg(zts_exe.getEmittedBin());
 
-    const zts_overview_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-zts-language-overview.sh" });
-    zts_overview_drift.addFileArg(zts_exe.getEmittedBin());
-    gates.docs_drift_step.dependOn(&zts_overview_drift.step);
-
-    // Chrome is not a standard build dependency, so keep real-browser
-    // interaction coverage explicit and fail loudly when the local toolchain
-    // is unavailable.
-    _ = ctx.addGate(&.{ "node", "scripts/test-zts-language-overview-browser.mjs" }, "test-zts-overview-browser", "Test the ZTS language overview in headless Chrome");
-
     // Strip debug info from the three installed binaries when -Dstrip is set.
     // The release workflow passes -Dstrip so shipped tarballs stay small; local
     // builds keep symbols by default. Stripping happens at link time, so it is

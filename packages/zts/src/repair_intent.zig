@@ -9,7 +9,7 @@
 //! `repair_plan.zig`; this enum is the higher-level *intent* a checker emits,
 //! which a planner then lowers to one of those edit primitives.
 //!
-//! Importable from `analyzer_only` builds: pure enum, no I/O.
+//! Pure enum, no I/O.
 
 const std = @import("std");
 

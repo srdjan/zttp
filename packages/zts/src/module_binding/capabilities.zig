@@ -11,7 +11,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const build_options = @import("build_options");
 const object = @import("../object.zig");
 const value = @import("../value.zig");
 const context = @import("../context.zig");
@@ -51,7 +50,6 @@ pub const ActiveModuleToken = struct {
     previous: ?ActiveModuleScope,
 };
 
-threadlocal var sdk_prng: ?std.Random.DefaultPrng = null;
 threadlocal var sdk_csprng: ?std.Random.DefaultCsprng = null;
 
 /// Generate a NativeFn wrapper around a ModuleFn.
@@ -377,20 +375,7 @@ pub fn fillRandomForActiveModule(ctx: *context.Context, buf: []u8) ActiveCapabil
     try requireActiveCapability(ctx, .random);
     if (buf.len == 0) return;
 
-    if (comptime build_options.analyzer_only) {
-        // The wasm/freestanding analyzer never executes handler code and has no
-        // OS CSPRNG; a deterministic PRNG keeps that build linking. IDs minted
-        // on this path are never security-bearing.
-        if (sdk_prng == null) {
-            const seed = std.hash.Wyhash.hash(0, currentActiveModuleSpecifier(ctx)) ^
-                @as(u64, @bitCast(nowNsForActiveModule(ctx) catch 0));
-            sdk_prng = std.Random.DefaultPrng.init(seed);
-        }
-        sdk_prng.?.random().bytes(buf);
-        return;
-    }
-
-    // Hosted runtime: a forward-ratcheting ChaCha CSPRNG seeded once per thread
+    // A forward-ratcheting ChaCha CSPRNG seeded once per thread
     // from the OS entropy pool. This backs zttp:id (uuid/ulid/nanoid), which
     // are routinely used as session tokens, reset tokens, and idempotency keys -
     // the previous Xoshiro256, seeded once from the wall clock, was both

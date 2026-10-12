@@ -10,14 +10,12 @@
 //!
 //! Embedders should import `zts`, the umbrella in `root.zig`, which re-exports
 //! this module's surface alongside the other three. This root exists so the
-//! four tiers are separate compilation units, and so `-Danalyzer_only` builds
-//! can leave the interpreter subtree out of the module graph entirely.
+//! four tiers are separate compilation units.
 //!
 //! Tier membership is recorded in `scripts/zts-tiers.allow`. See
 //! pre-rebase:docs/archive/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
-const build_options = @import("build_options");
 
 pub const value = @import("value.zig");
 pub const heap = @import("heap.zig");
@@ -31,13 +29,6 @@ pub const atom_table = @import("atom_table.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const interpreter = @import("interpreter.zig");
 
-// JIT C-ABI helpers are referenced from generated machine code via `extern fn`.
-// Anchor the module here so the linker emits the symbols. The analyzer-only
-// build (wasm/freestanding) never reaches the JIT, so skip the anchor to keep
-// the interpreter/JIT/GC subtree out of the module graph.
-comptime {
-    if (!build_options.analyzer_only) {}
-}
 pub const builtins = @import("builtins/root.zig");
 pub const parser = @import("parser/root.zig");
 pub const pool = @import("pool.zig");
@@ -61,7 +52,6 @@ pub const module_binding = @import("module_binding.zig");
 pub const module_manifest = @import("module_manifest.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
 pub const security_events = @import("security_events.zig");
-pub const wasm = @import("wasm/root.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const modules = @import("modules/root.zig");
 /// The pure HS256 bearer verifier (M4 T5). The runtime calls it before a tool

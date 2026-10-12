@@ -15,7 +15,6 @@ const corpus = @import("build/corpus.zig");
 const flow_census = @import("build/flow_census.zig");
 const tooling = @import("build/tooling.zig");
 const artifacts = @import("build/artifacts.zig");
-const wasm = @import("build/wasm.zig");
 const goldens = @import("build/goldens.zig");
 const runtime_tests = @import("build/runtime_tests.zig");
 const bench = @import("build/bench.zig");
@@ -34,7 +33,6 @@ pub fn build(b: *std.Build) void {
     const tools = tooling.add(ctx);
     const gates = repo_gates.add(ctx, tools);
     const bins = artifacts.add(ctx, gates);
-    const wasm_publish_test_step = wasm.add(ctx);
     const golden = goldens.add(ctx, bins);
     artifacts.addRunSteps(ctx, bins);
     const unit = runtime_tests.addUnit(ctx);
@@ -57,7 +55,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&tools.run_release_provenance_tests.step);
     test_step.dependOn(&tools.run_coverage_union_tests.step);
     test_step.dependOn(&tools.run_demo_passport_check_tests.step);
-    test_step.dependOn(wasm_publish_test_step);
     test_step.dependOn(tools.production_branch_metric_test_step);
     test_step.dependOn(golden.comptime_cli_step);
     test_step.dependOn(golden.generic_intersection_cli_step);

@@ -14,10 +14,7 @@ const file_io = @import("file_io.zig");
 const contract_types = @import("zts-contracts").contract_types;
 const module_authorization = @import("zts-base").module_authorization;
 const std = @import("std");
-const build_options = @import("build_options");
 const modules = @import("zttp-modules");
-const object = @import("object.zig");
-const value = @import("value.zig");
 
 // Namespaced to avoid shadowing the `<name>_binding` locals used in the
 // governance-assertion tests at the bottom of this file.
@@ -60,9 +57,8 @@ const durable_mod = @import("modules/workflow/durable.zig");
 const workflow_mod = @import("modules/workflow/workflow.zig");
 const queue_mod = @import("modules/workflow/queue.zig");
 
-/// All in-tree virtual module bindings, in registration order. This private
-/// array retains the native implementation pointers used by the runtime.
-const runtime_builtins = [_]ModuleBinding{
+/// All in-tree virtual module bindings, in registration order.
+pub const builtins = [_]ModuleBinding{
     ported.env,
     ported.crypto,
     ported.router,
@@ -93,65 +89,6 @@ const runtime_builtins = [_]ModuleBinding{
     tool_mod.binding,
     ported.sse,
 };
-
-/// The freestanding analyzer consumes module names, signatures, effects, and
-/// proof metadata, but never invokes a native module implementation. Project
-/// every built-in implementation pointer to one wasm-safe error stub so the
-/// emitted registry retains no runtime implementation or state callback.
-fn analyzerOnlyStub(
-    _: *anyopaque,
-    _: value.JSValue,
-    _: []const value.JSValue,
-) anyerror!value.JSValue {
-    return error.AnalyzerOnly;
-}
-
-fn analyzerFunctionBindings(
-    comptime exports: []const mb.FunctionBinding,
-) [exports.len]mb.FunctionBinding {
-    var projected: [exports.len]mb.FunctionBinding = undefined;
-    for (exports, 0..) |binding, i| {
-        inline for (@typeInfo(mb.FunctionBinding).@"struct".fields) |field| {
-            if (comptime std.mem.eql(u8, field.name, "func")) {
-                @field(projected[i], field.name) = @as(object.NativeFn, analyzerOnlyStub);
-            } else if (comptime std.mem.eql(u8, field.name, "module_func")) {
-                @field(projected[i], field.name) = null;
-            } else {
-                @field(projected[i], field.name) = @field(binding, field.name);
-            }
-        }
-    }
-    return projected;
-}
-
-fn analyzerModuleBindings(
-    comptime bindings: []const ModuleBinding,
-) [bindings.len]ModuleBinding {
-    @setEvalBranchQuota(100_000);
-    var projected: [bindings.len]ModuleBinding = undefined;
-    for (bindings, 0..) |binding, i| {
-        const exports = analyzerFunctionBindings(binding.exports);
-        inline for (@typeInfo(ModuleBinding).@"struct".fields) |field| {
-            if (comptime std.mem.eql(u8, field.name, "exports")) {
-                @field(projected[i], field.name) = &exports;
-            } else if (comptime std.mem.eql(u8, field.name, "state_init") or
-                std.mem.eql(u8, field.name, "state_deinit"))
-            {
-                @field(projected[i], field.name) = null;
-            } else {
-                @field(projected[i], field.name) = @field(binding, field.name);
-            }
-        }
-    }
-    return projected;
-}
-
-/// Analyzer builds keep the full registry metadata without retaining native
-/// implementation or state-lifecycle pointers.
-pub const builtins = if (build_options.analyzer_only)
-    analyzerModuleBindings(&runtime_builtins)
-else
-    runtime_builtins;
 
 /// Unified module registry: core built-ins plus explicitly registered extensions.
 pub const all = builtins ++ extension_bindings.all;
@@ -510,36 +447,6 @@ test "CapabilityMatrix.has finds present and misses absent" {
     try std.testing.expect(matrix.has(.stderr));
     try std.testing.expect(matrix.has(.clock));
     try std.testing.expect(!matrix.has(.crypto));
-}
-
-test "the analyzer projection keeps every module's own metadata and drops its implementation" {
-    const projected = comptime analyzerModuleBindings(&runtime_builtins);
-    try std.testing.expectEqual(runtime_builtins.len, projected.len);
-
-    for (runtime_builtins, projected) |runtime, analyzer| {
-        try std.testing.expectEqualStrings(runtime.specifier, analyzer.specifier);
-        try std.testing.expectEqualStrings(runtime.name, analyzer.name);
-        try std.testing.expectEqual(runtime.exports.len, analyzer.exports.len);
-        try std.testing.expectEqualSlices(
-            module_authorization.ModuleCapability,
-            runtime.required_capabilities,
-            analyzer.required_capabilities,
-        );
-        try std.testing.expect(analyzer.state_init == null);
-        try std.testing.expect(analyzer.state_deinit == null);
-
-        // Each entry must carry its OWN exports. A projection that returned one
-        // shared array would still pass a length check while every module
-        // reported the last module's signatures to the browser analyzer.
-        for (runtime.exports, analyzer.exports) |runtime_export, analyzer_export| {
-            try std.testing.expectEqualStrings(runtime_export.name, analyzer_export.name);
-            try std.testing.expectEqual(runtime_export.arg_count, analyzer_export.arg_count);
-            try std.testing.expectEqual(runtime_export.effect, analyzer_export.effect);
-            try std.testing.expectEqual(runtime_export.returns, analyzer_export.returns);
-            try std.testing.expect(analyzer_export.module_func == null);
-            try std.testing.expect(analyzer_export.func == @as(object.NativeFn, analyzerOnlyStub));
-        }
-    }
 }
 
 test "the builder's copy of the zttp:validate keyword list matches the module's" {

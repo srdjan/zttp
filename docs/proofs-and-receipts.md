@@ -24,9 +24,6 @@ The card comes from one analysis, shown in three places:
 - `zttp check` prints it once to the terminal for a one-shot run.
 - `zttp studio` mirrors it in the browser workbench.
 
-The in-browser playground on the zttp website runs the same analyzer
-compiled to WebAssembly, so the card there matches the card you get locally.
-
 ### The Stages
 
 The top of the card is a sequence of pass/fail gates. Each must pass before
@@ -125,7 +122,7 @@ block in detail.
 ### The Proof Trace
 
 Each property carries a proof trace: not just whether it holds, but how the
-compiler decided. Expand a chip in the playground or Studio, or read the
+compiler decided. Expand a chip in Studio, or read the
 auto-rendered block in the terminal HUD, to see:
 
 - A `summary` in one plain sentence: what was checked and what was found.

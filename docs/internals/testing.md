@@ -136,7 +136,7 @@ asserts only growth.
 
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
-`test-compile-bench`, `test-bench-diff`, `test-wasm-playground-publish`.
+`test-compile-bench`, `test-bench-diff`.
 
 `test-zts` checks the shared IR JSON writer's exact output, unsupported inputs,
 malformed property nodes, caller atom resolution, and allocation cleanup.
@@ -232,10 +232,7 @@ test references them. That is not hypothetical: when the JIT was removed,
 it. Compiling catches that class of breakage. Running the benchmarks here would
 import their measurement noise into the gate, so `bench-check` stays separate.
 The benchmark sampler, threshold policy, and atomic baseline writer live in
-`tooling/benchmark.zig`; the website WASM publisher and its rollback probes live
-in `tooling/wasm_playground_publish.zig`. Both are native Zig test roots. The
-publisher serializes writers and journals cross-file updates so an interrupted
-run can recover before it removes the superseded WASM.
+`tooling/benchmark.zig`, a native Zig test root.
 
 `build.zig.zon` remains the release-version authority. Root `VERSION` is a
 convenience mirror, and `test-release-check` rejects a missing, malformed, or
@@ -243,7 +240,7 @@ stale marker before release.
 
 ## What `zig build test` Excludes
 
-Six build steps:
+Three build steps:
 
 - **`test-zruntime`**, the `zruntime_tests.zig` root. See the next section.
 - **`test-module-scope-panic`**, a focused executable that proves authorization
@@ -251,16 +248,6 @@ Six build steps:
 - **`test-panic-isolation`**, an end-to-end script that needs the installed
   `zttp` binary, so it depends on the install step rather than on a test root.
   This step also depends on `test-module-scope-panic`.
-- **`test-zts-overview-browser`**, the dependency-free Chrome CDP check for the
-  ZTS language overview. It stays explicit because Chrome and Node are not
-  standard build dependencies. The step fails loudly when either is missing.
-- **`wasm`**, the freestanding `wasm64` build of the browser proof analyzer.
-  `scripts/verify.sh` compiles it after the native release binaries so changes
-  cannot retain POSIX, libc, SQLite, or other runtime-only dependencies in the
-  browser artifact.
-- **`wasm-playground-publish`**, the manual release operation that writes the
-  content-addressed analyzer into the sibling website checkout. Its in-tree
-  recovery and locking tests run under `test-wasm-playground-publish`.
 
 Everything driven by a shell script rather than a build step is also outside
 it: `smoke-v1`, `scripts/test-install-archive-safety.sh`,

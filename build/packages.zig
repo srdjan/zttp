@@ -31,7 +31,6 @@ pub fn add(ctx: Context) Result {
     // dependency of `test-zts`.
     const zts_build_options = b.addOptions();
     zts_build_options.addOption(bool, "perf_histogram", ctx.perf_histogram_enabled);
-    zts_build_options.addOption(bool, "analyzer_only", false);
 
     const zts_test_step = b.step("test-zts", "Run zts unit tests");
     const zts_roots = [_]struct { name: []const u8, src: []const u8 }{

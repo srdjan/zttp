@@ -5,7 +5,6 @@
 //! Split out of module_binding.zig, which re-exports every name here.
 
 const std = @import("std");
-const build_options = @import("build_options");
 const object = @import("../object.zig");
 const value = @import("../value.zig");
 const context = @import("../context.zig");
@@ -117,11 +116,8 @@ pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
 }
 
 /// SDK C-ABI bridge. These `export` functions are the runtime half of the
-/// zttp-sdk FFI boundary. Wrapping them in a struct that is referenced
-/// only from the comptime gate below lets `analyzer_only` builds (wasm) drop
-/// the whole family - and with it the interpreter value layer, SQLite, and
-/// libc - from the module graph. Native builds reference `sdk_bridge` and
-/// emit every declared bridge symbol.
+/// zttp-sdk FFI boundary. The comptime anchor below references `sdk_bridge`
+/// so every declared bridge symbol is emitted.
 pub const sdk_bridge = struct {
     pub export fn zttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
         if (capability_tag > @intFromEnum(ModuleCapability.policy_check)) return false;
@@ -733,7 +729,7 @@ pub const sdk_bridge = struct {
     }
 };
 
-// The SDK bridge is part of the binary ABI on native builds only.
+// The SDK bridge is part of the binary ABI.
 comptime {
-    if (!build_options.analyzer_only) _ = sdk_bridge;
+    _ = sdk_bridge;
 }

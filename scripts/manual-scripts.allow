@@ -16,12 +16,6 @@
 # asserts nothing, so there is no verdict for a gate to consume.
 build_minimal_dyld.sh manual-experiment
 
-# Publishes the wasm analyzer into a separate website repository under a
-# content-hashed filename. It writes outside this tree and needs that checkout,
-# so it cannot run in CI. What CI does check is that the artifact still builds:
-# `zig build wasm`, which scripts/verify.sh runs.
-build-wasm-playground.sh publishes-outside-tree
-
 # Two lines: build a TSX example ReleaseFast and serve it on port 3000. A
 # convenience for looking at the JSX frontend by hand; it blocks on a server, so
 # nothing automated can wait on it.

@@ -20,7 +20,6 @@
 //! and runtime are unaffected.
 
 const std = @import("std");
-const build_options = @import("build_options");
 const object = @import("object.zig");
 const value = @import("value.zig");
 const context = @import("context.zig");
@@ -111,12 +110,11 @@ pub const getState = bridge.getState;
 pub const setState = bridge.setState;
 pub const getAllocator = bridge.getAllocator;
 
-// The SDK bridge is part of the binary ABI on native builds only. Referencing
-// the module alone does not force analysis of its contents, so the export
-// family needs this anchor to be emitted: the `analyzer_only` (wasm) build
-// still drops the whole family, and with it the value layer, SQLite, and libc.
+// The SDK bridge is part of the binary ABI. Referencing the module alone does
+// not force analysis of its contents, so the export family needs this anchor
+// to be emitted.
 comptime {
-    if (!build_options.analyzer_only) _ = bridge.sdk_bridge;
+    _ = bridge.sdk_bridge;
 }
 
 // --- types ----------------------------------------------------------------

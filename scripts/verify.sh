@@ -88,9 +88,6 @@ step "zig build -Dhandler -Dverify -Dcontract  (handler precompilation path)"
 # obligations rather than compiling an empty claim.
 zig build -Dhandler=examples/handler/handler.ts -Dverify -Dcontract
 
-step "zig build wasm  (browser proof analyzer)"
-zig build wasm
-
 step "zig build smoke-v1  (v1 user-flow smoke)"
 zig build smoke-v1
 

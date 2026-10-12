@@ -4,10 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const perf_histogram = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
-    // analyzer_only strips the VM, SQLite, and libc from the build graph so the
-    // static analysis pipeline can target wasm64-freestanding. The normal
-    // build leaves it false and behaves exactly as before.
-    const analyzer_only = b.option(bool, "analyzer_only", "Build the static analyzer only (no interpreter, SQLite, or libc) for wasm/freestanding targets") orelse false;
     const sdk_dep = b.dependency("zttp_sdk", .{
         .target = target,
         .optimize = optimize,
@@ -27,7 +23,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/base_root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = !analyzer_only,
+        .link_libc = true,
     });
 
     // `zts-contracts` is data and serialization: what a contract and its
@@ -38,7 +34,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/contracts_root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = !analyzer_only,
+        .link_libc = true,
     });
     contracts_mod.addImport("zts-base", base_mod);
 
@@ -50,7 +46,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/engine_root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = !analyzer_only,
+        .link_libc = true,
     });
     engine_mod.addImport("zts-base", base_mod);
     engine_mod.addImport("zts-contracts", contracts_mod);
@@ -59,7 +55,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/compiler_root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = !analyzer_only,
+        .link_libc = true,
     });
     compiler_mod.addImport("zts-base", base_mod);
     compiler_mod.addImport("zts-contracts", contracts_mod);
@@ -73,7 +69,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
-        .link_libc = !analyzer_only,
+        .link_libc = true,
     });
     mod.addImport("zts-base", base_mod);
     mod.addImport("zts-contracts", contracts_mod);
@@ -82,31 +78,27 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "perf_histogram", perf_histogram);
-    build_options.addOption(bool, "analyzer_only", analyzer_only);
     // Every module that reads a build option needs its own copy: options are
-    // per-module, and the engine's `analyzer_only` gates are what strip the VM
-    // subtree for the wasm target.
+    // per-module.
     mod.addOptions("build_options", build_options);
     base_mod.addOptions("build_options", build_options);
     contracts_mod.addOptions("build_options", build_options);
     engine_mod.addOptions("build_options", build_options);
     compiler_mod.addOptions("build_options", build_options);
-    if (!analyzer_only) {
-        // sqlite.zig is analyzed only in the engine module, so only that
-        // module compiles the C source. Adding it to the umbrella as well
-        // put both copies in one binary and the linker reported every
-        // sqlite3_* symbol as a duplicate definition.
-        engine_mod.addCSourceFile(.{
-            .file = b.path("deps/sqlite/sqlite3.c"),
-            // THREADSAFE=2 (multi-thread): each connection is used by one
-            // thread at a time, which matches the per-runtime SqliteDb model.
-            // The HTTP server runs requests on a worker-thread pool, so
-            // THREADSAFE=0 (single-thread, all mutexing compiled out) would
-            // corrupt shared SQLite global state across concurrent requests.
-            .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=2", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
-        });
-        engine_mod.addIncludePath(b.path("deps/sqlite"));
-    }
+    // sqlite.zig is analyzed only in the engine module, so only that
+    // module compiles the C source. Adding it to the umbrella as well
+    // put both copies in one binary and the linker reported every
+    // sqlite3_* symbol as a duplicate definition.
+    engine_mod.addCSourceFile(.{
+        .file = b.path("deps/sqlite/sqlite3.c"),
+        // THREADSAFE=2 (multi-thread): each connection is used by one
+        // thread at a time, which matches the per-runtime SqliteDb model.
+        // The HTTP server runs requests on a worker-thread pool, so
+        // THREADSAFE=0 (single-thread, all mutexing compiled out) would
+        // corrupt shared SQLite global state across concurrent requests.
+        .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=2", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+    });
+    engine_mod.addIncludePath(b.path("deps/sqlite"));
     // The virtual module bindings are analyzed in the engine module.
     engine_mod.addImport("zttp-sdk", sdk_dep.module("zttp-sdk"));
     engine_mod.addImport("zttp-modules", modules_dep.module("zttp-modules"));

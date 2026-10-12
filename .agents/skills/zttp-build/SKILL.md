@@ -1,6 +1,6 @@
 ---
 name: zttp-build
-description: Use when running a zttp build beyond the everyday debug build and test suite - release builds, handler precompilation with -Dhandler/-Dverify/-Dcontract/-Dreplay/-Dtest-file, the optional -Dstudio and -Dedge features, the wasm playground, per-package test steps, filtered single tests, example handler tests, and benchmarks.
+description: Use when running a zttp build beyond the everyday debug build and test suite - release builds, handler precompilation with -Dhandler/-Dverify/-Dcontract/-Dreplay/-Dtest-file, the optional -Dstudio and -Dedge features, per-package test steps, filtered single tests, example handler tests, and benchmarks.
 ---
 
 # zttp build reference
@@ -36,13 +36,6 @@ zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Handler tests at buil
 zig build run -- examples/handler/handler.ts --watch --prove  # Proven live reload
 zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
 zig build cli -- --help                        # Run zttp
-```
-
-## Wasm playground
-
-```bash
-zig build wasm                         # Build zts analyzer as a wasm module (web playground)
-bash scripts/build-wasm-playground.sh  # Build wasm + publish to zttp-website/static
 ```
 
 ## Test steps

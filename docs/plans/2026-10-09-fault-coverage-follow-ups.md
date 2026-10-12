@@ -36,8 +36,8 @@ calling `cacheSet` total.
 Two production paths in `packages/tools/src/precompile.zig` decide the handler
 property: `analyzeHandlerPaths` (`:1408`, `:1458`, written at `:2038`) and
 `compileHandler` (`:2753`, `:2804-2807`). `zts check`, the agent protocol, the
-wasm analyzer (`wasm_analyzer.zig:107`, `skip_contract = false` at `:114`), and
-four `packages/pi` callers reach them. The durable workflow property
+former wasm analyzer (`pre-rebase:packages/tools/src/wasm_analyzer.zig:107`,
+`skip_contract = false` at `:114`), and four `packages/pi` callers reach them. The durable workflow property
 (`contract_builder.zig:3837`) and the system property (`system_linker.zig:1241`)
 are separate calculations. Other generator callers (`precompile.zig:2131`,
 `:2475`, `severity_census.zig:538`, `property_diagnostics.zig:657`) do not call

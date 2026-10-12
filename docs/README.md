@@ -11,9 +11,6 @@ and superseded execution records live in the `pre-rebase` git tag, under
 
 ## Start Here
 
-- [ZTS Language Overview](zts-language-overview.html) - a browser-readable map
-  of the implemented `zts-model-1` source, types, control flow, effects, proofs,
-  TSX frontend, modules, restrictions, and compiler contract.
 - [User Guide](user-guide.md) - the single user guide for install, first
   project, handler API, routing, JSON, JS/TS/TSX, virtual modules, tests,
   deploy, proof receipts, and troubleshooting.
@@ -81,11 +78,6 @@ and superseded execution records live in the `pre-rebase` git tag, under
   cassette goes stale, how to re-record the corpus against DeepSeek, a local
   MLX server, Claude, or OpenAI, and how to republish the convergence and
   coverage pages.
-- [ZTS Expert Overview](zts-expert-overview.html) - a browser-readable report on
-  the agent behind `zttp expert`: its identity, the proof loop one proposal
-  crosses, the six authority invariants, and the measured state of the corpus.
-  Dated, so read the numbers against [Convergence](convergence.md) and
-  [Coverage](coverage.md) rather than as live facts.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.
 - [Agent Protocol v2](internals/agent-protocol-v2.md) - the

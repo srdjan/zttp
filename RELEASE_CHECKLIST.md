@@ -12,8 +12,6 @@ gates, and keep release notes user-facing.
 ## Validation
 
 - [ ] `bash scripts/verify.sh --release`
-- [ ] `zig build wasm` and exercise one accepted and one rejected handler
-      through the exported `alloc` / `analyze` / `free` ABI.
 - [ ] `zig build smoke-getting-started` (macOS beta gate)
 - [ ] `zig build smoke-demo` (macOS beta gate)
 - [ ] `zig build smoke-studio` (macOS beta gate; builds `-Dstudio`)
@@ -41,10 +39,6 @@ cross-compile without Docker.
 - [ ] `docs/roadmap.md` is the only roadmap.
 - [ ] `docs/virtual-modules/README.md` matches the built-in module registry.
 - [ ] `docs/performance.md` contains the current public benchmark claims.
-- [ ] The official website playground uses the current ambient `Proof<T, P>`
-      syntax, its checked-in WASM artifact is rebuilt from this release, and
-      one accepted plus one rejected handler is exercised through the real
-      browser bridge before publication.
 - [ ] `zig build release-provenance` confirms that coverage and
       convergence evidence came from complete, publishable, clean-source runs
       whose source commits cover the release commit except for generated

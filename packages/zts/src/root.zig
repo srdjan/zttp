@@ -159,7 +159,6 @@ pub const manifest_registry = compiler.manifest_registry;
 pub const builtin_modules = engine.builtin_modules;
 pub const module_facts = compiler.module_facts;
 pub const security_events = engine.security_events;
-pub const wasm = engine.wasm;
 pub const sqlite = engine.sqlite;
 pub const sql_analysis = compiler.sql_analysis;
 pub const modules = engine.modules;

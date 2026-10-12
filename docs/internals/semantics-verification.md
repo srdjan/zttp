@@ -53,7 +53,7 @@ integers. Four are deliberately excluded for this reason:
 - involution of unary `-`, which fails on number coercion.
 
 The solver is injected from `packages/tools/src/smt_solver.zig`, so
-`std.process.Child` never enters the wasm analyzer build.
+`std.process.Child` never enters the analyzer.
 
 Only two conditions fail the build: a genuine counterexample (`ZTS755`) and an
 ill-typed obligation (`ZTS756`). An absent, broken, or undecided solver is a

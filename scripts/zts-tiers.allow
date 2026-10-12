@@ -163,10 +163,6 @@ zts translation_witness.zig
 zts trace.zig
 zts tsx_lowerer.zig
 zts value.zig
-zts wasm/interpreter.zig
-zts wasm/loader.zig
-zts wasm/pool.zig
-zts wasm/root.zig
 
 # zts-compiler
 zts-compiler abi_types.zig

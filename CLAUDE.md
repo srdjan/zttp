@@ -20,7 +20,7 @@ bash scripts/verify.sh                               # Full local gate mirroring
 zig build run -- examples/handler/handler.ts -p 3000 # Run zttp
 ```
 
-Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract`, `-Dreplay`, `-Dtest-file`), the optional `-Dstudio` and `-Dedge` features, the wasm playground, the per-package test steps, and benchmarks are in the `zttp-build` skill.
+Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract`, `-Dreplay`, `-Dtest-file`), the optional `-Dstudio` and `-Dedge` features, the per-package test steps, and benchmarks are in the `zttp-build` skill.
 
 ## CLI Surface
 

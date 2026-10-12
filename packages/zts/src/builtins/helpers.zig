@@ -1,5 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
 pub const compat = @import("zts-base").compat;
 pub const value = @import("../value.zig");
 pub const object = @import("../object.zig");
@@ -191,9 +190,6 @@ pub fn getStringDataImpl(val: value.JSValue, ctx: ?*context.Context) ?[]const u8
             rope.payload = .{ .leaf = flat };
             return flat.data();
         }
-        // Static analyzer builds never execute runtime helpers. Keep the
-        // no-context fallback from retaining libc in the freestanding module.
-        if (comptime build_options.analyzer_only) return null;
         const flat = rope.flatten(std.heap.c_allocator) catch return null;
         rope.kind = .leaf;
         rope.payload = .{ .leaf = flat };
