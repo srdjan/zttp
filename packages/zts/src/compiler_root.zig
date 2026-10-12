@@ -1,7 +1,7 @@
 //! `zts-compiler` - everything that decides whether a program is proven.
 //!
 //! The checkers, the type system, contract extraction, path enumeration and
-//! counterexample search, the semantics registry and its SMT layer, the rule,
+//! counterexample search, the semantics registry and its structural checks, the rule,
 //! idiom and restriction catalogs, and the repair machinery.
 //!
 //! This is the top of the tier graph. It names `zts-engine`, `zts-contracts`
@@ -66,8 +66,6 @@ pub const repair_validator = @import("repair_validator.zig");
 
 pub const semantics = @import("semantics.zig");
 pub const semantics_check = @import("semantics_check.zig");
-pub const semantics_smt = @import("semantics_smt.zig");
-pub const semantics_audit = @import("semantics_audit.zig");
 pub const semantics_corpus = @import("semantics_corpus.zig");
 pub const semantics_render = @import("semantics_render.zig");
 

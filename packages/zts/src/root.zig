@@ -163,8 +163,6 @@ pub const modules = engine.modules;
 pub const compat = base.compat;
 pub const semantics = compiler.semantics;
 pub const semantics_check = compiler.semantics_check;
-pub const semantics_smt = compiler.semantics_smt;
-pub const semantics_audit = compiler.semantics_audit;
 pub const semantics_corpus = compiler.semantics_corpus;
 pub const semantics_render = compiler.semantics_render;
 pub const module_spec_render = compiler.module_spec_render;
@@ -741,14 +739,6 @@ test "stable pathsMatch compatibility alias remains callable" {
 /// Classify a single SQL statement: which tables it touches and whether it
 /// writes.
 pub const analyzeSqlStatement = sql_analysis.analyzeStatement;
-
-/// Encode a semantics refutation for the SMT layer. `timeout_ms` is the law
-/// row's solver budget; a caller with no row of its own passes
-/// `default_audit_timeout_ms`.
-pub const encodeRefutation = semantics_audit.encodeRefutation;
-
-/// The audit solver budget for a law row that declares none.
-pub const default_audit_timeout_ms = semantics_audit.default_audit_timeout_ms;
 
 /// Render a module semantics spec as TypeScript.
 pub const renderSpecTs = semantics_render.renderSpecTs;

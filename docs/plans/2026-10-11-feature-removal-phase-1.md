@@ -33,6 +33,7 @@ the files `memory_store.zig`, `zts_expert_ratchet.zig`, and `witness_corpus.zig`
 the `/witnesses`, `/build`, and `/test` slash commands;
 the persona lines that name those tools;
 the `fix-violations` skill text about `review-patch`.
+The `SpecCode` variants ZTS755 to ZTS760 also wait for Phase 3: G12 removed their producer, and deleting them moves `diagnosticHash`.
 
 ## Deferred to a later group or phase for other reasons
 

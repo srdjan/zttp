@@ -617,3 +617,51 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - Exit 0, unfiltered: `zig build`, `test-expert-app`, `test-cli`, `test-standin`, `test-step-coverage`, `test-docs-drift`, `test-doc-links`, `test-module-boundary`, and `zig build test`. `bash scripts/audit-docs.sh`: exit 0.
 - The `zig build test` log contains two `[replay] model_context_mismatch` lines. They come from negative tests that check mismatch detection (a recorder and a promotion test). The step exit status is 0 and `coverage.json is stale` does not appear.
 - Invariant 4 after G11: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+
+## G12 SMT layer and z3
+
+### Removed
+
+- `packages/zts/src/semantics_smt.zig`, `packages/zts/src/semantics_audit.zig`, `packages/tools/src/smt_solver.zig`
+- In `semantics_check.zig`: `runSmt`, `runAudit`, `SmtResult`, `AuditResult`, `SmtObligation`, `SolveFn`, `collectSmtObligations`, `execLowering`, `proveSmtObligations`, and every test that used a fake solver (including the `collectSmtObligations` coverage test and the test that encoded every excluded law). The header now lists four mechanisms.
+- In `semantics_cli.zig`: the `--audit` flag, the SMT and audit fields of the report, the two "smt equivalence" and "exclusion audit" text lines, the `smt` and `audit` JSON keys, and the `smt_solver` import. The aggregation test now covers the structural and corpus failures only.
+- The `semantics_smt` and `semantics_audit` re-exports in `compiler_root.zig` and `root.zig`, and the `encodeRefutation` and `default_audit_timeout_ms` aliases in `root.zig`.
+- The `test-smt-solver` row in `build/host_tests.zig`, the `tools semantics_smt` row in `scripts/module-boundary.allow`, the two rows in `scripts/zts-tiers.allow`, and the `test-smt-solver` row in `docs/internals/testing.md`.
+- z3 from the install steps of `.github/workflows/ci.yml` and `release.yml`. The steps are now named "Install ripgrep" and install ripgrep only.
+
+### Rewritten
+
+- `scripts/check-semantics-spec.sh` runs `zts spec-check` and `zts spec-render --check docs/spec/semantics.spec.ts` with `set -euo pipefail`. It no longer needs `jq` and has no z3 branch.
+- `docs/internals/semantics-verification.md` describes four mechanisms and the soundness boundary. It cites the removed files as `pre-rebase:`.
+- Wording only: `CLAUDE.md`, `CONTRIBUTING.md` (Z3 and `ZTTP_Z3` removed from the prerequisites), `docs/README.md`, `docs/cli.md` (`ZTS75x counterexample` removed from the exit code text), `docs/zts-formal-spec-northstar-advanced.md` (`spec-check --audit` became `spec-check`), `docs/plans/2026-07-30-016-d3-canonical-form-wire-design.md`, and comments in `semantics.zig`, `compiler_root.zig`, `repair_validator.zig`, and `invariant_author.zig`.
+
+### Kept
+
+`semantics.zig` with `excluded_laws` and each row's `audit_timeout_ms` as data (hashed into `semanticsHash`, rendered into `docs/spec/`). `semantics_check.zig` `runCheck`, `semantics_corpus.zig`, `semantics_render.zig` (its rendered strings are unchanged, so `docs/spec/semantics.spec.ts` is byte-identical), `semantics_cli.zig` with `spec-check`, `spec-hash`, and `spec-render`, and `docs/spec/`.
+
+### Dead for Phase 3
+
+The `SpecCode` variants `smt_counterexample` (ZTS755), `smt_unencodable` (ZTS756), `excluded_law_holds` (ZTS757), `audit_solver_error` (ZTS758), `audit_inconclusive` (ZTS759), and `smt_unproven` (ZTS760) in `diagnostic_catalog.zig:109-114` have no producer now. The plan names ZTS757 and ZTS758; the other four are in the same state. They stay, with their rows at `scripts/corpus-uncovered.allow:107-112`, because deleting them moves `diagnosticHash`. The reason text on those rows ("produced by the semantics-conformance producer") is now inaccurate for ZTS755 to ZTS760. A Phase 3 commit that deletes the variants and rows must go with the re-record. `check-diagnostic-producers.sh` still passes ("17 variants"), so it does not cover these.
+
+Also unconsumed after G12: `semantics.excluded_laws` and `Law.audit_timeout_ms` have readers only in `semantics_render.zig` and the hash. Keep them while `semanticsHash` and `docs/spec/` are published identities.
+
+### Probe: `check-semantics-spec.sh` still fails when a check fails
+
+- Probe 1: appended one byte to `docs/spec/semantics.spec.ts`. `bash scripts/check-semantics-spec.sh` exited 1 and printed `spec-render --check: the committed spec is stale`. I restored the file from a copy. The script then exited 0, and `git diff --stat -- docs/spec/` was empty.
+- Probe 2: in a scratch tree (`scratchpad/simplify/probe2`), a stub `zig-out/bin/zts` exited 1 for `spec-check` and 0 otherwise. The copied script exited 1. With a stub that always exits 0, the copied script exited 0.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "semantics_smt|semantics_audit|smt_solver|runSmt|runAudit|SmtResult|AuditResult|test-smt-solver|ZTTP_Z3|\bz3\b|spec-check --audit|encodeRefutation|default_audit_timeout|collectSmtObligations" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md CONTRIBUTING.md .agents .github scripts build build.zig packages tooling
+```
+
+Remaining hits: `pre-rebase:` citations in `semantics-verification.md`, `semantics.zig`, `invariant_author.zig`, and the d3 plan, the sentence in `semantics-verification.md` that says `--audit` and `ZTTP_Z3` were removed, and the Phase 1 plan text.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `test-zts`, `test-zts-cli`, `test-zts-layering`, `test-module-boundary`, `test-release-check`, `test-release-workflow`, `test-diagnostic-corpus`, `test-docs-drift`, `test-step-coverage`, `test-script-reachability`, `test-doc-links`, `test-standin`, `test-expert-app`, and `zig build test`. `bash scripts/check-semantics-spec.sh`, `bash scripts/check-diagnostic-producers.sh`, `bash scripts/audit-docs.sh`, and `zig fmt --check build.zig build packages tooling`: exit 0. `coverage.json is stale` does not appear in the `zig build test` log.
+- Invariant 4 after G12: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/ packages/zts/src/diagnostic_catalog.zig` is empty. `diagnosticHash` is not in `meta --json`. `diagnostic_catalog.zig` is unchanged, `docs/coverage.json` still holds `6b7fead4...1191`, and `test-standin` and `test-expert-app` (which check it) pass.
+- Invariant 3: nothing changed under `packages/pi/src/skills/`, `prompts/`, `tool_registry.zig`, or `expert_persona.zig`.

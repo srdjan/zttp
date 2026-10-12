@@ -40,7 +40,6 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-module-graph-record` | `packages/tools/src/module_graph_record.zig` |
 | `test-agent-protocol` | `packages/tools/src/agent_protocol.zig` |
 | `test-module-audit` | `packages/tools/src/module_audit.zig` |
-| `test-smt-solver` | `packages/tools/src/smt_solver.zig` |
 | `test-verify-paths-core` | `packages/tools/src/verify_paths_core.zig` |
 | `test-report` | `packages/tools/src/report.zig` |
 | `test-project-config` | `packages/tools/src/project_config.zig` |

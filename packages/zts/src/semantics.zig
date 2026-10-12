@@ -500,10 +500,9 @@ pub fn opcodeDisposition(op: Opcode) Disposition {
 /// Algebraic laws the language's value semantics must satisfy: equivalences
 /// between *structurally different* denotations. Mechanism 3 (structural RPN
 /// equality) cannot admit these - both sides have different `Term` sequences -
-/// but the SMT check (mechanism 5, `semantics_smt.zig`) certifies them over the
-/// value model. They are spec content (claims about the language), so they are
-/// hashed into `semanticsHash` and rendered into the spec artifact. A law that
-/// did NOT hold would surface as an SMT counterexample at `spec-check` time.
+/// but a solver check (removed; see `pre-rebase:packages/zts/src/semantics_smt.zig`)
+/// certified them over the value model. They are spec content (claims about the language), so they are
+/// hashed into `semanticsHash` and rendered into the spec artifact.
 ///
 /// SOUNDNESS BOUNDARY - read before adding a law. The SMT encoder abstracts the
 /// engine's number type (i32 that promotes to IEEE-754 f64 on overflow; see
@@ -524,8 +523,8 @@ pub const Law = struct {
     name: []const u8,
     lhs: []const Term,
     rhs: []const Term,
-    /// Solver budget for this row's audit query, in milliseconds. `null` takes
-    /// `semantics_audit.default_audit_timeout_ms`. It is a per-row property
+    /// Solver budget for this row's audit query, in milliseconds. `null` took
+    /// the removed audit's default budget (`pre-rebase:packages/zts/src/semantics_audit.zig`). It is a per-row property
     /// because refutation cost is not uniform: three of the four excluded laws
     /// refute on a type mix and return in under a second, while the f64
     /// associativity counterexample search is two orders of magnitude slower
@@ -543,19 +542,18 @@ pub const Law = struct {
 // value model: every tempting equivalence is in `excluded_laws` below (machine-
 // refuted). Asserting laws that hold only for a restricted operand type needs the
 // reachability / type-precondition layer (the deferred faithful-model work), so
-// this table is intentionally empty for now. Mechanism 5 still proves every value
+// this table is intentionally empty for now. Mechanism 3 still proves every value
 // node's denote == exec(lower) and the refinements; the algebraic-law slot is
 // where guarded laws will land once preconditions exist.
 pub const algebraic_laws = [_]Law{};
 
 /// Excluded laws: equivalences that are tempting but FALSE under the engine's
 /// faithful value model, declared here so the exclusion is machine-checked rather
-/// than only asserted in the SOUNDNESS BOUNDARY comment above. The audit
-/// (`semantics_audit.zig`, via spec-check) encodes each over a faithful
-/// tagged-value model and REQUIRES the solver to find a counterexample - if one
-/// of these ever came back as actually holding, the build fails (the exclusion
-/// was wrong, or the value model drifted). They reuse the `Law` shape; the audit
-/// interprets them as non-laws.
+/// than only asserted in the SOUNDNESS BOUNDARY comment above. The removed audit
+/// (`pre-rebase:packages/zts/src/semantics_audit.zig`) encoded each over a faithful
+/// tagged-value model and required a solver counterexample. They are data now:
+/// hashed into `semanticsHash` and rendered into the spec. They reuse the `Law`
+/// shape; they are read as non-laws.
 pub const excluded_laws = [_]Law{
     // associativity of +  - holds over ℤ, fails on f64 rounding past 2^53.
     // Two orders of magnitude slower to refute than every other row here: the

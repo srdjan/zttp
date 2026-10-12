@@ -10,7 +10,7 @@
 //! so every sentence came back stamped with the one kind that existed.
 //!
 //! The advisory classifier is optional and lives behind an injected transport,
-//! following the pure/host split in `smt_solver.zig`: this file builds a request
+//! following the pure/host split that `pre-rebase:packages/tools/src/smt_solver.zig` used: this file builds a request
 //! body and decodes an answer, and the process that owns `std.http` supplies the
 //! transport. Builds, acceptance, and request serving never reach any of it.
 //! Only the sentence and the catalog's own published descriptions are sent.

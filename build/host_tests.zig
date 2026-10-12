@@ -66,7 +66,6 @@ const host_test_roots = [_]HostTestRoot{
     // No new root is needed there: those three packages reach their files through
     // analyzed imports, not through named modules the way tools does.
     .{ .owner = .tools, .src = "src/module_audit.zig", .step = "test-module-audit", .desc = "Run module-contract audit tests", .project_config = true },
-    .{ .owner = .tools, .src = "src/smt_solver.zig", .step = "test-smt-solver", .desc = "Run SMT solver harness tests", .project_config = true },
     .{ .owner = .tools, .src = "src/verify_paths_core.zig", .step = "test-verify-paths-core", .desc = "Run behavior-path verification core tests", .project_config = true },
     .{ .owner = .tools, .src = "src/report.zig", .step = "test-report", .desc = "Run analyzer report renderer tests", .project_config = true },
     .{ .owner = .tools, .src = "src/project_config.zig", .step = "test-project-config", .desc = "Run project config discovery tests" },

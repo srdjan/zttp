@@ -104,9 +104,9 @@ ZTS751 produced by the semantics-conformance producer (spec-check and module-spe
 ZTS752 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
 ZTS753 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
 ZTS754 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
-ZTS755 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
-ZTS756 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
-ZTS757 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
-ZTS758 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
-ZTS759 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
-ZTS760 produced by the semantics-conformance producer (spec-check and module-spec-render), which `check` never runs
+ZTS755 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
+ZTS756 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
+ZTS757 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
+ZTS758 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
+ZTS759 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record
+ZTS760 has no producer since plan 005 G12 removed the SMT and audit checks that emitted it; deleting the variant moves diagnosticHash, so its removal waits for the plan 005 Phase 3 re-record

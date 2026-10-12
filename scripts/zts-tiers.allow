@@ -202,11 +202,9 @@ zts-compiler route_resolution.zig
 zts-compiler rule_registry.zig
 zts-compiler saga_extractor.zig
 zts-compiler semantics.zig
-zts-compiler semantics_audit.zig
 zts-compiler semantics_check.zig
 zts-compiler semantics_corpus.zig
 zts-compiler semantics_render.zig
-zts-compiler semantics_smt.zig
 zts-compiler severity_census.zig
 zts-compiler source_identity.zig
 zts-compiler spec_discharge.zig

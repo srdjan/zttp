@@ -174,7 +174,7 @@ this revision:
   verification publish the profile and its hashes;
 - contracts, caches, receipts, attestations, capsules, and Pi repair evidence
   bind the core profile, grammar, semantics, and optional frontend identity;
-- `spec-check --audit` classifies all 69 reachable IR nodes and all 127
+- `spec-check` classifies all 69 reachable IR nodes and all 127
   reachable opcodes, with every classification carrying its stated evidence
   class.
 

@@ -52,13 +52,13 @@ jobs:
       # recorded codegen corpus holds the bytes rg produces. A runner without it
       # takes the in-process fallback, whose bytes differ, and four cassettes
       # then replay as stale.
-      - name: Install z3 and ripgrep
+      - name: Install ripgrep
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install z3 ripgrep
+            brew install ripgrep
           else
             sudo apt-get update
-            sudo apt-get install -y z3 ripgrep
+            sudo apt-get install -y ripgrep
           fi
 
       - name: Run authoritative verifier

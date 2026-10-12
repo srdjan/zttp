@@ -68,9 +68,9 @@ and superseded execution records live in the `pre-rebase` git tag, under
   native function extension notes.
 - [Module Capabilities](internals/capabilities.md) - built-in module
   capability governance.
-- [Semantics Verification](internals/semantics-verification.md) - the five
-  `spec-check` mechanisms, the SMT layer, the exclusion audit, and the
-  generated spec artifacts.
+- [Semantics Verification](internals/semantics-verification.md) - the four
+  `spec-check` mechanisms, the soundness boundary, and the generated spec
+  artifacts.
 - [Test Steps](internals/testing.md) - what `zig build test` includes and
   excludes, and why the zruntime suite is standalone.
 - [Cassette Recording](internals/cassette-recording.md) - when a codegen

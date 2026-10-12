@@ -388,7 +388,7 @@ and the payload sections this compiler does not yet generate. A request naming
 any other `schema_version` gets a frozen three-key negotiation response, so
 version discovery is one deterministic round trip.
 
-Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove-behavior` returns 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the five mechanisms, the SMT layer, the exclusion audit, and the generated artifacts these commands own.
+Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove-behavior` returns 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the four mechanisms, the soundness boundary, and the generated artifacts these commands own.
 
 ### Canonicalize And Normalize
 

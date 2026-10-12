@@ -39,10 +39,9 @@
 //! recomputes the law's rewrite from the original line independently, and the
 //! apply path is accepted only when the two agree byte for byte.
 //!
-//! It is deliberately solver-free. `semantics_check.runSmt` degrades to
-//! "skipped" when z3 is absent, so a wire flag that depended on a solver run
-//! would answer differently on a machine without z3 - and `repair_available` is
-//! a published protocol field, not a local diagnostic.
+//! It is deliberately solver-free: a wire flag that depended on a solver run
+//! would answer differently on a machine without that solver, and
+//! `repair_available` is a published protocol field, not a local diagnostic.
 
 const std = @import("std");
 const repair_intent = @import("repair_intent.zig");

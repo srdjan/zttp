@@ -4,11 +4,9 @@ How to build, how to test, and the conventions a PR must respect before merge. F
 
 ## Prerequisites
 
-Use Zig `0.16.0` stable. The full verifier also requires Python 3, `jq`, Z3,
+Use Zig `0.16.0` stable. The full verifier also requires Python 3, `jq`,
 and ripgrep. Ripgrep is part of the recorded expert output, so its in-process
-fallback does not produce the same cassette bytes. The semantics gate requires
-Z3 unless you set `ZTTP_Z3=off` to skip the SMT checks explicitly. A run with
-that setting does not verify the SMT soundness boundary.
+fallback does not produce the same cassette bytes.
 
 ## Build
 

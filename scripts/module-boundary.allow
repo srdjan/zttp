@@ -105,7 +105,6 @@ tools property_diagnostics
 tools semantics
 tools semantics_check
 tools semantics_corpus
-tools semantics_smt
 tools service_types
 tools spec_discharge
 tools sqlite

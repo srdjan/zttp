@@ -176,7 +176,7 @@ conditional branch over the same operands), the record-update row, the
 
 **M4 — declared law.** The rewrite instantiates an algebraic law registered on
 the intrinsics involved, discharged either by the existing SMT mechanism
-(`semantics_smt.zig` with z3, already in `scripts/verify.sh`) or by an audited
+(`pre-rebase:packages/zts/src/semantics_smt.zig` with z3, removed in plan 005) or by an audited
 `Law` entry on a `FunctionBinding` (`module_binding.zig:1431-1449`), with the
 law's own preconditions carried into the row's precondition column.
 *Covers:* `indexOf(v) !== -1` → `includes(v)` (law: equal for element types
