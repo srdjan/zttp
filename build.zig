@@ -54,7 +54,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&tools.run_release_check_tests.step);
     test_step.dependOn(&tools.run_release_provenance_tests.step);
     test_step.dependOn(&tools.run_coverage_union_tests.step);
-    test_step.dependOn(&tools.run_demo_passport_check_tests.step);
     test_step.dependOn(tools.production_branch_metric_test_step);
     test_step.dependOn(golden.comptime_cli_step);
     test_step.dependOn(golden.generic_intersection_cli_step);

@@ -21,7 +21,7 @@ Two runtime test roots:
 
 | Step | Root | Covers |
 |---|---|---|
-| (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `edge_server`, `studio`, `proof_adapter` |
+| (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `edge_server`, `proof_adapter` |
 | `test-cli` | `cli_main_tests` (`cli_main.zig`) | `dev_cli` and its dependencies: deploy, pi_app wiring, `zts_cli` delegation |
 
 The host test roots, declared in the `host_test_roots` table in `build/host_tests.zig`.
@@ -47,7 +47,6 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-verify-paths-core` | `packages/tools/src/verify_paths_core.zig` |
 | `test-report` | `packages/tools/src/report.zig` |
 | `test-project-config` | `packages/tools/src/project_config.zig` |
-| `test-proof-quest-fixture` | `packages/tools/src/proof_quest_fixture.zig` |
 | `test-openapi-manifest` | `packages/tools/src/openapi_manifest.zig` |
 | `test-vocab-envelope` | `packages/tools/src/vocab_envelope.zig` |
 | `test-instruction-counter` | `packages/tools/src/instruction_counter.zig` |

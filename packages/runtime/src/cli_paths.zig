@@ -1,31 +1,18 @@
 //! Binary-path resolution helpers for the developer CLI.
 //!
-//! Extracted from dev_cli.zig. `dev`, `studio`, `demo`, and `doctor` all
-//! need to re-enter either the developer CLI or the runtime binary, so
-//! they consult these helpers to figure out which path to use. Pure
-//! functions over a program-path string and the cwd — no shared state.
+//! Extracted from dev_cli.zig. `dev` and `doctor` need to re-enter either the
+//! developer CLI or the runtime binary, so they consult these helpers to
+//! figure out which path to use. Pure functions over a program-path string
+//! and the cwd - no shared state.
 
 const std = @import("std");
 
-/// `dev` and `studio` need the developer CLI because live reload and Studio
-/// are intentionally not linked into `zttp-runtime`. Re-entering the same
-/// binary with `serve` is safe: `serve` dispatches directly to runtime_cli.
+/// `dev` needs the developer CLI because live reload is intentionally not
+/// linked into `zttp-runtime`. Re-entering the same binary with `serve` is
+/// safe: `serve` dispatches directly to runtime_cli.
 pub fn resolveDeveloperServeBinary(allocator: std.mem.Allocator, program_path: []const u8) ![]const u8 {
     if (program_path.len > 0) return try allocator.dupe(u8, program_path);
     return try allocator.dupe(u8, "zttp");
-}
-
-/// `zttp demo` changes into the generated workspace before re-entering the
-/// CLI. Keep bare names bare so PATH lookup still works, but resolve
-/// cwd-relative executable paths while the original cwd is still known.
-pub fn resolveReentryBinaryAfterChdir(
-    allocator: std.mem.Allocator,
-    program_path: []const u8,
-    original_cwd: []const u8,
-) ![]const u8 {
-    if (std.fs.path.isAbsolute(program_path)) return try allocator.dupe(u8, program_path);
-    if (std.fs.path.dirname(program_path) == null) return try allocator.dupe(u8, program_path);
-    return try std.fs.path.resolve(allocator, &.{ original_cwd, program_path });
 }
 
 /// Find the `zttp` runtime binary.

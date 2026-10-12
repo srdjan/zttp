@@ -1,5 +1,5 @@
 //! Repository-only executables and their tests: release provenance, coverage
-//! union, the release passport, the proof-passport checker, the branch metric,
+//! union, the release passport, the branch metric,
 //! the stand-in author, expert qualification, and the reach measurement. None
 //! of them is installed.
 
@@ -10,7 +10,6 @@ pub const Result = struct {
     run_release_provenance_tests: *std.Build.Step.Run,
     run_coverage_union_tests: *std.Build.Step.Run,
     run_release_check_tests: *std.Build.Step.Run,
-    run_demo_passport_check_tests: *std.Build.Step.Run,
     production_branch_metric_test_step: *std.Build.Step,
     standin_exe: *std.Build.Step.Compile,
 };
@@ -99,32 +98,6 @@ pub fn add(ctx: Context) Result {
     const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
     release_check_test_step.dependOn(&run_release_check_tests.step);
 
-    // Validate the actual passport exported by the scripted demo through the
-    // canonical framed-event reader instead of a shell or Python reimplementation.
-    const demo_passport_check_mod = b.createModule(.{
-        .root_source_file = pi_host_dep.path("src/demo_passport_check.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    demo_passport_check_mod.addImport("zts", zts_host_mod);
-    const demo_passport_check_exe = b.addExecutable(.{
-        .name = "demo-passport-check",
-        .root_module = demo_passport_check_mod,
-    });
-    const demo_passport_check_cmd = b.addRunArtifact(demo_passport_check_exe);
-    demo_passport_check_cmd.has_side_effects = true;
-    if (b.args) |args| demo_passport_check_cmd.addArgs(args);
-    const demo_passport_check_step = b.step("demo-passport-check", "Validate an exported proof passport");
-    demo_passport_check_step.dependOn(&demo_passport_check_cmd.step);
-    const demo_passport_check_tests = b.addTest(.{
-        .filters = test_filters,
-        .root_module = demo_passport_check_mod,
-    });
-    const run_demo_passport_check_tests = b.addRunArtifact(demo_passport_check_tests);
-    const demo_passport_check_test_step = b.step("test-demo-passport-check", "Run proof-passport checker tests");
-    demo_passport_check_test_step.dependOn(&run_demo_passport_check_tests.step);
-
     // Repository-only AST metric. The live command receives the tracked Zig
     // source list from a NUL-safe script; its unit tests pin the AST definition
     // and its input floors. It is never installed in user projects.
@@ -207,7 +180,6 @@ pub fn add(ctx: Context) Result {
         .run_release_provenance_tests = run_release_provenance_tests,
         .run_coverage_union_tests = run_coverage_union_tests,
         .run_release_check_tests = run_release_check_tests,
-        .run_demo_passport_check_tests = run_demo_passport_check_tests,
         .production_branch_metric_test_step = production_branch_metric_test_step,
         .standin_exe = standin_exe,
     };

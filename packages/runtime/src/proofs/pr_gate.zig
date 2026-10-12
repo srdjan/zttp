@@ -1,7 +1,7 @@
 //! `zttp proofs gate` — the pull-request proof gate.
 //!
 //! A proof's value is realized at a trust boundary: a reviewer who did not
-//! write the code. Every other proof surface (terminal HUD, Studio, badge)
+//! write the code. Every other proof surface (terminal HUD, badge)
 //! is author-facing on the author's own machine. This command carries the
 //! verdict to where review happens. Given a git range, for every changed
 //! handler it compiles the before and after versions, runs the same

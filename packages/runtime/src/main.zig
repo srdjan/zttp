@@ -31,7 +31,6 @@ test {
     _ = @import("tool_auth.zig");
     _ = @import("credential_store.zig");
     _ = @import("edge_server.zig");
-    _ = @import("runtime_features.zig").studio;
     _ = @import("proof_adapter.zig");
     // Named here rather than reached. Its floor test is the one assertion
     // standing between the invariant adapter comparison and a comparison that

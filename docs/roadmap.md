@@ -44,7 +44,7 @@ with the tool-profile recommendation (`pre-rebase:docs/zttp-next/zttp-v1.0-scope
   state isolation, active specs, flow properties, contracts, and module policy.
 - Built-in `zttp:*` virtual modules listed in
   [Virtual Modules](virtual-modules/README.md).
-- Optional Studio and edge runtime builds via `-Dstudio` and `-Dedge`.
+- Optional edge runtime build via `-Dedge`.
 - Consumer-checked residual guards for computed environment keys, egress
   endpoints, and cache namespaces under an explicit capability policy.
 - Protected local ledger invariants: mandatory balance conservation and

@@ -135,10 +135,8 @@ pub const property_metas = [_]PropertyMeta{
 };
 
 /// Maps each proof property to the substrate restrictions that earn it,
-/// plus a short tagline. Mirrored by the JS `TRADE_TABLE` in
-/// `packages/runtime/src/studio.zig` for the browser lens; keep both in
-/// sync when adding properties or changing labels. Restriction names are
-/// the human strings from `packages/tools/src/json_diagnostics.zig`.
+/// plus a short tagline. Restriction names are the human strings from
+/// `packages/tools/src/json_diagnostics.zig`.
 pub const TradeRow = struct {
     property_field: []const u8,
     restrictions: []const []const u8,

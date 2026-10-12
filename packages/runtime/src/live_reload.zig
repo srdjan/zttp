@@ -29,12 +29,31 @@ const review_facts_mod = @import("zttp_proof_review").review;
 const spec_diagnostic = @import("zttp_proof_review").spec_diagnostic;
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
-const keystroke_input = @import("keystroke_input.zig");
 const printer_mod = @import("zttp_proof_review").printer;
-const studio_mod = @import("runtime_features.zig").studio;
 const counterexample_pipeline = @import("counterexample_pipeline.zig");
 const json_diag = precompile.json_diag;
-const proof_quest = @import("proof_quest.zig");
+
+/// A single ZTS diagnostic carried through analysis for terminal display.
+/// All slices are owned by the producer so the diagnostic stays valid past
+/// the transient `CheckResult` lifetime upstream.
+pub const Diagnostic = struct {
+    code: []u8,
+    severity: []u8,
+    file: []u8,
+    line: u32,
+    column: u32,
+    message: []u8,
+    suggestion: ?[]u8,
+
+    pub fn deinit(self: *Diagnostic, allocator: std.mem.Allocator) void {
+        allocator.free(self.code);
+        allocator.free(self.severity);
+        allocator.free(self.file);
+        allocator.free(self.message);
+        if (self.suggestion) |s| allocator.free(s);
+        self.* = undefined;
+    }
+};
 
 pub const LiveReloadConfig = struct {
     /// Enable contract diffing (--prove)
@@ -50,8 +69,6 @@ pub const LiveReloadConfig = struct {
     /// Capability policy resolved from the nearest zttp.json. Each candidate
     /// reload reads this path again so a policy edit takes effect immediately.
     policy_path: ?[]const u8 = null,
-    /// First-run guided proof quest for scaffolded projects.
-    quest: proof_quest.Config = .{},
 };
 
 fn readConfiguredPolicySource(
@@ -144,21 +161,9 @@ pub const LiveReloadState = struct {
     /// duplicate appends when the watcher fires for a no-op save (or when
     /// our own ledger write trips the recursive directory walk).
     last_ledger_sha: ?[std.crypto.hash.sha2.Sha256.digest_length * 2]u8,
-    /// True until the first proof card frame has been rendered. Drives the
-    /// one-shot bold emphasis on the Studio mirror footer so the URL stands
-    /// out the first time the HUD lights up, then settles into neutral.
-    studio_footer_first_render: bool,
-    /// Active proof-card lens (stored as enum tag; atomic for cross-thread reads).
-    lens: std.atomic.Value(u8),
-    /// Pre-rendered frames per lens so the keystroke thread can repaint
-    /// from cache without re-running analysis. Indexed by `@intFromEnum`.
-    lens_cache_mu: compat.Mutex,
-    lens_cache: [4]?[]u8,
-    keystroke_handle: ?*keystroke_input.Handle,
-    quest: proof_quest.State,
     /// Last analyzer `proofTrace` JSON, persisted across recompiles so every
-    /// HUD repaint (including lens rotation) can show the per-property
-    /// reasoning. Owned; replaced on each successful analysis.
+    /// HUD repaint can show the per-property reasoning. Owned; replaced on
+    /// each successful analysis.
     proof_trace_json: ?[]u8,
 
     pub fn init(
@@ -183,50 +188,24 @@ pub const LiveReloadState = struct {
             .previous_stamp = 0,
             .watch_paths = watch_paths,
             .last_ledger_sha = null,
-            .studio_footer_first_render = true,
-            .lens = std.atomic.Value(u8).init(@intFromEnum(proof_card_tui.Lens.properties)),
-            .lens_cache_mu = .{},
-            .lens_cache = .{ null, null, null, null },
-            .keystroke_handle = null,
-            .quest = proof_quest.State.init(allocator, handler_path, config.quest),
             .proof_trace_json = null,
         };
     }
 
     pub fn deinit(self: *LiveReloadState) void {
-        if (self.keystroke_handle) |h| keystroke_input.uninstall(h);
-        self.lens_cache_mu.lock();
-        defer self.lens_cache_mu.unlock();
-        for (&self.lens_cache) |*slot| {
-            if (slot.*) |bytes| self.allocator.free(bytes);
-            slot.* = null;
-        }
         if (self.current_contract) |*c| c.deinit(self.allocator);
         if (self.previous_code) |code| self.allocator.free(code);
         if (self.superseded_code) |code| self.allocator.free(code);
         if (self.proof_trace_json) |ptj| self.allocator.free(ptj);
     }
 
-    /// Read the active lens. Clamped against the enum tag range so adding
-    /// a fourth variant later cannot panic on out-of-range stores.
-    pub fn currentLens(self: *const LiveReloadState) proof_card_tui.Lens {
-        const raw = self.lens.load(.acquire);
-        const max = @typeInfo(proof_card_tui.Lens).@"enum".fields.len;
-        const clamped: u8 = if (raw >= max) 0 else raw;
-        return @enumFromInt(clamped);
-    }
-
     /// Run the watch-reload loop. Blocks until the server stops.
     pub fn run(self: *LiveReloadState, io: std.Io) !void {
         self.previous_stamp = try computeStamp(io, self.watch_paths);
-        // Install the keystroke listener before the first render so the very
-        // first proof card already advertises Tab. No-op on non-TTY.
-        self.keystroke_handle = keystroke_input.install(self.allocator, self, onKeystroke);
         // The server begins fail-closed while catalog analysis is pending.
         // Always extract and install the initial contract before requests can
         // leave that state, even when the proof HUD is disabled.
         self.seedInitialProof();
-        if (self.config.prove) self.quest.maybeStart();
 
         while (self.server.running.load(.acquire)) {
             try std.Io.sleep(io, .fromMilliseconds(self.config.poll_interval_ms), .awake);
@@ -240,7 +219,7 @@ pub const LiveReloadState = struct {
     }
 
     /// Run analysis on pre-read source, cleaning up CheckResult. Runs with
-    /// `json_mode = true` so structured diagnostics flow into studio; the
+    /// `json_mode = true` so structured diagnostics carry their fields; the
     /// terminal HUD reformats them itself via `printDiagnosticLines`.
     fn runAnalysisFromSource(self: *LiveReloadState, source: []const u8, skip_contract: bool) ?AnalysisResult {
         const policy_source = readConfiguredPolicySource(self.allocator, self.config.policy_path) catch |err| {
@@ -306,7 +285,7 @@ pub const LiveReloadState = struct {
         errors: u32,
         failure_stage: []const u8,
         pinned_regressions: usize,
-        diagnostics: []studio_mod.Diagnostic,
+        diagnostics: []Diagnostic,
         proof_trace_json: ?[]u8 = null,
         configured_policy: ?HandlerPolicy = null,
 
@@ -344,10 +323,7 @@ pub const LiveReloadState = struct {
     }
 
     fn recompileAndSwap(self: *LiveReloadState) void {
-        if (self.server.studio) |*studio| studio.updateChecking();
-
         var new_code: ?[]const u8 = zts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
-            if (self.server.studio) |*studio| studio.updateError("failed to read handler");
             printReload("Failed to read handler: {}. Keeping previous.\n", .{err});
             return;
         };
@@ -356,7 +332,6 @@ pub const LiveReloadState = struct {
         var timer = compat.Timer.start() catch null;
 
         var analysis = self.runAnalysisFromSource(new_code.?, shouldSkipContract(&self.config)) orelse {
-            if (self.server.studio) |*studio| studio.updateError("recompilation failed");
             printReload("Recompilation failed. Keeping previous handler.\n", .{});
             return;
         };
@@ -372,11 +347,6 @@ pub const LiveReloadState = struct {
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
 
         if (analysis.errors > 0) {
-            if (self.server.studio) |*studio| {
-                var msg_buf: [64]u8 = undefined;
-                const message = std.fmt.bufPrint(&msg_buf, "compilation failed at {s}", .{analysis.failure_stage}) catch "compilation failed";
-                studio.updateDiagnostics(message, analysis.diagnostics);
-            }
             printReload("Compilation failed at {s} ({d} error(s), {d}ms). Keeping previous handler.\n", .{
                 analysis.failure_stage,
                 analysis.errors,
@@ -384,7 +354,6 @@ pub const LiveReloadState = struct {
             });
             printDiagnosticLines(analysis.diagnostics, new_code);
             printReload("Next: fix the {s} diagnostic above; the previous handler is still serving.\n", .{analysis.failure_stage});
-            self.quest.afterProofFailed();
             if (analysis.pinned_regressions > 0) {
                 printReload("[witnesses] {d} pinned witness(es) re-fired - regression of a previously defended pattern.\n", .{analysis.pinned_regressions});
             }
@@ -474,10 +443,6 @@ pub const LiveReloadState = struct {
                     if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                         self.tryLogSwap(&new_contract, &sha_hex);
                         self.updateCurrentContract(new_contract);
-                        self.refreshDevAttestation(
-                            self.previous_code orelse "",
-                            analysis.configuredPolicy(),
-                        );
                         if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                     } else {
                         new_contract.deinit(self.allocator);
@@ -492,10 +457,6 @@ pub const LiveReloadState = struct {
                 if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                     self.tryLogSwap(&new_contract, &sha_hex);
                     self.updateCurrentContract(new_contract);
-                    self.refreshDevAttestation(
-                        self.previous_code orelse "",
-                        analysis.configuredPolicy(),
-                    );
                     if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                 } else {
                     new_contract.deinit(self.allocator);
@@ -516,10 +477,7 @@ pub const LiveReloadState = struct {
     }
 
     fn seedInitialProof(self: *LiveReloadState) void {
-        if (self.server.studio) |*studio| studio.updateChecking();
-
         const source = zts.file_io.readFile(self.allocator, self.handler_path, 10 * 1024 * 1024) catch |err| {
-            if (self.server.studio) |*studio| studio.updateError("failed to read handler");
             printProve("Initial proof skipped: failed to read handler: {}\n", .{err});
             return;
         };
@@ -527,7 +485,6 @@ pub const LiveReloadState = struct {
 
         var timer = compat.Timer.start() catch null;
         var analysis = self.runAnalysisFromSource(source, false) orelse {
-            if (self.server.studio) |*studio| studio.updateError("initial proof analysis failed");
             printProve("Initial proof analysis failed.\n", .{});
             return;
         };
@@ -542,11 +499,6 @@ pub const LiveReloadState = struct {
 
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
         if (analysis.errors > 0) {
-            if (self.server.studio) |*studio| {
-                var msg_buf: [72]u8 = undefined;
-                const message = std.fmt.bufPrint(&msg_buf, "initial compilation failed at {s}", .{analysis.failure_stage}) catch "initial compilation failed";
-                studio.updateDiagnostics(message, analysis.diagnostics);
-            }
             printProve("Initial proof failed at {s} ({d} error(s), {d}ms).\n", .{ analysis.failure_stage, analysis.errors, elapsed_ms });
             printDiagnosticLines(analysis.diagnostics, source);
             printProve("Next: fix the {s} diagnostic above, then save again.\n", .{analysis.failure_stage});
@@ -554,7 +506,6 @@ pub const LiveReloadState = struct {
         }
 
         var contract = analysis.contract orelse {
-            if (self.server.studio) |*studio| studio.updateError("no contract extracted");
             printProve("Initial proof skipped: no contract extracted.\n", .{});
             return;
         };
@@ -567,7 +518,6 @@ pub const LiveReloadState = struct {
         self.tryLogSwap(&contract, &sha_hex);
         self.updateCurrentContract(contract);
         self.installRuntimeContract(analysis.configuredPolicy());
-        self.refreshDevAttestation(source, analysis.configuredPolicy());
         if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
         printProve("Initial proof ready ({d}ms).\n", .{elapsed_ms});
     }
@@ -644,51 +594,6 @@ pub const LiveReloadState = struct {
             self.server.updateContractWithTools(validated, dev_tool_catalog, dev_ceiling);
             self.warnToolAuthMissing();
         }
-    }
-
-    fn refreshDevAttestation(
-        self: *LiveReloadState,
-        source: []const u8,
-        configured_policy: ?*const HandlerPolicy,
-    ) void {
-        if (!self.server.config.studio or !self.config.prove or source.len == 0) return;
-
-        var compiled = precompile.compileHandler(self.allocator, source, self.handler_path, .{
-            .emit_verify = true,
-            .emit_contract = true,
-            .policy = if (configured_policy) |policy| policy.* else null,
-            .sql_schema_path = self.config.sql_schema_path,
-            .system_path = self.config.system_path,
-        }) catch |err| {
-            printProve("Caller receipt skipped: compile failed: {}.\n", .{err});
-            return;
-        };
-        defer compiled.deinit(self.allocator);
-
-        if (compiled.verify_failed or compiled.bytecode.len == 0) {
-            printProve("Caller receipt skipped: no verified bytecode.\n", .{});
-            return;
-        }
-        const contract = if (compiled.contract) |*c| c else {
-            printProve("Caller receipt skipped: no contract emitted.\n", .{});
-            return;
-        };
-        std.crypto.hash.sha2.Sha256.hash(compiled.bytecode, &contract.artifact_sha256, .{});
-
-        var json_output: std.ArrayList(u8) = .empty;
-        defer json_output.deinit(self.allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &json_output);
-        zts.writeContractJson(contract, &aw.writer) catch |err| {
-            printProve("Caller receipt skipped: contract JSON failed: {}.\n", .{err});
-            return;
-        };
-        json_output = aw.toArrayList();
-        if (json_output.items.len == 0) return;
-
-        self.server.installDevAttestation(json_output.items, compiled.bytecode, contract) catch |err| {
-            printProve("Caller receipt skipped: attestation failed: {}.\n", .{err});
-            return;
-        };
     }
 
     /// Dedupe against the last logged sha and append a `kind=swap` row when
@@ -774,23 +679,6 @@ pub const LiveReloadState = struct {
             &delta,
         );
 
-        self.quest.afterProofRendered();
-        const quest_snapshot = self.quest.snapshot();
-
-        if (self.server.studio) |*studio| {
-            studio.updateFacts(.{
-                .facts = &new_facts,
-                .baseline = baseline_ptr,
-                .delta = &delta,
-                .recompile_ms = elapsed_ms,
-                .counterexample = cx_preview,
-                .quest = quest_snapshot,
-                .property_causes = causes_buf[0..n_causes],
-                .proof_trace_json = self.proof_trace_json,
-            });
-            studio.broadcast();
-        }
-
         const card = review_facts_mod.ProofCard{
             .handler_path = self.handler_path,
             .service_name = "dev",
@@ -803,109 +691,16 @@ pub const LiveReloadState = struct {
         };
 
         const recompile_ms: u32 = @intCast(@min(elapsed_ms, std.math.maxInt(u32)));
-        try self.refreshLensCache(&card, recompile_ms);
-
-        const active = self.currentLens();
-        var stderr_buf: [16 * 1024]u8 = undefined;
-        var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
-        try self.writeCachedFrame(active, &stderr_writer.interface);
-        try writeLensHint(&stderr_writer.interface, active, shared.stderrIsTty());
-        if (self.server.config.studio) {
-            const first = self.studio_footer_first_render;
-            proof_card_tui.writeStudioFooter(&stderr_writer.interface, .{
-                .host = self.server.config.host,
-                .port = self.server.config.port,
-                .first_time = first,
-                .tty = shared.stderrIsTty(),
-            }) catch {};
-            self.studio_footer_first_render = false;
-        }
-        stderr_writer.interface.flush() catch {};
-    }
-
-    /// Render every lens against the same card and swap the cache under
-    /// the mutex so the keystroke thread sees a consistent set.
-    fn refreshLensCache(
-        self: *LiveReloadState,
-        card: *const review_facts_mod.ProofCard,
-        recompile_ms: u32,
-    ) !void {
-        var rendered: [4]?[]u8 = .{ null, null, null, null };
-        errdefer for (&rendered) |*slot| if (slot.*) |b| self.allocator.free(b);
-
-        const caller_view = self.buildCallerView();
-
-        const lenses = [_]proof_card_tui.Lens{ .properties, .trade, .handover, .caller_view };
-        for (lenses, 0..) |lens, idx| {
-            var aw: std.Io.Writer.Allocating = .init(self.allocator);
-            defer aw.deinit();
-            try proof_card_tui.writeProofCardFrame(self.allocator, card, &aw.writer, .{
-                .recompile_ms = recompile_ms,
-                .lens = lens,
-                .caller_view = caller_view,
-                .proof_trace_json = self.proof_trace_json,
-            });
-            rendered[idx] = try self.allocator.dupe(u8, aw.writer.buffered());
-        }
-
-        self.lens_cache_mu.lock();
-        defer self.lens_cache_mu.unlock();
-        for (&self.lens_cache, 0..) |*slot, idx| {
-            if (slot.*) |old| self.allocator.free(old);
-            slot.* = rendered[idx];
-            rendered[idx] = null;
-        }
-    }
-
-    /// Snapshot the running server's attestation state into a CallerView
-    /// for the `.caller_view` lens. Returns null on unattested builds; the
-    /// pane renders the opt-out notice in that case. Borrowed strings; the
-    /// CallerView is valid only for the duration of this render cycle, which
-    /// is fine because the cache stores the rendered bytes, not the struct.
-    fn buildCallerView(self: *const LiveReloadState) ?proof_card_tui.CallerView {
-        const hs = self.server.attestation_headers orelse return null;
-        const fp = self.server.signer_fingerprint_hex orelse return null;
-        return .{
-            .proofs_header_value = hs.proofs_value,
-            .attest_header_value = hs.attest_value,
-            .key_fingerprint_hex = &fp,
-            .host = self.server.config.host,
-            .port = self.server.config.port,
-        };
-    }
-
-    /// Silent no-op when the cache is empty (no prove cycle has landed yet).
-    fn writeCachedFrame(
-        self: *LiveReloadState,
-        lens: proof_card_tui.Lens,
-        writer: *std.Io.Writer,
-    ) !void {
-        self.lens_cache_mu.lock();
-        defer self.lens_cache_mu.unlock();
-        const slot = self.lens_cache[@intFromEnum(lens)] orelse return;
-        try writer.writeAll(slot);
-    }
-
-    /// Tab (0x09) and `l`/`L` (fallback when a terminal intercepts Tab)
-    /// rotate the lens; other bytes are ignored.
-    fn onKeystroke(ctx: *anyopaque, byte: u8) void {
-        const self: *LiveReloadState = @ptrCast(@alignCast(ctx));
-        switch (byte) {
-            'b', 'B', 'r', 'R', 'y', 'Y', 's', 'S' => if (self.quest.handleKey(byte)) return,
-            0x09, 'l', 'L' => self.rotateLens(),
-            else => {},
-        }
-    }
-
-    pub fn rotateLens(self: *LiveReloadState) void {
-        const current = self.currentLens();
-        const next = current.next();
-        self.lens.store(@intFromEnum(next), .release);
+        var frame: std.Io.Writer.Allocating = .init(self.allocator);
+        defer frame.deinit();
+        try proof_card_tui.writeProofCardFrame(self.allocator, &card, &frame.writer, .{
+            .recompile_ms = recompile_ms,
+            .proof_trace_json = self.proof_trace_json,
+        });
 
         var stderr_buf: [16 * 1024]u8 = undefined;
         var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
-        self.writeCachedFrame(next, &stderr_writer.interface) catch return;
-        writeLensHint(&stderr_writer.interface, next, shared.stderrIsTty()) catch {};
+        try stderr_writer.interface.writeAll(frame.writer.buffered());
         stderr_writer.interface.flush() catch {};
     }
 
@@ -1208,20 +1003,11 @@ fn mentionsAiRelevantProof(proof_unlocked: []const u8) bool {
         std.mem.indexOf(u8, proof_unlocked, "replayable") != null;
 }
 
-fn writeLensHint(
-    writer: *std.Io.Writer,
-    lens: proof_card_tui.Lens,
-    tty: bool,
-) !void {
-    const c = shared.palette(tty);
-    try writer.print("{s}  Lens: {s}   (tab to rotate){s}\n", .{ c.dim, lens.label(), c.reset });
-}
-
 /// Render compile errors to stderr. Restriction-class diagnostics (ZTS001) get
 /// a framed why/buys/try block so first-time authors read the cut as deliberate
 /// design rather than a linter rule. `source`, when non-null, gates the
 /// in-frame code excerpt; pass the same buffer that was just analyzed.
-fn printDiagnosticLines(diagnostics: []const studio_mod.Diagnostic, source: ?[]const u8) void {
+fn printDiagnosticLines(diagnostics: []const Diagnostic, source: ?[]const u8) void {
     const tty = shared.stderrIsTty();
     var stderr_buf: [8 * 1024]u8 = undefined;
     var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
@@ -1231,7 +1017,7 @@ fn printDiagnosticLines(diagnostics: []const studio_mod.Diagnostic, source: ?[]c
 
 fn writeDiagnosticLines(
     writer: *std.Io.Writer,
-    diagnostics: []const studio_mod.Diagnostic,
+    diagnostics: []const Diagnostic,
     source: ?[]const u8,
     tty: bool,
 ) !void {
@@ -1247,7 +1033,7 @@ fn writeDiagnosticLines(
 
 fn writeRestrictionFrame(
     writer: *std.Io.Writer,
-    d: studio_mod.Diagnostic,
+    d: Diagnostic,
     source: ?[]const u8,
     tty: bool,
 ) !void {
@@ -1286,11 +1072,11 @@ fn writeRestrictionFrame(
     try writer.writeByte('\n');
 }
 
-/// Dupe each parser/checker JsonDiagnostic into an owned studio.Diagnostic
+/// Dupe each parser/checker JsonDiagnostic into an owned Diagnostic
 /// so the slice survives `CheckResult.deinit`. On allocation failure mid-
 /// loop, frees what has already been duped and propagates `error.OutOfMemory`.
-fn ownDiagnostics(allocator: std.mem.Allocator, source: []const json_diag.JsonDiagnostic) ![]studio_mod.Diagnostic {
-    var owned = try allocator.alloc(studio_mod.Diagnostic, source.len);
+fn ownDiagnostics(allocator: std.mem.Allocator, source: []const json_diag.JsonDiagnostic) ![]Diagnostic {
+    var owned = try allocator.alloc(Diagnostic, source.len);
     var filled: usize = 0;
     errdefer {
         var i: usize = 0;
@@ -1456,7 +1242,7 @@ test "writeDiagnosticLines: ZTS001 renders framed restriction rationale" {
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
 
-    const diagnostics = [_]studio_mod.Diagnostic{.{
+    const diagnostics = [_]Diagnostic{.{
         .code = @constCast("ZTS001"),
         .severity = @constCast("error"),
         .file = @constCast("handler.ts"),
@@ -1490,7 +1276,7 @@ test "writeDiagnosticLines: unknown ZTS001 falls back to suggestion" {
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
 
-    const diagnostics = [_]studio_mod.Diagnostic{.{
+    const diagnostics = [_]Diagnostic{.{
         .code = @constCast("ZTS001"),
         .severity = @constCast("error"),
         .file = @constCast("handler.ts"),
@@ -1513,7 +1299,7 @@ test "writeDiagnosticLines: non-ZTS001 keeps compact diagnostic form" {
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
 
-    const diagnostics = [_]studio_mod.Diagnostic{.{
+    const diagnostics = [_]Diagnostic{.{
         .code = @constCast("ZTS308"),
         .severity = @constCast("error"),
         .file = @constCast("handler.ts"),

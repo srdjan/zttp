@@ -54,7 +54,7 @@ pub const UpgradeVerdict = enum {
 
     /// Lowercase form, for the surfaces that render the verdict as a machine
     /// token rather than a headline: the deploy card, `proofs export` markdown
-    /// and HTML, the Studio JSON, and CSS class names. `toString` stays
+    /// and HTML, and CSS class names. `toString` stays
     /// UPPERCASE for the surfaces that already print it that way.
     pub fn slug(self: UpgradeVerdict) []const u8 {
         return @tagName(self);

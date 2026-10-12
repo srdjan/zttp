@@ -347,15 +347,6 @@ fn serveCommandWithDebugPanicPath(
     debug_panic_path: ?[]const u8,
 ) !void {
     const feature_flags = parseServeFeatureFlags(argv);
-    if (feature_flags.studio_enabled) {
-        if (!feature_options.enable_studio) {
-            // `zttp dev/serve --studio` is dispatched through the developer
-            // CLI, so pointing at "the developer CLI" misdirects. The actionable
-            // fix is to rebuild with -Dstudio, matching the dedicated `studio`
-            // command's wording.
-            shared.featureCompiledOut("studio", "studio");
-        }
-    }
     if (feature_flags.watch_enabled and !feature_options.enable_live_reload) {
         std.log.err("--watch is not available in zttp-runtime; use the zttp developer CLI", .{});
         std.process.exit(1);
@@ -367,11 +358,6 @@ fn serveCommandWithDebugPanicPath(
     };
     applyDebugPanicPathDefault(&config, debug_panic_path);
     warnDangerousServeFlags(feature_flags.force_swap, config.skip_env_check);
-    if (feature_flags.studio_enabled) config.studio = true;
-    if (feature_flags.demo_enabled) {
-        config.studio = true;
-        config.studio_demo_root = ".";
-    }
 
     var configured_policy = switch (config.handler) {
         .file_path => |path| try serve_policy.discoverConfiguredPolicy(allocator, path),
@@ -468,7 +454,6 @@ fn serveCommandWithDebugPanicPath(
                 .sql_schema_path = config.runtime_config.sqlite_path,
                 .system_path = config.runtime_config.system_config_path,
                 .policy_path = if (configured_policy) |*policy| policy.path else null,
-                .quest = .{ .enabled = feature_flags.quest_enabled, .explicit = feature_flags.quest_explicit },
             },
         );
         defer live_reload.deinit();
@@ -561,10 +546,6 @@ const ServeFeatureFlags = struct {
     watch_enabled: bool = false,
     prove_enabled: bool = false,
     force_swap: bool = false,
-    studio_enabled: bool = false,
-    demo_enabled: bool = false,
-    quest_enabled: bool = false,
-    quest_explicit: bool = false,
 };
 
 fn parseServeFeatureFlags(argv: []const []const u8) ServeFeatureFlags {
@@ -573,19 +554,6 @@ fn parseServeFeatureFlags(argv: []const []const u8) ServeFeatureFlags {
         if (std.mem.eql(u8, arg, "--watch")) flags.watch_enabled = true;
         if (std.mem.eql(u8, arg, "--prove")) flags.prove_enabled = true;
         if (std.mem.eql(u8, arg, "--force-swap")) flags.force_swap = true;
-        if (std.mem.eql(u8, arg, "--studio")) flags.studio_enabled = true;
-        if (std.mem.eql(u8, arg, "--demo")) flags.demo_enabled = true;
-        if (std.mem.eql(u8, arg, "--quest")) {
-            flags.quest_enabled = true;
-            flags.quest_explicit = true;
-        }
-        if (std.mem.eql(u8, arg, "--quest-default")) flags.quest_enabled = true;
-    }
-
-    if (flags.demo_enabled) flags.studio_enabled = true;
-    if (flags.studio_enabled or flags.quest_enabled) {
-        flags.watch_enabled = true;
-        flags.prove_enabled = true;
     }
     return flags;
 }
@@ -776,10 +744,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         } else if (std.mem.eql(u8, arg, "--watch") or
             std.mem.eql(u8, arg, "--prove") or
             std.mem.eql(u8, arg, "--force-swap") or
-            std.mem.eql(u8, arg, "--studio") or
-            std.mem.eql(u8, arg, "--demo") or
-            std.mem.eql(u8, arg, "--quest") or
-            std.mem.eql(u8, arg, "--quest-default"))
+            std.mem.eql(u8, arg, "--force-swap"))
         {
             // Handled by serveCommand before parseServeArgs is called
             continue;
@@ -1004,8 +969,6 @@ fn printServeHelp() void {
         \\  --watch               Auto-reload on source change
         \\  --prove               With --watch, gate swaps on upgrade verdict
         \\  --force-swap          With --watch, apply breaking swaps anyway
-        \\  --studio              Serve the local proof workbench
-        \\  --quest               Run the first-run proof quest
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -1039,33 +1002,6 @@ test "parseCommonServeFlag: -p consumes next arg as port" {
     try std.testing.expect(try parseCommonServeFlag(argv[0], &i, &argv, &config));
     try std.testing.expectEqual(@as(u16, 4242), config.port);
     try std.testing.expectEqual(@as(usize, 1), i);
-}
-
-test "parseServeFeatureFlags: quest implies watch and prove" {
-    const quest = parseServeFeatureFlags(&.{"--quest"});
-    try std.testing.expect(quest.quest_enabled);
-    try std.testing.expect(quest.quest_explicit);
-    try std.testing.expect(quest.watch_enabled);
-    try std.testing.expect(quest.prove_enabled);
-
-    const quest_default = parseServeFeatureFlags(&.{"--quest-default"});
-    try std.testing.expect(quest_default.quest_enabled);
-    try std.testing.expect(!quest_default.quest_explicit);
-    try std.testing.expect(quest_default.watch_enabled);
-    try std.testing.expect(quest_default.prove_enabled);
-}
-
-test "parseServeFeatureFlags: studio and demo imply proof watch loop" {
-    const studio = parseServeFeatureFlags(&.{"--studio"});
-    try std.testing.expect(studio.studio_enabled);
-    try std.testing.expect(studio.watch_enabled);
-    try std.testing.expect(studio.prove_enabled);
-
-    const demo = parseServeFeatureFlags(&.{"--demo"});
-    try std.testing.expect(demo.demo_enabled);
-    try std.testing.expect(demo.studio_enabled);
-    try std.testing.expect(demo.watch_enabled);
-    try std.testing.expect(demo.prove_enabled);
 }
 
 test "debug panic env default does not override explicit serve flag" {

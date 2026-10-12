@@ -222,8 +222,7 @@ Non-interactive integrations use `--print`, `--mode json`, or
 `--mode rpc`.
 
 Proof deltas and witness details are persisted as session events. Inspect
-them with `/ledger export <path>`, `zttp ledger`, `/witnesses <handler.ts>`,
-or the browser proof workbench surfaced by `/studio <handler.ts>`.
+them with `/ledger export <path>`, `zttp ledger`, or `/witnesses <handler.ts>`.
 
 ### Backends
 

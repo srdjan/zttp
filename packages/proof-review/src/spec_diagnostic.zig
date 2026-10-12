@@ -1,5 +1,5 @@
 //! Shared projection from `zts.HandlerContract.spec_diagnostics` into the
-//! `review.SpecState` shape used by the proof HUD, the studio JSON, the
+//! `review.SpecState` shape used by the proof HUD, the
 //! deploy review card, and the proof ledger. Consumed by both
 //! `live_reload.zig` (per-recompile) and `deploy.zig` (per-deploy review).
 
@@ -16,7 +16,7 @@ pub fn specStateFor(contract: *const zts.HandlerContract, name: []const u8) revi
         // implicit-default profile collapses its undischarged properties into a
         // single not_discharged whose spec_name is the joined "a, b, c" set, so
         // match `name` against any token in that set too - otherwise the HUD,
-        // studio, deploy card, and ledger would all report the collapsed
+        // deploy card, and ledger would all report the collapsed
         // properties as discharged.
         const matches = std.mem.eql(u8, d.spec_name, name) or
             (d.implicit_default and d.kind == .not_discharged and joinedSetContains(d.spec_name, name));

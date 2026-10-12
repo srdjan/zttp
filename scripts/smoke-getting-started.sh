@@ -75,7 +75,7 @@ step "init api project"
 cd "$APP_DIR"
 
 step "dev serves /health"
-"$ZTTP" dev --port "$DEV_PORT" --no-tour >/tmp/zttp-getting-started-dev.log 2>&1 &
+"$ZTTP" dev --port "$DEV_PORT" >/tmp/zttp-getting-started-dev.log 2>&1 &
 DEV_PID=$!
 health_body=$(wait_for_http "http://127.0.0.1:$DEV_PORT/health" 75) || {
     cat /tmp/zttp-getting-started-dev.log >&2 || true

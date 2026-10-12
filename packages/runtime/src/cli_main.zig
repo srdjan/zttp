@@ -40,6 +40,5 @@ test {
     _ = @import("proofs/invariant_report.zig");
     _ = @import("proof_card_tui.zig");
     _ = @import("proof_audit_ring.zig");
-    _ = @import("demo.zig");
     _ = @import("ratchet_command.zig");
 }

@@ -1,4 +1,4 @@
-//! zttp-proof-review — proof review/card support for local deploy, Studio, proofs,
+//! zttp-proof-review — proof review/card support for local deploy, proofs,
 //! and agent probes. Hosted control-plane deploy code was retired from core;
 //! the request runtime does not consume these files.
 

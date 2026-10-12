@@ -16,7 +16,6 @@ pub const canonicalize = @import("canonicalize.zig");
 pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 pub const system_analysis = @import("system_analysis.zig");
-pub const proof_quest_fixture = @import("proof_quest_fixture.zig");
 const json_diag = precompile.json_diag;
 const prove = @import("prove.zig");
 const mock = @import("mock_server.zig");

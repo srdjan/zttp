@@ -39,7 +39,7 @@ pub const Ctx = struct {
     environ: std.process.Environ,
     /// The name as typed, for diagnostics that quote it back.
     command: []const u8,
-    /// argv[0], which `dev`, `studio`, and `demo` re-exec.
+    /// argv[0], which `dev` re-execs.
     argv0: []const u8,
 };
 
@@ -109,8 +109,6 @@ const help_all_mid =
     \\Run and inspect:
     \\  zttp serve [handler.ts]              Run a handler without watch or proof
     \\  zttp doctor [path]                   Check project readiness
-    \\  zttp studio [handler.ts]             Optional browser proof workbench
-    \\  zttp demo                            Guided local proof theater
     \\  zttp edge [--config FILE]            Optional in-process edge runtime (-Dedge)
     \\  zttp workflow-queue [list|show|replay|discard] --durable <DIR>
     \\                                            Inspect workflow queue dead letters
@@ -321,11 +319,6 @@ test "help --all lists the invariant catalog commands under proof ledger" {
     try std.testing.expect(has(section, "zttp invariant author"));
     // The core screen stays at five verbs.
     try std.testing.expect(!has(core_help, "zttp invariant"));
-}
-
-test "help --all surfaces the optional browser studio workbench" {
-    var buf: [help_all_capacity]u8 = undefined;
-    try std.testing.expect(has(renderHelpAll(&buf), "zttp studio"));
 }
 
 test "hasAllFlag detects the --all escape hatch" {

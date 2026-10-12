@@ -49,7 +49,6 @@ const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
 const self_extract = @import("self_extract.zig");
-const studio_mod = @import("runtime_features.zig").studio;
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
 const response_mod = @import("server_response.zig");
@@ -95,162 +94,6 @@ const splitHeaderLine = http_parser.splitHeaderLine;
 const parseContentLength = http_parser.parseContentLength;
 
 const readFilePosix = engine.readFile;
-
-/// Upper bound on any single studio JSON or ndjson response body. The
-/// studio is a developer tool surface — it serves local browser pages
-/// and never faces public traffic — but the builders behind these
-/// endpoints (stateJsonCopy, generatedTests, witnessDetailJson) allocate
-/// proportional to the size of the running workspace. A pathological
-/// workspace (huge witness corpus, many open files) could otherwise
-/// produce multi-megabyte responses. Returning 413 keeps memory
-/// pressure bounded and makes the limit visible. 1 MiB is generous
-/// for the documented studio UI.
-const MAX_STUDIO_RESPONSE_BYTES: usize = 1 << 20;
-
-/// Hand `body` (owned by `allocator`) to `response` as the response body,
-/// or replace it with a 413 if it exceeds the studio bound. Both branches
-/// leave `response` ready for the caller's `return true`.
-fn finishStudioOwnedResponse(
-    response: *HttpResponse,
-    allocator: std.mem.Allocator,
-    body: []u8,
-    content_type: []const u8,
-) !void {
-    if (body.len > MAX_STUDIO_RESPONSE_BYTES) {
-        allocator.free(body);
-        response.status = 413;
-        response.body = "Studio response exceeds size limit";
-        try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-        return;
-    }
-    response.setBodyOwned(body);
-    try response.putHeaderBorrowed("Content-Type", content_type);
-}
-
-/// Populate `response` for a `/_zttp/studio*` path. Returns true if the
-/// caller should send `response`, false if the path didn't match any
-/// studio route. Studio-disabled and witness-not-found are populated as
-/// 404 responses (return true). Shared by the threaded and event-loop
-/// I/O paths so dispatch logic stays in one place.
-fn populateStudioResponse(
-    studio_opt: ?*studio_mod.State,
-    method: []const u8,
-    path: []const u8,
-    body: ?[]const u8,
-    response: *HttpResponse,
-    allocator: std.mem.Allocator,
-) !bool {
-    if (std.mem.eql(u8, path, "/_zttp/studio") or std.mem.eql(u8, path, "/_zttp/studio/")) {
-        try response.putHeaderBorrowed("Content-Type", "text/html; charset=utf-8");
-        response.body = studio_mod.index_html;
-        return true;
-    }
-    const studio = studio_opt orelse {
-        response.status = 404;
-        response.body = "Studio disabled";
-        try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-        return true;
-    };
-    if (std.mem.eql(u8, path, "/_zttp/studio/state.json")) {
-        const state_body = try studio.stateJsonCopy(allocator);
-        try finishStudioOwnedResponse(response, allocator, state_body, "application/json; charset=utf-8");
-        return true;
-    }
-    if (std.mem.eql(u8, path, studio_mod.caller_verify_path)) {
-        const verify_body = studio.callerVerifyJsonCopy(allocator) catch |err| {
-            switch (err) {
-                error.CallerReceiptUnavailable => {
-                    response.status = 404;
-                    response.body = "Caller receipt unavailable";
-                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                    return true;
-                },
-                error.CallerReceiptInvalid => {
-                    response.status = 409;
-                    response.body = "Caller receipt signature invalid";
-                    try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                    return true;
-                },
-                else => return err,
-            }
-        };
-        try finishStudioOwnedResponse(response, allocator, verify_body, "application/json; charset=utf-8");
-        return true;
-    }
-    if (std.mem.eql(u8, path, studio_mod.demo_state_path)) {
-        const response_body = studio.demoStateJsonCopy(allocator) catch |err| {
-            if (err == error.DemoDisabled) {
-                response.status = 404;
-                response.body = "Demo disabled";
-                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                return true;
-            }
-            return err;
-        };
-        try finishStudioOwnedResponse(response, allocator, response_body, "application/json; charset=utf-8");
-        return true;
-    }
-    if (std.mem.eql(u8, path, studio_mod.demo_action_path)) {
-        if (!std.mem.eql(u8, method, "POST")) {
-            response.status = 405;
-            response.body = "Method Not Allowed";
-            try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-            return true;
-        }
-        const action = studio_mod.parseDemoAction(allocator, body) catch |err| {
-            if (err == error.MissingDemoAction or err == error.InvalidDemoAction or err == error.UnknownDemoAction) {
-                response.status = 400;
-                response.body = "Invalid demo action";
-                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                return true;
-            }
-            return err;
-        };
-        const response_body = studio.applyDemoAction(allocator, action) catch |err| {
-            if (err == error.DemoDisabled) {
-                response.status = 404;
-                response.body = "Demo disabled";
-                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                return true;
-            }
-            if (err == error.DemoNeedsRepair) {
-                response.status = 409;
-                response.body = "Repair the demo before deploy";
-                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                return true;
-            }
-            if (err == error.DemoDeployFailed) {
-                response.status = 500;
-                response.body = "Demo local deploy failed";
-                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                return true;
-            }
-            return err;
-        };
-        try finishStudioOwnedResponse(response, allocator, response_body, "application/json; charset=utf-8");
-        return true;
-    }
-    if (std.mem.eql(u8, path, "/_zttp/studio/tests.jsonl")) {
-        const tests_body = try studio.generatedTests(allocator);
-        try finishStudioOwnedResponse(response, allocator, tests_body, "application/x-ndjson; charset=utf-8");
-        return true;
-    }
-    if (studio_mod.witnessDetailKey(path)) |key| {
-        if (studio.witnessDetailJson(allocator, key)) |witness_body| {
-            try finishStudioOwnedResponse(response, allocator, witness_body, "application/json; charset=utf-8");
-            return true;
-        } else |err| switch (err) {
-            error.InvalidWitnessKey, error.WitnessNotFound => {
-                response.status = 404;
-                response.body = "Witness not found";
-                try response.putHeaderBorrowed("Content-Type", "text/plain; charset=utf-8");
-                return true;
-            },
-            else => return err,
-        }
-    }
-    return false;
-}
 
 // ============================================================================
 // Connection Thread Pool (for macOS threaded backend)
@@ -627,15 +470,6 @@ const ConnectionPool = struct {
             return outcome_if_alive;
         }
 
-        if (self.server.config.studio and studio_mod.isStudioPath(request.path)) {
-            return self.handleStudioRequestSync(fd, request.method, request.path, request.body, keep_alive, req_allocator, &access_status) catch |err| {
-                std.log.warn("studio request failed for {s}: {}", .{ request.path, err });
-                access_status = 500;
-                self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
-                return .close;
-            };
-        }
-
         // Health and readiness probes - before WebSocket, static, and JS handler
         if (std.mem.eql(u8, request.path, "/_health")) {
             access_status = 200;
@@ -1000,43 +834,6 @@ const ConnectionPool = struct {
             duration_ms,
             request_id,
         });
-    }
-
-    fn handleStudioRequestSync(
-        self: *ConnectionPool,
-        fd: std.posix.fd_t,
-        method: []const u8,
-        path: []const u8,
-        body: ?[]const u8,
-        keep_alive: bool,
-        allocator: std.mem.Allocator,
-        status_out: *u16,
-    ) !RequestOutcome {
-        const studio_opt: ?*studio_mod.State = if (self.server.studio) |*s| s else null;
-
-        if (std.mem.eql(u8, path, studio_mod.sse_path)) {
-            const studio = studio_opt orelse {
-                status_out.* = 404;
-                self.sendErrorSync(fd, 404, "Studio disabled") catch {};
-                return .close;
-            };
-            studio_mod.upgradeToSse(studio, fd, allocator) catch |err| {
-                std.log.warn("studio SSE upgrade failed: {}", .{err});
-                status_out.* = 500;
-                return .close;
-            };
-            status_out.* = 200;
-            return .transferred;
-        }
-
-        var response = HttpResponse.init(allocator);
-        defer response.deinit();
-
-        if (try populateStudioResponse(studio_opt, method, path, body, &response, allocator)) {
-            status_out.* = response.status;
-            self.sendResponseSync(fd, &response, keep_alive, std.mem.eql(u8, method, "HEAD")) catch return error.WriteFailed;
-        }
-        return if (keep_alive) .keep_alive else .close;
     }
 
     fn readRequestData(
@@ -1511,14 +1308,6 @@ pub const ServerConfig = struct {
     /// means "use the policy derived from the contract properties".
     lifecycle_override: ?contract_runtime.PoolingPolicy = null,
 
-    /// Local author workbench at /_zttp/studio.
-    studio: bool = false,
-
-    /// Guided first-run proof theater layered on top of Studio. Only enabled
-    /// for `zttp demo`, and all mutation is scoped to the generated
-    /// workspace.
-    studio_demo_root: ?[]const u8 = null,
-
     /// The composition edge. Everything that executes a handler without
     /// serving HTTP - durable recovery and scheduling, replay, handler tests -
     /// takes this projection rather than the whole config, so the serving
@@ -1665,7 +1454,6 @@ pub const Server = struct {
     /// through their config. Server-lifetime; closed in deinit after the pool drains.
     incident_log_fd: ?std.c.fd_t = null,
     security_logger: ?*SecurityLogger,
-    studio: ?studio_mod.State,
     /// Precomputed `Zttp-Proofs` and `Zttp-Attest` header strings, built
     /// once in `start` when both a validated contract and an attestation JWS
     /// are present. Null otherwise; both response paths skip the writes.
@@ -1755,7 +1543,6 @@ pub const Server = struct {
             .contract_agent_required = false,
             .catalog_analysis_pending = false,
             .security_logger = null,
-            .studio = null,
             .attestation_headers = null,
             .well_known_doc = null,
             .signer_fingerprint_hex = null,
@@ -1782,7 +1569,6 @@ pub const Server = struct {
         if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
-        if (self.studio) |*studio| studio.deinit();
         engine.deinitSecurityEvents();
         self.static_cache.deinit();
         if (self.evented_ready) {
@@ -2172,7 +1958,6 @@ pub const Server = struct {
             self.well_known_doc = null;
         }
         self.signer_fingerprint_hex = null;
-        self.syncStudioCallerReceipt();
     }
 
     /// Cross-check the signed attestation claims against the hashes the server
@@ -2594,7 +2379,6 @@ pub const Server = struct {
         }
 
         self.signer_fingerprint_hex = verify_result.fingerprint_hex;
-        self.syncStudioCallerReceipt();
     }
 
     /// Derive the full capability policy from a freshly compiled
@@ -2623,27 +2407,6 @@ pub const Server = struct {
         return engine.contractRuntimePolicy(contract, configured);
     }
 
-    fn syncStudioCallerReceipt(self: *Self) void {
-        const studio = if (self.studio) |*s| s else return;
-        const headers = self.attestation_headers orelse {
-            studio.clearCallerReceipt();
-            return;
-        };
-        const fp = self.signer_fingerprint_hex orelse {
-            studio.clearCallerReceipt();
-            return;
-        };
-        studio.setCallerReceipt(.{
-            .proofs_header_value = headers.proofs_value,
-            .attest_header_value = headers.attest_value,
-            .key_fingerprint_hex = &fp,
-            .host = self.config.host,
-            .port = self.config.port,
-        }) catch |err| {
-            std.log.warn("studio caller receipt unavailable: {}", .{err});
-        };
-    }
-
     pub fn start(self: *Self) !void {
         // A system manifest loads independent handler source into child pools.
         // Those executables are outside the accepted artifact graph and cannot
@@ -2658,24 +2421,6 @@ pub const Server = struct {
         // Process-wide security event stream. Emits to an uninitialized
         // stream are silent no-ops, so this just sizes the ring once.
         try engine.initSecurityEvents(self.allocator, 128);
-
-        if (self.config.studio) {
-            switch (self.config.handler) {
-                .file_path => |path| {
-                    self.studio = if (self.config.studio_demo_root) |root|
-                        studio_mod.State.initDemo(self.allocator, path, .{ .workspace_root = root }) catch |err| blk: {
-                            std.log.warn("Studio disabled: {}", .{err});
-                            break :blk null;
-                        }
-                    else
-                        studio_mod.State.init(self.allocator, path) catch |err| blk: {
-                            std.log.warn("Studio disabled: {}", .{err});
-                            break :blk null;
-                        };
-                },
-                else => std.log.warn("Studio requires a file-based handler; continuing without studio.", .{}),
-            }
-        }
 
         if (self.config.security_log_path) |path| {
             self.security_logger = SecurityLogger.start(self.allocator, path) catch |err| {
@@ -2995,7 +2740,6 @@ pub const Server = struct {
                     };
                     self.well_known_doc = doc;
                     self.signer_fingerprint_hex = verify_result.fingerprint_hex;
-                    self.syncStudioCallerReceipt();
                     std.log.info("   Attestation: enabled (bound to running bytecode)", .{});
                 }
             }
@@ -3026,9 +2770,6 @@ pub const Server = struct {
         self.running.store(true, .release);
 
         std.log.info("Server listening on http://{s}:{d}", .{ self.config.host, self.config.port });
-        if (self.studio != null) {
-            std.log.info("Studio available at http://{s}:{d}/_zttp/studio", .{ self.config.host, self.config.port });
-        }
         std.log.info("   Pool size: {d} runtimes", .{self.config.pool_size});
     }
 
@@ -3668,32 +3409,6 @@ fn logContractSummary(contract: *const ValidatedRuntimeContract) void {
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "finishStudioOwnedResponse returns 413 when body exceeds bound" {
-    const allocator = std.testing.allocator;
-    var response = HttpResponse.init(allocator);
-    defer response.deinit();
-
-    const oversize_len = MAX_STUDIO_RESPONSE_BYTES + 1;
-    const big = try allocator.alloc(u8, oversize_len);
-    // Ownership transfers to finishStudioOwnedResponse on success or failure;
-    // it frees the buffer in the 413 branch.
-    try finishStudioOwnedResponse(&response, allocator, big, "application/json; charset=utf-8");
-    try std.testing.expectEqual(@as(u16, 413), response.status);
-}
-
-test "finishStudioOwnedResponse keeps body when within bound" {
-    const allocator = std.testing.allocator;
-    var response = HttpResponse.init(allocator);
-    defer response.deinit();
-
-    const body = try allocator.alloc(u8, 128);
-    @memset(body, '{');
-    try finishStudioOwnedResponse(&response, allocator, body, "application/json; charset=utf-8");
-    // HttpResponse.init defaults status to 200; helper only overwrites on 413.
-    try std.testing.expectEqual(@as(u16, 200), response.status);
-    try std.testing.expectEqual(@as(usize, 128), response.body.len);
-}
 
 test "splitHeaderLine accepts no-space colon" {
     const h1_opt = splitHeaderLine("X-Test:123");

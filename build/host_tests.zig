@@ -66,12 +66,10 @@ const host_test_roots = [_]HostTestRoot{
     // planting a failing test in every tools file and recording which ones
     // the aggregate suite reported.
     //
-    // The same audit ran over zts, runtime, and pi on 2026-07-31: 276 files
-    // carry tests and every one is collected. 274 by `zig build test`,
-    // `runtime/src/studio.zig` by the `zig build test-cli -Dstudio` step in
-    // scripts/verify.sh (studio compiles out by default), and
-    // `runtime/src/zruntime_tests.zig` by `zig build test-zruntime`. No new
-    // root needed there: those three packages reach their files through
+    // The same audit ran over zts, runtime, and pi on 2026-07-31: every file
+    // that carries tests is collected. `runtime/src/zruntime_tests.zig` is
+    // collected by `zig build test-zruntime` and the rest by `zig build test`.
+    // No new root is needed there: those three packages reach their files through
     // analyzed imports, not through named modules the way tools does.
     .{ .owner = .tools, .src = "src/module_audit.zig", .step = "test-module-audit", .desc = "Run module-contract audit tests", .project_config = true },
     .{ .owner = .tools, .src = "src/manifest_alignment.zig", .step = "test-manifest-alignment", .desc = "Run manifest alignment tests", .project_config = true },
@@ -79,7 +77,6 @@ const host_test_roots = [_]HostTestRoot{
     .{ .owner = .tools, .src = "src/verify_paths_core.zig", .step = "test-verify-paths-core", .desc = "Run behavior-path verification core tests", .project_config = true },
     .{ .owner = .tools, .src = "src/report.zig", .step = "test-report", .desc = "Run analyzer report renderer tests", .project_config = true },
     .{ .owner = .tools, .src = "src/project_config.zig", .step = "test-project-config", .desc = "Run project config discovery tests" },
-    .{ .owner = .tools, .src = "src/proof_quest_fixture.zig", .step = "test-proof-quest-fixture", .desc = "Run proof quest fixture tests", .project_config = true },
     .{ .owner = .tools, .src = "src/openapi_manifest.zig", .step = "test-openapi-manifest", .desc = "Run OpenAPI manifest tests", .project_config = true },
     .{ .owner = .tools, .src = "src/vocab_envelope.zig", .step = "test-vocab-envelope", .desc = "Run published vocabulary envelope derivation tests" },
     .{ .owner = .tools, .src = "src/instruction_counter.zig", .step = "test-instruction-counter", .desc = "Run retired-instruction counter tests" },

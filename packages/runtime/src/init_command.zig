@@ -1,14 +1,12 @@
 //! `zttp init` — scaffold a new project or partner extension. This module
 //! owns all scaffolding: the project templates, the extension templates, and
-//! the file writers. The studio/dev preflight reuses `scaffoldProject` to
-//! scaffold an empty cwd in place, so that helper is public. Dispatch and
-//! error-to-exit-code translation stay in dev_cli.main.
+//! the file writers. Dispatch and error-to-exit-code translation stay in
+//! dev_cli.main.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
 const zts = @import("zts");
-const zts_cli = @import("zts_cli");
 const shared = @import("cli_shared.zig");
 const cli_templates = @import("cli_templates.zig");
 const Template = cli_templates.Template;
@@ -179,7 +177,7 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
     const io = io_backend.io();
 
     // Named init scaffolds refuse every existing target before writing. The
-    // in-place studio preflight preserves a caller-owned .gitignore.
+    // in-place scaffold of "." preserves a caller-owned .gitignore.
     const relative_paths = [_][]const u8{
         "zttp.json",
         handlerPathForTemplate(template),
@@ -513,7 +511,26 @@ const htmxManifest =
     \\}
 ;
 
-const basicHandler = zts_cli.proof_quest_fixture.starter_source;
+const basicHandler =
+    \\// Starter handler with author-declared specs.
+    \\// Run `zttp dev` to check every spec again on each save.
+    \\
+    \\
+    \\structural Guardrails<T> = Proof<T,
+    \\    | "deterministic"
+    \\    | "no_secret_leakage"
+    \\    | "injection_safe"
+    \\>;
+    \\
+    \\function handler(req: Request): Guardrails<Response> {
+    \\    if (req.method === "GET" && req.path === "/") {
+    \\        return Response.html(
+    \\            "<main><h1>Hello, world!</h1><p>Proven at compile time.</p></main>"
+    \\        );
+    \\    }
+    \\    return Response.json({ error: "not found" }, { status: 404 });
+    \\}
+;
 
 const apiHandler =
     \\
@@ -617,13 +634,8 @@ const basicReadme =
     \\
     \\       zttp dev
     \\
-    \\   On a fresh scaffold, the Proof Quest runs once. Press `b` to preview
-    \\   a tiny edit that breaks `deterministic`, `y` to apply it, then `r`
-    \\   and `y` to repair it. Use `zttp dev --quest` to replay it later.
-    \\
     \\2. Edit `src/handler.ts` in your editor. The HUD re-verifies on save and
     \\   shows the verdict, proven surface, proof deltas, and spec diagnostics.
-    \\   Press `Tab` or `l` to rotate proof lenses.
     \\
     \\3. Run the fixture:
     \\
@@ -1006,7 +1018,7 @@ test "init preserves a pre-existing README" {
     try testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "demo/zttp.json", .{}));
 }
 
-test "studio scaffold preserves a pre-existing gitignore in a dotfile-only cwd" {
+test "in-place scaffold preserves a pre-existing gitignore in a dotfile-only cwd" {
     const testing = std.testing;
 
     var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });

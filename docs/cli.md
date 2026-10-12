@@ -84,12 +84,10 @@ Common `dev` and `serve` flags:
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |
 
-`dev` adds `--no-prove` (watch and reload without contract gating), `--quest` /
-`--no-quest` (replay or skip the first-run proof tour), and `--record-proof`,
-which captures the session's requests into a replayable proof capsule at
-`.zttp/capsules/default/`. `serve --watch` takes `--prove` and `--force-swap`
-(apply a breaking swap anyway) instead. Both take `--studio` when the binary was
-built with `-Dstudio`.
+`dev` adds `--no-prove` (watch and reload without contract gating) and
+`--record-proof`, which captures the session's requests into a replayable
+proof capsule at `.zttp/capsules/default/`. `serve --watch` takes `--prove` and
+`--force-swap` (apply a breaking swap anyway) instead.
 
 Without `--lifecycle`, only properties promoted from an accepted deployed
 certificate can relax the pool's recycling policy: `reuse` requires pure,
@@ -648,15 +646,10 @@ Environment variables `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
 
 ## Optional Surfaces
 
-- `zttp studio` runs the browser proof workbench when built with `-Dstudio`.
 - `zttp edge --config zttp.edge.json` runs the in-process multi-handler
   edge router when built with `-Dedge`.
-- `zttp demo --scripted --out proof-demo --export proof-demo/passport`
-  creates an offline Proof Passport demo.
 
-`studio` and `edge` are compiled out of the default build. Compiled out, each
-prints a one-line "rebuild with -Dstudio" or "rebuild with -Dedge" message and
-exits non-zero. `studio` stays listed in `zttp help --all` so its opt-in is
-discoverable.
+`edge` is compiled out of the default build. Compiled out, it prints a
+one-line "rebuild with -Dedge" message and exits non-zero.
 
 See [User Guide](user-guide.md) for the normal project flow.

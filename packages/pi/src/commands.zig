@@ -123,10 +123,6 @@ pub fn isChangelog(name: []const u8) bool {
     return std.mem.eql(u8, name, "/changelog");
 }
 
-pub fn isStudio(name: []const u8) bool {
-    return std.mem.eql(u8, name, "/studio");
-}
-
 pub fn isSessionFork(name: []const u8) bool {
     return std.mem.eql(u8, name, "/fork");
 }
@@ -249,8 +245,6 @@ test "isSettings isHotkeys isChangelog recognize their slash commands" {
     try testing.expect(!isHotkeys("/changelog"));
     try testing.expect(isChangelog("/changelog"));
     try testing.expect(!isChangelog("/settings"));
-    try testing.expect(isStudio("/studio"));
-    try testing.expect(!isStudio("/settings"));
 }
 
 test "isViewLedger and isViewChat recognize view commands" {

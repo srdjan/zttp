@@ -7,10 +7,6 @@ pub const Options = struct {
     sql_schema_path: ?[]const u8 = null,
     system_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
-    quest: struct {
-        enabled: bool = false,
-        explicit: bool = false,
-    } = .{},
 };
 
 pub const LiveReloadState = struct {

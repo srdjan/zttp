@@ -111,3 +111,73 @@ The only hit outside historical plan text is the `pre-rebase:` citation in `docs
 ### Checks
 
 See the G2 report for the exit status of each command. Invariant 4 after G2: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+
+## G3 Studio, demo, proof quest, tour, keystroke input, demo passport
+
+### Removed
+
+- `packages/runtime/src/`: `studio.zig`, `studio_stub.zig`, `demo.zig`, `demo_command.zig`, `proof_quest.zig`, `cli_tour.zig`, `keystroke_input.zig`
+- `packages/tools/src/proof_quest_fixture.zig` and its `test-proof-quest-fixture` row in `build/host_tests.zig`
+- `packages/pi/src/demo_passport.zig`, `demo_passport_check.zig`, and the `demo-passport-check` and `test-demo-passport-check` steps in `build/tooling.zig`
+- `scripts/smoke-demo.sh`, `scripts/smoke-studio.sh`, and the `smoke-demo` and `smoke-studio` steps in `build/smoke.zig`
+- The `-Dstudio` option (`build/Context.zig`, `packages/runtime/build.zig`), the `enable_studio` feature option, and the Studio selector in `runtime_features.zig`
+- The `zttp studio` and `zttp demo` commands, `studioPreflight`, `extractTemplateFlag`, and the `--template` flag of `studio`
+- The `--studio`, `--demo`, `--quest`, `--quest-default`, `--no-quest`, and `--no-tour` flags
+- The `/studio` slash command of `zttp expert`
+- The `verify.sh` step `zig build test-cli -Dstudio`, the two release.yml smoke steps, the `RELEASE_CHECKLIST.md` rows, the `manual-steps.allow` row `demo-passport-check`, and the matching markers and fixtures in `tooling/release_check.zig`
+
+### starter_source move
+
+`proof_quest_fixture.starter_source` became the `basicHandler` constant in `init_command.zig`, byte for byte. Check: `zttp init app-basic --template basic` ran before and after with the built binary. `src/handler.ts` has the same SHA-256 (`863c359f...0605a`) in both runs, and `app-api` and `app-htmx` are identical. The only scaffold difference is `README.md` of the basic template: the four lines about the Proof Quest and `zttp dev --quest` are gone, and so is the line about `Tab` lens rotation.
+
+### Edits that follow from the deletions
+
+- `live_reload.zig`: removed the quest state, the keystroke listener, the Studio hooks, the Studio footer, and `refreshDevAttestation` (it ran only under `--studio`). `Diagnostic` moved here from `studio.zig`.
+- Lens rotation: `keystroke_input.zig` was the only trigger for `Tab` and `l`. `live_reload.zig` therefore lost the lens atomic, the four-lens frame cache, `rotateLens`, `writeLensHint`, and `buildCallerView`. `renderHudInner` now renders one properties-lens frame and writes it to stderr.
+- `server.zig`: removed the Studio routes (`populateStudioResponse`, `handleStudioRequestSync`, the 413 size bound and its tests), the `studio` state, `syncStudioCallerReceipt`, and the `studio` and `studio_demo_root` config fields.
+- `runtime_cli.zig`: removed the Studio and quest flags from `ServeFeatureFlags` and from the option parser, the help lines, and two tests.
+- `proof_card_tui.zig`: removed `writeStudioFooter`, `StudioFooterOptions`, their three tests, and the two handover-lens lines "Studio has the full text" and "and a one-click copy.". The lens code itself stays.
+- `dev_command.zig`: removed the quest and tour logic of `dev`, `studioCommand`, and their tests. `cli_paths.zig`: removed `resolveReentryBinaryAfterChdir` (only `demo` used it) and its test in `dev_cli.zig`.
+- `packages/pi/src/repl.zig`, `commands.zig`: removed `/studio` (`isStudio`, `renderStudio`, the help line, and two tests). `app.zig`, `tests.zig`: removed the `demo_passport` import. `packages/pi/README.md` and `docs/`: removed the Studio sentences.
+- `scripts/smoke-getting-started.sh` passed `--no-tour` to `zttp dev`. The flag no longer exists, so the script no longer passes it.
+
+### Model-visible check for `repl.zig` and `commands.zig`
+
+`/studio` is a local REPL command. `dispatchLine` returns a `ToolResult` that the REPL loop writes to stdout. The result does not enter the session transcript or any model request. No text in `expert_persona.zig`, `tool_registry.zig`, `skills/`, or `prompts/` names `studio`. The text was therefore local help and the group removed it. Invariant 3 holds: none of the protected files changed.
+
+### Judgments the plan did not settle
+
+- The `basic` handler comment still says "Proof Quest starter ... press `b` ... press `r`". The plan requires a byte-for-byte move, so the comment stays. It describes a removed flow and needs a later decision.
+- `Tab` lens rotation is gone as a consequence of deleting `keystroke_input.zig`. The `trade`, `handover`, and `caller_view` lenses, `CallerView`, and `buildProofCertificate` stay in `proof_card_tui.zig` but nothing in `zttp dev` reaches them now. The section "The Three Lenses" in `docs/proofs-and-receipts.md` went with the rotation.
+- `Server.installDevAttestation`, `attest_build_receipt.buildDevJws`, and the `signer_fingerprint_hex` field in `server.zig` have no caller outside tests now. The plan did not list them. They stay (delete less).
+- `--no-quest` and `--no-tour` were deleted from `dev` instead of being accepted as no-ops, so they now fail as unknown options.
+- `init_command.scaffoldProject` keeps its `.` in-place branch. Only the removed `studio` command used it. The comments no longer name Studio.
+- `docs/roadmap.md:335` still lists "demo, Studio views" in a historical "no removal selected" sentence. G14 owns the roadmap rewrite.
+- `packages/zts/src/witness_corpus.zig` and `packages/tools/src/{json_diagnostics,upgrade_verifier}.zig` had comments that named Studio. Only the comments changed.
+
+### pi_app pass condition
+
+`git grep -n pi_app packages/runtime/src` lists `cli_args.zig`, `cli_doctor.zig`, `dev_cli.zig`, `dev_command.zig`, `handler_corpus.zig`, `witness_replay_lib.zig`, and one more file: `proof_cli.zig:308`, a doc comment that names the `pi_app.capsule_probe` seam. The plan's list omits it. The comment existed before G3 and is not an import.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "zttp studio|-Dstudio|enable_studio|_zttp/studio|studio_mod|studio\.zig|studio_stub|\bzttp demo\b|demo_command|demo\.zig|smoke-demo|smoke-studio|demo-passport|demo_passport|proof_quest|proof-quest|--quest|--no-quest|--no-tour|--studio|--demo\b|cli_tour|keystroke_input|test-demo-passport|Proof Passport demo|Proof Theater|proof theater|studioCommand|studioPreflight|printStudioHelp|cmdStudio|cmdDemo|isStudio|renderStudio|writeStudioFooter|/studio\b" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling RELEASE_CHECKLIST.md
+```
+
+The only hits are historical text in the plan files (`docs/plans/2026-09-19-feat-agent-handler-spec.md`, `docs/plans/2026-09-27-m5-a3-sse-framer-design.md`, and the plans of this series).
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read directly from a redirected run.
+
+- `zig build test-cli`: exit 0, 867 passed, 1 skipped, 0 failed.
+- `zig build test-server`: exit 0 (the test binary reports 502 passed, 2 skipped, 0 failed).
+- `zig build test-zruntime`, run alone: exit 0.
+- `zig build test-expert-app`: exit 0 (the test binary reports 1118 passed, 1 skipped, 0 failed). The log line `model_context_mismatch at turn 0/2` comes from the test "simulator recorder promotes and replays a complete two-Turn flow", which passes. It is a negative case, not a corpus replay failure.
+- `zig build test-step-coverage` (103 steps), `test-script-reachability` (47 scripts), `test-release-check`, `test-docs-drift`, `test-module-boundary`, `test-runtime-purity`: exit 0.
+- `zig build smoke-getting-started` and `zig build smoke-v1`: exit 0, both print PASS.
+- `zig build` and `zig build test`: exit 0.
+- `zig fmt --check build.zig build/ packages/ tooling/` and `bash scripts/audit-docs.sh`: exit 0.
+- Invariant 4 after G3: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: no file under `packages/pi/src/skills/` or `packages/pi/src/prompts/`, and no `expert_persona.zig` or `tool_registry.zig`, changed.

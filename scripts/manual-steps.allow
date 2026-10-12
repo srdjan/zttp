@@ -56,10 +56,6 @@ test-expert-mlx-e2e needs-local-server
 # inside a build that is itself producing artifacts.
 zts-training-export release-artifact
 
-# Verifies a demo passport against a live artifact. `test-demo-passport-check`
-# runs the unit tests behind it; this step is the operation.
-demo-passport-check release-operation
-
 # Installs the invariant drift gate into zig-out/tooling as a binary on its own.
 # `zig build test` already runs the gate and its unit tests through
 # `test-invariant-drift`, so the check is covered; what is uncovered is the

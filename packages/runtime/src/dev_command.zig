@@ -1,8 +1,7 @@
-//! `zttp dev` and `zttp studio` — the local edit loop. `dev` is the magnet
-//! surface (implies --watch --prove, optional proof-capsule recording and the
-//! first-run quest); `studio` adds the browser workbench and scaffolds an empty
-//! cwd in place. Both share runDevPreflight (analyzer gate before serving).
-//! Dispatch and error-to-exit-code translation stay in dev_cli.main.
+//! `zttp dev` - the local edit loop. `dev` is the magnet surface (implies
+//! --watch --prove, optional proof-capsule recording) and runs the analyzer
+//! gate (runDevPreflight) before serving. Dispatch and error-to-exit-code
+//! translation stay in dev_cli.main.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -11,7 +10,6 @@ const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const precompile = zts_cli.precompile;
 const shared = @import("cli_shared.zig");
-const cli_tour = @import("cli_tour.zig");
 const proof_cli = @import("proof_cli.zig");
 const pi_app = @import("pi_app");
 const project_config_mod = @import("project_config");
@@ -20,10 +18,6 @@ const resolveDeveloperServeBinary = cli_paths.resolveDeveloperServeBinary;
 const cli_doctor = @import("cli_doctor.zig");
 const doctorPathExists = cli_doctor.doctorPathExists;
 const printCheckStageFailures = cli_doctor.printCheckStageFailures;
-const init_command = @import("init_command.zig");
-const cli_templates = @import("cli_templates.zig");
-const Template = cli_templates.Template;
-const parseTemplate = cli_templates.parseTemplate;
 
 /// Unmeasured development value, never used outside zttp dev.
 const dev_turn_recorder_subdir = ".zttp/turns";
@@ -64,10 +58,7 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     const user_no_prove = shared.hasFlag(argv, "--no-prove");
     const user_has_watch = shared.hasFlag(argv, "--watch");
     const user_has_prove = shared.hasFlag(argv, "--prove");
-    const user_has_quest = shared.hasFlag(argv, "--quest");
-    const user_no_tour = cli_tour.skipRequested(argv);
     const user_record_proof = shared.hasFlag(argv, "--record-proof");
-    const default_quest = !user_no_tour and !user_has_quest and shared.stderrIsTty() and !cli_tour.tourMarkerExists(allocator);
 
     // `--record-proof` desugars to the existing live `--trace` capture aimed
     // inside a capsule directory, plus a manifest written once the session
@@ -99,15 +90,12 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     try appendDevTurnSettings(allocator, argv, &child_args, turn_directory);
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--no-prove")) continue;
-        if (std.mem.eql(u8, arg, "--no-tour")) continue;
-        if (std.mem.eql(u8, arg, "--no-quest")) continue;
         // `--record-proof` is a dev-layer flag; the runtime sees only --trace.
         if (std.mem.eql(u8, arg, "--record-proof")) continue;
         try child_args.append(allocator, arg);
     }
     if (!user_has_watch) try child_args.append(allocator, "--watch");
     if (!user_has_prove and !user_no_prove) try child_args.append(allocator, "--prove");
-    if (default_quest and !user_no_prove) try child_args.append(allocator, "--quest-default");
     if (record_trace_path) |trace_path| {
         try child_args.append(allocator, "--trace");
         try child_args.append(allocator, trace_path);
@@ -123,14 +111,6 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
         std.debug.print("After an edit, replay it with: zttp proofs replay {s}\n", .{capsule_name});
     }
 
-    // Render the four-property explanation once, just before the serve child's
-    // proof-card HUD (and the guided quest) start streaming, so a first-time
-    // user reads what a proof / deterministic / injection_safe mean before the
-    // quest drops them into "[quest] press b to preview...". Touches the marker;
-    // `default_quest` above already captured the pre-touch (first-run) state, so
-    // the tour and the quest appear together exactly once.
-    cli_tour.maybeShowFirstRunTour(allocator, argv);
-
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
@@ -144,7 +124,7 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     propagateChildExit(child.wait(io) catch return);
 }
 
-/// Mirror the serve child's exit code into the `dev`/`studio` parent. Without
+/// Mirror the serve child's exit code into the `dev` parent. Without
 /// this, a child that `std.process.exit(1)`s (port in use, missing handler,
 /// failed server init) leaves the parent returning 0, so callers and CI read
 /// a hard failure as success.
@@ -155,7 +135,7 @@ fn propagateChildExit(term: std.process.Child.Term) void {
 /// Decide the parent exit code for a finished serve child, split out from
 /// `propagateChildExit` so it is unit-testable without `std.process.exit`.
 /// Non-zero exits and fatal signals propagate. SIGINT remains a clean stop so
-/// Ctrl+C keeps its interactive dev/studio behavior.
+/// Ctrl+C keeps its interactive dev behavior.
 fn childExitCode(term: std.process.Child.Term) ?u8 {
     return switch (term) {
         .exited => |code| if (code != 0) code else null,
@@ -249,113 +229,6 @@ fn recordProofManifest(allocator: std.mem.Allocator, argv: []const []const u8, c
         explicit_system orelse discovered_system,
         policy_source,
     );
-}
-
-pub fn studioCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
-    const parsed = try extractTemplateFlag(allocator, argv);
-    defer allocator.free(parsed.filtered);
-
-    try studioPreflight(allocator, parsed.template);
-    try runDevPreflight(allocator, parsed.filtered, "studio");
-
-    const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
-    defer allocator.free(serve_binary);
-
-    const user_has_watch = shared.hasFlag(parsed.filtered, "--watch");
-    const user_has_prove = shared.hasFlag(parsed.filtered, "--prove");
-
-    var child_args = std.ArrayList([]const u8).empty;
-    defer child_args.deinit(allocator);
-    try child_args.append(allocator, serve_binary);
-    try child_args.append(allocator, "serve");
-    for (parsed.filtered) |arg| try child_args.append(allocator, arg);
-    if (!shared.hasFlag(parsed.filtered, "--studio")) try child_args.append(allocator, "--studio");
-    if (!user_has_watch) try child_args.append(allocator, "--watch");
-    if (!user_has_prove) try child_args.append(allocator, "--prove");
-
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var child = try std.process.spawn(io, .{
-        .argv = child_args.items,
-        .stdin = .inherit,
-        .stdout = .inherit,
-        .stderr = .inherit,
-    });
-    propagateChildExit(child.wait(io) catch return);
-}
-
-/// Lets `mkdir myapp && cd myapp && zttp studio` work as a single demo
-/// gesture. If the cwd (or any ancestor) already has a `zttp.json`, this
-/// is a no-op and the existing project loads. If the cwd is empty (only
-/// dotfiles like `.git` allowed), we scaffold the selected template
-/// in-place. If the cwd has user files but no manifest, we leave the
-/// existing `error.NoProjectConfig` path to print the standard hint.
-fn studioPreflight(allocator: std.mem.Allocator, template: Template) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var project_opt = try project_config_mod.discover(allocator, io, null);
-    if (project_opt) |*p| {
-        p.deinit(allocator);
-        return;
-    }
-
-    if (!directoryIsEffectivelyEmpty(io)) return;
-
-    try init_command.scaffoldProject(allocator, ".", template);
-    if (!builtin.is_test) {
-        std.debug.print("Scaffolded {s} template in current directory. Opening studio.\n\n", .{@tagName(template)});
-    }
-}
-
-/// Empty enough to scaffold over: no non-dotfile entries. `.git`,
-/// `.DS_Store`, IDE configs are all tolerated. A pre-existing
-/// `zttp.json` would have been caught by `discover` upstream, so this
-/// only inspects the surface of the cwd.
-fn directoryIsEffectivelyEmpty(io: std.Io) bool {
-    var dir = std.Io.Dir.openDir(std.Io.Dir.cwd(), io, ".", .{ .iterate = true }) catch return false;
-    defer dir.close(io);
-
-    var iter = dir.iterate();
-    while (iter.next(io) catch return false) |entry| {
-        if (entry.name.len == 0) continue;
-        if (entry.name[0] == '.') continue;
-        return false;
-    }
-    return true;
-}
-
-const StudioArgs = struct {
-    template: Template,
-    /// Owned allocation; caller frees once.
-    filtered: [][]const u8,
-};
-
-/// Parse and consume `--template <name>` from `argv`. Everything else is
-/// forwarded to `serve`, which would reject `--template` as
-/// `error.UnknownOption`. Default template is `basic`.
-fn extractTemplateFlag(allocator: std.mem.Allocator, argv: []const []const u8) !StudioArgs {
-    var template: Template = .basic;
-    var filtered = try allocator.alloc([]const u8, argv.len);
-    errdefer allocator.free(filtered);
-
-    var n: usize = 0;
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        if (std.mem.eql(u8, argv[i], "--template")) {
-            if (i + 1 >= argv.len) return error.MissingTemplate;
-            template = parseTemplate(argv[i + 1]) orelse return error.InvalidTemplate;
-            i += 1;
-            continue;
-        }
-        filtered[n] = argv[i];
-        n += 1;
-    }
-    const resized = try allocator.realloc(filtered, n);
-    return .{ .template = template, .filtered = resized };
 }
 
 fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, command: []const u8) !void {
@@ -474,13 +347,9 @@ pub fn printDevHelp() void {
         \\Common options:
         \\  -p, --port <PORT>     Port to listen on (project default: 3000)
         \\  -h, --host <HOST>     Host to bind to (project default: 127.0.0.1)
-        \\  --studio              Also serve the optional /_zttp/studio mirror
         \\  --no-prove            Watch and reload without contract proof gating
         \\  --record-proof        Capture this session's requests into a replayable
         \\                        proof capsule (.zttp/capsules/default/)
-        \\  --no-quest            Skip the first-run proof tour and guided quest
-        \\                        (alias: --no-tour)
-        \\  --quest               Replay the guided proof quest
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --sqlite <FILE>       SQLite database for zttp:sql
         \\  --system <FILE>       Handler bundle for zttp:service/workflow
@@ -492,37 +361,6 @@ pub fn printDevHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-pub fn printStudioHelp() void {
-    const help =
-        \\zttp studio [options] [handler.ts]
-        \\
-        \\Open the optional browser proof workbench at /_zttp/studio. In an
-        \\empty directory, this command scaffolds a project in place before
-        \\launching.
-        \\
-        \\Options:
-        \\  --template basic|api|htmx  Template used for empty-dir scaffolding
-        \\  -p, --port <PORT>          Port to listen on (default: 3000)
-        \\  -h, --host <HOST>          Host to bind to (default: 127.0.0.1)
-        \\  --no-env-check             Skip startup env validation
-        \\  --help                     Show this help
-        \\
-        \\Studio implies --watch --prove and keeps the old handler running when
-        \\a save fails verification.
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-test "extractTemplateFlag defaults to basic and strips the flag pair" {
-    const out = try extractTemplateFlag(std.testing.allocator, &.{ "--watch", "--studio" });
-    defer std.testing.allocator.free(out.filtered);
-    try std.testing.expectEqual(Template.basic, out.template);
-    try std.testing.expectEqual(@as(usize, 2), out.filtered.len);
-    try std.testing.expectEqualStrings("--watch", out.filtered[0]);
-    try std.testing.expectEqualStrings("--studio", out.filtered[1]);
 }
 
 test "dev supplies labelled turn settings and preserves explicit settings" {
@@ -539,111 +377,15 @@ test "dev supplies labelled turn settings and preserves explicit settings" {
     try std.testing.expectEqual(@as(usize, 0), args.items.len);
 }
 
-test "extractTemplateFlag consumes --template <name> and forwards the rest" {
-    const out = try extractTemplateFlag(std.testing.allocator, &.{ "--template", "htmx", "--watch" });
-    defer std.testing.allocator.free(out.filtered);
-    try std.testing.expectEqual(Template.htmx, out.template);
-    try std.testing.expectEqual(@as(usize, 1), out.filtered.len);
-    try std.testing.expectEqualStrings("--watch", out.filtered[0]);
-}
-
-test "extractTemplateFlag rejects missing or unknown templates" {
-    try std.testing.expectError(error.MissingTemplate, extractTemplateFlag(std.testing.allocator, &.{"--template"}));
-    try std.testing.expectError(error.InvalidTemplate, extractTemplateFlag(std.testing.allocator, &.{ "--template", "react" }));
-}
-
-test "studioPreflight scaffolds in an empty cwd" {
-    const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    try studioPreflight(testing.allocator, .basic);
-
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zttp.json", .{});
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "src/handler.ts", .{});
-}
-
-test "studioPreflight is a no-op when zttp.json already exists" {
-    const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    // Seed an existing project marker. Body content is intentionally bogus;
-    // discover() only cares that the file exists.
-    try zts.file_io.writeFile(testing.allocator, "zttp.json", "{}");
-
-    try studioPreflight(testing.allocator, .basic);
-
-    // No `src/handler.ts` should have been scaffolded over the existing project.
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "src/handler.ts", .{}));
-}
-
-test "studioPreflight refuses to scaffold over user files" {
-    const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    try zts.file_io.writeFile(testing.allocator, "notes.txt", "not a zttp project");
-
-    try studioPreflight(testing.allocator, .basic);
-
-    // No scaffold happened: zttp.json must not exist.
-    try std.testing.expectError(error.FileNotFound, std.Io.Dir.access(std.Io.Dir.cwd(), io, "zttp.json", .{}));
-}
-
-test "studioPreflight tolerates dotfile-only cwd (e.g. .git)" {
-    const testing = std.testing;
-
-    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, ".git");
-
-    try studioPreflight(testing.allocator, .basic);
-
-    try std.Io.Dir.access(std.Io.Dir.cwd(), io, "zttp.json", .{});
-}
-
 test "childExitCode propagates a failed serve child but not a clean stop" {
     // A serve child that std.process.exit(N)s (port in use, missing handler)
-    // must surface code N to the dev/studio parent.
+    // must surface code N to the dev parent.
     try std.testing.expectEqual(@as(?u8, 1), childExitCode(.{ .exited = 1 }));
     try std.testing.expectEqual(@as(?u8, 2), childExitCode(.{ .exited = 2 }));
     // A clean exit and SIGINT (Ctrl+C of a healthy session) stay 0.
     try std.testing.expectEqual(@as(?u8, null), childExitCode(.{ .exited = 0 }));
     try std.testing.expectEqual(@as(?u8, null), childExitCode(.{ .signal = .INT }));
-    // Fatal child-only signals must not make dev/studio report success.
+    // Fatal child-only signals must not make dev report success.
     try std.testing.expectEqual(@as(?u8, 139), childExitCode(.{ .signal = .SEGV }));
     try std.testing.expectEqual(@as(?u8, 134), childExitCode(.{ .signal = .ABRT }));
     try std.testing.expectEqual(@as(?u8, 137), childExitCode(.{ .signal = .KILL }));

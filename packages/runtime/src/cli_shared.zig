@@ -124,8 +124,8 @@ pub fn writeStderrLine(s: []const u8) void {
 }
 
 /// Report that an opt-in feature was compiled out of this build and exit
-/// non-zero. `name` is the command (e.g. "studio"), `flag` the build option
-/// to rebuild with (e.g. "studio" for `zig build -Dstudio`).
+/// non-zero. `name` is the command (e.g. "edge"), `flag` the build option
+/// to rebuild with (e.g. "edge" for `zig build -Dedge`).
 pub fn featureCompiledOut(name: []const u8, flag: []const u8) noreturn {
     std.debug.print("zttp {s} was compiled out of this build. Rebuild with: zig build -D{s}\n", .{ name, flag });
     std.process.exit(1);

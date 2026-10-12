@@ -630,7 +630,7 @@ pub fn countByProperty(
 
 /// Aggregate counts directly from an already-loaded entries slice. Lets
 /// consumers that need both the full entries list and a count breakdown
-/// (e.g. the studio Witnesses tile) avoid a second `loadEntries` walk.
+/// avoid a second `loadEntries` walk.
 pub fn countByPropertySlice(
     allocator: std.mem.Allocator,
     entries: []const Entry,

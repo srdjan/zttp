@@ -1,8 +1,6 @@
 //! Project starter templates shared across CLI commands.
 //!
-//! `Template` and `parseTemplate` are referenced by both the `init` command
-//! (scaffolding) and the `studio`/`dev` preflight (empty-dir scaffolding), so
-//! they live here rather than inside either command module. Template-specific
+//! `Template` and `parseTemplate` name the project starters. Template-specific
 //! scaffold sources and path mappers stay with `init` since only it scaffolds.
 
 const std = @import("std");

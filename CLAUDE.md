@@ -20,7 +20,7 @@ bash scripts/verify.sh                               # Full local gate mirroring
 zig build run -- examples/handler/handler.ts -p 3000 # Run zttp
 ```
 
-Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract`, `-Dreplay`, `-Dtest-file`), the optional `-Dstudio` and `-Dedge` features, the per-package test steps, and benchmarks are in the `zttp-build` skill.
+Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract`, `-Dreplay`, `-Dtest-file`), the optional `-Dedge` feature, the per-package test steps, and benchmarks are in the `zttp-build` skill.
 
 ## CLI Surface
 
@@ -29,7 +29,7 @@ Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract
 `zttp verify <url>` verifies provenance for a signed live-endpoint claim. It is
 distinct from `zttp proofs verify <bundle-dir>`, which checks bundle integrity
 and, when the artifact carries a certificate, runs semantic acceptance against
-the artifact itself. `studio` and `edge` are compiled out by default. Hosted
+the artifact itself. `edge` is compiled out by default. Hosted
 cloud deploy and the account verbs are deferred from this beta; hosted
 control-plane, registry, and OCI image orchestration are out of core.
 

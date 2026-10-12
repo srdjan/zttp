@@ -227,10 +227,6 @@ pub fn dispatchLine(
     if (commands.isSettings(argv[0])) return .{ .result = try renderSettings(allocator) };
     if (commands.isHotkeys(argv[0])) return .{ .result = try renderHotkeys(allocator) };
     if (commands.isChangelog(argv[0])) return .{ .result = try renderChangelog(allocator) };
-    if (commands.isStudio(argv[0])) {
-        const handler = if (argv.len > 1) argv[1] else "";
-        return .{ .result = try renderStudio(allocator, handler) };
-    }
     if (std.mem.eql(u8, argv[0], "/skills")) return .{ .result = try renderSkills(allocator) };
     if (std.mem.eql(u8, argv[0], "/templates")) return .{ .result = try renderTemplates(allocator) };
 
@@ -369,7 +365,6 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     try w.writeAll("Info commands: /model  /status  /settings  /hotkeys  /changelog\n");
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
     try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
-    try w.writeAll("Studio:        /studio <handler.ts>   show browser proof workbench command\n");
     try w.writeAll("Specs:         /specs <handler.ts>   show declared Proof<T, P> obligations\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
@@ -396,17 +391,6 @@ fn renderModel(allocator: std.mem.Allocator, session: *const agent.AgentSession)
     }
     try w.writeAll("\nSwitch with: /model <model-id>\n");
     return ToolResult.withPlainText(allocator, true, buf.written());
-}
-
-fn renderStudio(allocator: std.mem.Allocator, handler_path: []const u8) !ToolResult {
-    const path = if (handler_path.len == 0) "<handler.ts>" else handler_path;
-    const msg = try std.fmt.allocPrint(
-        allocator,
-        "Browser proof workbench:\n  zttp studio {s}\n\nOpen the studio page on the running server (default http://localhost:8080/_zttp/studio).\n\nStudio runs the handler with --watch --prove, shows release readiness, declared specs, witnesses, generated tests, and next actions.\n",
-        .{path},
-    );
-    defer allocator.free(msg);
-    return ToolResult.withPlainText(allocator, handler_path.len != 0, msg);
 }
 
 fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
@@ -2103,15 +2087,6 @@ test "renderStatus: enumerates every token total" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.out:    22") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_r:33") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "tokens.cache_w:44") != null);
-}
-
-test "renderStudio returns workbench command and URL" {
-    var result = try renderStudio(testing.allocator, "examples/handler/handler.ts");
-    defer result.deinit(testing.allocator);
-
-    try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "zttp studio examples/handler/handler.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "http://localhost:8080/_zttp/studio") != null);
 }
 
 fn renderDiffToBuf(buf: []u8, before: ?[]const u8, after: []const u8) []const u8 {

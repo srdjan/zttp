@@ -335,7 +335,7 @@ Projects can apply the same policy during local analysis by naming the file in
 }
 ```
 
-Project-backed `check`, `dev`, `studio`, `serve`, `test`, `doctor`, `compile`,
+Project-backed `check`, `dev`, `serve`, `test`, `doctor`, `compile`,
 `build`, and `deploy` commands use that configured policy. So do `zts check`, edit
 simulation, expert verification, live-reload candidates, and recorded proof
 capsules. A missing, unreadable, or malformed policy is an error; no command

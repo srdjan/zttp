@@ -20,8 +20,6 @@ const release_version = @import("release_version.zig");
 const release_verify_commands = [_][]const u8{
     "bash scripts/verify.sh",
     "zig build smoke-getting-started",
-    "zig build smoke-demo",
-    "zig build smoke-studio",
     "zig build bench-check",
     "zig build release-check",
 };
@@ -30,8 +28,6 @@ const build_gate_markers = [_][]const u8{
     "smoke-v1",
     "test-panic-isolation",
     "smoke-getting-started",
-    "smoke-demo",
-    "smoke-studio",
     "test-module-governance",
     "test-capability-audit",
     "test-docs-drift",
@@ -57,7 +53,6 @@ const verify_script_markers = [_][]const u8{
     "zig build -Doptimize=ReleaseFast",
     "zig build smoke-v1",
     "zig build test-panic-isolation",
-    "zig build test-cli -Dstudio",
     "bash scripts/check-normalize-idempotent.sh",
     "bash scripts/check-idiom-table.sh",
     "bash scripts/check-canonical-style.sh",
@@ -678,8 +673,6 @@ fn hasReleaseVerifyCommand(command: []const u8) bool {
 test "release verify commands cover release gates" {
     try std.testing.expect(hasReleaseVerifyCommand("bash scripts/verify.sh"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build smoke-getting-started"));
-    try std.testing.expect(hasReleaseVerifyCommand("zig build smoke-demo"));
-    try std.testing.expect(hasReleaseVerifyCommand("zig build smoke-studio"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build bench-check"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build release-check"));
 }
@@ -693,18 +686,17 @@ test "pending receipt-backed measurement note tolerates markdown wrapping" {
 
 test "release gate requirements require semantics and doctor wiring" {
     const build_zig =
-        "smoke-v1 test-panic-isolation smoke-getting-started smoke-demo smoke-studio " ++
+        "smoke-v1 test-panic-isolation smoke-getting-started " ++
         "test-module-governance test-capability-audit test-docs-drift test-evidence-marker " ++
         "test-examples";
     const ci_yml = "bash scripts/verify.sh\n";
     const release_yml =
         "bash scripts/verify.sh --release\n" ++
-        "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
+        "zig build smoke-getting-started\n" ++
         "zig build bench-check\nzig build release-check\ncontents: write\n";
     const verify_sh =
         "zig build test\nzig build test-zruntime\n" ++
         "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
-        "zig build test-cli -Dstudio\n" ++
         "bash scripts/test-install-archive-safety.sh\n" ++
         "bash scripts/check-normalize-idempotent.sh\nbash scripts/check-idiom-table.sh\n" ++
         "bash scripts/check-canonical-style.sh\nbash scripts/check-grammar-drift.sh\n" ++
@@ -723,7 +715,7 @@ test "release gate requirements require semantics and doctor wiring" {
     // and the passport would still report every gate wired.
     const per_commit_release_yml =
         ci_yml ++
-        "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
+        "zig build smoke-getting-started\n" ++
         "zig build bench-check\nzig build release-check\ncontents: write\n";
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, per_commit_release_yml, verify_sh));
 }
@@ -928,8 +920,6 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\// smoke-v1
         \\// test-panic-isolation
         \\// smoke-getting-started
-        \\// smoke-demo
-        \\// smoke-studio
         \\// test-module-governance
         \\// test-capability-audit
         \\// test-docs-drift
@@ -950,7 +940,6 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\zig build -Doptimize=ReleaseFast
         \\zig build smoke-v1
         \\zig build test-panic-isolation
-        \\zig build test-cli -Dstudio
         \\bash scripts/check-normalize-idempotent.sh
         \\bash scripts/check-idiom-table.sh
         \\bash scripts/check-canonical-style.sh
@@ -975,8 +964,6 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .data =
         \\bash scripts/verify.sh --release
         \\zig build smoke-getting-started
-        \\zig build smoke-demo
-        \\zig build smoke-studio
         \\zig build bench-check
         \\zig build release-check
         \\contents: write
@@ -1064,7 +1051,7 @@ test "release gate markers are read from build.zig and build/*.zig together" {
     // The root file names no gate; the step declarations live under build/.
     try tmp.dir.writeFile(io, .{ .sub_path = "build.zig", .data = "// orchestrator\n" });
     try tmp.dir.createDirPath(io, "build");
-    try tmp.dir.writeFile(io, .{ .sub_path = "build/smoke.zig", .data = "// smoke-v1 test-panic-isolation smoke-getting-started smoke-demo smoke-studio\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "build/smoke.zig", .data = "// smoke-v1 test-panic-isolation smoke-getting-started\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "build/gates.zig", .data = "// test-module-governance test-capability-audit test-docs-drift test-evidence-marker test-examples\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "build/notes.txt", .data = "// not a build file\n" });
 

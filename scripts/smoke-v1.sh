@@ -3,10 +3,6 @@
 #   init -> doctor -> check -> build -> run -> deploy -> run.
 # Exits non-zero on first failure, with a one-line diagnostic.
 #
-# studio is compiled out of the default build, so it is exercised separately
-# by scripts/smoke-studio.sh (which builds with -Dstudio); keep this fast path
-# free of any opt-in feature so it passes on a clean checkout.
-#
 # Usage: bash scripts/smoke-v1.sh
 
 set -euo pipefail

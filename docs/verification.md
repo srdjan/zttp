@@ -237,8 +237,7 @@ Three diagnostic codes:
   set.
 
 Diagnostics are stored on `HandlerContract.spec_diagnostics`. Surfaces:
-the live HUD, the proof studio (failing pills expand inline to the
-ZTS5xx code, source line, and snippet), the proof ledger
+the live HUD, the proof ledger
 (`declaredSpecs: [{name, discharged, diagnosticCode?,
 diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` per
 swap event; the diagnostic fields appear only on failed specs),

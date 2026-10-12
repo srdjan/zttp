@@ -94,12 +94,6 @@ zig build smoke-v1
 step "zig build test-panic-isolation  (handler panic isolation E2E)"
 zig build test-panic-isolation
 
-step "zig build test-cli -Dstudio  (studio workbench unit tests)"
-# studio.zig only compiles under -Dstudio, so its unit tests (incl. the
-# TRADE_TABLE drift gate) run in no default target. Build the CLI test suite
-# with studio enabled so they are actually exercised.
-zig build test-cli -Dstudio
-
 # The example suites are not run here any more: `zig build test` above depends
 # on them, the same way it owns the docs-drift and link gates. They used to run
 # only from this script, so `zig build test` reported a pass while 56 suites

@@ -17,12 +17,11 @@ card: a verdict, the proven surface, and - when something fails - the exact
 construct that broke a proof. It is the screen you read on every save. This
 guide explains how to read it.
 
-The card comes from one analysis, shown in three places:
+The card comes from one analysis, shown in two places:
 
 - `zttp dev` redraws it on every save, above the live-reload HUD, and
   `zttp test` prints it as the pre-test check.
 - `zttp check` prints it once to the terminal for a one-shot run.
-- `zttp studio` mirrors it in the browser workbench.
 
 ### The Stages
 
@@ -122,8 +121,7 @@ block in detail.
 ### The Proof Trace
 
 Each property carries a proof trace: not just whether it holds, but how the
-compiler decided. Expand a chip in Studio, or read the
-auto-rendered block in the terminal HUD, to see:
+compiler decided. Read the auto-rendered block in the terminal HUD to see:
 
 - A `summary` in one plain sentence: what was checked and what was found.
 - The `kind` of proof. `structural` is a single-pass scan of the IR.
@@ -164,22 +162,6 @@ properties.
 The proof tells you what the compiler proved; the durable directory tells you
 what the runtime persisted.
 
-### The Three Lenses
-
-In the `zttp dev` HUD, press `Tab` to rotate the card's left pane through
-three lenses:
-
-- `Properties` - the default `[+]`/`[-]` pills.
-- `Trade` - each proof paired with the substrate restriction that earned it:
-  which rejected JavaScript feature bought which guarantee.
-- `Handover` - a copy-pasteable producer proof summary for an AI agent or a
-  reviewer. It is not the deployed artifact certificate checked by
-  `packages/proof-checker`.
-
-Studio mirrors the same three views with a tab bar. The rotation is described
-in the [User Guide](user-guide.md); the restriction-to-proof map it draws on
-is [Restrictions to Proofs](restrictions-to-proofs.md).
-
 ## Counterexamples in the Live HUD
 
 When `zttp dev --watch --prove` recompiles your handler and a proven
@@ -188,11 +170,8 @@ card surfaces a Counterexample block. The block is the compiler's way of
 saying not just "you broke it" but "here is the construct that broke it,
 here is what to do, and here is what fails."
 
-Counterexamples land in two places at once. The terminal HUD writes them
-into the proof card frame stderr already streams. The studio at
-`http://localhost:3000/_zttp/studio` carries the same payload as a
-`counterexample` object in the SSE state, so a browser tab open beside
-your editor reflects the same regression without a refresh.
+Counterexamples land in the terminal HUD, which writes them into the proof
+card frame that stderr already streams.
 
 ### What the block looks like
 
@@ -288,11 +267,7 @@ clarifying question.
   Why row using the same full-width primitive. Three to five rows tall
   depending on whether a witness is present.
 - `packages/runtime/src/live_reload.zig` calls `buildFromDelta` after the
-  upgrade verifier produces a verdict, before the swap decision. The
-  studio receives the preview through the existing `updateFacts` channel.
-- `packages/runtime/src/studio.zig` serialises the preview into the
-  SSE `counterexample` field of the state JSON so the browser surface
-  stays in lockstep with the terminal frame.
+  upgrade verifier produces a verdict, before the swap decision.
 
 ### Related reading
 
@@ -421,28 +396,6 @@ analyzer-driven path already covers them.
 The block is read directly from `.zttp/witnesses/<short_hash>/` for
 the handler under check. A missing or empty corpus reports
 `{"total":0,"by_property":{}}`.
-
-#### Studio: `/_zttp/studio/witness/<key>.json`
-
-While the studio is running (`zttp studio <handler.ts>` or
-`zttp serve --studio --watch --prove`), each row in the Witnesses
-tile is clickable. Clicking fetches the on-disk witness file and
-renders the falsifying request, IO stubs, summary, source location,
-and pinned status inline. The endpoint is read-only:
-
-```text
-GET /_zttp/studio/witness/<key>.json
-=> {"key":"<hex>", "pinned":<bool>, "events":[<witness>, <request>, <io>...]}
-```
-
-`<key>` must be 1..64 hex chars (the same shape `witness_corpus.persist`
-produces). The events array is the on-disk JSONL re-emitted as a JSON
-array; each entry is an unmodified record from
-`counterexample.writeJsonl`. Studio caches nothing. It re-reads the
-file on every click, so a corpus refresh on disk is visible
-immediately. A fingerprint guard on the detail panel keeps an
-already-expanded witness expanded across the 750ms poll cycle when the
-underlying `(key, property, pinned)` set is unchanged.
 
 #### Agent tool: `pi_witnesses`
 

@@ -804,7 +804,7 @@ fn writeOptionalString(writer: anytype, value: ?[]const u8) !void {
 // -------------------------------------------------------------------------
 
 /// View of a blocked feature for human-facing renderers (terminal diagnostic
-/// frame, Studio overlay). All fields are guaranteed non-null because they are
+/// frame). All fields are guaranteed non-null because they are
 /// asserted at compile time on `.blocked` entries.
 pub const RestrictionInfo = struct {
     name: []const u8,

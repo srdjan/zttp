@@ -13,8 +13,6 @@ gates, and keep release notes user-facing.
 
 - [ ] `bash scripts/verify.sh --release`
 - [ ] `zig build smoke-getting-started` (macOS beta gate)
-- [ ] `zig build smoke-demo` (macOS beta gate)
-- [ ] `zig build smoke-studio` (macOS beta gate; builds `-Dstudio`)
 - [ ] `zig build bench-check` (rerun one miss; block the release if the rerun also misses)
 - [ ] `zig build release-check -- --json`
 

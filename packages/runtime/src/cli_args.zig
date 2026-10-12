@@ -68,7 +68,7 @@ test "deployArgsRequestCloud leaves --target validation to deploy parser" {
 /// remediation; `deploy`/`test`/`build` etc. take no handler argument, so that
 /// sentence would be misleading for them.
 fn commandAcceptsHandlerPath(command: []const u8) bool {
-    return std.mem.eql(u8, command, "dev") or std.mem.eql(u8, command, "studio");
+    return std.mem.eql(u8, command, "dev");
 }
 
 pub fn printNoProjectConfigDiagnostic(command: []const u8) void {
@@ -91,7 +91,7 @@ pub fn printNoProjectConfigDiagnostic(command: []const u8) void {
     }
 }
 
-/// Convert preflight errors from `dev`/`studio` (which run `zts check`
+/// Convert preflight errors from `dev` (which runs `zts check`
 /// before launching the runtime child) into clean exit-1 messages instead
 /// of panic-style stack-trace dumps. The readable line was already printed
 /// upstream by `zts check` itself.
@@ -196,7 +196,6 @@ fn isExpertValueTakingFlagEq(arg: []const u8) bool {
 
 test "commandAcceptsHandlerPath only includes the positional-path commands" {
     try std.testing.expect(commandAcceptsHandlerPath("dev"));
-    try std.testing.expect(commandAcceptsHandlerPath("studio"));
     try std.testing.expect(!commandAcceptsHandlerPath("deploy"));
     try std.testing.expect(!commandAcceptsHandlerPath("test"));
     try std.testing.expect(!commandAcceptsHandlerPath("build"));

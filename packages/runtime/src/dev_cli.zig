@@ -17,10 +17,8 @@ const ratchet_command = @import("ratchet_command.zig");
 const pi_app = @import("pi_app");
 const verify_cli = @import("verify_cli.zig");
 const cli_args = @import("cli_args.zig");
-const cli_tour = @import("cli_tour.zig");
 const cli_paths = @import("cli_paths.zig");
 const resolveDeveloperServeBinary = cli_paths.resolveDeveloperServeBinary;
-const resolveReentryBinaryAfterChdir = cli_paths.resolveReentryBinaryAfterChdir;
 const cli_doctor = @import("cli_doctor.zig");
 const doctorCommand = cli_doctor.doctorCommand;
 const printDoctorHelp = cli_doctor.printDoctorHelp;
@@ -33,7 +31,6 @@ const deployArgsRequestCloud = cli_args.deployArgsRequestCloud;
 const printNoProjectConfigDiagnostic = cli_args.printNoProjectConfigDiagnostic;
 const handlePreflightError = cli_args.handlePreflightError;
 const template_choices = cli_args.template_choices;
-const demo_command = @import("demo_command.zig");
 const test_command = @import("test_command.zig");
 const init_command = @import("init_command.zig");
 const build_command = @import("build_command.zig");
@@ -46,7 +43,6 @@ test {
     // blocks (and the sibling files they transitively pull in, e.g. the
     // analyzer/serve paths) are collected by `zig build test-cli`.
     _ = @import("cli_templates.zig");
-    _ = @import("demo_command.zig");
     _ = @import("test_command.zig");
     _ = @import("init_command.zig");
     _ = @import("build_command.zig");
@@ -202,53 +198,6 @@ fn cmdDev(ctx: cli_help.Ctx) anyerror!void {
     }
     dev_command.devCommand(ctx.allocator, ctx.argv0, ctx.args) catch |err| {
         if (handlePreflightError(err, ctx.command)) std.process.exit(1);
-        return err;
-    };
-    return;
-}
-
-fn cmdStudio(ctx: cli_help.Ctx) anyerror!void {
-    if (hasLongHelpFlag(ctx.args)) {
-        dev_command.printStudioHelp();
-        return;
-    }
-    if (!feature_options.enable_studio) shared.featureCompiledOut("studio", "studio");
-    dev_command.studioCommand(ctx.allocator, ctx.argv0, ctx.args) catch |err| {
-        if (handlePreflightError(err, ctx.command)) std.process.exit(1);
-        return err;
-    };
-    return;
-}
-
-fn cmdDemo(ctx: cli_help.Ctx) anyerror!void {
-    demo_command.demoCommand(ctx.allocator, ctx.argv0, ctx.args) catch |err| {
-        if (err == error.HelpRequested) {
-            demo_command.printDemoHelp();
-            return;
-        }
-        if (err == error.MissingOptionValue) {
-            std.debug.print("demo option requires a value.\n\n", .{});
-            demo_command.printDemoHelp();
-            std.process.exit(1);
-        }
-        if (err == error.InvalidPort) {
-            std.debug.print("--port requires a number from 1 to 65535.\n\n", .{});
-            demo_command.printDemoHelp();
-            std.process.exit(1);
-        }
-        if (err == error.OutputExists) {
-            std.debug.print("--out target already exists. Pick a new directory; zttp demo will not overwrite files.\n", .{});
-            std.process.exit(1);
-        }
-        if (err == error.InvalidOutputPath) {
-            std.debug.print("--out must end in a simple directory name using letters, numbers, '-' or '_'.\n", .{});
-            std.process.exit(1);
-        }
-        if (err == error.UnknownOption) {
-            std.debug.print("Unknown demo option.\n\n", .{});
-            demo_command.printDemoHelp();
-            std.process.exit(1);
-        }
         return err;
     };
     return;
@@ -526,8 +475,6 @@ const commands = [_]cli_help.Command{
     .{ .name = "auth", .run = cmdAuth, .section = .credentials, .args = "[claude|openai|status|revoke]", .blurb = "Manage cloud-provider keys for expert" },
     .{ .name = "init", .run = cmdInit, .section = .core, .args = "<name> [--template basic|api|htmx]", .blurb = "Create a project" },
     .{ .name = "dev", .run = cmdDev, .section = .core, .args = "[handler.ts]", .blurb = "Run locally, watch and prove on save" },
-    .{ .name = "studio", .run = cmdStudio, .section = .run_and_inspect, .args = "[handler.ts]", .blurb = "Optional browser proof workbench" },
-    .{ .name = "demo", .run = cmdDemo, .section = .run_and_inspect, .blurb = "Guided local proof theater" },
     .{ .name = "serve", .run = cmdServe, .section = .run_and_inspect, .args = "[handler.ts]", .blurb = "Run a handler without watch or proof" },
     .{ .name = "edge", .run = cmdEdge, .section = .run_and_inspect, .args = "[--config FILE]", .blurb = "Optional in-process edge runtime (-Dedge)" },
     .{ .name = "workflow-queue", .run = cmdWorkflowQueue, .section = .run_and_inspect, .args = "[list|show|replay|discard] --durable <DIR>", .blurb = "Inspect workflow queue dead letters" },
@@ -690,7 +637,7 @@ test "stored provider injection is limited to expert direct dispatch" {
     try std.testing.expect(!commandInjectsStoredProviders("doctor"));
 }
 
-test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {
+test "resolveDeveloperServeBinary re-enters developer CLI for dev" {
     const path = try resolveDeveloperServeBinary(std.testing.allocator, "/tmp/bin/zttp");
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings("/tmp/bin/zttp", path);
@@ -698,20 +645,6 @@ test "resolveDeveloperServeBinary re-enters developer CLI for studio and dev" {
     const fallback = try resolveDeveloperServeBinary(std.testing.allocator, "");
     defer std.testing.allocator.free(fallback);
     try std.testing.expectEqualStrings("zttp", fallback);
-}
-
-test "resolveReentryBinaryAfterChdir preserves PATH lookup for bare names" {
-    const bare = try resolveReentryBinaryAfterChdir(std.testing.allocator, "zttp", "/repo");
-    defer std.testing.allocator.free(bare);
-    try std.testing.expectEqualStrings("zttp", bare);
-
-    const relative = try resolveReentryBinaryAfterChdir(std.testing.allocator, "./zig-out/bin/zttp", "/repo");
-    defer std.testing.allocator.free(relative);
-    try std.testing.expect(std.mem.endsWith(u8, relative, "/repo/zig-out/bin/zttp"));
-
-    const absolute = try resolveReentryBinaryAfterChdir(std.testing.allocator, "/usr/local/bin/zttp", "/repo");
-    defer std.testing.allocator.free(absolute);
-    try std.testing.expectEqualStrings("/usr/local/bin/zttp", absolute);
 }
 
 test "doctorPathExists accepts relative paths" {
@@ -809,24 +742,6 @@ test "doctorCommand passes configured sqlite path into analyzer" {
     } else {
         return error.NoProjectConfig;
     }
-}
-
-test "first-run tour marker is durable: absent then created then detected" {
-    const testing = std.testing;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var tmp_dir = testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    const base = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp_dir.sub_path});
-
-    try testing.expect(!cli_tour.tourMarkerExistsAt(allocator, base));
-    cli_tour.touchTourMarkerAt(allocator, base);
-    try testing.expect(cli_tour.tourMarkerExistsAt(allocator, base));
-    // Idempotent: a second touch is harmless.
-    cli_tour.touchTourMarkerAt(allocator, base);
-    try testing.expect(cli_tour.tourMarkerExistsAt(allocator, base));
 }
 
 test "every listed command appears in help --all, and every listing has a command" {

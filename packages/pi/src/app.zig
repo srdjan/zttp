@@ -38,7 +38,6 @@ pub const equivalence_probe = @import("equivalence_probe.zig");
 /// via `pi_app.capsule_probe.setProbeFn` at startup, mirroring the perf-probe
 /// seam. The expert loop uses it to flag edits that regress a recorded capsule.
 pub const capsule_probe = @import("capsule_probe.zig");
-pub const demo_passport = @import("demo_passport.zig");
 
 pub fn checkLocalReadiness(allocator: std.mem.Allocator) !void {
     const raw = if (std.c.getenv("ZTTP_MLX_BASE_URL")) |value| std.mem.sliceTo(value, 0) else null;

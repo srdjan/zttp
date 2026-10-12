@@ -143,7 +143,7 @@ The DeepSeek and local replays must stay green after each of G13a to G13d. If re
 
 ### G14 Plan index and sound-mode merge
 
-Delete each plan under `docs/plans/` that meets all three conditions: `docs/plans/README.md` marks it complete or implemented, `docs/roadmap.md` does not call it open, and `git grep -l "<its file name>" -- ':!docs/plans'` finds no tracked non-plan file. List the deleted and kept files in the worklog with the reason for each kept file.
+Run G15 before G14. Delete each plan under `docs/plans/` that meets all three conditions: `docs/plans/README.md` marks it complete or implemented, `docs/roadmap.md` does not call it open, and `git grep -l "<its file name>" -- ':!docs/plans'` finds no tracked non-plan file. List the deleted and kept files in the worklog with the reason for each kept file.
 Fold `docs/sound-mode.md` into `docs/typescript.md`. Retarget links at `AGENTS.md:18`, `CLAUDE.md:89`, `README.md:156`, `docs/README.md:54`, `docs/internals/api-reference.md:142`, `docs/proofs-and-receipts.md:307`, `docs/user-guide.md:582`, and `docs/typescript.md:487,793`.
 Update `docs/roadmap.md`: Phase 1 complete, Studio and edge removed from Supported Now, M5 stopped by decision 3 of plan 005.
 Recount with the plan 003 reproduction command. Record the counts in the worklog.
@@ -158,3 +158,12 @@ Recount with the plan 003 reproduction command. Record the counts in the worklog
 ## Out of scope
 
 Phase 2 and Phase 3. The deferred items above. Renames. Refactors inside surviving files beyond deleting dead branches.
+
+## G15 Dead code that earlier groups left behind
+
+Added during execution. Each item lost its last production caller in an earlier group. Delete it, its tests, and its docs, under the same invariants.
+
+- From G3: the `trade`, `handover`, and `caller_view` lenses, `CallerView`, and any helper in `proof_card_tui.zig` that only those lenses reach, once `git grep` confirms no `zttp dev`, `deploy`, or `proofs` path renders them. Keep `buildProofCertificate` if any surviving path calls it.
+- From G3: `Server.installDevAttestation`, `attest_build_receipt.buildDevJws`, and the `signer_fingerprint_hex` field, which only `--studio` reached.
+- From G3: the in-place `.` branch of `init_command.scaffoldProject`, if no surviving command scaffolds in place.
+- Further items that later groups report go in this list before G15 runs.
