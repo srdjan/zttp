@@ -132,8 +132,8 @@ pub const RuntimeConfig = struct {
     /// message. The in-memory backend keeps the message in-flight until ack/nack.
     queue_lease_ms: i64 = 30_000,
     /// Dev/serve path only: the checked contract plus configured policy,
-    /// projected for installation instead of the embedded stub. Null on AOT
-    /// paths, which carry their full policy in `embedded_handler`. This is an
+    /// projected for installation instead of the embedded stub. Null when the
+    /// policy in `embedded_handler` stays the source. This is an
     /// input view only. HandlerPool deep-copies it into a refcounted policy
     /// generation that owns the backing for all in-flight runtimes.
     dev_capability_policy: ?zq.RuntimePolicy = null,
@@ -244,8 +244,7 @@ pub fn applyEmbeddedCapabilityPolicy(
     ctx.capability_policy = embedded_handler.capability_policy;
     // Dev/serve override: the embedded policy is the empty stub here, so the
     // full contract-derived policy is the enforcement source in interpreted
-    // mode. AOT builds leave dev_capability_policy null and keep the embedded
-    // list.
+    // mode. A null dev_capability_policy keeps the embedded list.
     if (config.dev_capability_policy) |policy| {
         ctx.capability_policy = policy;
     }

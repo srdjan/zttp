@@ -138,14 +138,6 @@ pub const AppendParams = struct {
     service_name: ?[]const u8 = null,
     /// Override clock for tests; null means read the wall clock.
     now_unix_ms: ?i64 = null,
-    /// Present only when `kind == .perf`. Borrowed; the caller frees
-    /// after `appendEvent` returns. The serialiser writes a `perf` JSON
-    /// object next to `facts`; older readers ignore it.
-    perf: ?*const PerfPayload = null,
-    /// Present only when `kind == .equivalence`. Borrowed; the caller frees
-    /// after `appendEvent` returns. The serialiser writes an `equivalence`
-    /// JSON object next to `facts`; older readers ignore it.
-    equivalence: ?*const EquivalencePayload = null,
     /// Present on deploy rows when the contract carries a cost envelope.
     /// `null` total with a body limit means the worst case is unbounded.
     cost_worst_case_total: ?u64 = null,
@@ -182,53 +174,6 @@ pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
         }
         try json.objectField("costBodyLimit");
         try json.write(body_limit);
-    }
-    if (params.perf) |perf| {
-        try json.objectField("perf");
-        try json.beginObject();
-        try json.objectField("handlerHash");
-        try json.write(perf.handler_hash);
-        try json.objectField("p50Us");
-        try json.write(perf.p50_us);
-        try json.objectField("p99Us");
-        try json.write(perf.p99_us);
-        try json.objectField("allocBytes");
-        try json.write(perf.alloc_bytes);
-        try json.objectField("sampleCount");
-        try json.write(perf.sample_count);
-        try json.objectField("sig");
-        try json.write(perf.sig);
-        try json.endObject();
-    }
-    if (params.equivalence) |eq| {
-        try json.objectField("equivalence");
-        try json.beginObject();
-        try json.objectField("beforeContractHash");
-        try json.write(eq.before_contract_hash);
-        try json.objectField("afterContractHash");
-        try json.write(eq.after_contract_hash);
-        try json.objectField("classification");
-        try json.write(eq.classification);
-        try json.objectField("lawsFired");
-        try json.beginArray();
-        for (eq.laws_fired) |law| try json.write(law);
-        try json.endArray();
-        try json.objectField("behaviorDiff");
-        try json.beginObject();
-        try json.objectField("preserved");
-        try json.write(eq.preserved);
-        try json.objectField("responseChanged");
-        try json.write(eq.response_changed);
-        try json.objectField("added");
-        try json.write(eq.added);
-        try json.objectField("removed");
-        try json.write(eq.removed);
-        try json.endObject();
-        try json.objectField("claimScope");
-        try json.write(eq.claim_scope);
-        try json.objectField("sig");
-        try json.write(eq.sig);
-        try json.endObject();
     }
     try json.endObject();
     try aw.writer.writeByte('\n');
@@ -616,7 +561,7 @@ test "appendEvent appends in order across calls" {
     defer f3.deinit(testing.allocator);
 
     try appendEvent(testing.allocator, .{
-        .kind = .perf,
+        .kind = .deploy,
         .facts = &f1,
         .handler_path = "src/handler.ts",
         .now_unix_ms = 1,
@@ -639,7 +584,7 @@ test "appendEvent appends in order across calls" {
     defer freeEvents(testing.allocator, events);
 
     try testing.expectEqual(@as(usize, 3), events.len);
-    try testing.expectEqual(EventKind.perf, events[0].kind);
+    try testing.expectEqual(EventKind.deploy, events[0].kind);
     try testing.expectEqual(EventKind.swap, events[1].kind);
     try testing.expectEqual(EventKind.deploy, events[2].kind);
     try testing.expectEqualStrings("sha-1", events[0].facts.contract_sha);
@@ -717,50 +662,6 @@ test "readEvents rejects malformed lines" {
     }
 }
 
-test "appendEvent round-trips a kind=perf row with embedded JWS" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    var facts = try buildFactsForTest(testing.allocator, "sha-perf-1", false);
-    defer facts.deinit(testing.allocator);
-
-    // The signature value is opaque to the ledger; we use a placeholder
-    // string here and exercise the real JWS path in the runtime end-to-end
-    // test (see test "Slice H end-to-end" in zruntime_tests.zig).
-    const perf: PerfPayload = .{
-        .handler_hash = "f" ** 64,
-        .p50_us = 17,
-        .p99_us = 142,
-        .alloc_bytes = 4096,
-        .sample_count = 256,
-        .sig = "header.payload.signature",
-    };
-
-    try appendEvent(testing.allocator, .{
-        .kind = .perf,
-        .facts = &facts,
-        .handler_path = "src/handler.ts",
-        .now_unix_ms = 1_700_000_001_000,
-        .perf = &perf,
-    });
-
-    const events = try readEvents(testing.allocator);
-    defer freeEvents(testing.allocator, events);
-
-    try testing.expectEqual(@as(usize, 1), events.len);
-    try testing.expectEqual(EventKind.perf, events[0].kind);
-    try testing.expect(events[0].perf != null);
-    try testing.expectEqualStrings("f" ** 64, events[0].perf.?.handler_hash);
-    try testing.expectEqual(@as(u64, 17), events[0].perf.?.p50_us);
-    try testing.expectEqual(@as(u64, 142), events[0].perf.?.p99_us);
-    try testing.expectEqual(@as(u64, 4096), events[0].perf.?.alloc_bytes);
-    try testing.expectEqual(@as(u64, 256), events[0].perf.?.sample_count);
-    try testing.expectEqualStrings("header.payload.signature", events[0].perf.?.sig);
-}
-
 test "appendEvent without perf payload omits the field for back-compat" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -788,56 +689,6 @@ test "appendEvent without perf payload omits the field for back-compat" {
     defer freeEvents(testing.allocator, events);
     try testing.expectEqual(@as(usize, 1), events.len);
     try testing.expectEqual(@as(?PerfPayload, null), events[0].perf);
-}
-
-test "appendEvent round-trips a kind=equivalence row" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    var facts = try buildFactsForTest(testing.allocator, "sha-eq-1", false);
-    defer facts.deinit(testing.allocator);
-
-    const eq: EquivalencePayload = .{
-        .before_contract_hash = "aa",
-        .after_contract_hash = "bb",
-        .classification = "equivalent_modulo_laws",
-        .laws_fired = &.{ "spread_assoc", "guard_hoist" },
-        .preserved = 5,
-        .response_changed = 0,
-        .added = 1,
-        .removed = 0,
-        .claim_scope = "deterministic",
-        .sig = "header.payload.signature",
-    };
-
-    try appendEvent(testing.allocator, .{
-        .kind = .equivalence,
-        .facts = &facts,
-        .handler_path = "src/handler.ts",
-        .now_unix_ms = 1_700_000_003_000,
-        .equivalence = &eq,
-    });
-
-    const events = try readEvents(testing.allocator);
-    defer freeEvents(testing.allocator, events);
-
-    try testing.expectEqual(@as(usize, 1), events.len);
-    try testing.expectEqual(EventKind.equivalence, events[0].kind);
-    try testing.expect(events[0].equivalence != null);
-    const got = events[0].equivalence.?;
-    try testing.expectEqualStrings("aa", got.before_contract_hash);
-    try testing.expectEqualStrings("bb", got.after_contract_hash);
-    try testing.expectEqualStrings("equivalent_modulo_laws", got.classification);
-    try testing.expectEqual(@as(usize, 2), got.laws_fired.len);
-    try testing.expectEqualStrings("spread_assoc", got.laws_fired[0]);
-    try testing.expectEqualStrings("guard_hoist", got.laws_fired[1]);
-    try testing.expectEqual(@as(u32, 5), got.preserved);
-    try testing.expectEqual(@as(u32, 1), got.added);
-    try testing.expectEqualStrings("deterministic", got.claim_scope);
-    try testing.expectEqualStrings("header.payload.signature", got.sig);
 }
 
 test "equivalence event kind round-trips through string" {
@@ -921,4 +772,39 @@ test "a legacy kind=equivalence row written by the removed probe still loads" {
     try testing.expectEqual(@as(u32, 0), eq.added);
     try testing.expectEqual(@as(u32, 0), eq.removed);
     try testing.expect(std.mem.startsWith(u8, eq.sig, "eyJhbGciOiJFZERTQSIs"));
+}
+
+// A raw `kind=equivalence` row whose payload is not empty: it carries fired
+// laws and non-zero counts, which the captured legacy row above does not.
+// The facts are the legacy row's own; only the payload differs.
+const raw_equivalence_row = legacy_equivalence_row[0..(std.mem.indexOf(u8, legacy_equivalence_row, "\"equivalence\":") orelse unreachable)] ++
+    "\"equivalence\":{\"beforeContractHash\":\"aa\",\"afterContractHash\":\"bb\",\"classification\":\"equivalent_modulo_laws\",\"lawsFired\":[\"spread_assoc\",\"guard_hoist\"],\"behaviorDiff\":{\"preserved\":5,\"responseChanged\":0,\"added\":1,\"removed\":0},\"claimScope\":\"deterministic\",\"sig\":\"header.payload.signature\"}}";
+
+test "a raw kind=equivalence row decodes fired laws and counts" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try state.ensureStateDir();
+    try zts.file_io.writeFile(testing.allocator, ledgerPath(), raw_equivalence_row ++ "\n");
+
+    const events = try readEvents(testing.allocator);
+    defer freeEvents(testing.allocator, events);
+
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(EventKind.equivalence, events[0].kind);
+    try testing.expect(events[0].equivalence != null);
+    const got = events[0].equivalence.?;
+    try testing.expectEqualStrings("aa", got.before_contract_hash);
+    try testing.expectEqualStrings("bb", got.after_contract_hash);
+    try testing.expectEqualStrings("equivalent_modulo_laws", got.classification);
+    try testing.expectEqual(@as(usize, 2), got.laws_fired.len);
+    try testing.expectEqualStrings("spread_assoc", got.laws_fired[0]);
+    try testing.expectEqualStrings("guard_hoist", got.laws_fired[1]);
+    try testing.expectEqual(@as(u32, 5), got.preserved);
+    try testing.expectEqual(@as(u32, 1), got.added);
+    try testing.expectEqualStrings("deterministic", got.claim_scope);
+    try testing.expectEqualStrings("header.payload.signature", got.sig);
 }

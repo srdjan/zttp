@@ -842,7 +842,7 @@ fn runTurnBody(
                     var gate_arena = std.heap.ArenaAllocator.init(ta);
                     const declared: ?*const registry_mod.ToolDef = blk: {
                         const found = registry.findByName(call.name) orelse break :blk null;
-                        // A trusted-only or RPC-only tool was never shown to the
+                        // A trusted-only tool was never shown to the
                         // model, so a call naming it is undeclared, not merely
                         // mis-typed. `findByName` alone cannot tell them apart.
                         break :blk if (found.allowedOn(.model)) found else null;

@@ -168,7 +168,7 @@ test "invokeJson decodes structured args before calling execute" {
     try testing.expectEqualStrings("hello json", result.llm_text);
 }
 
-test "model and rpc surfaces reject workspace writers" {
+test "the model surface rejects workspace writers" {
     var reg: Registry = .{};
     defer reg.deinit(testing.allocator);
     try reg.register(testing.allocator, writer_tool);
@@ -176,10 +176,6 @@ test "model and rpc surfaces reject workspace writers" {
     try testing.expectError(
         RegistryError.ToolNotAllowed,
         reg.invokeJsonOn(testing.allocator, .model, "writer", "{}"),
-    );
-    try testing.expectError(
-        RegistryError.ToolNotAllowed,
-        reg.invokeJsonOn(testing.allocator, .rpc, "writer", "{}"),
     );
 }
 

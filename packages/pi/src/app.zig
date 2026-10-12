@@ -528,13 +528,11 @@ test "buildRegistry omits writers and retired duplicate routes from model tools"
     const search = reg.findByName("workspace_search_text") orelse return error.TestFailed;
     try testing.expectEqual(registry_mod.ToolEffect.execute_process, search.effect);
     try testing.expect(search.allowedOn(.model));
-    try testing.expect(!search.allowedOn(.rpc));
 
     inline for (&.{ "zts_check", "pi_specs_status" }) |name| {
         const local_only = reg.findByName(name) orelse return error.TestFailed;
         try testing.expectEqual(registry_mod.ToolEffect.execute_process, local_only.effect);
         try testing.expect(!local_only.allowedOn(.model));
-        try testing.expect(!local_only.allowedOn(.rpc));
     }
 }
 

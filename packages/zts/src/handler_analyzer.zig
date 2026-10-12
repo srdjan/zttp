@@ -59,7 +59,7 @@ pub const HandlerAnalyzer = struct {
     }
 
     /// Enable detection for `Response.json(JSON.parse(request.body))` patterns.
-    /// This is intended for AOT precompile paths.
+    /// Route analysis during precompile turns this on.
     pub fn enableJsonBodyParsePatterns(self: *HandlerAnalyzer) void {
         self.enable_json_body_parse = true;
     }
@@ -599,7 +599,7 @@ pub const HandlerAnalyzer = struct {
                     };
                 }
 
-                // AOT-only dynamic pattern: Response.json(JSON.parse(request.body))
+                // Dynamic pattern: Response.json(JSON.parse(request.body)), recognised only when enableJsonBodyParsePatterns ran
                 if (self.enable_json_body_parse and self.isJsonParseOfRequestBody(arg_idx)) {
                     return .{
                         .body = "",

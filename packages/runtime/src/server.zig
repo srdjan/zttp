@@ -46,7 +46,6 @@ const pcc = @import("zttp_proof_checker");
 const proof_activation = @import("proof_activation.zig");
 const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
-const attest_build_receipt = @import("attest/build_receipt.zig");
 const self_extract = @import("self_extract.zig");
 const security_logger_mod = @import("security_logger.zig");
 const SecurityLogger = security_logger_mod.SecurityLogger;
@@ -1459,11 +1458,6 @@ pub const Server = struct {
     /// `attestation_headers`. Null on unattested builds; the route falls
     /// through to the normal handler path.
     well_known_doc: ?attest_well_known.Doc,
-    /// SHA-256 fingerprint of the signer public key, lowercase hex,
-    /// recovered from the embedded JWS during `Server.start` self-verify.
-    /// The HUD's "Caller view" lens consumes this; verifiers can pin it
-    /// with `zttp verify --trust-key <hex>`.
-    signer_fingerprint_hex: ?[64]u8,
     /// Co-located sub-handler registry for in-process `zttp:workflow.call`,
     /// built from `--system <manifest>` in `start()`. Each pooled orchestrator
     /// runtime references it via `RuntimeConfig.system_registry`. Null when no
@@ -1542,7 +1536,6 @@ pub const Server = struct {
             .security_logger = null,
             .attestation_headers = null,
             .well_known_doc = null,
-            .signer_fingerprint_hex = null,
         };
     }
 
@@ -1954,7 +1947,6 @@ pub const Server = struct {
             wkd.deinit(self.allocator);
             self.well_known_doc = null;
         }
-        self.signer_fingerprint_hex = null;
     }
 
     /// Cross-check the signed attestation claims against the hashes the server
@@ -2331,53 +2323,6 @@ pub const Server = struct {
         return identity;
     }
 
-    pub fn installDevAttestation(
-        self: *Self,
-        contract_json: []const u8,
-        bytecode: []const u8,
-        contract: *const engine.HandlerContract,
-    ) !void {
-        self.contract_lock.lock();
-        defer self.contract_lock.unlock();
-        self.clearAttestation();
-
-        const jws = try attest_build_receipt.buildDevJws(self.allocator, contract_json, bytecode, contract);
-        defer self.allocator.free(jws);
-
-        const props_or_default = contract.properties orelse engine.defaultHandlerProperties();
-
-        self.attestation_headers = try attest_header_strings.build(
-            self.allocator,
-            props_or_default,
-            jws,
-        );
-        errdefer {
-            if (self.attestation_headers) |*ah| {
-                ah.deinit(self.allocator);
-                self.attestation_headers = null;
-            }
-        }
-
-        var verify_result = try attest_envelope.verify(self.allocator, jws);
-        defer verify_result.deinit();
-
-        self.well_known_doc = try attest_well_known.build(
-            self.allocator,
-            contract_json,
-            jws,
-            verify_result.public_key,
-            verify_result.claims.contract_sha256,
-        );
-        errdefer {
-            if (self.well_known_doc) |*doc| {
-                doc.deinit(self.allocator);
-                self.well_known_doc = null;
-            }
-        }
-
-        self.signer_fingerprint_hex = verify_result.fingerprint_hex;
-    }
-
     /// Derive the full capability policy from a freshly compiled
     /// HandlerContract and push it onto the runtime pool (dev/serve live path
     /// only). Fail-closed on allocation failure so a proven-restricted handler
@@ -2574,8 +2519,8 @@ pub const Server = struct {
 
         // Either a checked source-policy contract or an accepted deployed
         // tuple can require authoritative bounded membership. Preserve the
-        // source-policy bit installed before Server.init; AOT handlers also
-        // carry their bit in generated code and the pool combines that input.
+        // source-policy bit installed before Server.init; the pool combines it
+        // with the bit that `embedded_handler` carries.
         pool_rt_config.runtime_policy_index_required = requiresRuntimePolicyIndex(
             pool_rt_config.runtime_policy_index_required,
             if (self.proof_checked) |promoted| promoted.guards.required > 0 else false,
@@ -2736,7 +2681,6 @@ pub const Server = struct {
                         break :attest;
                     };
                     self.well_known_doc = doc;
-                    self.signer_fingerprint_hex = verify_result.fingerprint_hex;
                     std.log.info("   Attestation: enabled (bound to running bytecode)", .{});
                 }
             }

@@ -44,7 +44,6 @@ const std = @import("std");
 const counterexample = @import("counterexample.zig");
 const json_utils = @import("zts-base").json_utils;
 const file_io = @import("zts-engine").file_io;
-const spec_discharge = @import("spec_discharge.zig");
 
 pub const corpus_root_relative = ".zttp/witnesses";
 
@@ -246,92 +245,6 @@ fn appendIndexEvent(
     }
 }
 
-/// Synthesise a structural witness for a cause-only spec and persist it
-/// to the corpus. Unlike flow-witness solve+persist, this does not try
-/// to construct a falsifying request: the spec's failure is a structural
-/// classifier verdict, not a trace property. The witness records the
-/// spec name plus a human-readable cause summary, keyed by
-/// sha256(spec_name|handler_path) so repeat synthesis is idempotent.
-///
-/// Caller owns the returned `PersistResult` (call `deinit`).
-pub fn synthesizeStructural(
-    allocator: std.mem.Allocator,
-    corpus_dir: []const u8,
-    spec_name: []const u8,
-    handler_path: []const u8,
-    summary: []const u8,
-) !PersistResult {
-    if (!spec_discharge.isCauseOnly(spec_name)) return error.UnsupportedSpec;
-
-    const key = try structuralKey(allocator, spec_name, handler_path);
-    errdefer allocator.free(key);
-
-    const file_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/{s}.witness.jsonl",
-        .{ corpus_dir, key },
-    );
-    errdefer allocator.free(file_path);
-
-    if (file_io.fileExists(allocator, file_path)) {
-        return .{
-            .outcome = .refreshed,
-            .key = key,
-            .file_path = file_path,
-        };
-    }
-
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{file_path});
-    defer allocator.free(tmp_path);
-
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    try writeStructuralJsonl(&aw.writer, spec_name, summary);
-    try file_io.writeFile(allocator, tmp_path, aw.writer.buffered());
-    try renameAtomic(allocator, tmp_path, file_path);
-
-    try appendIndexEvent(allocator, corpus_dir, .{
-        .property = spec_name,
-        .key = key,
-        .summary = summary,
-    });
-
-    return .{
-        .outcome = .created,
-        .key = key,
-        .file_path = file_path,
-    };
-}
-
-fn structuralKey(
-    allocator: std.mem.Allocator,
-    spec_name: []const u8,
-    handler_path: []const u8,
-) ![]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update("structural\x00");
-    hasher.update(spec_name);
-    hasher.update("\x00");
-    hasher.update(handler_path);
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    return allocator.dupe(u8, &hex);
-}
-
-fn writeStructuralJsonl(
-    writer: *std.Io.Writer,
-    spec_name: []const u8,
-    summary: []const u8,
-) !void {
-    try writer.writeAll("{\"type\":\"witness\",\"property\":");
-    try json_utils.writeJsonString(writer, spec_name);
-    try writer.writeAll(",\"origin\":{\"line\":1,\"column\":1},\"sink\":{\"line\":1,\"column\":1},\"kind\":\"structural\",\"summary\":");
-    try json_utils.writeJsonString(writer, summary);
-    try writer.writeAll("}\n");
-    try writer.writeAll("{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n");
-}
-
 /// True when a `<key>.pinned` marker exists in the corpus directory.
 /// Cheap: a single `access` syscall per check. Used by build-time tooling
 /// to flag regressions that re-fire a previously pinned witness.
@@ -347,62 +260,6 @@ pub fn isPinned(
     ) catch return false;
     defer allocator.free(marker);
     return file_io.fileExists(allocator, marker);
-}
-
-/// Toggle the pinned marker for a witness. Pinned witnesses are protected
-/// from `prune`. Idempotent.
-pub fn pin(
-    allocator: std.mem.Allocator,
-    corpus_dir: []const u8,
-    key: []const u8,
-    pinned: bool,
-) !void {
-    const marker = try std.fmt.allocPrint(
-        allocator,
-        "{s}/{s}.pinned",
-        .{ corpus_dir, key },
-    );
-    defer allocator.free(marker);
-
-    if (pinned) {
-        try file_io.writeFile(allocator, marker, "");
-    } else {
-        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        std.Io.Dir.cwd().deleteFile(io_backend.io(), marker) catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => return err,
-        };
-    }
-}
-
-/// Remove unpinned witnesses whose `first_seen_unix_s` is older than the
-/// given cutoff. Returns the number of witness files removed. Pinned
-/// witnesses are left in place regardless of age.
-pub fn prune(
-    allocator: std.mem.Allocator,
-    corpus_dir: []const u8,
-    older_than_unix_s: i64,
-) !usize {
-    const entries = loadEntries(allocator, corpus_dir) catch |err| switch (err) {
-        error.WitnessCorpusMissing => return 0,
-        else => return err,
-    };
-    defer freeEntries(allocator, entries);
-
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    const cwd = std.Io.Dir.cwd();
-
-    var removed: usize = 0;
-    for (entries) |e| {
-        if (e.pinned) continue;
-        if (e.first_seen_unix_s >= older_than_unix_s) continue;
-        cwd.deleteFile(io, e.file_path) catch continue;
-        removed += 1;
-    }
-    return removed;
 }
 
 /// Hydrate every entry in the corpus for one handler by replaying
@@ -549,70 +406,6 @@ fn freeEntry(allocator: std.mem.Allocator, e: *Entry) void {
     allocator.free(e.summary);
     allocator.free(e.file_path);
     e.* = undefined;
-}
-
-/// Number of leading hex chars from a witness key surfaced to the model in
-/// few-shot prompt lines. Short enough to keep the line compact, long enough
-/// for the agent to refer back to the full key via `pi_witnesses`.
-pub const FEW_SHOT_KEY_PREFIX_LEN: usize = 8;
-
-/// Length, in bytes, of the rendered few-shot line for `entry` using the
-/// shape `expert_persona` writes. Exposed so the persona builder and the
-/// selector agree byte-for-byte on the budget accounting.
-pub fn fewShotLineLen(entry: Entry) usize {
-    // "- [" + property + "] " + summary + " (key=" + short + suffix + ")\n"
-    const short_len = @min(FEW_SHOT_KEY_PREFIX_LEN, entry.key.len);
-    const suffix_len: usize = if (entry.pinned) ", pinned".len else 0;
-    return 3 + entry.property.len + 2 + entry.summary.len + 6 + short_len + suffix_len + 2;
-}
-
-/// Select witness entries for inclusion as few-shot context in the persona
-/// prompt. Order: pinned entries first, then most-recent unpinned by
-/// `first_seen_unix_s` descending. Selection stops when the next entry's
-/// rendered line would push the cumulative line bytes past `budget_bytes`.
-///
-/// Returns an empty slice when the corpus is missing or contains zero
-/// entries. Caller frees the result with `freeEntries`.
-pub fn selectFewShot(
-    allocator: std.mem.Allocator,
-    corpus_dir: []const u8,
-    budget_bytes: usize,
-) ![]Entry {
-    var entries = loadEntries(allocator, corpus_dir) catch |err| switch (err) {
-        error.WitnessCorpusMissing => return try allocator.alloc(Entry, 0),
-        else => return err,
-    };
-    errdefer freeEntries(allocator, entries);
-
-    if (entries.len == 0) return entries;
-
-    std.mem.sort(Entry, entries, {}, fewShotLessThan);
-
-    var used: usize = 0;
-    var kept: usize = 0;
-    while (kept < entries.len) : (kept += 1) {
-        const line_len = fewShotLineLen(entries[kept]);
-        if (used + line_len > budget_bytes) break;
-        used += line_len;
-    }
-
-    if (kept == entries.len) return entries;
-
-    // Free the entries we did not keep, then return a fresh slice. We do not
-    // use allocator.resize here: it returns the same backing allocation, so
-    // the caller's freeEntries would either free a length-mismatched slice
-    // (allocator size-class panic) or, in the kept == 0 edge case, free a
-    // zero-length slice that points into freed memory.
-    for (entries[kept..]) |*e| freeEntry(allocator, e);
-    const kept_slice = try allocator.alloc(Entry, kept);
-    @memcpy(kept_slice, entries[0..kept]);
-    allocator.free(entries);
-    return kept_slice;
-}
-
-fn fewShotLessThan(_: void, a: Entry, b: Entry) bool {
-    if (a.pinned != b.pinned) return a.pinned and !b.pinned;
-    return a.first_seen_unix_s > b.first_seen_unix_s;
 }
 
 /// Aggregate witness counts per property name. Caller frees with `freeCounts`.
@@ -807,7 +600,7 @@ test "loadEntries hydrates persisted witnesses with summary" {
     try testing.expect(!entries[0].pinned);
 }
 
-test "pin sets and clears the pinned marker" {
+test "a hand-made pinned marker is read by isPinned and loadEntries" {
     const allocator = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -825,38 +618,20 @@ test "pin sets and clears the pinned marker" {
     var r = try persist(allocator, dir, w);
     defer r.deinit(allocator);
 
-    try pin(allocator, dir, r.key, true);
+    try testing.expect(!isPinned(allocator, dir, r.key));
+    const before = try loadEntries(allocator, dir);
+    try testing.expect(!before[0].pinned);
+    freeEntries(allocator, before);
 
-    var entries = try loadEntries(allocator, dir);
-    try testing.expect(entries[0].pinned);
-    freeEntries(allocator, entries);
+    // The documented way to pin a witness is to create its marker file.
+    const marker = try std.fmt.allocPrint(allocator, "{s}/{s}.pinned", .{ dir, r.key });
+    defer allocator.free(marker);
+    try file_io.writeFile(allocator, marker, "");
 
-    try pin(allocator, dir, r.key, false);
-    entries = try loadEntries(allocator, dir);
-    defer freeEntries(allocator, entries);
-    try testing.expect(!entries[0].pinned);
-}
-
-test "pin off is idempotent when marker is already absent" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    var w = try makeWitness(allocator, "x");
-    defer w.deinit(allocator);
-
-    const dir = try corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try ensureCorpusDir(allocator, dir, "h.ts");
-
-    var r = try persist(allocator, dir, w);
-    defer r.deinit(allocator);
-
-    try pin(allocator, dir, r.key, false);
-    try pin(allocator, dir, r.key, false);
+    try testing.expect(isPinned(allocator, dir, r.key));
+    const after = try loadEntries(allocator, dir);
+    defer freeEntries(allocator, after);
+    try testing.expect(after[0].pinned);
 }
 
 test "loadEntries returns WitnessCorpusMissing when nothing exists" {
@@ -965,224 +740,4 @@ test "writeProofEnvelopeBlock emits zero-total when corpus is missing" {
     defer aw.deinit();
     try writeProofEnvelopeBlock(allocator, &aw.writer, dir);
     try testing.expectEqualStrings("{\"total\":0,\"by_property\":{}}", aw.writer.buffered());
-}
-
-test "synthesizeStructural rejects non-cause-only specs" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try ensureCorpusDir(allocator, dir, "h.ts");
-
-    const result = synthesizeStructural(allocator, dir, "no_secret_leakage", "h.ts", "x");
-    try testing.expectError(error.UnsupportedSpec, result);
-}
-
-test "synthesizeStructural creates a structural witness for cause-only specs" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try ensureCorpusDir(allocator, dir, "h.ts");
-
-    var first = try synthesizeStructural(allocator, dir, "deterministic", "h.ts", "remove Date.now()");
-    defer first.deinit(allocator);
-    try testing.expectEqual(PersistOutcome.created, first.outcome);
-    try testing.expectEqual(@as(usize, 64), first.key.len);
-
-    // Idempotent on the same (spec, handler) pair.
-    var second = try synthesizeStructural(allocator, dir, "deterministic", "h.ts", "remove Date.now()");
-    defer second.deinit(allocator);
-    try testing.expectEqual(PersistOutcome.refreshed, second.outcome);
-    try testing.expectEqualStrings(first.key, second.key);
-
-    const entries = try loadEntries(allocator, dir);
-    defer freeEntries(allocator, entries);
-    try testing.expectEqual(@as(usize, 1), entries.len);
-    try testing.expectEqualStrings("deterministic", entries[0].property);
-    try testing.expectEqualStrings("remove Date.now()", entries[0].summary);
-}
-
-test "prune removes only entries older than the cutoff and not pinned" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try ensureCorpusDir(allocator, dir, "h.ts");
-
-    var w = try makeWitness(allocator, "x");
-    defer w.deinit(allocator);
-    var r = try persist(allocator, dir, w);
-    defer r.deinit(allocator);
-
-    // Past cutoff: nothing to remove.
-    try testing.expectEqual(@as(usize, 0), try prune(allocator, dir, nowUnixSeconds() - 60));
-
-    const future = nowUnixSeconds() + 60;
-
-    // Pin the only entry; even with an aggressive cutoff it stays.
-    try pin(allocator, dir, r.key, true);
-    try testing.expectEqual(@as(usize, 0), try prune(allocator, dir, future));
-
-    // Unpin and prune with a future cutoff.
-    try pin(allocator, dir, r.key, false);
-    try testing.expectEqual(@as(usize, 1), try prune(allocator, dir, future));
-}
-
-test "selectFewShot returns empty slice on missing corpus" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try corpusDir(allocator, "missing.ts");
-    defer allocator.free(dir);
-
-    const entries = try selectFewShot(allocator, dir, 8 * 1024);
-    defer freeEntries(allocator, entries);
-    try testing.expectEqual(@as(usize, 0), entries.len);
-}
-
-test "selectFewShot orders pinned entries before unpinned, then newest first" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try ensureCorpusDir(allocator, dir, "h.ts");
-
-    // Three witnesses with distinct properties; vary summary so stableKey differs.
-    var w1 = try counterexample.solve(allocator, .{
-        .property = .no_secret_leakage,
-        .origin = .{ .line = 1, .column = 1 },
-        .sink = .{ .line = 2, .column = 1 },
-        .origin_node_id = 1,
-        .sink_node_id = 2,
-        .summary = "alpha",
-        .constraints = &.{},
-        .io_calls = &.{},
-    });
-    defer w1.deinit(allocator);
-    var r1 = try persist(allocator, dir, w1);
-    defer r1.deinit(allocator);
-
-    var w2 = try counterexample.solve(allocator, .{
-        .property = .injection_safe,
-        .origin = .{ .line = 3, .column = 1 },
-        .sink = .{ .line = 4, .column = 1 },
-        .origin_node_id = 3,
-        .sink_node_id = 4,
-        .summary = "beta",
-        .constraints = &.{},
-        .io_calls = &.{},
-    });
-    defer w2.deinit(allocator);
-    var r2 = try persist(allocator, dir, w2);
-    defer r2.deinit(allocator);
-
-    var w3 = try counterexample.solve(allocator, .{
-        .property = .no_credential_leakage,
-        .origin = .{ .line = 5, .column = 1 },
-        .sink = .{ .line = 6, .column = 1 },
-        .origin_node_id = 5,
-        .sink_node_id = 6,
-        .summary = "gamma",
-        .constraints = &.{},
-        .io_calls = &.{},
-    });
-    defer w3.deinit(allocator);
-    var r3 = try persist(allocator, dir, w3);
-    defer r3.deinit(allocator);
-
-    // Pin w2 only.
-    try pin(allocator, dir, r2.key, true);
-
-    const selected = try selectFewShot(allocator, dir, 8 * 1024);
-    defer freeEntries(allocator, selected);
-
-    try testing.expectEqual(@as(usize, 3), selected.len);
-    try testing.expect(selected[0].pinned);
-    try testing.expectEqualStrings("injection_safe", selected[0].property);
-    // Remaining two are unpinned; both should be present in either order.
-    try testing.expect(!selected[1].pinned);
-    try testing.expect(!selected[2].pinned);
-}
-
-test "selectFewShot truncates at the byte budget without partial entries" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try ensureCorpusDir(allocator, dir, "h.ts");
-
-    var w1 = try counterexample.solve(allocator, .{
-        .property = .no_secret_leakage,
-        .origin = .{ .line = 1, .column = 1 },
-        .sink = .{ .line = 2, .column = 1 },
-        .origin_node_id = 1,
-        .sink_node_id = 2,
-        .summary = "first",
-        .constraints = &.{},
-        .io_calls = &.{},
-    });
-    defer w1.deinit(allocator);
-    var r1 = try persist(allocator, dir, w1);
-    defer r1.deinit(allocator);
-
-    var w2 = try counterexample.solve(allocator, .{
-        .property = .injection_safe,
-        .origin = .{ .line = 3, .column = 1 },
-        .sink = .{ .line = 4, .column = 1 },
-        .origin_node_id = 3,
-        .sink_node_id = 4,
-        .summary = "second",
-        .constraints = &.{},
-        .io_calls = &.{},
-    });
-    defer w2.deinit(allocator);
-    var r2 = try persist(allocator, dir, w2);
-    defer r2.deinit(allocator);
-
-    // Pin r1 so it sorts first; budget large enough for one line, not two.
-    try pin(allocator, dir, r1.key, true);
-
-    const all = try selectFewShot(allocator, dir, 8 * 1024);
-    defer freeEntries(allocator, all);
-    try testing.expectEqual(@as(usize, 2), all.len);
-
-    const first_line_len = fewShotLineLen(all[0]);
-    const tight = try selectFewShot(allocator, dir, first_line_len + 1);
-    defer freeEntries(allocator, tight);
-    try testing.expectEqual(@as(usize, 1), tight.len);
-    try testing.expect(tight[0].pinned);
-
-    const zero = try selectFewShot(allocator, dir, 0);
-    defer freeEntries(allocator, zero);
-    try testing.expectEqual(@as(usize, 0), zero.len);
 }

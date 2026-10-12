@@ -1,4 +1,4 @@
-//! Shared proof-receipt signer for build-time and dev-time attestation.
+//! Shared proof-receipt signer for build-time attestation.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -63,28 +63,6 @@ pub fn buildJws(
         runtime_policy_sha256,
         executable_root_sha256,
         loaded.key_pair,
-    );
-}
-
-/// Produces a compact JWS for local dev receipts. Dev servers may run with a
-/// stripped environment, so this falls back to a process-local ephemeral key
-/// when the persistent identity cannot be loaded.
-pub fn buildDevJws(
-    allocator: std.mem.Allocator,
-    contract_json: []const u8,
-    bytecode: []const u8,
-    contract: *const zts.HandlerContract,
-) ![]u8 {
-    return try buildJwsWithKey(
-        allocator,
-        contract_json,
-        bytecode,
-        contract,
-        envelope.unpinned_runtime_policy_sha256,
-        // A dev receipt has no self-extracting artifact behind it, so there is
-        // no executable graph to commit to and it says so.
-        envelope.unpinned_executable_root,
-        loadPersistentOrEphemeralKey(allocator),
     );
 }
 
@@ -185,42 +163,6 @@ fn buildJwsWithKey(
 
     var env = try envelope.sign(allocator, claims, key_pair);
     return env.intoJws();
-}
-
-fn loadPersistentOrEphemeralKey(allocator: std.mem.Allocator) Ed25519.KeyPair {
-    const loaded = identity.loadOrCreate(allocator) catch |err| {
-        std.log.warn("attest: persistent identity unavailable ({s}); using ephemeral dev key", .{@errorName(err)});
-        return ephemeralKeyPair();
-    };
-    if (loaded.source == .generated) {
-        std.log.info("attest: minted persistent identity (fingerprint {s})", .{loaded.fingerprint_hex[0..16]});
-    }
-    return loaded.key_pair;
-}
-
-fn ephemeralKeyPair() Ed25519.KeyPair {
-    var seed: [Ed25519.KeyPair.seed_length]u8 = undefined;
-    // A signing key must come from a CSPRNG. The old fallback seeded a
-    // non-cryptographic xoshiro PRNG from time^pid - a low-entropy, partially
-    // predictable space an attacker could search to forge attestations. This
-    // Zig version exposes no portable OS-CSPRNG fallback (no std.posix.getrandom;
-    // arc4random_buf is absent on non-glibc Linux), so fail closed rather than
-    // mint a weak key - mirroring zttp:id, which panics rather than seed its
-    // CSPRNG from anything but /dev/urandom.
-    fillCsprng(&seed) catch @panic("attest: /dev/urandom unavailable; refusing to mint a signing key from a weak seed");
-    return envelope.keyPairFromSeed(seed) catch unreachable;
-}
-
-fn fillCsprng(buf: *[Ed25519.KeyPair.seed_length]u8) !void {
-    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-    if (fd < 0) return error.UrandomOpenFailed;
-    defer _ = std.c.close(fd);
-    var filled: usize = 0;
-    while (filled < buf.len) {
-        const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
-        if (n <= 0) return error.UrandomReadFailed;
-        filled += @intCast(n);
-    }
 }
 
 // The receipt uses an all-zero `capabilityHash` to mean "this contract makes no

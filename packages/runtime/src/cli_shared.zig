@@ -78,12 +78,6 @@ pub fn realCwd(allocator: std.mem.Allocator) ![]u8 {
     return try allocator.dupe(u8, cwd_z);
 }
 
-pub fn nowUnixMs() i64 {
-    var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
-    return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
-}
-
 pub fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const u8 {
     i.* += 1;
     if (i.* >= argv.len) return missing;
@@ -121,14 +115,6 @@ pub fn writeStdoutLine(s: []const u8) void {
 pub fn writeStderrLine(s: []const u8) void {
     _ = std.c.write(std.c.STDERR_FILENO, s.ptr, s.len);
     _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
-}
-
-/// Report that an opt-in feature was compiled out of this build and exit
-/// non-zero. `name` is the command (e.g. "edge"), `flag` the build option
-/// to rebuild with (e.g. "edge" for `zig build -Dedge`).
-pub fn featureCompiledOut(name: []const u8, flag: []const u8) noreturn {
-    std.debug.print("zttp {s} was compiled out of this build. Rebuild with: zig build -D{s}\n", .{ name, flag });
-    std.process.exit(1);
 }
 
 pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {

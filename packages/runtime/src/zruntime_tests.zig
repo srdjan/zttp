@@ -639,7 +639,6 @@ test {
     _ = @import("replay_runner.zig");
     _ = @import("durable_fetch.zig");
     _ = @import("retry_backoff.zig");
-    _ = @import("handler_corpus.zig");
     _ = @import("durable_dead_runs.zig");
     _ = @import("durable_dead_runs_cli.zig");
     _ = @import("fault_explain.zig");

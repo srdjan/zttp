@@ -163,7 +163,7 @@ The routes the handler answers and the shapes it accepts and returns. Bounded by
 `ApiRouteInfo`, reached through `ApiInfo.routes` in
 `packages/zts/src/contract_types.zig`, already expresses: method and path pattern,
 request schemas, response variants with their status codes, and authentication metadata.
-The sibling `RouteInfo` in the same file is the AOT route-table record. It carries
+The sibling `RouteInfo` in the same file is the route-table record. It carries
 `pattern`, `route_type`, `field`, `status`, `content_type`, and `aot`, and none of the
 fields this section draws on.
 

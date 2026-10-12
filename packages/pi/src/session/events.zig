@@ -954,21 +954,6 @@ pub fn writeEventLine(writer: *std.Io.Writer, record: EventRecord) !void {
     try writer.writeByte('\n');
 }
 
-pub fn writeEntryEventLine(
-    writer: *std.Io.Writer,
-    entry_id: EntryId,
-    part_index: ?u32,
-    record: EventRecord,
-) !void {
-    if (!isTranscriptRecord(record) or entry_id == 0) return error.InvalidEventIdentity;
-    try writeEnvelopeJson(writer, .{
-        .record = record,
-        .entry_id = entry_id,
-        .part_index = part_index,
-    });
-    try writer.writeByte('\n');
-}
-
 fn isTranscriptRecord(record: EventRecord) bool {
     return isTranscriptKind(std.meta.activeTag(record));
 }

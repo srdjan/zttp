@@ -1,7 +1,7 @@
 //! Leak-safe collection of writer output into an owned slice.
 //!
 //! Kept dependency-free (std only) so every layer of the agent - tools,
-//! transcript, loop, providers, RPC - can use it without an import cycle.
+//! transcript, loop, providers - can use it without an import cycle.
 
 const std = @import("std");
 

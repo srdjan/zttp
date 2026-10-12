@@ -17,7 +17,7 @@ pub const UiPayload = ui_payload.UiPayload;
 
 /// Execution outcome. `llm_text` is the compact provider-facing payload that
 /// stays in the transcript. `ui_payload` is optional structured data for the
-/// REPL, session replay, RPC, and JSON mode.
+/// REPL, session replay, and JSON mode.
 pub const ToolResult = struct {
     ok: bool,
     llm_text: []u8,
@@ -146,11 +146,9 @@ pub const InvocationSurface = enum {
     trusted,
     /// Provider/model tool calls inside the compiler-veto turn loop.
     model,
-    /// Generic JSON-RPC `tools.invoke` calls.
-    rpc,
 };
 
-/// Whether a trusted/RPC tool also belongs in the static model prefix. Some
+/// Whether a trusted tool also belongs in the static model prefix. Some
 /// local commands are deliberately retained after a model-facing authority is
 /// consolidated; keeping that choice on the definition avoids name-based
 /// filtering in provider serializers.
@@ -176,10 +174,6 @@ pub const ToolDef = struct {
             .model => self.model_exposure == .visible and switch (self.effect) {
                 .analyze, .read_workspace, .execute_process, .persist_agent_state => true,
                 .write_workspace => false,
-            },
-            .rpc => switch (self.effect) {
-                .analyze, .read_workspace => true,
-                .execute_process, .persist_agent_state, .write_workspace => false,
             },
         };
     }
@@ -360,7 +354,6 @@ test "local-only tools remain trusted but cannot enter the model prefix" {
     };
     try testing.expect(local_only.allowedOn(.trusted));
     try testing.expect(!local_only.allowedOn(.model));
-    try testing.expect(local_only.allowedOn(.rpc));
 }
 
 fn testExecute(

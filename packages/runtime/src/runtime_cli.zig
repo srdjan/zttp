@@ -715,8 +715,8 @@ fn parseLifecycle(str: []const u8) ?contract_runtime.PoolingPolicy {
 /// Build the base ServerConfig for a self-contained (deployed) binary from its
 /// appended payload. The embedded section-4 capability policy is wired as the
 /// enforcement source (`dev_capability_policy`) so the deployed binary restricts
-/// egress/env/cache/sql to the proven allowlist, matching dev/serve and the
-/// AOT-embedded path. Without this wiring a deployed handler fell back to the
+/// egress/env/cache/sql to the proven allowlist, matching dev/serve. Without
+/// this wiring a deployed handler fell back to the
 /// allow-all stub policy and ran effectively unsandboxed.
 fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
     // Matches the curl hint printed by `zttp deploy`; -p PORT still overrides.

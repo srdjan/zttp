@@ -824,3 +824,64 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches, with outp
 - Invariant 3: nothing changed under `tool_registry.zig`, `expert_persona.zig`, `skills/`, or `prompts/`.
 - Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 8: `git grep -n -E "providers/anthropic|providers/openai|anthropic_client|openai_client|initOpenAI|initAnthropic|ZTS_OPENAI|OPENAI_API_KEY|ANTHROPIC_API_KEY|MissingAnthropicCredential|MissingOpenAICredential|UnsupportedOpenAIModelOverride|auth claude|auth openai|openai_custom|openai_hosted|OpenAiEndpoint|openAiEndpointFromEnv|tools_schema|\.anthropic\b|\.openai\b|Provider\.(anthropic|openai)" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md CONTRIBUTING.md .agents .github scripts build build.zig packages tooling` leaves two lines: the sentences in `docs/cli.md` and `docs/user-guide.md` that say `zttp auth claude` and `zttp auth openai` are refused. `docs/plans/`, `docs/solutions/`, `CHANGELOG.md`, and the historical rows of `docs/convergence.md` still name the old providers on purpose.
+
+## G15 Dead code that earlier groups left behind
+
+Each item below lost its last production caller in an earlier group. For each item, `git grep` and the compiler confirmed the caller count before deletion. A verdict of "kept" names the surviving code that reaches the item.
+
+### Verdicts
+
+| Item | Verdict | Reason |
+|---|---|---|
+| Proof card lenses `trade`, `handover`, `caller_view`, `Lens`, `CallerView` | Deleted | The only caller of `writeProofCardFrame` is `live_reload.zig`, and it passes the default lens. No `zttp dev`, `deploy`, or `proofs` path sets another lens. |
+| `buildProofCertificate` | Deleted | No surviving path calls it. Only its own test did. |
+| Proof card columns | Reflowed to two | The frame now has a Properties pane and a Surface pane. The status bar writes Verdict and Contract in the two columns, and Baseline in a full-width row below them. The text of each cell is unchanged. |
+| `review.proof_to_restrictions`, `review.TradeRow` (`packages/proof-review/src/review.zig`) | Deleted | Only the trade lens read them. The plan did not list them. |
+| `Server.installDevAttestation`, `attest_build_receipt.buildDevJws` | Deleted | No caller. `loadPersistentOrEphemeralKey`, `ephemeralKeyPair`, and `fillCsprng` in `attest/build_receipt.zig` lost their only caller and went too. `identity.zig` keeps its own `fillCsprng`. The test that pins the unpinned executable-graph sentinel stays: it uses `buildJwsWithKey`. |
+| `Server.signer_fingerprint_hex` | Deleted | The field was write-only. Nothing read it, including the proof card. All four assignments went. |
+| `init_command.scaffoldProject` in-place `.` branch | Deleted | `validateProjectName` refuses `.`, and `initCommand` is the only production caller. The `preserved_path` parameter of `refuseExistingTargets` and `rollbackScaffoldFiles` went with it. The test "in-place scaffold preserves a pre-existing gitignore" went. |
+| `cli_shared.featureCompiledOut` | Deleted | No caller. |
+| `embedded_handler` import on `runtime_instance` (`packages/runtime/build.zig`) | Kept | `handler_instance.zig` imports `runtime_config.zig`, and `runtime_config.zig:7` imports `embedded_handler`. `runtime_pool.zig:14` also imports it. Without the import the benchmark module fails to compile. |
+| Stale AOT comments | Fixed | `handler_analyzer.zig` (two comments), `runtime_config.zig` (two), `server.zig` (one), `runtime_cli.zig` (one), `docs/consumer-contract.md:166`. `enableJsonBodyParsePatterns` and the `request_json_parse` source stay, because `precompile.zig:3575` calls them. |
+| `JSValue` symbol helpers (`SymbolBox`, `WellKnownSymbol`, `isSymbol`, `getSymbolId`, `getSymbolDescription`, `isWellKnownSymbol`) in `value.zig` | Deleted | No caller in `packages/`. |
+| `MemTag.symbol`, the `gc.zig` symbol arm, and the `Symbol`, `iterator`, `toStringTag`, `symbol_object` ids in `object.zig` | Kept | These are heap tags and atom or class ids. Deleting them renumbers ids that the bytecode and the hashed registries use. They wait for Phase 3. |
+| `contract_diff.writeProofJson`, `writeProofReport`, `ProofCertificate` | Deleted | No caller. `ProofCertificate` was only the argument type of the two writers. Their two tests went. |
+| `upgrade_verifier.writeUpgradeManifestJson`, `writeUpgradeReport` | Deleted | No caller, and no test. |
+| `report.zig` and the `test-report` step | Deleted | The only user was the test "an incomplete fault analysis writes isCovered false and report clean false". That test now asserts the same fact on `fault_coverage` directly (`!(isCovered() and warnings == 0)`) and is named "an incomplete fault analysis writes isCovered false". The row in `docs/internals/testing.md` went. |
+| `zts.routePatternsMatch`, `zts.pathsMatch` | Kept | Curated public surface, by the dispatch rule. |
+| `witness_corpus.synthesizeStructural` with `structuralKey` and `writeStructuralJsonl`, `spec_discharge.isCauseOnly` | Deleted | Only `witnesses_cli.zig` called them. The `spec_discharge` import in `witness_corpus.zig` went. |
+| `witness_corpus.pin`, `prune` | Deleted | No production caller. `isPinned` stays: `precompile_check.zig:219` calls it. The two `pin` tests became one test that makes a `<key>.pinned` marker by hand and checks `isPinned` and `loadEntries`. |
+| `witness_corpus.selectFewShot`, `fewShotLineLen`, `fewShotLessThan`, `FEW_SHOT_KEY_PREFIX_LEN` | Deleted | No caller outside the file's own tests. `expert_persona.zig` does not use them. |
+| Other `witness_corpus` functions | Kept | `corpusDir`, `ensureCorpusDir`, `persist`, `loadEntries`, `freeEntries`, `countByProperty`, `freeCounts`, `writeProofEnvelopeBlock`, and `isPinned` are reached by `pi_witnesses`, `pi_goal_check`, `pi_repair_plan`, `precompile_check`, `zts_cli`, or `diagnostic_corpus_gate`. |
+| `module_audit.verifyManifestPath` | Deleted | No caller and no test. |
+| `handler_corpus.zig` and its `zruntime_tests.zig` import | Deleted | Only its own tests reached it. |
+| `cli_shared.nowUnixMs` | Deleted | No caller. |
+| `proof_ledger.AppendParams.perf` and `.equivalence`, and their serializer blocks | Deleted | Only tests wrote these payloads. The reader, `PerfPayload`, `EquivalencePayload`, the `perf` and `equivalence` kinds, and the two legacy-row tests stay. |
+| Round-trip tests for the `perf` and `equivalence` writers | Rewritten | The perf round trip went: the legacy-row test already covers every perf field. The equivalence round trip is now "a raw kind=equivalence row decodes fired laws and counts". It reads a raw row whose facts come from the captured legacy row and whose payload has two fired laws and non-zero counts, which the captured row lacks. |
+| `session/events.zig` `writeEntryEventLine` | Deleted | No caller. |
+| `InvocationSurface.rpc` (the plan calls it `Surface.rpc`), its `allowedOn` branch, and the assertions on it | Deleted | Only `allowedOn(.model)` feeds the tool catalog. The test `test-expert-app` replay and the catalog digest check stay green (see below). The registry test "model and rpc surfaces reject workspace writers" is now "the model surface rejects workspace writers". |
+| Stale RPC comments | Fixed | `agent.zig` (two), `loop.zig`, `text_buffer.zig`, `registry/tool.zig` (two). |
+| RPC comments in `tools/pi_goal_candidate.zig:102,619` | Kept | Inside a tool definition file. They wait for Phase 3. |
+| `build/Context.zig` `pi_zts_cli_host_mod`, `project_config_mod` | Kept | `build/host_tests.zig:135-137,171-172` uses both. |
+
+### Judgments the plan did not settle
+
+- The status bar in the two-column card needs three cells in two columns. I put Verdict and Contract in the columns and Baseline in a full-width row. The alternative is one wide cell with all three. The chosen layout keeps the 24-character sha clip and never truncates at width 60.
+- Column split: 45 percent Properties and 55 percent Surface. The old split was 30, 40, and 30 percent. A new test checks the frame at widths 60, 100, and 200: every row has the requested width and every border row has exactly three corners.
+- The tool-definition rule covers `tools/*.zig` and `tool_registry.zig`. I treated `registry/tool.zig` as the registry type file, not a tool definition, so I edited it. If the root session reads the rule more widely, `git checkout` of the `registry/tool.zig` hunk and a re-add of the three `.rpc` lines restores the old state.
+- `packages/pi/src/memory_store.zig:20` still says "Mirrors the shape of slice C's few-shot selector". The selector is gone, but the file is a Phase 3 deletion, so I left it.
+- I did not rewrite the `.perf` use in `proof_ledger` tests that pass `kind = .perf` to `appendEvent` with no payload, except in "appendEvent appends in order across calls", where I changed the first kind to `.deploy`. The kind stays a valid enum member, and the `resolve` test builds `Event` values directly.
+- The `aot` field of the contract JSON and the `proof_trace.zig` text "The handler's AOT route table (routerMatch)" are contract output bytes. I left them.
+
+### Invariant 8 patterns
+
+`git grep -n -E "featureCompiledOut|installDevAttestation|buildDevJws|signer_fingerprint_hex|verifyManifestPath|writeEntryEventLine|writeProofJson|writeProofReport|writeUpgradeManifestJson|writeUpgradeReport|synthesizeStructural|isCauseOnly|handler_corpus|runHandlerCorpus|test-report|WellKnownSymbol|CallerView|caller_view|buildTradePane|buildHandoverPane|buildProofCertificate|proof_to_restrictions|TradeRow|allowedOn\(\.rpc\)|loadPersistentOrEphemeralKey|ProofCertificate" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling` returns nothing outside `docs/plans/`. `git grep -n "\.rpc\b" -- packages build scripts` returns nothing.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `test-cli` (813 passed, 1 skipped), `test-server`, `test-zruntime`, `test-zts`, `test-precompile`, `test-module-boundary`, `test-zts-layering`, `test-step-coverage`, `test-docs-drift`, `test-runtime-purity`, `test-proof-swallow`, `test-expert-app`, `test-standin`, `test-cassette`, `test-simulator`, `test-doc-links`, `test-script-reachability`, `test-release-check`, `test-residual-guards-drift`, `zig build`, and `zig build test`. `test-report` no longer exists. `zig fmt --check` on every edited Zig file: exit 0.
+- Invariant 2: `coverage.json is stale` and `response_order_mismatch` do not appear. The `model_context_mismatch at turn 0/2` lines are the known negative tests. The replay line reads `19/19 case(s) replayed from a flow artifact`.
+- Invariant 3: nothing changed under `tool_registry.zig`, `expert_persona.zig`, `skills/`, or `prompts/`. The `Surface.rpc` removal leaves the provider-neutral tool catalog bytes and digest unchanged: `tool_catalog_consolidation_test.zig` runs inside `test-expert-app` and passes.
+- Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.

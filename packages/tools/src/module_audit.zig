@@ -254,28 +254,6 @@ pub fn verifyBuiltins(allocator: std.mem.Allocator, options: VerifyOptions) !Ver
     return result;
 }
 
-pub fn verifyManifestPath(allocator: std.mem.Allocator, path: []const u8) !VerifyResult {
-    var result = VerifyResult{};
-    errdefer result.deinit(allocator);
-
-    try result.checked_files.append(allocator, path);
-    const content = file_io.readFile(allocator, path, 256 * 1024) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "failed to read module manifest: {s}", .{@errorName(err)});
-        defer allocator.free(message);
-        try appendDiagnostic(allocator, &result.diagnostics, "ZVM010", "error", message, path, 1, 1, "ensure the manifest exists and is readable");
-        return result;
-    };
-    defer allocator.free(content);
-
-    var manifest = moduleMetadata.parse(allocator, content) catch |err| {
-        try appendManifestDiagnostic(allocator, &result.diagnostics, path, err);
-        return result;
-    };
-    defer manifest.deinit(allocator);
-
-    return result;
-}
-
 fn auditPath(
     allocator: std.mem.Allocator,
     path: []const u8,

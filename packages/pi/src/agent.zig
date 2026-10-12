@@ -918,7 +918,7 @@ fn initFromEnvWithPreparedResume(
     }
 
     // Apply a --model launch override once, here, so every caller
-    // (interactive REPL, autoloop, --print, --rpc) inherits it without each
+    // (interactive REPL, autoloop, --print) inherits it without each
     // having to remember a separate apply step. Also covers no_session sessions.
     if (resolution) |resolved| {
         switch (session.backend) {
@@ -1329,7 +1329,7 @@ pub const CompactResult = union(enum) {
 };
 
 /// Compatibility text wrapper for the current TTY command. U8 exposes the
-/// same controller's structured result directly to RPC and command surfaces.
+/// same controller's structured result directly to command surfaces.
 pub fn compact(
     allocator: std.mem.Allocator,
     session: *AgentSession,
