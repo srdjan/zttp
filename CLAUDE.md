@@ -37,13 +37,7 @@ Full reference: [docs/cli.md](docs/cli.md). Semantics registry checking (`spec-c
 
 ## Architecture
 
-Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Two entry points:
-
-- `main.zig` -> `runtime_cli.zig` - the `zttp-runtime` binary (serve, attest, self-extract startup, version, help).
-- `cli_main.zig` -> `dev_cli.zig` - the `zttp` developer binary (init, dev, test, expert, deploy, and the advanced commands).
-- `cli_shared.zig` - arg parsing, watch sets, size parsing shared by both.
-
-HTTP in `server.zig`, runtime management in `handler_instance.zig` (`zruntime_tests.zig` is its end-to-end test root), live reload in `live_reload.zig`. Engine (`packages/zts/`): two-pass compilation (parse to IR, then bytecode), parser in `packages/zts/src/parser/`, VM dispatch loop in `interpreter.zig`. The interpreter is the single execution path; the tiered JIT was removed after measurement. Values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
+The interpreter is the single execution path; the tiered JIT was removed after measurement.
 
 Request flow: accept connection, check the integrity-validated route table,
 check the proof cache only when an accepted certificate promoted the required
@@ -54,13 +48,11 @@ the executable graph, and run `packages/proof-checker` before pool creation.
 Contract parsing alone enables env validation and route pre-filtering, not
 proof-authoritative caching or reuse.
 
-Key patterns: native Zig error unions (`!T`) throughout the implementation (the `Result<T>` seen in handlers is a user-facing JS and verification construct, not a Zig engine pattern), hidden classes for inline caching, request-scoped arena allocation.
-
 Detail: [docs/internals/architecture.md](docs/internals/architecture.md) and [docs/performance.md](docs/performance.md).
 
 ## Virtual Modules
 
-Import via `import { fn } from "zttp:module"`. The SDK-pure implementations live in `packages/modules/src/` under `data/`, `http/`, `net/`, `platform/`, and `security/`. The engine-coupled ones live in `packages/zts/src/modules/` under `data/`, `net/`, and `workflow/`. Some of those are whole implementations (`zttp:collections`, `zttp:bytes`, `zttp:json`, `zttp:result`, and the `workflow/` set: `zttp:io`, `zttp:scope`, `zttp:durable`, `zttp:workflow`, `zttp:queue`); the `net/` and `data/sql.zig` files are thin adapters that wrap the SDK-pure binding through `module_binding_adapter.zig`. The authoritative module-to-path registry is `packages/zts/src/builtin_modules.zig`. Each module owns its `pub const binding = sdk.ModuleBinding{...}` next to its implementation file; the type and the shared capability-enforcement helpers live in `packages/zts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, and so on) enforced at call time.
+Import via `import { fn } from "zttp:module"`. The authoritative module-to-path registry is `packages/zts/src/builtin_modules.zig`. Each module owns its `pub const binding = sdk.ModuleBinding{...}` next to its implementation file; the type and the shared capability-enforcement helpers live in `packages/zts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, and so on) enforced at call time.
 
 For the module list and every export, read `packages/zts/src/builtin_modules.zig`.
 
@@ -101,48 +93,12 @@ File identity selects the frontend: `.ts` enters the `zts-model-1` core and `.ts
 ## Models
 
 Two providers exist here: DeepSeek and a developer-managed local MLX-LM server.
-The Claude and OpenAI providers were removed; their code, corpora, and fixtures
-live at the `pre-rebase` tag.
-
-Start the local server yourself when you want it:
-
-```bash
-mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
-```
-
-`zttp expert --provider local` then selects it for a session, and
-`ZTTP_CODEGEN_PROVIDER=local` selects it for recording, which is the recorder's
-default when the variable is unset. Local recordings land under
-`packages/pi/src/simulator/testdata/empirical/local/codegen/`.
-
-DeepSeek is the one remote provider, added 2026-08-14 by explicit
-decision. `--provider deepseek` runs the expert loop against it and
-`ZTTP_CODEGEN_PROVIDER=deepseek` records a corpus into
-`packages/pi/src/simulator/testdata/empirical/deepseek/codegen/`. Both need
-`DEEPSEEK_API_KEY`. Handler source leaves the machine on a DeepSeek turn, which
-the destination banner states before the first turn.
-
-DeepSeek is also the headline since 2026-08-14: `models.default_provider` is
-`.deepseek`, so a bare `zttp expert` uses `deepseek-v4-flash`, and
-`headline_provider` derives from that same constant, so the ratchet and the
-published convergence number describe the model a user actually gets. The move
-waited on a complete 19-case corpus that replays 19/19 offline and a coverage
-baseline measured from it rather than borrowed.
-
-A DeepSeek turn is slower than a local one. `ZTTP_CODEGEN_TURN_TIMEOUT_MS`
-defaults to 3 minutes, which truncates the heavier cases; the corpus was
-recorded at 600000. A turn cut off by that ceiling can never replay, because the
-replay finishes in milliseconds and asks for one more model call than the
-recording holds, so the recorder now refuses to promote such a turn instead of
-emitting an artifact that fails later as a false divergence.
-
-The same ceiling exists because a stalled local generation is silence rather
-than an error and would otherwise take the whole corpus run with it. A failing
-local case is the measurement, not a reason to reach for a hosted model.
+Handler source leaves the machine on a DeepSeek turn. A failing local case is
+the measurement, not a reason to reach for a hosted model. Provider selection,
+recording, keys, and the turn timeout are in the `zttp-models` skill.
 
 ## Conventions
 
 - All Zig. New code in Zig unless editing existing JS/TS handler examples.
-- Tests live alongside code in `test "..."` blocks. Run relevant `zig build test*` after changes. [docs/internals/testing.md](docs/internals/testing.md) maps which step runs what.
 - `errdefer` on all allocations. `orelse` instead of `?` unwrap.
 - Use `zig build bench` for repository benchmarks. Do not add ad-hoc benchmark scripts.
