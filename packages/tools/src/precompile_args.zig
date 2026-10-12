@@ -25,7 +25,6 @@ fn takeArg(index: *usize, argv: []const []const u8, comptime message: []const u8
 pub const PrecompileOptions = struct {
     handler_path: []const u8,
     output_path: []const u8,
-    emit_aot: bool = false,
     emit_verify: bool = false,
     emit_contract: bool = false,
     emit_openapi: bool = false,
@@ -59,10 +58,6 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
     var index: usize = 0;
     while (index < argv.len) : (index += 1) {
         const arg = argv[index];
-        if (std.mem.eql(u8, arg, "--aot")) {
-            opts.emit_aot = true;
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--verify")) {
             opts.emit_verify = true;
             continue;
@@ -162,7 +157,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--aot] [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] [--declaration declaration.json] [--module-manifest path] <handler.ts> <output.zig>\n";
+    const usage = "Usage: precompile [--verify] [--contract] [--openapi] [--sdk ts] [--sql-schema path] [--system path] [--prove spec] [--policy policy.json] [--declaration declaration.json] [--module-manifest path] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
         errPrint(usage, .{});
         errPrint("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});

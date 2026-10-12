@@ -77,8 +77,6 @@ zts builtins/object_builtins.zig
 zts builtins/result.zig
 zts builtins/root.zig
 zts builtins/string_builtins.zig
-zts builtins/symbol.zig
-zts builtins/weak_collections.zig
 zts bytes.zig
 zts bytecode.zig
 zts bytecode_cache.zig

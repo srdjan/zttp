@@ -41,7 +41,7 @@ Every precompilation extracts a contract from the handler's IR. Add
   route, branching conditions, I/O sequence, and response status
   (exhaustive when the path count stays below 1024)
 - **Verification results** when combined with `-Dverify`
-- **Route patterns** when combined with `-Daot`
+- **Route patterns**: the exact-match routes that the handler analyzer reads
 
 ```json
 {

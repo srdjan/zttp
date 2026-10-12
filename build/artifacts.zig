@@ -156,9 +156,6 @@ fn addPrecompileArgs(
     opts: Context.PrecompileOptions,
     git_commit_sha: ?[]const u8,
 ) void {
-    if (opts.aot_enabled) {
-        run_precompile.addArg("--aot");
-    }
     if (opts.verify_enabled) {
         run_precompile.addArg("--verify");
     }

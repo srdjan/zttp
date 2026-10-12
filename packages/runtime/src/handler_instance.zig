@@ -14,7 +14,6 @@ const ascii = std.ascii;
 
 // Import zts module
 const zq = @import("zts");
-const embedded_handler = @import("embedded_handler");
 const durable_executor = @import("durable_executor.zig");
 const actor_queue = @import("actor_queue.zig");
 const trace_request_recorder = @import("trace_request_recorder.zig");
@@ -1567,7 +1566,7 @@ pub const HandlerInstance = struct {
             }
         }
 
-        // Create Request object from HttpRequest (shared between AOT and interpreter)
+        // Create Request object from HttpRequest
         const request_obj = try self.createRequestObject(request);
 
         // Build argument array: 1-arg (backward compat) or 2-arg (with capabilities)
@@ -1578,13 +1577,13 @@ pub const HandlerInstance = struct {
             break :blk args_buf[0..2];
         } else args_buf[0..1];
 
-        // === AOT PATH: Native Zig handler ===
+        // === TEST SEAM: injected native handler (builtin.is_test only) ===
         aot_attempt: {
             if (builtin.is_test) {
                 if (aot_override) |override_fn| {
                     const override_result = override_fn(self.ctx, args) catch |err| {
                         if (err == error.AotBail) break :aot_attempt;
-                        std.log.err("AOT override failed: {}", .{err});
+                        std.log.err("handler override failed: {}", .{err});
                         return error.HandlerError;
                     };
 
@@ -1596,20 +1595,6 @@ pub const HandlerInstance = struct {
                     return response;
                 }
             }
-            if (!embedded_handler.has_aot) break :aot_attempt;
-
-            const aot_result = embedded_handler.aotHandler(self.ctx, args) catch |err| {
-                if (err == error.AotBail) break :aot_attempt;
-                std.log.err("AOT handler failed: {}", .{err});
-                return error.HandlerError;
-            };
-
-            const response = try self.extractResponseInternal(aot_result, borrow_body);
-            if (borrow_body and response.requires_runtime) {
-                reset_after = false;
-            }
-            if (!nested_tool) trace_request_recorder.recordResponse(self, &response);
-            return response;
         }
 
         // === SLOW PATH: Full bytecode execution ===

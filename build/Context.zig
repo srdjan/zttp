@@ -35,7 +35,6 @@ proof_review_pkg_dep: *std.Build.Dependency,
 /// The `-D` options that drive handler precompilation (`-Dhandler`).
 pub const PrecompileOptions = struct {
     handler_path: ?[]const u8,
-    aot_enabled: bool,
     verify_enabled: bool,
     contract_enabled: bool,
     openapi_enabled: bool,
@@ -136,7 +135,6 @@ pub fn init(b: *std.Build) Context {
     // Handler path option (required for main build)
     const precompile: PrecompileOptions = .{
         .handler_path = b.option([]const u8, "handler", "Handler file to precompile (required)"),
-        .aot_enabled = b.option(bool, "aot", "Enable native AOT handler generation") orelse false,
         .verify_enabled = b.option(bool, "verify", "Enable compile-time handler verification") orelse false,
         .contract_enabled = b.option(bool, "contract", "Emit handler contract manifest (contract.json)") orelse false,
         .openapi_enabled = b.option(bool, "openapi", "Emit OpenAPI manifest (openapi.json)") orelse false,

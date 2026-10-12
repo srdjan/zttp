@@ -231,3 +231,68 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - `zttp edge` now prints "Unknown command: edge" and the help text.
 - Invariant 4 after G4: `policy_hash`, `module_registry_hash`, and `spec-hash` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: nothing under `packages/pi` changed.
+
+## G5 AOT native-handler path and dead builtins
+
+### Removed
+
+- `packages/tools/src/transpiler.zig`, `packages/zts/src/builtins/symbol.zig`, `packages/zts/src/builtins/weak_collections.zig`, `scripts/build_minimal_dyld.sh`, and `scripts/run-jsx.sh`
+- `-Daot` (`aot_enabled` in `build/Context.zig`, its `--aot` forwarding in `build/artifacts.zig`) and `--aot` with `emit_aot` in `precompile_args.zig`
+- In `precompile.zig`: the transpiler branch and its fallback early return in `compileHandler`, the `emit_aot` option and its readers, the `CompiledHandler` fields `aot` and `transpiled_source` (with their cleanup), the `AotAnalysis.handler_loc` field, the transpiled-source branch and the `has_aot` code generation in `writeZigFile` (about 170 lines, including the generated `aotHandler`, `aot_metadata`, `emitAotBodyValExtraction`, and `contentTypeFor`), the `handler_path` parameter of `writeZigFile`, the `IrTranspiler` import, and the `transpiler.zig` test import. The test "unsupported AOT statements emit a runtime bail without taking the error return" went with the transpiler.
+- `has_aot` and `aotHandler` in `embedded_handler_stub.zig`, and the production `embedded_handler.has_aot` dispatch with the unused `embedded_handler` import in `handler_instance.zig`
+- The `symbol` and `weak_collections` imports and the `WeakMapData`, `WeakSetData`, `createSymbol`, `createWellKnownSymbol`, `initWeakCollections`, and `initSymbol` re-exports in `builtins/root.zig`
+- Rows in `scripts/zts-tiers.allow` (`builtins/symbol.zig`, `builtins/weak_collections.zig`) and `scripts/manual-scripts.allow` (`build_minimal_dyld.sh`, `run-jsx.sh`)
+- Docs: `docs/verification.md` no longer shows `-Daot`. `docs/contracts-and-sandboxing.md` no longer says route patterns need `-Daot`: the contract always read routes through `analyzeAot`.
+
+### Kept on purpose
+
+- `analyzeAot`, `AotAnalysis`, `countAotPatterns`, and every call that feeds `extractContractFromAnalysis`. In `compileHandler` the contract branch now calls `analyzeAot` once as `route_analysis`. Before G5 the default build did the same (`aot` was null without `--aot`, so `temp_aot` supplied the routes).
+- The test-only `aot_override` seam in `handler_instance.zig` (`setAotOverrideForTest` and the `builtin.is_test` branch) and every test that uses it. G5 renamed its comment to "TEST SEAM" and its log text to "handler override failed". The label `aot_attempt` stays.
+- The contract wire fields named `aot` (`HandlerContract.aot`, `RouteInfo.aot`, `AotInfo`). They are contract JSON and move the artifact hash if removed.
+- The `cached_dispatch` fast path in `handler_instance.zig`. It runs static routes from the bytecode dispatch table and is not the native-handler path.
+
+### Routes unchanged (extra proof)
+
+The contract path is `zts compile --verify --contract <handler> <out.zig>`, which writes `contract.json` beside the output. `zts check --json --contract <handler>` printed the same bytes before and after. The three examples (`examples/handler/handler.ts`, `examples/routing/router.ts`, `examples/hypermedia/order.ts`) have an empty top-level `routes` array in this build, so two scratch handlers with non-empty route tables also ran. One uses `match (request.url)` with three exact arms. The other uses `request.path === ...` with two exact `if` arms. Both sit in the scratchpad, not in the repository.
+
+Commands, run with `DEEPSEEK_API_KEY` unset and the private caches. Each ran against a `zig build` binary of the same tree, before the edits and after them:
+
+```
+zig-out/bin/zts compile --verify --contract <handler> <dir>/out.zig
+zig-out/bin/zts check --json --contract <handler>
+```
+
+Results of `cmp` between the before and after runs, per handler: `contract.json`, the saved routes section, and the `check --json` output are byte-identical for all five handlers (exit 0 for each compile). The scratch handlers show 3 and 2 exact routes (`/api/a`, `/api/b`, `/api/c`; `/ping`, `/version`). Before G5, `zts compile --aot` on the two scratch handlers also produced the same `contract.json` as the run without `--aot`.
+
+The generated `out.zig` differs in exactly one place: the five lines `pub const has_aot = false;`, the `aotHandler` stub, and a blank line are gone.
+
+### Judgments the plan did not settle
+
+- The plan names the `has_aot` field only. G5 also removed the generated and stub `aotHandler` function and `aot_metadata`. After the `has_aot` check went, nothing called `aotHandler`, and the stub always returned `error.AotBail`.
+- G5 removed the `CompiledHandler.aot` field, `AotAnalysis.handler_loc`, and the `handler_path` parameter of `writeZigFile`. Only the deleted generator read them.
+- G5 removed the unused `embedded_handler` import from `handler_instance.zig`. It left the build wiring that attaches the import to `runtime_instance` (`packages/runtime/build.zig:149`), because `dev_cli.zig` and `runtime_cli.zig` still need the import in other modules. Whether the `runtime_instance` attachment is dead needs a separate check (G15).
+
+### Dead code for G15
+
+- `packages/runtime/build.zig:149`: `embedded_handler` anonymous import on the `runtime_instance` module. `handler_instance.zig` no longer imports it. Confirm no other file in that module does, then drop it.
+- Stale comments that name the AOT path: `handler_analyzer.zig:62` ("intended for AOT precompile paths") and `:602` ("AOT-only dynamic pattern"), `runtime_config.zig:135,247`, `server.zig:2580`, `runtime_cli.zig:719`, `docs/consumer-contract.md:166`. `HandlerAnalyzer.enableJsonBodyParsePatterns` and the `request_json_parse` body source still feed the contract route table, so they are code to keep, not to delete.
+- Symbol support in `object.zig` and `value.zig` (`WellKnownSymbol`) lost its builtin creators, `createSymbol` and `createWellKnownSymbol`. G5 did not check whether the engine still reaches that support.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "transpiler|IrTranspiler|emit_aot|has_aot|aot_metadata|aotHandler|\-Daot|--aot|aot_enabled|build_minimal_dyld|run-jsx|builtins/symbol|weak_collections|createWellKnownSymbol|createSymbol|initWeakCollections|WeakMapData|WeakSetData|initSymbol|transpiled_source" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling
+```
+
+Remaining hits are historical plan text only: `docs/plans/2026-09-23-m4-t5-scope-and-grants-design.md`, `2026-10-08-boolean-and-arity-checks.md`, `2026-10-11-feature-removal-phase-1.md`, `2026-10-11-shared-analysis-first-unit.md`, and `2026-10-11-shared-analysis-worklog.md`.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read directly from a redirected run.
+
+- `zig build`: exit 0.
+- Unfiltered, exit 0 each: `test-precompile`, `test-zts`, `test-zts-layering`, `test-script-reachability`, `test-contract-golden`, `test-cli` (868 passed, 1 skipped, 0 failed; the same count as a run at HEAD), `test-server`, `test-examples`, `test-step-coverage`, `test-docs-drift`, `test-module-boundary`, `test-zruntime` (alone), `test-runtime-purity`, `test-release-check`, `test-doc-links`.
+- `zig build test`: exit 0 on the final run. A first run exited 1 because `check-script-reachability.sh` and `check-zts-layering.sh` read `git ls-files`, and a `git stash` and `git stash pop` that G5 used for a count comparison had put the deleted files back into the index. `git rm --cached` fixed the index. The rerun passed.
+- `zig fmt --check build.zig build/ packages/ tooling/`: exit 0.
+- Invariant 4 after G5: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: nothing under `packages/pi` changed.

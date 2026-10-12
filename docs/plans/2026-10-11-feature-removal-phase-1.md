@@ -167,4 +167,5 @@ Added during execution. Each item lost its last production caller in an earlier 
 - From G3: `Server.installDevAttestation`, `attest_build_receipt.buildDevJws`, and the `signer_fingerprint_hex` field, which only `--studio` reached.
 - From G3: the in-place `.` branch of `init_command.scaffoldProject`, if no surviving command scaffolds in place.
 - From G4: `cli_shared.featureCompiledOut`, which only `edge` and Studio called.
+- From G5: the `embedded_handler` import on `runtime_instance` in `packages/runtime/build.zig`, if no file in that module imports it; stale AOT comments at `handler_analyzer.zig`, `runtime_config.zig`, `server.zig`, `runtime_cli.zig`, and `docs/consumer-contract.md` (keep `enableJsonBodyParsePatterns` and the `request_json_parse` body source, which feed routes); `WellKnownSymbol` support in `object.zig` and `value.zig`, if the engine no longer reaches it.
 - Further items that later groups report go in this list before G15 runs.

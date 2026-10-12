@@ -14,12 +14,10 @@
 
 # Manual macOS experiment in dyld load overhead. Builds and times the binary;
 # asserts nothing, so there is no verdict for a gate to consume.
-build_minimal_dyld.sh manual-experiment
 
 # Two lines: build a TSX example ReleaseFast and serve it on port 3000. A
 # convenience for looking at the JSX frontend by hand; it blocks on a server, so
 # nothing automated can wait on it.
-run-jsx.sh interactive-server
 
 # Developer machine setup. Runs before the tree can be built at all, so no build
 # step or gate could depend on it.

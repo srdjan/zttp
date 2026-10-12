@@ -19,8 +19,6 @@ pub const string_builtins = @import("string_builtins.zig");
 pub const math = @import("math.zig");
 pub const console = @import("console.zig");
 pub const result = @import("result.zig");
-pub const symbol = @import("symbol.zig");
-pub const weak_collections = @import("weak_collections.zig");
 
 // Re-export shared types from helpers
 const value = helpers.value;
@@ -36,8 +34,6 @@ const addMethodDynamicWithId = helpers.addMethodDynamicWithId;
 // Public re-exports consumed by other codebase modules
 pub const ClassId = helpers.ClassId;
 pub const JsonError = json.JsonError;
-pub const WeakMapData = weak_collections.WeakMapData;
-pub const WeakSetData = weak_collections.WeakSetData;
 
 // Functions referenced by external code
 pub const jsonParse = json.jsonParse;
@@ -52,10 +48,6 @@ pub const performanceNow = date.performanceNow;
 pub const math_constants = math.math_constants;
 pub const allocFloat = helpers.allocFloat;
 pub const getStringData = helpers.getStringData;
-pub const createSymbol = symbol.createSymbol;
-pub const createWellKnownSymbol = symbol.createWellKnownSymbol;
-pub const initWeakCollections = weak_collections.initWeakCollections;
-pub const initSymbol = symbol.initSymbol;
 pub const errorToString = err.errorToString;
 pub const typeErrorConstructor = err.typeErrorConstructor;
 pub const errorConstructor = err.errorConstructor;
