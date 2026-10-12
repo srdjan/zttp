@@ -28,7 +28,7 @@ apply. The model cannot emit text that bypasses the check.
 ```
 packages/pi/
   src/
-    app.zig               # entrypoint; parses ExpertFlags, dispatches to REPL / print / rpc
+    app.zig               # entrypoint; parses ExpertFlags, dispatches to REPL / print
     agent.zig             # AgentSession: transcript, backend union, resolved provider identity, persistence
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
@@ -38,7 +38,6 @@ packages/pi/
     expert_persona.zig    # buildSystemPromptWithContext: prologue + skill + live rule / feature / module snapshots + optional AGENTS.md
     repl.zig              # line-buffered REPL + slash command router
     print_mode.zig        # --print / --mode json
-    rpc_mode.zig          # --mode rpc: line-delimited JSON-RPC 2.0 over stdio
     commands.zig          # slash command table
     frontmatter.zig       # tiny YAML parser for skill / prompt .md files
     context/
@@ -201,25 +200,12 @@ Compaction policy loads from built-in defaults, then
 Unknown keys, malformed JSON, wrong types, and values outside the active
 model's range reject the named settings file. This file accepts no credentials.
 
-### `--mode rpc` (line-delimited JSON-RPC 2.0)
-
-`zttp expert --mode rpc` exposes the agent over stdio for programmatic
-clients. Methods: `turn`, `compact`, `session.info`, `tools.list`,
-`tools.invoke`, `skills.list`, `templates.{list,expand}`,
-`model.{list,set}`, `shutdown`. Turn events emit as `"event"`
-notifications using the same `{v,k,d}` envelope as `events.jsonl`.
-`compact` accepts optional `{instructions}` and returns a structured status:
-`compacted`, `no_change`, `not_compactable`, `unavailable`, or `failed`.
-Automatic compaction emits ordered `compaction` start/end notifications before
-the retried model events.
-
 ### CLI REPL
 
 `zttp expert` runs a line-buffered CLI REPL for interactive work.
 Natural-language lines go to the model; slash commands route to local
 compiler tools, session management, skills, templates, and ledger export.
-Non-interactive integrations use `--print`, `--mode json`, or
-`--mode rpc`.
+Non-interactive integrations use `--print` or `--mode json`.
 
 Proof deltas and witness details are persisted as session events. Inspect
 them with `/ledger export <path>`, `zttp ledger`, or `/witnesses <handler.ts>`.
@@ -260,8 +246,8 @@ model. In-process resume refuses a different provider and leaves the current
 session unchanged.
 
 Model IDs select within the active provider and never change providers.
-`--model`, `/model`, and RPC `model.set` all use the same exact registry lookup.
-`/model` and RPC `model.list` show only the active provider's entries. A switch
+`--model` and `/model` both use the same exact registry lookup.
+`/model` shows only the active provider's entries. A switch
 lasts for the current session and applies the registry request budget. The
 OpenAI entry records a 16,384-token output capability but keeps zttp's
 8,192-token request policy.
@@ -290,7 +276,6 @@ to pi:
 --model <id>             model registered for the active provider
 --print <prompt>         one-shot, rendered text to stdout
 --mode json              one-shot, NDJSON events to stdout (needs --print)
---mode rpc               long-lived JSON-RPC 2.0 over stdio
 ```
 
 Flag interactions the parser enforces:
@@ -299,8 +284,6 @@ Flag interactions the parser enforces:
   exclusive; each picks a different session-selection strategy.
 - `--yes` and `--no-edit` are mutually exclusive; they resolve the
   edit-approval policy to `auto_approve` and `auto_reject` respectively.
-- `--mode rpc` and `--print` are mutually exclusive; RPC is long-lived,
-  `--print` is one-shot.
 - `--mode json` requires `--print`; the JSON event stream only makes
   sense in one-shot mode.
 - `--goal` is compiler-only and rejects `--provider` and `--model`.
@@ -362,8 +345,7 @@ Add a tool:
 3. Add a `"<name>"` line to the `expected_names` array in the
    `buildRegistry` test, and the prompt dispatch guide at the top of
    `expert_persona.zig`.
-4. Rebuild. Model calls reject `write_workspace`; RPC calls allow only
-   `analyze` and `read_workspace`. Model-mediated source writes must use the
+4. Rebuild. Model calls reject `write_workspace`. Model-mediated source writes must use the
    synthetic `propose_change_set` tool so aggregate proof and the approval
    policy run before the workspace transaction commits.
 

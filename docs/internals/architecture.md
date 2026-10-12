@@ -79,7 +79,7 @@ standalone summarizer has no tools or normal history. After validation, the
 session flushes pending raw frames, synchronizes a compaction checkpoint, and
 installs an already-built projection without allocation. Normal request
 admission and one-shot overflow recovery wrap the provider client at the shared
-model-call seam, so TTY, print, JSON, RPC, and resumed sessions use one policy.
+model-call seam, so TTY, print, JSON, and resumed sessions use one policy.
 
 ## Execution State Ownership
 

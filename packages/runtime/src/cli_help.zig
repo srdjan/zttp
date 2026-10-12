@@ -202,7 +202,6 @@ const expert_help =
     \\                [--provider local|claude|openai|deepseek] [--model <id>]
     \\                [--tools minimal|full] [--no-context-files]
     \\  zttp expert --print <prompt> [--mode json]
-    \\  zttp expert --mode rpc
     \\  zttp expert --handler <handler.ts> --goal <goals> [--max-iters N]
     \\
     \\Flags:
@@ -219,7 +218,6 @@ const expert_help =
     \\  --tools minimal|full       select workspace-read-only or full tool preset
     \\  --print <prompt>           run a single non-interactive turn and exit
     \\  --mode json                with --print, emit NDJSON transcript events
-    \\  --mode rpc                 run line-delimited JSON-RPC 2.0 over stdio
     \\  --handler <path>           handler path for autoloop repair
     \\  --goal <csv>               property goals for autoloop repair
     \\  --max-iters <N>            autoloop iteration budget
@@ -324,7 +322,6 @@ test "expert help advertises documented modes" {
     inline for (.{
         "zttp expert --resume",
         "zttp expert --print <prompt> [--mode json]",
-        "zttp expert --mode rpc",
         "zttp expert --handler <handler.ts> --goal <goals>",
         "--tools minimal|full",
         "--no-context-files",

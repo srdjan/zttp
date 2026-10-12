@@ -156,26 +156,6 @@ pub fn add(ctx: Context) Result {
     );
     expert_qualification_step.dependOn(&expert_qualification_cmd.step);
 
-    // Repository-only reach measurement. A normal build or test never calls
-    // a model; the executable requires an explicit live mode and confirmation.
-    const reach_mod = b.createModule(.{
-        .root_source_file = pi_host_dep.path("src/expert_reach_main.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-        .link_libc = true,
-        .imports = &.{
-            .{ .name = "zts", .module = zts_host_mod },
-            .{ .name = "zts_cli", .module = ctx.pi_zts_cli_host_mod },
-            .{ .name = "project_config", .module = ctx.project_config_mod },
-        },
-    });
-    const reach_exe = b.addExecutable(.{ .name = "provable-reach", .root_module = reach_mod });
-    const reach_cmd = b.addRunArtifact(reach_exe);
-    reach_cmd.has_side_effects = true;
-    reach_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| reach_cmd.addArgs(args);
-    b.step("provable-reach", "Run reference admission, offline smoke, or an authorized fresh reach measurement").dependOn(&reach_cmd.step);
-
     return .{
         .run_release_provenance_tests = run_release_provenance_tests,
         .run_coverage_union_tests = run_coverage_union_tests,

@@ -5,13 +5,14 @@ Every task has a reference program that must pass the same compiler and runtime 
 The report keeps every selected task, including model, transport, budget, and harness failures.
 
 The first full fresh measurement on 2026-09-21 reached all eight tasks: four whole-handler and four typed-hole tasks.
-The result and its limits are recorded below, with the [machine-readable report](provable-reach.json).
+The result and its limits are recorded below, with the machine-readable report (`pre-rebase:docs/provable-reach.json`).
 An offline smoke result verifies the harness and does not measure the model.
+The measurement tooling, the task suite, and the machine-readable report live at the `pre-rebase` tag and are no longer in the working tree.
 The [existing convergence corpus](convergence.md) remains a separate measurement.
 
 ## Task suite
 
-The suite in `packages/pi/src/expert_reach_corpus.zig` has four functional families.
+The suite in `pre-rebase:packages/pi/src/expert_reach_corpus.zig` has four functional families.
 Each has a whole-handler task and a typed-hole task, for eight task instances.
 The two input modes have the same required behavior but provide different amounts of starting code.
 Their results must be read separately.
@@ -57,7 +58,7 @@ Failure is a valid measured outcome; missing evidence is not success.
 
 ## Running the harness
 
-The repository-only command is `zig build provable-reach`.
+At the `pre-rebase` tag, the repository-only command is `zig build provable-reach`.
 Each invocation needs a new output directory.
 Its parent directory must already exist.
 The command refuses to overwrite an existing run.
@@ -94,7 +95,7 @@ The authoring limits stay the same for the larger run.
 The one-task pilot was authorized and completed on 2026-09-21.
 The full eight-task run was separately authorized and completed on the same date.
 
-Run the offline integrity suite with `zig build test-provable-reach`.
+At that tag, run the offline integrity suite with `zig build test-provable-reach`.
 It checks report membership, evidence origin, success evidence, and failure accounting.
 The deterministic smoke supplies the separate end-to-end authoring and runtime evidence.
 
@@ -175,7 +176,7 @@ No exact billed dollar amount was returned.
 The source revision was `d5209b09fd08c8c27956d8afcfc5ced16bf13375`, known and clean before and after the run.
 The suite hash was `4aa3b09be556c5802cf3dd9b2627c7750f5050934fca8d4ebac2d9e241c49971`.
 All frozen task identities matched the offline full suite; model, compiler, request-policy, and budget identities matched the approved pilot configuration.
-The [report](provable-reach.json) retains those identities and all eight outcome rows.
+The report (`pre-rebase:docs/provable-reach.json`) retains those identities and all eight outcome rows.
 Complete local evidence is retained at `/Users/srdjans/Code/_TEAMOK/ZTTP-evidence/m3/reach-live-1790002155-86713/`, with the original output at `/tmp/zttp-reach-live-full/`.
 
 This closes M3's bounded measurement.

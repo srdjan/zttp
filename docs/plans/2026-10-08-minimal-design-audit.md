@@ -258,7 +258,7 @@ The list includes deferred, externally reachable, and obsolete functions. It is 
 | concatRopeStringWithArena | packages/zts/src/string.zig:442 |
 | connectTimeout | packages/pi/src/providers/http_errors.zig:59 |
 | constraintOf | packages/zts/src/type_env.zig:130 |
-| emitNotification | packages/pi/src/rpc_mode.zig:876 |
+| emitNotification | pre-rebase:packages/pi/src/rpc_mode.zig:876 |
 | expectValidJsonLines | packages/pi/src/standin_tests.zig:999 |
 | findTopLevelChar | packages/tools/src/canonicalize.zig:1494 |
 | installProjectionOwned | packages/pi/src/transcript.zig:251 |

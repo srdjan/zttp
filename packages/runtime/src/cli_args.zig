@@ -217,7 +217,7 @@ test "validateExpertArgs accepts documented expert launch forms" {
     try ok(&.{ "--fork", "abc" });
     try ok(&.{"--fork=abc"});
     try ok(&.{ "--print", "add a GET /health route", "--mode", "json" });
-    try ok(&.{"--mode=rpc"});
+    try ok(&.{"--mode=json"});
     try ok(&.{ "--handler", "handler.ts", "--goal", "no_secret_leakage", "--max-iters", "4" });
     try ok(&.{ "--tools", "minimal", "--yes", "--no-context-files" });
     try ok(&.{ "--no-session", "--no-persist-tool-output", "--no-edit" });

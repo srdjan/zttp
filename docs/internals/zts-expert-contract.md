@@ -124,10 +124,10 @@ Event kinds and their `d` payloads:
 
 ## In-Process Expert Tools
 
-`tools.list` exposes compiler-native Pi tools in addition to the stable analyzer
-commands above. These tools are additive and run inside the same vetoed expert
-loop. `tools.list` is the live inventory; the ones below are the compiler-native
-core:
+The expert loop offers compiler-native Pi tools in addition to the stable
+analyzer commands above. These tools are additive and run inside the same vetoed
+expert loop. The tool registry is the live inventory; the ones below are the
+compiler-native core:
 
 | Tool | Purpose |
 |---|---|
@@ -136,22 +136,16 @@ core:
 | `pi_goal_candidate` | Compose repair planning and supported repair dry-runs in memory; returns verified `proposed_content` and `applied:false`; never writes. |
 | `pi_goal_check` | Check property goals and return executable counterexample witnesses. |
 
-`zttp expert --mode rpc` exposes a line-delimited JSON-RPC 2.0 interface over
-stdio for long-lived clients. The agent resolves provider identity from launch
+The agent resolves provider identity from launch
 flags, persisted session metadata, or the current DeepSeek default before
 constructing a backend. The explicit local provider is the loopback-only MLX-LM
 Chat Completions adapter for `LiquidAI/LFM2.5-2.6B-MLX-8bit`. Provider
-credentials are read only after resolution. `session.info` includes the
-resolved provider and model.
+credentials are read only after resolution.
 
-Edits in RPC mode are proposed only through the model-mediated `turn` method:
-the model emits one ordered `propose_change_set`, the compiler proves the
-aggregate overlay, and a `verified_change_set` event is returned.
-`propose_change_set` is not a directly invocable entry in
-`tools.list` / `tools.invoke` (those expose the read-only analyzer tools); a
-client cannot apply an unverified edit out of band. Generic `tools.invoke`
-exposes only tools classified as `analyze` or `read_workspace`; process,
-agent-state persistence, and workspace-write effects are not invocable there.
+Edits are proposed only through the model-mediated turn: the model emits one
+ordered `propose_change_set`, the compiler proves the aggregate overlay, and a
+`verified_change_set` event is returned. A client cannot apply an unverified
+edit out of band.
 
 ## Compatibility
 

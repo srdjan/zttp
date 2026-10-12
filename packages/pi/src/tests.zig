@@ -55,7 +55,6 @@ comptime {
     _ = @import("expert_evidence_identity.zig");
     _ = @import("expert_failure_analysis.zig");
     _ = @import("expert_qualification.zig");
-    _ = @import("expert_reach.zig");
     _ = @import("expert_security_probes.zig");
     _ = @import("expert_codegen_record.zig");
     _ = @import("auto_repair.zig");
@@ -96,7 +95,6 @@ comptime {
     _ = @import("session/session_id.zig");
     _ = @import("session/replay_test.zig");
     _ = @import("context/project_context.zig");
-    _ = @import("rpc_mode.zig");
     _ = @import("frontmatter.zig");
     _ = @import("skills/catalog.zig");
     _ = @import("prompts/catalog.zig");

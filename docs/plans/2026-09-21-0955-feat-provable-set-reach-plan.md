@@ -277,5 +277,5 @@ No exact billed dollar amount was returned.
 No case was replaced, and no agent behavior or task acceptance was changed after the pilot.
 
 The [measurement record](../provable-reach.md#first-full-measurement) contains each outcome and the evidence location.
-The [machine-readable report](../provable-reach.json) retains all eight rows and the frozen identities.
+The machine-readable report (`pre-rebase:docs/provable-reach.json`) retains all eight rows and the frozen identities.
 M3 is complete for this bounded suite. M2's full verification remains separate and pending.

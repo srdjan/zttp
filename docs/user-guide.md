@@ -1049,8 +1049,7 @@ new session instead; old model reasoning is never silently restamped under the
 new protocol.
 
 `--model <id>` selects only within the active provider. It never infers or
-changes the provider. `/model` and RPC `model.set` follow the same rule and
-persist the choice atomically. Claude defaults to `claude-sonnet-4-6`; OpenAI
+changes the provider. `/model` follows the same rule and persists the choice atomically. Claude defaults to `claude-sonnet-4-6`; OpenAI
 defaults to `gpt-4o-mini`; DeepSeek defaults to `deepseek-v4-flash`. The
 compiler-only `--goal` workflow rejects `--provider` and `--model` and does not
 check model readiness.

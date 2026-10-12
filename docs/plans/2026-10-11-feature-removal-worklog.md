@@ -564,3 +564,56 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - `zig fmt --check build.zig build packages tooling` and `bash scripts/audit-docs.sh`: exit 0.
 - Invariant 4 after G10: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: nothing changed under `packages/pi/src/skills/`, `prompts/`, `tool_registry.zig`, or `expert_persona.zig`. `test-expert-app` replays offline with exit 0.
+
+## G11 Provable-reach tooling and RPC mode
+
+### Removed
+
+- `packages/pi/src/expert_reach_main.zig`, `expert_reach_report.zig`, `expert_reach_corpus.zig`, `expert_reach.zig`, `expert_reach_tests.zig`
+- `docs/provable-reach.json`
+- `packages/pi/src/rpc_mode.zig` and the `--mode rpc` value. In `app.zig` this removed the `rpc_mode` import, the dispatch branch in `run`, the `ExpertFlags.rpc_mode` field, the `rpc` arm of `setMode`, and the `RpcModeConflictsWithPrint` error with its message. Three flag tests that exercised `--mode rpc` went, and the `--goal` conflict test now covers only `--print`.
+- The `provable-reach` build step (`build/tooling.zig`), the `test-provable-reach` root (`build/host_tests.zig`), and the `provable-reach` row in `scripts/manual-steps.allow`.
+- The `expert_reach.zig` and `rpc_mode.zig` imports in `packages/pi/src/tests.zig`.
+- The `--mode rpc` lines in `cli_help.zig` (usage, flag list, and the help test) and RPC user documentation in `docs/cli.md`, `docs/user-guide.md`, `docs/internals/architecture.md`, `docs/internals/zts-expert-contract.md`, and `packages/pi/README.md`.
+
+### Kept
+
+- `docs/provable-reach.md` stays as the M3 record. Its links to the JSON and its citation of `expert_reach_corpus.zig` now read `pre-rebase:`. One sentence near the top says that the tooling, suite, and report live at the `pre-rebase` tag. The command sections say they apply at that tag.
+- `STRATEGY.md`, `docs/roadmap.md`, `docs/plans/README.md`, and `CONCEPTS.md` cite `docs/provable-reach.md`, not the JSON, and did not change.
+- `expert_qualification.zig`, the qualification scripts, `gate_record.zig`, session resume, `--fork`, and `/tree` are untouched. Print mode and the REPL did not change, and nothing in `rpc_mode.zig` was shared with them (its helpers were private).
+
+### Model-visible check
+
+Nothing removed is model-visible. `rpc_mode.zig` and the reach files only served a stdio client and a repository measurement. No prompt, persona, skill, tool description, or transcript text changed, and `git diff HEAD` shows no change under `packages/pi/src/skills/`, `prompts/`, `expert_persona.zig`, or `tool_registry.zig`.
+
+### Judgments the plan did not settle
+
+- `error.GoalConflictsWithPrintOrRpc` became `error.GoalConflictsWithPrint`, and its message dropped "or --mode rpc". The old name had no meaning once RPC was gone.
+- `--mode rpc` now fails with `UnsupportedMode`. The messages say `(json)` and `only accepts 'json'`.
+- The `.rpc` member of the tool-surface enum (`registry/tool.zig`), the `allowedOn(.rpc)` branch, and the tests that use them stay. The enum feeds the shared tool-visibility logic, so removing it is a registry change. This is a G15 candidate.
+- `docs/plans/2026-09-21-0955-feat-provable-set-reach-plan.md:280` and `docs/plans/2026-10-08-minimal-design-audit.md:261` now cite `pre-rebase:`. The M3 plan link to the JSON would otherwise fail `test-doc-links`.
+- `CHANGELOG.md:625` still mentions `tools.invoke` RPC access. It is history and stays.
+- `docs/internals/zts-expert-contract.md`: the in-process tools section named `tools.list`. I reworded it to name the tool registry, and removed the RPC paragraph. The `propose_change_set` guarantee stays in one sentence.
+
+### Dead code for G15
+
+- `session/events.zig`: `writeEntryEventLine` (line 957) has no caller left. Only `rpc_mode.zig` used it.
+- `registry/tool.zig` `Surface.rpc`, the `.rpc` branch in `allowedOn`, `registry/registry.zig` test "model and rpc surfaces reject workspace writers", and the `.rpc` assertions in `app.zig` (the registry effect test). Nothing production uses `.rpc` now.
+- Comments that still say RPC: `agent.zig:1029` ("--rpc"), `agent.zig:1454` (`compact` doc), `loop.zig:853`, `tools/pi_goal_candidate.zig:102,619`, `text_buffer.zig:4`, `registry/tool.zig:20,149,153`.
+- `build/Context.zig` fields `pi_zts_cli_host_mod` and `project_config_mod` were passed to the reach executable. Check whether other steps still use them.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "expert_reach|provable-reach|provable_reach|rpc_mode|rpc mode|--mode rpc|mode=rpc|test-provable|JSON-RPC|RpcMode" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling
+```
+
+Remaining hits: `docs/provable-reach.md` (the M3 record, with `pre-rebase:` or "at that tag" wording), links to `docs/provable-reach.md` from `STRATEGY.md`, `docs/roadmap.md`, and `docs/plans/README.md`, the M3 plan text, the `pre-rebase:` citations, the `Generic JSON-RPC` comment in `registry/tool.zig`, and plan text of this series.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `test-expert-app`, `test-cli`, `test-standin`, `test-step-coverage`, `test-docs-drift`, `test-doc-links`, `test-module-boundary`, and `zig build test`. `bash scripts/audit-docs.sh`: exit 0.
+- The `zig build test` log contains two `[replay] model_context_mismatch` lines. They come from negative tests that check mismatch detection (a recorder and a promotion test). The step exit status is 0 and `coverage.json is stale` does not appear.
+- Invariant 4 after G11: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.

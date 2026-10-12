@@ -6,7 +6,6 @@ const registry_mod = @import("registry/registry.zig");
 const repl = @import("repl.zig");
 const loop = @import("loop.zig");
 const print_mode = @import("print_mode.zig");
-const rpc_mode = @import("rpc_mode.zig");
 const ledger = @import("ledger.zig");
 const autoloop = @import("autoloop.zig");
 const transcript_mod = @import("transcript.zig");
@@ -75,11 +74,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     if (flags.goals != null) {
         runAutoloop(allocator, &registry, flags) catch |err| return handleModeError(err);
-        return;
-    }
-
-    if (flags.rpc_mode) {
-        rpc_mode.run(allocator, &registry, flags, flags.policy orelse .auto_reject) catch |err| return handleModeError(err);
         return;
     }
 
@@ -274,10 +268,9 @@ pub fn flagErrorMessage(err: anyerror) []const u8 {
         error.MissingGateLogPath => "error: --gate-log requires a path value\n",
         error.MutuallyExclusiveResumeFlags => "error: --resume and --session-id are mutually exclusive\n",
         error.MissingPrintPrompt => "error: --print requires a value\n",
-        error.MissingModeValue => "error: --mode requires a value (json|rpc)\n",
-        error.UnsupportedMode => "error: --mode only accepts 'json' or 'rpc'\n",
+        error.MissingModeValue => "error: --mode requires a value (json)\n",
+        error.UnsupportedMode => "error: --mode only accepts 'json'\n",
         error.JsonModeRequiresPrint => "error: --mode json requires --print <prompt>\n",
-        error.RpcModeConflictsWithPrint => "error: --mode rpc cannot be combined with --print\n",
         error.MissingToolsPreset => "error: --tools requires a value (full, minimal)\n",
         error.UnsupportedToolsPreset => "error: --tools only accepts 'full' or 'minimal'\n",
         error.MissingForkSessionId => "error: --fork requires a session id value\n",
@@ -287,7 +280,7 @@ pub fn flagErrorMessage(err: anyerror) []const u8 {
         error.InvalidMaxIters => "error: --max-iters must be a positive integer\n",
         error.MissingHandlerValue => "error: --handler requires a path value\n",
         error.GoalRequiresHandler => "error: --goal requires --handler <path>\n",
-        error.GoalConflictsWithPrintOrRpc => "error: --goal cannot be combined with --print or --mode rpc\n",
+        error.GoalConflictsWithPrint => "error: --goal cannot be combined with --print\n",
         error.MissingModelValue => "error: --model requires a model id value\n",
         error.MissingProviderValue => "error: --provider requires local, claude, or openai\n",
         error.UnsupportedProvider => "error: --provider only accepts local, claude, or openai\n",
@@ -316,10 +309,6 @@ fn setMode(out: *ExpertFlags, val: []const u8) !void {
         out.json_mode = true;
         return;
     }
-    if (std.mem.eql(u8, val, "rpc")) {
-        out.rpc_mode = true;
-        return;
-    }
     return error.UnsupportedMode;
 }
 
@@ -339,9 +328,6 @@ pub const ExpertFlags = struct {
     fork_session_id: ?[]const u8 = null,
     print: ?[]const u8 = null,
     json_mode: bool = false,
-    /// Line-delimited JSON-RPC 2.0 over stdio. Long-lived session; mutually
-    /// exclusive with --print.
-    rpc_mode: bool = false,
     tools_preset: ToolsPreset = .full,
     /// Comma-separated property tags to drive convergence against. When
     /// non-null, `zttp expert` short-circuits the conversational run and
@@ -474,9 +460,8 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     if (out.fork_session_id != null and out.resume_latest) return error.MutuallyExclusiveForkFlags;
     if (out.fork_session_id != null and out.session_id != null) return error.MutuallyExclusiveForkFlags;
     if (out.json_mode and out.print == null) return error.JsonModeRequiresPrint;
-    if (out.rpc_mode and out.print != null) return error.RpcModeConflictsWithPrint;
     if (out.goals != null and out.handler == null) return error.GoalRequiresHandler;
-    if (out.goals != null and (out.print != null or out.rpc_mode)) return error.GoalConflictsWithPrintOrRpc;
+    if (out.goals != null and out.print != null) return error.GoalConflictsWithPrint;
     if (out.goals != null and (out.provider != null or out.model != null)) return error.GoalConflictsWithProviderOrModel;
     if (saw_yes) {
         out.policy = .auto_approve;
@@ -652,24 +637,6 @@ test "parseExpertFlags: --no-context-files defaults to false" {
     const argv = [_][]const u8{ "zts", "expert" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expectEqual(false, flags.no_context_files);
-}
-
-test "parseExpertFlags: --mode rpc sets rpc_mode" {
-    const argv = [_][]const u8{ "zts", "expert", "--mode", "rpc" };
-    const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(true, flags.rpc_mode);
-    try testing.expectEqual(false, flags.json_mode);
-}
-
-test "parseExpertFlags: --mode=rpc inline form" {
-    const argv = [_][]const u8{ "zts", "expert", "--mode=rpc" };
-    const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(true, flags.rpc_mode);
-}
-
-test "parseExpertFlags: --mode rpc with --print errors" {
-    const argv = [_][]const u8{ "zts", "expert", "--mode", "rpc", "--print", "hi" };
-    try testing.expectError(error.RpcModeConflictsWithPrint, parseExpertFlags(argv[0..]));
 }
 
 test "parseExpertFlags: --mode bogus still rejected" {
@@ -962,12 +929,7 @@ test "parseExpertFlags: --goal without --handler is rejected" {
 
 test "parseExpertFlags: --goal conflicts with --print" {
     const argv = [_][]const u8{ "zts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--print", "hi" };
-    try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
-}
-
-test "parseExpertFlags: --goal conflicts with --mode rpc" {
-    const argv = [_][]const u8{ "zts", "expert", "--handler", "h.ts", "--goal", "no_secret_leakage", "--mode", "rpc" };
-    try testing.expectError(error.GoalConflictsWithPrintOrRpc, parseExpertFlags(argv[0..]));
+    try testing.expectError(error.GoalConflictsWithPrint, parseExpertFlags(argv[0..]));
 }
 
 test "splitCsv trims whitespace and drops empty entries" {

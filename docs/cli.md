@@ -499,7 +499,6 @@ zttp expert --no-edit
 zttp expert --provider claude --model claude-sonnet-4-6
 zttp expert --print "add a GET /health route"
 zttp expert --print "..." --mode json
-zttp expert --mode rpc
 zttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
@@ -518,7 +517,6 @@ zttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--no-context-files` | Skip the `AGENTS.md` / `CLAUDE.md` project-context walk. The persona and live snapshots still ship. |
 | `--print <text>` | Non-interactive: send one message, print the response, and exit. |
 | `--mode json` | Emit JSON-encoded turn events to stdout (pairs with `--print`). |
-| `--mode rpc` | Run in RPC mode for editor integrations. |
 | `--handler <file>` | Override the handler file (default: auto-detected from `zttp.json`). |
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 | `--max-iters <n>` | Autoloop iteration budget for a `--goal` run. Defaults to 8. |
@@ -537,12 +535,6 @@ order from `$HOME/.zttp/settings.json` and `<cwd>/.zttp/settings.json`; the
 project file wins. Only `compaction.enabled`, `maxInputTokens`, `reserveTokens`,
 and `keepRecentTokens` are accepted.
 
-RPC `compact` accepts optional `{"instructions":"..."}` and returns a typed
-result object with status `compacted`, `no_change`, `not_compactable`,
-`unavailable`, or `failed`. Successful results include the kept entry ID,
-before/after token estimates, and summary usage. Automatic compaction emits
-ordered `compaction` start/end notifications.
-
 The explicit local provider uses `LiquidAI/LFM2.5-2.6B-MLX-8bit` through
 non-streaming Chat Completions at the loopback-only `ZTTP_MLX_BASE_URL`, which defaults to
 `http://127.0.0.1:8080`. Zttp checks `/health` and `/v1/models` before creating
@@ -554,8 +546,7 @@ The local adapter was tested with MLX-LM 0.31.3 and model revision
 against the resolved provider. A model ID never switches the provider. The
 resolution order is explicit launch flags, stored resume or fork identity, then
 the current DeepSeek default. `/model` lists only models for the active provider, marks the
-current one, and persists a valid change. RPC clients get the same allowed set
-through `model.list` and the same validation through `model.set`.
+current one, and persists a valid change.
 
 The local model has a 131,072-token context and an 8,192-token request output
 budget. Claude defaults to `claude-sonnet-4-6`; OpenAI defaults to
