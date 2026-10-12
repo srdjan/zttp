@@ -5,16 +5,18 @@
 DECISIONS ACCEPTED 2026-10-11. The owner answered "your recommendations", which selects the recommended option of all nine decisions.
 Decision 3 therefore stops M5: agent handlers are not the next product.
 Decision 7 keeps `zts agent --stdin-json` with its determinism gate and module graph operation, and cuts RPC mode.
-The DeepSeek re-record in Phase 3 still needs a separate authorization.
+The owner authorized Phase 3 and its complete DeepSeek recording with "go ahead with phase 3" on 2026-10-12.
 The tag `pre-rebase` marks `b33cac5c`, the full feature set before any removal.
 Phase 1 executes from `docs/plans/2026-10-11-feature-removal-phase-1.md`. That plan corrects several file lists below and moves every model-visible tool removal to Phase 3, because the tool catalog is part of the frozen replay identity.
 Phase 1 is complete. The owner selected Phase 2 execution through Decision 10 on 2026-10-12.
 The implementation plan is `docs/plans/2026-10-12-1109-refactor-feature-removal-phase-two-plan.md`.
 It corrects the Phase 2 sequence: runtime authority and artifact sections leave first; model-visible ledger and tool exports wait for Phase 3.
 Certificate schema 4 becomes 5 alongside payload format 6 becoming 7. The eight handler properties and residual guards remain.
-Decision 11 confirms retained compiler exports until Phase 3. Combined phases and DeepSeek recording remain outside this execution.
+Decision 11 confirms retained compiler exports until Phase 3. Phase 2 did not include combined phases or DeepSeek recording.
 Phase 2 is complete on 2026-10-12. The worklog records removals, format boundaries, offline checks, and review limits.
 The full verification script passes. Compiler identities remain unchanged, and all nineteen authoring cases replay offline.
+Phase 3 now executes from `docs/plans/2026-10-12-1444-refactor-feature-removal-phase-three-plan.md`.
+Its reviewed sequence replaces evidence tooling first, adds refusal boundaries, and completes the language migration with one recording.
 
 Plan 003 kept every documented feature and changed only internal compiler boundaries.
 This proposal is different: the owner asked which features can go.
