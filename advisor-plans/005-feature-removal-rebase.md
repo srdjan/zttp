@@ -2,7 +2,12 @@
 
 ## Status
 
-PROPOSED 2026-10-11. No decision is recorded. This document authorizes no edit.
+DECISIONS ACCEPTED 2026-10-11. The owner answered "your recommendations", which selects the recommended option of all nine decisions.
+Decision 3 therefore stops M5: agent handlers are not the next product.
+Decision 7 keeps `zts agent --stdin-json` with its determinism gate and module graph operation, and cuts RPC mode.
+The DeepSeek re-record in Phase 3 still needs a separate authorization.
+The tag `pre-rebase` marks `b33cac5c`, the full feature set before any removal.
+Phase 1 executes from `docs/plans/2026-10-11-feature-removal-phase-1.md`. That plan corrects several file lists below and moves every model-visible tool removal to Phase 3, because the tool catalog is part of the frozen replay identity.
 
 Plan 003 kept every documented feature and changed only internal compiler boundaries.
 This proposal is different: the owner asked which features can go.

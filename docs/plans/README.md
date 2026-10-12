@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Plan 005 Phase 1: feature removal](2026-10-11-feature-removal-phase-1.md) | Active 2026-10-11; G1 to G14 in order, progress in the worklog | Owner accepted plan 005 decisions 1 to 9 with "your recommendations"
 | [Multi-module contract analysis](2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md) | Complete 2026-10-11; results and coverage limits in [worklog](2026-10-11-multi-module-analysis-worklog.md) | Owner approved the concrete plan with "yes, execute" |
 | [Shared analysis first unit](2026-10-11-shared-analysis-first-unit.md) | Complete 2026-10-11; results and coverage limits in [worklog](2026-10-11-shared-analysis-worklog.md) | Owner approved execution with "go ahead" |
 | [Minimal design audit](2026-10-08-minimal-design-audit.md) | Research complete; reductions, compatibility questions, and acceptance checks | User requested simplification discovery; implementation scope remains unselected |
