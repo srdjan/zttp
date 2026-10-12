@@ -27,7 +27,7 @@ const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
 const anthropic_sse_parser = @import("anthropic/sse_parser.zig");
 const anthropic_response_assembler = @import("anthropic/response_assembler.zig");
-const anthropic_propose_change_set = @import("anthropic/propose_change_set.zig");
+const propose_change_set = @import("propose_change_set.zig");
 const openai_sse_parser = @import("openai/sse_parser.zig");
 const openai_response_assembler = @import("openai/response_assembler.zig");
 const local_client = @import("local/client.zig");
@@ -249,7 +249,7 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
 pub fn replayObserved(
     arena: std.mem.Allocator,
     cassette: Cassette,
-    observed: ?*?anthropic_propose_change_set.RejectionShape,
+    observed: ?*?propose_change_set.RejectionShape,
 ) !loop.ModelCallResult {
     return switch (cassette.header.provider) {
         .local => {
@@ -266,7 +266,7 @@ pub fn replayObserved(
         .anthropic => {
             const event_list = try anthropic_sse_parser.parseAll(arena, cassette.body);
             const outcome = try anthropic_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
+            const reply = try propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
             return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
         .deepseek => {
@@ -284,7 +284,7 @@ pub fn replayObserved(
             if (!cassette.header.stream) return CassetteError.NonStreamingOpenAINotSupported;
             const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
             const outcome = try openai_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
+            const reply = try propose_change_set.maybeRemapObserved(arena, outcome.reply, outcome.stop_reason, observed);
             return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
     };

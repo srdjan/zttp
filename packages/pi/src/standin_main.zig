@@ -7,7 +7,7 @@ const request = @import("standin/request.zig");
 const range = @import("standin/range.zig");
 const sse_parser = @import("providers/openai/sse_parser.zig");
 const response_assembler = @import("providers/openai/response_assembler.zig");
-const propose_change_set = @import("providers/anthropic/propose_change_set.zig");
+const propose_change_set = @import("providers/propose_change_set.zig");
 const standin_range_doc = @import("standin_range_doc");
 
 pub fn main(init: std.process.Init.Minimal) !void {

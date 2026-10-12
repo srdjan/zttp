@@ -2,10 +2,10 @@
 //! machine's first-class ordered change-set reply.
 
 const std = @import("std");
-const turn = @import("../../turn.zig");
-const tool_catalog = @import("../tool_catalog.zig");
-const contract_gate = @import("../../contract_gate.zig");
-const ToolDef = @import("../../registry/tool.zig").ToolDef;
+const turn = @import("../turn.zig");
+const tool_catalog = @import("tool_catalog.zig");
+const contract_gate = @import("../contract_gate.zig");
+const ToolDef = @import("../registry/tool.zig").ToolDef;
 
 pub const tool_name = tool_catalog.propose_change_set.name;
 pub const tool_description = tool_catalog.propose_change_set.description;

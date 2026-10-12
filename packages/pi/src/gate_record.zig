@@ -12,7 +12,7 @@ const contract_gate = @import("contract_gate.zig");
 const ToolDef = @import("registry/tool.zig").ToolDef;
 const json_writer = @import("providers/json_writer.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
-const propose_change_set = @import("providers/anthropic/propose_change_set.zig");
+const propose_change_set = @import("providers/propose_change_set.zig");
 
 pub const RejectionShape = propose_change_set.RejectionShape;
 

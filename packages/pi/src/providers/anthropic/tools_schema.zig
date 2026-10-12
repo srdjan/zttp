@@ -7,7 +7,7 @@ const std = @import("std");
 const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const registry_mod = @import("../../registry/registry.zig");
 const json_writer = @import("../json_writer.zig");
-const propose_change_set = @import("propose_change_set.zig");
+const propose_change_set = @import("../propose_change_set.zig");
 const tool_catalog = @import("../tool_catalog.zig");
 
 fn writeToolEntry(

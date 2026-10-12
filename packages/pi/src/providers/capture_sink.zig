@@ -6,7 +6,7 @@
 //! recorder succeeds.
 
 const model_request = @import("model_request.zig");
-const propose_change_set = @import("anthropic/propose_change_set.zig");
+const propose_change_set = @import("propose_change_set.zig");
 
 pub const ResponseFieldPresence = struct {
     choices: bool = false,

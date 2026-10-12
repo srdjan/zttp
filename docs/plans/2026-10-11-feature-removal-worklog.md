@@ -665,3 +665,27 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - Exit 0, unfiltered: `zig build`, `test-zts`, `test-zts-cli`, `test-zts-layering`, `test-module-boundary`, `test-release-check`, `test-release-workflow`, `test-diagnostic-corpus`, `test-docs-drift`, `test-step-coverage`, `test-script-reachability`, `test-doc-links`, `test-standin`, `test-expert-app`, and `zig build test`. `bash scripts/check-semantics-spec.sh`, `bash scripts/check-diagnostic-producers.sh`, `bash scripts/audit-docs.sh`, and `zig fmt --check build.zig build packages tooling`: exit 0. `coverage.json is stale` does not appear in the `zig build test` log.
 - Invariant 4 after G12: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/ packages/zts/src/diagnostic_catalog.zig` is empty. `diagnosticHash` is not in `meta --json`. `diagnostic_catalog.zig` is unchanged, `docs/coverage.json` still holds `6b7fead4...1191`, and `test-standin` and `test-expert-app` (which check it) pass.
 - Invariant 3: nothing changed under `packages/pi/src/skills/`, `prompts/`, `tool_registry.zig`, or `expert_persona.zig`.
+
+## G13 baseline
+
+Unfiltered `zig build test-standin` before G13a (HEAD `22dc9b1a`), run with `DEEPSEEK_API_KEY` unset and private Zig caches, exit 0: `Build Summary: 6/6 steps succeeded; 56/56 tests passed`, and the run step line `run test 56 pass (56 total)`. G13b and G13d must reproduce `56/56 tests passed`. The step runs only tests whose name contains `stand-in` (`standin_only` in `build/host_tests.zig` sets `.filters = &.{"stand-in"}`), so a ported test keeps `stand-in` in its name.
+
+## G13a Neutral home for propose_change_set
+
+### Moved
+
+`packages/pi/src/providers/anthropic/propose_change_set.zig` is now `packages/pi/src/providers/propose_change_set.zig` (`git mv`). Its four relative imports changed depth (`../turn.zig`, `tool_catalog.zig`, `../contract_gate.zig`, `../registry/tool.zig`). No other line of the file changed.
+
+### Importers updated (14 files)
+
+`cassette_tests.zig`, `gate_record.zig`, `loop.zig`, `standin_main.zig`, `standin_tests.zig`, `tests.zig`, `simulator/recorder.zig`, `providers/capture_sink.zig`, `providers/cassette_client.zig`, `providers/anthropic/client.zig`, `providers/anthropic/tools_schema.zig`, `providers/deepseek/client.zig`, `providers/local/client.zig`, `providers/openai/client.zig`. In `cassette_client.zig` the import alias `anthropic_propose_change_set` became `propose_change_set` (four uses), because the file is no longer under `anthropic/`. `tools_schema.zig` stays in place.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each run was redirected to a file and the exit status read directly.
+
+- Exit 0, unfiltered: `test-expert-app` (1048 of 1049 passed, 1 skipped), `test-cassette` (425/425), `test-simulator` (927/927), `test-standin` (56/56, equal to the G13 baseline), `test-module-boundary`, `zig build`, and `zig build test` (9132 of 9138 passed, 6 skipped). `zig fmt --check` on the 15 changed files: exit 0.
+- Invariant 2: the `test-expert-app` log and the `zig build test` log contain `model_context_mismatch at turn 0/2` only from the two negative tests (a recorder test and a promotion test), as in G12. `response_order_mismatch` and `coverage.json is stale` do not appear.
+- Invariant 3: `git diff --stat` over `tool_registry.zig`, `expert_persona.zig`, `skills/`, and `prompts/` is empty.
+- Invariant 4 after G13a: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 8: `git grep -n "anthropic/propose_change_set" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages` returns only the Phase 1 plan and this worklog (historical text). `advisor-plans/005-feature-removal-rebase.md` also names the old path.
