@@ -325,13 +325,6 @@ fn cmdLedger(ctx: cli_help.Ctx) anyerror!void {
     return;
 }
 
-fn cmdGateReport(ctx: cli_help.Ctx) anyerror!void {
-    // Reads a --gate-log JSONL file and prints the measured contract pass rate
-    // per tool and the measured turn volume per niche per day.
-    try pi_app.runGateReportCommand(ctx.allocator, ctx.args);
-    return;
-}
-
 fn cmdExpert(ctx: cli_help.Ctx) anyerror!void {
     return dispatchExpert(ctx.allocator, ctx.args);
 }
@@ -437,7 +430,6 @@ const commands = [_]cli_help.Command{
     .{ .name = "compile", .run = cmdCompile, .section = .package, .args = "<handler.ts> -o <bin>", .blurb = "Build a binary from an explicit path" },
     .{ .name = "build", .run = cmdBuild, .section = .package, .args = "[-o <bin>]", .blurb = "Emit a self-contained binary" },
     .{ .name = "ledger", .run = cmdLedger, .section = .proof_ledger, .args = "[export|replay]", .blurb = "Export or replay an expert-session verified-patch ledger" },
-    .{ .name = "gate-report", .run = cmdGateReport, .section = .proof_ledger, .args = "<gate-log-path>", .blurb = "Report tool-contract pass rate and turn volume per niche" },
     .{ .name = "expert", .run = cmdExpert, .section = .core, .blurb = "Interactive compiler-in-the-loop agent", .injects_stored_providers = true },
     .{ .name = "deploy", .run = cmdDeploy, .section = .core, .blurb = "Build, prove, deploy (local default)" },
     .{ .name = "verify", .run = cmdVerify, .section = .proof_ledger, .args = "<url>", .blurb = "Verify a deployed proof receipt" },

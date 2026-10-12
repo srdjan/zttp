@@ -9,7 +9,6 @@
 const mb = @import("module_binding.zig");
 const adapter = @import("module_binding_adapter.zig");
 const ModuleBinding = mb.ModuleBinding;
-const extension_bindings = @import("extension_bindings.zig");
 const file_io = @import("file_io.zig");
 const contract_types = @import("zts-contracts").contract_types;
 const module_authorization = @import("zts-base").module_authorization;
@@ -90,8 +89,8 @@ pub const builtins = [_]ModuleBinding{
     ported.sse,
 };
 
-/// Unified module registry: core built-ins plus explicitly registered extensions.
-pub const all = builtins ++ extension_bindings.all;
+/// Unified module registry: the core built-ins.
+pub const all = builtins;
 
 /// Number of built-in modules.
 pub const count = all.len;

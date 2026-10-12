@@ -380,8 +380,6 @@ fn printInitExtensionNextSteps(name: []const u8) void {
     std.debug.print("Initialized zttp extension in {s}\n", .{name});
     std.debug.print("Next steps:\n", .{});
     std.debug.print("  cd {s}\n", .{name});
-    std.debug.print("  zts verify-module-manifest zttp-module.json\n", .{});
-    std.debug.print("  zts extension-status --module-manifest zttp-module.json\n", .{});
     std.debug.print("  # adjust build.zig.zon to point at the version of zttp-sdk you depend on,\n", .{});
     std.debug.print("  # then `zig build` to compile the native binding.\n", .{});
 }
@@ -832,18 +830,13 @@ const extension_readme_template =
     \\
     \\## Files
     \\
-    \\- `zttp-module.json` - proof metadata for tools like
-    \\  `zts verify-module-manifest` and `zts extension-status`.
+    \\- `zttp-module.json` - proof metadata that the analyzer reads through
+    \\  `--module-manifest`.
     \\- `src/root.zig` - the native Zig binding that implements the export.
     \\- `build.zig` / `build.zig.zon` - Zig build wiring against `zttp-sdk`.
     \\- `handler.ts` - a sibling handler that imports `zttp-ext:{{name}}` so
     \\  you can verify end-to-end with `zts check` once the manifest is
     \\  registered via `--module-manifest`.
-    \\
-    \\## Validate the manifest
-    \\
-    \\    zts verify-module-manifest zttp-module.json
-    \\    zts extension-status --module-manifest zttp-module.json
     \\
     \\## Wire up `zttp-sdk`
     \\

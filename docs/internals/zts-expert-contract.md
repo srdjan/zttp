@@ -73,12 +73,9 @@ Code ranges:
 | `check <handler.ts> --json` | Analyzer result, proof envelope, diagnostics, and optional contract. |
 | `verify-paths <file>... --json` | Path and flow verification. |
 | `verify-modules --builtins --strict --json` | Built-in module governance. |
-| `verify-module-manifest <manifest.json> --json` | Extension manifest validation. |
-| `extension-status --module-manifest <path>... --json` | Extension status summary. |
 | `edit-simulate [handler.ts] --stdin-json` | Pre-apply edit simulation. |
-| `review-patch <file> --json` | Diff-aware post-edit review. |
 
-Commands such as `prove`, `mock`, `link`, `rollout`, and `compile` are useful
+Commands such as `prove`, `link`, `rollout`, and `compile` are useful
 CLI tools, but their text output is not the structured v1 contract.
 
 ## Proof Envelope

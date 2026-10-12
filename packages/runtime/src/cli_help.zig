@@ -121,7 +121,6 @@ const help_all_mid =
     \\Proof ledger:
     \\  zttp proofs [list|show|diff|watch|export|badge|bundle|verify|gate]
     \\  zttp ledger [export|replay]          Export or replay an expert-session verified-patch ledger
-    \\  zttp gate-report <gate-log>          Report tool-contract pass rate and turn volume per niche
     \\  zttp verify <url>                    Verify a deployed proof receipt
     \\  zttp invariant list                  Print the supported application-invariant kinds
     \\  zttp invariant author --kind <name>  Draft a reviewable invariant candidate
@@ -281,12 +280,12 @@ test "help --all surfaces the advanced commands" {
     var buf: [help_all_capacity]u8 = undefined;
     const help_all = renderHelpAll(&buf);
     inline for (.{
-        "zttp serve",          "zttp build",          "zttp compile",
-        "zttp doctor",         "zttp proofs",         "zttp check",
-        "zttp features",       "zttp modules",        "zttp restrictions",
-        "zttp meta",           "zttp describe-rule",  "zttp verify-paths",
-        "zttp verify-modules", "zttp edit-simulate",  "zttp review-patch",
-        "zttp rollout",        "zttp workflow-queue", "zttp durable",
+        "zttp serve",          "zttp build",         "zttp compile",
+        "zttp doctor",         "zttp proofs",        "zttp check",
+        "zttp features",       "zttp modules",       "zttp restrictions",
+        "zttp meta",           "zttp describe-rule", "zttp verify-paths",
+        "zttp verify-modules", "zttp edit-simulate", "zttp rollout",
+        "zttp workflow-queue", "zttp durable",
     }) |cmd| {
         try std.testing.expect(has(help_all, cmd));
     }
@@ -341,8 +340,7 @@ test "expert help advertises documented modes" {
 
 test "help --all no longer advertises hosted cloud deploy" {
     // Trailing space avoids spurious substring matches with longer
-    // command names (e.g. `zttp review` would otherwise match
-    // `zttp review-patch`).
+    // command names.
     var buf: [help_all_capacity]u8 = undefined;
     const help_all = renderHelpAll(&buf);
     inline for (.{

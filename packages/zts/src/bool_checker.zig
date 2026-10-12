@@ -1585,8 +1585,8 @@ pub const BoolChecker = struct {
     /// Reads only `.builtin` records. That is the exact translation of the
     /// legacy filter `builtin_modules.fromSpecifier(module) == null` skip:
     /// `fromSpecifier` searches `builtin_modules.all`, which is
-    /// `builtins ++ extension_bindings.all`, and does NOT consult a manifest
-    /// registry. So a partner-registered module was skipped before and must
+    /// `builtins`, and does NOT consult a manifest registry. So a
+    /// partner-registered module was skipped before and must
     /// stay skipped, which is why `.partner` is excluded here alongside
     /// `.unresolved`.
     fn scanImports(self: *BoolChecker) void {

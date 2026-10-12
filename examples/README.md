@@ -2,7 +2,7 @@
 
 Handler files grouped by what they demonstrate. The compiler treats every
 example as a complete program: parse, contract, verify, then run. Each
-`.test.jsonl` file beside a handler is replayable through `zttp mock`.
+`.test.jsonl` file beside a handler is replayable through `zttp test`.
 Workflow examples use live server checks in `scripts/test-examples.sh` because
 they exercise real durable state, signals, and the persisted workflow queue.
 
@@ -118,10 +118,10 @@ diagnostic.
 
 ## Diagnosing failures
 
-Every `.test.jsonl` next to a handler is a replayable assertion. Run them with the mock server:
+Every `.test.jsonl` next to a handler is a replayable assertion. Run them with `zttp test`:
 
 ```bash
-zttp mock examples/handler/handler.test.jsonl --port 3001
+zttp test examples/handler/handler.test.jsonl
 ```
 
 When verification fails on an unsupported language feature, the terminal shows the framed restriction block (`why` / `buys` / `try`). See `zts restrictions` for the full table of language cuts and the proofs they unlock.

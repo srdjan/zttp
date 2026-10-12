@@ -85,7 +85,6 @@ zts bytecode_verifier.zig
 zts comptime.zig
 zts context.zig
 zts cost_meter.zig
-zts extension_bindings.zig
 zts file_io.zig
 zts gc.zig
 zts handler_analyzer.zig

@@ -44,11 +44,6 @@ const host_test_roots = [_]HostTestRoot{
     // through the `zts_cli` module. Same rationale as canonicalize.
     .{ .owner = .tools, .src = "src/zts_cli.zig", .step = "test-zts-cli", .desc = "Run analyzer dispatch + machine-command module tests", .project_config = true },
     .{ .owner = .tools, .src = "src/deploy_manifest.zig", .step = "test-deploy-manifest", .desc = "Run deploy manifest renderer tests" },
-    // collected_via_named_module: training_export.zig is reached only
-    // through the `zts_cli` command table, and the `zts_cli` root does not
-    // analyze it, so this root is what runs its tests. Verified 2026-08-26
-    // by test count: the zts_cli suite stayed at 140 with the file added.
-    .{ .owner = .tools, .src = "src/training_export.zig", .step = "test-training-export", .desc = "Run ZTS training-export bundle tests", .project_config = true },
     // collected_via_named_module: agent_identity.zig is re-exported by
     // zts_cli.zig but not yet referenced by any analyzed code, and Zig only
     // collects tests from files it analyzes - so the `zts_cli` root runs

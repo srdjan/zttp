@@ -316,12 +316,10 @@ every model tool call was graded against its declared `input_schema`. The gate
 observes only: no call is blocked, retried, or rewritten because of a verdict,
 and the schema verdict stays separate from the tool's own execution result.
 
-`zttp gate-report` reads that log and prints the measured contract pass rate per
-tool and the measured turn volume per niche per day:
+Pass a path to write the log:
 
 ```bash
 zttp expert --gate-log /tmp/gate.jsonl
-zttp gate-report /tmp/gate.jsonl
 ```
 
 A niche is the pair of a task class and a hash over the sorted tool schemas, so
@@ -349,11 +347,9 @@ command registry:
 ```bash
 zttp check [handler.ts] [--json] [--contract] [--types] [--declaration path]
 zttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
-zttp mock <tests.jsonl> [--port <port>]
 zttp link <system.json>
 zttp rollout <old-system.json> <new-system.json>
 zttp edit-simulate [handler.ts] [--before old.ts]
-zttp review-patch <file> [--before old.ts] [--json]
 zttp gen-tests [handler.ts] [-o output.jsonl]
 zttp canonicalize <file> --json
 zttp normalize <file> [--write] [--check] [--json] [--sql-schema <path>]
@@ -368,12 +364,9 @@ zttp spec-check [--json]
 zttp spec-hash [--json]
 zttp spec-render [--out path] [--check path]
 zttp module-spec-render [--check] [--json]
-zttp zts-training-export --out <dir> --commit <sha> --worktree clean|dirty
 zttp verify-paths <file>... [--json]
 zttp verify-modules <file>... [--strict] [--json]
 zttp verify-modules --builtins --strict --json
-zttp verify-module-manifest <manifest.json> [--json]
-zttp extension-status --module-manifest <path>... [--json]
 ```
 
 With a configured policy, computed env keys, egress endpoints, and cache
@@ -396,31 +389,6 @@ any other `schema_version` gets a frozen three-key negotiation response, so
 version discovery is one deterministic round trip.
 
 Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove-behavior` returns 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the five mechanisms, the SMT layer, the exclusion audit, and the generated artifacts these commands own.
-
-### Training Export
-
-`zttp zts-training-export` writes the sealed training contract bundle: the rule
-catalog, the admitted feature set, the restrictions and the proofs they unlock,
-the virtual module exports, the published examples, and the rendered semantics
-spec, plus a `manifest.json` that binds every identity hash this compiler
-publishes and a SHA-256 for each emitted file.
-
-The bundle is the only channel by which a training pipeline may learn what this
-compiler enforces. Held-out evaluation material is excluded by construction: the
-exporter renders from registries compiled into the binary and never opens the
-recorded corpora, so there is no filter that could fail open.
-
-`--commit` and `--worktree` are required. The command reads no git state of its
-own, so a bundle that cannot name its source is refused rather than emitted with
-the field blank, and a dirty worktree is refused outright. Run `zig build
-zts-training-export` to have `scripts/zts-training-export.sh` supply both from
-git, write the bundle, and then verify every digest the manifest claims against
-the bytes on disk.
-
-`bundle_id` covers the compiler authority only - schema, versions, soundness
-epoch, every identity hash, and the sorted file digests. Provenance is recorded
-but not hashed into it, so two clean checkouts of the same commit on two
-machines produce the same bundle id.
 
 ### Canonicalize And Normalize
 

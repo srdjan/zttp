@@ -17,16 +17,13 @@ pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 pub const system_analysis = @import("system_analysis.zig");
 const json_diag = precompile.json_diag;
-const mock = @import("mock_server.zig");
 pub const system_build = @import("system_build.zig");
 const system_rollout = @import("system_rollout.zig");
 const search_rules = @import("search_rules.zig");
-const review_patch = @import("review_patch.zig");
 const prove_behavior = @import("prove_behavior.zig");
 const expert = @import("expert.zig");
 const semantics_cli = @import("semantics_cli.zig");
 const module_spec_cli = @import("module_spec_cli.zig");
-const training_export = @import("training_export.zig");
 const project_config_mod = @import("project_config");
 const zts = @import("zts");
 const zts_file_io = zts.file_io;
@@ -57,12 +54,10 @@ pub const Command = struct {
 
 pub const commands = [_]Command{
     .{ .name = "check", .run = runCheckCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Run the analyzer once", .usage = "check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path]" },
-    .{ .name = "mock", .run = mock.runWithArgs, .category = .analyze, .args = "<tests.jsonl>", .blurb = "Mock server from test fixtures", .usage = "mock <tests.jsonl> [--port PORT]" },
     .{ .name = "link", .run = system_build.runWithArgs, .category = .analyze, .args = "<system.json>", .blurb = "Cross-handler system linking", .usage = "link <system.json> [--output-dir <dir>]" },
     .{ .name = "gen-tests", .run = runGenTestsCommand, .category = .analyze, .args = "[handler.ts]", .blurb = "Generate a starter test fixture", .usage = "gen-tests [handler.ts] [-o output.jsonl]" },
     .{ .name = "prove-behavior", .run = prove_behavior.runWithArgs, .category = .analyze, .args = "<before> <after>", .blurb = "Behavioral-equivalence verdict between two handler versions", .usage = "prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]" },
     .{ .name = "edit-simulate", .run = edit_simulate.runWithArgs, .category = .analyze, .args = "[handler.ts]", .blurb = "Simulate an edit and report violations", .usage = "edit-simulate [handler.ts] [--before old.ts] [--stdin-json]" },
-    .{ .name = "review-patch", .run = review_patch.runWithArgs, .category = .analyze, .args = "<file>", .blurb = "Review a patch for new violations", .usage = "review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]" },
     .{ .name = "rollout", .run = system_rollout.runWithArgs, .category = .analyze, .args = "<old-system> <new>", .blurb = "System-level deployment manifest", .usage = "rollout <old-system.json> <new-system.json> [--output-dir <dir>]" },
     .{ .name = "canonicalize", .run = canonicalize.runWithArgs, .category = .analyze, .args = "<file> --json", .blurb = "Canonicalize a handler and report refactors", .usage = "canonicalize <file> --json [--simulate]" },
     .{ .name = "normalize", .run = canonicalize.runNormalizeWithArgs, .category = .analyze, .args = "<file>", .blurb = "Rewrite a handler into Canonical Normal Form", .usage = "normalize <file> [--write] [--check] [--json]" },
@@ -77,11 +72,8 @@ pub const commands = [_]Command{
     .{ .name = "spec-hash", .run = semantics_cli.runSpecHashCommand, .category = .machine, .args = "[--json]", .blurb = "Print the semantics-registry hash", .usage = "spec-hash [--json]" },
     .{ .name = "spec-render", .run = semantics_cli.runSpecRenderCommand, .category = .machine, .args = "[--out path] [--check path]", .blurb = "Render the semantics registry as a readable TypeScript spec", .usage = "spec-render [--out path] [--check path]" },
     .{ .name = "module-spec-render", .run = module_spec_cli.runModuleSpecRenderCommand, .category = .machine, .args = "[--check]", .blurb = "Generate the module spec JSON from the Zig bindings", .usage = "module-spec-render [--check] [--json]" },
-    .{ .name = "zts-training-export", .run = training_export.runTrainingExportCommand, .category = .machine, .args = "--out <dir> --commit <sha> --worktree clean|dirty", .blurb = "Emit the sealed ZTS training contract bundle", .usage = "zts-training-export --out <dir> --commit <sha> --worktree clean|dirty [--json]" },
     .{ .name = "verify-paths", .run = expert.runVerifyPaths, .category = .machine, .args = "<file>...", .blurb = "Behavior-path verification", .usage = "verify-paths <file>... [--json]" },
     .{ .name = "verify-modules", .run = expert.runVerifyModules, .category = .machine, .args = "<file>...", .blurb = "Module-contract verification", .usage = "verify-modules <file>... [--strict] [--json] | --builtins" },
-    .{ .name = "verify-module-manifest", .run = expert.runVerifyModuleManifest, .category = .machine, .args = "<manifest.json>", .blurb = "Verify a module manifest", .usage = "verify-module-manifest <manifest.json> [--json]" },
-    .{ .name = "extension-status", .run = expert.runExtensionStatus, .category = .machine, .args = "--module-manifest <path>...", .blurb = "Report extension module status", .usage = "extension-status --module-manifest <path>... [--json]" },
 };
 
 /// True for every command in the shared registry. `compile` is excluded by
@@ -771,7 +763,7 @@ fn printGenTestsHelp() void {
         \\
         \\Enumerates all execution paths through the handler and emits a
         \\declarative JSONL test case for each path. Output is immediately
-        \\runnable via `--test` or `zttp mock`.
+        \\runnable via `--test`.
         \\
         \\If no handler is specified, uses the entry from zttp.json.
         \\

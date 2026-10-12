@@ -18,7 +18,6 @@ const local_client = @import("providers/local/client.zig");
 const tools_common = @import("tools/common.zig");
 const tool_registry = @import("tool_registry.zig");
 const gate_record = @import("gate_record.zig");
-const gate_report = @import("gate_report.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -110,12 +109,6 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
 /// Re-exported so `--gate-log` callers keep one name for the sink.
 pub const FileGateSink = gate_record.FileGateSink;
-
-/// Print the measured contract pass rate per tool and the measured turn volume
-/// per niche per day from a gate log.
-pub fn runGateReportCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    try gate_report.runWithArgs(allocator, argv);
-}
 
 pub fn runLedgerCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     try ledger.runWithArgs(allocator, argv);

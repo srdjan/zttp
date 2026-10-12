@@ -314,8 +314,7 @@ reformatted.
 
 Witness files use `counterexample.writeJsonl` exactly. They use the
 same request and virtual-module stub shape consumed by the runtime
-witness-replay path. `zttp mock` is for `.test.jsonl` fixtures and
-does not accept `--replay`.
+witness-replay path.
 
 ### How the corpus grows
 

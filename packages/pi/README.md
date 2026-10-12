@@ -20,7 +20,7 @@ The agent's job is narrow:
 3. Prove the edit passes every compiler rule before it lands.
 
 Step three is the moat. The agent runs `edit_simulate` in-process
-before any apply, and `verify_paths` + `review_patch --diff-only` after
+before any apply, and `verify_paths` + `zts_expert_review_patch` with `diff_only` after
 apply. The model cannot emit text that bypasses the check.
 
 ## Where it lives
@@ -135,7 +135,7 @@ those bytes through `propose_change_set`, which owns the vetoed write path.
 
 ### Post-apply verification (`loop.zig:postApplyCheck`)
 
-After an edit lands, `verify_paths` and `review_patch --diff-only` run
+After an edit lands, `verify_paths` and `zts_expert_review_patch` with `diff_only` run
 against the touched file. The loop logs any new violation that should
 have been caught by the veto as a regression signal.
 
@@ -400,10 +400,8 @@ prompt text, tool-argument text, or paths.
 
 ```sh
 zttp expert --gate-log /tmp/gate.jsonl
-zttp gate-report /tmp/gate.jsonl
 ```
 
-The report prints the contract pass rate per tool and the turn volume per niche
-per day. A niche is the pair of a task class and a hash over the sorted tool
+A niche is the pair of a task class and a hash over the sorted tool
 schemas, so a schema change starts a new niche instead of silently invalidating
 the history of the old one.

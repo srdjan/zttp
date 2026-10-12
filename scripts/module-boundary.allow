@@ -113,7 +113,6 @@ tools spec_discharge
 tools sqlite
 tools system_linker
 tools tool_schema
-tools trace
 tools witness_corpus
 
 # pi

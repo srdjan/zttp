@@ -77,7 +77,7 @@ pub const ContractExtractionRule = struct {
 ///
 /// `inherits` resolves to the existing enum tag that the manifest validator
 /// and audit fence enforce against. `name` is the partner-declared semantic
-/// label; it is preserved for tooling (extension-status) but not used for
+/// label; it is preserved for tooling but not used for
 /// enforcement, since the runtime capability fence is structural and only
 /// understands the closed enum. Bare-string entries (the original form)
 /// have `partner_name == null`.

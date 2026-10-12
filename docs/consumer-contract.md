@@ -641,8 +641,7 @@ range is a claim about numbering rather than a set, so a count here would be a d
 kind of statement from every other row. `zts describe-rule` enumerates them.
 
 Two counts need a qualifier before a gate reads them. Virtual modules = 29 counts
-`runtime_builtins`, the in-tree base. `all = builtins ++ extension_bindings.all`, so a
-build that registers an extension holds more. Residual guard families = 4 counts the
+`runtime_builtins`, the in-tree base. Residual guard families = 4 counts the
 catalog; three are in `enabled_families` today, and `sql` is catalogued but not
 release-enabled. In both cases the alphabet and the effective set are different questions,
 and P1 binds the envelope to publish both as separate blocks. A consumer pins one of them

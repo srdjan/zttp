@@ -130,14 +130,6 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     runtime_purity_cmd.addFileArg(cli_exe.getEmittedBin());
     runtime_purity_cmd.addFileArg(runtime_exe.getEmittedBin());
     runtime_purity_cmd.addFileArg(zts_exe.getEmittedBin());
-    // Emit the sealed ZTS training contract bundle. The script supplies commit
-    // and worktree state; the exporter refuses a dirty tree.
-    const training_export_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/zts-training-export.sh" });
-    training_export_cmd.addFileArg(zts_exe.getEmittedBin());
-    training_export_cmd.has_side_effects = true;
-    if (b.args) |args| training_export_cmd.addArgs(args);
-    const training_export_step = b.step("zts-training-export", "Emit the sealed ZTS training contract bundle");
-    training_export_step.dependOn(&training_export_cmd.step);
 
     const runtime_purity_step = b.step("test-runtime-purity", "Assert the deployed runtime and analyzer carry no agent/provider surface");
     runtime_purity_step.dependOn(&runtime_purity_cmd.step);

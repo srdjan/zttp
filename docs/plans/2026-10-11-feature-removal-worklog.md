@@ -453,3 +453,63 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - `zig fmt --check build.zig build/ packages/ tooling/` and `bash scripts/audit-docs.sh`: exit 0.
 - Invariant 4 after G8: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: nothing under `packages/pi` changed.
+
+## G9 Analyzer command extras
+
+### Removed
+
+- `packages/tools/src/review_patch.zig`, `mock_server.zig`, `training_export.zig`, `packages/pi/src/gate_report.zig`, `packages/zts/src/extension_bindings.zig`, `scripts/zts-training-export.sh`
+- The commands `review-patch`, `mock`, `zts-training-export`, `verify-module-manifest`, and `extension-status` from `zts_cli.commands`, and `gate-report` from the `zttp` command table. `zttp mock x` and the others now print "Unknown command".
+- In `packages/tools/src/expert.zig`: `runVerifyModuleManifest`, `runExtensionStatus`, and everything only they reached (the entry type and loader, the argument parser, the text and JSON writers, `writeLabelSetText`, `writeContractRuleText`, `writeExportJson`, both help printers, and three parser tests). `meta`, `verify-paths`, and `verify-modules` stay.
+- `extension_bindings` import and concatenation in `builtin_modules.zig`: `all` is now `builtins`.
+- The `zts-training-export` build step (`build/artifacts.zig`), the `test-training-export` root (`build/host_tests.zig`), and the `zts-training-export` row in `scripts/manual-steps.allow`.
+- `pi_app.runGateReportCommand`, the `gate_report` import in `app.zig`, and its import in `tests.zig`.
+- The `extension_bindings.zig` row in `scripts/zts-tiers.allow`, the `tools trace` row in `scripts/module-boundary.allow` (only `mock_server.zig` reached `zts.trace` from `packages/tools`), and the `zttp mock --replay` ban row in `scripts/check-docs-drift.sh`.
+
+### Edits that follow from the deletions
+
+- `cli_help.zig`: removed the `gate-report` line from `help --all`, dropped `zttp review-patch` from the advanced-commands test, and reworded one test comment that used `review-patch` as its example.
+- `bool_checker.zig`, `module_manifest.zig`, `docs/consumer-contract.md`: comments and one sentence that named `extension_bindings.all` or `extension-status`.
+- `init_command.zig`: the `init --extension` path stays. Removed the two "Next steps" lines that named `zts verify-module-manifest` and `zts extension-status`, and the "Validate the manifest" section of the generated extension README. The README line about `zttp-module.json` now says the analyzer reads it through `--module-manifest`, which `precompile_args.zig` still accepts. The "partner module" wording in the init help text stays because it is accurate.
+- `scripts/check-docs-drift.sh`: the minimum for parsed dispatch commands fell from 40 to 33. This gate floors its own input. G9 removed seven commands (45 to 38), so the old floor failed. The new floor keeps the same margin of five.
+- Docs: `docs/cli.md` (command list, the `gate-report` paragraph, the whole Training Export section), `docs/internals/testing.md`, `docs/internals/zts-expert-contract.md`, `docs/proofs-and-receipts.md`, `examples/README.md` (now points `.test.jsonl` files at `zttp test`), `packages/pi/README.md`.
+
+### `review-patch` text in `packages/pi`: model-visible, left alone
+
+`expert_workflow.zig:162` is the `spec_goal` workflow route. `workflowNote` injects it into the session as a system note, so it reaches the model request. It names the registered tool `zts_expert_review_patch`, not the deleted CLI command. `expert_codegen_eval.zig:567` compares a tool name in code. Both stay and wait for Phase 3 with the tool.
+
+The doc comment at the top of `packages/pi/src/tools/zts_expert_review_patch.zig` still says "matching the CLI's `zts review-patch --diff-only` semantics". The file is a tool definition, so Phase 1 may not touch it. The comment is stale. It goes in Phase 3.
+
+`packages/pi/src/skills/fix-violations.md:11` says `review_patch --diff-only`. The plan already assigns that skill text to Phase 3. `packages/pi/README.md` now says `zts_expert_review_patch` with `diff_only`, which is the tool name.
+
+### Dead code for G15
+
+- `module_audit.verifyManifestPath` (`packages/tools/src/module_audit.zig:257`) has no caller and no test. Only the two deleted commands called it. Its helper `appendManifestDiagnostic` still has a caller in the same file.
+- `module_manifest.parse` is still used by `contract_builder.zig`, `precompile_args.zig`, `manifest_registry.zig`, and others. No `module_manifest.zig` function lost its last caller.
+- `ModuleMetadata.Manifest` text and JSON writers are gone with `expert.zig`. Nothing else remained.
+
+### Judgments the plan did not settle
+
+- Lowering the floor in `check-docs-drift.sh` and removing the `tools trace` and `zttp mock --replay` rows follow invariant 7: each subject went in this group.
+- `examples/README.md` named `zttp mock` as the way to replay `.test.jsonl` fixtures. I pointed it at `zttp test`, which runs the same file format (`[tests.jsonl]` argument). I did not run an example through `zttp test`.
+- `docs/cli.md` kept the "Tool Contract Gate" section and `--gate-log`. Only the `gate-report` reader went.
+- The `release-artifact` reason in `scripts/manual-steps.allow` had one row. It has none now, and the gate passes, so no reason list needed an edit.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "review_patch\.zig|review-patch|gate_report|gate-report|training_export|training-export|mock_server|zttp mock|zts mock|extension_bindings\.zig|extension-status|verify-module-manifest|runVerifyModuleManifest|runExtensionStatus|extension_bindings\.all" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling examples RELEASE_CHECKLIST.md
+```
+
+Remaining hits: plan text of this series, `advisor-plans/005-feature-removal-rebase.md`, the model-visible `zts_expert_review_patch` tool name and its stale comment in `packages/pi` (Phase 3), `skills/fix-violations.md` (Phase 3), and frozen cassette text under `packages/pi/src/simulator/testdata`.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `test-zts-cli`, `test-expert`, `test-cli` (829 passed, 1 skipped, 0 failed), `test-step-coverage`, `test-script-reachability`, `test-docs-drift`, `test-release-check`, `test-module-governance`, `test-expert-golden`, `test-doc-links`, `test-module-boundary` ("module boundary: OK (84 internal modules, 67 allowed package reaches)"), `test-expert-app`, `test-runtime-purity`, `test-standin`, and `zig build test`.
+- `zig fmt --check build.zig build packages tooling` and `bash scripts/audit-docs.sh`: exit 0.
+- `test-docs-drift` and `test-module-boundary` first failed (floor of 40 commands, unused `tools trace` row). Both pass after the edits above.
+- The text `model_context_mismatch` appears in the output of `test-expert-app` and `zig build test`. It comes from replay tests that force a mismatch, and both steps exit 0.
+- Invariant 4 after G9: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: no change under `packages/pi/src/skills/`, `prompts/`, `tool_registry.zig`, or `expert_persona.zig`.

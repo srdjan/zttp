@@ -52,10 +52,6 @@ provable-reach manual-model-spend
 # absence from the aggregate step is stated at its definition in build/host_tests.zig.
 test-expert-mlx-e2e needs-local-server
 
-# Emits a sealed training bundle and refuses a dirty tree, so it cannot run
-# inside a build that is itself producing artifacts.
-zts-training-export release-artifact
-
 # Installs the invariant drift gate into zig-out/tooling as a binary on its own.
 # `zig build test` already runs the gate and its unit tests through
 # `test-invariant-drift`, so the check is covered; what is uncovered is the
