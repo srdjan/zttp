@@ -74,6 +74,7 @@ const host_test_roots = [_]HostTestRoot{
     // never needs an API key, and does not transitively pull in the
     // tools/skills tests, so it stays fast.
     .{ .owner = .pi, .src = "src/cassette_tests.zig", .step = "test-cassette", .desc = "Run pi provider cassette harness tests (offline)", .project_config = true, .pi_modules = true },
+    .{ .owner = .pi, .src = "src/recorder_smoke_tests.zig", .step = "test-recorder-smoke", .desc = "Run provider-free recorder capture and replay smoke test", .project_config = true, .pi_modules = true },
     .{ .owner = .pi, .src = "src/simulator_tests.zig", .step = "test-simulator", .desc = "Run fail-closed full-flow simulator tests (offline)", .project_config = true, .pi_modules = true },
     .{ .owner = .pi, .src = "src/standin_tests.zig", .step = "test-standin", .desc = "Run the deterministic stand-in through the real expert loop", .project_config = true, .pi_modules = true, .standin_only = true },
 };

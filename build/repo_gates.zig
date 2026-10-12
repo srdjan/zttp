@@ -66,7 +66,11 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     const convergence_emitter = ctx.addGate(&.{ "/bin/bash", "scripts/check-convergence-emitter.sh" }, "test-convergence-emitter", "Check the convergence marker has one producer and one consumer");
 
     const evidence_marker = ctx.addGate(&.{ "/bin/bash", "scripts/test-evidence-marker.sh" }, "test-evidence-marker", "Check release evidence marker and publisher boundaries");
+    evidence_marker.run.addArtifactArg(tools.evidence_marker_tests);
+    evidence_marker.run.addArtifactArg(tools.evidence_publish_exe);
+    evidence_marker.run.step.dependOn(&tools.run_evidence_publish_tests.step);
     evidence_marker.run.step.dependOn(&tools.run_release_provenance_tests.step);
+    convergence_emitter.run.step.dependOn(&evidence_marker.run.step);
 
     const expert_qualification_boundary = ctx.addGate(&.{
         "python3",

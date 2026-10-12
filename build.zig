@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&proofs.residual_guards_drift.step);
     test_step.dependOn(&gates.zts_layering.step);
     test_step.dependOn(&tools.run_release_check_tests.step);
+    test_step.dependOn(&tools.run_evidence_publish_tests.step);
     test_step.dependOn(&tools.run_release_provenance_tests.step);
     test_step.dependOn(&tools.run_coverage_union_tests.step);
     test_step.dependOn(tools.production_branch_metric_test_step);

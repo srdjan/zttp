@@ -45,6 +45,7 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-instruction-counter` | `packages/tools/src/instruction_counter.zig` |
 | `test-expert-app` | `packages/pi/src/tests.zig` |
 | `test-cassette` | `packages/pi/src/cassette_tests.zig` |
+| `test-recorder-smoke` | `packages/pi/src/recorder_smoke_tests.zig` |
 | `test-simulator` | `packages/pi/src/simulator_tests.zig` |
 | `test-standin` | `packages/pi/src/standin_tests.zig` |
 
@@ -58,6 +59,9 @@ Two of those roots exist because of how modules are wired rather than because
 of what they test. `canonicalize.zig` and `zts_cli.zig` are reached only
 through the `zts_cli` named module, so a test root that imports them by
 relative path collects none of their tests. The table entry is what runs them.
+
+`test-recorder-smoke` captures a loopback response, stores its request digest, and replays the stored bytes through production APIs.
+The dedicated unfiltered step needs no provider credential. Full-flow simulator tests separately enforce request checkpoint matching.
 
 `test-cassette` covers provider response parsing and assembly. `test-simulator`
 covers the versioned full-flow contract: strict loading, request checkpoint

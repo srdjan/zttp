@@ -7,6 +7,9 @@ const std = @import("std");
 const Context = @import("Context.zig");
 
 pub const Result = struct {
+    evidence_marker_tests: *std.Build.Step.Compile,
+    evidence_publish_exe: *std.Build.Step.Compile,
+    run_evidence_publish_tests: *std.Build.Step.Run,
     run_release_provenance_tests: *std.Build.Step.Run,
     run_coverage_union_tests: *std.Build.Step.Run,
     run_release_check_tests: *std.Build.Step.Run,
@@ -20,6 +23,34 @@ pub fn add(ctx: Context) Result {
     const test_filters = ctx.test_filters;
     const zts_host_mod = ctx.zts_host_mod;
     const pi_host_dep = ctx.pi_host_dep;
+
+    // Release evidence parsing and rendering stay in repository-only native
+    // commands. The publication shells keep the stable entry-point names.
+    const evidence_marker_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tooling/evidence_marker.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const evidence_publish_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/evidence_publish.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const evidence_publish_exe = b.addExecutable(.{
+        .name = "evidence-publish",
+        .root_module = evidence_publish_mod,
+    });
+    const evidence_publish_cmd = b.addRunArtifact(evidence_publish_exe);
+    evidence_publish_cmd.has_side_effects = true;
+    if (b.args) |args| evidence_publish_cmd.addArgs(args);
+    const evidence_publish_step = b.step("evidence-publish", "Render validated release evidence");
+    evidence_publish_step.dependOn(&evidence_publish_cmd.step);
+    const evidence_publish_tests = b.addTest(.{ .root_module = evidence_publish_mod });
+    const run_evidence_publish_tests = b.addRunArtifact(evidence_publish_tests);
+    const evidence_publish_test_step = b.step("test-evidence-publish", "Run native evidence publisher tests");
+    evidence_publish_test_step.dependOn(&run_evidence_publish_tests.step);
 
     // Authoritative release-evidence provenance gate. It is Zig-native so the
     // release path has no language/toolchain dependency beyond this build.
@@ -157,6 +188,9 @@ pub fn add(ctx: Context) Result {
     expert_qualification_step.dependOn(&expert_qualification_cmd.step);
 
     return .{
+        .evidence_marker_tests = evidence_marker_tests,
+        .evidence_publish_exe = evidence_publish_exe,
+        .run_evidence_publish_tests = run_evidence_publish_tests,
         .run_release_provenance_tests = run_release_provenance_tests,
         .run_coverage_union_tests = run_coverage_union_tests,
         .run_release_check_tests = run_release_check_tests,

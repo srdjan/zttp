@@ -1,4 +1,4 @@
-//! expert_codegen_record - baseline recorder and offline recorder smoke test.
+//! expert_codegen_record - baseline recorder.
 //!
 //! Corpus recording spends real model time and stays gated behind
 //! `ZTTP_CODEGEN_RECORD=1`. `ZTTP_CODEGEN_PROVIDER` selects the provider;
@@ -16,8 +16,6 @@ const zts_cli = @import("zts_cli");
 const local = @import("providers/local/client.zig");
 const deepseek = @import("providers/deepseek/client.zig");
 const cassette_client = @import("providers/cassette_client.zig");
-const cassette_record = @import("providers/cassette_record.zig");
-const capture_sink = @import("providers/capture_sink.zig");
 const model_request = @import("providers/model_request.zig");
 const tool_catalog = @import("providers/tool_catalog.zig");
 const registry_mod = @import("registry/registry.zig");
@@ -43,43 +41,6 @@ const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
 
 const testing = std.testing;
-
-const CodegenResponseCapture = struct {
-    allocator: std.mem.Allocator,
-    out_dir: []const u8,
-    scenario: []const u8,
-
-    fn record(
-        context: *anyopaque,
-        call_index: usize,
-        snapshot: *const model_request.ModelRequestSnapshot,
-        raw_response: []const u8,
-    ) anyerror!void {
-        const self: *CodegenResponseCapture = @ptrCast(@alignCast(context));
-        const scenario_dir = try std.fs.path.join(self.allocator, &.{ self.out_dir, self.scenario });
-        defer self.allocator.free(scenario_dir);
-        var io_backend = std.Io.Threaded.init(self.allocator, .{ .environ = .empty });
-        defer io_backend.deinit();
-        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), scenario_dir);
-
-        const path = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}/step_{d}.jsonl",
-            .{ scenario_dir, call_index },
-        );
-        defer self.allocator.free(path);
-        try cassette_record.writeCassette(self.allocator, path, raw_response, .{
-            .provider = switch (snapshot.config.provider) {
-                .local => .local,
-                .deepseek => .deepseek,
-            },
-            .scenario = self.scenario,
-            .stream = snapshot.config.stream,
-            .model = snapshot.config.model,
-            .request_sha256 = if (snapshot.wire_request_sha256) |digest| digest.slice() else null,
-        });
-    }
-};
 
 /// Where one case's provider responses were read from.
 pub const StepSource = enum { flow_artifact, missing };
@@ -547,71 +508,6 @@ test "required-green recording refuses unapplied and failed-intent turns" {
         error.RecordedIntentCheckFailed,
         requireGreenRecording(true, true, false),
     );
-}
-
-// Smoke test: prove the production local record tee writes a cassette that
-// replays to the same reply. The wire response is loopback-local so harness
-// changes never need provider credit merely to reach capture and replay. The
-// local client is the one with a plain-HTTP loopback endpoint policy, so it
-// stands in for the Chat Completions clients here; DeepSeek requires HTTPS.
-test "record-tee captures a faithful local cassette offline" {
-    // The provider parser intentionally uses leaky arena JSON parsing because
-    // one model turn owns the entire result. Match that production lifetime.
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const response_body =
-        "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"," ++
-        "\"message\":{\"role\":\"assistant\",\"content\":\"OK\"}}]," ++
-        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
-
-    var server = try cassette_record.LocalHttpServer.init(allocator, response_body, "application/json");
-    try server.start();
-    errdefer server.join() catch {};
-    const endpoint = try server.url(allocator, "");
-    defer allocator.free(endpoint);
-
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const record_root = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
-    defer allocator.free(record_root);
-
-    var capture = CodegenResponseCapture{
-        .allocator = allocator,
-        .out_dir = record_root,
-        .scenario = "_smoke",
-    };
-    var sink = capture_sink.CaptureSink{
-        .context = &capture,
-        .record_fn = CodegenResponseCapture.record,
-    };
-    var client = local.Client.initWithCapture(.{
-        .system_prompt = "You are a terse assistant. Reply with exactly one word.",
-        .model = "deterministic-recorder-smoke",
-        .base_url = endpoint,
-    }, &sink);
-
-    var tr: transcript_mod.Transcript = .{};
-    defer tr.deinit(allocator);
-    try tr.append(allocator, .{ .user_text = "Say OK." });
-
-    const live = try client.sendTurn(allocator, &tr, null);
-    try server.join();
-
-    // Replay the just-written cassette and confirm it round-trips to a reply.
-    const path = try std.fmt.allocPrint(allocator, "{s}/_smoke/step_0.jsonl", .{record_root});
-    defer allocator.free(path);
-    const cassette = try cassette_client.loadCassetteFromPath(allocator, path);
-    const replayed = try cassette_client.replay(allocator, cassette);
-
-    const live_kind = std.meta.activeTag(live.reply.response);
-    const replay_kind = std.meta.activeTag(replayed.reply.response);
-    try testing.expectEqual(live_kind, replay_kind);
-    switch (replayed.reply.response) {
-        .final_text => |text| try testing.expectEqualStrings("OK", text),
-        else => return error.ExpectedFinalText,
-    }
-    std.debug.print("[codegen-smoke] live and replay agree: {s}\n", .{@tagName(replay_kind)});
 }
 
 const IntentPolicy = union(enum) {

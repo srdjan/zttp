@@ -39,13 +39,11 @@ fail() {
   exit 1
 }
 
-# Every tracked file carrying a marker, minus documentation and minus this file,
-# which names both markers in its own text. Documentation is excluded by
-# extension rather than by directory: prose that names a marker lives in
-# `docs/`, in `advisor-plans/`, and in any plan directory added later, and a
-# markdown file cannot print a line into the build output wherever it sits.
+# Every versioned or new source file carrying a marker, minus documentation and
+# this file. Including new files keeps the gate valid before the source commit.
+# Documentation is excluded by extension because Markdown cannot emit a line.
 sites_for() {
-  git ls-files -z |
+  git ls-files -z --cached --others --exclude-standard |
     xargs -0 sh -c '
       for file do
         [ -f "$file" ] && printf "%s\0" "$file"
@@ -94,6 +92,7 @@ check_marker() {
 convergence_marker='[codegen-convergence]'
 coverage_marker='[proof-coverage]'
 seed_marker='[seed-coverage]'
+native_consumer="tooling/evidence_publish.zig"
 convergence_publisher="scripts/update-convergence.sh"
 coverage_publisher="scripts/update-coverage.sh"
 producer="packages/pi/src/expert_codegen_record.zig"
@@ -102,28 +101,21 @@ producer="packages/pi/src/expert_codegen_record.zig"
 # declared class through the real veto.
 seed_producer="packages/pi/src/standin_range_tests.zig"
 
-check_marker "$convergence_marker" "$producer" "$convergence_publisher"
-check_marker "$coverage_marker" "$producer" "$coverage_publisher"
-check_marker "$seed_marker" "$seed_producer" "$coverage_publisher"
+check_marker "$convergence_marker" "$producer" "$native_consumer"
+check_marker "$coverage_marker" "$producer" "$native_consumer"
+check_marker "$seed_marker" "$seed_producer" "$native_consumer"
 
-# And neither publisher may read the other's marker. A coverage line has no
-# model column to fill, and a convergence line says nothing about what the
-# corpus covers; either one lifted into the wrong page is a number answering a
-# question nobody asked of it.
-if grep -q -F "$coverage_marker" "$convergence_publisher"; then
-  fail "$convergence_publisher reads $coverage_marker"
+# Each stable shell must select only its named native publication mode.
+grep -q -F 'evidence-publish -- convergence' "$convergence_publisher" ||
+  fail "$convergence_publisher no longer selects the convergence publisher"
+grep -q -F 'evidence-publish -- coverage' "$coverage_publisher" ||
+  fail "$coverage_publisher no longer selects the coverage publisher"
+if grep -q -F 'evidence-publish -- coverage' "$convergence_publisher"; then
+  fail "$convergence_publisher selects coverage publication"
 fi
-if grep -q -F "$convergence_marker" "$coverage_publisher"; then
-  fail "$coverage_publisher reads $convergence_marker"
-fi
-# The seed figure is a compiler claim with no model in it. A convergence row has
-# a model column to fill, so lifting a seed count into that page would publish a
-# number about the compiler under a model's name.
-if grep -q -F "$seed_marker" "$convergence_publisher"; then
-  fail "$convergence_publisher reads $seed_marker"
+if grep -q -F 'evidence-publish -- convergence' "$coverage_publisher"; then
+  fail "$coverage_publisher selects convergence publication"
 fi
 
-bash scripts/test-evidence-marker.sh
-
-printf 'convergence emitter OK: %s and %s have one producer (%s); %s has one producer (%s); each has one publisher\n' \
-  "$convergence_marker" "$coverage_marker" "$producer" "$seed_marker" "$seed_producer"
+printf 'convergence emitter OK: %s and %s have one producer (%s); %s has one producer (%s); all use native consumer %s\n' \
+  "$convergence_marker" "$coverage_marker" "$producer" "$seed_marker" "$seed_producer" "$native_consumer"

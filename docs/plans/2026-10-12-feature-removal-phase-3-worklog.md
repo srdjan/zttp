@@ -43,6 +43,47 @@ The reviewed plan SHA-256 is `8d9c0d7fdc945006426acbc21bb96100c23ac912f0b29da3e9
 Private review packets and resolved evidence remain in the external scratch directory.
 I will execute the native tooling unit first. Separate Sol high workers own the publisher replacement and recorder smoke scenario.
 
+## Native tooling unit evidence
+
+The plan activation commit is `54163525`. The documentation link check returned direct exit status 0 before that commit.
+The unfiltered offline authoring baseline returned 0: 965 tests passed and the live-provider test skipped.
+A second unfiltered baseline captured both complete markers: nineteen replay cases and eighteen runtime intents.
+The captured convergence measurement reports thirteen raw passes, nineteen final greens, and eighteen passing intents.
+Those numbers describe the existing recordings, not a new model run. No provider has run.
+Compiler metadata remains byte-for-byte equal to the captured baseline.
+
+The new `test-recorder-smoke` step runs without a filter or credential.
+The main agent reviewed its complete test and required exact live text and stored response bytes.
+Its refined unfiltered run and `test-cassette` passed 757 tests. `test-step-coverage` also passed; the direct build status was 0.
+The request digest assertion establishes capture-to-storage fidelity. Existing full-flow tests separately enforce replay request matching.
+The native publisher replacement remains in progress. No language or module identity has changed.
+
+The main agent built an ordinary baseline artifact in the external scratch directory; the public build command returned 0.
+The private artifact will support the compatibility measurement after the compiler migration.
+Publisher review identified Unicode escaping and a fixed probe count. The worker will preserve encoding and require actual probe completion.
+
+The native publication, marker, emitter, release-validator, script, and step checks returned 0.
+The refined authoring and smoke checks passed 1343 tests, with one live-provider skip; documentation checks returned 0.
+The markers still report nineteen complete cases and eighteen passing runtime intents. Compiler metadata remains unchanged.
+The main agent reproduced both marker payloads and all four generated fixture files through freshly compiled native commands.
+Every byte comparison returned 0. The comparisons used historical fixtures and did not publish new model measurements.
+
+Three cleanup reviews found seven changes. The main agent removed dead capture code, redundant state, and dead test branches.
+The main agent also named positional inputs, centralized production floors, reused the union marker, and shared marker checks in the build graph.
+The affected unfiltered checks passed 397 tests. Four public-command output comparisons still returned 0.
+
+Two independent native reviews found two publisher defects and one weak producer-failure probe.
+A malformed results header and a union missing a current code each returned success in public command probes.
+The publisher now checks complete table shape, union membership, count consistency, and evidence partitions before writing.
+The producer-failure probe will use valid markers, a call sentinel, and private copies of publication destinations.
+The final unfiltered native checks returned 0: all 24 build steps and 32 tests passed.
+The wrapper passed four public command checks, eight publication boundary checks, and two producer-exit checks.
+The main agent reproduced both refusals through the final public command; each returned 1 and preserved both output sentinels.
+All four valid historical fixture outputs remain byte-identical. A missing completion receipt also returns 1.
+The main agent reviewed the complete changes. All native review findings are resolved; no provider has run.
+Code review: skipped (ce-code-review unavailable). Its mandatory Python helpers conflict with repository instructions.
+Native independent reviews and the main agent's complete diff review provide the replacement evidence.
+
 ## Research reconciliation
 
 The runtime and compiler reports identify the existing `retired_authority` predicate as the first compatibility boundary.
