@@ -29,7 +29,6 @@ const contract_runtime = @import("../contract_runtime.zig");
 const self_extract = @import("../self_extract.zig");
 const static_mod = @import("../server_static.zig");
 const guard_report = @import("guard_report.zig");
-const invariant_report = @import("invariant_report.zig");
 
 /// Bumped to 3 for the residual guard certificate. The verifier checks this for
 /// equality so a bundle cannot be read under proof rules it did not carry.
@@ -378,9 +377,6 @@ fn verifySemantics(
         .policy_section_digest = payload.policy_section_sha256,
         .identity = identity,
         .provenance = if (payload.attestation_jws != null) .unchecked else .absent,
-        .invariant_spec = payload.invariant_section,
-        .tool_catalog = payload.tool_catalog_section,
-        .declaration = payload.declaration_section,
     }, pcc.policy.production);
 
     const accepted = switch (assessment.outcome) {
@@ -415,16 +411,6 @@ fn verifySemantics(
     var guard_writer = std.Io.Writer.fixed(&guard_buf);
     guard_report.writeSummary(&guard_writer, assessment.guards) catch {};
     try stdout.print("Guards:    {s}\n", .{guard_writer.buffered()});
-    // Sized from the renderer's own bound. A fixed writer that runs out stops
-    // mid-sentence, and the sentence it would stop before is the one that says
-    // what this report did not check.
-    var invariant_buf: [invariant_report.max_summary_bytes]u8 = undefined;
-    var invariant_writer = std.Io.Writer.fixed(&invariant_buf);
-    invariant_report.writeSummary(
-        &invariant_writer,
-        contract_runtime.InvariantStatus.fromVerdicts(assessment.invariants),
-    ) catch {};
-    try stdout.print("Invariant: {s}\n", .{invariant_writer.buffered()});
     try stdout.print(
         "Signature: {s}\n",
         .{switch (assessment.provenance) {
@@ -821,7 +807,7 @@ fn predecessorArtifact(allocator: std.mem.Allocator) ![]u8 {
     const trailer = artifact[base.len + payload.len ..];
     std.mem.writeInt(u64, trailer[0..8], base.len, .little);
     std.mem.writeInt(u64, trailer[8..16], payload.len, .little);
-    std.mem.writeInt(u16, trailer[16..18], self_extract.FORMAT_VERSION - 1, .little);
+    std.mem.writeInt(u16, trailer[16..18], 6, .little);
     std.mem.writeInt(u16, trailer[18..20], 0, .little);
     std.mem.writeInt(u32, trailer[20..24], std.hash.crc.Crc32.hash(payload), .little);
     std.mem.writeInt(u64, trailer[24..32], self_extract.MAGIC, .little);

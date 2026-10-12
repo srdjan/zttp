@@ -14,7 +14,6 @@ const Dir = std.Io.Dir;
 const Runtime = engine.Runtime;
 const HandlerPool = engine.HandlerPool;
 const RuntimeConfig = engine.RuntimeConfig;
-const AgentLimits = engine.AgentLimits;
 const execution_spec = @import("execution_spec.zig");
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
@@ -541,9 +540,6 @@ const ConnectionPool = struct {
                 .query_params = request.query_params,
                 .headers = request.headers,
                 .body = request.body,
-                // Every request runs under the generation's accepted
-                // capability ceiling, when the generation has one.
-                .capability_ceiling = self.server.activeCapabilityCeiling(),
             }, &fault_location) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else if (err == error.HandlerNotImplemented) 501 else 500;
                 var fault_buf: [256]u8 = undefined;
@@ -1165,12 +1161,6 @@ pub const Server = struct {
     /// kernel says otherwise, and null again after any live swap: the swapped
     /// handler is not the artifact the certificate described.
     proof_checked: ?contract_runtime.ProofCheckedContract = null,
-    /// The capability ceiling `zttp dev` checks module calls against: the one
-    /// the producer's contract reports, lowered with the same code as an
-    /// accepted one and claiming nothing (M4 T5b). Null for a deployment,
-    /// which checks only the ceiling its certificate promoted. Replaced with
-    /// the contract, under `contract_lock`.
-    dev_capability_ceiling: ?contract_runtime.AcceptedCeiling = null,
     /// Guards `contract`/`proof_cache` against the live-reload watcher thread
     /// freeing+rebuilding them (`updateContract`) while worker threads read
     /// them mid-request. Only engaged when `reload_active` is set, so the
@@ -1303,35 +1293,13 @@ pub const Server = struct {
     /// replaces the executable without re-running acceptance, so it cannot
     /// produce that tuple, and the swap is refused rather than allowed to leave
     /// a new handler standing on the old policy's coverage.
-    /// Drop the promotion and release the accepted tool catalog it owns.
-    /// The catalog tool routes are validated against: the accepted one when a
-    /// certificate promoted this generation, else the dev one, else none.
-    /// The capability ceiling every handler call of this generation runs
-    /// under: the accepted one when a certificate promoted this generation,
-    /// else the dev one, else none. The view borrows from the generation, so
-    /// a request holds it only while it holds the generation.
-    pub fn activeCapabilityCeiling(self: *const Self) ?http_types.CapabilityCeiling {
-        if (self.proof_checked) |*promoted| {
-            if (promoted.capability_ceiling) |*ceiling| {
-                return .{ .categories = ceiling.categories, .excluded_modules = ceiling.excluded_modules };
-            }
-        }
-        if (self.dev_capability_ceiling) |*ceiling| {
-            return .{ .categories = ceiling.categories, .excluded_modules = ceiling.excluded_modules };
-        }
-        return null;
-    }
-
     fn clearProofChecked(self: *Self) void {
-        if (self.proof_checked) |*promoted| promoted.deinit();
         self.proof_checked = null;
-        if (self.dev_capability_ceiling) |*ceiling| ceiling.deinit();
-        self.dev_capability_ceiling = null;
     }
 
     pub fn generationIsGuarded(self: *const Self) bool {
         const promoted = self.proof_checked orelse return false;
-        return promoted.guards.required > 0 or promoted.invariants.configured;
+        return promoted.guards.required > 0;
     }
 
     /// Replace the runtime contract and reconfigure the proof cache.
@@ -1570,15 +1538,6 @@ pub const Server = struct {
         };
 
         if (!is_production_artifact) {
-            if (self.config.runtime_config.invariant_section != null) {
-                if (!builtin.is_test) {
-                    std.log.err(
-                        "activation: a configured invariant requires an embedded proof certificate; build the project before serving it",
-                        .{},
-                    );
-                }
-                return error.InvariantCertificateRequired;
-            }
             if (self.config.certificate != null and !builtin.is_test) {
                 std.log.info("Proof certificate present but this is not a deployed artifact; running unpromoted", .{});
             }
@@ -1618,65 +1577,9 @@ pub const Server = struct {
                 .signature_verified
             else
                 .absent,
-            .invariant_spec = self.config.runtime_config.invariant_section,
-            .tool_catalog = self.config.runtime_config.tool_catalog_section,
-            .declaration = self.config.runtime_config.declaration_section,
         }, pcc.policy.production);
 
-        self.proof_checked = contract_runtime.promote(
-            contract,
-            assessment,
-            policy_digest,
-            self.config.runtime_config.tool_catalog_section,
-            self.config.runtime_config.declaration_section,
-            .{
-                .handler_deadline_ms = self.config.timeout_ms,
-                .outbound_timeout_ms = self.config.runtime_config.outbound_timeout_ms,
-            },
-        ) catch |err| {
-            if (!builtin.is_test) {
-                switch (err) {
-                    error.OutOfMemory => {},
-                    error.AcceptedToolCatalogUndecodable => std.log.err(
-                        "activation: the accepted tool catalog does not decode; refusing to serve",
-                        .{},
-                    ),
-                    error.ToolSchemaNotCompilable => std.log.err(
-                        "activation: a schema in the accepted tool catalog does not compile; refusing to serve",
-                        .{},
-                    ),
-                    error.ToolCatalogContractMismatch => std.log.err(
-                        "activation: the contract's tool list does not match the accepted tool catalog; refusing to serve",
-                        .{},
-                    ),
-                    error.ToolCatalogMissing => std.log.err(
-                        "activation: the contract lists tools but the artifact carries no accepted tool catalog; refusing to serve",
-                        .{},
-                    ),
-                    error.AgentHandlerDeadlineDisabled => std.log.err(
-                        "activation: an agent handler requires a non-zero handler deadline; refusing to serve",
-                        .{},
-                    ),
-                    error.AgentOutboundTimeoutNotBelowTurnDeadline => std.log.err(
-                        "activation: the outbound timeout is not below the agent turn deadline; refusing to serve",
-                        .{},
-                    ),
-                    error.AgentTurnDeadlineNotBelowHandlerDeadline => std.log.err(
-                        "activation: the agent turn deadline and terminal margin are not below the handler deadline; refusing to serve",
-                        .{},
-                    ),
-                    error.AcceptedDeclarationUndecodable => std.log.err(
-                        "activation: the accepted declaration does not decode; refusing to serve",
-                        .{},
-                    ),
-                    error.DeclarationProfileUnknown => std.log.err(
-                        "activation: the accepted declaration names a ceiling profile this runtime does not hold; refusing to serve",
-                        .{},
-                    ),
-                }
-            }
-            return err;
-        };
+        self.proof_checked = contract_runtime.promote(contract, assessment, policy_digest);
         if (self.proof_checked == null) {
             if (!builtin.is_test) {
                 if (assessment.rejection()) |rejection| {
@@ -1693,10 +1596,6 @@ pub const Server = struct {
                 }
             }
             return error.ProofAcceptanceFailed;
-        }
-
-        if (self.config.runtime_config.invariant_section != null and !assessment.invariants.ready()) {
-            return error.InvariantCoverageMissing;
         }
 
         if (!builtin.is_test) {
@@ -1743,9 +1642,6 @@ pub const Server = struct {
             .contract_section = self.config.contract_json,
             .policy_section_digest = policy_section_sha256,
             .identity = self.observedArtifactIdentity(),
-            .invariant_spec = self.config.runtime_config.invariant_section,
-            .tool_catalog = self.config.runtime_config.tool_catalog_section,
-            .declaration = self.config.runtime_config.declaration_section,
         }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
@@ -4004,11 +3900,11 @@ test "a live swap drops the promotion the replaced artifact earned" {
     server.contract = try contract_runtime.validate(raw, .{});
 
     // Stand in for what an accepted certificate earns.
-    server.proof_checked = try contract_runtime.promote(&server.contract.?, .{
+    server.proof_checked = contract_runtime.promote(&server.contract.?, .{
         .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
         .provenance = .absent,
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null, null, .{});
+    }, [_]u8{0} ** 32);
     try std.testing.expect(server.proof_checked != null);
 
     // The certificate described the artifact that is being replaced, so the
@@ -4033,7 +3929,7 @@ test "promotion refuses a policy rejection" {
     defer validated.deinit();
 
     // Checked but refused by policy.
-    try std.testing.expect((try contract_runtime.promote(&validated, .{
+    try std.testing.expect((contract_runtime.promote(&validated, .{
         .outcome = .{ .rejected = .{
             .reached = .{ .proof_checked = .trusted },
             .rejection = .{
@@ -4045,7 +3941,7 @@ test "promotion refuses a policy rejection" {
         } },
         .provenance = .absent,
         .work_spent = 1,
-    }, [_]u8{0} ** 32, null, null, .{})) == null);
+    }, [_]u8{0} ** 32)) == null);
 }
 
 test "self-extract runtime policy binding rejects a widened policy" {

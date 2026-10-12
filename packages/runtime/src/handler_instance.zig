@@ -1407,15 +1407,6 @@ pub const HandlerInstance = struct {
         }
         const handler_obj = self.cached_handler_obj orelse return error.NoHandler;
 
-        // The generation's accepted capability ceiling (M4 T5b) holds for
-        // exactly this call too, and is cleared the same way on every exit.
-        const previous_ceiling = self.ctx.active_capability_ceiling;
-        self.ctx.active_capability_ceiling = if (request.capability_ceiling) |ceiling|
-            .{ .categories = ceiling.categories, .excluded_modules = ceiling.excluded_modules }
-        else
-            null;
-        defer self.ctx.active_capability_ceiling = previous_ceiling;
-
         var tracked = false;
         if (builtin.mode == .Debug and request_id != 0) {
             const prev = self.active_request_id.swap(request_id, .acq_rel);

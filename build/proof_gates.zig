@@ -1,10 +1,9 @@
 //! Gates over the acceptance kernel and the proof boundary: mutation probes,
-//! kernel purity, the trusted-boundary ratchet, residual guards, invariant and
-//! vocabulary drift, and the proof-review package tests.
+//! kernel purity, the trusted-boundary ratchet, residual guards,
+//! and the proof-review package tests.
 
 const std = @import("std");
 const Context = @import("Context.zig");
-const packages = @import("packages.zig");
 
 pub const Result = struct {
     proof_checker_purity: *std.Build.Step.Run,
@@ -13,12 +12,11 @@ pub const Result = struct {
     proof_ratchet_drift: *std.Build.Step.Run,
     residual_guards_drift: *std.Build.Step.Run,
     residual_guards_drift_step: *std.Build.Step,
-    invariant_drift_step: *std.Build.Step,
     run_proof_ratchet_tests: *std.Build.Step.Run,
     run_proof_review_pkg_tests: *std.Build.Step.Run,
 };
 
-pub fn add(ctx: Context, pkgs: packages.Result) Result {
+pub fn add(ctx: Context) Result {
     const b = ctx.b;
     const target = ctx.target;
     const optimize = ctx.optimize;
@@ -75,61 +73,6 @@ pub fn add(ctx: Context, pkgs: packages.Result) Result {
     const residual_guards_drift = ctx.addGate(&.{ "bash", "scripts/check-residual-guards.sh" }, "test-residual-guards-drift", "Check residual guard catalogs, evidence, and docs");
     residual_guards_drift.run.has_side_effects = true;
 
-    // Application-invariant drift is useful only with compiled evidence from
-    // the kernel, compiler, protected native module, and runtime observer.
-    //
-    // The gate is a host Zig command. It imports the surfaces that are data -
-    // the kernel operation catalog, the kind table, the linked native binding,
-    // and the authoring renderer - and text-scans only the surfaces that are
-    // code, because there is no regex in Zig and a typed import cannot be
-    // misparsed.
-    //
-    // `has_side_effects` is load-bearing. A Run step is cached on its
-    // executable and its arguments, never on the files the program reads at
-    // run time, so without this the gate reports a cached pass after
-    // docs/verification.md changes and stops noticing drift.
-    const invariant_gate_mod = b.createModule(.{
-        .root_source_file = tools_dep.path("src/invariant_drift_gate.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    invariant_gate_mod.addImport("zts", ctx.zts_host_mod);
-    invariant_gate_mod.addImport("zttp_proof_checker", ctx.proofCheckerMod());
-    const invariant_gate_exe = b.addExecutable(.{
-        .name = "invariant-drift-gate",
-        .root_module = invariant_gate_mod,
-    });
-    const invariant_gate_cmd = b.addRunArtifact(invariant_gate_exe);
-    invariant_gate_cmd.has_side_effects = true;
-    const invariant_drift_step = b.step("test-invariant-drift", "Check invariant catalogs, compiled evidence, and docs");
-    invariant_drift_step.dependOn(&invariant_gate_cmd.step);
-    invariant_drift_step.dependOn(&pkgs.run_proof_checker_tests.step);
-    invariant_drift_step.dependOn(&pkgs.run_modules_tests.step);
-
-    invariant_drift_step.dependOn(pkgs.zts_test_step);
-
-    // A probe is code. One that does not compile runs no check, and a failed
-    // build and a passing gate both emit no failure message, so the gate's own
-    // unit tests hang off the same named step as the gate.
-    const invariant_gate_tests = b.addTest(.{
-        .filters = test_filters,
-        .root_module = invariant_gate_mod,
-    });
-    const run_invariant_gate_tests = b.addRunArtifact(invariant_gate_tests);
-    const invariant_gate_test_step = b.step("test-invariant-gate", "Run the invariant drift gate's own parser and probe-table tests");
-    invariant_gate_test_step.dependOn(&run_invariant_gate_tests.step);
-    invariant_drift_step.dependOn(&run_invariant_gate_tests.step);
-
-    // The gate binary on its own, so a single mutation probe can be run
-    // directly and read from its exit status. Routing a probe through the
-    // aggregate step above would mix the gate's verdict with seven test suites.
-    const invariant_gate_install = b.addInstallArtifact(invariant_gate_exe, .{
-        .dest_dir = .{ .override = .{ .custom = "tooling" } },
-    });
-    const invariant_gate_step = b.step("invariant-gate", "Build the invariant drift gate into zig-out/tooling");
-    invariant_gate_step.dependOn(&invariant_gate_install.step);
-
     // The trusted-boundary ratchet. Rooted at its own file because nothing in
     // the product imports it: it is a corpus plus assertions, and a file no
     // analyzed root reaches contributes no tests.
@@ -144,6 +87,7 @@ pub fn add(ctx: Context, pkgs: packages.Result) Result {
                 .{ .name = "zts", .module = ctx.zts_dep.module("zts") },
                 .{ .name = "zts_cli", .module = ctx.zts_cli_mod },
                 .{ .name = "zttp_proof_checker", .module = ctx.proofCheckerMod() },
+                .{ .name = "project_config", .module = ctx.project_config_mod },
             },
         }),
     });
@@ -170,9 +114,6 @@ pub fn add(ctx: Context, pkgs: packages.Result) Result {
     const proof_review_pkg_test_step = b.step("test-proof-review", "Run zttp proof-review package tests");
     proof_review_pkg_test_step.dependOn(&run_proof_review_pkg_tests.step);
 
-    // The remaining evidence roots do not exist yet; build.zig passes them to
-    // addInvariantDriftEvidence once they do.
-
     return .{
         .proof_checker_purity = proof_checker_purity.run,
         .script_reachability = script_reachability.run,
@@ -180,34 +121,7 @@ pub fn add(ctx: Context, pkgs: packages.Result) Result {
         .proof_ratchet_drift = proof_ratchet_drift.run,
         .residual_guards_drift = residual_guards_drift.run,
         .residual_guards_drift_step = residual_guards_drift.step,
-        .invariant_drift_step = invariant_drift_step,
         .run_proof_ratchet_tests = run_proof_ratchet_tests,
         .run_proof_review_pkg_tests = run_proof_review_pkg_tests,
     };
-}
-
-/// The invariant drift gate's evidence roots that other files create. All of
-/// the gate's build wiring stays in this file because
-/// packages/tools/src/invariant_drift_gate.zig reads it as text, and its
-/// mutation probes edit that text.
-pub fn addInvariantDriftEvidence(
-    invariant_drift_step: *std.Build.Step,
-    run_project_config_tests: *std.Build.Step.Run,
-    run_unit_tests: *std.Build.Step.Run,
-    run_cli_tests: *std.Build.Step.Run,
-) void {
-    // The tools root that collects invariant_author.zig through its
-    // re-export from project_config.zig.
-    invariant_drift_step.dependOn(&run_project_config_tests.step);
-    // The runtime root (main.zig).
-    invariant_drift_step.dependOn(&run_unit_tests.step);
-    // The invariant status renderer is anchored from `cli_main.zig`, so the
-    // developer CLI root is the only one that compiles and runs its tests.
-    // The drift gate asserts that the renderer's source states write
-    // applicability before its counts and keeps the deployment assumption
-    // outside every branch; both are source scans, and a source scan proves
-    // nothing about what the renderer produced. Naming a test in the gate's
-    // evidence table without this dependency would be the gate claiming a
-    // test ran when nothing made it compile.
-    invariant_drift_step.dependOn(&run_cli_tests.step);
 }

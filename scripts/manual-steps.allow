@@ -47,16 +47,6 @@ expert-qualification manual-model-spend
 # absence from the aggregate step is stated at its definition in build/host_tests.zig.
 test-expert-mlx-e2e needs-local-server
 
-# Installs the invariant drift gate into zig-out/tooling as a binary on its own.
-# `zig build test` already runs the gate and its unit tests through
-# `test-invariant-drift`, so the check is covered; what is uncovered is the
-# install, and it exists so a reviewer can apply one edit to a copy of the
-# gate's declared inputs and read the verdict from this binary's exit status
-# alone. Routing that through the aggregate step would mix the gate's verdict
-# with seven test suites. See
-# docs/solutions/conventions/a-gate-can-be-non-vacuous-and-still-porous.md.
-invariant-gate mutation-harness
-
 # Computes the coverage union for one corpus identity and prints it as a marker
 # line. `scripts/update-coverage.sh` invokes it during publication, which
 # refuses a dirty tree and so cannot run inside a build that is itself producing

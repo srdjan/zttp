@@ -1,6 +1,6 @@
 //! Runtime-rooted test suites: the runtime and dev-CLI unit roots, the
 //! standalone zruntime root, the server facade suite, the example handler
-//! suites, and the reference-tools artifact check.
+//! suites.
 
 const std = @import("std");
 const Context = @import("Context.zig");
@@ -11,8 +11,7 @@ pub const UnitRuns = struct {
     run_cli_tests: *std.Build.Step.Run,
 };
 
-/// The runtime (main.zig) and dev CLI (cli_main.zig) unit roots. Both are
-/// evidence for the invariant drift gate; build/proof_gates.zig wires that.
+/// The runtime (main.zig) and dev CLI (cli_main.zig) unit roots.
 pub fn addUnit(ctx: Context) UnitRuns {
     const b = ctx.b;
     const runtime_dep = ctx.runtime_dep;

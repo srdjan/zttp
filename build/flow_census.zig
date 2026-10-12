@@ -23,6 +23,7 @@ pub fn add(ctx: Context) Result {
     });
     gate_mod.addImport("zts", ctx.zts_host_mod);
     gate_mod.addImport("zttp_proof_checker", ctx.proofCheckerMod());
+    gate_mod.addImport("project_config", ctx.project_config_mod);
     const gate_exe = b.addExecutable(.{
         .name = "flow-census-gate",
         .root_module = gate_mod,

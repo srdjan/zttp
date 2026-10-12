@@ -719,9 +719,6 @@ fn appendedServerConfig(payload: *const self_extract.Payload) ServerConfig {
         // the allow-all stub and egress/env/cache/sql go unenforced.
         .runtime_config = .{
             .dev_capability_policy = payload.policy,
-            .invariant_section = payload.invariant_section,
-            .tool_catalog_section = payload.tool_catalog_section,
-            .declaration_section = payload.declaration_section,
         },
     };
 }

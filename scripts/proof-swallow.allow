@@ -64,10 +64,6 @@ packages/proof-checker/src/checker.zig markDeclared catch-continue
 # function returns `?Rejection`, and a non-null value refuses the artifact.
 packages/proof-checker/src/checker.zig bindExecutableGraph catch-return
 
-# A tool catalog or declaration decode failure returns an undecodable
-# rejection. It cannot turn an invalid byte sequence into an accepted one.
-packages/proof-checker/src/checker.zig checkBoundBytes catch-return
-
 # The graph-root loop above these searches has already read every member and
 # rejected a failed read. A failed read here cannot bypass that binding.
 packages/proof-checker/src/checker.zig checkGraphMemberDigest catch-break
@@ -86,15 +82,13 @@ packages/runtime/src/proof_activation.zig certificateCommitments catch-return
 packages/runtime/src/proof_activation.zig retiredInputFeature catch-switch
 
 # Kernel catch blocks return a Rejection. Neither policy, certificate, guard,
-# nor graph decode failure can reach the acceptance result. The multiline
-# invariant catches also return an undecodable-spec rejection.
+# nor graph decode failure can reach the acceptance result.
 packages/proof-checker/src/checker.zig bindExecutableGraph catch-block
 packages/proof-checker/src/checker.zig check catch-block
-packages/proof-checker/src/checker.zig checkConfiguredInvariants catch-multiline
 packages/proof-checker/src/checker.zig checkGuardCoverage catch-block
 
-# A missing observed root refuses server startup. Accept converts graph and
-# invariant observer errors to refusals; OutOfMemory still propagates.
+# A missing observed root refuses server startup. Accept converts graph errors
+# to refusals; OutOfMemory still propagates.
 packages/runtime/src/proof_activation.zig observedRoot catch-switch
 packages/runtime/src/proof_activation.zig observedRoot catch-value
 packages/runtime/src/proof_activation.zig accept catch-switch
@@ -259,13 +253,11 @@ packages/zts/src/type_env.zig pushGenericScope catch-poison
 packages/zts/src/type_env.zig putTypeAlias catch-poison
 packages/zts/src/type_env.zig registerCapsuleAlias catch-poison
 
-# These two parts functions are test fixtures with runtime safety enabled.
-# Their fixed member arrays satisfy computeRoot; no production path calls them.
+# This parts function is a test fixture with runtime safety enabled.
+# Its fixed member array satisfies computeRoot; no production path calls it.
 packages/proof-checker/src/checker.zig parts catch-trap
-packages/proof-checker/src/checker.zig parts catch-trap@2
 
-# Each additional kernel catch in these functions returns a rejection. The
-# second bound-byte decode returns the same undecodable rejection as the first.
+# Each additional kernel catch in these functions returns a rejection.
 packages/proof-checker/src/checker.zig bindExecutableGraph catch-block@2
 packages/proof-checker/src/checker.zig bindExecutableGraph catch-block@3
 packages/proof-checker/src/checker.zig bindExecutableGraph catch-block@4
@@ -273,13 +265,9 @@ packages/proof-checker/src/checker.zig bindExecutableGraph catch-return@2
 packages/proof-checker/src/checker.zig check catch-block@2
 packages/proof-checker/src/checker.zig check catch-block@3
 packages/proof-checker/src/checker.zig check catch-block@4
-packages/proof-checker/src/checker.zig checkBoundBytes catch-return@2
-packages/proof-checker/src/checker.zig checkConfiguredInvariants catch-multiline@2
 
-# The second observed graph build or invariant read in accept refuses the
-# artifact. Each certificate digest failure returns null to a caller that
+# Each certificate digest failure returns null to a caller that
 # refuses an unreadable graph root or decodes the bytes independently.
-packages/runtime/src/proof_activation.zig accept catch-switch@2
 packages/runtime/src/proof_activation.zig certificateCommitments catch-return@2
 packages/runtime/src/proof_activation.zig certificateCommitments catch-return@3
 

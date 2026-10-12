@@ -12,7 +12,9 @@
 //! separately; this module is the name-keyed core.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zq = @import("zts");
+const retired_authority = @import("project_config").retired_authority;
 const runtime_pool = @import("runtime_pool.zig");
 const runtime_config = @import("runtime_config.zig");
 const http_types = @import("http_types.zig");
@@ -72,6 +74,17 @@ pub const SystemRuntime = struct {
             .read_file = zq.file_io.readFileForModuleGraph,
         });
         errdefer contract.deinit(self.allocator);
+
+        const retired_facts = retired_authority.contractFacts(&contract);
+        if (retired_authority.first(retired_facts)) |feature| {
+            if (!builtin.is_test) {
+                std.log.err(
+                    "system target '{s}' refused retired runtime authority: {s}",
+                    .{ name, feature.sentence() },
+                );
+            }
+            return error.UnsupportedRuntimeAuthority;
+        }
 
         var target_config = config;
         // No configured capability policy reaches a co-located sub-handler, so
@@ -234,6 +247,68 @@ test "SystemRuntime dispatches a request to a named co-located handler in-proces
 
     // An unknown sub-handler is a clear error, not a silent default.
     try std.testing.expectError(error.UnknownHandler, sys.dispatch("nope", view));
+}
+
+test "SystemRuntime refuses direct retired authority before registration" {
+    const allocator = std.testing.allocator;
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+
+    const sources = [_][]const u8{
+        \\import { balance } from "zttp:ledger";
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+        \\import { toolCatalog } from "zttp:tool";
+        \\function handler(req) { return Response.text("ok"); }
+        ,
+    };
+    for (sources) |source| {
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            sys.addHandler("retired", source, "retired.ts", .{}, 1),
+        );
+        try std.testing.expectEqual(@as(usize, 0), sys.targets.items.len);
+    }
+}
+
+test "SystemRuntime refuses retired authority from a local dependency before registration" {
+    const allocator = std.testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_len = try tmp.dir.realPath(io, &dir_buf);
+    const dir = dir_buf[0..dir_len];
+    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.ts", .{dir});
+    defer allocator.free(entry_path);
+    const dependency_path = try std.fmt.allocPrint(allocator, "{s}/dependency.ts", .{dir});
+    defer allocator.free(dependency_path);
+    const entry_source =
+        \\import { helper } from "./dependency.ts";
+        \\function handler(req) { return Response.text(String(helper())); }
+    ;
+
+    const dependency_sources = [_][]const u8{
+        \\import { balance } from "zttp:ledger";
+        \\export function helper() { return 1; }
+        ,
+        \\import { toolCatalog } from "zttp:tool";
+        \\export function helper() { return 1; }
+        ,
+    };
+    var sys = SystemRuntime.init(allocator);
+    defer sys.deinit();
+    for (dependency_sources) |dependency_source| {
+        try zq.file_io.writeFile(allocator, dependency_path, dependency_source);
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            sys.addHandler("retired", entry_source, entry_path, .{}, 1),
+        );
+        try std.testing.expectEqual(@as(usize, 0), sys.targets.items.len);
+    }
 }
 
 // The remaining tests exercise the full `zttp:workflow.call` path end to end:

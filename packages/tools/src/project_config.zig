@@ -1,20 +1,7 @@
 const std = @import("std");
 
 const zts = @import("zts");
-pub const invariant_config = @import("invariant_config.zig");
-pub const invariant_author = @import("invariant_author.zig");
-pub const tool_catalog_encoding = @import("tool_catalog_encoding.zig");
 pub const retired_authority = @import("retired_authority.zig");
-
-test {
-    _ = invariant_config;
-    _ = tool_catalog_encoding;
-    // The ZTDCL1 round trip between the zts encoder and the kernel decoder.
-    _ = @import("declaration_encoding_test.zig");
-    // Re-exported but never referenced by analyzed code, so only this anchor
-    // makes `zig build test-project-config` collect its tests.
-    _ = invariant_author;
-}
 
 pub const ProjectConfig = struct {
     root_dir: []const u8,

@@ -35,11 +35,3 @@ qualify-expert.sh manual-model-spend
 # rendered table against the registry row by row - so this script is the
 # author-side fix for a failure that gate reports, not a check of its own.
 update-restrictions-doc.sh regeneration-tool
-
-# Nineteen lines that `cd` to the repository root and `exec zig build
-# test-invariant-drift`. The gate is the Zig binary behind that step, and `zig
-# build test` already runs it, so this file checks nothing of its own: it is the
-# spelling a developer already has in their fingers from when the gate was a
-# Python body in this same path. Wiring it into a build step would run the same
-# gate twice.
-check-invariants.sh delegating-wrapper

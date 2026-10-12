@@ -53,17 +53,7 @@ pub const MemberKind = enum(u16) {
     /// certificate that contains it so a mutated plan names itself rather than
     /// surfacing as a whole-certificate mismatch.
     residual_plan = 16,
-    /// Canonical structured application invariant specification bytes.
-    invariant_spec = 17,
-    /// Identity of the authoritative protected-ledger native adapter.
-    invariant_ledger_adapter = 18,
-    /// Canonical `ZTCAT1` tool catalog bytes. Present only for a tool-profile
-    /// handler; the kernel decodes the bytes and recomputes this digest.
-    tool_catalog = 19,
-    /// Canonical `ZTDCL1` declaration bytes. Present only when the handler
-    /// carries a declaration; the kernel decodes the bytes and recomputes this
-    /// digest.
-    declaration = 20,
+    // Wire ordinals 17 through 20 are retired.
 
     pub fn fromWire(value: u16) ?MemberKind {
         @setRuntimeSafety(true);
@@ -101,14 +91,6 @@ pub const MemberKind = enum(u16) {
             // empty plan and no plan are the same statement and one of them
             // would then be required.
             .residual_plan,
-            .invariant_spec,
-            .invariant_ledger_adapter,
-            // Present only for a tool-profile handler. A handler with no tools
-            // has no catalog, as a handler with no invariant has no spec.
-            .tool_catalog,
-            // Present only when the handler carries a declaration. A handler
-            // with none has no member, as a handler with no tools has no catalog.
-            .declaration,
             => false,
         };
     }
@@ -410,13 +392,17 @@ test "required kinds must all be present" {
     try testing.expectError(error.MissingRequiredKind, checkRequiredKinds(members[0 .. members.len - 1]));
 }
 
-test "semantics is required and declaration is optional" {
+test "semantics is required and the residual plan is optional" {
     try testing.expect(MemberKind.semantics.required());
-    try testing.expect(!MemberKind.declaration.required());
+    try testing.expect(!MemberKind.residual_plan.required());
 }
 
 test "member kind wire decoding is closed" {
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(0));
+    try testing.expectEqual(@as(?MemberKind, .residual_plan), MemberKind.fromWire(16));
+    for ([_]u16{ 17, 18, 19, 20 }) |retired_kind| {
+        try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(retired_kind));
+    }
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(21));
     inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
         const kind: MemberKind = @enumFromInt(field.value);

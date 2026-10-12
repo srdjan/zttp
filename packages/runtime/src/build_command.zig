@@ -16,8 +16,6 @@ const artifact_graph = @import("artifact_graph.zig");
 const pcc = @import("zttp_proof_checker");
 const proof_activation = @import("proof_activation.zig");
 const proof_certificate = @import("proof_certificate.zig");
-const invariant_adapter = @import("invariant_adapter.zig");
-const invariant_observer = @import("invariant_observer.zig");
 const self_extract = @import("self_extract.zig");
 const attest_build_receipt = @import("attest/build_receipt.zig");
 const live_reload = @import("live_reload.zig");
@@ -564,17 +562,10 @@ const ArtifactTailInput = struct {
     /// captured them. Absent means no certificate is embedded, which the strict
     /// activation path refuses rather than treats as permission.
     proof_evidence: ?*const zts.ProofEvidence = null,
-    /// Exact canonical invariant specification selected by project config.
-    /// The same bytes feed certificate construction and payload embedding.
-    invariant_spec: ?[]const u8 = null,
     /// The configured capability policy, when the project has one. It is the
     /// only source of entries for a contract category the compiler could not
     /// enumerate; without it such a category ships denying everything.
     configured_policy: ?*const zts.HandlerPolicy = null,
-    /// The consumer declaration the compile enforced, when the project has
-    /// one. Its canonical `ZTDCL1` form ships as section 10 and binds as the
-    /// `declaration` graph member. Borrowed.
-    declaration: ?*const zts.declaration.Declaration = null,
 };
 
 const ArtifactTailCapabilities = struct {
@@ -603,11 +594,8 @@ const ArtifactTailCapabilities = struct {
 };
 
 fn retiredArtifactFeature(input: ArtifactTailInput) ?retired_authority.Feature {
-    var facts: retired_authority.Facts = .{
-        .invariant_config = input.invariant_spec != null,
-        .declaration_config = input.declaration != null,
-    };
-    if (input.contract) |contract| facts = mergeRetiredFacts(facts, retired_authority.contractFacts(contract));
+    var facts: retired_authority.Facts = .{};
+    if (input.contract) |contract| facts = retired_authority.contractFacts(contract);
     if (input.proof_evidence) |evidence| {
         for (evidence.proof.nodes) |node| {
             if (node.tag == .ledger_call) {
@@ -617,14 +605,6 @@ fn retiredArtifactFeature(input: ArtifactTailInput) ?retired_authority.Feature {
         }
     }
     return retired_authority.first(facts);
-}
-
-fn mergeRetiredFacts(a: retired_authority.Facts, b: retired_authority.Facts) retired_authority.Facts {
-    var merged = a;
-    inline for (std.meta.fields(retired_authority.Facts)) |field| {
-        @field(merged, field.name) = @field(a, field.name) or @field(b, field.name);
-    }
-    return merged;
 }
 
 fn serializeContractCapability(
@@ -716,42 +696,6 @@ fn writeArtifactTail(
     var runtime_policy_digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(policy_section, &runtime_policy_digest, .{});
 
-    // The canonical tool catalog, encoded once from the contract the compiler
-    // built. The same bytes are shipped as the section and hashed into the
-    // `tool_catalog` graph member, so the consumer rebuilds the member from
-    // exactly what it loads. A handler with no catalog has neither.
-    const tool_catalog_section: ?[]u8 = if (input.contract) |contract|
-        project_config_mod.tool_catalog_encoding.encode(allocator, contract.tools.items) catch |err| {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "failed to encode the tool catalog ({s}); refusing to write an artifact whose catalog the consumer could not read",
-                    .{@errorName(err)},
-                );
-            }
-            return err;
-        }
-    else
-        null;
-    defer if (tool_catalog_section) |bytes| allocator.free(bytes);
-
-    // The canonical declaration, encoded once from the declaration the compile
-    // enforced. The same bytes are shipped as section 10 and hashed into the
-    // `declaration` graph member. A declaration with only classifications ships
-    // too: the section carries both halves. No declaration, no section.
-    const declaration_section: ?[]u8 = if (input.declaration) |decl|
-        zts.declaration.encodeCanonical(allocator, decl) catch |err| {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "failed to encode the declaration ({s}); refusing to write an artifact whose declaration the consumer could not read",
-                    .{@errorName(err)},
-                );
-            }
-            return err;
-        }
-    else
-        null;
-    defer if (declaration_section) |bytes| allocator.free(bytes);
-
     const artifact_sections = artifact_graph.ArtifactInputs{
         .bytecode = input.bytecode,
         .dep_bytecodes = input.dep_bytecodes,
@@ -761,22 +705,6 @@ fn writeArtifactTail(
             artifact_graph.identityFromContract(contract)
         else
             .{},
-        .invariant_spec_digest = if (input.invariant_spec) |bytes|
-            pcc.invariant.digest(bytes)
-        else
-            null,
-        // The adapter this build linked. `writeArtifactTail` folds its own
-        // root below, so it must name the adapter itself rather than rely on
-        // the certificate builder having named one.
-        .invariant_adapter_digest = invariant_adapter.linkedDigest(),
-        .tool_catalog_digest = if (tool_catalog_section) |bytes|
-            pcc.tool_catalog.digest(bytes)
-        else
-            null,
-        .declaration_digest = if (declaration_section) |bytes|
-            pcc.declaration.digest(bytes)
-        else
-            null,
     };
 
     // The certificate, when the compile captured the evidence for one. Building
@@ -796,7 +724,6 @@ fn writeArtifactTail(
             // certificate names which one rather than leaving the consumer to
             // accept whichever policy it happens to be handed.
             .runtime_policy_digest = runtime_policy_digest,
-            .invariant_spec = input.invariant_spec,
         }) catch |err| {
             if (!builtin.is_test) {
                 std.log.err(
@@ -869,9 +796,6 @@ fn writeArtifactTail(
             .policy_section = policy_section,
             .attestation = attestation_jws,
             .certificate = if (certificate) |value| value.bytes else null,
-            .invariant_section = input.invariant_spec,
-            .tool_catalog_section = tool_catalog_section,
-            .declaration_section = declaration_section,
         },
     );
 }
@@ -928,15 +852,6 @@ pub const BuildRequest = struct {
     sql_schema_path: ?[]const u8 = null,
     system_path: ?[]const u8 = null,
     policy: ?*const zts.HandlerPolicy = null,
-    /// Canonical application invariant bytes loaded from project config.
-    invariant_spec: ?[]const u8 = null,
-    /// The consumer declaration from project config (M4 T4). Borrowed.
-    declaration: ?*const zts.declaration.Declaration = null,
-    /// zttp.json's `auth` names (M4 T5), written into the contract. Borrowed.
-    tool_auth: ?zts.handler_contract.ToolAuth = null,
-    /// zttp.json's credential references (M4 T6), written into the
-    /// contract. Borrowed.
-    credentials: []const zts.handler_contract.CredentialRef = &.{},
     protected_ledger_path: ?[]const u8 = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
@@ -991,10 +906,6 @@ const BuildCompileInput = struct {
     sql_schema_path: ?[]const u8,
     system_path: ?[]const u8,
     policy: ?*const zts.HandlerPolicy,
-    declaration: ?*const zts.declaration.Declaration = null,
-    /// The project's credential references (M4 T6). A build always compares
-    /// them, so a tool naming a credential with none configured refuses.
-    credentials: []const zts.handler_contract.CredentialRef = &.{},
 };
 
 fn compileCapability(
@@ -1009,8 +920,6 @@ fn compileCapability(
         .sql_schema_path = input.sql_schema_path,
         .system_path = input.system_path,
         .policy = if (input.policy) |policy| policy.* else null,
-        .declaration = input.declaration,
-        .credentials = input.credentials,
     });
 }
 
@@ -1083,8 +992,6 @@ fn runBuild(
         .sql_schema_path = request.sql_schema_path,
         .system_path = request.system_path,
         .policy = request.policy,
-        .declaration = request.declaration,
-        .credentials = request.credentials,
     }) catch |err| {
         // precompile already prints per-error lines to stderr; only surface
         // the remediation hint so the dev knows where to look.
@@ -1110,22 +1017,6 @@ fn runBuild(
         return error.NoBytecode;
     }
 
-    // The identity source names (M4 T5) ride in the contract, so the graph
-    // member that binds the contract binds them too. Names only, never a key.
-    if (request.tool_auth) |auth| {
-        if (compiled.contract) |*contract| {
-            if (contract.tool_auth) |*prior| prior.deinit(allocator);
-            contract.tool_auth = try auth.dupe(allocator);
-        }
-    }
-    if (request.credentials.len > 0) {
-        if (compiled.contract) |*contract| {
-            zts.handler_contract.credential_ref.freeAll(allocator, contract.credentials);
-            contract.credentials = &.{};
-            contract.credentials = try zts.handler_contract.credential_ref.dupeAll(allocator, request.credentials);
-        }
-    }
-
     const retired_input: ArtifactTailInput = .{
         .runtime_binary = "",
         .output_path = output_path,
@@ -1135,12 +1026,8 @@ fn runBuild(
         .contract = if (compiled.contract) |*contract| contract else null,
         .proof_evidence = if (compiled.proof_evidence) |*evidence| evidence else null,
         .configured_policy = request.policy,
-        .invariant_spec = request.invariant_spec,
-        .declaration = request.declaration,
     };
-    var retired_feature = retiredArtifactFeature(retired_input);
-    if (retired_feature == null and request.tool_auth != null) retired_feature = .tool_auth;
-    if (retired_feature == null and request.credentials.len != 0) retired_feature = .credentials;
+    const retired_feature = retiredArtifactFeature(retired_input);
     if (retired_feature) |feature| {
         if (!builtin.is_test) std.debug.print("Build refused retired runtime authority: {s}\n", .{feature.sentence()});
         return error.UnsupportedRuntimeAuthority;
@@ -1166,8 +1053,6 @@ fn runBuild(
         .contract = if (compiled.contract) |*contract| contract else null,
         .proof_evidence = if (compiled.proof_evidence) |*evidence| evidence else null,
         .configured_policy = request.policy,
-        .invariant_spec = request.invariant_spec,
-        .declaration = request.declaration,
     });
 
     caps.codesign(caps.context, allocator, output_path);
@@ -1804,63 +1689,6 @@ test "ledger proof calls are refused before certificate construction" {
     }));
 }
 
-test "ledger function escapes are refused even beside a directly observed call" {
-    const allocator = std.testing.allocator;
-    const sources = [_][]const u8{
-        \\import { post } from "zttp:ledger";
-        \\function invoke(fn, group) { return fn(group); }
-        \\export function handler(req) {
-        \\  return invoke(post, { ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
-        \\}
-        ,
-        \\import { post } from "zttp:ledger";
-        \\export function handler(req) {
-        \\  const ledger = { post: post };
-        \\  return ledger.post({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
-        \\}
-        ,
-        \\import { post } from "zttp:ledger";
-        \\export function handler(req) {
-        \\  const fn = post;
-        \\  fn({ ledger: "main", currency: "USD", idempotencyKey: "known", entries: [] });
-        \\  const holder = { fn: fn };
-        \\  return holder.fn({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
-        \\}
-        ,
-        \\import { post } from "zttp:ledger";
-        \\export function handler(req) {
-        \\  const fn = post;
-        \\  if (req.url !== "") { const marker = "branch"; }
-        \\  return fn({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
-        \\}
-        ,
-        \\import { post } from "zttp:ledger";
-        \\export function handler(req) {
-        \\  const fn = post;
-        \\  const invoke = () => fn({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
-        \\  return invoke();
-        \\}
-        ,
-        \\import { post } from "zttp:ledger";
-        \\const storedPost = post;
-        \\export function handler(req) {
-        \\  return storedPost({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [] });
-        \\}
-        ,
-    };
-
-    for (sources) |source| {
-        var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
-            .strict = false,
-        });
-        defer compiled.deinit(allocator);
-        try std.testing.expectError(
-            error.UnsupportedLedgerEscape,
-            invariant_observer.observe(allocator, compiled.bytecode, compiled.dep_bytecodes orelse &.{}),
-        );
-    }
-}
-
 test "ledger operations do not erase secret labels" {
     const allocator = std.testing.allocator;
     const sources = [_][]const u8{
@@ -2228,46 +2056,10 @@ test "the signed root and the startup rebuild are the same fold" {
 }
 
 // ---------------------------------------------------------------------------
-// Tool catalog: from a real compile, through the artifact, to promotion
+// Artifact round-trip through the producer and consumer
 // ---------------------------------------------------------------------------
 
 const contract_runtime = @import("contract_runtime.zig");
-
-/// `packages/tools/tests/fixtures/contract/tool_catalog.ts`, verbatim. The
-/// runtime test root cannot embed a file outside its package, so the source is
-/// repeated here; the fixture's own tests pin the contract it yields.
-const tool_catalog_fixture_source =
-    \\import { toolCatalog } from "zttp:tool";
-    \\import { routerMatch } from "zttp:router";
-    \\import { schemaCompile } from "zttp:validate";
-    \\
-    \\schemaCompile("PingInput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
-    \\schemaCompile("PingOutput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
-    \\
-    \\toolCatalog({
-    \\  ping: {
-    \\    route: "POST /tools/ping",
-    \\    description: "Report that the service is up.",
-    \\    input: "PingInput",
-    \\    output: "PingOutput",
-    \\    maxInputBytes: 256
-    \\  }
-    \\});
-    \\
-    \\function ping(req: Request): Response {
-    \\  return Response.json({ ok: true });
-    \\}
-    \\
-    \\const routes = { "POST /tools/ping": ping };
-    \\
-    \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
-    \\  const found = routerMatch(routes, req);
-    \\  if (found !== undefined) {
-    \\    return found.handler(req);
-    \\  }
-    \\  return Response.json({ error: "not found" }, { status: 404 });
-    \\}
-;
 
 /// Captures the payload the artifact tail would write, serialized exactly as
 /// `self_extract.create` serializes it, so a test reads it back the way a
@@ -2334,23 +2126,7 @@ const LoadedArtifact = struct {
                 .frontend_profile_id = if (view.source_identity.frontend) |f| f.profile.id() else null,
                 .frontend_grammar_hash = if (view.source_identity.frontend) |f| f.grammar_hash else null,
             },
-            .tool_catalog = self.payload.tool_catalog_section,
-            .declaration = self.payload.declaration_section,
         };
-    }
-
-    fn certificateMembers(self: *const LoadedArtifact, kind: artifact_graph.MemberKind, out: []artifact_graph.Member) ![]artifact_graph.Member {
-        var budget = pcc.limits.Budget.init(.{});
-        const decoded = try pcc.certificate.decode(self.payload.certificate orelse return error.TestUnexpectedResult, .{}, &budget);
-        var count: usize = 0;
-        var index: u32 = 0;
-        while (index < decoded.graph.len()) : (index += 1) {
-            const member = try decoded.graph.get(index);
-            if (member.kind != kind) continue;
-            out[count] = member;
-            count += 1;
-        }
-        return out[0..count];
     }
 
     fn executableRoot(self: *const LoadedArtifact) ![32]u8 {
@@ -2363,21 +2139,10 @@ const LoadedArtifact = struct {
 /// Compile `source`, run the production artifact tail over it, and load the
 /// payload it would have written.
 fn loadArtifactForSource(allocator: std.mem.Allocator, source: []const u8) !LoadedArtifact {
-    return loadDeclaredArtifactForSource(allocator, source, null);
-}
-
-/// `loadArtifactForSource` with a consumer declaration, which the compile
-/// enforces and the tail ships as section 10.
-fn loadDeclaredArtifactForSource(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    declaration: ?*const zts.declaration.Declaration,
-) !LoadedArtifact {
     var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
         .emit_verify = true,
         .emit_contract = true,
         .emit_proof_evidence = true,
-        .declaration = declaration,
     });
     defer compiled.deinit(allocator);
     const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
@@ -2393,7 +2158,6 @@ fn loadDeclaredArtifactForSource(
         .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
         .contract = &contract,
         .proof_evidence = &evidence,
-        .declaration = declaration,
     }, capture.capabilities());
 
     var payload = (try self_extract.parse(allocator, capture.serialized orelse return error.TestUnexpectedResult)) orelse
@@ -2447,59 +2211,6 @@ test "a changed runtime policy member is refused at artifact binding (B8.8)" {
     inputs.policy_section_digest = changed_digest;
     const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
     try expectRefusedAt(assessment, .artifact_binding, .graph_member_digest_mismatch);
-}
-
-test "a handler with no tool catalog ships no section and no member, and promotes none" {
-    const allocator = std.testing.allocator;
-    var artifact = try loadArtifactForSource(allocator,
-        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
-        \\  return Response.text("ok");
-        \\}
-    );
-    defer artifact.deinit();
-
-    try std.testing.expect(artifact.payload.tool_catalog_section == null);
-    var member_buf: [4]artifact_graph.Member = undefined;
-    try std.testing.expectEqual(@as(usize, 0), (try artifact.certificateMembers(.tool_catalog, &member_buf)).len);
-    try std.testing.expectEqual(@as(usize, 0), artifact.contract.view().tools.len);
-
-    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
-    try expectAccepted(assessment);
-    var promoted = (try contract_runtime.promote(
-        &artifact.contract,
-        assessment,
-        artifact.payload.policy_section_sha256,
-        null,
-        null,
-        .{},
-    )) orelse return error.TestUnexpectedResult;
-    defer promoted.deinit();
-    try std.testing.expect(promoted.tool_catalog == null);
-
-    // No declaration either: no section, no member, no ceiling.
-    try std.testing.expect(artifact.payload.declaration_section == null);
-    try std.testing.expectEqual(@as(usize, 0), (try artifact.certificateMembers(.declaration, &member_buf)).len);
-    try std.testing.expect(promoted.capability_ceiling == null);
-}
-
-// ---------------------------------------------------------------------------
-// Declaration: from a real compile, through the artifact, to promotion (M4 T5b)
-// ---------------------------------------------------------------------------
-
-const declared_fixture_source =
-    \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
-    \\  return Response.text("ok");
-    \\}
-;
-
-/// A `boundary` ceiling that also excludes `zttp:sql`, which the profile does
-/// not exclude by itself.
-const declared_fixture_declaration =
-    \\{"version":2,"ceiling":{"profile":"boundary","exclude":["zttp:sql"]}}
-;
-
-fn parseTestDeclaration(allocator: std.mem.Allocator, json: []const u8) !zts.declaration.Declaration {
-    return precompile.parseDeclarationBytes(allocator, json, "test declaration", null);
 }
 
 test "a handler that does not always return is not accepted" {
@@ -3111,65 +2822,4 @@ test "project build compiler enforces configured capability policy" {
         .system_path = null,
         .policy = &policy,
     }));
-}
-
-const declared_project_handler =
-    \\import { fetch } from "zttp:fetch";
-    \\function handler(req: Request): Response {
-    \\  const r = fetch("https://api.example.com/customers/1");
-    \\  return Response.json({ n: r.json().customer.name });
-    \\}
-    \\
-;
-
-/// A project whose zttp.json names `declaration.json`, holding `declaration`.
-fn writeDeclaredProject(tmp: *std.testing.TmpDir, declaration: []const u8) !void {
-    try tmp.dir.createDirPath(std.testing.io, "src");
-    try tmp.dir.writeFile(std.testing.io, .{
-        .sub_path = "zttp.json",
-        .data = "{\"entry\":\"src/handler.ts\",\"declaration\":\"declaration.json\"}",
-    });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "declaration.json", .data = declaration });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = declared_project_handler });
-}
-
-/// A one-tool handler whose route fetches with the credential `name` (M4 T6).
-fn credentialedToolSource(comptime name: []const u8) []const u8 {
-    return
-    \\import { toolCatalog } from "zttp:tool";
-    \\import { routerMatch } from "zttp:router";
-    \\import { schemaCompile } from "zttp:validate";
-    \\import { fetch } from "zttp:fetch";
-    \\
-    \\schemaCompile("PingInput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{}}");
-    \\schemaCompile("PingOutput", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"ok\":{\"type\":\"boolean\"}}}");
-    \\
-    \\toolCatalog({
-    \\  ping: {
-    \\    route: "POST /tools/ping",
-    \\    description: "Ask the upstream whether it is up.",
-    \\    input: "PingInput",
-    \\    output: "PingOutput",
-    \\    maxInputBytes: 256
-    \\  }
-    \\});
-    \\
-    \\function ping(req: Request): Response {
-    \\  const res = fetch("https://api.weather.example/v1/status", { credential: "
-    ++ name ++
-        \\" });
-        \\  return Response.json({ ok: res.ok });
-        \\}
-        \\
-        \\const routes = { "POST /tools/ping": ping };
-        \\
-        \\function handler(req: Request): Response {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) {
-        \\    return found.handler(req);
-        \\  }
-        \\  return Response.json({ error: "not found" }, { status: 404 });
-        \\}
-        \\
-    ;
 }

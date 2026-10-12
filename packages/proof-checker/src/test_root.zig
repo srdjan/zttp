@@ -7,17 +7,14 @@
 comptime {
     _ = @import("capability_policy.zig");
     _ = @import("certificate.zig");
-    _ = @import("declaration.zig");
     _ = @import("checker.zig");
     _ = @import("executable_graph.zig");
     _ = @import("limits.zig");
-    _ = @import("invariant.zig");
     _ = @import("policy.zig");
     _ = @import("proof_system.zig");
     _ = @import("residual.zig");
     _ = @import("root.zig");
     _ = @import("safety.zig");
-    _ = @import("tool_catalog.zig");
     _ = @import("verdict.zig");
     _ = @import("wire.zig");
 }

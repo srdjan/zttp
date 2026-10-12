@@ -17,8 +17,6 @@ const zts = @import("zts");
 const retired_authority = @import("project_config").retired_authority;
 
 const artifact_graph = @import("artifact_graph.zig");
-const invariant_observer = @import("invariant_observer.zig");
-const invariant_adapter = @import("invariant_adapter.zig");
 
 const graph = pcc.executable_graph;
 
@@ -50,19 +48,6 @@ pub const Inputs = struct {
     /// the kernel. Empty means no solver ran, and the kernel treats an
     /// unanswered solver edge as inconclusive.
     solver_results: []const bool = &.{},
-    /// Exact canonical invariant specification section loaded with the
-    /// artifact. Null means this deployment configures no application
-    /// invariant.
-    invariant_spec: ?[]const u8 = null,
-    /// Exact canonical `ZTCAT1` tool catalog section loaded with the artifact.
-    /// Null means the handler has no tool catalog. The graph member is rebuilt
-    /// from these bytes, never from the producer's list, so a changed byte
-    /// fails at artifact binding.
-    tool_catalog: ?[]const u8 = null,
-    /// Exact canonical `ZTDCL1` declaration section loaded with the artifact.
-    /// Null means the handler has no declaration. The graph member is rebuilt
-    /// from these bytes, so a changed byte fails at artifact binding.
-    declaration: ?[]const u8 = null,
 };
 
 pub const Error = error{
@@ -72,23 +57,15 @@ pub const Error = error{
 };
 
 fn retiredInputFeature(allocator: std.mem.Allocator, inputs: Inputs) Error!?retired_authority.Feature {
-    var facts: retired_authority.Facts = .{
-        .invariant_config = inputs.invariant_spec != null,
-        .tool_catalog = inputs.tool_catalog != null,
-        .declaration_config = inputs.declaration != null,
-    };
     if (inputs.contract_section) |json| {
         var contract = zts.handler_contract.parseFromJson(allocator, json) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.InvalidContractSection,
         };
         defer contract.deinit(allocator);
-        const contract_facts = retired_authority.contractFacts(&contract);
-        inline for (std.meta.fields(retired_authority.Facts)) |field| {
-            @field(facts, field.name) = @field(facts, field.name) or @field(contract_facts, field.name);
-        }
+        return retired_authority.first(retired_authority.contractFacts(&contract));
     }
-    return retired_authority.first(facts);
+    return null;
 }
 
 fn refusal(
@@ -142,24 +119,6 @@ fn graphInputs(inputs: Inputs) artifact_graph.Inputs {
         .proof_ir_digest = if (commitments) |value| value.ir else null,
         .proof_certificate_digest = if (commitments) |value| value.certificate else null,
         .residual_plan_digest = if (commitments) |value| value.residual_plan else null,
-        .invariant_spec_digest = if (inputs.invariant_spec) |bytes|
-            pcc.invariant.digest(bytes)
-        else
-            null,
-        // The adapter this serving binary linked, read from its own manifest
-        // rather than from the acceptance kernel's expectation. That is what
-        // makes the member a statement about this process: a binary whose
-        // linked adapter no longer matches the artifact's fails to reproduce
-        // the member and the artifact is refused rather than served.
-        .invariant_adapter_digest = invariant_adapter.linkedDigest(),
-        .tool_catalog_digest = if (inputs.tool_catalog) |bytes|
-            pcc.tool_catalog.digest(bytes)
-        else
-            null,
-        .declaration_digest = if (inputs.declaration) |bytes|
-            pcc.declaration.digest(bytes)
-        else
-            null,
     });
 }
 
@@ -200,36 +159,6 @@ pub fn accept(
     const scratch = try allocator.alloc(u8, pcc.checker.scratchBytes(policy.limits));
     defer allocator.free(scratch);
 
-    const observed_invariants = invariant_observer.observe(
-        allocator,
-        inputs.bytecode,
-        inputs.dep_bytecodes,
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        // exhaustive: this arm handles rather than drops. Any other error means
-        // the observer could not read the operations out of the bytecode, and
-        // an unread observation is refused, never treated as an empty one -
-        // an empty operation set would satisfy the coverage check below. Only
-        // OutOfMemory propagates, so an allocation failure is not reported to
-        // the operator as an invariant mismatch in the artifact.
-        else => return refusal(
-            .invariant_coverage,
-            .invariant_observed_mismatch,
-            inputs.provenance,
-            true,
-        ),
-    };
-    defer allocator.free(observed_invariants);
-    const observed_operations = try allocator.alloc(pcc.invariant.ObservedOperation, observed_invariants.len);
-    defer allocator.free(observed_operations);
-    for (observed_invariants, 0..) |operation, index| {
-        observed_operations[index] = .{
-            .function_ordinal = operation.function_ordinal,
-            .code_offset = operation.code_offset,
-            .operation = operation.operation,
-        };
-    }
-
     return pcc.check(.{
         .certificate = certificate,
         .observed_graph = observed,
@@ -237,10 +166,6 @@ pub fn accept(
         .scratch = scratch,
         .solver_results = inputs.solver_results,
         .runtime_policy = if (inputs.policy_section) |bytes| .{ .bytes = bytes } else null,
-        .invariant_spec = inputs.invariant_spec,
-        .observed_invariant_operations = observed_operations,
-        .tool_catalog = inputs.tool_catalog,
-        .declaration = inputs.declaration,
     }, policy);
 }
 

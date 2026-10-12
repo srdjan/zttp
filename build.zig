@@ -25,7 +25,7 @@ pub fn build(b: *std.Build) void {
     const ctx = Context.init(b);
 
     const pkgs = packages.add(ctx);
-    const proofs = proof_gates.add(ctx, pkgs);
+    const proofs = proof_gates.add(ctx);
     const host = host_tests.add(ctx, proofs);
     const diagnostic_corpus = corpus.add(ctx);
     const flow_census_gate = flow_census.add(ctx);
@@ -36,7 +36,6 @@ pub fn build(b: *std.Build) void {
     const golden = goldens.add(ctx, bins);
     artifacts.addRunSteps(ctx, bins);
     const unit = runtime_tests.addUnit(ctx);
-    proof_gates.addInvariantDriftEvidence(proofs.invariant_drift_step, host.project_config, unit.run_unit_tests, unit.run_cli_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&unit.run_unit_tests.step);
@@ -49,7 +48,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&gates.release_workflow.step);
     test_step.dependOn(&gates.proof_swallow.step);
     test_step.dependOn(&proofs.residual_guards_drift.step);
-    test_step.dependOn(proofs.invariant_drift_step);
     test_step.dependOn(&gates.zts_layering.step);
     test_step.dependOn(&tools.run_release_check_tests.step);
     test_step.dependOn(&tools.run_release_provenance_tests.step);

@@ -29,12 +29,4 @@ test {
     // way, because `test_runner.zig` above imports `handler_instance.zig`.
     _ = @import("server.zig");
     _ = @import("proof_adapter.zig");
-    // Named here rather than reached. Its floor test is the one assertion
-    // standing between the invariant adapter comparison and a comparison that
-    // is unequal for every input, and it ran only because `server.zig` happens
-    // to reach `proof_activation.accept`, which happens to call
-    // `linkedDigest()`. A refactor that routed activation differently would
-    // have stopped running it, and the drift gate's evidence marker for it
-    // proves the text is present, not that it executed.
-    _ = @import("invariant_adapter.zig");
 }

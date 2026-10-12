@@ -29,11 +29,6 @@ pub const Error = error{
     TooManyMembers,
     TooManyFunctions,
     MalformedBytecodeStream,
-    /// An artifact commits to an invariant specification without naming the
-    /// adapter that enforces it. Refused rather than defaulted: a default
-    /// would be a value this file chose, and the whole point of the member is
-    /// that the caller states what it linked.
-    MissingInvariantAdapterDigest,
     OutOfMemory,
 };
 
@@ -70,23 +65,6 @@ pub const Inputs = struct {
     /// no guarded operation, which is a different statement from an empty plan
     /// and is why the member is absent rather than zero.
     residual_plan_digest: ?[32]u8 = null,
-    /// Digest of the exact canonical invariant specification section. The
-    /// protected ledger adapter is committed beside it when present.
-    invariant_spec_digest: ?[32]u8 = null,
-    /// Digest of the manifest of the protected-ledger adapter the caller
-    /// linked. Required whenever `invariant_spec_digest` is present, and
-    /// deliberately not defaulted here: this file must not be able to supply
-    /// the value it commits to, or the member would again be one constant
-    /// meeting itself. `invariant_adapter.linkedDigest()` computes it.
-    invariant_adapter_digest: ?[32]u8 = null,
-    /// Domain-separated digest of the exact canonical `ZTCAT1` tool catalog
-    /// section, as `pcc.tool_catalog.digest` computes it. Absent when the
-    /// handler has no tool catalog: the member is absent, not zero.
-    tool_catalog_digest: ?[32]u8 = null,
-    /// Domain-separated digest of the exact canonical `ZTDCL1` declaration
-    /// section, as `pcc.declaration.digest` computes it. Absent when the
-    /// handler has no declaration: the member is absent, not zero.
-    declaration_digest: ?[32]u8 = null,
 };
 
 /// The identity half of the commitment: which modules the handler imports, and
@@ -138,13 +116,6 @@ pub const ArtifactInputs = struct {
     proof_ir_digest: ?[32]u8 = null,
     proof_certificate_digest: ?[32]u8 = null,
     residual_plan_digest: ?[32]u8 = null,
-    invariant_spec_digest: ?[32]u8 = null,
-    /// See `Inputs.invariant_adapter_digest`.
-    invariant_adapter_digest: ?[32]u8 = null,
-    /// See `Inputs.tool_catalog_digest`.
-    tool_catalog_digest: ?[32]u8 = null,
-    /// See `Inputs.declaration_digest`.
-    declaration_digest: ?[32]u8 = null,
 };
 
 /// Project the artifact onto the graph inputs.
@@ -164,10 +135,6 @@ pub fn fromArtifact(inputs: ArtifactInputs) Inputs {
         .proof_ir_digest = inputs.proof_ir_digest,
         .proof_certificate_digest = inputs.proof_certificate_digest,
         .residual_plan_digest = inputs.residual_plan_digest,
-        .invariant_spec_digest = inputs.invariant_spec_digest,
-        .invariant_adapter_digest = inputs.invariant_adapter_digest,
-        .tool_catalog_digest = inputs.tool_catalog_digest,
-        .declaration_digest = inputs.declaration_digest,
     };
 }
 
@@ -275,25 +242,6 @@ pub fn build(
     if (inputs.residual_plan_digest) |digest| {
         try collector.add(.residual_plan, 0, digest);
     }
-    if (inputs.invariant_spec_digest) |digest| {
-        try collector.add(.invariant_spec, 0, digest);
-        // The adapter the caller linked, never the one this package's kernel
-        // dependency expects. Both the producer and the serving binary derive
-        // it from their own `zts.modules.ledger` manifest, and the acceptance
-        // kernel compares the member against its own table. Reading
-        // `pcc.invariant.adapterDigest()` here would put the kernel's constant
-        // on both sides of that comparison and it would always hold.
-        const adapter = inputs.invariant_adapter_digest orelse
-            return error.MissingInvariantAdapterDigest;
-        try collector.add(.invariant_ledger_adapter, 0, adapter);
-    }
-    if (inputs.tool_catalog_digest) |digest| {
-        try collector.add(.tool_catalog, 0, digest);
-    }
-    if (inputs.declaration_digest) |digest| {
-        try collector.add(.declaration, 0, digest);
-    }
-
     const members = out[0..collector.count];
     std.mem.sort(Member, members, {}, struct {
         fn lt(_: void, a: Member, b: Member) bool {
@@ -404,10 +352,6 @@ fn sampleInputs(main: []const u8, deps: []const []const u8) Inputs {
         .capability_hash = [_]u8{0xC3} ** 32,
         .proof_ir_digest = [_]u8{0xD4} ** 32,
         .proof_certificate_digest = [_]u8{0xE5} ** 32,
-        .invariant_spec_digest = [_]u8{0xF6} ** 32,
-        .invariant_adapter_digest = [_]u8{0xF8} ** 32,
-        .tool_catalog_digest = [_]u8{0x7C} ** 32,
-        .declaration_digest = [_]u8{0xDC} ** 32,
     };
 }
 
@@ -450,27 +394,6 @@ test "the inventory covers every executable and authority-bearing member" {
     try testing.expectEqual(@as(usize, 4), pools);
 
     _ = try graph.computeRoot(members);
-}
-
-test "an invariant specification with no linked adapter digest is refused" {
-    // The member cannot be defaulted here, so the absence has to be an error
-    // rather than a member this file invents. A caller that commits to an
-    // invariant without saying which adapter enforces it gets no artifact.
-    const allocator = testing.allocator;
-    var main_buf: [4096]u8 = undefined;
-    const main = try test_support.moduleBlob(allocator, 0x10, &main_buf);
-
-    const out = try allocator.alloc(Member, max_members);
-    defer allocator.free(out);
-    var inputs = sampleInputs(main, &.{});
-    inputs.invariant_adapter_digest = null;
-    try testing.expectError(error.MissingInvariantAdapterDigest, build(allocator, inputs, out));
-
-    // And an artifact that commits to no invariant at all still builds: the
-    // requirement is tied to the specification member, not imposed on every
-    // handler.
-    inputs.invariant_spec_digest = null;
-    _ = try build(allocator, inputs, out);
 }
 
 test "the same inputs produce the same inventory and root" {
@@ -552,26 +475,6 @@ test "mutating any member class moves the root" {
         .{ .name = "proof certificate", .apply = struct {
             fn f(i: *Inputs) void {
                 i.proof_certificate_digest = [_]u8{0xE6} ** 32;
-            }
-        }.f },
-        .{ .name = "invariant spec", .apply = struct {
-            fn f(i: *Inputs) void {
-                i.invariant_spec_digest = [_]u8{0xF7} ** 32;
-            }
-        }.f },
-        .{ .name = "invariant ledger adapter", .apply = struct {
-            fn f(i: *Inputs) void {
-                i.invariant_adapter_digest = [_]u8{0xF9} ** 32;
-            }
-        }.f },
-        .{ .name = "tool catalog", .apply = struct {
-            fn f(i: *Inputs) void {
-                i.tool_catalog_digest = [_]u8{0x7D} ** 32;
-            }
-        }.f },
-        .{ .name = "declaration", .apply = struct {
-            fn f(i: *Inputs) void {
-                i.declaration_digest = [_]u8{0xDD} ** 32;
             }
         }.f },
     };
@@ -672,64 +575,4 @@ test "an artifact without a proof IR omits the member rather than zeroing it" {
         try testing.expect(member.kind != .proof_ir);
     }
     try testing.expectError(error.MissingRequiredKind, graph.checkRequiredKinds(members));
-}
-
-test "an artifact without a tool catalog omits the member and still has every required kind" {
-    // A handler with no tool catalog has no section and no member. The member
-    // is not required, so its absence is not a missing required kind.
-    const allocator = testing.allocator;
-    var main_buf: [4096]u8 = undefined;
-    const main = try test_support.moduleBlob(allocator, 0x10, &main_buf);
-
-    var inputs = sampleInputs(main, &.{});
-    inputs.tool_catalog_digest = null;
-    const out = try allocator.alloc(Member, max_members);
-    defer allocator.free(out);
-    const members = try build(allocator, inputs, out);
-    for (members) |member| {
-        try testing.expect(member.kind != .tool_catalog);
-    }
-    try graph.checkRequiredKinds(members);
-
-    inputs.tool_catalog_digest = [_]u8{0x7C} ** 32;
-    const with_out = try allocator.alloc(Member, max_members);
-    defer allocator.free(with_out);
-    var catalog_members: usize = 0;
-    for (try build(allocator, inputs, with_out)) |member| {
-        if (member.kind != .tool_catalog) continue;
-        catalog_members += 1;
-        try testing.expectEqual(@as(u32, 0), member.ordinal);
-        try testing.expectEqualSlices(u8, &([_]u8{0x7C} ** 32), &member.digest);
-    }
-    try testing.expectEqual(@as(usize, 1), catalog_members);
-}
-
-test "an artifact without a declaration omits the member and still has every required kind" {
-    // A handler with no declaration has no section and no member. The member
-    // is not required, so its absence is not a missing required kind.
-    const allocator = testing.allocator;
-    var main_buf: [4096]u8 = undefined;
-    const main = try test_support.moduleBlob(allocator, 0x10, &main_buf);
-
-    var inputs = sampleInputs(main, &.{});
-    inputs.declaration_digest = null;
-    const out = try allocator.alloc(Member, max_members);
-    defer allocator.free(out);
-    const members = try build(allocator, inputs, out);
-    for (members) |member| {
-        try testing.expect(member.kind != .declaration);
-    }
-    try graph.checkRequiredKinds(members);
-
-    inputs.declaration_digest = [_]u8{0xDC} ** 32;
-    const with_out = try allocator.alloc(Member, max_members);
-    defer allocator.free(with_out);
-    var declaration_members: usize = 0;
-    for (try build(allocator, inputs, with_out)) |member| {
-        if (member.kind != .declaration) continue;
-        declaration_members += 1;
-        try testing.expectEqual(@as(u32, 0), member.ordinal);
-        try testing.expectEqualSlices(u8, &([_]u8{0xDC} ** 32), &member.digest);
-    }
-    try testing.expectEqual(@as(usize, 1), declaration_members);
 }

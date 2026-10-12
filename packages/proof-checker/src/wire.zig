@@ -169,10 +169,71 @@ test "a string length out of range names itself before the body is required" {
     try testing.expectError(error.Truncated, reader.string(u32, 1, 9, error.TooLong));
 }
 
+test "reader accepts exact boundaries and rejects an empty required string" {
+    const exact = [_]u8{ 0x34, 0x12, 0xaa, 0xbb };
+    var reader = Reader{ .bytes = &exact };
+    try testing.expectEqual(@as(u16, 0x1234), try reader.int(u16));
+    try testing.expectEqualSlices(u8, &.{ 0xaa, 0xbb }, try reader.take(2));
+    try testing.expect(reader.atEnd());
+
+    const empty = [_]u8{ 0, 0, 0, 0 };
+    reader = .{ .bytes = &empty };
+    try testing.expectError(error.TooShort, reader.string(u32, 1, 8, error.TooShort));
+}
+
+test "header rejects the wrong magic" {
+    const bytes = [_]u8{ 'N', 'O', 1, 0 };
+    try testing.expectError(error.BadMagic, header(&bytes, "OK", 1));
+}
+
 test "a canonical list admits only strictly ascending items" {
     var order = Ascending([]const u8, bytesOrder){};
     try testing.expectEqual(std.math.Order.lt, order.step("a"));
     try testing.expectEqual(std.math.Order.lt, order.step("b"));
     try testing.expectEqual(std.math.Order.eq, order.step("b"));
     try testing.expectEqual(std.math.Order.gt, order.step("a"));
+}
+
+test "iterator returns its final record and skipAll advances the reader" {
+    const Support = struct {
+        fn read(reader: *Reader) Truncated!u8 {
+            @setRuntimeSafety(true);
+            return reader.int(u8);
+        }
+    };
+    const RecordIterator = Iterator(u8, Truncated, Support.read);
+    const bytes = [_]u8{ 7, 8 };
+
+    var one = RecordIterator{ .bytes = &bytes, .pos = 0, .remaining = 1 };
+    try testing.expectEqual(@as(?u8, 7), try one.next());
+    try testing.expectEqual(@as(?u8, null), try one.next());
+
+    var reader = Reader{ .bytes = &bytes };
+    const two = RecordIterator{ .bytes = &bytes, .pos = 0, .remaining = 2 };
+    try two.skipAll(&reader);
+    try testing.expectEqual(@as(usize, bytes.len), reader.pos);
+    try testing.expect(reader.atEnd());
+}
+
+test "digest includes its domain" {
+    const left = domainDigest("left", "same payload");
+    const right = domainDigest("right", "same payload");
+    try testing.expect(!std.mem.eql(u8, &left, &right));
+}
+
+test "writer exposes exact raw integer and string bytes" {
+    var raw_buf: [4]u8 = undefined;
+    var raw_writer = Writer{ .buf = &raw_buf };
+    raw_writer.raw(&.{ 1, 2, 3 });
+    try testing.expectEqualSlices(u8, &.{ 1, 2, 3 }, raw_writer.bytes());
+
+    var int_buf: [4]u8 = undefined;
+    var int_writer = Writer{ .buf = &int_buf };
+    int_writer.int(u16, 0x1234);
+    try testing.expectEqualSlices(u8, &.{ 0x34, 0x12 }, int_writer.bytes());
+
+    var string_buf: [8]u8 = undefined;
+    var string_writer = Writer{ .buf = &string_buf };
+    string_writer.string("abc");
+    try testing.expectEqualSlices(u8, &.{ 3, 0, 0, 0, 'a', 'b', 'c' }, string_writer.bytes());
 }

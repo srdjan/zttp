@@ -37,8 +37,8 @@ const host_test_roots = [_]HostTestRoot{
     // collected_via_named_module: canonicalize.zig is reached only through
     // the `zts_cli` module, so this root is what runs its tests.
     .{ .owner = .tools, .src = "src/canonicalize.zig", .step = "test-canonicalize", .desc = "Run canonicalize/normalize tool tests", .project_config = true },
-    .{ .owner = .tools, .src = "src/system_rollout.zig", .step = "test-rollout", .desc = "Run rollout planner tests" },
-    .{ .owner = .tools, .src = "src/expert.zig", .step = "test-expert", .desc = "Run zts expert v1 contract tripwires" },
+    .{ .owner = .tools, .src = "src/system_rollout.zig", .step = "test-rollout", .desc = "Run rollout planner tests", .project_config = true },
+    .{ .owner = .tools, .src = "src/expert.zig", .step = "test-expert", .desc = "Run zts expert v1 contract tripwires", .project_config = true },
     // collected_via_named_module: zts_cli.zig and the command files it
     // imports (describe_rule.zig, search_rules.zig, ...) are reached only
     // through the `zts_cli` module. Same rationale as canonicalize.
@@ -81,7 +81,7 @@ const host_test_roots = [_]HostTestRoot{
 pub const Result = struct {
     /// The Run step of each root, in table order, for the aggregate `test` step.
     runs: [host_test_roots.len]*std.Build.Step.Run,
-    /// The `test-project-config` root, evidence for the invariant drift gate.
+    /// The `test-project-config` root.
     project_config: *std.Build.Step.Run,
 };
 

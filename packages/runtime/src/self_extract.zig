@@ -14,49 +14,9 @@ const handler_policy = zts.handler_policy;
 // 24      8     magic
 
 pub const MAGIC: u64 = 0x5A54_5042_4331_0000; // "ZTPBC1\0\0"
-/// Bumped to 6 for the declaration section. The reader checks equality, not an
-/// upper bound. Version 5 cannot carry the declaration section, so interpreting
-/// it under current rules would serve a declared handler without the ceiling
-/// its certificate names. Version 5 added the tool catalog section and version
-/// 4 the application-invariant specification section for the same reason.
-pub const FORMAT_VERSION: u16 = 6;
-
-/// The largest `ZTDCL1` section the reader accepts, derived from the kernel's
-/// own per-field bounds so the two cannot drift. One classification is the
-/// source-kind byte, three u32 length prefixes with each string at its maximum,
-/// and the label and required bytes. The ceiling is the presence flag, the
-/// profile byte, the u16 exclude count, and `max_exclude` prefixed strings at
-/// their maximum. Anything larger cannot decode, so it is refused before it is
-/// copied.
-pub const max_declaration_section_bytes: usize = blk: {
-    const decl = @import("zttp_proof_checker").declaration;
-    const classification: usize = 1 + 3 * 4 + decl.max_source_name_bytes + decl.max_path_bytes +
-        decl.max_reason_bytes + 1 + 1;
-    const ceiling: usize = 1 + 1 + 2 + @as(usize, decl.max_exclude) * (4 + decl.max_exclude_bytes);
-    break :blk decl.header_size + @as(usize, decl.max_classifications) * classification + ceiling;
-};
-
-/// The largest `ZTCAT1` section the reader accepts, derived from the kernel's
-/// own per-field bounds. Schema 4 added a kind byte to each entry. Schema 5
-/// added the seventh u32 agent limit. A tool entry includes schemas, scopes,
-/// exports, and credentials. An agent entry includes tool names, a provider,
-/// and seven limits. Use the larger entry bound so either kind fits. Anything
-/// larger cannot decode and is refused before it is copied.
-pub const max_tool_catalog_section_bytes: usize = blk: {
-    const cat = @import("zttp_proof_checker").tool_catalog;
-    const strings: usize = 8 * 4 + cat.max_name_bytes + cat.max_method_bytes + cat.max_path_bytes +
-        cat.max_description_bytes + 2 * cat.max_schema_name_bytes + 2 * cat.max_schema_bytes;
-    const exports: usize = @as(usize, cat.max_exports) * (2 * 4 + 2 * cat.max_export_field_bytes);
-    const scopes: usize = 2 * (4 + cat.max_scope_field_bytes);
-    const credentials: usize = 2 + @as(usize, cat.max_credentials) * (4 + cat.max_credential_name_bytes);
-    const tool_entry: usize = 1 + strings + 4 + scopes + 2 + exports + credentials;
-    const agent_entry: usize = 1 + 4 * 4 + cat.max_name_bytes + cat.max_method_bytes +
-        cat.max_path_bytes + cat.max_description_bytes + 4 + 2 +
-        @as(usize, cat.max_agent_tools) * (4 + cat.max_name_bytes) +
-        4 + cat.max_endpoint_bytes + 4 + cat.max_credential_name_bytes + 7 * 4;
-    const entry = @max(tool_entry, agent_entry);
-    break :blk cat.header_size + @as(usize, cat.max_entries) * entry;
-};
+/// Format 7 removes payload sections 8 through 10. The reader checks exact
+/// equality. It refuses format 6 instead of interpreting retired authority.
+pub const FORMAT_VERSION: u16 = 7;
 pub const TRAILER_SIZE: usize = 32;
 const base_copy_chunk_size: usize = 64 * 1024;
 
@@ -72,14 +32,7 @@ pub const Section = enum(u8) {
     /// discharges, the evidence for each, and the executable-graph inventory
     /// the consumer compares against what it loaded.
     certificate = 7,
-    /// Canonical structured application invariant specification bytes.
-    invariant = 8,
-    /// Canonical `ZTCAT1` tool catalog bytes, bound as the `tool_catalog`
-    /// executable-graph member. Present only for a handler with a catalog.
-    tool_catalog = 9,
-    /// Canonical `ZTDCL1` declaration bytes, bound as the `declaration`
-    /// executable-graph member. Present only for a handler with a declaration.
-    declaration = 10,
+    // Values 8 through 10 belonged to retired sections. Do not reuse them.
 };
 
 pub const Payload = struct {
@@ -103,11 +56,6 @@ pub const Payload = struct {
     /// carries none, which the strict activation path refuses separately: an
     /// absent certificate is a missing proof, not a permissive default.
     certificate: ?[]const u8 = null,
-    invariant_section: ?[]const u8 = null,
-    /// Section 9, exactly as read. Null when the handler has no tool catalog.
-    tool_catalog_section: ?[]const u8 = null,
-    /// Section 10, exactly as read. Null when the handler has no declaration.
-    declaration_section: ?[]const u8 = null,
 
     pub fn deinit(self: *const Payload, allocator: std.mem.Allocator) void {
         allocator.free(self.bytecode);
@@ -117,9 +65,6 @@ pub const Payload = struct {
         if (self.policy_section) |section| allocator.free(section);
         if (self.attestation_jws) |a| allocator.free(a);
         if (self.certificate) |c| allocator.free(c);
-        if (self.invariant_section) |section| allocator.free(section);
-        if (self.tool_catalog_section) |section| allocator.free(section);
-        if (self.declaration_section) |section| allocator.free(section);
         // Free the values arrays inside each policy allow list
         if (self.policy.env.values.len > 0) allocator.free(self.policy.env.values);
         if (self.policy.egress.values.len > 0) allocator.free(self.policy.egress.values);
@@ -296,12 +241,6 @@ pub const PayloadInput = struct {
     /// verbatim, so the bytes the consumer decodes are the bytes that were
     /// bound into the executable graph.
     certificate: ?[]const u8 = null,
-    /// Exact canonical invariant bytes committed by the proof certificate.
-    invariant_section: ?[]const u8 = null,
-    /// Exact canonical `ZTCAT1` bytes bound as the `tool_catalog` graph member.
-    tool_catalog_section: ?[]const u8 = null,
-    /// Exact canonical `ZTDCL1` bytes bound as the `declaration` graph member.
-    declaration_section: ?[]const u8 = null,
 };
 
 const ArtifactWriteCapability = struct {
@@ -467,9 +406,6 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
     section_count += 1; // policy always present
     if (input.attestation != null) section_count += 1;
     if (input.certificate != null) section_count += 1;
-    if (input.invariant_section != null) section_count += 1;
-    if (input.tool_catalog_section != null) section_count += 1;
-    if (input.declaration_section != null) section_count += 1;
 
     try buf.ensureTotalCapacity(allocator, input.bytecode.len + 256);
     try writeU16(&buf, allocator, section_count);
@@ -513,21 +449,6 @@ pub fn serializePayload(allocator: std.mem.Allocator, input: PayloadInput) ![]u8
         try writeSection(&buf, allocator, .certificate, certificate);
     }
 
-    // Section 8: canonical application invariant (if configured)
-    if (input.invariant_section) |invariant_section| {
-        try writeSection(&buf, allocator, .invariant, invariant_section);
-    }
-
-    // Section 9: canonical tool catalog (if the handler has one)
-    if (input.tool_catalog_section) |tool_catalog_section| {
-        try writeSection(&buf, allocator, .tool_catalog, tool_catalog_section);
-    }
-
-    // Section 10: canonical declaration (if the handler has one)
-    if (input.declaration_section) |declaration_section| {
-        try writeSection(&buf, allocator, .declaration, declaration_section);
-    }
-
     return buf.toOwnedSlice(allocator);
 }
 
@@ -542,14 +463,11 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var contract_json: ?[]const u8 = null;
     var attestation_jws: ?[]const u8 = null;
     var certificate: ?[]const u8 = null;
-    var invariant_section: ?[]const u8 = null;
-    var tool_catalog_section: ?[]const u8 = null;
-    var declaration_section: ?[]const u8 = null;
     var policy: zts.RuntimePolicy = .{};
     var policy_section: ?[]const u8 = null;
     var policy_section_sha256 = [_]u8{0} ** 32;
     var policy_strings: std.ArrayList([]const u8) = .empty;
-    var seen_sections = [_]bool{false} ** 11;
+    var seen_sections = [_]bool{false} ** 8;
     errdefer {
         if (bytecode) |b| allocator.free(b);
         if (dep_bytecodes) |deps| {
@@ -560,9 +478,6 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         if (policy_section) |section| allocator.free(section);
         if (attestation_jws) |a| allocator.free(a);
         if (certificate) |c| allocator.free(c);
-        if (invariant_section) |section| allocator.free(section);
-        if (tool_catalog_section) |section| allocator.free(section);
-        if (declaration_section) |section| allocator.free(section);
         freePolicyArrays(allocator, policy);
         for (policy_strings.items) |s| allocator.free(s);
         policy_strings.deinit(allocator);
@@ -605,18 +520,6 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
             @intFromEnum(Section.certificate) => {
                 certificate = try allocator.dupe(u8, section_data);
             },
-            @intFromEnum(Section.invariant) => {
-                if (section_data.len > @import("zttp_proof_checker").invariant.max_spec_bytes) return error.InvalidPayload;
-                invariant_section = try allocator.dupe(u8, section_data);
-            },
-            @intFromEnum(Section.tool_catalog) => {
-                if (section_data.len > max_tool_catalog_section_bytes) return error.InvalidPayload;
-                tool_catalog_section = try allocator.dupe(u8, section_data);
-            },
-            @intFromEnum(Section.declaration) => {
-                if (section_data.len > max_declaration_section_bytes) return error.InvalidPayload;
-                declaration_section = try allocator.dupe(u8, section_data);
-            },
             // No forward-compatibility skip. The payload version is checked for
             // equality, so a section this reader does not know is not a future
             // artifact - it is a malformed one, and reading the rest of it would
@@ -625,7 +528,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         }
     }
 
-    if (bytecode == null) return error.InvalidPayload;
+    if (bytecode == null or policy_section == null) return error.InvalidPayload;
     if (pos != data.len) return error.InvalidPayload;
 
     return .{
@@ -638,9 +541,6 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         .policy_section = policy_section,
         .attestation_jws = attestation_jws,
         .certificate = certificate,
-        .invariant_section = invariant_section,
-        .tool_catalog_section = tool_catalog_section,
-        .declaration_section = declaration_section,
     };
 }
 
@@ -653,7 +553,7 @@ fn freePolicyArrays(allocator: std.mem.Allocator, policy: zts.RuntimePolicy) voi
 
 fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8 {
     var pos: usize = 0;
-    if (data.len < 2) return &.{};
+    if (data.len < 2) return error.InvalidPayload;
 
     const count = try readU16(data, &pos);
     var deps = try allocator.alloc([]const u8, count);
@@ -665,11 +565,12 @@ fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8
 
     while (filled < count) : (filled += 1) {
         const dep_size = try readU32(data, &pos);
-        if (pos + dep_size > data.len) return error.InvalidPayload;
+        if (dep_size > data.len - pos) return error.InvalidPayload;
         deps[filled] = try allocator.dupe(u8, data[pos .. pos + dep_size]);
         pos += dep_size;
     }
 
+    if (pos != data.len) return error.InvalidPayload;
     return deps;
 }
 
@@ -1312,14 +1213,12 @@ test "roundtrip: serialize and parse payload" {
 
     const bytecode = "test bytecode data";
     const contract = "{\"routes\":[]}";
-    const invariant_section = "canonical invariant bytes";
     const policy = zts.RuntimePolicy{};
 
     const serialized = try serializePayload(allocator, .{
         .bytecode = bytecode,
         .contract_json = contract,
         .policy = &policy,
-        .invariant_section = invariant_section,
     });
     defer allocator.free(serialized);
 
@@ -1330,7 +1229,6 @@ test "roundtrip: serialize and parse payload" {
     try std.testing.expectEqualStrings(contract, parsed.contract_json.?);
     try std.testing.expectEqual(@as(usize, 0), parsed.dep_bytecodes.len);
     try std.testing.expect(parsed.attestation_jws == null);
-    try std.testing.expectEqualStrings(invariant_section, parsed.invariant_section.?);
 }
 
 test "roundtrip: payload with deps" {
@@ -1353,6 +1251,104 @@ test "roundtrip: payload with deps" {
     try std.testing.expectEqualStrings(dep1, parsed.dep_bytecodes[0]);
     try std.testing.expectEqualStrings(dep2, parsed.dep_bytecodes[1]);
     try std.testing.expect(parsed.contract_json == null);
+}
+
+test "payload parser requires the policy section" {
+    const allocator = std.testing.allocator;
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeU16(&encoded, allocator, 1);
+    try writeSection(&encoded, allocator, .bytecode, "bytecode");
+
+    const parsed = parse(allocator, encoded.items) catch |err| {
+        try std.testing.expectEqual(error.InvalidPayload, err);
+        return;
+    };
+    if (parsed) |payload| payload.deinit(allocator);
+    return error.TestExpectedError;
+}
+
+test "payload parser accepts bytecode with the complete required policy" {
+    const allocator = std.testing.allocator;
+    const policy = zts.RuntimePolicy{};
+    const policy_section = try serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeU16(&encoded, allocator, 2);
+    try writeSection(&encoded, allocator, .bytecode, "bytecode");
+    try writeSection(&encoded, allocator, .policy, policy_section);
+
+    const parsed = (try parse(allocator, encoded.items)) orelse return error.TestExpectedPayload;
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqualStrings("bytecode", parsed.bytecode);
+    try std.testing.expectEqualSlices(u8, policy_section, parsed.policy_section.?);
+}
+
+test "payload parser accepts a complete empty dependency section" {
+    const allocator = std.testing.allocator;
+    const policy = zts.RuntimePolicy{};
+    const policy_section = try serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeU16(&encoded, allocator, 3);
+    try writeSection(&encoded, allocator, .bytecode, "bytecode");
+    try writeSection(&encoded, allocator, .deps, &.{ 0, 0 });
+    try writeSection(&encoded, allocator, .policy, policy_section);
+
+    const parsed = (try parse(allocator, encoded.items)) orelse return error.TestExpectedPayload;
+    defer parsed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), parsed.dep_bytecodes.len);
+}
+
+test "payload parser rejects malformed dependency framing" {
+    const allocator = std.testing.allocator;
+    const policy = zts.RuntimePolicy{};
+    const policy_section = try serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    const truncated_count = [_]u8{0};
+    const truncated_size = [_]u8{ 1, 0, 2, 0, 0 };
+    const truncated_body = [_]u8{ 1, 0, 3, 0, 0, 0, 'a', 'b' };
+    const cases = [_][]const u8{
+        &truncated_count,
+        &truncated_size,
+        &truncated_body,
+    };
+
+    for (cases) |deps_section| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try writeU16(&encoded, allocator, 3);
+        try writeSection(&encoded, allocator, .bytecode, "bytecode");
+        try writeSection(&encoded, allocator, .deps, deps_section);
+        try writeSection(&encoded, allocator, .policy, policy_section);
+
+        const parsed = parse(allocator, encoded.items) catch |err| {
+            try std.testing.expectEqual(error.InvalidPayload, err);
+            continue;
+        };
+        if (parsed) |payload| payload.deinit(allocator);
+        return error.TestExpectedError;
+    }
+}
+
+test "payload parser rejects trailing dependency data" {
+    const allocator = std.testing.allocator;
+    const policy = zts.RuntimePolicy{};
+    const policy_section = try serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+
+    var encoded: std.ArrayList(u8) = .empty;
+    defer encoded.deinit(allocator);
+    try writeU16(&encoded, allocator, 3);
+    try writeSection(&encoded, allocator, .bytecode, "bytecode");
+    try writeSection(&encoded, allocator, .deps, &.{ 0, 0, 0xff });
+    try writeSection(&encoded, allocator, .policy, policy_section);
+    try std.testing.expectError(error.InvalidPayload, parse(allocator, encoded.items));
 }
 
 test "roundtrip: payload with attestation JWS" {
@@ -1527,186 +1523,24 @@ test "payload parser rejects oversized and duplicate policy sections" {
     try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
 }
 
-test "roundtrip: payload with a tool catalog section" {
+test "payload parser rejects retired raw section tags 8 through 10" {
     const allocator = std.testing.allocator;
-    const policy = zts.RuntimePolicy{};
-    var catalog_buf: [4096]u8 = undefined;
-    const catalog = @import("zttp_proof_checker").tool_catalog.test_support.sample(&catalog_buf);
+    for ([_]u8{ 8, 9, 10 }) |section_type| {
+        var encoded: std.ArrayList(u8) = .empty;
+        defer encoded.deinit(allocator);
+        try writeU16(&encoded, allocator, 2);
+        try writeSection(&encoded, allocator, .bytecode, "bytecode");
+        try encoded.append(allocator, section_type);
+        try writeU32(&encoded, allocator, 1);
+        try encoded.append(allocator, 0);
 
-    const serialized = try serializePayload(allocator, .{
-        .bytecode = "bytecode",
-        .contract_json = "{}",
-        .policy = &policy,
-        .invariant_section = "invariant",
-        .tool_catalog_section = catalog,
-    });
-    defer allocator.free(serialized);
-    // bytecode, contract, policy, invariant, tool catalog.
-    try std.testing.expectEqual(@as(u16, 5), std.mem.readInt(u16, serialized[0..2], .little));
-
-    const parsed = (try parse(allocator, serialized)).?;
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, catalog, parsed.tool_catalog_section.?);
-    try std.testing.expectEqualStrings("invariant", parsed.invariant_section.?);
-
-    // A handler with no catalog carries no section, and parses to null.
-    const without = try serializePayload(allocator, .{ .bytecode = "bytecode", .policy = &policy });
-    defer allocator.free(without);
-    const parsed_without = (try parse(allocator, without)).?;
-    defer parsed_without.deinit(allocator);
-    try std.testing.expect(parsed_without.tool_catalog_section == null);
-}
-
-test "payload parser rejects oversized and duplicate tool catalog sections" {
-    const allocator = std.testing.allocator;
-    const oversized = try allocator.alloc(u8, max_tool_catalog_section_bytes + 1);
-    defer allocator.free(oversized);
-    @memset(oversized, 0);
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try writeU16(&encoded, allocator, 2);
-    try writeSection(&encoded, allocator, .bytecode, "bytecode");
-    try writeSection(&encoded, allocator, .tool_catalog, oversized);
-    try std.testing.expectError(error.InvalidPayload, parse(allocator, encoded.items));
-
-    // The bound itself is accepted by the framing: the kernel, not the
-    // framing, decides whether such bytes are a catalog.
-    encoded.clearRetainingCapacity();
-    try writeU16(&encoded, allocator, 2);
-    try writeSection(&encoded, allocator, .bytecode, "bytecode");
-    try writeSection(&encoded, allocator, .tool_catalog, oversized[0..max_tool_catalog_section_bytes]);
-    const at_bound = (try parse(allocator, encoded.items)).?;
-    defer at_bound.deinit(allocator);
-    try std.testing.expectEqual(max_tool_catalog_section_bytes, at_bound.tool_catalog_section.?.len);
-
-    encoded.clearRetainingCapacity();
-    try writeU16(&encoded, allocator, 3);
-    try writeSection(&encoded, allocator, .bytecode, "bytecode");
-    try writeSection(&encoded, allocator, .tool_catalog, "first");
-    try writeSection(&encoded, allocator, .tool_catalog, "second");
-    try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
-}
-
-test "payload catalog bound admits a schema 5 catalog with every tool field at its maximum" {
-    const allocator = std.testing.allocator;
-    const cat = @import("zttp_proof_checker").tool_catalog;
-    const storage = try allocator.alloc(u8, max_tool_catalog_section_bytes);
-    defer allocator.free(storage);
-    var writer = cat.test_support.Writer{ .buf = storage };
-    writer.raw(cat.magic);
-    writer.int(u16, cat.schema_version);
-    writer.int(u16, cat.max_entries);
-
-    var export_names: [cat.max_exports][cat.max_export_field_bytes]u8 = undefined;
-    var exports: [cat.max_exports]cat.test_support.SampleExport = undefined;
-    const module = [_]u8{'m'} ** cat.max_export_field_bytes;
-    for (&export_names, &exports, 0..) |*name, *item, i| {
-        @memset(name, 'a');
-        name[0] = 'a' + @as(u8, @intCast(i / 26));
-        name[1] = 'a' + @as(u8, @intCast(i % 26));
-        item.* = .{ .module = &module, .name = name };
+        const parsed = parse(allocator, encoded.items) catch |err| {
+            try std.testing.expectEqual(error.UnknownPayloadSection, err);
+            continue;
+        };
+        if (parsed) |payload| payload.deinit(allocator);
+        return error.TestExpectedError;
     }
-    var credentials: [cat.max_credentials][]const u8 = undefined;
-    for (&credentials, 0..) |*name, i| name.* = &export_names[i];
-    const method = [_]u8{'P'} ** cat.max_method_bytes;
-    const description = [_]u8{'d'} ** cat.max_description_bytes;
-    const schema_name = [_]u8{'s'} ** cat.max_schema_name_bytes;
-    const schema = [_]u8{'s'} ** cat.max_schema_bytes;
-    const scope = [_]u8{'s'} ** cat.max_scope_field_bytes;
-    for (0..cat.max_entries) |i| {
-        var name = [_]u8{'a'} ** cat.max_name_bytes;
-        name[0] = 'a' + @as(u8, @intCast(i / 26));
-        name[1] = 'a' + @as(u8, @intCast(i % 26));
-        var path = [_]u8{'p'} ** cat.max_path_bytes;
-        path[0] = '/';
-        path[1] = name[0];
-        path[2] = name[1];
-        cat.test_support.writeEntry(&writer, .{
-            .name = &name,
-            .method = &method,
-            .path = &path,
-            .description = &description,
-            .input_name = &schema_name,
-            .input_schema = &schema,
-            .output_name = &schema_name,
-            .output_schema = &schema,
-            .scope_tenant = &scope,
-            .scope_subject = &scope,
-            .exports = &exports,
-            .credentials = &credentials,
-        });
-    }
-    const bytes = writer.bytes();
-    _ = try cat.decode(bytes);
-    try std.testing.expectEqual(max_tool_catalog_section_bytes, bytes.len);
-    const policy = zts.RuntimePolicy{};
-    const payload = try serializePayload(allocator, .{ .bytecode = "code", .policy = &policy, .tool_catalog_section = bytes });
-    defer allocator.free(payload);
-    const parsed = (try parse(allocator, payload)) orelse return error.TestMissingPayload;
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, bytes, parsed.tool_catalog_section orelse return error.TestMissingCatalog);
-}
-
-test "roundtrip: payload with a declaration section" {
-    const allocator = std.testing.allocator;
-    const policy = zts.RuntimePolicy{};
-    var declaration_buf: [4096]u8 = undefined;
-    const declaration = @import("zttp_proof_checker").declaration.test_support.sample(&declaration_buf);
-
-    const serialized = try serializePayload(allocator, .{
-        .bytecode = "bytecode",
-        .contract_json = "{}",
-        .policy = &policy,
-        .tool_catalog_section = "catalog",
-        .declaration_section = declaration,
-    });
-    defer allocator.free(serialized);
-    // bytecode, contract, policy, tool catalog, declaration.
-    try std.testing.expectEqual(@as(u16, 5), std.mem.readInt(u16, serialized[0..2], .little));
-
-    const parsed = (try parse(allocator, serialized)).?;
-    defer parsed.deinit(allocator);
-    try std.testing.expectEqualSlices(u8, declaration, parsed.declaration_section.?);
-    try std.testing.expectEqualStrings("catalog", parsed.tool_catalog_section.?);
-
-    // A handler with no declaration carries no section, and parses to null.
-    const without = try serializePayload(allocator, .{ .bytecode = "bytecode", .policy = &policy });
-    defer allocator.free(without);
-    const parsed_without = (try parse(allocator, without)).?;
-    defer parsed_without.deinit(allocator);
-    try std.testing.expect(parsed_without.declaration_section == null);
-}
-
-test "payload parser rejects oversized and duplicate declaration sections" {
-    const allocator = std.testing.allocator;
-    const oversized = try allocator.alloc(u8, max_declaration_section_bytes + 1);
-    defer allocator.free(oversized);
-    @memset(oversized, 0);
-
-    var encoded: std.ArrayList(u8) = .empty;
-    defer encoded.deinit(allocator);
-    try writeU16(&encoded, allocator, 2);
-    try writeSection(&encoded, allocator, .bytecode, "bytecode");
-    try writeSection(&encoded, allocator, .declaration, oversized);
-    try std.testing.expectError(error.InvalidPayload, parse(allocator, encoded.items));
-
-    // The bound itself is accepted by the framing: the kernel, not the
-    // framing, decides whether such bytes are a declaration.
-    encoded.clearRetainingCapacity();
-    try writeU16(&encoded, allocator, 2);
-    try writeSection(&encoded, allocator, .bytecode, "bytecode");
-    try writeSection(&encoded, allocator, .declaration, oversized[0..max_declaration_section_bytes]);
-    const at_bound = (try parse(allocator, encoded.items)).?;
-    defer at_bound.deinit(allocator);
-    try std.testing.expectEqual(max_declaration_section_bytes, at_bound.declaration_section.?.len);
-
-    encoded.clearRetainingCapacity();
-    try writeU16(&encoded, allocator, 3);
-    try writeSection(&encoded, allocator, .bytecode, "bytecode");
-    try writeSection(&encoded, allocator, .declaration, "first");
-    try writeSection(&encoded, allocator, .declaration, "second");
-    try std.testing.expectError(error.DuplicatePayloadSection, parse(allocator, encoded.items));
 }
 
 test "getCleanBinarySize: no trailer returns full size" {
@@ -1747,7 +1581,7 @@ fn buildTrailer(payload_offset: u64, payload_size: u64, version: u16) [TRAILER_S
 }
 
 test "a trailer from the previous payload format is refused with a rebuild diagnostic" {
-    try std.testing.expectEqual(@as(u16, 6), FORMAT_VERSION);
+    try std.testing.expectEqual(@as(u16, 7), FORMAT_VERSION);
     const trailer = buildTrailer(100, 50, 2);
     try std.testing.expectError(
         error.UnsupportedArtifactFormat,
@@ -1767,6 +1601,13 @@ test "a trailer from the previous payload format is refused with a rebuild diagn
     try std.testing.expectError(
         error.UnsupportedArtifactFormat,
         readTrailer(100 + 50 + TRAILER_SIZE, &version_five),
+    );
+    // Version 6 carries retired payload sections 8 through 10. The next
+    // reader must refuse it instead of reading removed runtime authority.
+    const version_six = buildTrailer(100, 50, 6);
+    try std.testing.expectError(
+        error.UnsupportedArtifactFormat,
+        readTrailer(100 + 50 + TRAILER_SIZE, &version_six),
     );
 }
 

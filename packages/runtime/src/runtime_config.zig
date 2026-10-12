@@ -42,17 +42,6 @@ pub const RuntimeConfig = struct {
     outbound_max_response_bytes: usize = 1024 * 1024,
     outbound_timeout_ms: u32 = 10_000,
     sqlite_path: ?[]const u8 = null,
-    /// Exact consumer-checked bytes, borrowed for the runtime generation.
-    invariant_section: ?[]const u8 = null,
-    /// Exact `ZTCAT1` tool catalog section loaded with the artifact, borrowed
-    /// for the runtime generation. It is handed to acceptance and lowered only
-    /// from there. Null when the handler has no tool catalog.
-    tool_catalog_section: ?[]const u8 = null,
-    /// Exact `ZTDCL1` declaration section loaded with the artifact, borrowed
-    /// for the runtime generation. It is handed to acceptance, and the
-    /// accepted ceiling is lowered only from there. Null when the handler has
-    /// no declaration.
-    declaration_section: ?[]const u8 = null,
     trace_file_path: ?[]const u8 = null,
     /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).
     /// `incident_log_path` is the CLI-supplied path; the server opens it once at

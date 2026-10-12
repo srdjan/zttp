@@ -12,7 +12,6 @@ pub const HandlerInstance = handler_instance.HandlerInstance;
 pub const AotOverrideFn = handler_instance.AotOverrideFn;
 pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 pub const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
-pub const AgentLimits = zq.handler_contract.AgentLimits;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
 pub const HandlerProperties = zq.HandlerProperties;
@@ -27,9 +26,6 @@ pub const normalizedSqlQuery = zq.handler_policy.normalizedSqlQuery;
 pub const sqlQueryIsReadOnly = zq.handler_policy.sqlQueryIsReadOnly;
 pub const contractRequiresRuntimePolicyIndex = zq.handler_policy.contractRequiresRuntimePolicyIndex;
 pub const JSValue = zq.JSValue;
-/// Test-only reach for server.zig's agent admission tests (M5 A1 U3).
-pub const Context = zq.Context;
-pub const ToolExport = zq.handler_contract.ToolExport;
 pub const emptyContract = zq.handler_contract.emptyContract;
 pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;
@@ -42,21 +38,6 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize
 
 pub fn sourceIdentityForPath(path: []const u8) SourceIdentity {
     return zq.sourceIdentityForPath(path);
-}
-
-/// Source-mode startup must validate agent settings before the watcher can
-/// install its first catalog. This is a producer catalog, as in dev admission.
-pub fn sourceHasAgent(allocator: std.mem.Allocator, source: []const u8, filename: []const u8) !bool {
-    var contract = try zq.pipeline.extractContract(allocator, source, filename, .{
-        .strict = false,
-        .version = zq.version.string,
-        .read_file = zq.file_io.readFileForModuleGraph,
-    });
-    defer contract.deinit(allocator);
-    for (contract.tools.items) |entry| {
-        if (entry.agent != null) return true;
-    }
-    return false;
 }
 
 pub fn initSecurityEvents(allocator: std.mem.Allocator, capacity: usize) !void {

@@ -17,8 +17,6 @@ const pcc = @import("zttp_proof_checker");
 const retired_authority = @import("project_config").retired_authority;
 
 const artifact_graph = @import("artifact_graph.zig");
-const invariant_observer = @import("invariant_observer.zig");
-const invariant_adapter = @import("invariant_adapter.zig");
 
 const cert = pcc.certificate;
 const graph = pcc.executable_graph;
@@ -41,17 +39,6 @@ pub const Error = error{
     DuplicateMember,
     MissingRequiredKind,
     ZeroCommitment,
-    InvalidInvariantSpec,
-    MissingInvariantObservation,
-    DuplicateInvariantObservation,
-    InvariantOperationMismatch,
-    MissingInvariantSpec,
-    InvariantObservationMismatch,
-    /// The executable graph was asked to commit to an invariant specification
-    /// with no linked adapter named beside it. Reachable only if this file
-    /// stops filling `invariant_adapter_digest`, which is why it is a refusal
-    /// rather than an assertion.
-    MissingInvariantAdapterDigest,
     /// The encoded certificate does not decode under the default consumer
     /// limits, so every consumer would refuse it. A proof larger than those
     /// limits reaches this, and so would an encoder the decoder disagrees with.
@@ -99,8 +86,6 @@ pub const Inputs = struct {
     /// recomputes it from the bytes it is handed, so this is what ties a guard
     /// plan to one policy rather than to any policy.
     runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
-    /// Exact canonical invariant bytes configured for this artifact.
-    invariant_spec: ?[]const u8 = null,
 };
 
 pub const Built = struct {
@@ -161,7 +146,7 @@ fn irNodes(allocator: std.mem.Allocator, evidence: *const zts.ProofEvidence) Err
     for (evidence.proof.nodes, 0..) |node, index| {
         nodes[index] = .{
             .id = node.id,
-            .tag = tagFor(node.tag),
+            .tag = try tagFor(node.tag),
             .is_handler = if (evidence.proof.handler_function) |handler| handler == node.id else false,
             .parent = node.parent,
             .first_child = node.first_child,
@@ -173,10 +158,9 @@ fn irNodes(allocator: std.mem.Allocator, evidence: *const zts.ProofEvidence) Err
     return nodes;
 }
 
-/// The compiler's lowering alphabet and the kernel's are the same alphabet with
-/// two definitions. This switch is exhaustive on both sides, so adding a tag to
-/// one without the other is a compile error rather than a silent remap.
-fn tagFor(tag: zts.ProofIrTag) ps.NodeTag {
+/// Retained compiler tags keep their kernel wire values.
+/// This exhaustive switch refuses the retired ledger tag before encoding.
+fn tagFor(tag: zts.ProofIrTag) Error!ps.NodeTag {
     return switch (tag) {
         .function => .function,
         .sequence => .sequence,
@@ -185,7 +169,7 @@ fn tagFor(tag: zts.ProofIrTag) ps.NodeTag {
         .return_node => .return_node,
         .plain => .plain,
         .capability_call => .capability_call,
-        .ledger_call => .ledger_call,
+        .ledger_call => error.UnsupportedRuntimeAuthority,
     };
 }
 
@@ -236,7 +220,7 @@ const ObligationBuilder = struct {
 
 /// Build and encode the certificate for one compiled handler.
 pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
-    var retired_facts: retired_authority.Facts = .{ .invariant_config = inputs.invariant_spec != null };
+    var retired_facts: retired_authority.Facts = .{};
     for (inputs.evidence.proof.nodes) |node| {
         if (node.tag == .ledger_call) retired_facts.ledger_module = true;
     }
@@ -258,16 +242,6 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     artifact.residual_plan_digest = residual_plan_digest;
     artifact.proof_ir_digest = ir_root;
     artifact.proof_certificate_digest = [_]u8{0} ** 32;
-    const invariant_spec_digest = if (inputs.invariant_spec) |bytes| blk: {
-        _ = pcc.invariant.decode(bytes) catch return error.InvalidInvariantSpec;
-        break :blk pcc.invariant.digest(bytes);
-    } else null;
-    artifact.invariant_spec_digest = invariant_spec_digest;
-    // The adapter this binary linked, read from its own manifest. Not
-    // `pcc.invariant.adapterDigest()`: the acceptance kernel compares the
-    // member against that value, and a producer that read it too would be
-    // committing to the consumer's expectation rather than to what it linked.
-    artifact.invariant_adapter_digest = invariant_adapter.linkedDigest();
     const members = try allocator.alloc(graph.Member, artifact_graph.max_members);
     errdefer allocator.free(members);
     const built_members = try artifact_graph.build(allocator, artifact_graph.fromArtifact(artifact), members);
@@ -311,24 +285,8 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
         }
     }.lt);
 
-    const observed = invariant_observer.observe(
-        allocator,
-        inputs.artifact.bytecode,
-        inputs.artifact.dep_bytecodes,
-    ) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        else => error.MalformedBytecodeStream,
-    };
-    defer allocator.free(observed);
-    if (inputs.invariant_spec == null and observed.len != 0) return error.MissingInvariantSpec;
-    if (inputs.invariant_spec != null and observed.len == 0) return error.MissingInvariantObservation;
-    var invariant_translation = try translationAndInvariantWitnesses(
-        allocator,
-        inputs.evidence,
-        nodes,
-        observed,
-    );
-    defer invariant_translation.deinit();
+    const translation = try translationWitnesses(allocator, inputs.evidence);
+    defer allocator.free(translation);
     const rewrites = try rewriteRecords(allocator, inputs.evidence);
     defer allocator.free(rewrites);
     const trusted = try trustedEdges(allocator, inputs.evidence);
@@ -341,18 +299,16 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
             .contract_digest = inputs.contract_digest,
             .residual_plan_digest = cert.residualPlanDigest(residual_plan),
             .runtime_policy_digest = inputs.runtime_policy_digest,
-            .invariant_spec_digest = invariant_spec_digest orelse [_]u8{0} ** 32,
             .development = inputs.development,
         },
         .graph = built_members,
         .obligations = builder.obligations.items,
         .ir = nodes,
         .evidence = builder.evidence.items,
-        .translation = invariant_translation.translation,
+        .translation = translation,
         .rewrites = rewrites,
         .trusted = trusted,
         .residual = residual_plan,
-        .invariants = invariant_translation.invariants,
     };
 
     const bytes = try allocator.alloc(u8, cert.encodedSize(parts));
@@ -458,46 +414,15 @@ fn appendTotalityEvidence(
     }
 }
 
-const InvariantTranslation = struct {
-    allocator: std.mem.Allocator,
-    translation: []cert.Witness,
-    invariants: []cert.InvariantWitness,
-
-    fn deinit(self: *InvariantTranslation) void {
-        self.allocator.free(self.translation);
-        self.allocator.free(self.invariants);
-    }
-};
-
-fn translationAndInvariantWitnesses(
+fn translationWitnesses(
     allocator: std.mem.Allocator,
     evidence: *const zts.ProofEvidence,
-    nodes: []const cert.IrNode,
-    observed: []const invariant_observer.Observed,
-) Error!InvariantTranslation {
+) Error![]cert.Witness {
     const total = evidence.emissions.len + evidence.jumps.len;
     const out = try allocator.alloc(cert.Witness, total);
     errdefer allocator.free(out);
-    var invariants: std.ArrayList(cert.InvariantWitness) = .empty;
-    errdefer invariants.deinit(allocator);
     var index: usize = 0;
     for (evidence.emissions) |emission| {
-        var invariant_observation: ?invariant_observer.Observed = null;
-        if (emission.node < nodes.len and nodes[emission.node].tag == .ledger_call) {
-            for (observed) |candidate| {
-                if (candidate.function_ordinal != emission.function_ordinal) continue;
-                if (candidate.code_offset < emission.code_start) continue;
-                if (@as(u64, candidate.code_offset) >= @as(u64, emission.code_start) + emission.code_len) continue;
-                if (invariant_observation != null) return error.DuplicateInvariantObservation;
-                invariant_observation = candidate;
-            }
-            const operation = invariant_observation orelse return error.MissingInvariantObservation;
-            const catalog_index = nodes[emission.node].aux;
-            if (catalog_index >= pcc.invariant.catalog.len) return error.InvariantOperationMismatch;
-            if (pcc.invariant.catalog[catalog_index].operation != operation.operation) {
-                return error.InvariantOperationMismatch;
-            }
-        }
         out[index] = .{
             .ir_node = emission.node,
             // Keep the complete expression span: branch targets can enter
@@ -509,19 +434,6 @@ fn translationAndInvariantWitnesses(
             .scope_ir_node = emission.scope,
             .kind = .emission,
         };
-        if (invariant_observation) |operation| {
-            const catalog = pcc.invariant.catalog[nodes[emission.node].aux];
-            try invariants.append(allocator, .{
-                .ir_node = emission.node,
-                .scope_ir_node = emission.scope,
-                .function_ordinal = operation.function_ordinal,
-                .code_offset = operation.code_offset,
-                .translation_index = 0,
-                .operation = operation.operation,
-                .sink = catalog.sink,
-                .impl_id = catalog.impl_id,
-            });
-        }
         index += 1;
     }
     for (evidence.jumps) |jump| {
@@ -544,30 +456,7 @@ fn translationAndInvariantWitnesses(
             return cert.Witness.order(a, b) == .lt;
         }
     }.lt);
-    for (invariants.items) |*invariant| {
-        var translation_index: ?u32 = null;
-        for (out, 0..) |witness, witness_index| {
-            if (witness.kind != .emission) continue;
-            if (witness.ir_node != invariant.ir_node) continue;
-            if (witness.scope_ir_node != invariant.scope_ir_node) continue;
-            if (invariant.code_offset < witness.code_start or
-                @as(u64, invariant.code_offset) >= @as(u64, witness.code_start) + witness.code_len) continue;
-            if (translation_index != null) return error.DuplicateInvariantObservation;
-            translation_index = @intCast(witness_index);
-        }
-        invariant.translation_index = translation_index orelse return error.MissingInvariantObservation;
-    }
-    std.mem.sort(cert.InvariantWitness, invariants.items, {}, struct {
-        fn lt(_: void, a: cert.InvariantWitness, b: cert.InvariantWitness) bool {
-            return cert.InvariantWitness.order(a, b) == .lt;
-        }
-    }.lt);
-    if (invariants.items.len != observed.len) return error.InvariantObservationMismatch;
-    return .{
-        .allocator = allocator,
-        .translation = out,
-        .invariants = try invariants.toOwnedSlice(allocator),
-    };
+    return out;
 }
 
 fn rewriteRecords(
@@ -628,8 +517,12 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
     // copies are held against each other.
     inline for (@typeInfo(zts.ProofIrTag).@"enum".fields) |field| {
         const tag: zts.ProofIrTag = @enumFromInt(field.value);
+        if (tag == .ledger_call) {
+            try testing.expectError(error.UnsupportedRuntimeAuthority, tagFor(tag));
+            continue;
+        }
         try testing.expectEqual(
-            @as(u16, @intFromEnum(tagFor(tag))),
+            @as(u16, @intFromEnum(try tagFor(tag))),
             @as(u16, field.value),
         );
     }
@@ -637,7 +530,7 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
     // side is being built, but only by members named here. A tag the kernel
     // gained that nobody wrote down is the drift this test exists to catch.
     try testing.expectEqual(
-        @typeInfo(zts.ProofIrTag).@"enum".fields.len,
+        @typeInfo(zts.ProofIrTag).@"enum".fields.len - 1,
         @typeInfo(ps.NodeTag).@"enum".fields.len,
     );
 

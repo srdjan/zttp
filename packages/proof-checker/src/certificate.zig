@@ -14,7 +14,6 @@ const std = @import("std");
 const limits_mod = @import("limits.zig");
 const ps = @import("proof_system.zig");
 const graph_mod = @import("executable_graph.zig");
-const invariant = @import("invariant.zig");
 const residual = @import("residual.zig");
 const verdict = @import("verdict.zig");
 
@@ -81,8 +80,7 @@ pub const SectionTag = enum(u16) {
     /// Residual guard obligations. Present only under a proof system that
     /// carries them.
     residual = 10,
-    /// Protected-ledger operation witnesses for a configured invariant.
-    invariant = 11,
+    // Section tag 11 is retired.
 
     pub fn fromWire(value: u16) ?SectionTag {
         @setRuntimeSafety(true);
@@ -93,7 +91,7 @@ pub const SectionTag = enum(u16) {
         @setRuntimeSafety(true);
         return switch (self) {
             .identity, .graph, .obligations, .proof_ir, .evidence => true,
-            .translation, .rewrites, .trusted, .solver, .residual, .invariant => false,
+            .translation, .rewrites, .trusted, .solver, .residual => false,
         };
     }
 };
@@ -102,7 +100,7 @@ pub const SectionTag = enum(u16) {
 // Records
 // ---------------------------------------------------------------------------
 
-pub const identity_size = 193;
+pub const identity_size = 161;
 
 pub const Identity = struct {
     /// Root over the canonical executable graph.
@@ -118,9 +116,6 @@ pub const Identity = struct {
     /// was built against. The checker recomputes it from the bytes it is given,
     /// so this is what ties a guard plan to one policy rather than to any.
     runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
-    /// Digest of the canonical structured invariant specification. All zero
-    /// when this artifact declares no application invariant.
-    invariant_spec_digest: [32]u8 = [_]u8{0} ** 32,
     /// The artifact was built with an ephemeral identity or an unpinned runtime
     /// policy. It can be checked; it can never satisfy production acceptance.
     development: bool,
@@ -351,29 +346,6 @@ pub const ResidualObligation = struct {
     }
 };
 
-pub const invariant_record_size = 28;
-
-/// One protected-ledger call related to proof IR and final bytecode.
-pub const InvariantWitness = struct {
-    ir_node: u32,
-    scope_ir_node: u32,
-    function_ordinal: u32,
-    code_offset: u32,
-    translation_index: u32,
-    operation: invariant.Operation,
-    sink: invariant.SinkId,
-    impl_id: u32,
-
-    /// Canonical order follows the independently observed final-code location.
-    pub fn order(a: InvariantWitness, b: InvariantWitness) std.math.Order {
-        @setRuntimeSafety(true);
-        if (a.function_ordinal != b.function_ordinal) return std.math.order(a.function_ordinal, b.function_ordinal);
-        if (a.code_offset != b.code_offset) return std.math.order(a.code_offset, b.code_offset);
-        if (a.ir_node != b.ir_node) return std.math.order(a.ir_node, b.ir_node);
-        return std.math.order(@intFromEnum(a.operation), @intFromEnum(b.operation));
-    }
-};
-
 pub const solver_record_size = 8;
 
 pub const SolverQueryKind = enum(u16) {
@@ -429,7 +401,6 @@ pub const RewriteTable = Table(Rewrite, rewrite_record_size);
 pub const TrustedTable = Table(TrustedEdge, trusted_record_size);
 pub const SolverTable = Table(SolverQuery, solver_record_size);
 pub const ResidualTable = Table(ResidualObligation, residual_record_size);
-pub const InvariantTable = Table(InvariantWitness, invariant_record_size);
 
 fn u16At(bytes: []const u8, offset: usize) u16 {
     @setRuntimeSafety(true);
@@ -560,21 +531,6 @@ fn decodeRecord(comptime Record: type, bytes: []const u8) DecodeError!Record {
                 .operation_id = u32At(bytes, 8),
             };
         },
-        InvariantWitness => blk: {
-            const operation = invariant.Operation.fromWire(bytes[20]) orelse return error.UnknownEnumMember;
-            const sink = invariant.SinkId.fromWire(bytes[21]) orelse return error.UnknownEnumMember;
-            try requireZero(bytes[22..24]);
-            break :blk InvariantWitness{
-                .ir_node = u32At(bytes, 0),
-                .scope_ir_node = u32At(bytes, 4),
-                .function_ordinal = u32At(bytes, 8),
-                .code_offset = u32At(bytes, 12),
-                .translation_index = u32At(bytes, 16),
-                .operation = operation,
-                .sink = sink,
-                .impl_id = u32At(bytes, 24),
-            };
-        },
         SolverQuery => blk: {
             const kind = SolverQueryKind.fromWire(u16At(bytes, 4)) orelse return error.UnknownEnumMember;
             try requireZero(bytes[6..8]);
@@ -605,7 +561,6 @@ pub const Certificate = struct {
     trusted: TrustedTable = .{},
     solver: SolverTable = .{},
     residual: ResidualTable = .{},
-    invariants: InvariantTable = .{},
 };
 
 const Slot = struct {
@@ -628,7 +583,6 @@ fn slot(comptime tag: SectionTag) Slot {
         .trusted => .{ .part_field = "trusted", .cert_field = "trusted", .limit_field = "max_trusted_edges", .record_size = trusted_record_size },
         .solver => .{ .part_field = "solver", .cert_field = "solver", .limit_field = "max_solver_queries", .record_size = solver_record_size },
         .residual => .{ .part_field = "residual", .cert_field = "residual", .limit_field = "max_residual_obligations", .record_size = residual_record_size },
-        .invariant => .{ .part_field = "invariants", .cert_field = "invariants", .limit_field = "max_invariant_operations", .record_size = invariant_record_size },
     };
 }
 
@@ -656,9 +610,8 @@ pub fn decode(bytes: []const u8, limits: Limits, budget: *Budget) DecodeError!Ce
 
 /// Bounded decode against an explicit set of accepted schema versions.
 ///
-/// The set comes from the consumer's policy, so which schemas a build reads is
-/// a policy decision rather than a constant compiled into the decoder. Equality
-/// against the set, never a range.
+/// The compiled layout must match first. The policy set can narrow that layout,
+/// but it cannot make an older or newer layout decodable.
 pub fn decodeAccepting(
     bytes: []const u8,
     accepted_schemas: []const u16,
@@ -672,6 +625,7 @@ pub fn decodeAccepting(
 
     if (std.mem.readInt(u64, bytes[0..8], .little) != magic) return error.BadMagic;
     const schema = u16At(bytes, 8);
+    if (schema != ps.schema_version) return error.UnsupportedSchemaVersion;
     accepted: {
         for (accepted_schemas) |candidate| {
             if (candidate == schema) break :accepted;
@@ -752,8 +706,7 @@ fn decodeSection(
             @memcpy(&identity.contract_digest, payload[64..96]);
             @memcpy(&identity.residual_plan_digest, payload[96..128]);
             @memcpy(&identity.runtime_policy_digest, payload[128..160]);
-            @memcpy(&identity.invariant_spec_digest, payload[160..192]);
-            const flags = payload[192];
+            const flags = payload[160];
             if (flags & ~@as(u8, 0x01) != 0) return error.ReservedFieldNonZero;
             identity.development = (flags & 0x01) != 0;
             cert.identity = identity;
@@ -941,7 +894,6 @@ pub const Parts = struct {
     trusted: []const TrustedEdge = &.{},
     solver: []const SolverQuery = &.{},
     residual: []const ResidualObligation = &.{},
-    invariants: []const InvariantWitness = &.{},
 };
 
 pub const EncodeError = error{BufferTooSmall};
@@ -1056,7 +1008,6 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             try cursor.raw(&parts.identity.contract_digest);
             try cursor.raw(&parts.identity.residual_plan_digest);
             try cursor.raw(&parts.identity.runtime_policy_digest);
-            try cursor.raw(&parts.identity.invariant_spec_digest);
             try cursor.u8At(if (parts.identity.development) 0x01 else 0x00);
         },
         .graph => {
@@ -1165,21 +1116,6 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
                 try cursor.zeros(4);
             }
         },
-        .invariant => {
-            const records = @field(parts, slot(tag).part_field);
-            try writeTable(cursor, tag, records.len, slot(tag).record_size);
-            for (records) |witness| {
-                try cursor.u32At(witness.ir_node);
-                try cursor.u32At(witness.scope_ir_node);
-                try cursor.u32At(witness.function_ordinal);
-                try cursor.u32At(witness.code_offset);
-                try cursor.u32At(witness.translation_index);
-                try cursor.u8At(@intFromEnum(witness.operation));
-                try cursor.u8At(@intFromEnum(witness.sink));
-                try cursor.zeros(2);
-                try cursor.u32At(witness.impl_id);
-            }
-        },
     }
 }
 
@@ -1281,7 +1217,6 @@ fn buildAllSections(buf: []u8) ![]u8 {
     const trusted = [_]TrustedEdge{.{ .family = .opcode, .member_id = 7, .reason = .not_modeled, .grade = .trusted }};
     const solver = [_]SolverQuery{.{ .obligation_index = 0, .query_kind = .opcode_equivalence }};
     const guards = [_]ResidualObligation{.{ .kind = .env_key, .normalization = .identifier_exact_v1, .sink = .env_read, .section = .env, .impl_id = 9, .operation_id = 1 }};
-    const invariants = [_]InvariantWitness{.{ .ir_node = 1, .scope_ir_node = 0, .function_ordinal = 0, .code_offset = 2, .translation_index = 0, .operation = .post, .sink = .ledger_post, .impl_id = 9 }};
     var parts = fixture.minimalParts(&members, &ir, &obligations, &evidence);
     parts.identity.executable_root = try graph_mod.computeRoot(&members);
     parts.translation = &translation;
@@ -1289,7 +1224,6 @@ fn buildAllSections(buf: []u8) ![]u8 {
     parts.trusted = &trusted;
     parts.solver = &solver;
     parts.residual = &guards;
-    parts.invariants = &invariants;
     return encode(parts, buf);
 }
 
@@ -1319,13 +1253,93 @@ test "the immediate predecessor certificate is refused rather than reinterpreted
     const bytes = try buildMinimal(&buf);
     var predecessor: [4096]u8 = undefined;
     @memcpy(predecessor[0..bytes.len], bytes);
-    std.mem.writeInt(u16, predecessor[8..10], 2, .little);
-    std.mem.writeInt(u16, predecessor[10..12], 1, .little);
+    std.mem.writeInt(u16, predecessor[8..10], 4, .little);
+    try testing.expectEqual(@as(u16, 4), u16At(&predecessor, 8));
 
     var budget = Budget.init(.{});
     try testing.expectError(
         error.UnsupportedSchemaVersion,
         decode(predecessor[0..bytes.len], .{}, &budget),
+    );
+}
+
+test "policy cannot make the immediate predecessor certificate decodable" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    var predecessor: [4096]u8 = undefined;
+    @memcpy(predecessor[0..bytes.len], bytes);
+    std.mem.writeInt(u16, predecessor[8..10], 4, .little);
+    const allowed_schemas = [_]u16{4};
+
+    var budget = Budget.init(.{});
+    try testing.expectError(
+        error.UnsupportedSchemaVersion,
+        decodeAccepting(predecessor[0..bytes.len], &allowed_schemas, .{}, &budget),
+    );
+}
+
+test "policy can exclude the compiled certificate schema" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    const allowed_schemas = [_]u16{6};
+
+    var budget = Budget.init(.{});
+    try testing.expectError(
+        error.UnsupportedSchemaVersion,
+        decodeAccepting(bytes, &allowed_schemas, .{}, &budget),
+    );
+}
+
+test "retired certificate section 11 is refused as unknown" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    var extended: [4106]u8 = undefined;
+    @memcpy(extended[0..bytes.len], bytes);
+
+    std.mem.writeInt(u16, extended[16..18], u16At(bytes, 16) + 1, .little);
+    const section = extended[bytes.len..][0..10];
+    std.mem.writeInt(u16, section[0..2], 11, .little);
+    std.mem.writeInt(u32, section[2..6], 4, .little);
+    std.mem.writeInt(u32, section[6..10], 0, .little);
+
+    var budget = Budget.init(.{});
+    try testing.expectError(
+        error.UnknownSectionTag,
+        decode(extended[0 .. bytes.len + section.len], .{}, &budget),
+    );
+}
+
+test "retired graph member kinds are refused as unknown" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    const graph_section = testSection(bytes, .graph);
+    const first_record = graph_section.payload + 4;
+
+    for ([_]u16{ 17, 18, 19, 20 }) |retired_kind| {
+        var changed: [4096]u8 = undefined;
+        @memcpy(changed[0..bytes.len], bytes);
+        std.mem.writeInt(u16, changed[first_record..][0..2], retired_kind, .little);
+        var budget = Budget.init(.{});
+        try testing.expectError(
+            error.UnknownEnumMember,
+            decode(changed[0..bytes.len], .{}, &budget),
+        );
+    }
+}
+
+test "retired proof IR tag 8 is refused as unknown" {
+    var buf: [4096]u8 = undefined;
+    const bytes = try buildMinimal(&buf);
+    const ir_section = testSection(bytes, .proof_ir);
+    const first_record = ir_section.payload + 4;
+    var changed: [4096]u8 = undefined;
+    @memcpy(changed[0..bytes.len], bytes);
+    std.mem.writeInt(u16, changed[first_record + 4 ..][0..2], 8, .little);
+
+    var budget = Budget.init(.{});
+    try testing.expectError(
+        error.UnknownEnumMember,
+        decode(changed[0..bytes.len], .{}, &budget),
     );
 }
 
@@ -1383,10 +1397,10 @@ test "all certificate sections have pinned wire bytes and decoded fields" {
     // This literal pins the wire format. Computing the expected digest from
     // the encoder at test time would check only encoder-decoder agreement.
     const pinned = [_]u8{
-        0x60, 0x63, 0xe7, 0x03, 0x86, 0x68, 0x10, 0xab,
-        0x6d, 0x57, 0xa8, 0x71, 0x38, 0x19, 0xc2, 0xe7,
-        0xc2, 0x66, 0x38, 0xe2, 0xa2, 0xe2, 0x4b, 0xe9,
-        0x51, 0xa8, 0xc7, 0x8d, 0xe2, 0xdf, 0xdc, 0xf6,
+        0x16, 0x3d, 0x37, 0x36, 0x77, 0x49, 0x6c, 0x96,
+        0xf5, 0xed, 0xad, 0x35, 0xf5, 0x6c, 0xce, 0x55,
+        0x35, 0xd0, 0xec, 0xf7, 0xf5, 0xa9, 0x42, 0xa8,
+        0x7b, 0xa7, 0xfa, 0x0b, 0x4d, 0x1f, 0x5f, 0x03,
     };
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
@@ -1394,7 +1408,7 @@ test "all certificate sections have pinned wire bytes and decoded fields" {
 
     var budget = Budget.init(.{});
     const cert = try decode(bytes, .{}, &budget);
-    try testing.expectEqual(@as(u16, 11), u16At(bytes, 16));
+    try testing.expectEqual(@as(u16, 10), u16At(bytes, 16));
     try testing.expectEqual(@as(u32, 8), cert.graph.len());
     try testing.expectEqual(@as(u32, 1), cert.obligations.len());
     try testing.expectEqual(@as(u32, 2), cert.ir.len());
@@ -1404,7 +1418,6 @@ test "all certificate sections have pinned wire bytes and decoded fields" {
     try testing.expectEqual(@as(u32, 1), cert.trusted.len());
     try testing.expectEqual(@as(u32, 1), cert.solver.len());
     try testing.expectEqual(@as(u32, 1), cert.residual.len());
-    try testing.expectEqual(@as(u32, 1), cert.invariants.len());
     try testing.expectEqualSlices(u8, &fixture.digest(2), &cert.identity.contract_digest);
     try testing.expectEqual(graph_mod.MemberKind.main_bytecode, (try cert.graph.get(0)).kind);
     try testing.expectEqual(ps.Property.response_total, (try cert.obligations.get(0)).property);
@@ -1416,7 +1429,6 @@ test "all certificate sections have pinned wire bytes and decoded fields" {
     try testing.expectEqual(@as(i32, -1), (try cert.rewrites.get(0)).delta);
     try testing.expectEqual(SolverQueryKind.opcode_equivalence, (try cert.solver.get(0)).query_kind);
     try testing.expectEqual(residual.GuardKind.env_key, (try cert.residual.get(0)).kind);
-    try testing.expectEqual(@as(u32, 2), (try cert.invariants.get(0)).code_offset);
 }
 
 test "each required certificate section is required by the decoder" {
@@ -1447,7 +1459,6 @@ const CertificateDecodeSite = enum {
     trusted_reserved,
     solver_reserved,
     residual_reserved,
-    invariant_reserved,
 };
 
 test "certificate record reserved sites and closed wire fields refuse nonzero bytes" {
@@ -1455,7 +1466,7 @@ test "certificate record reserved sites and closed wire fields refuse nonzero by
     const bytes = try buildAllSections(&buf);
     const Site = struct { site: CertificateDecodeSite, tag: SectionTag, offset: usize, value: u8, expected: DecodeError };
     const sites = [_]Site{
-        .{ .site = .identity_flags, .tag = .identity, .offset = 192, .value = 0x02, .expected = error.ReservedFieldNonZero }, // C08
+        .{ .site = .identity_flags, .tag = .identity, .offset = 160, .value = 0x02, .expected = error.ReservedFieldNonZero }, // C08
         .{ .site = .obligation_reserved, .tag = .obligations, .offset = 3, .value = 1, .expected = error.ReservedFieldNonZero },
         .{ .site = .ir_flags, .tag = .proof_ir, .offset = 6, .value = 0x02, .expected = error.ReservedFieldNonZero }, // C22
         .{ .site = .ir_reserved, .tag = .proof_ir, .offset = 7, .value = 1, .expected = error.ReservedFieldNonZero },
@@ -1467,7 +1478,6 @@ test "certificate record reserved sites and closed wire fields refuse nonzero by
         .{ .site = .trusted_reserved, .tag = .trusted, .offset = 6, .value = 1, .expected = error.ReservedFieldNonZero }, // C23
         .{ .site = .solver_reserved, .tag = .solver, .offset = 6, .value = 1, .expected = error.ReservedFieldNonZero }, // C19
         .{ .site = .residual_reserved, .tag = .residual, .offset = 12, .value = 1, .expected = error.ReservedFieldNonZero }, // C17
-        .{ .site = .invariant_reserved, .tag = .invariant, .offset = 22, .value = 1, .expected = error.ReservedFieldNonZero }, // C18
     };
     inline for (sites) |site| {
         var changed: [4096]u8 = undefined;
@@ -1506,13 +1516,13 @@ test "certificate section and record limits include the limit" {
     var buf: [4096]u8 = undefined;
     const bytes = try buildAllSections(&buf);
     var budget = Budget.init(.{});
-    const cert = try decode(bytes, .{ .max_sections = 11, .max_graph_members = 8, .max_solver_queries = 1 }, &budget);
+    const cert = try decode(bytes, .{ .max_sections = 10, .max_graph_members = 8, .max_solver_queries = 1 }, &budget);
     try testing.expectEqual(@as(u32, 1), cert.solver.len());
 
     budget = Budget.init(.{});
     try testing.expectError(error.CountExceedsLimit, decode(bytes, .{ .max_solver_queries = 0 }, &budget));
     budget = Budget.init(.{});
-    try testing.expectError(error.CountExceedsLimit, decode(bytes, .{ .max_sections = 10 }, &budget));
+    try testing.expectError(error.CountExceedsLimit, decode(bytes, .{ .max_sections = 9 }, &budget));
 }
 
 test "certificate section count past the limit is refused before reading sections" {
@@ -1520,20 +1530,20 @@ test "certificate section count past the limit is refused before reading section
     const bytes = try buildAllSections(&buf);
     var changed: [4096]u8 = undefined;
     @memcpy(changed[0..bytes.len], bytes);
-    std.mem.writeInt(u16, changed[16..18], 12, .little);
+    std.mem.writeInt(u16, changed[16..18], 11, .little);
     var budget = Budget.init(.{});
-    try testing.expectError(error.CountExceedsLimit, decode(changed[0..bytes.len], .{ .max_sections = 11 }, &budget));
+    try testing.expectError(error.CountExceedsLimit, decode(changed[0..bytes.len], .{ .max_sections = 10 }, &budget));
 }
 
 test "certificate decode charges table framing and every record" {
     var buf: [4096]u8 = undefined;
     const bytes = try buildAllSections(&buf);
-    var budget = Budget.init(.{ .max_work = 104 });
+    var budget = Budget.init(.{ .max_work = 96 });
     const cert = try decode(bytes, .{}, &budget);
     try testing.expectEqual(@as(u64, 0), budget.remaining);
-    try testing.expectError(error.Truncated, cert.invariants.get(cert.invariants.len()));
+    try testing.expectError(error.Truncated, cert.residual.get(cert.residual.len()));
 
-    budget = Budget.init(.{ .max_work = 103 });
+    budget = Budget.init(.{ .max_work = 95 });
     try testing.expectError(error.WorkBudgetExhausted, decode(bytes, .{}, &budget));
 }
 

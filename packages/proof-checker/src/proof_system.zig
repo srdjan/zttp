@@ -10,7 +10,7 @@ const std = @import("std");
 /// The certificate wire schema. Bumped for any layout change; the kernel checks
 /// equality, never a range, so an older or newer certificate is refused with a
 /// rebuild diagnostic instead of being reinterpreted.
-pub const schema_version: u16 = 4;
+pub const schema_version: u16 = 5;
 
 /// The proof system a certificate claims to be written in. The only accepted
 /// system carries closed rules over the canonical proof IR, translation
@@ -187,11 +187,8 @@ pub const RuleFamily = enum { totality, translation };
 
 /// Proof-IR node tags the kernel can walk.
 ///
-/// Six, which is what this subset's totality actually depends on: a function,
-/// a statement sequence, a branch, a loop, a return, and a leaf for everything
-/// else. `match` is an expression here and can never be the construct that
-/// returns; a call is one too. Both collapse to `plain`, because a tag nothing
-/// can produce is a tag no rule can be checked against.
+/// Seven, which is what this subset and residual reconstruction need: six
+/// totality shapes and one unresolved capability call.
 pub const NodeTag = enum(u16) {
     function = 1,
     sequence = 2,
@@ -206,9 +203,7 @@ pub const NodeTag = enum(u16) {
     /// can count the guarded operations for itself instead of reading the
     /// producer's list of them.
     capability_call = 7,
-    /// A call to the protected `zttp:ledger` interface. `aux` names the row in
-    /// the consumer-owned invariant operation catalog.
-    ledger_call = 8,
+    // Wire ordinal 8 is retired with protected-ledger invariants.
 
     pub fn fromWire(value: u16) ?NodeTag {
         @setRuntimeSafety(true);
@@ -220,7 +215,7 @@ pub const NodeTag = enum(u16) {
     /// to smuggle data past the decoder.
     pub fn usesAux(self: NodeTag) bool {
         @setRuntimeSafety(true);
-        return self == .capability_call or self == .ledger_call;
+        return self == .capability_call;
     }
 };
 
@@ -246,13 +241,15 @@ pub const TrustReason = enum(u16) {
 };
 
 test "wire decoders refuse values outside the alphabet" {
-    try std.testing.expectEqual(@as(u16, 4), schema_version);
+    try std.testing.expectEqual(@as(u16, 5), schema_version);
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(1));
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(0));
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(2));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(0));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(9));
     try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(9));
+    try std.testing.expectEqual(@as(?NodeTag, .capability_call), NodeTag.fromWire(7));
+    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(8));
     try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(9));
     try std.testing.expectEqual(@as(?TrustReason, null), TrustReason.fromWire(6));
 }

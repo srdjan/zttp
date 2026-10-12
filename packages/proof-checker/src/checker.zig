@@ -9,15 +9,12 @@ const std = @import("std");
 
 const capability_policy = @import("capability_policy.zig");
 const cert_mod = @import("certificate.zig");
-const declaration = @import("declaration.zig");
 const graph = @import("executable_graph.zig");
-const invariant = @import("invariant.zig");
 const limits_mod = @import("limits.zig");
 const policy_mod = @import("policy.zig");
 const ps = @import("proof_system.zig");
 const residual = @import("residual.zig");
 const safety = @import("safety.zig");
-const tool_catalog = @import("tool_catalog.zig");
 const verdict = @import("verdict.zig");
 
 const Assessment = verdict.Assessment;
@@ -34,7 +31,7 @@ const SemanticState = verdict.SemanticState;
 /// server happens to run startup on.
 pub fn scratchBytes(limits: limits_mod.Limits) usize {
     @setRuntimeSafety(true);
-    return irBitBytes(limits) * 3 + depthBytes(limits) + rangeStackBytes(limits);
+    return irBitBytes(limits) * 2 + depthBytes(limits) + rangeStackBytes(limits);
 }
 
 fn irBitBytes(limits: limits_mod.Limits) usize {
@@ -162,20 +159,6 @@ pub const Inputs = struct {
     /// bytes and decodes them itself; bytes are required, and a digest without
     /// bytes proves only that two sides hashed the same blob.
     runtime_policy: ?RuntimeCapabilityPolicyInput = null,
-    /// Exact canonical invariant specification bytes supplied by the
-    /// deployment artifact. The checker decodes and hashes them itself.
-    invariant_spec: ?[]const u8 = null,
-    /// Ledger calls decoded independently from final bytecode by the loader.
-    observed_invariant_operations: []const invariant.ObservedOperation = &.{},
-    /// Exact canonical `ZTCAT1` tool catalog bytes supplied by the deployment
-    /// artifact, when the handler has a tool catalog. The checker decodes and
-    /// hashes them itself and requires the one graph member that names them.
-    tool_catalog: ?[]const u8 = null,
-    /// Exact canonical `ZTDCL1` declaration bytes supplied by the deployment
-    /// artifact, when the handler carries a declaration. The checker decodes
-    /// and hashes them itself and requires the one graph member that names
-    /// them.
-    declaration: ?[]const u8 = null,
 };
 
 pub const RuntimeCapabilityPolicyInput = struct {
@@ -268,8 +251,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     }
 
     const bit_bytes = irBitBytes(limits);
-    const invariant_start = bit_bytes * 2;
-    const depth_start = bit_bytes * 3;
+    const depth_start = bit_bytes * 2;
     const range_start = depth_start + depthBytes(limits);
     var session = Session{
         .certificate = certificate,
@@ -278,14 +260,9 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .solver_results = inputs.solver_results,
         .budget = &budget,
         .total = BitSet.init(inputs.scratch[0..bit_bytes]),
-        .declared = BitSet.init(inputs.scratch[bit_bytes..invariant_start]),
-        .invariant_nodes = BitSet.init(inputs.scratch[invariant_start..depth_start]),
+        .declared = BitSet.init(inputs.scratch[bit_bytes..depth_start]),
         .depths = .{ .bytes = inputs.scratch[depth_start..range_start] },
         .active_ranges = .{ .bytes = inputs.scratch[range_start..] },
-        .invariant_spec = inputs.invariant_spec,
-        .observed_invariant_operations = inputs.observed_invariant_operations,
-        .tool_catalog = inputs.tool_catalog,
-        .declaration = inputs.declaration,
     };
 
     const outcome = session.run() catch |err| {
@@ -319,7 +296,6 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
             .provenance = inputs.provenance,
             .work_spent = budget.spent(limits),
             .guards = outcome.guards,
-            .invariants = outcome.invariants,
             .properties = outcome.properties,
             .disclosed_edges = outcome.disclosed_edges,
         };
@@ -335,7 +311,6 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .disclosed_edges = outcome.disclosed_edges,
         .properties = outcome.properties,
         .guards = outcome.guards,
-        .invariants = outcome.invariants,
     };
 }
 
@@ -346,7 +321,6 @@ const Outcome = struct {
     properties: verdict.PropertyVerdicts = .{},
     disclosed_edges: u32 = 0,
     guards: verdict.GuardVerdicts = .{},
-    invariants: verdict.InvariantVerdicts = .{},
 };
 
 /// One acceptance run's working state.
@@ -366,11 +340,6 @@ const Session = struct {
     declared: BitSet,
     depths: DepthTable,
     active_ranges: RangeStack,
-    invariant_nodes: BitSet,
-    invariant_spec: ?[]const u8,
-    observed_invariant_operations: []const invariant.ObservedOperation,
-    tool_catalog: ?[]const u8,
-    declaration: ?[]const u8,
 
     const SessionError = cert_mod.DecodeError;
 
@@ -408,14 +377,6 @@ const Session = struct {
 
         if (try self.checkTranslation()) |rejection| return rejection;
 
-        const invariants = switch (try self.checkInvariantCoverage()) {
-            .rejected => |outcome| return outcome,
-            .covered => |covered| covered,
-        };
-
-        if (try self.checkToolCatalog()) |rejection| return rejection;
-        if (try self.checkDeclaration()) |rejection| return rejection;
-
         const guards = switch (try self.checkGuardCoverage()) {
             .rejected => |outcome| return outcome,
             .covered => |verdicts| verdicts,
@@ -423,315 +384,7 @@ const Session = struct {
 
         var outcome = try self.checkEvidence(entry);
         outcome.guards = guards;
-        outcome.invariants = invariants;
         return outcome;
-    }
-
-    const MemberBinding = union(enum) {
-        missing,
-        bound,
-        mismatch: graph.Member,
-    };
-
-    const MemberBinder = struct {
-        kind: graph.MemberKind,
-        digest: ?[32]u8,
-        found: bool = false,
-
-        fn visit(self: *MemberBinder, member: graph.Member) ?MemberBinding {
-            @setRuntimeSafety(true);
-            if (member.kind != self.kind) return null;
-            if (self.digest == null) return .{ .mismatch = member };
-            if (self.found) return .{ .mismatch = member };
-            self.found = true;
-            if (member.ordinal != 0 or !std.mem.eql(u8, &member.digest, &self.digest.?)) {
-                return .{ .mismatch = member };
-            }
-            return null;
-        }
-
-        fn finish(self: MemberBinder) MemberBinding {
-            @setRuntimeSafety(true);
-            return if (self.found) .bound else .missing;
-        }
-    };
-
-    fn bindMember(self: *Session, kind: graph.MemberKind, digest: ?[32]u8) SessionError!MemberBinding {
-        @setRuntimeSafety(true);
-        var binder = MemberBinder{ .kind = kind, .digest = digest };
-        var graph_index: u32 = 0;
-        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
-            try self.budget.spend(1);
-            const member = try self.certificate.graph.get(graph_index);
-            if (binder.visit(member)) |mismatch| return mismatch;
-        }
-        return binder.finish();
-    }
-
-    fn checkBoundBytes(self: *Session, comptime kind: graph.MemberKind, bytes: ?[]const u8) SessionError!?Outcome {
-        @setRuntimeSafety(true);
-        const stage: verdict.Stage = if (kind == .tool_catalog) .tool_catalog else .declaration;
-        const missing_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_member_missing else .declaration_member_missing;
-        const undecodable_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_undecodable else .declaration_undecodable;
-        const mismatch_code: verdict.ReasonCode = if (kind == .tool_catalog) .tool_catalog_digest_mismatch else .declaration_digest_mismatch;
-        const digest: ?[32]u8 = if (bytes) |supplied| blk: {
-            if (kind == .tool_catalog) {
-                _ = tool_catalog.decode(supplied) catch return reject(stage, undecodable_code, .none);
-                break :blk tool_catalog.digest(supplied);
-            } else {
-                _ = declaration.decode(supplied) catch return reject(stage, undecodable_code, .none);
-                break :blk declaration.digest(supplied);
-            }
-        } else null;
-        switch (try self.bindMember(kind, digest)) {
-            .missing => if (bytes != null) return reject(stage, missing_code, .none),
-            .bound => {},
-            .mismatch => |member| {
-                if (bytes == null) return reject(stage, missing_code, memberSubject(member));
-                return .{ .state = .integrity_verified, .rejection = .{
-                    .stage = stage,
-                    .code = mismatch_code,
-                    .subject = memberSubject(member),
-                    .expected = .{ .digest = member.digest },
-                    .actual = .{ .digest = digest.? },
-                    .recertifiable = true,
-                } };
-            },
-        }
-        return null;
-    }
-
-    fn checkToolCatalog(self: *Session) SessionError!?Outcome {
-        @setRuntimeSafety(true);
-        return self.checkBoundBytes(.tool_catalog, self.tool_catalog);
-    }
-
-    fn checkDeclaration(self: *Session) SessionError!?Outcome {
-        @setRuntimeSafety(true);
-        return self.checkBoundBytes(.declaration, self.declaration);
-    }
-
-    const InvariantOutcome = union(enum) {
-        covered: verdict.InvariantVerdicts,
-        rejected: Outcome,
-    };
-
-    const InvariantSite = union(enum) {
-        refused: verdict.ReasonCode,
-        covered: bool,
-    };
-
-    /// Relate the structured specification, proof IR, translation witnesses,
-    /// and independently decoded final-bytecode ledger calls.
-    fn checkInvariantCoverage(self: *Session) SessionError!InvariantOutcome {
-        @setRuntimeSafety(true);
-        const zero = [_]u8{0} ** 32;
-        const declared_digest = self.certificate.identity.invariant_spec_digest;
-        if (std.mem.eql(u8, &declared_digest, &zero)) return self.checkUnconfiguredInvariants();
-        return self.checkConfiguredInvariants(declared_digest);
-    }
-
-    fn checkUnconfiguredInvariants(self: *Session) SessionError!InvariantOutcome {
-        @setRuntimeSafety(true);
-        if (self.invariant_spec != null) {
-            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, .none) };
-        }
-        if (self.certificate.invariants.len() != 0 or self.observed_invariant_operations.len != 0) {
-            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
-        }
-        var graph_index: u32 = 0;
-        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
-            try self.budget.spend(1);
-            const member = try self.certificate.graph.get(graph_index);
-            if (member.kind == .invariant_spec or member.kind == .invariant_ledger_adapter) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, memberSubject(member)) };
-            }
-        }
-        var node_index: u32 = 0;
-        while (node_index < self.certificate.ir.len()) : (node_index += 1) {
-            try self.budget.spend(1);
-            if ((try self.certificate.ir.get(node_index)).tag == .ledger_call) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .{ .ir_node = node_index }) };
-            }
-        }
-        return .{ .covered = .{} };
-    }
-
-    fn checkConfiguredInvariants(self: *Session, declared_digest: [32]u8) SessionError!InvariantOutcome {
-        @setRuntimeSafety(true);
-        const spec_bytes = self.invariant_spec orelse
-            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_missing, .none) };
-        const spec = invariant.decode(spec_bytes) catch
-            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_undecodable, .none) };
-        const spec_digest = invariant.digest(spec_bytes);
-        if (!std.mem.eql(u8, &spec_digest, &declared_digest)) {
-            return .{ .rejected = .{ .state = .integrity_verified, .rejection = .{
-                .stage = .invariant_coverage,
-                .code = .invariant_spec_digest_mismatch,
-                .expected = .{ .digest = declared_digest },
-                .actual = .{ .digest = spec_digest },
-                .recertifiable = true,
-            } } };
-        }
-
-        var spec_binder = MemberBinder{ .kind = .invariant_spec, .digest = spec_digest };
-        var adapter_binder = MemberBinder{ .kind = .invariant_ledger_adapter, .digest = invariant.adapterDigest() };
-        var graph_index: u32 = 0;
-        while (graph_index < self.certificate.graph.len()) : (graph_index += 1) {
-            try self.budget.spend(1);
-            const member = try self.certificate.graph.get(graph_index);
-            switch (member.kind) {
-                .invariant_spec => {
-                    if (spec_binder.visit(member)) |_| {
-                        return .{ .rejected = reject(.invariant_coverage, .invariant_spec_digest_mismatch, memberSubject(member)) };
-                    }
-                },
-                .invariant_ledger_adapter => {
-                    if (adapter_binder.visit(member)) |_| {
-                        return .{ .rejected = reject(.invariant_coverage, .invariant_adapter_identity_mismatch, memberSubject(member)) };
-                    }
-                },
-                // exhaustive: this walk counts the two invariant members and
-                // nothing else. A kind the arms above do not name increments
-                // neither counter, and both counters are then required to be
-                // exactly 1 below, so skipping a kind here cannot turn a
-                // missing or duplicated invariant member into coverage. The
-                // digest of every other kind is checked by the graph walk that
-                // verified integrity before this stage runs.
-                else => {},
-            }
-        }
-        if (spec_binder.finish() == .missing) {
-            return .{ .rejected = reject(.invariant_coverage, .invariant_spec_member_missing, .none) };
-        }
-        if (adapter_binder.finish() == .missing) {
-            return .{ .rejected = reject(.invariant_coverage, .invariant_adapter_member_missing, .none) };
-        }
-        if (self.certificate.invariants.len() == 0 and self.observed_invariant_operations.len == 0) {
-            return .{ .rejected = reject(.invariant_coverage, .invariant_operation_required, .none) };
-        }
-        if (self.observed_invariant_operations.len > self.policy.limits.max_invariant_operations) {
-            return .{ .rejected = reject(.limits, .work_budget_exhausted, .none) };
-        }
-
-        // One bit per declared kind, read through the schema-neutral kind view
-        // so a schema 1 and a schema 2 document that name the same kinds
-        // produce the same mask. The ordinal is bounded before it reaches the
-        // shift: the catalog asserts the bound at compile time, and a mask
-        // built from an out-of-range ordinal would name a kind that is not the
-        // one declared.
-        var kind_bits: u32 = 0;
-        var kind_index: u16 = 0;
-        while (kind_index < spec.kind_count) : (kind_index += 1) {
-            try self.budget.spend(1);
-            const declared_kind = spec.kindAt(kind_index) catch
-                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_undecodable, .none) };
-            const ordinal = invariant.kindInfo(declared_kind).wire_ordinal;
-            if (ordinal == 0 or ordinal > @bitSizeOf(u32)) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_spec_undecodable, .none) };
-            }
-            kind_bits |= @as(u32, 1) << @intCast(ordinal - 1);
-        }
-
-        var result = verdict.InvariantVerdicts{
-            .configured = true,
-            .kind_bits = kind_bits,
-        };
-        var previous_witness: ?cert_mod.InvariantWitness = null;
-        var previous_observed: ?invariant.ObservedOperation = null;
-        var index: u32 = 0;
-        while (index < self.certificate.invariants.len()) : (index += 1) {
-            try self.budget.spend(4);
-            const supplied = try self.certificate.invariants.get(index);
-            if (previous_witness) |previous| {
-                switch (cert_mod.InvariantWitness.order(previous, supplied)) {
-                    .lt => {},
-                    .eq => return .{ .rejected = reject(.invariant_coverage, .invariant_member_duplicate, .{ .code_offset = supplied.code_offset }) },
-                    .gt => return .{ .rejected = reject(.invariant_coverage, .invariant_member_out_of_order, .{ .code_offset = supplied.code_offset }) },
-                }
-            }
-            previous_witness = supplied;
-
-            if (index >= self.observed_invariant_operations.len) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_member_extra, .{ .code_offset = supplied.code_offset }) };
-            }
-            const observed = self.observed_invariant_operations[index];
-            var subject: verdict.Subject = .{ .code_offset = supplied.code_offset };
-            switch (try self.checkInvariantSite(supplied, observed, previous_observed, &subject)) {
-                .refused => |code| return .{ .rejected = reject(.invariant_coverage, code, subject) },
-                .covered => |writes| {
-                    result.covered += 1;
-                    if (writes) result.writes += 1;
-                },
-            }
-            previous_observed = observed;
-        }
-        if (self.observed_invariant_operations.len > self.certificate.invariants.len()) {
-            const extra = self.observed_invariant_operations[self.certificate.invariants.len()];
-            return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .{ .code_offset = extra.code_offset }) };
-        }
-
-        var node_index: u32 = 0;
-        while (node_index < self.certificate.ir.len()) : (node_index += 1) {
-            try self.budget.spend(1);
-            const node = try self.certificate.ir.get(node_index);
-            if (node.tag != .ledger_call) continue;
-            result.required += 1;
-            if (node.aux >= invariant.catalog.len) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_operation_unknown, .{ .ir_node = node_index }) };
-            }
-            if (!self.invariant_nodes.get(node_index)) {
-                return .{ .rejected = reject(.invariant_coverage, .invariant_member_missing, .{ .ir_node = node_index }) };
-            }
-        }
-        safety.check(result.ready());
-        return .{ .covered = result };
-    }
-
-    fn checkInvariantSite(
-        self: *Session,
-        supplied: cert_mod.InvariantWitness,
-        observed: invariant.ObservedOperation,
-        previous_observed: ?invariant.ObservedOperation,
-        subject: *verdict.Subject,
-    ) SessionError!InvariantSite {
-        @setRuntimeSafety(true);
-        if (previous_observed) |previous| {
-            if (invariant.ObservedOperation.order(previous, observed) != .lt) {
-                subject.* = .{ .code_offset = observed.code_offset };
-                return .{ .refused = .invariant_observed_mismatch };
-            }
-        }
-        if (observed.function_ordinal != supplied.function_ordinal or
-            observed.code_offset != supplied.code_offset or
-            observed.operation != supplied.operation)
-        {
-            return .{ .refused = .invariant_observed_mismatch };
-        }
-
-        subject.* = .{ .ir_node = supplied.ir_node };
-        if (supplied.ir_node >= self.certificate.ir.len()) return .{ .refused = .invariant_member_extra };
-        const node = try self.certificate.ir.get(supplied.ir_node);
-        if (node.tag != .ledger_call) return .{ .refused = .invariant_member_extra };
-        if (node.aux >= invariant.catalog.len) return .{ .refused = .invariant_operation_unknown };
-        if (self.invariant_nodes.get(supplied.ir_node)) return .{ .refused = .invariant_member_duplicate };
-        self.invariant_nodes.set(supplied.ir_node, true);
-
-        const expected = invariant.catalog[node.aux];
-        if (supplied.operation != expected.operation) return .{ .refused = .invariant_operation_mismatch };
-        if (supplied.sink != expected.sink) return .{ .refused = .invariant_sink_mismatch };
-        if (supplied.impl_id != expected.impl_id) return .{ .refused = .invariant_impl_identity_mismatch };
-        if (supplied.translation_index >= self.certificate.translation.len()) {
-            return .{ .refused = .invariant_translation_missing };
-        }
-        const emission = try self.certificate.translation.get(supplied.translation_index);
-        if (emission.kind != .emission or emission.ir_node != supplied.ir_node or
-            emission.scope_ir_node != supplied.scope_ir_node or supplied.code_offset < emission.code_start or
-            @as(u64, supplied.code_offset) >= @as(u64, emission.code_start) + emission.code_len)
-        {
-            return .{ .refused = .invariant_translation_missing };
-        }
-        return .{ .covered = expected.writes };
     }
 
     const GuardOutcome = union(enum) {
@@ -1022,7 +675,7 @@ const Session = struct {
                 .branch => node.child_count == 2 and self.allChildrenTotal(node),
                 // A guarded call returns a value; it never returns a Response
                 // from the handler, so it establishes no totality.
-                .loop_node, .plain, .capability_call, .ledger_call => false,
+                .loop_node, .plain, .capability_call => false,
             };
             self.total.set(index, value or self.declared.get(index));
         }
@@ -1058,7 +711,7 @@ const Session = struct {
             else
                 null,
             .loop_node => .loop_never_total,
-            .function, .plain, .capability_call, .ledger_call => null,
+            .function, .plain, .capability_call => null,
         };
     }
 
@@ -2009,684 +1662,6 @@ pub const test_support = struct {
     }
 };
 
-const test_invariant_spec = invariant.magic.* ++ [_]u8{
-    1, 0, // schema
-    1, 0, // balance_conservation_v1
-    6, 0, // ledger id length
-    1, 0, // currency count
-} ++ "ledger" ++ "USD" ++ [_]u8{2};
-
-/// The same ledger and currencies under wire schema 2, which names its kinds
-/// in a sorted record list instead of in the header.
-const test_invariant_spec_v2 = invariant.magic.* ++ [_]u8{
-    2, 0, // schema
-    1, 0, // declared kind count
-    6, 0, // ledger id length
-    1, 0, // currency count
-} ++ "ledger" ++ "USD" ++ [_]u8{2} ++ [_]u8{
-    1, 0, // balance_conservation_v1
-    0, 0, // payload length
-};
-
-const test_invariant_account_payload = [_]u8{
-    2, 0, // matcher count
-    1, // exact
-    13, 0, // length
-} ++ "clearing:main" ++ [_]u8{
-    2, // prefix
-    6, 0, // length
-} ++ "asset:";
-
-/// The same ledger again, declaring both catalog kinds. Per-kind reporting has
-/// nothing to say until a document declares more than one kind.
-const test_invariant_spec_two_kinds = invariant.magic.* ++ [_]u8{
-    2, 0, // schema
-    2, 0, // declared kind count
-    6, 0, // ledger id length
-    1, 0, // currency count
-} ++ "ledger" ++ "USD" ++ [_]u8{2} ++ [_]u8{
-    1, 0, // balance_conservation_v1
-    0, 0, // payload length
-    2,                                  0, // declared_accounts_v1
-    test_invariant_account_payload.len, 0,
-} ++ test_invariant_account_payload;
-
-const InvariantTestFixture = struct {
-    members: [11]graph.Member,
-    ir: [4]cert_mod.IrNode,
-    obligations: [8]cert_mod.Obligation,
-    evidence: [10]cert_mod.Evidence,
-    translation: [3]cert_mod.Witness,
-    trusted: [1]cert_mod.TrustedEdge,
-    invariant_witnesses: [1]cert_mod.InvariantWitness,
-    observed: [1]invariant.ObservedOperation,
-    /// The specification bytes the certificate is built over and the consumer
-    /// is handed. Both wire schemas run the same acceptance path.
-    spec: []const u8,
-    buffer: [8192]u8 = undefined,
-    len: usize = 0,
-    scratch: [scratchBytes(.{})]u8 = undefined,
-
-    fn parts(self: *InvariantTestFixture, invariant_witnesses: []const cert_mod.InvariantWitness) cert_mod.Parts {
-        @setRuntimeSafety(true);
-        return .{
-            .identity = .{
-                .executable_root = graph.computeRoot(&self.members) catch unreachable,
-                .ir_root = cert_mod.irRootFromNodes(&self.ir),
-                .contract_digest = test_support.digest(2),
-                .invariant_spec_digest = invariant.digest(self.spec),
-                .development = false,
-            },
-            .graph = &self.members,
-            .obligations = &self.obligations,
-            .ir = &self.ir,
-            .evidence = &self.evidence,
-            .translation = &self.translation,
-            .trusted = &self.trusted,
-            .invariants = invariant_witnesses,
-        };
-    }
-
-    fn encodeWith(self: *InvariantTestFixture, invariant_witnesses: []const cert_mod.InvariantWitness) !void {
-        @setRuntimeSafety(true);
-        for (&self.members) |*member| {
-            if (member.kind == .proof_ir) member.digest = cert_mod.irRootFromNodes(&self.ir);
-            if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
-        }
-        std.mem.sort(graph.Member, &self.members, {}, struct {
-            fn lessThan(_: void, a: graph.Member, b: graph.Member) bool {
-                @setRuntimeSafety(true);
-                return graph.Member.order(a, b) == .lt;
-            }
-        }.lessThan);
-
-        var built = self.parts(invariant_witnesses);
-        built.identity.executable_root = [_]u8{0} ** 32;
-        const provisional = try cert_mod.encode(built, &self.buffer);
-        var budget = Budget.init(.{});
-        const decoded = try cert_mod.decode(provisional, .{}, &budget);
-        const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
-        for (&self.members) |*member| {
-            if (member.kind == .proof_certificate) member.digest = certificate_digest;
-        }
-        built.graph = &self.members;
-        built.identity.executable_root = try graph.computeRoot(&self.members);
-        self.len = (try cert_mod.encode(built, &self.buffer)).len;
-    }
-
-    fn inputs(self: *InvariantTestFixture) Inputs {
-        @setRuntimeSafety(true);
-        return .{
-            .certificate = self.buffer[0..self.len],
-            .observed_graph = &self.members,
-            .scratch = &self.scratch,
-            .invariant_spec = self.spec,
-            .observed_invariant_operations = &self.observed,
-        };
-    }
-};
-
-fn buildInvariantFixture() !InvariantTestFixture {
-    @setRuntimeSafety(true);
-    return buildInvariantFixtureFor(test_invariant_spec);
-}
-
-fn buildInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
-    @setRuntimeSafety(true);
-    var fixture = InvariantTestFixture{
-        .spec = spec,
-        .members = .{
-            .{ .kind = .main_bytecode, .ordinal = 0, .digest = test_support.digest(1) },
-            .{ .kind = .contract_bytes, .ordinal = 0, .digest = test_support.digest(2) },
-            .{ .kind = .runtime_policy_bytes, .ordinal = 0, .digest = test_support.digest(3) },
-            .{ .kind = .source_profile_core, .ordinal = 0, .digest = test_support.digest(4) },
-            .{ .kind = .core_grammar, .ordinal = 0, .digest = test_support.digest(5) },
-            .{ .kind = .semantics, .ordinal = 0, .digest = test_support.digest(6) },
-            .{ .kind = .capability_matrix, .ordinal = 0, .digest = test_support.digest(7) },
-            .{ .kind = .proof_ir, .ordinal = 0, .digest = test_support.digest(8) },
-            .{ .kind = .proof_certificate, .ordinal = 0, .digest = test_support.digest(9) },
-            .{ .kind = .invariant_spec, .ordinal = 0, .digest = invariant.digest(spec) },
-            .{ .kind = .invariant_ledger_adapter, .ordinal = 0, .digest = invariant.adapterDigest() },
-        },
-        .ir = .{
-            .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = test_support.digest(20) },
-            .{ .id = 1, .tag = .sequence, .parent = 0, .first_child = 2, .child_count = 2, .digest = test_support.digest(21) },
-            .{ .id = 2, .tag = .ledger_call, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(22), .aux = 0 },
-            .{ .id = 3, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(23) },
-        },
-        .obligations = .{
-            .{ .property = .response_total, .subject_kind = .function, .subject_id = 0 },
-            .{ .property = .results_checked, .subject_kind = .handler, .subject_id = 0 },
-            .{ .property = .no_secret_leakage, .subject_kind = .handler, .subject_id = 0 },
-            .{ .property = .state_isolated, .subject_kind = .handler, .subject_id = 0 },
-            .{ .property = .deterministic, .subject_kind = .handler, .subject_id = 0 },
-            .{ .property = .read_only, .subject_kind = .handler, .subject_id = 0 },
-            .{ .property = .retry_safe, .subject_kind = .handler, .subject_id = 0 },
-            .{ .property = .capability_bounded, .subject_kind = .handler, .subject_id = 0 },
-        },
-        .evidence = .{
-            .{ .obligation_index = 0, .edge = .proved, .rule = .sequence_member_total, .node_id = 1, .aux = 0 },
-            .{ .obligation_index = 0, .edge = .translation_validated, .rule = .emission_contiguous, .node_id = 0, .aux = 0 },
-            .{ .obligation_index = 0, .edge = .translation_validated, .rule = .jump_target_resolved, .node_id = 0, .aux = 0 },
-            test_support.testedFor(1),
-            test_support.testedFor(2),
-            test_support.testedFor(3),
-            test_support.testedFor(4),
-            test_support.testedFor(5),
-            test_support.testedFor(6),
-            test_support.testedFor(7),
-        },
-        .translation = .{
-            .{ .ir_node = 1, .code_start = 0, .code_len = 8, .target_ir = 1, .target_offset = 0, .scope_ir_node = 0, .kind = .emission },
-            .{ .ir_node = 2, .code_start = 2, .code_len = 1, .target_ir = 2, .target_offset = 2, .scope_ir_node = 0, .kind = .emission },
-            .{ .ir_node = 3, .code_start = 4, .code_len = 2, .target_ir = 3, .target_offset = 4, .scope_ir_node = 0, .kind = .emission },
-        },
-        .trusted = .{
-            .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
-        },
-        .invariant_witnesses = .{
-            .{
-                .ir_node = 2,
-                .scope_ir_node = 0,
-                .function_ordinal = 0,
-                .code_offset = 2,
-                .translation_index = 1,
-                .operation = .post,
-                .sink = .ledger_post,
-                .impl_id = invariant.catalog[0].impl_id,
-            },
-        },
-        .observed = .{
-            .{ .function_ordinal = 0, .code_offset = 2, .operation = .post },
-        },
-    };
-    try fixture.encodeWith(&fixture.invariant_witnesses);
-    return fixture;
-}
-
-/// The same artifact with its one ledger call site reading a balance instead of
-/// writing a posting group. Nothing else moves: the call site is still named by
-/// the proof IR, still witnessed, and still independently observed.
-fn buildBalanceOnlyInvariantFixtureFor(spec: []const u8) !InvariantTestFixture {
-    @setRuntimeSafety(true);
-    var fixture = try buildInvariantFixtureFor(spec);
-    fixture.ir[2].aux = 1;
-    fixture.invariant_witnesses[0].operation = .balance;
-    fixture.invariant_witnesses[0].sink = .ledger_balance;
-    fixture.invariant_witnesses[0].impl_id = invariant.catalog[1].impl_id;
-    fixture.observed[0].operation = .balance;
-    try fixture.encodeWith(&fixture.invariant_witnesses);
-    return fixture;
-}
-
-test "a configured invariant is checked independently from property and guard verdicts" {
-    var fixture = try buildInvariantFixture();
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected invariant rejection: {s} / {s}\n", .{
-            rejection.stage.name(),
-            rejection.code.text(),
-        });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-    try testing.expect(result.invariants.configured);
-    try testing.expectEqual(@as(u32, 1), result.invariants.required);
-    try testing.expectEqual(@as(u32, 1), result.invariants.covered);
-    try testing.expectEqual(@as(u32, 1), result.invariants.writes);
-    try testing.expect(result.invariants.ready());
-    try testing.expectEqual(@as(u32, 1), result.invariants.kind_bits);
-    try testing.expectEqual(@as(u32, 0), result.guards.required);
-}
-
-test "a schema 2 invariant specification is accepted and reports the same kind bits" {
-    // The schema 2 document declares the same ledger, currencies and kinds as
-    // the schema 1 one above. Acceptance and the reported mask must not depend
-    // on which schema carried them, and the digest the certificate binds must
-    // be the one this document hashes to under its own domain.
-    var fixture = try buildInvariantFixtureFor(test_invariant_spec_v2);
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected schema 2 invariant rejection: {s} / {s}\n", .{
-            rejection.stage.name(),
-            rejection.code.text(),
-        });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-    try testing.expect(result.invariants.configured);
-    try testing.expectEqual(@as(u32, 1), result.invariants.required);
-    try testing.expectEqual(@as(u32, 1), result.invariants.covered);
-    try testing.expectEqual(@as(u32, 1), result.invariants.writes);
-    try testing.expect(result.invariants.ready());
-    try testing.expectEqual(@as(u32, 1), result.invariants.kind_bits);
-}
-
-test "a schema 2 certificate bound to the schema 1 digest of the same ledger is refused" {
-    // The two schemas hash under different domains, so a certificate that
-    // carries the schema 1 digest cannot stand for schema 2 bytes even when
-    // both declare the same ledger, currencies and kinds.
-    var fixture = try buildInvariantFixtureFor(test_invariant_spec_v2);
-    var under_v1_domain = std.crypto.hash.sha2.Sha256.init(.{});
-    under_v1_domain.update(invariant.digest_domain);
-    under_v1_domain.update(test_invariant_spec_v2);
-    const borrowed = under_v1_domain.finalResult();
-    for (&fixture.members) |*member| {
-        if (member.kind == .invariant_spec) member.digest = borrowed;
-    }
-    try fixture.encodeWith(&fixture.invariant_witnesses);
-    const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
-    try testing.expectEqual(
-        verdict.ReasonCode.invariant_spec_digest_mismatch,
-        result.rejection().?.code,
-    );
-}
-
-test "missing and extra invariant witnesses reject" {
-    var missing = try buildInvariantFixture();
-    try missing.encodeWith(&.{});
-    var result = check(missing.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection().?.code);
-
-    var extra = try buildInvariantFixture();
-    const witnesses = [_]cert_mod.InvariantWitness{
-        extra.invariant_witnesses[0],
-        .{
-            .ir_node = 2,
-            .scope_ir_node = 0,
-            .function_ordinal = 0,
-            .code_offset = 3,
-            .translation_index = 1,
-            .operation = .post,
-            .sink = .ledger_post,
-            .impl_id = invariant.catalog[0].impl_id,
-        },
-    };
-    try extra.encodeWith(&witnesses);
-    result = check(extra.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection().?.code);
-}
-
-test "invariant call must lie within its full expression emission" {
-    var fixture = try buildInvariantFixture();
-    fixture.translation[1].code_len = 2;
-    fixture.invariant_witnesses[0].code_offset = 3;
-    fixture.observed[0].code_offset = 3;
-    try fixture.encodeWith(&fixture.invariant_witnesses);
-    try testing.expect(check(fixture.inputs(), policy_mod.production).accepted());
-
-    for ([_]u32{ 1, 4 }) |offset| {
-        fixture.invariant_witnesses[0].code_offset = offset;
-        fixture.observed[0].code_offset = offset;
-        try fixture.encodeWith(&fixture.invariant_witnesses);
-        const result = check(fixture.inputs(), policy_mod.production);
-        try testing.expectEqual(verdict.ReasonCode.invariant_translation_missing, result.rejection().?.code);
-    }
-}
-
-test "a forged invariant operation cannot borrow a real call site" {
-    var fixture = try buildInvariantFixture();
-    var forged = fixture.invariant_witnesses;
-    forged[0].operation = .balance;
-    forged[0].sink = .ledger_balance;
-    forged[0].impl_id = invariant.catalog[1].impl_id;
-    fixture.observed[0].operation = .balance;
-    try fixture.encodeWith(&forged);
-
-    const result = check(fixture.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
-    try testing.expectEqual(verdict.ReasonCode.invariant_operation_mismatch, result.rejection().?.code);
-}
-
-test "a balance-only artifact is covered and reports vacuous write applicability" {
-    var fixture = try buildBalanceOnlyInvariantFixtureFor(test_invariant_spec);
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected balance-only rejection: {s} / {s}\n", .{
-            rejection.stage.name(),
-            rejection.code.text(),
-        });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-    try testing.expect(result.invariants.configured);
-    try testing.expectEqual(@as(u32, 1), result.invariants.required);
-    try testing.expectEqual(@as(u32, 1), result.invariants.covered);
-    try testing.expectEqual(@as(u32, 0), result.invariants.writes);
-    // The read call site is genuinely covered, so the artifact is ready. The
-    // report says what is missing; it does not relabel readiness.
-    try testing.expect(result.invariants.ready());
-    try testing.expectEqual(
-        verdict.WriteApplicability.vacuous,
-        result.invariants.writeApplicability(),
-    );
-    try testing.expectEqual(
-        verdict.WriteApplicability.vacuous,
-        result.invariants.writeApplicabilityFor(.balance_conservation_v1),
-    );
-    // A kind this document does not declare is not vacuous, it is absent.
-    try testing.expectEqual(
-        verdict.WriteApplicability.not_applicable,
-        result.invariants.writeApplicabilityFor(.declared_accounts_v1),
-    );
-}
-
-test "a post-bearing artifact reports covered write applicability for every declared kind" {
-    var fixture = try buildInvariantFixtureFor(test_invariant_spec_two_kinds);
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected two-kind rejection: {s} / {s}\n", .{
-            rejection.stage.name(),
-            rejection.code.text(),
-        });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-    try testing.expectEqual(@as(u32, 1), result.invariants.writes);
-    try testing.expectEqual(@as(u32, 0b11), result.invariants.kind_bits);
-    try testing.expectEqual(
-        verdict.WriteApplicability.covered,
-        result.invariants.writeApplicability(),
-    );
-    try testing.expectEqual(
-        verdict.WriteApplicability.covered,
-        result.invariants.writeApplicabilityFor(.balance_conservation_v1),
-    );
-    try testing.expectEqual(
-        verdict.WriteApplicability.covered,
-        result.invariants.writeApplicabilityFor(.declared_accounts_v1),
-    );
-
-    // Both catalog kinds gate `post`, so per-kind applicability is degenerate:
-    // the same artifact read-only reports vacuous for both, not for one.
-    var read_only = try buildBalanceOnlyInvariantFixtureFor(test_invariant_spec_two_kinds);
-    const read_only_result = check(read_only.inputs(), policy_mod.production);
-    try testing.expect(read_only_result.accepted());
-    try testing.expectEqual(
-        verdict.WriteApplicability.vacuous,
-        read_only_result.invariants.writeApplicabilityFor(.balance_conservation_v1),
-    );
-    try testing.expectEqual(
-        verdict.WriteApplicability.vacuous,
-        read_only_result.invariants.writeApplicabilityFor(.declared_accounts_v1),
-    );
-}
-
-test "a configured artifact exhibiting no ledger operation rejects with invariant_operation_required" {
-    var fixture = try buildInvariantFixture();
-    try fixture.encodeWith(&.{});
-    var inputs = fixture.inputs();
-    inputs.observed_invariant_operations = &.{};
-    const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
-    try testing.expectEqual(
-        verdict.ReasonCode.invariant_operation_required,
-        result.rejection().?.code,
-    );
-    // A rejected artifact reports no applicability at all. Vacuity is a report
-    // about an accepted artifact, never a softer landing for a refused one.
-    try testing.expectEqual(
-        verdict.WriteApplicability.not_applicable,
-        result.invariants.writeApplicability(),
-    );
-}
-
-test "a declared write absent from independent observation rejects rather than reporting vacuous" {
-    // The witness list names a posting group the loader never found. The exact
-    // count comparison refuses it; write applicability is never reached.
-    var unobserved = try buildInvariantFixture();
-    var unobserved_inputs = unobserved.inputs();
-    unobserved_inputs.observed_invariant_operations = &.{};
-    var result = check(unobserved_inputs, policy_mod.production);
-    try testing.expectEqual(verdict.Stage.invariant_coverage, result.rejection().?.stage);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_extra, result.rejection().?.code);
-    try testing.expectEqual(
-        verdict.WriteApplicability.not_applicable,
-        result.invariants.writeApplicability(),
-    );
-
-    // The other direction: the loader found a posting group the certificate
-    // does not witness. Reporting that as vacuous would hide a real write.
-    var unwitnessed = try buildInvariantFixture();
-    try unwitnessed.encodeWith(&.{});
-    result = check(unwitnessed.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_member_missing, result.rejection().?.code);
-    try testing.expectEqual(
-        verdict.WriteApplicability.not_applicable,
-        result.invariants.writeApplicability(),
-    );
-
-    // A witness that renames the observed write as a read is a forgery, not a
-    // read-only topology.
-    var forged = try buildInvariantFixture();
-    forged.invariant_witnesses[0].operation = .balance;
-    forged.invariant_witnesses[0].sink = .ledger_balance;
-    forged.invariant_witnesses[0].impl_id = invariant.catalog[1].impl_id;
-    try forged.encodeWith(&forged.invariant_witnesses);
-    result = check(forged.inputs(), policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_observed_mismatch, result.rejection().?.code);
-    try testing.expectEqual(
-        verdict.WriteApplicability.not_applicable,
-        result.invariants.writeApplicability(),
-    );
-}
-
-test "tampered invariant specification bytes reject before coverage" {
-    var fixture = try buildInvariantFixture();
-    var tampered = test_invariant_spec.*;
-    tampered[tampered.len - 1] = 3;
-    var inputs = fixture.inputs();
-    inputs.invariant_spec = &tampered;
-    const result = check(inputs, policy_mod.production);
-    try testing.expectEqual(verdict.ReasonCode.invariant_spec_digest_mismatch, result.rejection().?.code);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .none), std.meta.activeTag(result.rejection().?.subject));
-    const expected_digest = invariant.digest(test_invariant_spec);
-    try testing.expectEqualSlices(u8, &expected_digest, &result.rejection().?.expected.?.digest);
-}
-
-test "invariant coverage refuses observations beyond the configured limit" {
-    var fixture = try buildInvariantFixture();
-    const observed = [_]invariant.ObservedOperation{
-        fixture.observed[0],
-        .{ .function_ordinal = 0, .code_offset = 4, .operation = .post },
-    };
-    var inputs = fixture.inputs();
-    inputs.observed_invariant_operations = &observed;
-    var limited = policy_mod.production;
-    limited.limits.max_invariant_operations = 1;
-    try expectAt(check(inputs, limited), .limits, .work_budget_exhausted);
-}
-
-test "an invariant witness cannot name a return node" {
-    var fixture = try buildInvariantFixture();
-    fixture.invariant_witnesses[0].ir_node = 3;
-    fixture.invariant_witnesses[0].translation_index = 2;
-    fixture.invariant_witnesses[0].code_offset = 4;
-    fixture.observed[0].code_offset = 4;
-    try fixture.encodeWith(&fixture.invariant_witnesses);
-    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_member_extra);
-}
-
-test "an invariant witness needs its own scope and a valid translation index" {
-    var scope = try buildInvariantFixture();
-    scope.invariant_witnesses[0].scope_ir_node = 1;
-    try scope.encodeWith(&scope.invariant_witnesses);
-    try expectAt(check(scope.inputs(), policy_mod.production), .invariant_coverage, .invariant_translation_missing);
-
-    var absent = try buildInvariantFixture();
-    absent.invariant_witnesses[0].translation_index = @intCast(absent.translation.len);
-    try absent.encodeWith(&absent.invariant_witnesses);
-    try expectAt(check(absent.inputs(), policy_mod.production), .invariant_coverage, .invariant_translation_missing);
-}
-
-test "an unconfigured invariant refuses supplied specification bytes" {
-    var fixture = try test_support.build();
-    var inputs = fixture.inputs();
-    inputs.invariant_spec = test_invariant_spec;
-    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_digest_mismatch);
-}
-
-test "an unconfigured invariant refuses observed operations" {
-    var fixture = try test_support.build();
-    const observed = [_]invariant.ObservedOperation{.{ .function_ordinal = 0, .code_offset = 2, .operation = .post }};
-    var inputs = fixture.inputs();
-    inputs.observed_invariant_operations = &observed;
-    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_missing);
-}
-
-test "an unconfigured invariant refuses invariant graph members" {
-    var fixture = try buildInvariantFixture();
-    var parts = fixture.parts(&.{});
-    parts.identity.invariant_spec_digest = [_]u8{0} ** 32;
-    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
-    var inputs = fixture.inputs();
-    inputs.invariant_spec = null;
-    inputs.observed_invariant_operations = &.{};
-    const result = check(inputs, policy_mod.production);
-    try expectAt(result, .invariant_coverage, .invariant_spec_missing);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .graph_member), std.meta.activeTag(result.rejection().?.subject));
-}
-
-test "an unconfigured invariant refuses a ledger call in the IR" {
-    var fixture = try test_support.build();
-    fixture.ir[2].tag = .ledger_call;
-    try fixture.encode();
-    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_spec_missing);
-}
-
-test "an invariant witness offset must match the independent observation" {
-    var fixture = try buildInvariantFixture();
-    fixture.observed[0].code_offset = 3;
-    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_observed_mismatch);
-}
-
-test "duplicate and descending invariant witnesses keep distinct reasons" {
-    var fixture = try buildInvariantFixture();
-    var witnesses = [_]cert_mod.InvariantWitness{ fixture.invariant_witnesses[0], fixture.invariant_witnesses[0] };
-    try fixture.encodeWith(&witnesses);
-    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_member_duplicate);
-
-    witnesses[1].code_offset = 1;
-    try fixture.encodeWith(&witnesses);
-    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_member_out_of_order);
-}
-
-test "one ledger node cannot use two ordered witnesses" {
-    var fixture = try buildInvariantFixture();
-    fixture.translation[1].code_len = 2;
-    var witnesses = [_]cert_mod.InvariantWitness{ fixture.invariant_witnesses[0], fixture.invariant_witnesses[0] };
-    witnesses[1].code_offset = 3;
-    const observed = [_]invariant.ObservedOperation{
-        fixture.observed[0],
-        .{ .function_ordinal = 0, .code_offset = 3, .operation = .post },
-    };
-    try fixture.encodeWith(&witnesses);
-    var inputs = fixture.inputs();
-    inputs.observed_invariant_operations = &observed;
-    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_member_duplicate);
-}
-
-test "duplicate independent observations reject before witness comparison" {
-    var fixture = try buildInvariantFixture();
-    fixture.translation[1].code_len = 2;
-    var witnesses = [_]cert_mod.InvariantWitness{ fixture.invariant_witnesses[0], fixture.invariant_witnesses[0] };
-    witnesses[1].code_offset = 3;
-    const observed = [_]invariant.ObservedOperation{ fixture.observed[0], fixture.observed[0] };
-    try fixture.encodeWith(&witnesses);
-    var inputs = fixture.inputs();
-    inputs.observed_invariant_operations = &observed;
-    const result = check(inputs, policy_mod.production);
-    try expectAt(result, .invariant_coverage, .invariant_observed_mismatch);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .code_offset), std.meta.activeTag(result.rejection().?.subject));
-    try testing.expectEqual(@as(u32, 2), result.rejection().?.subject.code_offset);
-}
-
-test "an invariant witness cannot use a jump as its emission" {
-    var fixture = try buildInvariantFixture();
-    const translation = [_]cert_mod.Witness{
-        fixture.translation[0],                                                                                                   fixture.translation[1], fixture.translation[2],
-        .{ .ir_node = 2, .code_start = 3, .code_len = 1, .target_ir = 2, .target_offset = 2, .scope_ir_node = 0, .kind = .jump },
-    };
-    var witness = fixture.invariant_witnesses;
-    witness[0].translation_index = 3;
-    witness[0].code_offset = 3;
-    fixture.observed[0].code_offset = 3;
-    var parts = fixture.parts(&witness);
-    parts.translation = &translation;
-    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
-    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_translation_missing);
-}
-
-test "a second ledger call needs a witness when witness and observation counts agree" {
-    var fixture = try buildInvariantFixture();
-    const ir = [_]cert_mod.IrNode{
-        fixture.ir[0],
-        fixture.ir[1],
-        fixture.ir[2],
-        .{ .id = 3, .tag = .ledger_call, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(24), .aux = 0 },
-        .{ .id = 4, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(25) },
-    };
-    var ordered_ir = ir;
-    ordered_ir[1].child_count = 3;
-    const translation = [_]cert_mod.Witness{
-        fixture.translation[0],
-        fixture.translation[1],
-        .{ .ir_node = 3, .code_start = 4, .code_len = 1, .target_ir = 3, .target_offset = 4, .scope_ir_node = 0, .kind = .emission },
-        .{ .ir_node = 4, .code_start = 6, .code_len = 2, .target_ir = 4, .target_offset = 6, .scope_ir_node = 0, .kind = .emission },
-    };
-    var parts = fixture.parts(&fixture.invariant_witnesses);
-    parts.ir = &ordered_ir;
-    parts.translation = &translation;
-    parts.identity.ir_root = cert_mod.irRootFromNodes(&ordered_ir);
-    for (&fixture.members) |*member| {
-        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
-    }
-    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
-    const result = check(fixture.inputs(), policy_mod.production);
-    try expectAt(result, .invariant_coverage, .invariant_member_missing);
-    try testing.expectEqual(@as(std.meta.Tag(verdict.Subject), .ir_node), std.meta.activeTag(result.rejection().?.subject));
-    try testing.expectEqual(@as(u32, 3), result.rejection().?.subject.ir_node);
-}
-
-test "an invariant specification that cannot decode rejects" {
-    const invalid = [_]u8{0};
-    var fixture = try buildInvariantFixtureFor(&invalid);
-    try expectAt(check(fixture.inputs(), policy_mod.production), .invariant_coverage, .invariant_spec_undecodable);
-}
-
-test "missing invariant graph members reject independently" {
-    var fixture = try buildInvariantFixture();
-    var without_spec: [10]graph.Member = undefined;
-    @memcpy(without_spec[0..9], fixture.members[0..9]);
-    without_spec[9] = fixture.members[10];
-    const parts = fixture.parts(&fixture.invariant_witnesses);
-    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &without_spec);
-    var inputs = fixture.inputs();
-    inputs.observed_graph = &without_spec;
-    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_member_missing);
-
-    var other = try buildInvariantFixture();
-    var without_adapter: [10]graph.Member = undefined;
-    @memcpy(&without_adapter, other.members[0..10]);
-    const other_parts = other.parts(&other.invariant_witnesses);
-    other.len = try encodeBoundTestParts(&other.buffer, other_parts, &without_adapter);
-    var other_inputs = other.inputs();
-    other_inputs.observed_graph = &without_adapter;
-    try expectAt(check(other_inputs, policy_mod.production), .invariant_coverage, .invariant_adapter_member_missing);
-}
-
-test "an invariant spec member at a nonzero ordinal rejects even with the right digest" {
-    var fixture = try buildInvariantFixture();
-    fixture.members[9].ordinal = 1;
-    const parts = fixture.parts(&fixture.invariant_witnesses);
-    fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
-    var inputs = fixture.inputs();
-    inputs.observed_graph = &fixture.members;
-    try expectAt(check(inputs, policy_mod.production), .invariant_coverage, .invariant_spec_digest_mismatch);
-}
-
 test "an opcode inventory edge may name an id past the proof IR" {
     // Only a node edge is bounded by the IR length. An opcode id names a
     // bytecode opcode, so bounding it by the node count would refuse a sound
@@ -2697,31 +1672,6 @@ test "an opcode inventory edge may name an id past the proof IR" {
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(result.rejection() == null);
     try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
-}
-
-test "invariant adapter, operation, sink, and implementation identities reject" {
-    var adapter = try buildInvariantFixture();
-    for (&adapter.members) |*member| {
-        if (member.kind == .invariant_ledger_adapter) member.digest = test_support.digest(0x78);
-    }
-    const parts = adapter.parts(&adapter.invariant_witnesses);
-    adapter.len = try encodeBoundTestParts(&adapter.buffer, parts, &adapter.members);
-    try expectAt(check(adapter.inputs(), policy_mod.production), .invariant_coverage, .invariant_adapter_identity_mismatch);
-
-    var operation = try buildInvariantFixture();
-    operation.ir[2].aux = @intCast(invariant.catalog.len);
-    try operation.encodeWith(&operation.invariant_witnesses);
-    try expectAt(check(operation.inputs(), policy_mod.production), .invariant_coverage, .invariant_operation_unknown);
-
-    var sink = try buildInvariantFixture();
-    sink.invariant_witnesses[0].sink = .ledger_balance;
-    try sink.encodeWith(&sink.invariant_witnesses);
-    try expectAt(check(sink.inputs(), policy_mod.production), .invariant_coverage, .invariant_sink_mismatch);
-
-    var impl = try buildInvariantFixture();
-    impl.invariant_witnesses[0].impl_id +%= 1;
-    try impl.encodeWith(&impl.invariant_witnesses);
-    try expectAt(check(impl.inputs(), policy_mod.production), .invariant_coverage, .invariant_impl_identity_mismatch);
 }
 
 test "a guarded artifact is accepted, and its guards are counted apart from its properties" {
@@ -3044,12 +1994,48 @@ test "a residual-plan graph member must name the actual plan" {
 
 test "the immediate predecessor schema is refused by production" {
     var fixture = try test_support.buildGuarded();
-    std.mem.writeInt(u16, fixture.buffer[8..10], 2, .little);
+    std.mem.writeInt(u16, fixture.buffer[8..10], 4, .little);
     const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.rejection() != null);
+    try testing.expectEqual(verdict.Stage.decode, result.rejection().?.stage);
     try testing.expectEqual(
         verdict.ReasonCode.unsupported_schema_version,
         result.rejection().?.code,
     );
+    try testing.expect(result.rejection().?.recertifiable);
+}
+
+test "policy cannot make the immediate predecessor schema decodable" {
+    var fixture = try test_support.buildGuarded();
+    std.mem.writeInt(u16, fixture.buffer[8..10], 4, .little);
+    const allowed_schemas = [_]u16{4};
+    var predecessor_policy = policy_mod.production;
+    predecessor_policy.schema_versions = &allowed_schemas;
+
+    const result = check(fixture.inputs(), predecessor_policy);
+    try testing.expect(result.rejection() != null);
+    try testing.expectEqual(verdict.Stage.decode, result.rejection().?.stage);
+    try testing.expectEqual(
+        verdict.ReasonCode.unsupported_schema_version,
+        result.rejection().?.code,
+    );
+    try testing.expect(result.rejection().?.recertifiable);
+}
+
+test "policy can exclude the compiled certificate schema" {
+    var fixture = try test_support.buildGuarded();
+    const allowed_schemas = [_]u16{6};
+    var future_policy = policy_mod.production;
+    future_policy.schema_versions = &allowed_schemas;
+
+    const result = check(fixture.inputs(), future_policy);
+    try testing.expect(result.rejection() != null);
+    try testing.expectEqual(verdict.Stage.decode, result.rejection().?.stage);
+    try testing.expectEqual(
+        verdict.ReasonCode.unsupported_schema_version,
+        result.rejection().?.code,
+    );
+    try testing.expect(result.rejection().?.recertifiable);
 }
 
 /// Re-encode a guarded fixture from parts a test built by hand, keeping the
@@ -3262,7 +2248,7 @@ test "an observed member after the last claimed member rejects" {
     var fixture = try test_support.build();
     var observed: [10]graph.Member = undefined;
     @memcpy(observed[0..fixture.members.len], &fixture.members);
-    observed[9] = .{ .kind = .declaration, .ordinal = 0, .digest = test_support.digest(0x74) };
+    observed[9] = .{ .kind = .residual_plan, .ordinal = 1, .digest = test_support.digest(0x74) };
     var inputs = fixture.inputs();
     inputs.observed_graph = &observed;
     try expectAt(check(inputs, policy_mod.production), .artifact_binding, .graph_member_extra);
@@ -3741,6 +2727,20 @@ test "emission ranges that partially overlap reject" {
     try testing.expectEqual(verdict.ReasonCode.witness_range_overlaps, result.rejection().?.code);
 }
 
+test "adjacent emission ranges may share one boundary" {
+    var fixture = try test_support.build();
+    const emissions = [_]cert_mod.Witness{
+        .{ .ir_node = 1, .code_start = 0, .code_len = 4, .target_ir = 1, .target_offset = 0, .scope_ir_node = 0, .kind = .emission },
+        .{ .ir_node = 2, .code_start = 4, .code_len = 4, .target_ir = 2, .target_offset = 4, .scope_ir_node = 0, .kind = .emission },
+    };
+    var parts = fixture.parts();
+    parts.translation = &emissions;
+    try fixture.encodeParts(parts);
+
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.accepted());
+}
+
 test "emission ranges reject overlap with any active ancestor" {
     var fixture = try test_support.build();
     const emissions = [_]cert_mod.Witness{
@@ -3872,6 +2872,7 @@ test "a property a policy does not require may go unestablished" {
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(result.accepted());
+    try testing.expectEqual(@as(u32, 4), result.disclosed_edges);
 }
 
 test "a grade below the policy floor rejects and says both sides" {
@@ -4133,358 +3134,10 @@ test "scratch smaller than the kernel needs is refused rather than truncated" {
     try testing.expect(!result.rejection().?.recertifiable);
 }
 
-test "scratchBytes covers three bits per node at the configured bound" {
+test "scratchBytes covers two bits per node at the configured bound" {
     const needed = scratchBytes(.{ .max_ir_nodes = 64, .max_witnesses = 4 });
-    try testing.expectEqual(@as(usize, 184), needed);
+    try testing.expectEqual(@as(usize, 176), needed);
     try testing.expect(scratchBytes(.{}) > 0);
-}
-
-/// The minimal accepted artifact plus `extra` tool catalog members, one per
-/// ordinal from zero, each carrying the digest of `catalog`.
-fn CatalogFixture(comptime extra: usize) type {
-    @setRuntimeSafety(true);
-    return BindingFixture(extra, 0);
-}
-
-/// The minimal accepted artifact plus `extra` declaration members, one per
-/// ordinal from zero, each carrying the digest of `declarationBytes`.
-fn DeclarationFixture(comptime extra: usize) type {
-    @setRuntimeSafety(true);
-    return BindingFixture(0, extra);
-}
-
-/// The minimal accepted artifact plus `catalogs` tool catalog members and
-/// `declarations` declaration members, one per ordinal from zero within each
-/// kind. `inputs` supplies the catalog bytes when `catalogs` is not zero, and
-/// the declaration bytes when `declarations` is not zero.
-fn BindingFixture(comptime catalogs: usize, comptime declarations: usize) type {
-    @setRuntimeSafety(true);
-    return struct {
-        const Self = @This();
-
-        base: test_support.Fixture,
-        members: [9 + catalogs + declarations]graph.Member,
-        catalog_buf: [1024]u8 = undefined,
-        catalog_len: usize = 0,
-        declaration_buf: [1024]u8 = undefined,
-        declaration_len: usize = 0,
-        buffer: [8192]u8 = undefined,
-        len: usize = 0,
-
-        fn catalog(self: *const Self) []const u8 {
-            @setRuntimeSafety(true);
-            return self.catalog_buf[0..self.catalog_len];
-        }
-
-        fn declarationBytes(self: *const Self) []const u8 {
-            @setRuntimeSafety(true);
-            return self.declaration_buf[0..self.declaration_len];
-        }
-
-        fn encode(self: *Self) !void {
-            @setRuntimeSafety(true);
-            for (&self.members) |*member| {
-                if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
-            }
-            std.mem.sort(graph.Member, &self.members, {}, struct {
-                fn lessThan(_: void, a: graph.Member, b: graph.Member) bool {
-                    @setRuntimeSafety(true);
-                    return graph.Member.order(a, b) == .lt;
-                }
-            }.lessThan);
-            var built = self.base.parts();
-            built.graph = &self.members;
-            built.identity.executable_root = [_]u8{0} ** 32;
-            const provisional = try cert_mod.encode(built, &self.buffer);
-            var budget = Budget.init(.{});
-            const decoded = try cert_mod.decode(provisional, .{}, &budget);
-            const certificate_digest = try cert_mod.commitmentDigest(provisional, decoded);
-            for (&self.members) |*member| {
-                if (member.kind == .proof_certificate) member.digest = certificate_digest;
-            }
-            built.identity.executable_root = try graph.computeRoot(&self.members);
-            self.len = (try cert_mod.encode(built, &self.buffer)).len;
-        }
-
-        fn inputs(self: *Self) Inputs {
-            @setRuntimeSafety(true);
-            return .{
-                .certificate = self.buffer[0..self.len],
-                .observed_graph = &self.members,
-                .scratch = &self.base.scratch,
-                .tool_catalog = if (catalogs == 0) null else self.catalog(),
-                .declaration = if (declarations == 0) null else self.declarationBytes(),
-            };
-        }
-
-        fn build() !Self {
-            @setRuntimeSafety(true);
-            var self = Self{ .base = try test_support.build(), .members = undefined };
-            self.catalog_len = tool_catalog.test_support.sample(&self.catalog_buf).len;
-            self.declaration_len = declaration.test_support.sample(&self.declaration_buf).len;
-            const catalog_digest = tool_catalog.digest(self.catalog());
-            const declaration_digest = declaration.digest(self.declarationBytes());
-            @memcpy(self.members[0..9], &self.base.members);
-            for (0..catalogs) |ordinal| {
-                self.members[9 + ordinal] = .{ .kind = .tool_catalog, .ordinal = @intCast(ordinal), .digest = catalog_digest };
-            }
-            for (0..declarations) |ordinal| {
-                self.members[9 + catalogs + ordinal] = .{ .kind = .declaration, .ordinal = @intCast(ordinal), .digest = declaration_digest };
-            }
-            try self.encode();
-            return self;
-        }
-    };
-}
-
-fn expectRejected(result: Assessment, code: verdict.ReasonCode) !void {
-    @setRuntimeSafety(true);
-    const rejection = result.rejection() orelse {
-        std.debug.print("expected {s}, accepted\n", .{code.text()});
-        return error.TestUnexpectedResult;
-    };
-    if (rejection.code != code) {
-        std.debug.print("expected {s}, got {s} / {s}\n", .{ code.text(), rejection.stage.name(), rejection.code.text() });
-        return error.TestUnexpectedResult;
-    }
-}
-
-test "a tool catalog matching its graph member is accepted" {
-    var fixture = try CatalogFixture(1).build();
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-}
-
-test "one mutated catalog byte rejects with tool_catalog_digest_mismatch" {
-    var fixture = try CatalogFixture(1).build();
-    var tampered: [1024]u8 = undefined;
-    const original = fixture.catalog();
-    @memcpy(tampered[0..original.len], original);
-    // A byte inside the first description: the bytes still decode, so only the
-    // digest can refuse them.
-    const at = std.mem.indexOf(u8, original, "Echo the input").?;
-    tampered[at] = 'e';
-    var inputs = fixture.inputs();
-    inputs.tool_catalog = tampered[0..original.len];
-    const result = check(inputs, policy_mod.production);
-    try expectRejected(result, .tool_catalog_digest_mismatch);
-    try testing.expectEqual(verdict.Stage.tool_catalog, result.rejection().?.stage);
-}
-
-test "a graph member naming another catalog digest rejects" {
-    var fixture = try CatalogFixture(1).build();
-    for (&fixture.members) |*member| {
-        if (member.kind == .tool_catalog) member.digest[0] +%= 1;
-    }
-    try fixture.encode();
-    try expectRejected(check(fixture.inputs(), policy_mod.production), .tool_catalog_digest_mismatch);
-}
-
-test "a second tool catalog member rejects" {
-    var fixture = try CatalogFixture(2).build();
-    try expectRejected(check(fixture.inputs(), policy_mod.production), .tool_catalog_digest_mismatch);
-}
-
-test "catalog bytes with no graph member reject" {
-    var fixture = try test_support.build();
-    var buf: [1024]u8 = undefined;
-    var inputs = fixture.inputs();
-    inputs.tool_catalog = tool_catalog.test_support.sample(&buf);
-    try expectRejected(check(inputs, policy_mod.production), .tool_catalog_member_missing);
-}
-
-test "a tool catalog member with no catalog bytes rejects" {
-    var fixture = try CatalogFixture(1).build();
-    var inputs = fixture.inputs();
-    inputs.tool_catalog = null;
-    try expectRejected(check(inputs, policy_mod.production), .tool_catalog_member_missing);
-}
-
-test "undecodable catalog bytes reject before the digest is compared" {
-    var fixture = try CatalogFixture(1).build();
-    var inputs = fixture.inputs();
-    inputs.tool_catalog = "ZTCAT1\x00\x00\x01\x00\x00\x00";
-    try expectRejected(check(inputs, policy_mod.production), .tool_catalog_undecodable);
-}
-
-test "every tool catalog reason code is observed" {
-    var seen = std.EnumSet(verdict.ReasonCode).initEmpty();
-
-    var matching = try CatalogFixture(1).build();
-    var buf: [1024]u8 = undefined;
-
-    var mutated = matching.inputs();
-    var tampered: [1024]u8 = undefined;
-    const original = matching.catalog();
-    @memcpy(tampered[0..original.len], original);
-    tampered[std.mem.indexOf(u8, original, "Echo the input").?] = 'e';
-    mutated.tool_catalog = tampered[0..original.len];
-
-    var no_bytes = matching.inputs();
-    no_bytes.tool_catalog = null;
-
-    var undecodable = matching.inputs();
-    undecodable.tool_catalog = "not a catalog";
-
-    var plain = try test_support.build();
-    var no_member = plain.inputs();
-    no_member.tool_catalog = tool_catalog.test_support.sample(&buf);
-
-    for ([_]Inputs{ mutated, no_bytes, undecodable, no_member }) |inputs| {
-        const result = check(inputs, policy_mod.production);
-        if (result.rejection()) |rejection| seen.insert(rejection.code);
-    }
-
-    inline for (@typeInfo(verdict.ReasonCode).@"enum".fields) |field| {
-        if (comptime std.mem.startsWith(u8, field.name, "tool_catalog_")) {
-            const code: verdict.ReasonCode = @enumFromInt(field.value);
-            if (!seen.contains(code)) {
-                std.debug.print("{s} is never observed\n", .{field.name});
-                return error.TestUnexpectedResult;
-            }
-        }
-    }
-}
-
-test "an artifact with no declaration and no declaration member passes the declaration stage" {
-    var fixture = try test_support.build();
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-}
-
-test "a declaration matching its graph member is accepted" {
-    var fixture = try DeclarationFixture(1).build();
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-}
-
-test "a tool catalog and a declaration each matching their member are accepted" {
-    var fixture = try BindingFixture(1, 1).build();
-    const result = check(fixture.inputs(), policy_mod.production);
-    if (result.rejection()) |rejection| {
-        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
-        return error.TestUnexpectedResult;
-    }
-    try testing.expect(result.accepted());
-}
-
-/// The fixture's declaration with one byte of a reason changed. The bytes
-/// still decode, so only the digest can refuse them.
-fn tamperedDeclaration(original: []const u8, out: *[1024]u8) []const u8 {
-    @setRuntimeSafety(true);
-    @memcpy(out[0..original.len], original);
-    const at = std.mem.indexOf(u8, original, "Payment token.").?;
-    out[at] = 'p';
-    return out[0..original.len];
-}
-
-test "one mutated declaration byte rejects with declaration_digest_mismatch" {
-    var fixture = try DeclarationFixture(1).build();
-    var tampered: [1024]u8 = undefined;
-    var inputs = fixture.inputs();
-    inputs.declaration = tamperedDeclaration(fixture.declarationBytes(), &tampered);
-    _ = try declaration.decode(inputs.declaration.?);
-    const result = check(inputs, policy_mod.production);
-    try expectRejected(result, .declaration_digest_mismatch);
-    try testing.expectEqual(verdict.Stage.declaration, result.rejection().?.stage);
-}
-
-test "a graph member naming another declaration digest rejects" {
-    var fixture = try DeclarationFixture(1).build();
-    for (&fixture.members) |*member| {
-        if (member.kind == .declaration) member.digest[0] +%= 1;
-    }
-    try fixture.encode();
-    try expectRejected(check(fixture.inputs(), policy_mod.production), .declaration_digest_mismatch);
-}
-
-test "a second declaration member rejects" {
-    var fixture = try DeclarationFixture(2).build();
-    try expectRejected(check(fixture.inputs(), policy_mod.production), .declaration_digest_mismatch);
-}
-
-test "declaration bytes with no graph member reject" {
-    var fixture = try test_support.build();
-    var buf: [1024]u8 = undefined;
-    var inputs = fixture.inputs();
-    inputs.declaration = declaration.test_support.sample(&buf);
-    const result = check(inputs, policy_mod.production);
-    try expectRejected(result, .declaration_member_missing);
-    try testing.expectEqual(verdict.Stage.declaration, result.rejection().?.stage);
-}
-
-test "a declaration member with no declaration bytes rejects and names the member" {
-    var fixture = try DeclarationFixture(1).build();
-    var inputs = fixture.inputs();
-    inputs.declaration = null;
-    const result = check(inputs, policy_mod.production);
-    try expectRejected(result, .declaration_member_missing);
-    try testing.expectEqual(verdict.Stage.declaration, result.rejection().?.stage);
-    try testing.expectEqual(verdict.Subject{ .graph_member = .{
-        .kind = @intFromEnum(graph.MemberKind.declaration),
-        .ordinal = 0,
-    } }, result.rejection().?.subject);
-}
-
-test "undecodable declaration bytes reject before the digest is compared" {
-    var fixture = try DeclarationFixture(1).build();
-    var inputs = fixture.inputs();
-    inputs.declaration = "ZTDCL1\x00\x00\x01\x00\x00\x00\x00";
-    try expectRejected(check(inputs, policy_mod.production), .declaration_undecodable);
-}
-
-test "every declaration reason code is observed" {
-    var seen = std.EnumSet(verdict.ReasonCode).initEmpty();
-
-    var matching = try DeclarationFixture(1).build();
-    var buf: [1024]u8 = undefined;
-
-    var mutated = matching.inputs();
-    var tampered: [1024]u8 = undefined;
-    mutated.declaration = tamperedDeclaration(matching.declarationBytes(), &tampered);
-
-    var no_bytes = matching.inputs();
-    no_bytes.declaration = null;
-
-    var undecodable = matching.inputs();
-    undecodable.declaration = "not a declaration";
-
-    var plain = try test_support.build();
-    var no_member = plain.inputs();
-    no_member.declaration = declaration.test_support.sample(&buf);
-
-    for ([_]Inputs{ mutated, no_bytes, undecodable, no_member }) |inputs| {
-        const result = check(inputs, policy_mod.production);
-        if (result.rejection()) |rejection| {
-            try testing.expectEqual(verdict.Stage.declaration, rejection.stage);
-            seen.insert(rejection.code);
-        }
-    }
-
-    var codes: usize = 0;
-    inline for (@typeInfo(verdict.ReasonCode).@"enum".fields) |field| {
-        if (comptime std.mem.startsWith(u8, field.name, "declaration_")) {
-            codes += 1;
-            const code: verdict.ReasonCode = @enumFromInt(field.value);
-            if (!seen.contains(code)) {
-                std.debug.print("{s} is never observed\n", .{field.name});
-                return error.TestUnexpectedResult;
-            }
-        }
-    }
-    try testing.expectEqual(@as(usize, 3), codes);
 }
 
 const ReasonProbe = enum { root_mismatch, zero_root, trailing_member, missing_evidence, fabricated_totality };
@@ -4508,7 +3161,7 @@ fn runReasonProbe(probe: ReasonProbe) !Assessment {
         .trailing_member => {
             var members: [10]graph.Member = undefined;
             @memcpy(members[0..9], &fixture.members);
-            members[9] = .{ .kind = .declaration, .ordinal = 0, .digest = test_support.digest(0x74) };
+            members[9] = .{ .kind = .residual_plan, .ordinal = 1, .digest = test_support.digest(0x74) };
             var inputs = fixture.inputs();
             inputs.observed_graph = &members;
             return check(inputs, policy_mod.production);
@@ -4599,23 +3252,6 @@ fn reasonAllowlist(code: verdict.ReasonCode) ?[]const u8 {
         .runtime_policy_missing => "checker.test.a guarded artifact with no policy bytes rejects rather than assuming any checks absent authority",
         .runtime_policy_undecodable => "checker.test.policy bytes that do not hash to the committed digest reject checks policy bytes",
         .guard_family_disabled => "checker.test.a fully consistent SQL guard remains disabled checks the family gate",
-
-        .invariant_spec_missing => "checker tests for observed operations, graph members, and ledger calls on the unconfigured path pin this code",
-        .invariant_spec_undecodable => "checker.test.an invariant specification that cannot decode rejects checks the spec decoder",
-        .invariant_spec_digest_mismatch => "checker tests for supplied bytes without configuration and tampered spec bytes pin the digest",
-        .invariant_spec_member_missing, .invariant_adapter_member_missing => "checker.test.missing invariant graph members reject independently checks both bound members",
-        .invariant_adapter_identity_mismatch => "checker.test.invariant adapter, operation, sink, and implementation identities reject checks adapter identity",
-        .invariant_operation_required => "checker.test.a configured artifact exhibiting no ledger operation rejects with invariant_operation_required checks emptiness",
-        .invariant_member_missing => "checker.test.a second ledger call needs a witness when witness and observation counts agree checks the IR scan",
-        .invariant_member_extra => "checker.test.missing and extra invariant witnesses reject checks the independent count",
-        .invariant_member_duplicate, .invariant_member_out_of_order => "checker.test.duplicate and descending invariant witnesses keep distinct reasons checks canonical order",
-        .invariant_operation_unknown, .invariant_sink_mismatch, .invariant_impl_identity_mismatch => "checker.test.invariant adapter, operation, sink, and implementation identities reject checks catalog comparison",
-        .invariant_operation_mismatch => "checker.test.a forged invariant operation cannot borrow a real call site checks operation identity",
-        .invariant_translation_missing => "checker.test.invariant call must lie within its full expression emission checks translation coverage",
-        .invariant_observed_mismatch => "checker.test.an invariant witness offset must match the independent observation checks independent offsets",
-
-        .tool_catalog_undecodable, .tool_catalog_digest_mismatch, .tool_catalog_member_missing => "checker.test.every tool catalog reason code is observed constructs each public-check rejection",
-        .declaration_undecodable, .declaration_digest_mismatch, .declaration_member_missing => "checker.test.every declaration reason code is observed constructs each public-check rejection",
     };
 }
 

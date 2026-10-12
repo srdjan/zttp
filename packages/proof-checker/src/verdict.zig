@@ -6,7 +6,6 @@
 //! a valid signature is none of those.
 
 const std = @import("std");
-const invariant = @import("invariant.zig");
 const proof_system = @import("proof_system.zig");
 
 /// How far semantic acceptance got. Ordered: each state implies the ones before
@@ -112,12 +111,7 @@ pub const Stage = enum(u8) {
     policy = 9,
     /// Residual guard reconstruction and coverage.
     guard_coverage = 10,
-    /// Application invariant specification and protected-operation coverage.
-    invariant_coverage = 11,
-    /// Tool catalog decoding and its executable-graph member.
-    tool_catalog = 12,
-    /// Declaration decoding and its executable-graph member.
-    declaration = 13,
+    // Stage ordinals 11 through 13 are retired.
 
     pub fn name(self: Stage) []const u8 {
         @setRuntimeSafety(true);
@@ -224,34 +218,8 @@ pub const ReasonCode = enum(u16) {
     guard_family_disabled = 1916,
     semantics_epoch_not_selected = 1806,
 
-    // application invariants
-    invariant_spec_missing = 2001,
-    invariant_spec_undecodable = 2002,
-    invariant_spec_digest_mismatch = 2003,
-    invariant_spec_member_missing = 2004,
-    invariant_adapter_member_missing = 2005,
-    invariant_adapter_identity_mismatch = 2006,
-    invariant_operation_required = 2007,
-    invariant_member_missing = 2008,
-    invariant_member_extra = 2009,
-    invariant_member_duplicate = 2010,
-    invariant_member_out_of_order = 2011,
-    invariant_operation_unknown = 2012,
-    invariant_operation_mismatch = 2013,
-    invariant_sink_mismatch = 2014,
-    invariant_impl_identity_mismatch = 2015,
-    invariant_translation_missing = 2016,
-    invariant_observed_mismatch = 2017,
-
-    // tool catalog
-    tool_catalog_undecodable = 2101,
-    tool_catalog_digest_mismatch = 2102,
-    tool_catalog_member_missing = 2103,
-
-    // declaration
-    declaration_undecodable = 2201,
-    declaration_digest_mismatch = 2202,
-    declaration_member_missing = 2203,
+    // Reason ordinals 2001 through 2017, 2101 through 2103, and 2201 through
+    // 2203 are retired.
 
     pub fn text(self: ReasonCode) []const u8 {
         @setRuntimeSafety(true);
@@ -297,98 +265,6 @@ pub const GuardVerdicts = struct {
     pub fn ready(self: GuardVerdicts) bool {
         @setRuntimeSafety(true);
         return self.required == self.covered;
-    }
-};
-
-/// Whether a covered call site can modify protected ledger state.
-///
-/// Coverage counts call sites, not calls that executed. An artifact that reads
-/// balances and never posts therefore carries nothing for a write-gating kind
-/// to constrain. That is a missing write-applicability report, not a
-/// demonstrated conservation failure: the operation floor still ran, the read
-/// call site is genuinely covered, and the store still validates its baseline
-/// on real input at startup. It is reported rather than refused, because
-/// refusing a legitimate read-only topology would push an author to add a
-/// posting group nobody wants.
-///
-/// This is a report and never a verdict. It does not appear in `ready()`, in
-/// the runtime's `coverageReady()`, or in the activation condition either of
-/// those feeds.
-pub const WriteApplicability = enum {
-    /// No invariant is configured, or the kind asked about is not declared, so
-    /// the question does not arise.
-    not_applicable,
-    /// Configured and covered, with no covered call site that writes. Nothing
-    /// was weakened; there was nothing for a write-gating kind to apply to.
-    vacuous,
-    /// At least one covered call site can modify protected ledger state.
-    covered,
-};
-
-/// Write applicability for one declared kind, given what the artifact as a
-/// whole reports.
-///
-/// Per-kind applicability is degenerate today, and deliberately so: both
-/// members of the closed catalog gate `post`, so every declared kind answers
-/// what the artifact answers, and only a kind the document does not declare
-/// differs. Do not add a per-kind observation pass to make it less degenerate.
-/// Whether a write was observed is settled once, by the exact operation,
-/// witness and observation comparison in `checkInvariantCoverage`, and a
-/// second place that decides it is a second answer to a settled question. The
-/// day the catalog holds a kind whose `applies_to_writes` is false, that
-/// catalog row - not a new pass over the artifact - is what changes the answer
-/// here.
-pub fn writeApplicabilityForKind(
-    declared_kind_bits: u32,
-    artifact: WriteApplicability,
-    kind: invariant.Kind,
-) WriteApplicability {
-    @setRuntimeSafety(true);
-    if (declared_kind_bits & invariant.kindBit(kind) == 0) return .not_applicable;
-    if (!invariant.kindInfo(kind).applies_to_writes) return .not_applicable;
-    return artifact;
-}
-
-/// What the consumer established about a configured application invariant.
-/// This remains separate from static property grades and residual guards.
-pub const InvariantVerdicts = struct {
-    configured: bool = false,
-    /// Protected operations reconstructed from proof IR.
-    required: u32 = 0,
-    /// Operations related to final bytecode and independently observed calls.
-    covered: u32 = 0,
-    /// Covered operations that can modify protected ledger state.
-    writes: u32 = 0,
-    /// One bit per configured invariant kind, at the kind's wire ordinal less
-    /// one. In-memory only: no certificate or artifact section carries it, so
-    /// the width here is bounded by the catalog rather than by a wire format.
-    kind_bits: u32 = 0,
-
-    pub fn ready(self: InvariantVerdicts) bool {
-        @setRuntimeSafety(true);
-        return self.configured and self.required > 0 and self.required == self.covered;
-    }
-
-    /// Write applicability for the artifact as a whole.
-    ///
-    /// Derived, never recorded. `writes` is incremented in exactly one place,
-    /// as the exact operation, witness and observation comparison accepts each
-    /// call site, and a declared write the loader did not independently
-    /// observe - or an observed write the certificate does not witness -
-    /// rejects before this is ever reached. Deciding here from anything but
-    /// that count would answer a question already answered.
-    pub fn writeApplicability(self: InvariantVerdicts) WriteApplicability {
-        @setRuntimeSafety(true);
-        if (!self.configured) return .not_applicable;
-        return if (self.writes == 0) .vacuous else .covered;
-    }
-
-    /// Write applicability for one declared kind. `kind_bits` says which kinds
-    /// the accepted specification declared; nothing is recomputed from the
-    /// document. See `writeApplicabilityForKind` for why this is degenerate.
-    pub fn writeApplicabilityFor(self: InvariantVerdicts, kind: invariant.Kind) WriteApplicability {
-        @setRuntimeSafety(true);
-        return writeApplicabilityForKind(self.kind_bits, self.writeApplicability(), kind);
     }
 };
 
@@ -485,10 +361,6 @@ pub const Assessment = struct {
     /// verdicts, never folded into either: a covered guard is a promise to
     /// check at run time, and a passing check is not a theorem.
     guards: GuardVerdicts = .{},
-    /// Application invariant coverage. Runtime enforcement remains a separate
-    /// deployment condition and does not raise a static proof grade.
-    invariants: InvariantVerdicts = .{},
-
     pub fn accepted(self: Assessment) bool {
         @setRuntimeSafety(true);
         return self.outcome == .accepted;
@@ -585,10 +457,9 @@ test "a property keeps its acceptance when its grade is updated" {
     try std.testing.expect(properties.accepted(.response_total));
 }
 
-test "guard and invariant readiness require exact non-empty coverage" {
+test "guard readiness requires exact coverage" {
     try std.testing.expect(!(GuardVerdicts{ .required = 1, .covered = 2 }).ready());
     try std.testing.expect(!(GuardVerdicts{ .required = 2, .covered = 1 }).ready());
-    try std.testing.expect(!(InvariantVerdicts{ .configured = true }).ready());
 }
 
 test "reason codes are unique and stable" {
@@ -599,6 +470,24 @@ test "reason codes are unique and stable" {
             if (i != j) try std.testing.expect(a.value != b.value);
         }
         try std.testing.expect(a.value >= 1000);
+    }
+}
+
+test "retired stage and reason ordinals remain unused" {
+    for ([_]u8{ 11, 12, 13 }) |retired_stage| {
+        try std.testing.expectEqual(@as(?Stage, null), std.enums.fromInt(Stage, retired_stage));
+    }
+    for (2001..2018) |retired_reason| {
+        try std.testing.expectEqual(
+            @as(?ReasonCode, null),
+            std.enums.fromInt(ReasonCode, @as(u16, @intCast(retired_reason))),
+        );
+    }
+    for ([_]u16{ 2101, 2102, 2103, 2201, 2202, 2203 }) |retired_reason| {
+        try std.testing.expectEqual(
+            @as(?ReasonCode, null),
+            std.enums.fromInt(ReasonCode, retired_reason),
+        );
     }
 }
 
@@ -623,9 +512,6 @@ test "every stage and state has its exact stable name" {
         .{ Stage.solver, "solver" },
         .{ Stage.policy, "policy" },
         .{ Stage.guard_coverage, "guard_coverage" },
-        .{ Stage.invariant_coverage, "invariant_coverage" },
-        .{ Stage.tool_catalog, "tool_catalog" },
-        .{ Stage.declaration, "declaration" },
     };
     try std.testing.expectEqual(@typeInfo(Stage).@"enum".fields.len, stages.len);
     inline for (stages) |item| try std.testing.expectEqualStrings(item[1], item[0].name());

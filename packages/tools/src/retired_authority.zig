@@ -43,14 +43,6 @@ pub const Facts = struct {
     ledger_config: bool = false,
 };
 
-pub const project_keys = [_][]const u8{
-    "invariants",
-    "declaration",
-    "ledger",
-    "auth",
-    "credentials",
-};
-
 pub fn isRetiredModule(specifier: []const u8) bool {
     return std.mem.eql(u8, specifier, "zttp:ledger") or
         std.mem.eql(u8, specifier, "zttp:tool");

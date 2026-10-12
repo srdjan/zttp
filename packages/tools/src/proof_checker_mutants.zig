@@ -19,8 +19,8 @@ const Mutant = struct {
 // probing a deleted list and reported rows that no longer existed.
 var mutants: []const Mutant = &.{};
 
-// The Phase 0 suite contains 276 tests. This floor allows only a small loss.
-const minimum_test_count: usize = 270;
+// The unfiltered suite runs 195 tests after Phase 2 removes three subjects.
+const minimum_test_count: usize = 195;
 const test_timeout_seconds: u64 = 10;
 const process_output_limit: std.Io.Limit = .limited(8 * 1024 * 1024);
 const baseline_timeout: std.Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(120), .clock = .awake } };

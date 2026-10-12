@@ -145,6 +145,7 @@ pub fn build(b: *std.Build) void {
     });
     runtime_instance.addImport("zts", zts_mod);
     runtime_instance.addImport("zttp_proof_checker", proof_checker_mod);
+    runtime_instance.addImport("project_config", project_config_mod);
     runtime_instance.addOptions("runtime_feature_options", runtime_features);
     runtime_instance.addAnonymousImport("embedded_handler", .{
         .root_source_file = b.path("src/embedded_handler_stub.zig"),

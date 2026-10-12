@@ -33,16 +33,9 @@ runtime builtins
 runtime bytecode
 runtime bytes
 runtime bytecode_cache
-# The accepted declaration names its ceiling profile by wire index (M4 T5b);
-# the runtime lowers that index to the same profile row the build enforced,
-# so the runtime ceiling and the build ceiling cannot use two tables.
-runtime capability_profiles
 runtime compat
 runtime contract_diff
 runtime counterexample
-# The build and deploy paths carry the zttp.json consumer declaration into the
-# flow check (M4 T4); the runtime names its type, the loader runs in tools.
-runtime declaration
 # The one endpoint rule. The runtime compares what the compiler recorded, so
 # both must canonicalize `scheme://host:port` identically; a second copy in the
 # runtime is the drift this row exists to avoid.
@@ -75,17 +68,11 @@ runtime spec_discharge
 # a denied write did not add.
 runtime sqlite
 runtime string
-# Compiling the accepted tool catalog's schemas at startup (M4 T3): the
-# runtime refuses to serve a catalog whose schema does not compile.
-runtime tool_schema
 runtime trace
 
 # tools
 tools builtin_modules
 tools bytecode_cache
-# The vocabulary envelope publishes the capability profile table, which moved
-# to zts-base so the compiler can enforce it (M4 T5b).
-tools capability_profiles
 tools contract_diff
 # The routed-property census iterates the flow PropertyTag enum so a new
 # property cannot silently omit its direct and routed rejection probes.
@@ -109,7 +96,6 @@ tools service_types
 tools spec_discharge
 tools sqlite
 tools system_linker
-tools tool_schema
 tools witness_corpus
 
 # pi

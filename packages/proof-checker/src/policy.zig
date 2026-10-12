@@ -196,8 +196,8 @@ test "production refuses development artifacts and solver edges" {
 }
 
 test "policy pins its proof system and epoch" {
-    try testing.expect(production.acceptsSchema(4));
-    try testing.expect(!production.acceptsSchema(3));
+    try testing.expect(production.acceptsSchema(5));
+    try testing.expect(!production.acceptsSchema(4));
     try testing.expect(production.acceptsProofSystem(.zttp_pcc_v3));
     try testing.expect(production.acceptsEpoch(ps.semantics_epoch));
     try testing.expect(!production.acceptsEpoch(ps.semantics_epoch + 1));

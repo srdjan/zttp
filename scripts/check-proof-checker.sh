@@ -42,8 +42,8 @@ while IFS= read -r -d '' path; do
   esac
 done < <(git ls-files -z --cached --others --exclude-standard "$src" | sort -z)
 # The kernel is small on purpose, but "smaller than this" means the glob broke
-# or a file was dropped. The floor is the count on 2026-09-25.
-min_sources=15
+# or a retained file was dropped. Phase 2 leaves 13 files after three subjects retire.
+min_sources=13
 if [[ ${#sources[@]} -lt $min_sources ]]; then
   note "found ${#sources[@]} source files under $src, expected at least $min_sources - the gate is reading nothing"
   exit 1
@@ -203,9 +203,8 @@ for file in "${sources[@]}"; do
 done
 
 # The floor itself. Deleting the corpus must fail this gate, not quietly pass it.
-# The count on 2026-09-25 was 274; the margin allows a small consolidation, not
-# the loss of a file's worth of tests.
-min_tests=265
+# Phase 2 leaves 195 test blocks. The unfiltered kernel suite runs all 195.
+min_tests=195
 if [[ "$total_tests" -lt "$min_tests" ]]; then
   note "found $total_tests kernel tests, expected at least $min_tests"
 fi
@@ -228,7 +227,7 @@ unproducible_codes=(
 verdict_file="$src/verdict.zig"
 reason_codes=()
 while IFS= read -r code; do reason_codes+=("$code"); done < <(awk '/^pub const ReasonCode = enum/,/^};/' "$verdict_file" | sed -nE 's/^[[:space:]]+([a-z_]+) = [0-9]+,.*/\1/p')
-if [[ ${#reason_codes[@]} -lt 50 ]]; then
+if [[ ${#reason_codes[@]} -lt 71 ]]; then
   note "read ${#reason_codes[@]} ReasonCode members from $verdict_file; the census is reading nothing"
 fi
 test_block_lines="$(awk '
