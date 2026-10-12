@@ -5,7 +5,6 @@ const project_config_mod = @import("project_config");
 const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const proofs_cli = @import("proofs_cli.zig");
-const proof_cli = @import("proof_cli.zig");
 const witnesses_cli = @import("witnesses_cli.zig");
 const invariant_cli = @import("invariant_cli.zig");
 const shared = @import("cli_shared.zig");
@@ -105,7 +104,6 @@ fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8)
     pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
     pi_app.perf_probe.setProbeFn(perf_probe_lib.recordPerfReceipt);
     pi_app.equivalence_probe.setProbeFn(equivalence_probe_lib.recordEquivalenceReceipt);
-    pi_app.capsule_probe.setProbeFn(dev_command.capsuleReplayProbe);
     try pi_app.run(allocator);
 }
 
@@ -428,19 +426,6 @@ fn cmdProofs(ctx: cli_help.Ctx) anyerror!void {
     return;
 }
 
-fn cmdProof(ctx: cli_help.Ctx) anyerror!void {
-    // Deprecated alias for `zttp proofs replay`, kept for one release and
-    // deliberately absent from `help --all`. proof_cli.run prints the
-    // migration note. Expected user errors (missing capsule, policy
-    // mismatch, regression) are explained on stderr; only unexpected ones
-    // bubble.
-    proof_cli.run(ctx.allocator, ctx.args) catch |err| {
-        if (proof_cli.isExpectedUserError(err)) std.process.exit(1);
-        return err;
-    };
-    return;
-}
-
 fn cmdWitnesses(ctx: cli_help.Ctx) anyerror!void {
     witnesses_cli.run(ctx.allocator, ctx.args) catch |err| {
         if (witnesses_cli.isExpectedUserError(err)) std.process.exit(1);
@@ -484,8 +469,7 @@ const commands = [_]cli_help.Command{
     .{ .name = "deploy", .run = cmdDeploy, .section = .core, .blurb = "Build, prove, deploy (local default)" },
     .{ .name = "verify", .run = cmdVerify, .section = .proof_ledger, .args = "<url>", .blurb = "Verify a deployed proof receipt" },
     .{ .name = "invariant", .run = cmdInvariant, .section = .proof_ledger, .args = "[list|author]", .blurb = "List invariant kinds or draft a reviewable candidate" },
-    .{ .name = "proofs", .run = cmdProofs, .section = .proof_ledger, .args = "[list|show|diff|watch|export|badge|bundle|verify|gate|replay]" },
-    .{ .name = "proof", .run = cmdProof, .section = .unlisted },
+    .{ .name = "proofs", .run = cmdProofs, .section = .proof_ledger, .args = "[list|show|diff|watch|export|badge|bundle|verify|gate]" },
     .{ .name = "witnesses", .run = cmdWitnesses, .section = .advanced, .args = "[list|pin|unpin|prune|synthesize]", .blurb = "Falsifying-input corpus" },
     .{ .name = "version", .run = cmdVersion, .section = .advanced, .alias = "--version", .blurb = "Show version" },
     .{ .name = "help", .alias = "--help", .run = cmdHelp, .section = .unlisted },
@@ -743,7 +727,7 @@ test "every listed command appears in help --all, and every listing has a comman
     const help_all = cli_help.renderHelpAllForTest(&buf);
 
     // Direction 1: a command in the table must be advertised, unless it is
-    // deliberately unlisted (the deprecated `proof` alias, and `help` itself).
+    // deliberately unlisted (`help` itself).
     for (commands) |c| {
         if (c.section == .unlisted) continue;
         var needle: [64]u8 = undefined;

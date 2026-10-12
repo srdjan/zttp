@@ -28,8 +28,6 @@ test {
     _ = proof_review.state;
 
     _ = @import("proof_ledger.zig");
-    _ = @import("capsule.zig");
-    _ = @import("proof_cli.zig");
     _ = @import("perf_probe_lib.zig");
     _ = @import("equivalence_probe_lib.zig");
     _ = @import("proofs_cli.zig");
@@ -39,6 +37,5 @@ test {
     _ = @import("proofs/guard_report.zig");
     _ = @import("proofs/invariant_report.zig");
     _ = @import("proof_card_tui.zig");
-    _ = @import("proof_audit_ring.zig");
     _ = @import("ratchet_command.zig");
 }

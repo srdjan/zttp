@@ -1,7 +1,6 @@
 //! `zttp dev` - the local edit loop. `dev` is the magnet surface (implies
-//! --watch --prove, optional proof-capsule recording) and runs the analyzer
-//! gate (runDevPreflight) before serving. Dispatch and error-to-exit-code
-//! translation stay in dev_cli.main.
+//! --watch --prove) and runs the analyzer gate (runDevPreflight) before
+//! serving. Dispatch and error-to-exit-code translation stay in dev_cli.main.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -10,8 +9,6 @@ const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const precompile = zts_cli.precompile;
 const shared = @import("cli_shared.zig");
-const proof_cli = @import("proof_cli.zig");
-const pi_app = @import("pi_app");
 const project_config_mod = @import("project_config");
 const cli_paths = @import("cli_paths.zig");
 const resolveDeveloperServeBinary = cli_paths.resolveDeveloperServeBinary;
@@ -58,20 +55,6 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     const user_no_prove = shared.hasFlag(argv, "--no-prove");
     const user_has_watch = shared.hasFlag(argv, "--watch");
     const user_has_prove = shared.hasFlag(argv, "--prove");
-    const user_record_proof = shared.hasFlag(argv, "--record-proof");
-
-    // `--record-proof` desugars to the existing live `--trace` capture aimed
-    // inside a capsule directory, plus a manifest written once the session
-    // ends. The session trace path must outlive the child process.
-    const capsule_name = "default";
-    const record_trace_path: ?[]u8 = if (user_record_proof)
-        proof_cli.sessionTracePathAlloc(allocator, capsule_name) catch |err| blk: {
-            std.debug.print("zttp dev: --record-proof could not prepare a capsule: {}\n", .{err});
-            break :blk null;
-        }
-    else
-        null;
-    defer if (record_trace_path) |p| allocator.free(p);
 
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
@@ -90,26 +73,10 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
     try appendDevTurnSettings(allocator, argv, &child_args, turn_directory);
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--no-prove")) continue;
-        // `--record-proof` is a dev-layer flag; the runtime sees only --trace.
-        if (std.mem.eql(u8, arg, "--record-proof")) continue;
         try child_args.append(allocator, arg);
     }
     if (!user_has_watch) try child_args.append(allocator, "--watch");
     if (!user_has_prove and !user_no_prove) try child_args.append(allocator, "--prove");
-    if (record_trace_path) |trace_path| {
-        try child_args.append(allocator, "--trace");
-        try child_args.append(allocator, trace_path);
-        // Write the manifest up front: it describes the handler (its hashes,
-        // contract, policy), not the recorded traces, and `dev` is normally
-        // ended with Ctrl+C — which signals the whole process group, so any
-        // post-shutdown code here would not reliably run. Writing now means
-        // the capsule is complete the moment the first request is captured.
-        recordProofManifest(allocator, argv, capsule_name) catch |err| {
-            std.debug.print("zttp dev: --record-proof could not write the capsule manifest: {}\n", .{err});
-        };
-        std.debug.print("Recording a proof capsule to .zttp/capsules/{s}/ — requests this session are captured.\n", .{capsule_name});
-        std.debug.print("After an edit, replay it with: zttp proofs replay {s}\n", .{capsule_name});
-    }
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -147,20 +114,6 @@ fn childExitCode(term: std.process.Child.Term) ?u8 {
     };
 }
 
-/// Adapter registered into the `pi_app.capsule_probe` seam: replays the
-/// workspace's active capsule against just-applied content and maps the
-/// runtime tally onto the PI seam's tally type. Best-effort by contract.
-pub fn capsuleReplayProbe(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    handler_path: []const u8,
-    after_bytes: []const u8,
-) anyerror!pi_app.capsule_probe.ReplayTally {
-    const tally = proof_cli.replayActiveCapsule(allocator, workspace_root, handler_path, after_bytes) catch
-        return pi_app.capsule_probe.ReplayTally{};
-    return .{ .total = tally.total, .regressed = tally.regressed };
-}
-
 /// The project's configured capability policy, for a boundary that is about to
 /// publish a verdict. A configured policy that cannot be read is a refusal, not
 /// an absent policy, so both callers stop rather than analyze without it.
@@ -181,54 +134,6 @@ fn loadConfiguredPolicy(
         }
         return error.CheckFailed;
     };
-}
-
-/// Resolve the handler + system path the recording session used, then write
-/// the capsule manifest. Split out so `devCommand` stays readable.
-fn recordProofManifest(allocator: std.mem.Allocator, argv: []const []const u8, capsule_name: []const u8) !void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    const explicit_path = shared.findPositionalPath(argv);
-    var project = try project_config_mod.discover(allocator, io, explicit_path);
-    defer if (project) |*p| p.deinit(allocator);
-
-    const handler_path = if (explicit_path) |path|
-        try allocator.dupe(u8, path)
-    else if (project) |*cfg|
-        try cfg.resolvedEntry(allocator)
-    else
-        return error.NoProjectConfig;
-    defer allocator.free(handler_path);
-
-    const explicit_sqlite = optionValue(argv, "--sqlite");
-    const explicit_system = optionValue(argv, "--system");
-    const discovered_sqlite = if (explicit_sqlite == null)
-        if (project) |*cfg| try cfg.resolvedSqlitePath(allocator) else null
-    else
-        null;
-    defer if (discovered_sqlite) |p| allocator.free(p);
-    const discovered_system = if (explicit_system == null)
-        if (project) |*cfg| try cfg.resolvedSystemPath(allocator) else null
-    else
-        null;
-    defer if (discovered_system) |p| allocator.free(p);
-    const policy_source = try loadConfiguredPolicy(
-        allocator,
-        if (project) |*cfg| cfg else null,
-        "proof recording",
-    );
-    defer if (policy_source) |source| allocator.free(source);
-
-    try proof_cli.writeManifest(
-        allocator,
-        capsule_name,
-        handler_path,
-        explicit_sqlite orelse discovered_sqlite,
-        explicit_system orelse discovered_system,
-        policy_source,
-    );
 }
 
 fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, command: []const u8) !void {
@@ -348,8 +253,6 @@ pub fn printDevHelp() void {
         \\  -p, --port <PORT>     Port to listen on (project default: 3000)
         \\  -h, --host <HOST>     Host to bind to (project default: 127.0.0.1)
         \\  --no-prove            Watch and reload without contract proof gating
-        \\  --record-proof        Capture this session's requests into a replayable
-        \\                        proof capsule (.zttp/capsules/default/)
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --sqlite <FILE>       SQLite database for zttp:sql
         \\  --system <FILE>       Handler bundle for zttp:service/workflow

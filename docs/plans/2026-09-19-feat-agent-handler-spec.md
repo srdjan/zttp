@@ -93,8 +93,8 @@ M4 T6 added both on the synchronous `fetch` path.
 Existing recorders also do not supply the proposed turn contract.
 `packages/runtime/src/trace_request_recorder.zig` captures request/response data
 without per-effect acknowledgement; `packages/runtime/src/security_logger.zig`
-uses best-effort writes; `packages/runtime/src/proof_audit_ring.zig` records cache
-and route decisions. U2 still needs an acknowledged, bounded turn recorder.
+uses best-effort writes; `pre-rebase:packages/runtime/src/proof_audit_ring.zig` records
+cache and route decisions. U2 still needs an acknowledged, bounded turn recorder.
 
 The language does not expose general JavaScript async execution. This feature
 must fit the admitted language and native callback model. It must not silently

@@ -357,3 +357,54 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - After the change `zts prove a b` prints "Unknown command: prove", `zts compile --openapi` prints "Unknown flag: --openapi", and `zig build -Dreplay=x` prints "invalid option: -Dreplay".
 - Invariant 4 after G6: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: nothing under `packages/pi` changed.
+
+## G7 Runtime proof extras: `proof` alias, capsules, audit ring
+
+### Removed
+
+- `packages/runtime/src/proof_cli.zig`, `capsule.zig`, and `proof_audit_ring.zig`
+- The `proofs replay` subcommand (`Subcommand.replay`, its parser row, its help text, and its dispatch in `proofs_cli.zig`). `zttp proofs replay x` now prints "unknown subcommand".
+- The `zttp proof` alias (`cmdProof` and its table row in `dev_cli.zig`). `zttp proof replay x` now prints "Unknown command: proof".
+- `dev --record-proof`: the flag handling, the `--trace` desugaring, `recordProofManifest`, and the help lines in `dev_command.zig`.
+- The capsule callback: `capsuleReplayProbe` in `dev_command.zig` and its registration `pi_app.capsule_probe.setProbeFn(...)` in `dev_cli.zig`.
+- The audit ring push sites (`pushRouteBlocked`, `pushCacheHit`) in `server.zig`, and the ring reads and `audit_ring.clear()` calls in `proof_card_tui.zig`.
+- Two tests in `proofs_cli.zig` (replay as a subcommand, replay missing capsule) and one in `proof_card_tui.zig` (requests pane renders audit events). A new test in `proofs_cli.zig` asserts that `replay` is refused and absent from the help. `test-cli` went from 868 to 846 passed: 20 tests lived in the three deleted files (6, 10, and 4), three more were removed, and one was added.
+- Docs: `docs/cli.md` (the `--record-proof` text, the `proofs replay` lines, the deprecated-alias paragraph), `docs/proofs-and-receipts.md` (one phrase naming the audit ring), and `docs/plans/2026-09-19-feat-agent-handler-spec.md` (the ring citation became `pre-rebase:`).
+- Help text: `cli_help.zig` and the `proofs` row in `dev_cli.zig` no longer list `replay`.
+
+### Kept on purpose
+
+- `proofs list`, `show`, `diff`, `watch`, `export`, `badge`, `bundle`, `verify`, `gate`, and the HTML and Markdown renders.
+- `proof_ledger.zig` (no row kind changed), `replay_runner.zig`, `witness_replay_lib.zig`, `zttp ledger replay`, and the release workflow step. `replay_runner.replayOne` has other callers (`replay_turn.zig`, `witness_replay_lib.zig`, `runtime_cli.zig`), so no code from `proof_cli.zig` had to move.
+- `packages/pi/src/capsule_probe.zig` and its `app.zig` and `tests.zig` references. They are G10 scope. No code calls `capsule_probe` now, since the registration is gone.
+- The `--replay`, `--test-file`, and `--trace` runtime flags on `serve` and `dev`.
+- `tooling/release_check.zig` needed no change: the proof-surface check reads only `badge`, `bundle`, and `verify` from `proofs_cli.zig`.
+- The `Proof<...>` capsule vocabulary (ZTS611, `CONCEPTS.md` "Proof capsule", `defect_seeds.zig`): it is a language construct, not the recorded-trace capsule.
+
+### Judgments the plan did not settle
+
+- The Requests pane. `proof_card_tui.zig` laid out three columns, and the third column held the audit ring. With the ring gone, G7 removed the pane content and its "Requests" header and kept the three-column geometry. The third column now holds only the status bar's Baseline cell and is blank in the other rows. The frame width stays 100 columns, the status bar and Why row are unchanged, and the `ColumnWidths.requests` field became `status`. A two-column reflow is a possible later change.
+- `dev --record-proof` is not refused by `dev`. The flag now passes through to `serve`, which handles it as it handles any unknown flag.
+- G7 left `packages/pi/src/app.zig:37-40` comments about the capsule probe seam unchanged (G10 deletes that seam).
+
+### Dead code for G15 and G10
+
+- G10: `packages/pi/src/capsule_probe.zig`, its `app.zig` export, and its `tests.zig` import. Nothing calls it.
+- G15: nothing else in `packages/runtime` was reached only by the three deleted files. `zts.trace` and `file_io` have other users.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "proof_cli|\bcapsule\.zig|proof_audit_ring|audit_ring|AuditRing|--record-proof|record_proof|proofs replay|proof replay|zttp proof replay|\.zttp/capsules|proofs? alias|cmdProof\b|replayActiveCapsule|capsuleReplayProbe|recordProofManifest" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling examples
+```
+
+Remaining hits: plan text of this series, the `pre-rebase:` citation, an unrelated "proof replay" phrase in `docs/plans/2026-10-09-fault-coverage-for-upstream-calls.md`, `packages/pi/src/capsule_probe.zig` comments (G10), unrelated `Proof alias` test names, and frozen cassette text under `packages/pi/src/simulator/testdata`.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `test-cli` (846 passed, 1 skipped, 0 failed), `test-server`, `test-expert-app`, `test-release-check`, `test-module-boundary`, `test-docs-drift`, `test-step-coverage`, `test-doc-links`, `test-runtime-purity`, `test-script-reachability`, `test-zruntime` (alone), and `zig build test`.
+- `zig fmt --check build.zig build/ packages/ tooling/` and `bash scripts/audit-docs.sh`: exit 0.
+- Invariant 4 after G7: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: nothing under `packages/pi` changed. The only `pi` references to deleted files are the unregistered `capsule_probe` seam, which imports none of them.

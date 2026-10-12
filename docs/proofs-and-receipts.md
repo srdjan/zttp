@@ -240,8 +240,7 @@ The three keystrokes hold for both classes:
 cause-only Counterexamples this is a no-op today because the cause is a
 construct rather than a runnable request. For flow-driven Counterexamples
 this hits the dev server with the synthesised request and the replay
-stub responses, so a developer can see the regression reproduce in the
-same audit ring the rest of the HUD streams.
+stub responses, so a developer can see the regression reproduce.
 
 `[s]` pins the underlying witness into the corpus as a regression test.
 The pinned witness re-fires on every subsequent analysis pass, so a fix

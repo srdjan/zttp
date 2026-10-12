@@ -119,8 +119,7 @@ const help_all_mid =
     \\  zttp compile <handler.ts> -o <bin>   Build a binary from an explicit path
     \\
     \\Proof ledger:
-    \\  zttp proofs [list|show|diff|watch|export|badge|bundle|verify|gate|replay]
-    \\  zttp proofs replay <capsule>         Replay a recorded capsule against the current handler
+    \\  zttp proofs [list|show|diff|watch|export|badge|bundle|verify|gate]
     \\  zttp ledger [export|replay]          Export or replay an expert-session verified-patch ledger
     \\  zttp gate-report <gate-log>          Report tool-contract pass rate and turn volume per niche
     \\  zttp verify <url>                    Verify a deployed proof receipt

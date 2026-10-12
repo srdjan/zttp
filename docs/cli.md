@@ -84,10 +84,9 @@ Common `dev` and `serve` flags:
 | `--static <dir>` | Serve static files. |
 | `--no-env-check` | Skip startup env validation. |
 
-`dev` adds `--no-prove` (watch and reload without contract gating) and
-`--record-proof`, which captures the session's requests into a replayable
-proof capsule at `.zttp/capsules/default/`. `serve --watch` takes `--prove` and
-`--force-swap` (apply a breaking swap anyway) instead.
+`dev` adds `--no-prove` (watch and reload without contract gating).
+`serve --watch` takes `--prove` and `--force-swap` (apply a breaking swap
+anyway) instead.
 
 Without `--lifecycle`, only properties promoted from an accepted deployed
 certificate can relax the pool's recycling policy: `reuse` requires pure,
@@ -179,7 +178,6 @@ zttp proofs diff HEAD~1 HEAD
 zttp proofs export --format md --ref HEAD
 zttp proofs badge
 zttp proofs gate --base origin/main --head HEAD
-zttp proofs replay <capsule>
 ```
 
 `zttp proofs gate` compares every changed handler between the base and the head.
@@ -193,16 +191,10 @@ an array of `{"property", "severity"}` objects, empty when nothing was lost.
 When a critical proof is lost, the gate writes no signed receipt for that
 handler. See [Proofs and receipts](proofs-and-receipts.md#proof-gate).
 
-`zttp proofs replay <capsule>` replays a capsule recorded by `zttp dev
---record-proof` against the current handler: exit 0 reproduced, 1 regression. It
-fails closed when the capsule's pinned handler, contract, or policy hash no
-longer matches (`--allow-version-mismatch` overrides). `zttp verify <url>`
+`zttp verify <url>`
 verifies a live endpoint's attestation. `zttp proofs verify <bundle-dir>`
 checks a local bundle's integrity and, when it contains a binary and
 certificate, runs independent semantic acceptance.
-
-The old spelling `zttp proof replay` still works as a deprecated alias for one
-release and prints a migration note. It is no longer listed in `zttp help --all`.
 
 `zttp proofs verify` checks the bundle manifest before it hashes anything. The
 manifest must declare `"toolVersion": "zttp-bundle-3"` and name a `contract`

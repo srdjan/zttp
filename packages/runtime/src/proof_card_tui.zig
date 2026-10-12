@@ -1,14 +1,14 @@
 //! TUI frame writer for ProofCard.
 //!
-//! Renders a ProofCard as a static three-pane ASCII frame: properties grid,
-//! surface tree, request audit. The frame does not move the cursor and does
-//! not require raw mode, so callers can drive a live HUD by simply rendering
+//! Renders a ProofCard as a static ASCII frame: a properties grid and a
+//! surface tree, with a status bar below. The frame does not move the cursor
+//! and does not require raw mode, so callers can drive a live HUD by simply rendering
 //! a fresh frame after each event (e.g. each recompile).
 //!
 //! Layout (default 100 cols):
 //!
-//!     +-------- Properties --------+----- Surface -----+--- Requests ---+
-//!     | [+] retry-safe             | routes (2)        | (no requests)  |
+//!     +-------- Properties --------+----- Surface -----+----------------+
+//!     | [+] retry-safe             | routes (2)        |                |
 //!     | [+] read-only              |   /healthz        |                |
 //!     | ...                        |   /api (prefix)   |                |
 //!     +----------------------------+-------------------+----------------+
@@ -17,11 +17,10 @@
 
 const std = @import("std");
 const review = @import("zttp_proof_review").review;
-const audit_ring = @import("proof_audit_ring.zig");
 
 /// Which view the left pane of the proof card renders. Only the left
-/// pane and its header swap between lenses; the Surface and Requests
-/// panes plus the status bar stay identical so frame geometry is stable
+/// pane and its header swap between lenses; the Surface pane
+/// plus the status bar stay identical so frame geometry is stable
 /// across all four.
 pub const Lens = enum {
     properties,
@@ -86,7 +85,7 @@ pub const FrameOptions = struct {
 const ColumnWidths = struct {
     properties: u16,
     surface: u16,
-    requests: u16,
+    status: u16,
 
     /// Three panes plus four border columns consume the total width. The
     /// content split is roughly 30/40/30 with the surface pane absorbing
@@ -95,9 +94,9 @@ const ColumnWidths = struct {
         const clamped: u16 = @max(60, @min(total_width, 200));
         const inside: u16 = clamped - 4;
         const props: u16 = @max(20, inside * 30 / 100);
-        const reqs: u16 = @max(20, inside * 30 / 100);
-        const surf: u16 = if (inside > props + reqs) inside - props - reqs else 30;
-        return .{ .properties = props, .surface = surf, .requests = reqs };
+        const stat: u16 = @max(20, inside * 30 / 100);
+        const surf: u16 = if (inside > props + stat) inside - props - stat else 30;
+        return .{ .properties = props, .surface = surf, .status = stat };
     }
 };
 
@@ -114,11 +113,9 @@ pub fn writeProofCardFrame(
     defer freeLines(allocator, &left);
     var surface = try buildSurfacePane(allocator, card);
     defer freeLines(allocator, &surface);
-    var requests = try buildRequestsPane(allocator);
-    defer freeLines(allocator, &requests);
 
     try writeBorder(writer, widths);
-    try writeRow(writer, widths, opts.lens.label(), "Surface", "Requests");
+    try writeRow(writer, widths, opts.lens.label(), "Surface", "");
     if (opts.recompile_ms) |ms| {
         var buf: [32]u8 = undefined;
         const stamp = try std.fmt.bufPrint(&buf, "  {d}ms recompile", .{ms});
@@ -126,13 +123,12 @@ pub fn writeProofCardFrame(
     }
     try writeBorder(writer, widths);
 
-    const tall: usize = @max(@max(left.items.len, surface.items.len), requests.items.len);
+    const tall: usize = @max(left.items.len, surface.items.len);
     var i: usize = 0;
     while (i < tall) : (i += 1) {
         const p = if (i < left.items.len) left.items[i] else "";
         const s = if (i < surface.items.len) surface.items[i] else "";
-        const r = if (i < requests.items.len) requests.items[i] else "";
-        try writeRow(writer, widths, p, s, r);
+        try writeRow(writer, widths, p, s, "");
     }
 
     try writeBorder(writer, widths);
@@ -284,7 +280,7 @@ fn writeFullRow(
     content: []const u8,
 ) !void {
     const inside_width: usize =
-        @as(usize, widths.properties) + @as(usize, widths.surface) + @as(usize, widths.requests) + 2;
+        @as(usize, widths.properties) + @as(usize, widths.surface) + @as(usize, widths.status) + 2;
     try writer.writeAll("|");
     const visible: usize = @min(content.len, inside_width);
     try writer.writeAll(content[0..visible]);
@@ -761,38 +757,6 @@ fn appendStringSection(
     }
 }
 
-fn buildRequestsPane(allocator: std.mem.Allocator) !LineList {
-    var lines: LineList = .empty;
-    errdefer freeLines(allocator, &lines);
-
-    var snapshot_buf: [audit_ring.RING_CAPACITY]audit_ring.AuditEvent = undefined;
-    const n = audit_ring.snapshot(&snapshot_buf);
-    if (n == 0) {
-        try lines.append(allocator, try allocator.dupe(u8, "(no requests yet)"));
-        return lines;
-    }
-
-    // Render newest-first so the most recent activity sits at the top of the
-    // pane the same way a tail view does. The ring's `snapshot` writes
-    // chronologically (oldest -> newest), so iterate in reverse.
-    var i: usize = n;
-    while (i > 0) {
-        i -= 1;
-        const ev = snapshot_buf[i];
-        const glyph: []const u8 = switch (ev.kind) {
-            .cache_hit => "*",
-            .route_blocked => "x",
-        };
-        const line = try std.fmt.allocPrint(
-            allocator,
-            "{s} {s} {s} {s}",
-            .{ glyph, ev.kind.label(), ev.methodSlice(), ev.pathSlice() },
-        );
-        try lines.append(allocator, line);
-    }
-    return lines;
-}
-
 fn appendCountedHeading(
     allocator: std.mem.Allocator,
     lines: *LineList,
@@ -818,7 +782,7 @@ fn writeBorder(writer: *std.Io.Writer, widths: ColumnWidths) !void {
     try writer.writeAll("+");
     try writer.splatByteAll('-', widths.surface);
     try writer.writeAll("+");
-    try writer.splatByteAll('-', widths.requests);
+    try writer.splatByteAll('-', widths.status);
     try writer.writeAll("+\n");
 }
 
@@ -834,7 +798,7 @@ fn writeRow(
     try writer.writeAll("|");
     try writePadded(writer, b, widths.surface);
     try writer.writeAll("|");
-    try writePadded(writer, c, widths.requests);
+    try writePadded(writer, c, widths.status);
     try writer.writeAll("|\n");
 }
 
@@ -900,7 +864,6 @@ test "writeProofCardFrame: structure and content" {
         .delta = &delta,
     };
 
-    audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
@@ -909,7 +872,7 @@ test "writeProofCardFrame: structure and content" {
     // Frame headers and panes are present.
     try std.testing.expect(std.mem.indexOf(u8, out, "Properties") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Surface") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Requests") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "Requests") == null);
 
     // Property glyphs reflect proven/not-proven flags.
     try std.testing.expect(std.mem.indexOf(u8, out, "[+] read-only") != null);
@@ -925,9 +888,6 @@ test "writeProofCardFrame: structure and content" {
     try std.testing.expect(std.mem.indexOf(u8, out, "api.example.com") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "capabilities (1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "clock") != null);
-
-    // Empty audit ring -> placeholder text.
-    try std.testing.expect(std.mem.indexOf(u8, out, "(no requests yet)") != null);
 
     // Status bar shows verdict, truncated contract sha, baseline note.
     try std.testing.expect(std.mem.indexOf(u8, out, "Verdict: safe") != null);
@@ -1051,48 +1011,6 @@ test "writeProofCardFrame: resisted block surfaces a held flow proof and keeps w
     }
 }
 
-test "writeProofCardFrame: requests pane renders audit events newest-first" {
-    const allocator = std.testing.allocator;
-    var current = try buildTestFacts(allocator);
-    defer current.deinit(allocator);
-
-    var delta = try review.deriveDelta(allocator, &current, null);
-    defer delta.deinit(allocator);
-
-    const card = ProofCard{
-        .handler_path = "src/handler.ts",
-        .service_name = "demo",
-        .region = "us-east",
-        .current = &current,
-        .baseline = null,
-        .delta = &delta,
-    };
-
-    audit_ring.clear();
-    audit_ring.pushCacheHit("GET", "/healthz");
-    audit_ring.pushRouteBlocked("POST", "/admin");
-
-    var aw = std.Io.Writer.Allocating.init(allocator);
-    defer aw.deinit();
-    try writeProofCardFrame(allocator, &card, &aw.writer, .{});
-    const out = aw.writer.buffered();
-
-    // Both events render in the pane.
-    try std.testing.expect(std.mem.indexOf(u8, out, "cache hit GET /healthz") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "route blocked POST /admin") != null);
-
-    // Newest event renders first within the pane: route_blocked must precede
-    // cache_hit in the output bytes.
-    const route_idx = std.mem.indexOf(u8, out, "route blocked").?;
-    const cache_idx = std.mem.indexOf(u8, out, "cache hit").?;
-    try std.testing.expect(route_idx < cache_idx);
-
-    // Placeholder is gone once the ring has events.
-    try std.testing.expect(std.mem.indexOf(u8, out, "(no requests yet)") == null);
-
-    audit_ring.clear();
-}
-
 test "writeProofCardFrame: recompile_ms surfaces in properties header" {
     const allocator = std.testing.allocator;
     var current = try buildTestFacts(allocator);
@@ -1151,7 +1069,6 @@ test "writeProofCardFrame: renders Why row when a demoted property has a cause" 
         .property_causes = causes[0..],
     };
 
-    audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
@@ -1186,7 +1103,6 @@ test "writeProofCardFrame: no Why row when there are no demotions" {
         .property_causes = causes[0..],
     };
 
-    audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
@@ -1218,7 +1134,6 @@ test "writeProofCardFrame: demotion without a matching cause renders no Why row"
         // property_causes intentionally empty.
     };
 
-    audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     try writeProofCardFrame(allocator, &card, &aw.writer, .{});
@@ -1271,7 +1186,6 @@ fn renderForTest(
         .counterexample = cx,
     };
 
-    audit_ring.clear();
     try writeProofCardFrame(allocator, &card, &out_aw.writer, .{});
 }
 
@@ -1358,7 +1272,6 @@ fn renderLensForTest(
         .delta = &delta,
     };
 
-    audit_ring.clear();
     try writeProofCardFrame(allocator, &card, &out_aw.writer, .{ .lens = lens });
 }
 
@@ -1478,7 +1391,6 @@ test "caller_view lens with null caller_view renders the opt-out notice" {
         .delta = &delta,
     };
 
-    audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     try writeProofCardFrame(allocator, &card, &aw.writer, .{ .lens = .caller_view });
@@ -1513,7 +1425,6 @@ test "caller_view lens with attestation context renders the four blocks" {
         .port = 3000,
     };
 
-    audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     // Wider frame so the left pane fits the long Zttp-Attest line and the
@@ -1560,7 +1471,6 @@ test "caller_view truncates long header values for the narrow left pane" {
         .port = 3000,
     };
 
-    audit_ring.clear();
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
     try writeProofCardFrame(allocator, &card, &aw.writer, .{ .width = 200, .lens = .caller_view, .caller_view = view });

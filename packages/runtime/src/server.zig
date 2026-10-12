@@ -39,7 +39,6 @@ const SystemRuntime = in_process_dispatch.SystemRuntime;
 const actor_queue = @import("actor_queue.zig");
 const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
-const proof_audit_ring = @import("proof_audit_ring.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const artifact_graph = @import("artifact_graph.zig");
 const invariant_report = @import("proofs/invariant_report.zig");
@@ -542,7 +541,6 @@ const ConnectionPool = struct {
         // Route pre-filtering (threaded path)
         if (self.server.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
-                proof_audit_ring.pushRouteBlocked(request.method, request.path);
                 access_status = 404;
                 self.sendStatusSync(fd, 404, "Not Found", keep_alive) catch {};
                 return outcome_if_alive;
@@ -692,7 +690,6 @@ const ConnectionPool = struct {
                 var cached_opt = cache.get(key, req_allocator);
                 if (cached_opt != null) {
                     defer cached_opt.?.deinit();
-                    proof_audit_ring.pushCacheHit(request.method, request.path);
                     access_status = cached_opt.?.status;
                     self.sendResponseSync(fd, &cached_opt.?, keep_alive, is_head) catch return .close;
                     return outcome_if_alive;
