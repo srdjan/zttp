@@ -81,7 +81,6 @@ runtime string
 # runtime refuses to serve a catalog whose schema does not compile.
 runtime tool_schema
 runtime trace
-runtime witness_corpus
 
 # tools
 tools builtin_modules

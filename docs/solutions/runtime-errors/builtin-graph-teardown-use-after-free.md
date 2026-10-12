@@ -80,7 +80,7 @@ properties are owned by `builtin_objects`, so the old stale-reference
 
 Once Guard Malloc completed cleanly, the Linux-only gates were removed from
 `packages/runtime/src/zruntime.zig`, `packages/runtime/src/server_test.zig`,
-`packages/runtime/src/ratchet_command.zig`, and
+`pre-rebase:packages/runtime/src/ratchet_command.zig`, and
 `packages/runtime/src/runtime_pool.zig`.
 
 ## Why This Works

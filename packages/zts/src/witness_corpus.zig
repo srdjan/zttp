@@ -17,7 +17,7 @@
 //!
 //! `<short_hash>` is the first 16 hex chars of sha256(handler_path) to keep
 //! corpus directory names short and stable. The original path is recorded
-//! once in `handler.path` so `zts witnesses list` can present it without
+//! once in `handler.path` so a listing surface can present it without
 //! reversing the hash.
 //!
 //! `<key>` is `counterexample.CounterexampleWitness.stableKey()` - sha256

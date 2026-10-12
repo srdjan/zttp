@@ -815,8 +815,7 @@ zttp serve --trace traces.jsonl src/handler.ts
 zttp serve --replay traces.jsonl src/handler.ts
 ```
 
-Persisted counterexamples live in the witness corpus and can be inspected with
-`zttp witnesses`. See [Witness Corpus](proofs-and-receipts.md#witness-corpus).
+Persisted counterexamples live in the witness corpus. See [Witness Corpus](proofs-and-receipts.md#witness-corpus).
 
 ## Deploy And Verify
 

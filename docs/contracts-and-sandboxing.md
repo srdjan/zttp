@@ -505,8 +505,7 @@ deployed artifact's proof certificate and checker verdict provide the
 separate semantic acceptance boundary.
 
 ```bash
-zttp ratchet show <handler.ts>  # print declared and proven specs, and their differences
-zttp check <handler.ts>         # exit 1 on an undischarged proof (ZTS500)
+zttp check <handler.ts>  # exit 1 on an undischarged proof (ZTS500)
 ```
 
 Handlers that declare no `Proof<T, P>` ratchet against the default full

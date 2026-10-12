@@ -63,16 +63,16 @@ case "$failure_output" in
     ;;
 esac
 
-# A scanner error must not be reclassified as an unused allowlist row. Both
-# files below carry runtime's spec_discharge reach, so dropping both scans
-# reproduces the misleading CI verdict that prompted this regression.
+# A scanner error must not be reclassified as an unused allowlist row. The
+# file below is the only runtime file with spec_discharge reach, so dropping
+# its scan reproduces the misleading CI verdict that prompted this regression.
 if failure_output="$(
   bash -c '
     awk() {
       local arg
       for arg in "$@"; do
         case "$arg" in
-          packages/runtime/src/counterexample_pipeline.zig|packages/runtime/src/witnesses_cli.zig)
+          packages/runtime/src/counterexample_pipeline.zig)
             return 1
             ;;
         esac

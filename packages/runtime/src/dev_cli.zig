@@ -5,14 +5,12 @@ const project_config_mod = @import("project_config");
 const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const proofs_cli = @import("proofs_cli.zig");
-const witnesses_cli = @import("witnesses_cli.zig");
 const invariant_cli = @import("invariant_cli.zig");
 const shared = @import("cli_shared.zig");
 const runtime_cli = @import("runtime_cli.zig");
 const feature_options = @import("runtime_feature_options");
 const embedded_handler = @import("embedded_handler");
 const proof_ledger = @import("proof_ledger.zig");
-const ratchet_command = @import("ratchet_command.zig");
 const pi_app = @import("pi_app");
 const verify_cli = @import("verify_cli.zig");
 const cli_args = @import("cli_args.zig");
@@ -46,7 +44,6 @@ test {
     _ = @import("init_command.zig");
     _ = @import("build_command.zig");
     _ = @import("dev_command.zig");
-    _ = @import("ratchet_command.zig");
     _ = @import("cli_help.zig");
     _ = @import("workflow_queue_cli.zig");
     _ = @import("durable_dead_runs_cli.zig");
@@ -320,21 +317,6 @@ fn cmdBuild(ctx: cli_help.Ctx) anyerror!void {
     return;
 }
 
-fn cmdRatchet(ctx: cli_help.Ctx) anyerror!void {
-    ratchet_command.run(ctx.allocator, ctx.args) catch |err| switch (err) {
-        error.MissingArgument,
-        error.UnknownSubcommand,
-        error.UnknownFlag,
-        error.TooManyArguments,
-        error.BaselineFlagRemoved,
-        error.NonRatchetableSpec,
-        => std.process.exit(1),
-        error.HandlerCompileFailed, error.Regression => std.process.exit(1),
-        else => return err,
-    };
-    return;
-}
-
 fn cmdLedger(ctx: cli_help.Ctx) anyerror!void {
     // Session ledger management (list, resume, export, replay). Lives only
     // in the developer CLI; the pi-free `zts` analyzer binary does not
@@ -426,14 +408,6 @@ fn cmdProofs(ctx: cli_help.Ctx) anyerror!void {
     return;
 }
 
-fn cmdWitnesses(ctx: cli_help.Ctx) anyerror!void {
-    witnesses_cli.run(ctx.allocator, ctx.args) catch |err| {
-        if (witnesses_cli.isExpectedUserError(err)) std.process.exit(1);
-        return err;
-    };
-    return;
-}
-
 fn cmdInvariant(ctx: cli_help.Ctx) anyerror!void {
     invariant_cli.run(ctx.allocator, ctx.args) catch |err| {
         if (invariant_cli.isExpectedUserError(err)) std.process.exit(1);
@@ -462,7 +436,6 @@ const commands = [_]cli_help.Command{
     .{ .name = "test", .run = cmdTest, .section = .core, .args = "[tests.jsonl]", .blurb = "Run handler tests" },
     .{ .name = "compile", .run = cmdCompile, .section = .package, .args = "<handler.ts> -o <bin>", .blurb = "Build a binary from an explicit path" },
     .{ .name = "build", .run = cmdBuild, .section = .package, .args = "[-o <bin>]", .blurb = "Emit a self-contained binary" },
-    .{ .name = "ratchet", .run = cmdRatchet, .section = .advanced, .args = "show <handler.ts>", .blurb = "Print declared vs proven spec sets" },
     .{ .name = "ledger", .run = cmdLedger, .section = .proof_ledger, .args = "[export|replay]", .blurb = "Export or replay an expert-session verified-patch ledger" },
     .{ .name = "gate-report", .run = cmdGateReport, .section = .proof_ledger, .args = "<gate-log-path>", .blurb = "Report tool-contract pass rate and turn volume per niche" },
     .{ .name = "expert", .run = cmdExpert, .section = .core, .blurb = "Interactive compiler-in-the-loop agent", .injects_stored_providers = true },
@@ -470,7 +443,6 @@ const commands = [_]cli_help.Command{
     .{ .name = "verify", .run = cmdVerify, .section = .proof_ledger, .args = "<url>", .blurb = "Verify a deployed proof receipt" },
     .{ .name = "invariant", .run = cmdInvariant, .section = .proof_ledger, .args = "[list|author]", .blurb = "List invariant kinds or draft a reviewable candidate" },
     .{ .name = "proofs", .run = cmdProofs, .section = .proof_ledger, .args = "[list|show|diff|watch|export|badge|bundle|verify|gate]" },
-    .{ .name = "witnesses", .run = cmdWitnesses, .section = .advanced, .args = "[list|pin|unpin|prune|synthesize]", .blurb = "Falsifying-input corpus" },
     .{ .name = "version", .run = cmdVersion, .section = .advanced, .alias = "--version", .blurb = "Show version" },
     .{ .name = "help", .alias = "--help", .run = cmdHelp, .section = .unlisted },
 };

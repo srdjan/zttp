@@ -9,12 +9,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 test {
     _ = @import("dev_cli.zig");
-    // `dev_cli` imports these, but Zig's lazy analysis only reaches a decl that
-    // is actually referenced, and their entry points are referenced solely from
-    // dispatch branches no test calls. Without these explicit anchors their
+    // `dev_cli` imports this, but Zig's lazy analysis only reaches a decl that
+    // is actually referenced, and their entry point is referenced solely from
+    // a dispatch branch no test calls. Without this explicit anchor its
     // `test` blocks are never collected: measured, adding a test to
-    // `witnesses_cli.zig` moved the collected count by zero.
-    _ = @import("witnesses_cli.zig");
+    // `pre-rebase:packages/runtime/src/witnesses_cli.zig` moved the collected
+    // count by zero.
     _ = @import("invariant_cli.zig");
 
     // Force-link the proof-review submodules used by the developer CLI.
@@ -37,5 +37,4 @@ test {
     _ = @import("proofs/guard_report.zig");
     _ = @import("proofs/invariant_report.zig");
     _ = @import("proof_card_tui.zig");
-    _ = @import("ratchet_command.zig");
 }

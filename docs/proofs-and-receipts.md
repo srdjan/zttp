@@ -303,7 +303,7 @@ invocation):
 
 `<short_hash>` is the first sixteen hex characters of
 `sha256(handler_path)`. The original path is recorded in `handler.path`
-so the listing surfaces (`zttp witnesses list`, `pi_witnesses`) can
+so the listing surface (`pi_witnesses`) can
 present it without reversing the hash.
 
 `<key>` is `counterexample.CounterexampleWitness.stableKey()`: a sha256
@@ -340,38 +340,16 @@ population pass.
 
 Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
 `idempotent`, `state_isolated`, `fault_covered`) do not have flow-style
-falsifying inputs - their classification is structural. Seed those
-entries explicitly with `zttp witnesses synthesize <handler> <spec>`.
+falsifying inputs - their classification is structural. The analyzer
+persists no entries for them. The former `synthesize` command that seeded
+them is gone (`pre-rebase:packages/runtime/src/witnesses_cli.zig`).
 
 ### Surfaces
 
-#### CLI: `zttp witnesses`
-
-```text
-zttp witnesses list [<handler>]
-zttp witnesses pin <handler> <key|prefix>
-zttp witnesses unpin <handler> <key|prefix>
-zttp witnesses prune <handler> [--older-than <seconds>]
-zttp witnesses synthesize <handler> <spec>
-```
-
-`list` with no handler argument summarises every corpus directory found
-under `.zttp/witnesses/`. With a handler, it prints one line per
-witness with key prefix, property, pinned status, and the
-natural-language summary the analyzer produced.
-
-`pin` and `unpin` accept any unique key prefix. Pinned witnesses are
-protected from `prune`.
-
-`prune` removes unpinned witnesses whose first-seen timestamp is older
-than the cutoff. The default is 90 days.
-
-`synthesize` seeds a structural witness for one of the cause-only specs.
-Repeat invocations on the same `(handler, spec)` pair are idempotent;
-the underlying key is `sha256("structural" | spec | handler_path)`. The
-stored summary is the per-property `Try:` suggestion from
-`spec_discharge.suggestionFor`. Flow-rich specs are rejected because the
-analyzer-driven path already covers them.
+There is no CLI for the corpus. The former `witnesses` command (`list`, `pin`,
+`unpin`, `prune`, `synthesize`) is gone (`pre-rebase:packages/runtime/src/witnesses_cli.zig`).
+To pin an entry, create its `<key>.pinned` marker file by hand. Delete the
+marker to unpin it.
 
 #### JSON envelope
 
@@ -439,7 +417,6 @@ in particular be treated as part of the source of truth.
 - [verification.md - Author-Declared Proof Discharge](verification.md#8-author-declared-proof-discharge)
 - `packages/zts/src/witness_corpus.zig` - persistence library
 - `packages/zts/src/counterexample.zig` - solver and JSONL wire format
-- `packages/runtime/src/witnesses_cli.zig` - `zttp witnesses` subcommand
 - `packages/pi/src/tools/pi_witnesses.zig` - agent tool
 
 ## Proof Gate

@@ -267,7 +267,7 @@ corpus. Each falsifying input the analyzer materialises is written
 under `.zttp/witnesses/<short_hash>/` so the same logical leak does
 not need to be rediscovered next session. See
 [Witness Corpus](proofs-and-receipts.md#witness-corpus)
-for layout, CLI (`zttp witnesses`), and agent tool (`pi_witnesses`).
+for layout and the agent tool (`pi_witnesses`).
 
 A witness drives each `fetch`, `serviceCall`, or `workflow.call` that a
 branch tests to the response the branch needs: status 503 behind `!res.ok`

@@ -329,42 +329,17 @@ a schema change starts a new niche instead of silently invalidating the history
 of the old one. Records carry tool names, counts, enums, hashes, and booleans.
 They never carry prompt text, tool-argument text, or paths.
 
-## Spec Ratchet And Witnesses
-
-`zttp ratchet show` compiles a handler and prints its declared and proven spec
-sets, plus anything declared-but-unproven, proven-beyond-declared, or
-declared-but-not-monotonic. It reports and never fails:
-
-```bash
-zttp ratchet show src/handler.ts
-```
+## Spec Ratchet
 
 A handler with no `Proof<T, P>` annotation activates every supported spec. The
 proven set is also written to `contract.json` under `provenSpecs` and rides
 inside the signed `Zttp-Attest` JWS, with the active set alongside it under
 `declaredSpecs`, so cross-build diffs are mechanical and attestable.
 
-`zttp ratchet check` is deprecated and kept working for one release. `zttp
-check` is the gate: it compiles the same contract and exits 1 on an
-undischarged proof (`ZTS500`) and on a non-monotonic declared name.
-
-`zttp witnesses` inspects the on-disk corpus of compiler-discovered falsifying
-inputs under `.zttp/witnesses/<short-hash>/`:
-
-```bash
-zttp witnesses list [<handler>]
-zttp witnesses pin <handler> <key|prefix>
-zttp witnesses unpin <handler> <key|prefix>
-zttp witnesses prune <handler> [--older-than <seconds>]
-zttp witnesses synthesize <handler> <spec>
-```
-
-Pinned witnesses are never pruned. With no handler argument, `list` summarizes
-every corpus directory found. Flow-rich specs populate the corpus automatically
-through the analyzer; `synthesize` seeds a structural witness for a cause-only
-spec (`deterministic`, `read_only`, `retry_safe`, `idempotent`,
-`state_isolated`, `fault_covered`) from the per-property suggestion in
-spec discharge. See [Witness Corpus](proofs-and-receipts.md#witness-corpus).
+`zttp check` is the gate: it compiles the contract and exits 1 on an
+undischarged proof (`ZTS500`) and on a non-monotonic declared name. The
+former `ratchet` and `witnesses` commands are gone. The witness corpus under
+`.zttp/witnesses/` stays; see [Witness Corpus](proofs-and-receipts.md#witness-corpus).
 
 ## Analyzer Commands
 

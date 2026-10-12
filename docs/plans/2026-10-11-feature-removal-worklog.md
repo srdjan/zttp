@@ -408,3 +408,48 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - `zig fmt --check build.zig build/ packages/ tooling/` and `bash scripts/audit-docs.sh`: exit 0.
 - Invariant 4 after G7: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: nothing under `packages/pi` changed. The only `pi` references to deleted files are the unregistered `capsule_probe` seam, which imports none of them.
+
+## G8 Developer CLI extras: `witnesses` and `ratchet show`
+
+### Removed
+
+- `packages/runtime/src/witnesses_cli.zig` (5 tests) and `ratchet_command.zig` (12 tests). `test-cli` went from 846 to 829 passed, which is exactly those 17 tests.
+- The `ratchet` and `witnesses` command rows, `cmdRatchet`, `cmdWitnesses`, and the imports and test anchors for both files in `dev_cli.zig` and `cli_main.zig`. `zttp ratchet x` and `zttp witnesses list` now print "Unknown command".
+- Their two lines in the `Advanced` block of `cli_help.zig` (`help --all`). The block now lists only `version`.
+- The `runtime witness_corpus` row in `scripts/module-boundary.allow`. Only `witnesses_cli.zig` reached that module from `packages/runtime`. The plan said `live_reload.zig` uses `witness_corpus`, but it reads only `result.pinned_witness_regressions` from the analyzer, so the row was unused and the gate failed until G8 removed it.
+- Docs: `docs/cli.md` (the section is now "Spec Ratchet" and keeps the `provenSpecs` and `declaredSpecs` text), `docs/proofs-and-receipts.md` (the "CLI" subsection, the `synthesize` mention, the `witnesses_cli.zig` see-also row), `docs/contracts-and-sandboxing.md` (the `ratchet show` example line), `docs/user-guide.md` and `docs/verification.md` (one mention each). `docs/solutions/runtime-errors/builtin-graph-teardown-use-after-free.md` now cites `pre-rebase:packages/runtime/src/ratchet_command.zig`.
+- One stale comment in `packages/zts/src/witness_corpus.zig` that named `zts witnesses list`.
+
+### Kept on purpose
+
+- `packages/zts/src/witness_corpus.zig`, `packages/pi/src/tools/zts_expert_ratchet.zig`, `pi_witnesses.zig`, `proof_ratchet.zig`. Nothing under `packages/pi` changed. The comments in `zts_expert_ratchet.zig` that name `zttp ratchet show` and `zttp ratchet check` are stale. They are under `packages/pi`, which Phase 1 may not touch, so they wait for Phase 3.
+- `zttp check` (the gate that `ratchet check` duplicated) and the `.zttp/witnesses/` on-disk corpus layout.
+
+### Judgment calls the plan did not settle
+
+- `scripts/test-module-boundary.sh` used `witnesses_cli.zig` as one of two injected scan failures. Its comment said both files carry the runtime `spec_discharge` reach, so dropping both scans makes the row look unused and reproduces the misleading verdict the probe guards against. After G8 only `counterexample_pipeline.zig` has that reach, so the probe injects the failure for that one file. The assertion is unchanged: the gate must exit non-zero and must print "failed to scan tracked Zig files for runtime". No other surviving runtime file has `spec_discharge` reach, so no substitute subject exists. The gate passes with the one-file probe.
+- With the CLI gone, the docs tell a reader to pin a witness by creating its `<key>.pinned` marker file by hand (the layout section already defines the marker). The docs do not offer a manual replacement for `prune` or `synthesize`.
+- The `Advanced` section of `help --all` stays with one row (`version`).
+
+### Dead code for G15
+
+- `witness_corpus.synthesizeStructural` with its two tests and the `UnsupportedSpec` path, and `spec_discharge.isCauseOnly` (its only caller): only `witnesses_cli.zig` called them. A comment at `spec_discharge.zig:94` names `synthesizeStructural`.
+- `witness_corpus.pin` and `witness_corpus.prune` with their tests: no production caller remains outside the file's own tests. `isPinned` has a live caller (`precompile_check.zig`), so keep it. `selectFewShot` also shows no caller outside its own tests in `packages/`; G15 should confirm and decide.
+- `witness_corpus.zig` itself and `pi_witnesses.zig` are Phase 3 per the plan.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "witnesses_cli|ratchet_command|ratchet show|ratchet check|zttp ratchet|zts ratchet|zttp witnesses|zts witnesses|witnesses (list|pin|unpin|prune|synthesize)|cmdRatchet|cmdWitnesses|RatchetError" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling examples advisor-plans
+```
+
+Remaining hits: plan text of this series and `advisor-plans/005-feature-removal-rebase.md`, the `pre-rebase:` citations in `docs/proofs-and-receipts.md`, the builtin-graph solution doc, and `cli_main.zig`, and the two stale comments in `packages/pi/src/tools/zts_expert_ratchet.zig` (Phase 3).
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `test-cli` (829 passed, 1 skipped, 0 failed), `test-module-boundary` ("module boundary: OK (84 internal modules, 68 allowed package reaches)"), `test-docs-drift`, `test-step-coverage`, `test-script-reachability`, `test-doc-links`, `test-release-check`, `zig build test`, and `test-zruntime` (alone).
+- `zig fmt --check build.zig build/ packages/ tooling/` and `bash scripts/audit-docs.sh`: exit 0.
+- Invariant 4 after G8: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: nothing under `packages/pi` changed.
