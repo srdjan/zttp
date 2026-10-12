@@ -21,7 +21,7 @@ Two runtime test roots:
 
 | Step | Root | Covers |
 |---|---|---|
-| (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `edge_server`, `proof_adapter` |
+| (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `proof_adapter` |
 | `test-cli` | `cli_main_tests` (`cli_main.zig`) | `dev_cli` and its dependencies: deploy, pi_app wiring, `zts_cli` delegation |
 
 The host test roots, declared in the `host_test_roots` table in `build/host_tests.zig`.

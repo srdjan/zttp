@@ -644,12 +644,4 @@ Optional cloud keys are stored in `~/.zttp/providers.json` with mode `0600`.
 Environment variables `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
 `DEEPSEEK_API_KEY` override stored values after their provider is selected.
 
-## Optional Surfaces
-
-- `zttp edge --config zttp.edge.json` runs the in-process multi-handler
-  edge router when built with `-Dedge`.
-
-`edge` is compiled out of the default build. Compiled out, it prints a
-one-line "rebuild with -Dedge" message and exits non-zero.
-
 See [User Guide](user-guide.md) for the normal project flow.

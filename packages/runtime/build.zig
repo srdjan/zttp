@@ -2,14 +2,12 @@ const std = @import("std");
 
 const RuntimeFeatureConfig = struct {
     enable_live_reload: bool,
-    enable_edge: bool,
 };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const perf_histogram = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
-    const enable_edge_opt = b.option(bool, "edge", "Compile the in-process edge runtime (zttp edge) into the binaries") orelse false;
 
     const zts_dep = b.dependency("zts", .{
         .target = target,
@@ -50,11 +48,9 @@ pub fn build(b: *std.Build) void {
 
     const runtime_features = runtimeFeatureOptions(b, .{
         .enable_live_reload = false,
-        .enable_edge = enable_edge_opt,
     });
     const cli_features = runtimeFeatureOptions(b, .{
         .enable_live_reload = true,
-        .enable_edge = enable_edge_opt,
     });
 
     const runtime_main = b.addModule("runtime_main", .{
@@ -177,6 +173,5 @@ pub fn build(b: *std.Build) void {
 fn runtimeFeatureOptions(b: *std.Build, config: RuntimeFeatureConfig) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(bool, "enable_live_reload", config.enable_live_reload);
-    options.addOption(bool, "enable_edge", config.enable_edge);
     return options;
 }

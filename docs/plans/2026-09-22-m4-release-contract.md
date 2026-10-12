@@ -155,7 +155,7 @@ comment records that the TLS handshake is also outside its bound
 
 **T1a. No zero or unarmed deadline.** Depends on nothing. Owned files:
 `packages/runtime/src/runtime_http.zig`, `fetch_deadline.zig`,
-`runtime_cli.zig`, `edge_server.zig` (`:711` parses the same field),
+`runtime_cli.zig`, `pre-rebase:packages/runtime/src/edge_server.zig` (`:711` parses the same field),
 `handler_instance.zig`, and `invariant_cli.zig` as a watchdog caller. The
 exchange deadline is finite for every handler, not only under the tool profile:
 0 is refused at the CLI, in edge configuration, and at `HandlerInstance.init`,
@@ -164,7 +164,7 @@ fails the fetch rather than letting the exchange run without a bound.
 Completion: check C1a.
 
 T1a result, 2026-09-22. Zero is refused at `runtime_cli.zig:694`,
-`edge_server.zig:710`, and both `HandlerInstance` initializers
+`pre-rebase:packages/runtime/src/edge_server.zig:710`, and both `HandlerInstance` initializers
 (`handler_instance.zig:252`, `:375`). `outboundTimeout` has no `.none` branch,
 the durable step clamp no longer treats 0 as unset, and `FetchDeadline.arm`
 returns `ZeroTimeout` or `WatchdogUnavailable`, which each caller maps to a

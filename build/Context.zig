@@ -75,7 +75,6 @@ pub fn init(b: *std.Build) Context {
     const test_filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
-    const edge_enabled = b.option(bool, "edge", "Compile the in-process edge runtime (zttp edge) into the binaries") orelse false;
     const strip_enabled = b.option(bool, "strip", "Strip debug info from the installed zttp/zts/zttp-runtime binaries (release artifacts)") orelse false;
     const zts_dep = b.dependency("zts", .{
         .target = target,
@@ -98,7 +97,6 @@ pub fn init(b: *std.Build) Context {
         .target = target,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
-        .edge = edge_enabled,
     });
     const runtime_bench_dep = b.dependency("zttp_runtime", .{
         .target = target,

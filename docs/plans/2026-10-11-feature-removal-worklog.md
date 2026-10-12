@@ -181,3 +181,53 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - `zig fmt --check build.zig build/ packages/ tooling/` and `bash scripts/audit-docs.sh`: exit 0.
 - Invariant 4 after G3: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: no file under `packages/pi/src/skills/` or `packages/pi/src/prompts/`, and no `expert_persona.zig` or `tool_registry.zig`, changed.
+
+## G4 Edge runtime
+
+### Removed
+
+- `packages/runtime/src/edge_server.zig`, `packages/runtime/src/edge_server_stub.zig`, and `docs/edge.md`
+- The `-Dedge` option (`build/Context.zig`, `packages/runtime/build.zig`), the `enable_edge` field of `RuntimeFeatureConfig`, and the `enable_edge` feature option
+- The edge selector in `runtime_features.zig`. The file stays and holds only the live-reload selector.
+- The `zttp edge` verb in both binaries: `edgeCommand`, `parseEdgeConfigPath`, `printEdgeHelp`, and the `edge` dispatch branch in `runtime_cli.zig`, plus `cmdEdge` and the `edge` registry row in `dev_cli.zig`
+- The `edge` line in `runtime_help_text` (`runtime_cli.zig`), the `edge` entry of `dispatched_verbs`, and the `edge` line of `help --all` (`cli_help.zig`)
+- The `edge_server.zig` import in the `main.zig` test block. The edge tests went with the file. No other test changed.
+- The "Optional Surfaces" section of `docs/cli.md` (it held only `edge`), the `docs/user-guide.md` and `docs/README.md` links to `edge.md`, the `docs/roadmap.md` Supported Now item, the `-Dedge` line and description clause in `.agents/skills/zttp-build/SKILL.md`, the `-Dedge` clause in `CLAUDE.md`, the edge name in the `docs/internals/testing.md` and `build/runtime_tests.zig` coverage lists, and the edge entry in the `docs/internals/architecture.md` package table
+
+### Retargeted citations
+
+- `docs/plans/2026-09-22-m4-release-contract.md:158,167` now cite `pre-rebase:packages/runtime/src/edge_server.zig`.
+- `docs/solutions/security-issues/edge-chunked-encoded-body-amplification.md` stays. Its Solution paragraphs now cite `server.zig` (`completeRequestLength`, line 899, and `readRequestData`, line 850) and `pre-rebase:` for the edge lines. Its verification command no longer names `-Dedge`.
+- `main.zig` comment: compile coverage of `handler_instance.zig` now comes from `test_runner.zig`, not from `edge_server.zig`.
+
+### Judgments the plan did not settle
+
+- The plan cites `server.zig:1053,1116` for the lesson. Those lines are stale after G3. The chunked encoded-cap code is at `server.zig:850` and `899-928`, and the solution doc cites those lines.
+- The solution doc cited `edge_server.zig` also in its Solution section (lines 34 and 36), not only at lines 45 and 47. Invariant 8 required the edit, so G4 rewrote those too.
+- The edge regression test (one-byte chunks with 1,100-byte extensions, `edge_server.zig:1031`) went with the file. `server.zig` has no equivalent test. The solution doc now says so. G4 did not add a test (out of scope). A later group or a follow-up commit can add one.
+- `packages/runtime/src/cli_shared.zig` `featureCompiledOut` has no caller now (only `edge` used it, since G3 removed Studio). It stays, and G15 owns it.
+- `docs/solutions/` frontmatter title and tags of the chunked-amplification note still say "edge". The file name stays by plan. `CHANGELOG.md` history lines about the edge server stay.
+- The `dev_cli.zig` import `feature_options` was already unused before G4. It is untouched.
+- `docs/plans/2026-10-11-feature-removal-phase-1.md` and `advisor-plans/*` still name edge as historical plan text.
+
+### Dead code for G15
+
+- `cli_shared.featureCompiledOut` (no caller; its doc comment still uses `edge` as the example).
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "edge_server|edge_server_stub|-Dedge|enable_edge|zttp edge|zttp\.edge|edge\.md|edge runtime|edge-runtime|EdgeServer|edgeCommand|cmdEdge|printEdgeHelp|parseEdgeConfigPath|in-process edge|edge router|edge config|edge_enabled" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling RELEASE_CHECKLIST.md advisor-plans CHANGELOG.md
+```
+
+Remaining hits: `pre-rebase:` citations, the solution doc (history of the fix), `cli_shared.zig:128` (comment on the dead `featureCompiledOut`), `CHANGELOG.md` history, `advisor-plans/`, and plan text of this series.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read directly from a redirected run.
+
+- `zig build`, `zig build test-cli` (867 passed, 1 skipped, 0 failed), `test-server`, `test-zruntime` (alone), `test-step-coverage`, `test-docs-drift`, `test-release-check`, `test-runtime-purity`, `test-script-reachability`, `test-module-boundary`, `test-doc-links`, and `zig build test`: exit 0.
+- `bash scripts/audit-docs.sh` and `zig fmt --check build.zig build/ packages/ tooling/`: exit 0.
+- `zttp edge` now prints "Unknown command: edge" and the help text.
+- Invariant 4 after G4: `policy_hash`, `module_registry_hash`, and `spec-hash` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: nothing under `packages/pi` changed.

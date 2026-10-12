@@ -14,7 +14,7 @@ share the same `zts` engine and contract logic.
 
 | Path | Role |
 |---|---|
-| `packages/runtime/` | HTTP server, runtime adapter, CLI, local deploy, proof ledger, edge runtime. |
+| `packages/runtime/` | HTTP server, runtime adapter, CLI, local deploy, proof ledger. |
 | `packages/zts/` | Parser, type checker, verifier, bytecode, interpreter, contracts, virtual-module registry. |
 | `packages/tools/` | Precompile pipeline and analyzer command registry shared by `zttp` and `zts`. |
 | `packages/modules/` | SDK-pure virtual modules and module spec JSON. |

@@ -166,4 +166,5 @@ Added during execution. Each item lost its last production caller in an earlier 
 - From G3: the `trade`, `handover`, and `caller_view` lenses, `CallerView`, and any helper in `proof_card_tui.zig` that only those lenses reach, once `git grep` confirms no `zttp dev`, `deploy`, or `proofs` path renders them. Keep `buildProofCertificate` if any surviving path calls it.
 - From G3: `Server.installDevAttestation`, `attest_build_receipt.buildDevJws`, and the `signer_fingerprint_hex` field, which only `--studio` reached.
 - From G3: the in-place `.` branch of `init_command.scaffoldProject`, if no surviving command scaffolds in place.
+- From G4: `cli_shared.featureCompiledOut`, which only `edge` and Studio called.
 - Further items that later groups report go in this list before G15 runs.

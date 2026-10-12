@@ -4,7 +4,6 @@ const builtin = @import("builtin");
 const Server = @import("server.zig").Server;
 const ServerConfig = @import("server.zig").ServerConfig;
 const engine = @import("engine_adapter.zig");
-const edge_server = @import("runtime_features.zig").edge;
 const contract_runtime = @import("contract_runtime.zig");
 const replay_runner = @import("replay_runner.zig");
 const test_runner = @import("test_runner.zig");
@@ -126,10 +125,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         try serveCommandWithEnviron(allocator, user_args[1..], init.environ);
         return;
     }
-    if (std.mem.eql(u8, command, "edge")) {
-        try edgeCommand(allocator, user_args[1..]);
-        return;
-    }
     if (std.mem.eql(u8, command, "attest")) {
         try attestCommand(allocator);
         return;
@@ -182,70 +177,6 @@ pub fn durableCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
     }
     std.debug.print("zttp durable: unknown subcommand '{s}'. Run `zttp durable --help` for usage.\n", .{argv[0]});
     std.process.exit(1);
-}
-
-pub fn edgeCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const config_path = parseEdgeConfigPath(argv) catch |err| {
-        switch (err) {
-            // --help printed usage and is not an error.
-            error.HelpRequested => return,
-            // On a default (edge-compiled-out) build, the more useful signal is
-            // that edge is unavailable; let that win over an arg-parse error.
-            error.UnknownOption, error.MissingEdgeConfig => {
-                if (!feature_options.enable_edge) shared.featureCompiledOut("edge", "edge");
-                std.log.err("zttp edge: invalid arguments", .{});
-                std.process.exit(1);
-            },
-            else => {
-                std.log.err("zttp edge: {}", .{err});
-                std.process.exit(1);
-            },
-        }
-    };
-
-    if (!feature_options.enable_edge) shared.featureCompiledOut("edge", "edge");
-
-    var config = edge_server.loadConfig(allocator, config_path) catch |err| {
-        std.log.err("zttp edge: failed to load config '{s}': {}", .{ config_path, err });
-        std.process.exit(1);
-    };
-    var edge = edge_server.EdgeServer.init(allocator, config) catch |err| {
-        config.deinit(allocator);
-        std.log.err("Failed to initialize edge runtime: {}", .{err});
-        std.process.exit(1);
-    };
-    defer edge.deinit();
-
-    edge.run() catch |err| {
-        if (err == error.TlsTerminationNotImplemented) {
-            std.log.err("HTTPS listener config is parsed but TLS termination is not wired yet; use protocol \"http\" for this edge runtime milestone.", .{});
-            std.process.exit(1);
-        }
-        std.log.err("Edge runtime error: {}", .{err});
-        std.process.exit(1);
-    };
-}
-
-fn parseEdgeConfigPath(argv: []const []const u8) ![]const u8 {
-    var path: ?[]const u8 = null;
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (std.mem.eql(u8, arg, "--help")) {
-            printEdgeHelp();
-            return error.HelpRequested;
-        }
-        if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "--config")) {
-            path = try shared.takeArg(&i, argv, error.MissingEdgeConfig);
-            continue;
-        }
-        if (!std.mem.startsWith(u8, arg, "-")) {
-            path = arg;
-            continue;
-        }
-        return error.UnknownOption;
-    }
-    return path orelse "zttp.edge.json";
 }
 
 fn attestCommand(allocator: std.mem.Allocator) !void {
@@ -889,7 +820,7 @@ fn printAppendedHelp() void {
 /// bare-argument default, and `--version` / `--help` are spellings of two of
 /// these, so the list is the set of names a user can type as a subcommand.
 const dispatched_verbs = [_][]const u8{
-    "workflow-queue", "durable", "serve", "edge", "attest", "version", "help",
+    "workflow-queue", "durable", "serve", "attest", "version", "help",
 };
 
 fn printHelp() void {
@@ -901,7 +832,6 @@ const runtime_help_text =
     \\
     \\Usage:
     \\  zttp serve [options] [handler.ts]    Run handler
-    \\  zttp edge [--config FILE]            Run in-process edge runtime
     \\  zttp workflow-queue <cmd> --durable <DIR>  Inspect workflow queue dead letters
     \\  zttp durable dead-runs <cmd> --durable <DIR>  Inspect failed durable runs
     \\  zttp attest                           Inspect embedded proof artifact
@@ -912,26 +842,6 @@ const runtime_help_text =
     \\For init, dev, and deploy commands, use `zttp`.
     \\
 ;
-
-fn printEdgeHelp() void {
-    const help =
-        \\zttp edge [options]
-        \\
-        \\Requires a binary built with: zig build -Dedge
-        \\
-        \\Options:
-        \\  -c, --config <FILE>  Edge config JSON (default: zttp.edge.json)
-        \\
-        \\Config shape:
-        \\  {
-        \\    "listener": {"host":"127.0.0.1","port":8080,"protocol":"http"},
-        \\    "handlers": [{"name":"api","entry":"src/handler.ts","pool":8}],
-        \\    "routes": [{"host":"*","method":"*","pathPrefix":"/","target":"api"}]
-        \\  }
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
 
 fn printServeHelp() void {
     const help =

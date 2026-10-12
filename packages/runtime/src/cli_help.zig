@@ -109,7 +109,6 @@ const help_all_mid =
     \\Run and inspect:
     \\  zttp serve [handler.ts]              Run a handler without watch or proof
     \\  zttp doctor [path]                   Check project readiness
-    \\  zttp edge [--config FILE]            Optional in-process edge runtime (-Dedge)
     \\  zttp workflow-queue [list|show|replay|discard] --durable <DIR>
     \\                                            Inspect workflow queue dead letters
     \\  zttp durable dead-runs [list|show|replay|discard] --durable <DIR>

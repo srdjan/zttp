@@ -31,9 +31,9 @@ The decoded-size check inside the chunk parser was necessary but insufficient: c
 
 ## Solution
 
-The encoded cap is now a shared parser policy. `maxChunkedEncodedBodyBytes` permits 64 KiB of overhead for small payload limits and at most another decoded-limit-sized allowance for larger bodies, using checked addition to saturate at `usize` maximum (`packages/runtime/src/http_parser.zig:445`). Both the main and edge readers call that shared helper (`packages/runtime/src/server.zig:929`, `packages/runtime/src/edge_server.zig:796`).
+The encoded cap is now a shared parser policy. `maxChunkedEncodedBodyBytes` permits 64 KiB of overhead for small payload limits and at most another decoded-limit-sized allowance for larger bodies, using checked addition to saturate at `usize` maximum (`packages/runtime/src/http_parser.zig:445`). Both the main and edge readers called that shared helper. The edge reader was removed with the edge runtime (see `pre-rebase:packages/runtime/src/edge_server.zig`), so `completeRequestLength` in `packages/runtime/src/server.zig:899` is now the only caller (`packages/runtime/src/server.zig:913`).
 
-The edge reader creates one `ChunkedBodyParseState` for the request and passes it to `chunkedBodyConsumedResumable` on every read (`packages/runtime/src/edge_server.zig:795`, `packages/runtime/src/edge_server.zig:821`, `packages/runtime/src/edge_server.zig:836`). It rejects both incomplete bodies whose buffered encoded length crosses the cap and complete bodies whose consumed encoded length is over the cap (`packages/runtime/src/edge_server.zig:822`, `packages/runtime/src/edge_server.zig:824`, `packages/runtime/src/edge_server.zig:837`, `packages/runtime/src/edge_server.zig:839`). The existing `error.FileTooBig` path therefore continues to map the request to HTTP 413.
+The edge reader created one `ChunkedBodyParseState` for the request and passed it to `chunkedBodyConsumedResumable` on every read (`pre-rebase:packages/runtime/src/edge_server.zig:795`). The main reader does the same: `readRequestData` creates one state per request (`packages/runtime/src/server.zig:850`) and `completeRequestLength` passes it on every read (`packages/runtime/src/server.zig:914`). It rejects both incomplete bodies whose buffered encoded length crosses the cap and complete bodies whose consumed encoded length is over the cap (`packages/runtime/src/server.zig:919`, `packages/runtime/src/server.zig:928`). The existing `error.FileTooBig` path therefore continues to map the request to HTTP 413.
 
 ## Why This Works
 
@@ -42,9 +42,9 @@ Decoded and encoded limits now protect different resources: the parser's decoded
 ## Prevention
 
 - Keep wire-size and decoded-size limits separate for framed or compressed protocols.
-- Preserve the edge regression that uses one-byte chunks with large extensions; it must stay below `max_body_size` after decoding while exceeding the encoded cap (`packages/runtime/src/edge_server.zig:1031`).
+- Keep a regression that uses one-byte chunks with large extensions; it must stay below `max_body_size` after decoding while exceeding the encoded cap. It first lived in the edge runtime (`pre-rebase:packages/runtime/src/edge_server.zig:1031`). Since plan 005 G4 it is the `server.zig` test "threaded completeRequestLength rejects a chunked body whose encoding exceeds the wire cap", which checks both the in-flight and the completing branch.
 - Preserve poisoned-prefix resume tests for splits in size lines, chunk data, chunk-data CRLF, and trailers so regressions cannot hide behind functionally correct full rescans.
-- Verify this path with `zig build -Dedge`, `zig build test-zruntime -Dedge`, `zig build test-zruntime`, and `zig build`.
+- Verify this path with `zig build test-server`, `zig build test-zruntime`, and `zig build`.
 
 ## Related Issues
 

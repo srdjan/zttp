@@ -24,7 +24,7 @@ pub fn addUnit(ctx: Context) UnitRuns {
     });
 
     // Runtime-side tests (main.zig root) — covers runtime_cli, cli_shared,
-    // server, edge_server, and proof_adapter via the test block in
+    // server, and proof_adapter via the test block in
     // main.zig. NOT zruntime, the handler-instance test root: it is the root of
     // its own module, so a file import from main.zig collects none of its
     // tests. Measured at 521 tests with and without that import.

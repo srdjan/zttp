@@ -52,7 +52,6 @@ and superseded execution records live in the `pre-rebase` git tag, under
 - [Proofs and Receipts](proofs-and-receipts.md) - the proof card, the
   counterexample block, the persisted witness corpus, and the pull-request
   proof gate.
-- [Edge Runtime](edge.md) - optional in-process multi-handler router.
 - [Performance](performance.md) - current benchmark claims and tuning notes.
 - [Reliability](reliability.md) - limits, failure behavior, and exit codes.
 - [Threat Model](threat-model.md) - current trust boundaries and non-goals.

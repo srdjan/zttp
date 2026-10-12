@@ -214,11 +214,6 @@ fn cmdServe(ctx: cli_help.Ctx) anyerror!void {
     return;
 }
 
-fn cmdEdge(ctx: cli_help.Ctx) anyerror!void {
-    try runtime_cli.edgeCommand(ctx.allocator, ctx.args);
-    return;
-}
-
 fn cmdWorkflowQueue(ctx: cli_help.Ctx) anyerror!void {
     try runtime_cli.workflowQueueCommand(ctx.allocator, ctx.args);
     return;
@@ -476,7 +471,6 @@ const commands = [_]cli_help.Command{
     .{ .name = "init", .run = cmdInit, .section = .core, .args = "<name> [--template basic|api|htmx]", .blurb = "Create a project" },
     .{ .name = "dev", .run = cmdDev, .section = .core, .args = "[handler.ts]", .blurb = "Run locally, watch and prove on save" },
     .{ .name = "serve", .run = cmdServe, .section = .run_and_inspect, .args = "[handler.ts]", .blurb = "Run a handler without watch or proof" },
-    .{ .name = "edge", .run = cmdEdge, .section = .run_and_inspect, .args = "[--config FILE]", .blurb = "Optional in-process edge runtime (-Dedge)" },
     .{ .name = "workflow-queue", .run = cmdWorkflowQueue, .section = .run_and_inspect, .args = "[list|show|replay|discard] --durable <DIR>", .blurb = "Inspect workflow queue dead letters" },
     .{ .name = "durable", .run = cmdDurable, .section = .run_and_inspect, .args = "dead-runs [list|show|replay|discard] --durable <DIR>", .blurb = "Inspect durable runs that permanently failed recovery" },
     .{ .name = "doctor", .run = cmdDoctor, .section = .run_and_inspect, .args = "[path]", .blurb = "Check project readiness" },

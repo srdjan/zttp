@@ -119,8 +119,6 @@ function handler(req: Request): Response {
 }
 ```
 
-For multi-handler routing behind one listener, see [Edge Runtime](edge.md).
-
 ## JSON And Validation
 
 Use normal `JSON.parse` and `Response.json` for basic JSON. Use

@@ -1,6 +1,6 @@
 ---
 name: zttp-build
-description: Use when running a zttp build beyond the everyday debug build and test suite - release builds, handler precompilation with -Dhandler/-Dverify/-Dcontract/-Dreplay/-Dtest-file, the optional -Dedge feature, per-package test steps, filtered single tests, example handler tests, and benchmarks.
+description: Use when running a zttp build beyond the everyday debug build and test suite - release builds, handler precompilation with -Dhandler/-Dverify/-Dcontract/-Dreplay/-Dtest-file, per-package test steps, filtered single tests, example handler tests, and benchmarks.
 ---
 
 # zttp build reference
@@ -16,7 +16,6 @@ The four everyday commands live in the root `AGENTS.md`: `zig build`, `zig build
 
 ```bash
 zig build -Doptimize=ReleaseFast              # Release build
-zig build -Dedge                               # Compile in the edge runtime (zttp edge); off by default
 ```
 
 ## Handler precompilation

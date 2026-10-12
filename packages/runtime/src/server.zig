@@ -3521,6 +3521,59 @@ test "threaded readRequestData handles partial headers" {
     try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
 }
 
+test "threaded completeRequestLength rejects a chunked body whose encoding exceeds the wire cap" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const max_body_size: usize = 64;
+
+    var server: Server = undefined;
+    server.config = .{ .handler = .{ .inline_code = "" }, .max_body_size = max_body_size, .max_headers = 64 };
+
+    var pool = ConnectionPool{
+        .workers = &[_]std.Thread{},
+        .queue = ConnectionPool.BoundedQueue.init(),
+        .running = std.atomic.Value(bool).init(true),
+        .server = &server,
+        .allocator = allocator,
+    };
+
+    // Each one-byte decoded chunk carries a large extension. The decoded
+    // payload stays within max_body_size while its encoded representation
+    // exceeds the separate wire-size cap. Ported from the edge listener test
+    // (pre-rebase:packages/runtime/src/edge_server.zig) when edge was removed.
+    var request: std.ArrayList(u8) = .empty;
+    try request.appendSlice(
+        allocator,
+        "POST /api HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n",
+    );
+    const body_start = request.items.len;
+    var chunk_index: usize = 0;
+    while (chunk_index < max_body_size) : (chunk_index += 1) {
+        try request.appendSlice(allocator, "1;");
+        try request.appendNTimes(allocator, 'x', 1100);
+        try request.appendSlice(allocator, "\r\na\r\n");
+    }
+    const incomplete_len = request.items.len;
+    try request.appendSlice(allocator, "0\r\n\r\n");
+    const encoded_cap = http_parser.maxChunkedEncodedBodyBytes(max_body_size);
+    try std.testing.expect(incomplete_len - body_start > encoded_cap);
+
+    // A body still in flight past the cap is refused before it completes.
+    var in_flight: http_parser.ChunkedBodyParseState = .{};
+    try std.testing.expectError(
+        error.FileTooBig,
+        pool.completeRequestLength(request.items[0..incomplete_len], &in_flight),
+    );
+
+    // A read that crosses the cap and finishes the body in one step is refused too.
+    var complete: http_parser.ChunkedBodyParseState = .{};
+    try std.testing.expectError(
+        error.FileTooBig,
+        pool.completeRequestLength(request.items, &complete),
+    );
+}
+
 test "threaded readRequestData handles chunked body across reads" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
