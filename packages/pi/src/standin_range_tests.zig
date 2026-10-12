@@ -4,8 +4,8 @@ const std = @import("std");
 const expert_eval = @import("expert_eval.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const prompt_catalog = @import("prompts/catalog.zig");
-const response_assembler = @import("providers/openai/response_assembler.zig");
-const sse_parser = @import("providers/openai/sse_parser.zig");
+const local_client = @import("providers/local/client.zig");
+const turn = @import("turn.zig");
 const playbook = @import("standin/playbook.zig");
 const range = @import("standin/range.zig");
 const standin_range_doc = @import("standin_range_doc");
@@ -220,15 +220,8 @@ test "stand-in gate: shared review kind keeps each entry behavior" {
                 .step_index = 0,
                 .source = "",
             });
-            const events = try sse_parser.parseAll(allocator, body);
-            const outcome = try response_assembler.assemble(allocator, events);
-            switch (outcome.reply.response) {
-                .tool_calls => |calls| {
-                    try testing.expectEqual(@as(usize, 1), calls.len);
-                    try testing.expectEqualStrings(expected_tool, calls[0].name);
-                },
-                else => return error.ExpectedToolCall,
-            }
+            const outcome = try local_client.decodeResponse(allocator, "", body);
+            try expectSingleToolCall(outcome.reply.response, expected_tool);
         }
     }
 }
@@ -259,8 +252,7 @@ test "stand-in gate: negative corpus dispatches to misses without edit instructi
             .step_index = 0,
             .source = "function handler(req: Request): Response { return Response.json({ ok: true }); }\n",
         });
-        const events = try sse_parser.parseAll(allocator, body);
-        const outcome = try response_assembler.assemble(allocator, events);
+        const outcome = try local_client.decodeResponse(allocator, "", body);
         switch (outcome.reply.response) {
             .final_text => |reply| {
                 if (std.mem.indexOf(u8, reply, "[standin-miss]") == null) false_fires += 1;
@@ -323,15 +315,8 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
                 .source = sequenceSource(entry.id),
                 .last_output = if (step_index < case.outputs.len) case.outputs[step_index] else null,
             });
-            const events = try sse_parser.parseAll(allocator, body);
-            const outcome = try response_assembler.assemble(allocator, events);
-            switch (outcome.reply.response) {
-                .tool_calls => |calls| {
-                    try testing.expectEqual(@as(usize, 1), calls.len);
-                    try testing.expectEqualStrings(expected_tool, calls[0].name);
-                },
-                else => return error.ExpectedToolCall,
-            }
+            const outcome = try local_client.decodeResponse(allocator, "", body);
+            try expectSingleToolCall(outcome.reply.response, expected_tool);
             if (std.mem.eql(u8, expected_tool, "propose_change_set")) {
                 propose_change_sets += 1;
                 try testing.expectEqual(case.tools.len - 1, step_index);
@@ -352,8 +337,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
             .step_index = case.tools.len,
             .source = sequenceSource(entry.id),
         });
-        const events = try sse_parser.parseAll(allocator, body);
-        const outcome = try response_assembler.assemble(allocator, events);
+        const outcome = try local_client.decodeResponse(allocator, "", body);
         switch (outcome.reply.response) {
             .final_text => |text| switch (entry.action) {
                 .answer => try testing.expect(text.len >= 120),
@@ -1498,4 +1482,18 @@ fn eqlFold(a: []const u8, b: []const u8) bool {
         if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
     }
     return true;
+}
+
+/// The reply must be exactly one call to `expected_tool`. The local decoder
+/// already remaps a well-formed `propose_change_set` call into its first-class
+/// change-set response, so that tool is recognised by the remapped shape.
+fn expectSingleToolCall(response: turn.AssistantReply.Response, expected_tool: []const u8) !void {
+    switch (response) {
+        .tool_calls => |calls| {
+            try testing.expectEqual(@as(usize, 1), calls.len);
+            try testing.expectEqualStrings(expected_tool, calls[0].name);
+        },
+        .change_set => try testing.expectEqualStrings("propose_change_set", expected_tool),
+        else => return error.ExpectedToolCall,
+    }
 }

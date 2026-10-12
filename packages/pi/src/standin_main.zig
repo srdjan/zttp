@@ -5,8 +5,7 @@ const standin = @import("standin/main.zig");
 const playbook = @import("standin/playbook.zig");
 const request = @import("standin/request.zig");
 const range = @import("standin/range.zig");
-const sse_parser = @import("providers/openai/sse_parser.zig");
-const response_assembler = @import("providers/openai/response_assembler.zig");
+const local_client = @import("providers/local/client.zig");
 const propose_change_set = @import("providers/propose_change_set.zig");
 const standin_range_doc = @import("standin_range_doc");
 
@@ -21,7 +20,7 @@ test {
     _ = @import("standin/server.zig");
 }
 
-test "stand-in tool SSE survives the real parser, assembler, and apply-edit remapper" {
+test "stand-in tool reply survives the real local decoder and apply-edit remapper" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -31,8 +30,7 @@ test "stand-in tool SSE survives the real parser, assembler, and apply-edit rema
         .step_index = 3,
         .source = "function handler(req: Request): Response { return Response.json({ old: true }); }\n",
     });
-    const events = try sse_parser.parseAll(allocator, body);
-    const outcome = try response_assembler.assemble(allocator, events);
+    const outcome = try local_client.decodeResponse(allocator, "", body);
     const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
         .change_set => |edit| {
@@ -43,7 +41,7 @@ test "stand-in tool SSE survives the real parser, assembler, and apply-edit rema
     }
 }
 
-test "stand-in miss SSE survives the real parser and assembler" {
+test "stand-in miss reply survives the real local decoder" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -53,14 +51,13 @@ test "stand-in miss SSE survives the real parser and assembler" {
         .step_index = 0,
         .source = "",
     });
-    const events = try sse_parser.parseAll(allocator, body);
-    const outcome = try response_assembler.assemble(allocator, events);
+    const outcome = try local_client.decodeResponse(allocator, "", body);
     switch (outcome.reply.response) {
         .final_text => |text| try std.testing.expectEqualStrings(
             "[standin-miss] The deterministic playbook server understood the ask as: \"Protect this handler with bearer JWT auth\". " ++
                 "The supported range is explain, review, add-route, add-env, write-test, fix, and fill-hole. " ++
                 "Run `zig build zttp-standin -- --range` to inspect it. Use a hosted model, or point " ++
-                "ZTS_OPENAI_BASE_URL at a real local model.",
+                "ZTTP_MLX_BASE_URL at a real local model.",
             text,
         ),
         else => return error.TestExpectedEqual,

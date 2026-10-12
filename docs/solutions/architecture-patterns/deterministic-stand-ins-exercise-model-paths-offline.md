@@ -50,6 +50,12 @@ response, then leave the production boundaries on both sides intact. An unknown
 prompt or unreachable state must refuse rather than fall back to a hosted model
 or invent an answer.
 
+The stand-in model server speaks non-streaming Chat Completions at
+`POST /v1/chat/completions` on a loopback root. A test points a local-provider
+session at it with `AgentSession.initLocal`, so the production local decoder
+and request writer run against every scripted reply. Its miss reply tells the
+reader to point `ZTTP_MLX_BASE_URL` at a real local model.
+
 For recorder coverage, send deterministic Anthropic SSE through the production
 client and recording tee, persist the cassette, load it, and replay it. The
 loopback smoke test follows that exact path without credentials

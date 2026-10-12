@@ -68,7 +68,7 @@ packages/pi/
       catalog.zig         # same shape, seven templates
       *.md
     simulator/            # cassette recorder, replay runner, promotion, corpus testdata
-    standin/              # deterministic stand-in model server for offline loop tests
+    standin/              # deterministic stand-in model server (non-streaming Chat Completions on loopback) for offline loop tests
     test_support/
       tmp.zig             # shared IsolatedTmp for filesystem tests
       env.zig             # EnvOverride for setenv/unsetenv

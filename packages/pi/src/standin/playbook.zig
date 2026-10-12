@@ -1,4 +1,4 @@
-//! Deterministic task playbooks and OpenAI Responses SSE rendering.
+//! Deterministic task playbooks and non-streaming Chat Completions rendering.
 
 const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
@@ -9,7 +9,7 @@ const range = @import("range.zig");
 const request = @import("request.zig");
 
 pub const version = range.version;
-pub const protocol = "openai-responses-sse";
+pub const protocol = "chat-completions-json";
 
 /// Identifier base for read continuation calls, kept clear of every playbook
 /// step index so no two calls in one turn share a call id.
@@ -133,7 +133,7 @@ pub fn renderMiss(allocator: std.mem.Allocator, ask: []const u8) ![]u8 {
     }
     try writer.writeAll(
         ". Run `zig build zttp-standin -- --range` to inspect it. " ++
-            "Use a hosted model, or point ZTS_OPENAI_BASE_URL at a real local model.",
+            "Use a hosted model, or point ZTTP_MLX_BASE_URL at a real local model.",
     );
     const owned = try text.toOwnedSlice();
     defer allocator.free(owned);
@@ -617,7 +617,7 @@ fn renderSourceMiss(allocator: std.mem.Allocator, playbook_name: []const u8, rea
     const text = try std.fmt.allocPrint(
         allocator,
         "[standin-miss] The deterministic {s} playbook did not apply an edit: {s}. " ++
-            "Use a hosted model, or point ZTS_OPENAI_BASE_URL at a real local model.",
+            "Use a hosted model, or point ZTTP_MLX_BASE_URL at a real local model.",
         .{ playbook_name, reason },
     );
     defer allocator.free(text);
@@ -1222,6 +1222,9 @@ fn renderApplyArgs(
     return try buf.toOwnedSlice();
 }
 
+/// Render one non-streaming Chat Completions reply that calls one tool. The
+/// wire shape is what `providers/local/client.zig` decodes: a single choice
+/// whose message carries `tool_calls`, with the arguments as a JSON string.
 fn renderToolCall(
     allocator: std.mem.Allocator,
     step_index: usize,
@@ -1232,70 +1235,32 @@ fn renderToolCall(
     defer buf.deinit();
     const writer = buf.writer();
     try writer.print(
-        "event: response.created\n" ++
-            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"standin-{d}\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"deterministic-playbook\"}}}}\n\n",
-        .{step_index},
-    );
-    try writer.print(
-        "event: response.output_item.added\n" ++
-            "data: {{\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{{\"id\":\"standin-item-{d}\",\"type\":\"function_call\",\"call_id\":\"standin-call-{d}\",\"name\":",
-        .{ step_index, step_index },
-    );
-    try writeJsonString(writer, name);
-    try writer.writeAll(",\"arguments\":\"\"}}\n\n");
-    try writer.writeAll("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":");
-    try writeJsonString(writer, args);
-    try writer.writeAll("}\n\n");
-    try writer.writeAll("event: response.function_call_arguments.done\ndata: {\"type\":\"response.function_call_arguments.done\",\"output_index\":0,\"arguments\":");
-    try writeJsonString(writer, args);
-    try writer.writeAll("}\n\n");
-    try writer.print(
-        "event: response.output_item.done\n" ++
-            "data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"id\":\"standin-item-{d}\",\"type\":\"function_call\",\"call_id\":\"standin-call-{d}\",\"name\":",
+        "{{\"id\":\"standin-{d}\",\"object\":\"chat.completion\",\"model\":\"deterministic-playbook\"," ++
+            "\"choices\":[{{\"index\":0,\"finish_reason\":\"tool_calls\",\"message\":{{\"role\":\"assistant\",\"content\":null," ++
+            "\"tool_calls\":[{{\"id\":\"standin-call-{d}\",\"type\":\"function\",\"function\":{{\"name\":",
         .{ step_index, step_index },
     );
     try writeJsonString(writer, name);
     try writer.writeAll(",\"arguments\":");
     try writeJsonString(writer, args);
-    try writer.writeAll("}}\n\n");
-    try writer.print(
-        "event: response.completed\n" ++
-            "data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"standin-{d}\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"deterministic-playbook\",\"usage\":{{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}}}}\n\n" ++
-            "data: [DONE]\n",
-        .{step_index},
+    try writer.writeAll(
+        "}}]}}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}\n",
     );
     return try buf.toOwnedSlice();
 }
 
+/// Render one non-streaming Chat Completions reply that answers in text.
 fn renderText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
     const writer = buf.writer();
     try writer.writeAll(
-        "event: response.created\n" ++
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"standin-text\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"deterministic-playbook\"}}\n\n" ++
-            "event: response.output_item.added\n" ++
-            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"standin-message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n" ++
-            "event: response.content_part.added\n" ++
-            "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n" ++
-            "event: response.output_text.delta\n" ++
-            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":",
+        "{\"id\":\"standin-text\",\"object\":\"chat.completion\",\"model\":\"deterministic-playbook\"," ++
+            "\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":",
     );
     try writeJsonString(writer, text);
-    try writer.writeAll("}\n\n");
-    try writer.writeAll("event: response.output_text.done\ndata: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":");
-    try writeJsonString(writer, text);
-    try writer.writeAll("}\n\n");
-    try writer.writeAll("event: response.content_part.done\ndata: {\"type\":\"response.content_part.done\",\"output_index\":0,\"content_index\":0,\"part\":{\"type\":\"output_text\",\"text\":");
-    try writeJsonString(writer, text);
-    try writer.writeAll("}}\n\n");
-    try writer.writeAll("event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"standin-message\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":");
-    try writeJsonString(writer, text);
-    try writer.writeAll("}]}}\n\n");
     try writer.writeAll(
-        "event: response.completed\n" ++
-            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"standin-text\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"deterministic-playbook\",\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"total_tokens\":0}}}\n\n" ++
-            "data: [DONE]\n",
+        "}}],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}\n",
     );
     return try buf.toOwnedSlice();
 }
@@ -1330,7 +1295,7 @@ test "stand-in natural add-route ask becomes the historical structured route spe
     try testing.expectEqual(@as(u16, 201), spec.status);
 }
 
-test "stand-in add-route steps use tool cassette event names and propose_change_set last" {
+test "stand-in add-route steps render a chat completions tool call for propose_change_set" {
     const parsed: request.ParsedRequest = .{
         .ask = "Add a GET /health route to handler.ts",
         .step_index = 3,
@@ -1338,9 +1303,9 @@ test "stand-in add-route steps use tool cassette event names and propose_change_
     };
     const body = try renderResponse(testing.allocator, parsed);
     defer testing.allocator.free(body);
-    try testing.expect(std.mem.indexOf(u8, body, "event: response.function_call_arguments.delta") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"finish_reason\":\"tool_calls\"") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\"name\":\"propose_change_set\"") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "data: [DONE]") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "event:") == null);
 }
 
 test "stand-in handler body scan skips destructured parameters and object return types" {

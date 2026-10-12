@@ -689,3 +689,37 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each run 
 - Invariant 3: `git diff --stat` over `tool_registry.zig`, `expert_persona.zig`, `skills/`, and `prompts/` is empty.
 - Invariant 4 after G13a: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 8: `git grep -n "anthropic/propose_change_set" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages` returns only the Phase 1 plan and this worklog (historical text). `advisor-plans/005-feature-removal-rebase.md` also names the old path.
+
+## G13b Stand-in on the chat-completions wire
+
+### Decision
+
+The stand-in tests run on the local client (`AgentSession.initLocal`, `providers/local/client.zig`). `deepseek.validateBaseUrl` is unchanged: it still requires HTTPS, and no loopback exception exists. The local client posts to `<root>/v1/chat/completions` and accepts only a plain-HTTP loopback root with no path, so the stand-in serves exactly `POST /v1/chat/completions` and the tests pass `server.url(allocator, "")` as the root.
+
+### Changed
+
+- `standin/server.zig`: the route is `POST /v1/chat/completions`; the 400 text says "invalid Chat Completions request"; the header comment names Chat Completions. The health route is unchanged.
+- `standin/request.zig`: `parse` reads a top-level `messages` array. A `user` message has a string `content`. An `assistant` message with `tool_calls` supplies the path of the last `workspace_read_file` call (`readCallPath`). A `tool` message with string `content` plays the part of `function_call_output`. A compaction summary arrives as two user messages (the marker, then the body), so a `summary_follows` flag replaces the old two-part content array. `readInputText` and `isUserMessage` are gone. The nine request tests carry the same assertions on the new body shape. No test was added or removed.
+- `standin/playbook.zig`: `protocol` is `chat-completions-json`. `renderToolCall` and `renderText` emit one non-streaming `chat.completion` object (`choices[0].message` with `tool_calls` or `content`, `finish_reason` `tool_calls` or `stop`, and a zero `usage`). The two miss texts name `ZTTP_MLX_BASE_URL`. The add-route rendering test asserts the JSON shape.
+- `standin_main.zig`: the openai `sse_parser` and `response_assembler` imports are gone; the two decode tests use `local_client.decodeResponse`. The miss text assertion names `ZTTP_MLX_BASE_URL`.
+- `standin_tests.zig`: the openai imports are gone. All nine sessions use `initLocal` with the stand-in root as `base_url`, and the tools come from `local_client.writeToolsArray` (helper `buildLocalToolsJson`). The seven decode sites call `local_client.decodeResponse(allocator, "", body)`.
+- `standin_range_tests.zig`: the same decode change. A new helper `expectSingleToolCall` handles one case the old assembler did not have: the local decoder already remaps a well-formed `propose_change_set` call into `.change_set`, so the helper accepts that shape for `propose_change_set` and `.tool_calls` for every other tool.
+- Docs: a paragraph in `docs/solutions/architecture-patterns/deterministic-stand-ins-exercise-model-paths-offline.md` and the `standin/` line in `packages/pi/README.md`. `packages/pi/docs/standin-range.md` (generated) is unchanged because it does not describe the wire.
+
+### Not touched
+
+`providers/openai/`, `providers/anthropic/`, the provider arms in `agent.zig` (including `ZTS_OPENAI_BASE_URL` and the `/v1/responses` URL tests), `repl.zig`, `cli_auth.zig`, and the enum. These are G13d. `docs/coverage.md` and `docs/convergence.md` are unchanged.
+
+### Seed equivalence
+
+The `test-standin` output before G13a and after G13b is identical line for line, apart from the cache path in the `failed command` line: `seeded retry arm 54/54`, `compiler repair arm 4/4`, `seeded salvage arm 6/6`, `veto classes 64/64`, `rule accounting 62 advertised = 61 seed-verified + 1 accounted unseeded`, the `[seed-coverage]` JSON line, `generated routing 448/448`, and the rest. No seed tripped a different rule.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches, with output redirected and the exit status read directly.
+
+- Exit 0, unfiltered: `test-standin` (56/56, equal to the G13 baseline), `test-residual-guards-drift` (56/56), `test-expert-app` (1048 of 1049, 1 skipped), `test-cassette` (425/425), `test-simulator` (927/927), `test-convergence-emitter`, `test-step-coverage`, `test-docs-drift`, `test-doc-links`, `test-script-reachability`, `test-module-boundary`, `test-diagnostic-producers`, `zig build`, and `zig build test` (9132 of 9138, 6 skipped). `zig fmt --check` on `standin/` and `standin_*.zig`: exit 0. `zig build zttp-standin -- --range` builds the executable and prints the range document.
+- Invariant 2: the only `model_context_mismatch at turn 0/2` lines are the two negative tests. `response_order_mismatch` and `coverage.json is stale` do not appear. `docs/coverage.json` and `docs/convergence.json` are unchanged.
+- Invariant 3: `git diff --stat` over `tool_registry.zig`, `expert_persona.zig`, `skills/`, and `prompts/` is empty.
+- Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 8: `git grep -n "openai-responses-sse\|v1/responses" -- docs README.md CLAUDE.md AGENTS.md .github scripts build build.zig packages` leaves only `agent.zig` URL tests, `providers/cassette_record.zig:440`, and `providers/openai/client.zig:30` (all G13c or G13d), plus the plan files.

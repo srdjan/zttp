@@ -1,4 +1,4 @@
-//! Loopback-only HTTP server for the deterministic OpenAI wire stand-in.
+//! Loopback-only HTTP server for the deterministic Chat Completions stand-in.
 
 const std = @import("std");
 const playbook = @import("playbook.zig");
@@ -260,7 +260,7 @@ fn dispatch(allocator: std.mem.Allocator, incoming: HttpRequest) !HttpResponse {
         return .{ .status = 200, .reason = "OK", .content_type = "application/json", .body = body };
     }
 
-    if (std.mem.eql(u8, incoming.method, "POST") and std.mem.eql(u8, incoming.path, "/v1/responses")) {
+    if (std.mem.eql(u8, incoming.method, "POST") and std.mem.eql(u8, incoming.path, "/v1/chat/completions")) {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const parsed = request.parse(arena.allocator(), incoming.body) catch |err| switch (err) {
@@ -268,7 +268,7 @@ fn dispatch(allocator: std.mem.Allocator, incoming: HttpRequest) !HttpResponse {
                 allocator,
                 400,
                 "Bad Request",
-                "invalid Responses API request\n",
+                "invalid Chat Completions request\n",
             ),
             else => return err,
         };

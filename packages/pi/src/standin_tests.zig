@@ -1,4 +1,4 @@
-//! End-to-end proof for the deterministic OpenAI wire stand-in.
+//! End-to-end proof for the deterministic Chat Completions stand-in.
 
 const std = @import("std");
 const agent = @import("agent.zig");
@@ -7,9 +7,7 @@ const expert_persona = @import("expert_persona.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const codegen_types = @import("expert_codegen_types.zig");
 const loop = @import("loop.zig");
-const openai_client = @import("providers/openai/client.zig");
-const response_assembler = @import("providers/openai/response_assembler.zig");
-const sse_parser = @import("providers/openai/sse_parser.zig");
+const local_client = @import("providers/local/client.zig");
 const propose_change_set = @import("providers/propose_change_set.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const transcript_mod = @import("transcript.zig");
@@ -34,7 +32,7 @@ comptime {
 
 const testing = std.testing;
 
-test "stand-in add-route playbook applies an edit through the real OpenAI agent loop and veto" {
+test "stand-in add-route playbook applies an edit through the real agent loop and veto" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -50,18 +48,17 @@ test "stand-in add-route playbook applies an edit through the real OpenAI agent 
     var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
-    const endpoint = try server.url(allocator, "/v1/responses");
+    const endpoint = try server.url(allocator, "");
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const tools_json = try buildLocalToolsJson(allocator, &registry);
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
-    var session = try agent.AgentSession.initOpenAI(
+    var session = try agent.AgentSession.initLocal(
         allocator,
-        "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint },
+        endpoint,
     );
     defer session.deinit(allocator);
 
@@ -133,18 +130,17 @@ fn runSeedArm(
     var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
-    const endpoint = try server.url(allocator, "/v1/responses");
+    const endpoint = try server.url(allocator, "");
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const tools_json = try buildLocalToolsJson(allocator, &registry);
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
-    var session = try agent.AgentSession.initOpenAI(
+    var session = try agent.AgentSession.initLocal(
         allocator,
-        "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint },
+        endpoint,
     );
     defer session.deinit(allocator);
 
@@ -297,18 +293,17 @@ test "stand-in seeded arm: a foreign source gets a miss, not a scripted defect" 
     var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
-    const endpoint = try server.url(allocator, "/v1/responses");
+    const endpoint = try server.url(allocator, "");
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const tools_json = try buildLocalToolsJson(allocator, &registry);
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
-    var session = try agent.AgentSession.initOpenAI(
+    var session = try agent.AgentSession.initLocal(
         allocator,
-        "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint },
+        endpoint,
     );
     defer session.deinit(allocator);
 
@@ -386,18 +381,17 @@ test "stand-in hole arm: two one-fill turns compose through publisher and apply"
     var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
-    const endpoint = try server.url(allocator, "/v1/responses");
+    const endpoint = try server.url(allocator, "");
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const tools_json = try buildLocalToolsJson(allocator, &registry);
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
-    var session = try agent.AgentSession.initOpenAI(
+    var session = try agent.AgentSession.initLocal(
         allocator,
-        "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint },
+        endpoint,
     );
     defer session.deinit(allocator);
 
@@ -481,17 +475,16 @@ test "stand-in miss returns its marker through the real loop and applies no edit
     var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
-    const endpoint = try server.url(allocator, "/v1/responses");
+    const endpoint = try server.url(allocator, "");
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
-    var session = try agent.AgentSession.initOpenAI(
+    const tools_json = try buildLocalToolsJson(allocator, &registry);
+    var session = try agent.AgentSession.initLocal(
         allocator,
-        "unused-loopback-key",
         "Use the deterministic playbook server.",
         tools_json,
-        .{ .base_url = endpoint },
+        endpoint,
     );
     defer session.deinit(allocator);
 
@@ -551,18 +544,17 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
         var server = try server_mod.Server.init(allocator, 0, null);
         defer server.deinit();
         try server.start();
-        const endpoint = try server.url(allocator, "/v1/responses");
+        const endpoint = try server.url(allocator, "");
 
         var registry = try app.buildRegistry(allocator);
         defer registry.deinit(allocator);
-        const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+        const tools_json = try buildLocalToolsJson(allocator, &registry);
         const system_prompt = try expert_persona.buildSystemPrompt(allocator);
-        var session = try agent.AgentSession.initOpenAI(
+        var session = try agent.AgentSession.initLocal(
             allocator,
-            "unused-loopback-key",
             system_prompt,
             tools_json,
-            .{ .base_url = endpoint },
+            endpoint,
         );
         defer session.deinit(allocator);
 
@@ -655,8 +647,7 @@ test "stand-in gate: every source edit draft passes the real parser and compiler
             .step_index = case.step_index,
             .source = case.source,
         });
-        const events = try sse_parser.parseAll(allocator, body);
-        const outcome = try response_assembler.assemble(allocator, events);
+        const outcome = try local_client.decodeResponse(allocator, "", body);
         const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
         switch (reply.response) {
             .change_set => |edit| {
@@ -695,8 +686,7 @@ test "stand-in review reports source observations without a compiler verdict" {
         .step_index = 1,
         .source = source,
     });
-    const events = try sse_parser.parseAll(allocator, body);
-    const outcome = try response_assembler.assemble(allocator, events);
+    const outcome = try local_client.decodeResponse(allocator, "", body);
     switch (outcome.reply.response) {
         .final_text => |text| {
             try testing.expect(std.mem.indexOf(u8, text, "missing visible `result.ok` guard") != null);
@@ -723,8 +713,7 @@ test "stand-in environment edit preserves existing handler source and passes the
         .step_index = 2,
         .source = source,
     });
-    const events = try sse_parser.parseAll(allocator, body);
-    const outcome = try response_assembler.assemble(allocator, events);
+    const outcome = try local_client.decodeResponse(allocator, "", body);
     const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
         .change_set => |edit| {
@@ -780,8 +769,7 @@ test "stand-in environment edit returns a miss for unsupported handler sources" 
             .step_index = 2,
             .source = case.source,
         });
-        const events = try sse_parser.parseAll(allocator, body);
-        const outcome = try response_assembler.assemble(allocator, events);
+        const outcome = try local_client.decodeResponse(allocator, "", body);
         switch (outcome.reply.response) {
             .final_text => |text| {
                 try testing.expect(std.mem.indexOf(u8, text, "[standin-miss]") != null);
@@ -826,8 +814,7 @@ test "stand-in violation fix preserves source around the inserted guard" {
         .step_index = 3,
         .source = source,
     });
-    const events = try sse_parser.parseAll(allocator, body);
-    const outcome = try response_assembler.assemble(allocator, events);
+    const outcome = try local_client.decodeResponse(allocator, "", body);
     const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
         .change_set => |edit| {
@@ -867,8 +854,7 @@ test "stand-in violation fix returns a miss for an already guarded source" {
         .step_index = 3,
         .source = source,
     });
-    const events = try sse_parser.parseAll(allocator, body);
-    const outcome = try response_assembler.assemble(allocator, events);
+    const outcome = try local_client.decodeResponse(allocator, "", body);
     switch (outcome.reply.response) {
         .final_text => |text| {
             try testing.expect(std.mem.indexOf(u8, text, "[standin-miss]") != null);
@@ -905,18 +891,17 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
     var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
-    const endpoint = try server.url(allocator, "/v1/responses");
+    const endpoint = try server.url(allocator, "");
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const tools_json = try buildLocalToolsJson(allocator, &registry);
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
-    var session = try agent.AgentSession.initOpenAI(
+    var session = try agent.AgentSession.initLocal(
         allocator,
-        "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint },
+        endpoint,
     );
     defer session.deinit(allocator);
 
@@ -1021,13 +1006,13 @@ fn transcriptTextBytes(transcript: *const transcript_mod.Transcript) usize {
     return count;
 }
 
-fn buildOpenAIToolsJson(
+fn buildLocalToolsJson(
     allocator: std.mem.Allocator,
     registry: *const @import("registry/registry.zig").Registry,
 ) ![]u8 {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
-    try openai_client.writeToolsArray(buf.writer(), registry);
+    try local_client.writeToolsArray(buf.writer(), registry);
     return try buf.toOwnedSlice();
 }
 
