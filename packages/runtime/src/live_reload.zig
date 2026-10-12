@@ -32,6 +32,7 @@ const proof_card_tui = @import("proof_card_tui.zig");
 const printer_mod = @import("zttp_proof_review").printer;
 const counterexample_pipeline = @import("counterexample_pipeline.zig");
 const json_diag = precompile.json_diag;
+const retired_authority = @import("project_config").retired_authority;
 
 /// A single ZTS diagnostic carried through analysis for terminal display.
 /// All slices are owned by the producer so the diagnostic stays valid past
@@ -103,6 +104,7 @@ fn shouldSkipContract(config: *const LiveReloadConfig) bool {
 /// pool, a server, and a file watcher.
 const SwapRefusal = enum {
     none,
+    candidate_uses_retired_authority,
     installed_generation_is_guarded,
     installed_generation_has_invariant,
     candidate_computes_a_capability_resource,
@@ -114,6 +116,11 @@ fn swapRefusal(
     candidate: ?*const HandlerContract,
     candidate_policy_checked: bool,
 ) SwapRefusal {
+    if (candidate) |contract| {
+        if (retired_authority.first(retired_authority.contractFacts(contract)) != null) {
+            return .candidate_uses_retired_authority;
+        }
+    }
     if (installed_generation_has_invariant) {
         return .installed_generation_has_invariant;
     }
@@ -741,6 +748,13 @@ pub const LiveReloadState = struct {
             configured_policy != null,
         )) {
             .none => {},
+            .candidate_uses_retired_authority => {
+                printReload(
+                    "New handler uses retired runtime authority. Live swap refused; the old handler stays active.\n",
+                    .{},
+                );
+                return false;
+            },
             .installed_generation_is_guarded => {
                 printReload(
                     "Running artifact guards capability resources at run time. Live swap refused; the old handler stays active.\n",
@@ -1198,6 +1212,19 @@ test "a swap that would strand a guard is refused from either side" {
     try std.testing.expectEqual(
         SwapRefusal.installed_generation_has_invariant,
         swapRefusal(true, true, null, true),
+    );
+}
+
+test "a retired authority candidate cannot replace the serving generation" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = zts.handler_contract.emptyContract(path);
+    defer contract.deinit(allocator);
+    try contract.modules.append(allocator, try allocator.dupe(u8, "zttp:tool"));
+
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_uses_retired_authority,
+        swapRefusal(false, false, &contract, true),
     );
 }
 

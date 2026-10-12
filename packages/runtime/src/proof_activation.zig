@@ -14,6 +14,7 @@
 const std = @import("std");
 const pcc = @import("zttp_proof_checker");
 const zts = @import("zts");
+const retired_authority = @import("project_config").retired_authority;
 
 const artifact_graph = @import("artifact_graph.zig");
 const invariant_observer = @import("invariant_observer.zig");
@@ -66,7 +67,29 @@ pub const Inputs = struct {
 
 pub const Error = error{
     OutOfMemory,
+    InvalidContractSection,
+    UnsupportedRuntimeAuthority,
 };
+
+fn retiredInputFeature(allocator: std.mem.Allocator, inputs: Inputs) Error!?retired_authority.Feature {
+    var facts: retired_authority.Facts = .{
+        .invariant_config = inputs.invariant_spec != null,
+        .tool_catalog = inputs.tool_catalog != null,
+        .declaration_config = inputs.declaration != null,
+    };
+    if (inputs.contract_section) |json| {
+        var contract = zts.handler_contract.parseFromJson(allocator, json) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidContractSection,
+        };
+        defer contract.deinit(allocator);
+        const contract_facts = retired_authority.contractFacts(&contract);
+        inline for (std.meta.fields(retired_authority.Facts)) |field| {
+            @field(facts, field.name) = @field(facts, field.name) or @field(contract_facts, field.name);
+        }
+    }
+    return retired_authority.first(facts);
+}
 
 fn refusal(
     stage: pcc.verdict.Stage,
@@ -147,6 +170,7 @@ pub fn accept(
     inputs: Inputs,
     policy: pcc.Policy,
 ) Error!Assessment {
+    if (try retiredInputFeature(allocator, inputs) != null) return error.UnsupportedRuntimeAuthority;
     const certificate = inputs.certificate orelse
         return refusal(.decode, .missing_required_section, inputs.provenance, true);
 
@@ -262,6 +286,36 @@ test "an artifact with no certificate is refused, not waved through" {
     try testing.expect(!result.accepted());
     try testing.expectEqual(pcc.ReasonCode.missing_required_section, result.rejection().?.code);
     try testing.expect(result.rejection().?.recertifiable);
+}
+
+test "a retired contract refuses activation before proof acceptance" {
+    const allocator = testing.allocator;
+    const handler_path = try allocator.dupe(u8, "handler.ts");
+    var contract = zts.handler_contract.emptyContract(handler_path);
+    defer contract.deinit(allocator);
+    try contract.modules.ensureUnusedCapacity(allocator, 1);
+    const module = try allocator.dupe(u8, "zttp:tool");
+    contract.modules.appendAssumeCapacity(module);
+
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    try zts.writeContractJson(&contract, &json.writer);
+
+    try testing.expectError(error.UnsupportedRuntimeAuthority, accept(allocator, .{
+        .certificate = null,
+        .bytecode = "",
+        .contract_section = json.written(),
+        .policy_section_digest = [_]u8{0} ** 32,
+    }, pcc.policy.production));
+}
+
+test "a malformed contract refuses activation before proof acceptance" {
+    try testing.expectError(error.InvalidContractSection, accept(testing.allocator, .{
+        .certificate = null,
+        .bytecode = "",
+        .contract_section = "not a contract",
+        .policy_section_digest = [_]u8{0} ** 32,
+    }, pcc.policy.production));
 }
 
 test "a certificate that does not decode is refused at the decode stage" {

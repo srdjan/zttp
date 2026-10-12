@@ -28,6 +28,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     });
     precompile_exe.root_module.addImport("zts", ctx.zts_host_mod);
     precompile_exe.root_module.addImport("zttp_proof_checker", ctx.proofCheckerMod());
+    precompile_exe.root_module.addImport("project_config", ctx.project_config_mod);
 
     // Runtime template binary — used for self-contained outputs and direct
     // runtime tests. Minimal dependencies:

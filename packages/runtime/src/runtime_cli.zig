@@ -11,6 +11,8 @@ const durable_recovery = @import("durable_recovery.zig");
 const durable_scheduler = @import("durable_scheduler.zig");
 const feature_options = @import("runtime_feature_options");
 const project_config_mod = @import("project_config");
+const retired_authority = project_config_mod.retired_authority;
+const zts = @import("zts");
 const self_extract = @import("self_extract.zig");
 const live_reload_mod = @import("runtime_features.zig").live_reload;
 const serve_policy = @import("serve_policy.zig");
@@ -312,6 +314,10 @@ fn serveCommandWithDebugPanicPath(
         applyCheckedServePolicy(&config, &checked_policy.?);
     }
 
+    // Source analysis must run before replay, fixture execution, scheduling,
+    // watching, or pool initialization can exercise recorded authority.
+    try validateSourceAgentSettings(allocator, config);
+
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config.executionSpec()) catch |err| {
             if (err != error.ReplayVerificationFailed) {
@@ -331,11 +337,6 @@ fn serveCommandWithDebugPanicPath(
         };
         return;
     }
-
-    // The watcher's initial catalog arrives after Server.start. Check source
-    // agent settings here so missing settings refuse startup, not the first
-    // request. Replay and fixture execution use their in-memory sink above.
-    try validateSourceAgentSettings(allocator, config);
 
     var scheduler: ?durable_scheduler.DurableScheduler = null;
     defer if (scheduler) |*worker| worker.deinit();
@@ -409,8 +410,28 @@ fn validateSourceAgentSettings(allocator: std.mem.Allocator, config: ServerConfi
         .file_path, .inline_code => {
             const source = try @import("handler_loader.zig").load(allocator, config.handler);
             defer allocator.free(source.code);
-            if (try engine.sourceHasAgent(allocator, source.code, source.filename)) {
-                try @import("server.zig").validateAgentTurnSettings(config);
+            var contract = try zts.pipeline.extractContract(
+                allocator,
+                source.code,
+                source.filename,
+                .{
+                    .strict = false,
+                    .version = zts.version.string,
+                    .read_file = zts.file_io.readFileForModuleGraph,
+                },
+            );
+            defer contract.deinit(allocator);
+            if (retired_authority.first(retired_authority.contractFacts(&contract))) |feature| {
+                if (!builtin.is_test) {
+                    std.log.err("Source uses retired runtime authority: {s}", .{feature.sentence()});
+                }
+                return error.UnsupportedRuntimeAuthority;
+            }
+            for (contract.tools.items) |entry| {
+                if (entry.agent != null) {
+                    try @import("server.zig").validateAgentTurnSettings(config);
+                    break;
+                }
             }
         },
         else => {},
@@ -983,7 +1004,7 @@ test "agent turn flags refuse missing empty zero and invalid values" {
     }
 }
 
-test "source agent settings are refused before starting the watcher" {
+test "source retired authority is refused before replay watch or pool startup" {
     const source =
         \\import { toolCatalog } from "zttp:tool";
         \\import { routerMatch } from "zttp:router";
@@ -1006,17 +1027,49 @@ test "source agent settings are refused before starting the watcher" {
         \\  return Response.json({}, { status: 404 });
         \\}
     ;
-    var config: ServerConfig = .{ .handler = .{ .inline_code = source }, .pool_size = 3 };
-    try std.testing.expectError(error.AgentTurnRecorderDirectoryRequired, validateSourceAgentSettings(std.testing.allocator, config));
-    config.agent_turn_recorder_dir = "/tmp/turns";
-    try std.testing.expectError(error.AgentTurnRecorderCeilingRequired, validateSourceAgentSettings(std.testing.allocator, config));
-    config.agent_turn_recorder_max_bytes = 16 * 1024 * 1024;
-    try std.testing.expectError(error.MaxAgentTurnsRequired, validateSourceAgentSettings(std.testing.allocator, config));
-    config.max_agent_turns = 1;
-    try validateSourceAgentSettings(std.testing.allocator, config);
-    config.pool_size = 2;
-    try std.testing.expectError(error.MaxAgentTurnsInvalid, validateSourceAgentSettings(std.testing.allocator, config));
+    const config: ServerConfig = .{
+        .handler = .{ .inline_code = source },
+        .pool_size = 3,
+        .agent_turn_recorder_dir = "/tmp/turns",
+        .agent_turn_recorder_max_bytes = 16 * 1024 * 1024,
+        .max_agent_turns = 1,
+    };
+    try std.testing.expectError(
+        error.UnsupportedRuntimeAuthority,
+        validateSourceAgentSettings(std.testing.allocator, config),
+    );
     try validateSourceAgentSettings(std.testing.allocator, .{ .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" } });
+}
+
+test "source startup refuses retired authority in a local dependency" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { import: []const u8, body: []const u8 }{
+        .{
+            .import = "import { balance } from \"zttp:ledger\";",
+            .body = "export function retired() { return balance(\"main\", \"USD\", \"asset:cash\"); }",
+        },
+        .{
+            .import = "import { agentPrompt } from \"zttp:tool\";",
+            .body = "export function retired() { return agentPrompt(); }",
+        },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const helper = try std.fmt.allocPrint(allocator, "{s}\n{s}\n", .{ case.import, case.body });
+        defer allocator.free(helper);
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = helper });
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data =
+            \\import { retired } from "./dep.ts";
+            \\function handler(req) { return Response.text("ok"); }
+        });
+        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+        defer allocator.free(handler_path);
+        try std.testing.expectError(
+            error.UnsupportedRuntimeAuthority,
+            validateSourceAgentSettings(allocator, .{ .handler = .{ .file_path = handler_path } }),
+        );
+    }
 }
 
 test "serve policy validation never bypasses a configured policy" {

@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const retired_authority = @import("project_config").retired_authority;
 const pcc = @import("zttp_proof_checker");
 const artifact_graph = @import("../artifact_graph.zig");
 const contract_runtime = @import("../contract_runtime.zig");
@@ -43,6 +44,7 @@ pub const BundleArgs = struct {
 
 pub const ComponentVerdict = struct {
     name: []const u8,
+    path: []const u8,
     pass: bool,
     expected_sha: [64]u8,
     actual_sha: [64]u8,
@@ -88,6 +90,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
 
     const contract_bytes = try zts.file_io.readFile(allocator, args.contract_path, 256 * 1024 * 1024);
     defer allocator.free(contract_bytes);
+    try refuseRetiredContract(allocator, contract_bytes, stderr);
     try ensureDir(allocator, args.out_dir);
     const contract_sha = sha256Hex(contract_bytes);
     const contract_dest = try std.fs.path.join(allocator, &.{ args.out_dir, "handler.contract.json" });
@@ -238,7 +241,10 @@ pub fn verify(
 
     var verdicts: std.ArrayList(ComponentVerdict) = .empty;
     defer {
-        for (verdicts.items) |v| allocator.free(v.name);
+        for (verdicts.items) |v| {
+            allocator.free(v.name);
+            allocator.free(v.path);
+        }
         verdicts.deinit(allocator);
     }
     try verifyComponents(allocator, io, bundle_dir, manifest_bytes, &verdicts, stderr);
@@ -254,9 +260,11 @@ pub fn verify(
     var any_failed = false;
     var has_binary = false;
     var has_certificate = false;
+    var contract_path: ?[]const u8 = null;
     for (verdicts.items) |v| {
         const label: []const u8 = if (v.pass) "OK  " else "FAIL";
         try stdout.print("  {s}  {s}\n", .{ label, v.name });
+        if (std.mem.eql(u8, v.name, "contract")) contract_path = v.path;
         if (std.mem.eql(u8, v.name, "binary")) has_binary = true;
         if (std.mem.eql(u8, v.name, "certificate")) has_certificate = true;
         if (!v.pass) {
@@ -274,6 +282,11 @@ pub fn verify(
         "\nIntegrity: verified ({d} component(s) match the manifest)\n",
         .{verdicts.items.len},
     );
+
+    const verified_contract_path = contract_path orelse return error.InvalidManifest;
+    const contract_bytes = try readBundleFile(allocator, io, bundle_dir, verified_contract_path, 256 * 1024 * 1024);
+    defer allocator.free(contract_bytes);
+    try refuseRetiredContract(allocator, contract_bytes, stderr);
 
     // Integrity is one state. What the artifact does is another, and a bundle
     // that only matched hashes has established nothing about it. Say which one
@@ -539,13 +552,37 @@ fn verifyComponents(
         };
 
         const name_dup = try allocator.dupe(u8, name);
-        errdefer allocator.free(name_dup);
-        try out.append(allocator, .{
+        const path_dup = allocator.dupe(u8, path) catch |err| {
+            allocator.free(name_dup);
+            return err;
+        };
+        out.append(allocator, .{
             .name = name_dup,
+            .path = path_dup,
             .pass = std.mem.eql(u8, &actual, &expected_sha),
             .expected_sha = expected_sha,
             .actual_sha = actual,
-        });
+        }) catch |err| {
+            allocator.free(name_dup);
+            allocator.free(path_dup);
+            return err;
+        };
+    }
+}
+
+fn refuseRetiredContract(
+    allocator: std.mem.Allocator,
+    contract_bytes: []const u8,
+    stderr: *std.Io.Writer,
+) !void {
+    var contract = zts.handler_contract.parseFromJson(allocator, contract_bytes) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return,
+    };
+    defer contract.deinit(allocator);
+    if (retired_authority.first(retired_authority.contractFacts(&contract))) |feature| {
+        try stderr.print("zttp proofs: retired runtime authority is unsupported: {s}\n", .{feature.sentence()});
+        return error.UnsupportedRuntimeAuthority;
     }
 }
 
@@ -789,6 +826,40 @@ fn predecessorArtifact(allocator: std.mem.Allocator) ![]u8 {
     std.mem.writeInt(u32, trailer[20..24], std.hash.crc.Crc32.hash(payload), .little);
     std.mem.writeInt(u64, trailer[24..32], self_extract.MAGIC, .little);
     return artifact;
+}
+
+test "bundle creation refuses a retired contract before creating output" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const handler_path = try allocator.dupe(u8, "handler.ts");
+    var contract = zts.handler_contract.emptyContract(handler_path);
+    defer contract.deinit(allocator);
+    try contract.modules.ensureUnusedCapacity(allocator, 1);
+    contract.modules.appendAssumeCapacity(try allocator.dupe(u8, "zttp:ledger"));
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    try zts.writeContractJson(&contract, &json.writer);
+    try zts.file_io.writeFile(allocator, "contract.json", json.written());
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.UnsupportedRuntimeAuthority, writeBundle(
+        allocator,
+        .{ .contract_path = "contract.json", .out_dir = "bundle" },
+        &out.writer,
+        &err.writer,
+    ));
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().access(std.testing.io, "bundle", .{}),
+    );
 }
 
 test "bundle refuses a current-format artifact whose payload checksum fails, instead of bundling it as hash-only" {
@@ -1226,6 +1297,43 @@ test "verify passes a bundle written by writeBundle" {
     // check semantically is reported on another. A caller reading one word
     // cannot mistake the first state for the second.
     try std.testing.expect(std.mem.indexOf(u8, text, "Proof:     not checked") != null);
+}
+
+test "bundle verification refuses retired contract facts" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+    try ensureDir(allocator, "bundle");
+
+    const handler_path = try allocator.dupe(u8, "handler.ts");
+    var contract = zts.handler_contract.emptyContract(handler_path);
+    defer contract.deinit(allocator);
+    try contract.modules.ensureUnusedCapacity(allocator, 1);
+    contract.modules.appendAssumeCapacity(try allocator.dupe(u8, "zttp:tool"));
+    var json: std.Io.Writer.Allocating = .init(allocator);
+    defer json.deinit();
+    try zts.writeContractJson(&contract, &json.writer);
+    try zts.file_io.writeFile(allocator, "bundle/handler.contract.json", json.written());
+    const sha = sha256Hex(json.written());
+    const manifest = try std.fmt.allocPrint(
+        allocator,
+        "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}",
+        .{sha},
+    );
+    defer allocator.free(manifest);
+    try zts.file_io.writeFile(allocator, "bundle/bundle.json", manifest);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(allocator);
+    defer err.deinit();
+    try std.testing.expectError(
+        error.UnsupportedRuntimeAuthority,
+        verify(allocator, "bundle", false, &out.writer, &err.writer),
+    );
 }
 
 test "verify hashes a component larger than one read buffer" {

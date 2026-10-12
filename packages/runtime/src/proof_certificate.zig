@@ -14,6 +14,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const pcc = @import("zttp_proof_checker");
+const retired_authority = @import("project_config").retired_authority;
 
 const artifact_graph = @import("artifact_graph.zig");
 const invariant_observer = @import("invariant_observer.zig");
@@ -25,6 +26,7 @@ const ps = pcc.proof_system;
 
 pub const Error = error{
     OutOfMemory,
+    UnsupportedRuntimeAuthority,
     /// A guarded operation names no row in the consumer-owned catalog.
     GuardedOperationsNotRepresentable,
     BufferTooSmall,
@@ -234,6 +236,11 @@ const ObligationBuilder = struct {
 
 /// Build and encode the certificate for one compiled handler.
 pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
+    var retired_facts: retired_authority.Facts = .{ .invariant_config = inputs.invariant_spec != null };
+    for (inputs.evidence.proof.nodes) |node| {
+        if (node.tag == .ledger_call) retired_facts.ledger_module = true;
+    }
+    try retired_authority.refuse(retired_facts);
     const nodes = try irNodes(allocator, inputs.evidence);
     defer allocator.free(nodes);
 

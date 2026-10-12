@@ -25,6 +25,7 @@ const HandlerPolicy = zts.HandlerPolicy;
 pub const json_diag = @import("json_diagnostics.zig");
 const sqlite = zts.sqlite;
 const util = @import("precompile_util.zig");
+const retired_authority = @import("project_config").retired_authority;
 
 const args_mod = @import("precompile_args.zig");
 const PrecompileOptions = args_mod.PrecompileOptions;
@@ -964,6 +965,19 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         return err;
     };
     defer compiled.deinit(allocator);
+
+    var retired_facts: retired_authority.Facts = .{};
+    if (compiled.contract) |*contract| retired_facts = retired_authority.contractFacts(contract);
+    retired_facts.declaration_config = opts.declaration_path != null;
+    if (compiled.proof_evidence) |*evidence| {
+        for (evidence.proof.nodes) |node| {
+            if (node.tag == .ledger_call) retired_facts.ledger_module = true;
+        }
+    }
+    if (retired_authority.first(retired_facts)) |feature| {
+        debugPrint("Precompile refused retired runtime authority: {s}\n", .{feature.sentence()});
+        return error.UnsupportedRuntimeAuthority;
+    }
 
     // Deferred verification failure: violations enriched with counterexamples, return error now.
     if (compiled.verify_failed) {
@@ -2632,6 +2646,35 @@ test "compile keeps its accepted tool-catalog flow outcome" {
     try std.testing.expectEqualStrings("tool", contract.tools.items[0].name);
     try std.testing.expectEqualStrings("assistant", contract.tools.items[1].name);
     try std.testing.expect(contract.properties.?.no_secret_leakage);
+}
+
+test "precompile refuses a retired module before replacing generated output" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "handler.ts",
+        .data =
+        \\import { toolInput } from "zttp:tool";
+        \\function handler(req: Request): Response {
+        \\  const input = toolInput("Input", req);
+        \\  return Response.json({ ok: input.ok });
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "embedded_handler.zig", .data = "sentinel" });
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+    defer allocator.free(handler_path);
+    const output_path = try tmp.dir.realPathFileAlloc(std.testing.io, "embedded_handler.zig", allocator);
+    defer allocator.free(output_path);
+
+    try std.testing.expectError(
+        error.UnsupportedRuntimeAuthority,
+        runCompileWithArgs(allocator, &.{ handler_path, output_path }),
+    );
+    const output = try zts.file_io.readFile(allocator, output_path, 64);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("sentinel", output);
 }
 
 test "formatIsoTimestamp produces ISO-8601 UTC" {

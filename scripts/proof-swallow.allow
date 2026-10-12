@@ -80,6 +80,11 @@ packages/proof-checker/src/checker.zig checkGraphMemberDigest catch-break
 # if they are undecodable. Neither path can buy acceptance with a null.
 packages/runtime/src/proof_activation.zig certificateCommitments catch-return
 
+# The retired-authority check propagates OutOfMemory. Every other contract
+# parse error returns InvalidContractSection and stops activation before the
+# kernel runs. No failed parse can produce an acceptance verdict.
+packages/runtime/src/proof_activation.zig retiredInputFeature catch-switch
+
 # Kernel catch blocks return a Rejection. Neither policy, certificate, guard,
 # nor graph decode failure can reach the acceptance result. The multiline
 # invariant catches also return an undecodable-spec rejection.

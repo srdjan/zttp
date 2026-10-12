@@ -33,7 +33,7 @@ pub const HostTestRoot = struct {
 // scripts/check-docs-drift.sh reads the step names out of this table and
 // holds docs/internals/testing.md to them.
 const host_test_roots = [_]HostTestRoot{
-    .{ .owner = .tools, .src = "src/precompile.zig", .step = "test-precompile", .desc = "Run precompile tool tests" },
+    .{ .owner = .tools, .src = "src/precompile.zig", .step = "test-precompile", .desc = "Run precompile tool tests", .project_config = true },
     // collected_via_named_module: canonicalize.zig is reached only through
     // the `zts_cli` module, so this root is what runs its tests.
     .{ .owner = .tools, .src = "src/canonicalize.zig", .step = "test-canonicalize", .desc = "Run canonicalize/normalize tool tests", .project_config = true },

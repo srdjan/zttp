@@ -4,6 +4,7 @@ const zts = @import("zts");
 pub const invariant_config = @import("invariant_config.zig");
 pub const invariant_author = @import("invariant_author.zig");
 pub const tool_catalog_encoding = @import("tool_catalog_encoding.zig");
+pub const retired_authority = @import("retired_authority.zig");
 
 test {
     _ = invariant_config;
@@ -197,6 +198,13 @@ pub fn loadAbsolute(
 
     if (parsed.value != .object) return error.InvalidProjectConfig;
     const obj = parsed.value.object;
+
+    if (retired_authority.first(retired_authority.projectFacts(obj))) |feature| {
+        if (!@import("builtin").is_test) {
+            std.debug.print("zttp.json uses retired runtime authority: {s}\n", .{feature.sentence()});
+        }
+        return error.UnsupportedRuntimeAuthority;
+    }
 
     const root_dir_src = std.fs.path.dirname(manifest_path) orelse return error.InvalidProjectConfig;
     const entry = try dupStringField(allocator, obj, "entry", "src/handler.ts");
@@ -491,66 +499,6 @@ test "discover finds manifest from relative handler path" {
     try std.testing.expectEqualStrings("src/handler.ts", config.entry);
 }
 
-test "project discovery requires a readable confirmed invariant and paired store" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
-        \\{"invariants":"invariant.json","ledger":"ledger.db"}
-    });
-    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-    defer a.free(manifest);
-    try std.testing.expectError(error.FileNotFound, discover(a, io, manifest));
-    try tmp.dir.writeFile(io, .{ .sub_path = "invariant.json", .data =
-        \\{"version":1,"kind":"unsupported","ledger":"main","currencies":[{"code":"USD","scale":2}]}
-    });
-    try std.testing.expectError(error.UnsupportedInvariantKind, discover(a, io, manifest));
-    try tmp.dir.writeFile(io, .{ .sub_path = "invariant.json", .data =
-        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
-    });
-    var config = (try discover(a, io, manifest)).?;
-    defer config.deinit(a);
-    const path = (try config.resolvedLedgerPath(a)).?;
-    defer a.free(path);
-    const expected = try std.fs.path.resolve(a, &.{ config.root_dir, "ledger.db" });
-    defer a.free(expected);
-    try std.testing.expectEqualStrings(expected, path);
-    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{\"ledger\":\"ledger.db\"}" });
-    try std.testing.expectError(error.IncompleteInvariantConfig, discover(a, io, manifest));
-}
-
-test "project config reads the declaration named by the manifest, resolved beside it" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try std.Io.Dir.createDirPath(tmp.dir, io, "policy");
-    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
-        \\{"declaration":"policy/declaration.json"}
-    });
-    const body =
-        \\{"version":1,"classifications":[]}
-    ;
-    try tmp.dir.writeFile(io, .{ .sub_path = "policy/declaration.json", .data = body });
-    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-    defer a.free(manifest);
-
-    var config = (try discover(a, io, manifest)).?;
-    defer config.deinit(a);
-    try std.testing.expectEqualStrings("policy/declaration.json", config.declaration.?);
-
-    const path = (try config.resolvedDeclarationPath(a)).?;
-    defer a.free(path);
-    const expected = try std.fs.path.resolve(a, &.{ config.root_dir, "policy", "declaration.json" });
-    defer a.free(expected);
-    try std.testing.expectEqualStrings(expected, path);
-
-    const bytes = (try config.readDeclaration(a)).?;
-    defer a.free(bytes);
-    try std.testing.expectEqualStrings(body, bytes);
-}
-
 test "project config without a declaration key reads no declaration" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -567,110 +515,35 @@ test "project config without a declaration key reads no declaration" {
     try std.testing.expect((try config.readDeclaration(a)) == null);
 }
 
-test "project config declaration read fails for a missing or oversized file" {
-    const a = std.testing.allocator;
+test "project discovery rejects every retired authority configuration" {
+    const allocator = std.testing.allocator;
     const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
-        \\{"declaration":"declaration.json"}
-    });
-    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-    defer a.free(manifest);
-    var config = (try discover(a, io, manifest)).?;
-    defer config.deinit(a);
-
-    try std.testing.expectError(error.FileNotFound, config.readDeclaration(a));
-
-    const big = try a.alloc(u8, zts.declaration.max_document_bytes + 1);
-    defer a.free(big);
-    @memset(big, ' ');
-    try tmp.dir.writeFile(io, .{ .sub_path = "declaration.json", .data = big });
-    try std.testing.expectError(error.FileTooBig, config.readDeclaration(a));
-}
-
-test "project config reads the auth names and refuses any other auth shape" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{\"auth\":{\"keyEnv\":\"TOOL_KEY\",\"tenantClaim\":\"org\"}}" });
-        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-        defer a.free(manifest);
-        var config = (try discover(a, io, manifest)).?;
-        defer config.deinit(a);
-        const auth = config.auth orelse return error.TestExpectedAuth;
-        try std.testing.expectEqualStrings("TOOL_KEY", auth.key_env);
-        try std.testing.expectEqualStrings("org", auth.tenant_claim);
-    }
-
-    const refused = [_][]const u8{
-        "{\"auth\":\"TOOL_KEY\"}",
-        "{\"auth\":{\"keyEnv\":\"TOOL_KEY\"}}",
-        "{\"auth\":{\"tenantClaim\":\"org\"}}",
-        "{\"auth\":{\"keyEnv\":\"TOOL_KEY\",\"tenantClaim\":\"org\",\"key\":\"secret\"}}",
-        "{\"auth\":{\"keyEnv\":\"\",\"tenantClaim\":\"org\"}}",
-        "{\"auth\":{\"keyEnv\":\"TOOL_KEY\",\"tenantClaim\":7}}",
+    const manifests = [_][]const u8{
+        "{\"declaration\":\"declaration.json\"}",
+        "{\"declaration\":null}",
+        "{\"invariants\":\"invariant.json\",\"ledger\":\"ledger.db\"}",
+        "{\"invariants\":null}",
+        "{\"ledger\":null}",
+        "{\"auth\":{\"keyEnv\":\"TOOL_KEY\",\"tenantClaim\":\"org\"}}",
+        "{\"auth\":null}",
+        "{\"credentials\":{\"weather\":{\"env\":\"WEATHER_KEY\",\"endpoint\":\"https://api.weather.example\",\"header\":\"authorization\",\"methods\":[\"GET\"],\"paths\":[\"/v1/forecast\"]}}}",
+        "{\"credentials\":null}",
     };
-    for (refused) |body| {
+    for (manifests) |body| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = body });
-        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-        defer a.free(manifest);
-        try std.testing.expectError(error.InvalidAuthConfig, discover(a, io, manifest));
-    }
-}
-
-test "project config reads the credential references and refuses a broken one" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
-            \\{"credentials": {
-            \\  "weather": {"env": "WEATHER_KEY", "endpoint": "https://api.weather.example", "header": "authorization",
-            \\    "scheme": "Bearer", "methods": ["GET"], "paths": ["/v1/forecast"]},
-            \\  "billing": {"env": "BILLING_KEY", "endpoint": "https://billing.example:8443", "header": "x-api-key",
-            \\    "methods": ["POST"], "paths": ["/charges"]}}}
+        try tmp.dir.writeFile(io, .{ .sub_path = "invariant.json", .data =
+            \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
         });
-        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-        defer a.free(manifest);
-        var config = (try discover(a, io, manifest)).?;
-        defer config.deinit(a);
-        try std.testing.expectEqual(@as(usize, 2), config.credentials.len);
-        try std.testing.expectEqualStrings("billing", config.credentials[0].name);
-        try std.testing.expectEqualStrings("https://billing.example:8443", config.credentials[0].endpoint);
-        try std.testing.expectEqualStrings("weather", config.credentials[1].name);
-        try std.testing.expectEqualStrings("WEATHER_KEY", config.credentials[1].env);
-    }
-
-    {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{}" });
-        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-        defer a.free(manifest);
-        var config = (try discover(a, io, manifest)).?;
-        defer config.deinit(a);
-        try std.testing.expectEqual(@as(usize, 0), config.credentials.len);
-    }
-
-    const refused = [_][]const u8{
-        "{\"credentials\": []}",
-        "{\"credentials\": {\"w\": {\"env\": \"K\", \"endpoint\": \"http://api.example\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"]}}}",
-        "{\"credentials\": {\"w\": {\"env\": \"K\", \"endpoint\": \"https://api.example\", \"header\": \"x\", \"methods\": [\"GET\"], \"paths\": [\"/\"], \"value\": \"s3cret\"}}}",
-    };
-    for (refused) |body| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = body });
-        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-        defer a.free(manifest);
-        try std.testing.expectError(error.InvalidCredentialConfig, discover(a, io, manifest));
+        const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", allocator);
+        defer allocator.free(manifest);
+        if (discover(allocator, io, manifest)) |config_optional| {
+            var config = config_optional orelse return error.TestExpectedError;
+            config.deinit(allocator);
+            return error.TestExpectedError;
+        } else |err| {
+            try std.testing.expectEqual(error.UnsupportedRuntimeAuthority, err);
+        }
     }
 }

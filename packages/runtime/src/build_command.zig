@@ -23,6 +23,7 @@ const attest_build_receipt = @import("attest/build_receipt.zig");
 const live_reload = @import("live_reload.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const project_config_mod = @import("project_config");
+const retired_authority = project_config_mod.retired_authority;
 const cli_paths = @import("cli_paths.zig");
 const resolveRuntimeBinary = cli_paths.resolveRuntimeBinary;
 
@@ -694,6 +695,31 @@ const ArtifactTailCapabilities = struct {
     ) anyerror!void,
 };
 
+fn retiredArtifactFeature(input: ArtifactTailInput) ?retired_authority.Feature {
+    var facts: retired_authority.Facts = .{
+        .invariant_config = input.invariant_spec != null,
+        .declaration_config = input.declaration != null,
+    };
+    if (input.contract) |contract| facts = mergeRetiredFacts(facts, retired_authority.contractFacts(contract));
+    if (input.proof_evidence) |evidence| {
+        for (evidence.proof.nodes) |node| {
+            if (node.tag == .ledger_call) {
+                facts.ledger_module = true;
+                break;
+            }
+        }
+    }
+    return retired_authority.first(facts);
+}
+
+fn mergeRetiredFacts(a: retired_authority.Facts, b: retired_authority.Facts) retired_authority.Facts {
+    var merged = a;
+    inline for (std.meta.fields(retired_authority.Facts)) |field| {
+        @field(merged, field.name) = @field(a, field.name) or @field(b, field.name);
+    }
+    return merged;
+}
+
 fn serializeContractCapability(
     _: ?*anyopaque,
     allocator: std.mem.Allocator,
@@ -760,6 +786,10 @@ fn writeArtifactTail(
     input: ArtifactTailInput,
     capabilities: ArtifactTailCapabilities,
 ) !void {
+    if (retiredArtifactFeature(input)) |feature| {
+        if (!builtin.is_test) std.debug.print("Build refused retired runtime authority: {s}\n", .{feature.sentence()});
+        return error.UnsupportedRuntimeAuthority;
+    }
     const contract_json: ?[]u8 = if (input.contract) |contract|
         try capabilities.serialize_contract(capabilities.context, allocator, contract)
     else
@@ -1187,6 +1217,26 @@ fn runBuild(
             contract.credentials = &.{};
             contract.credentials = try zts.handler_contract.credential_ref.dupeAll(allocator, request.credentials);
         }
+    }
+
+    const retired_input: ArtifactTailInput = .{
+        .runtime_binary = "",
+        .output_path = output_path,
+        .attest_requested = attest_requested,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = if (compiled.contract) |*contract| contract else null,
+        .proof_evidence = if (compiled.proof_evidence) |*evidence| evidence else null,
+        .configured_policy = request.policy,
+        .invariant_spec = request.invariant_spec,
+        .declaration = request.declaration,
+    };
+    var retired_feature = retiredArtifactFeature(retired_input);
+    if (retired_feature == null and request.tool_auth != null) retired_feature = .tool_auth;
+    if (retired_feature == null and request.credentials.len != 0) retired_feature = .credentials;
+    if (retired_feature) |feature| {
+        if (!builtin.is_test) std.debug.print("Build refused retired runtime authority: {s}\n", .{feature.sentence()});
+        return error.UnsupportedRuntimeAuthority;
     }
 
     // The compile subcommand splices bytecode onto the runtime binary, not
@@ -1640,6 +1690,38 @@ test "an artifact whose bytecode cannot be walked is refused rather than half-co
     try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
 }
 
+test "a ledger proof node refuses artifact construction before serialization" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { balance } from "zttp:ledger";
+        \\function handler(req: Request): Response {
+        \\  const result = balance("main", "USD", "asset:cash");
+        \\  return Response.json({ ok: result.ok });
+        \\}
+    ;
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const contract = &(compiled.contract orelse return error.TestUnexpectedResult);
+    const evidence = &(compiled.proof_evidence orelse return error.TestUnexpectedResult);
+
+    var probe = ArtifactTailProbe{};
+    try std.testing.expectError(error.UnsupportedRuntimeAuthority, writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = true,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = contract,
+        .proof_evidence = evidence,
+    }, probe.capabilities()));
+    try std.testing.expectEqual(@as(usize, 0), probe.serialize_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.sign_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
+}
+
 test "the certificate names the exact policy the artifact carries" {
     const allocator = std.testing.allocator;
 
@@ -1790,302 +1872,29 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
     }
 }
 
-test "ledger calls including a fused literal call are independently observed and accepted" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { post, balance } from "zttp:ledger";
-        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
-        \\  const current = balance("main", "USD", "cash");
-        \\  if (!current.ok) return Response.text(current.error, { status: 500 });
-        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [
-        \\    { account: "cash", amount: "100" },
-        \\    { account: "clearing", amount: "-100" }
-        \\  ] });
-        \\  if (!result.ok) return Response.text(result.error, { status: 400 });
-        \\  return Response.text(current.value);
-        \\}
-    ;
-    const invariant_spec = try project_config_mod.invariant_config.parse(allocator,
-        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
-    );
-    defer allocator.free(invariant_spec);
-
-    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
-        .emit_verify = true,
-        .emit_contract = true,
-        .emit_proof_evidence = true,
-    });
-    defer compiled.deinit(allocator);
-    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
-    const contract = compiled.contract orelse return error.TestUnexpectedResult;
-    const contract_json = try serializeContractJson(allocator, &contract);
-    defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
-    const policy_section = try self_extract.serializePolicy(allocator, &policy);
-    defer allocator.free(policy_section);
-    try std.testing.expectError(error.MissingInvariantSpec, proof_certificate.build(allocator, .{
-        .evidence = &evidence,
-        .properties = dischargedProperties(&contract),
-        .artifact = .{
-            .bytecode = compiled.bytecode,
-            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-            .contract_section = contract_json,
-            .policy_section_digest = artifact_graph.digestOf(policy_section),
-            .identity = artifact_graph.identityFromContract(&contract),
-        },
-        .contract_digest = artifact_graph.digestOf(contract_json),
-        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
-    }));
-
-    var built = try proof_certificate.build(allocator, .{
-        .evidence = &evidence,
-        .properties = dischargedProperties(&contract),
-        .artifact = .{
-            .bytecode = compiled.bytecode,
-            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-            .contract_section = contract_json,
-            .policy_section_digest = artifact_graph.digestOf(policy_section),
-            .identity = artifact_graph.identityFromContract(&contract),
-            .invariant_spec_digest = pcc.invariant.digest(invariant_spec),
-        },
-        .contract_digest = artifact_graph.digestOf(contract_json),
-        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
-        .invariant_spec = invariant_spec,
-    });
-    defer built.deinit();
-
-    const assessment = try proof_activation.accept(allocator, .{
-        .certificate = built.bytes,
-        .bytecode = compiled.bytecode,
-        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-        .contract_section = contract_json,
-        .policy_section_digest = artifact_graph.digestOf(policy_section),
-        .policy_section = policy_section,
-        .identity = artifact_graph.identityFromContract(&contract),
-        .invariant_spec = invariant_spec,
-    }, pcc.policy.development);
-    try std.testing.expect(assessment.accepted());
-    try std.testing.expect(assessment.invariants.ready());
-    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.required);
-    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.covered);
-    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.writes);
-
-    // The embedded section is part of both the executable graph and the
-    // certificate identity. Removing it or changing one canonical byte must
-    // refuse the artifact before any runtime is installed.
-    const missing_spec = try proof_activation.accept(allocator, .{
-        .certificate = built.bytes,
-        .bytecode = compiled.bytecode,
-        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-        .contract_section = contract_json,
-        .policy_section_digest = artifact_graph.digestOf(policy_section),
-        .policy_section = policy_section,
-        .identity = artifact_graph.identityFromContract(&contract),
-    }, pcc.policy.development);
-    try std.testing.expect(!missing_spec.accepted());
-
-    const changed_spec = try allocator.dupe(u8, invariant_spec);
-    defer allocator.free(changed_spec);
-    changed_spec[changed_spec.len - 1] = 3;
-    const tampered_spec = try proof_activation.accept(allocator, .{
-        .certificate = built.bytes,
-        .bytecode = compiled.bytecode,
-        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-        .contract_section = contract_json,
-        .policy_section_digest = artifact_graph.digestOf(policy_section),
-        .policy_section = policy_section,
-        .identity = artifact_graph.identityFromContract(&contract),
-        .invariant_spec = changed_spec,
-    }, pcc.policy.development);
-    try std.testing.expect(!tampered_spec.accepted());
-}
-
-test "a balance-only handler is accepted and reports vacuous write applicability" {
-    // The decision this test pins: a handler that reads balances and never
-    // posts has a genuinely covered call site and nothing for a write-gating
-    // kind to constrain. That is a missing write-applicability report, not a
-    // demonstrated conservation failure, so it is reported and accepted rather
-    // than refused. Refusing it would push an author to add a posting group
-    // nobody wants.
+test "ledger proof calls are refused before certificate construction" {
     const allocator = std.testing.allocator;
     const source =
         \\import { balance } from "zttp:ledger";
         \\export function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const current = balance("main", "USD", "cash");
-        \\  if (!current.ok) return Response.text(current.error, { status: 500 });
-        \\  return Response.text(current.value);
+        \\  return Response.json({ ok: current.ok });
         \\}
     ;
-    const invariant_spec = try project_config_mod.invariant_config.parse(allocator,
-        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
-    );
-    defer allocator.free(invariant_spec);
-
     var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
-        .emit_verify = true,
         .emit_contract = true,
         .emit_proof_evidence = true,
     });
     defer compiled.deinit(allocator);
     const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
-    const contract_json = try serializeContractJson(allocator, &contract);
-    defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
-    const policy_section = try self_extract.serializePolicy(allocator, &policy);
-    defer allocator.free(policy_section);
 
-    var built = try proof_certificate.build(allocator, .{
+    try std.testing.expectError(error.UnsupportedRuntimeAuthority, proof_certificate.build(allocator, .{
         .evidence = &evidence,
         .properties = dischargedProperties(&contract),
-        .artifact = .{
-            .bytecode = compiled.bytecode,
-            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-            .contract_section = contract_json,
-            .policy_section_digest = artifact_graph.digestOf(policy_section),
-            .identity = artifact_graph.identityFromContract(&contract),
-            .invariant_spec_digest = pcc.invariant.digest(invariant_spec),
-        },
-        .contract_digest = artifact_graph.digestOf(contract_json),
-        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
-        .invariant_spec = invariant_spec,
-    });
-    defer built.deinit();
-
-    const assessment = try proof_activation.accept(allocator, .{
-        .certificate = built.bytes,
-        .bytecode = compiled.bytecode,
-        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-        .contract_section = contract_json,
-        .policy_section_digest = artifact_graph.digestOf(policy_section),
-        .policy_section = policy_section,
-        .identity = artifact_graph.identityFromContract(&contract),
-        .invariant_spec = invariant_spec,
-    }, pcc.policy.development);
-    try std.testing.expect(assessment.accepted());
-    try std.testing.expect(assessment.invariants.ready());
-    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.required);
-    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.covered);
-    try std.testing.expectEqual(@as(u32, 0), assessment.invariants.writes);
-    try std.testing.expectEqual(
-        pcc.verdict.WriteApplicability.vacuous,
-        assessment.invariants.writeApplicability(),
-    );
-
-    // The promoted generation carries the same answer, and coverage readiness
-    // is untouched by it.
-    const status = contract_runtime.InvariantStatus.fromVerdicts(assessment.invariants);
-    try std.testing.expect(status.coverageReady());
-    try std.testing.expectEqual(
-        pcc.verdict.WriteApplicability.vacuous,
-        status.write_applicability,
-    );
-}
-
-test "a two-kind schema 2 specification is accepted end to end and reports per-kind write applicability" {
-    // Every other end-to-end case on this path declares one kind under schema
-    // 1, and every `zruntime_tests` case bypasses acceptance outright with
-    // `invariant_coverage_accepted = true`. The checker's two-kind cases use a
-    // synthetic fixture rather than a compiled handler. Nothing therefore drove
-    // a `declared_accounts_v1` document through the real producer and the real
-    // consumer, and "each piece is tested with the same decoder" is an
-    // estimate. This measures it.
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { post, balance } from "zttp:ledger";
-        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
-        \\  const current = balance("main", "USD", "cash");
-        \\  if (!current.ok) return Response.text(current.error, { status: 500 });
-        \\  const result = post({ ledger: "main", currency: "USD", idempotencyKey: req.url, entries: [
-        \\    { account: "cash", amount: "100" },
-        \\    { account: "clearing", amount: "-100" }
-        \\  ] });
-        \\  if (!result.ok) return Response.text(result.error, { status: 400 });
-        \\  return Response.text(current.value);
-        \\}
-    ;
-    const invariant_spec = try project_config_mod.invariant_config.parse(allocator,
-        \\{"version":2,"ledger":"main","currencies":[{"code":"USD","scale":2}],"kinds":[{"kind":"balance_conservation_v1"},{"kind":"declared_accounts_v1","accounts":[{"prefix":"cash"},{"prefix":"clearing"}]}]}
-    );
-    defer allocator.free(invariant_spec);
-
-    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
-        .emit_verify = true,
-        .emit_contract = true,
-        .emit_proof_evidence = true,
-    });
-    defer compiled.deinit(allocator);
-    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
-    const contract = compiled.contract orelse return error.TestUnexpectedResult;
-    const contract_json = try serializeContractJson(allocator, &contract);
-    defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
-    const policy_section = try self_extract.serializePolicy(allocator, &policy);
-    defer allocator.free(policy_section);
-
-    var built = try proof_certificate.build(allocator, .{
-        .evidence = &evidence,
-        .properties = dischargedProperties(&contract),
-        .artifact = .{
-            .bytecode = compiled.bytecode,
-            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-            .contract_section = contract_json,
-            .policy_section_digest = artifact_graph.digestOf(policy_section),
-            .identity = artifact_graph.identityFromContract(&contract),
-            .invariant_spec_digest = pcc.invariant.digest(invariant_spec),
-        },
-        .contract_digest = artifact_graph.digestOf(contract_json),
-        .runtime_policy_digest = artifact_graph.digestOf(policy_section),
-        .invariant_spec = invariant_spec,
-    });
-    defer built.deinit();
-
-    const assessment = try proof_activation.accept(allocator, .{
-        .certificate = built.bytes,
-        .bytecode = compiled.bytecode,
-        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-        .contract_section = contract_json,
-        .policy_section_digest = artifact_graph.digestOf(policy_section),
-        .policy_section = policy_section,
-        .identity = artifact_graph.identityFromContract(&contract),
-        .invariant_spec = invariant_spec,
-    }, pcc.policy.development);
-    try std.testing.expect(assessment.accepted());
-    try std.testing.expect(assessment.invariants.ready());
-    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.required);
-    try std.testing.expectEqual(@as(u32, 2), assessment.invariants.covered);
-    try std.testing.expectEqual(@as(u32, 1), assessment.invariants.writes);
-
-    // Both catalog kinds, at wire ordinal less one. A schema 1 document, or a
-    // schema 2 document naming one kind, leaves the second bit clear, so this
-    // is the assertion that says the second kind survived the producer and the
-    // consumer rather than being dropped on either side.
-    try std.testing.expectEqual(@as(u32, 0b11), assessment.invariants.kind_bits);
-    try std.testing.expectEqual(
-        pcc.verdict.WriteApplicability.covered,
-        assessment.invariants.writeApplicabilityFor(.declared_accounts_v1),
-    );
-    try std.testing.expectEqual(
-        pcc.verdict.WriteApplicability.covered,
-        assessment.invariants.writeApplicabilityFor(.balance_conservation_v1),
-    );
-
-    // The specification is a graph member under schema 2 exactly as it is
-    // under schema 1: one canonical byte changed must refuse the artifact.
-    const changed_spec = try allocator.dupe(u8, invariant_spec);
-    defer allocator.free(changed_spec);
-    changed_spec[changed_spec.len - 1] = changed_spec[changed_spec.len - 1] +% 1;
-    const tampered = try proof_activation.accept(allocator, .{
-        .certificate = built.bytes,
-        .bytecode = compiled.bytecode,
-        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-        .contract_section = contract_json,
-        .policy_section_digest = artifact_graph.digestOf(policy_section),
-        .policy_section = policy_section,
-        .identity = artifact_graph.identityFromContract(&contract),
-        .invariant_spec = changed_spec,
-    }, pcc.policy.development);
-    try std.testing.expect(!tampered.accepted());
+        .artifact = .{ .bytecode = compiled.bytecode, .policy_section_digest = [_]u8{0} ** 32 },
+        .contract_digest = [_]u8{0} ** 32,
+    }));
 }
 
 test "ledger function escapes are refused even beside a directly observed call" {
@@ -2708,84 +2517,13 @@ fn expectRefusedAt(assessment: pcc.Assessment, stage: pcc.verdict.Stage, code: p
     try std.testing.expectEqual(stage, rejection.stage);
 }
 
-test "a real compile of a tool handler reaches acceptance and promotes the catalog it shipped" {
-    const allocator = std.testing.allocator;
-    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
-    defer artifact.deinit();
-
-    // The producer shipped the section and committed the member to it.
-    const section = artifact.payload.tool_catalog_section orelse return error.TestUnexpectedResult;
-    var member_buf: [4]artifact_graph.Member = undefined;
-    const members = try artifact.certificateMembers(.tool_catalog, &member_buf);
-    try std.testing.expectEqual(@as(usize, 1), members.len);
-    try std.testing.expectEqual(@as(u32, 0), members[0].ordinal);
-    try std.testing.expectEqualSlices(u8, &pcc.tool_catalog.digest(section), &members[0].digest);
-
-    // The startup rebuild from the loaded sections folds the root the
-    // certificate names.
-    const inputs = artifact.activationInputs();
-    const observed = (try proof_activation.observedRoot(allocator, inputs)) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualSlices(u8, &(try artifact.executableRoot()), &observed);
-
-    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
-    try expectAccepted(assessment);
-
-    var promoted = (try contract_runtime.promote(
-        &artifact.contract,
-        assessment,
-        artifact.payload.policy_section_sha256,
-        section,
-        null,
-        .{},
-    )) orelse return error.TestUnexpectedResult;
-    defer promoted.deinit();
-    const catalog = promoted.tool_catalog orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), catalog.entries.len);
-    const ping = catalog.entries[0];
-    try std.testing.expectEqualStrings("ping", ping.name);
-    try std.testing.expectEqualStrings("POST", ping.method);
-    try std.testing.expectEqualStrings("/tools/ping", ping.path);
-    try std.testing.expectEqual(@as(u32, 256), ping.max_input_bytes);
-}
-
-test "one changed catalog byte in a copy of an accepted tool artifact is refused at artifact binding" {
-    const allocator = std.testing.allocator;
-    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
-    defer artifact.deinit();
-    const section = artifact.payload.tool_catalog_section orelse return error.TestUnexpectedResult;
-
-    // A byte inside the description, so the tampered copy still decodes: the
-    // refusal is the member binding, not a decode failure.
-    const tampered = try allocator.dupe(u8, section);
-    defer allocator.free(tampered);
-    const at = std.mem.indexOf(u8, tampered, "service is up") orelse return error.TestUnexpectedResult;
-    tampered[at] = 'S';
-    _ = try pcc.tool_catalog.decode(tampered);
-
-    var inputs = artifact.activationInputs();
-    inputs.tool_catalog = tampered;
-    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
-    // The runtime rebuilds the member from the bytes it loaded, so the changed
-    // byte moves the member digest away from the certificate's.
-    try expectRefusedAt(assessment, .artifact_binding, .graph_member_digest_mismatch);
-}
-
-test "a tool artifact whose catalog section was deleted is refused at artifact binding" {
-    const allocator = std.testing.allocator;
-    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
-    defer artifact.deinit();
-
-    var inputs = artifact.activationInputs();
-    inputs.tool_catalog = null;
-    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
-    // The certificate's graph still names member 19; the loaded sections no
-    // longer produce it.
-    try expectRefusedAt(assessment, .artifact_binding, .graph_member_missing);
-}
-
 test "a changed runtime policy member is refused at artifact binding (B8.8)" {
     const allocator = std.testing.allocator;
-    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
+    var artifact = try loadArtifactForSource(allocator,
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    );
     defer artifact.deinit();
     const policy_section = artifact.payload.policy_section orelse return error.TestUnexpectedResult;
 
@@ -2802,36 +2540,6 @@ test "a changed runtime policy member is refused at artifact binding (B8.8)" {
     inputs.policy_section_digest = changed_digest;
     const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
     try expectRefusedAt(assessment, .artifact_binding, .graph_member_digest_mismatch);
-}
-
-test "a contract tool list that disagrees with the accepted catalog refuses to start" {
-    const allocator = std.testing.allocator;
-    var artifact = try loadArtifactForSource(allocator, tool_catalog_fixture_source);
-    defer artifact.deinit();
-    const section = artifact.payload.tool_catalog_section orelse return error.TestUnexpectedResult;
-    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
-    try expectAccepted(assessment);
-
-    // The same contract with one byte bound changed. The accepted catalog wins,
-    // and a disagreement is a refusal, not a merge.
-    const contract_json = artifact.payload.contract_json orelse return error.TestUnexpectedResult;
-    const needle = "\"maxInputBytes\": 256";
-    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, contract_json, needle));
-    const changed_json = try std.mem.replaceOwned(u8, allocator, contract_json, needle, "\"maxInputBytes\": 257");
-    defer allocator.free(changed_json);
-    const raw = try contract_runtime.parseContractJson(allocator, changed_json);
-    var disagreeing = try contract_runtime.validate(raw, .{ .bytecode = artifact.payload.bytecode });
-    defer disagreeing.deinit();
-    try std.testing.expectError(
-        error.ToolCatalogContractMismatch,
-        contract_runtime.promote(&disagreeing, assessment, artifact.payload.policy_section_sha256, section, null, .{}),
-    );
-
-    // And the contract names tools while no catalog section was accepted.
-    try std.testing.expectError(
-        error.ToolCatalogMissing,
-        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, null, .{}),
-    );
 }
 
 test "a handler with no tool catalog ships no section and no member, and promotes none" {
@@ -2885,137 +2593,6 @@ const declared_fixture_declaration =
 
 fn parseTestDeclaration(allocator: std.mem.Allocator, json: []const u8) !zts.declaration.Declaration {
     return precompile.parseDeclarationBytes(allocator, json, "test declaration", null);
-}
-
-test "a real compile of a declared handler reaches acceptance and promotes the ceiling it shipped" {
-    const allocator = std.testing.allocator;
-    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
-    defer declaration.deinit();
-    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
-    defer artifact.deinit();
-
-    // The producer shipped the canonical bytes and committed the member to
-    // them.
-    const section = artifact.payload.declaration_section orelse return error.TestUnexpectedResult;
-    const expected = try zts.declaration.encodeCanonical(allocator, &declaration);
-    defer allocator.free(expected);
-    try std.testing.expectEqualSlices(u8, expected, section);
-    var member_buf: [4]artifact_graph.Member = undefined;
-    const members = try artifact.certificateMembers(.declaration, &member_buf);
-    try std.testing.expectEqual(@as(usize, 1), members.len);
-    try std.testing.expectEqual(@as(u32, 0), members[0].ordinal);
-    try std.testing.expectEqualSlices(u8, &pcc.declaration.digest(section), &members[0].digest);
-
-    // The startup rebuild folds the root the certificate names.
-    const inputs = artifact.activationInputs();
-    const observed = (try proof_activation.observedRoot(allocator, inputs)) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualSlices(u8, &(try artifact.executableRoot()), &observed);
-
-    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
-    try expectAccepted(assessment);
-
-    var promoted = (try contract_runtime.promote(
-        &artifact.contract,
-        assessment,
-        artifact.payload.policy_section_sha256,
-        null,
-        section,
-        .{},
-    )) orelse return error.TestUnexpectedResult;
-    defer promoted.deinit();
-    const ceiling = promoted.capability_ceiling orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("boundary", ceiling.profile.name);
-    try std.testing.expectEqual(@as(usize, 3), ceiling.excluded_modules.len);
-    try std.testing.expectEqualStrings("zttp:cache", ceiling.excluded_modules[0]);
-    try std.testing.expectEqualStrings("zttp:ratelimit", ceiling.excluded_modules[1]);
-    try std.testing.expectEqualStrings("zttp:sql", ceiling.excluded_modules[2]);
-    const view = ceiling.view();
-    try std.testing.expect(view.admits(.env));
-    try std.testing.expect(view.admits(.crypto));
-    try std.testing.expect(!view.admits(.network));
-    try std.testing.expect(!view.admits(.sqlite));
-}
-
-test "a declaration with classifications and no ceiling ships its section and promotes no ceiling" {
-    const allocator = std.testing.allocator;
-    var declaration = try parseTestDeclaration(allocator,
-        \\{"version":1,"classifications":[
-        \\ {"source":"fetch:billing.example.com","path":"card.token","label":"credential","required":false,"reason":"Card token."}]}
-    );
-    defer declaration.deinit();
-    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
-    defer artifact.deinit();
-
-    const section = artifact.payload.declaration_section orelse return error.TestUnexpectedResult;
-    var member_buf: [4]artifact_graph.Member = undefined;
-    try std.testing.expectEqual(@as(usize, 1), (try artifact.certificateMembers(.declaration, &member_buf)).len);
-
-    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
-    try expectAccepted(assessment);
-    var promoted = (try contract_runtime.promote(
-        &artifact.contract,
-        assessment,
-        artifact.payload.policy_section_sha256,
-        null,
-        section,
-        .{},
-    )) orelse return error.TestUnexpectedResult;
-    defer promoted.deinit();
-    try std.testing.expect(promoted.capability_ceiling == null);
-}
-
-test "one changed declaration byte in a copy of an accepted declared artifact is refused at artifact binding" {
-    const allocator = std.testing.allocator;
-    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
-    defer declaration.deinit();
-    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
-    defer artifact.deinit();
-    const section = artifact.payload.declaration_section orelse return error.TestUnexpectedResult;
-
-    // A byte inside the excluded specifier, so the tampered copy still
-    // decodes: the refusal is the member binding, not a decode failure.
-    const tampered = try allocator.dupe(u8, section);
-    defer allocator.free(tampered);
-    const at = std.mem.indexOf(u8, tampered, "zttp:sql") orelse return error.TestUnexpectedResult;
-    tampered[at + "zttp:".len] = 't';
-    _ = try pcc.declaration.decode(tampered);
-
-    var inputs = artifact.activationInputs();
-    inputs.declaration = tampered;
-    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
-    try expectRefusedAt(assessment, .artifact_binding, .graph_member_digest_mismatch);
-}
-
-test "a declared artifact whose declaration section was deleted is refused at artifact binding" {
-    const allocator = std.testing.allocator;
-    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
-    defer declaration.deinit();
-    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
-    defer artifact.deinit();
-
-    var inputs = artifact.activationInputs();
-    inputs.declaration = null;
-    const assessment = try proof_activation.accept(allocator, inputs, pcc.policy.production);
-    // The certificate's graph still names member 20; the loaded sections no
-    // longer produce it.
-    try expectRefusedAt(assessment, .artifact_binding, .graph_member_missing);
-}
-
-test "a declaration section that does not lower refuses to start" {
-    const allocator = std.testing.allocator;
-    var declaration = try parseTestDeclaration(allocator, declared_fixture_declaration);
-    defer declaration.deinit();
-    var artifact = try loadDeclaredArtifactForSource(allocator, declared_fixture_source, &declaration);
-    defer artifact.deinit();
-    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
-    try expectAccepted(assessment);
-
-    // Promotion lowers only what acceptance was handed. Bytes that do not
-    // decode are a refusal, never a generation without its ceiling.
-    try std.testing.expectError(
-        error.AcceptedDeclarationUndecodable,
-        contract_runtime.promote(&artifact.contract, assessment, artifact.payload.policy_section_sha256, null, "not a declaration", .{}),
-    );
 }
 
 test "a handler that does not always return is not accepted" {
@@ -3141,49 +2718,6 @@ test "prepareProjectArtifact default path: <root>/.zttp/<subdir>/<basename>" {
 
     // Handler path resolves to the manifest entry.
     try testing.expectStringEndsWith(artifact.handler_path, "src/handler.ts");
-}
-
-test "build commands preserve protected ledger files on output collision" {
-    const allocator = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
-    defer allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-    try tmp.dir.writeFile(io, .{ .sub_path = "invariant.json", .data =
-        \\{"version":1,"kind":"balance_conservation_v1","ledger":"main","currencies":[{"code":"USD","scale":2}]}
-    });
-    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data =
-        \\{"entry":"handler.ts","invariants":"invariant.json","ledger":"ledger.sqlite"}
-    });
-    // Refusal precedes compilation, so even a missing handler cannot mask it.
-    for ([_][]const u8{ "", "-wal", "-shm", "-journal" }) |suffix| {
-        const output = try std.fmt.allocPrint(allocator, "ledger.sqlite{s}", .{suffix});
-        defer allocator.free(output);
-        try tmp.dir.writeFile(io, .{ .sub_path = output, .data = "protected bytes" });
-        try std.testing.expectError(error.ProtectedLedgerPath, buildCommand(allocator, &.{ "-o", output, "--no-attest" }));
-        try std.testing.expectError(error.ProtectedLedgerPath, compileCommand(allocator, &.{ "handler.ts", "-o", output, "--no-attest" }));
-        const unchanged = try zts.file_io.readFile(allocator, output, 1024);
-        defer allocator.free(unchanged);
-        try std.testing.expectEqualStrings("protected bytes", unchanged);
-    }
-    // Deploy has a fixed output path and also writes a separate proof ledger.
-    const root = try tmp.dir.realPathFileAlloc(io, ".", allocator);
-    defer allocator.free(root);
-    const deploy_output = try std.fmt.allocPrint(allocator, ".zttp/deploy/{s}", .{std.fs.path.basename(root)});
-    defer allocator.free(deploy_output);
-    try tmp.dir.createDirPath(io, ".zttp/deploy");
-    for ([_][]const u8{ deploy_output, ".zttp/proofs.jsonl" }) |output| {
-        const config = try std.fmt.allocPrint(allocator, "{{\"entry\":\"handler.ts\",\"invariants\":\"invariant.json\",\"ledger\":\"{s}\"}}", .{output});
-        defer allocator.free(config);
-        try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = config });
-        try tmp.dir.writeFile(io, .{ .sub_path = output, .data = "protected bytes" });
-        try std.testing.expectError(error.ProtectedLedgerPath, localDeployCommand(allocator, &.{ "--local", "--no-attest" }));
-        const unchanged = try zts.file_io.readFile(allocator, output, 1024);
-        defer allocator.free(unchanged);
-        try std.testing.expectEqualStrings("protected bytes", unchanged);
-    }
 }
 
 test "prepareProjectArtifact override path: passes through unchanged, no parent created" {
@@ -3410,10 +2944,12 @@ const BuildProbe = struct {
     source: []const u8 = "function handler(req) { return Response.text('ok'); }",
     bytecode: []const u8 = &[_]u8{ 1, 2, 3, 4 },
     with_contract: bool = true,
+    retired_module: ?[]const u8 = null,
     compile_error: ?anyerror = null,
 
     read_calls: usize = 0,
     compile_calls: usize = 0,
+    resolve_calls: usize = 0,
     tail_calls: usize = 0,
     codesign_calls: usize = 0,
     ledger_calls: usize = 0,
@@ -3446,13 +2982,26 @@ const BuildProbe = struct {
         self.compile_saw_system = input.system_path != null;
         self.compile_saw_policy = input.policy != null;
         if (self.compile_error) |err| return err;
+        const bytecode = try allocator.dupe(u8, self.bytecode);
+        errdefer allocator.free(bytecode);
+        var contract: ?zts.HandlerContract = if (self.with_contract)
+            try emptyProbeContract(allocator)
+        else
+            null;
+        errdefer if (contract) |*built| built.deinit(allocator);
+        if (self.retired_module) |module| {
+            const owned_module = try allocator.dupe(u8, module);
+            errdefer allocator.free(owned_module);
+            try contract.?.modules.append(allocator, owned_module);
+        }
         return .{
-            .bytecode = try allocator.dupe(u8, self.bytecode),
-            .contract = if (self.with_contract) try emptyProbeContract(allocator) else null,
+            .bytecode = bytecode,
+            .contract = contract,
         };
     }
 
-    fn resolveRuntime(_: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]const u8 {
+    fn resolveRuntime(context: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]const u8 {
+        of(context).resolve_calls += 1;
         return allocator.dupe(u8, "/nonexistent/zttp-runtime");
     }
 
@@ -3495,6 +3044,21 @@ const BuildProbe = struct {
         };
     }
 };
+
+test "a retired module refuses a build before runtime resolution or artifact output" {
+    var probe = BuildProbe{ .retired_module = "zttp:tool" };
+    try std.testing.expectError(error.UnsupportedRuntimeAuthority, runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "artifact.bin",
+        .attest_requested = true,
+    }, probe.capabilities()));
+
+    try std.testing.expectEqual(@as(usize, 1), probe.compile_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolve_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.codesign_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
+}
 
 test "a deploy build signs, codesigns, and records one ledger row" {
     var probe = BuildProbe{};
@@ -3662,49 +3226,6 @@ fn writeDeclaredProject(tmp: *std.testing.TmpDir, declaration: []const u8) !void
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = declared_project_handler });
 }
 
-test "a project build carries the zttp.json declaration and refuses a required entry never seen" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try writeDeclaredProject(&tmp,
-        \\{"version":1,"classifications":[
-        \\ {"source":"fetch:billing.example.com","path":"card.token","label":"credential","required":true,"reason":"Card token."}]}
-    );
-
-    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
-    defer allocator.free(handler_path);
-    var context = try discoverExplicitCompileContext(allocator, handler_path);
-    defer context.deinit(allocator);
-    const declaration = context.declarationPtr() orelse return error.TestExpectedDeclaration;
-    try std.testing.expectEqual(@as(usize, 1), declaration.classifications.len);
-
-    // The real reader and compiler; the tail, signer, and ledger are probes,
-    // and none of them may run.
-    var probe = BuildProbe{};
-    var caps = probe.capabilities();
-    caps.read_source = readSourceCapability;
-    caps.compile = compileCapability;
-    try std.testing.expectError(error.RequiredClassificationAbsent, runBuild(allocator, .{
-        .handler_path = handler_path,
-        .output_path = "out",
-        .declaration = context.declarationPtr(),
-        .attest_requested = false,
-    }, caps));
-    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
-
-    // Control: the same build without the declaration reaches the tail.
-    var control = BuildProbe{};
-    var control_caps = control.capabilities();
-    control_caps.read_source = readSourceCapability;
-    control_caps.compile = compileCapability;
-    _ = try runBuild(allocator, .{
-        .handler_path = handler_path,
-        .output_path = "out",
-        .attest_requested = false,
-    }, control_caps);
-    try std.testing.expectEqual(@as(usize, 1), control.tail_calls);
-}
-
 /// A one-tool handler whose route fetches with the credential `name` (M4 T6).
 fn credentialedToolSource(comptime name: []const u8) []const u8 {
     return
@@ -3744,99 +3265,4 @@ fn credentialedToolSource(comptime name: []const u8) []const u8 {
         \\}
         \\
     ;
-}
-
-test "a project build refuses a tool credential zttp.json does not define" {
-    const allocator = std.testing.allocator;
-    const weather_refs =
-        \\{"entry":"src/handler.ts","credentials":{"weather":{"env":"W","endpoint":"https://api.weather.example",
-        \\ "header":"authorization","scheme":"Bearer","methods":["GET"],"paths":["/v1"]}}}
-    ;
-    const Case = struct { manifest: []const u8, source: []const u8, refused: bool };
-    const cases = [_]Case{
-        .{ .manifest = weather_refs, .source = credentialedToolSource("weather"), .refused = false },
-        .{ .manifest = weather_refs, .source = credentialedToolSource("billing"), .refused = true },
-        .{ .manifest = "{\"entry\":\"src/handler.ts\"}", .source = credentialedToolSource("weather"), .refused = true },
-    };
-    for (cases) |case| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        try tmp.dir.createDirPath(std.testing.io, "src");
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "zttp.json", .data = case.manifest });
-        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "src/handler.ts", .data = case.source });
-        const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
-        defer allocator.free(handler_path);
-        var context = try discoverExplicitCompileContext(allocator, handler_path);
-        defer context.deinit(allocator);
-
-        var probe = BuildProbe{};
-        var caps = probe.capabilities();
-        caps.read_source = readSourceCapability;
-        caps.compile = compileCapability;
-        const request: BuildRequest = .{
-            .handler_path = handler_path,
-            .output_path = "out",
-            .credentials = context.credentials,
-            .attest_requested = false,
-        };
-        if (case.refused) {
-            try std.testing.expectError(error.CredentialBreached, runBuild(allocator, request, caps));
-            try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
-        } else {
-            _ = try runBuild(allocator, request, caps);
-            try std.testing.expectEqual(@as(usize, 1), probe.tail_calls);
-        }
-    }
-}
-
-test "a project build carries the zttp.json ceiling and refuses a handler outside it" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    // `boundary` admits no `network`, and the handler imports `zttp:fetch`.
-    try writeDeclaredProject(&tmp,
-        \\{"version":2,"ceiling":{"profile":"boundary","exclude":[]}}
-    );
-
-    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
-    defer allocator.free(handler_path);
-    var context = try discoverExplicitCompileContext(allocator, handler_path);
-    defer context.deinit(allocator);
-    const declaration = context.declarationPtr() orelse return error.TestExpectedDeclaration;
-    try std.testing.expectEqualStrings("boundary", (declaration.ceiling orelse return error.TestExpectedCeiling).profile.name);
-
-    var probe = BuildProbe{};
-    var caps = probe.capabilities();
-    caps.read_source = readSourceCapability;
-    caps.compile = compileCapability;
-    try std.testing.expectError(error.CeilingBreached, runBuild(allocator, .{
-        .handler_path = handler_path,
-        .output_path = "out",
-        .declaration = context.declarationPtr(),
-        .attest_requested = false,
-    }, caps));
-    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
-
-    // Control: the same build without the declaration reaches the tail.
-    var control = BuildProbe{};
-    var control_caps = control.capabilities();
-    control_caps.read_source = readSourceCapability;
-    control_caps.compile = compileCapability;
-    _ = try runBuild(allocator, .{
-        .handler_path = handler_path,
-        .output_path = "out",
-        .attest_requested = false,
-    }, control_caps);
-    try std.testing.expectEqual(@as(usize, 1), control.tail_calls);
-}
-
-test "a project whose declaration the loader refuses does not build" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try writeDeclaredProject(&tmp, "{\"version\":1,\"classifications\":[]}");
-
-    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
-    defer allocator.free(handler_path);
-    try std.testing.expectError(error.DeclarationContextFailed, discoverExplicitCompileContext(allocator, handler_path));
 }

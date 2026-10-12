@@ -107,3 +107,72 @@ The U1 worker proposes `packages/tools/src/retired_authority.zig` as the one sha
 Precompile uses the helper directly. Runtime callers reach the same helper through the existing project-configuration surface.
 The predicate uses contract facts, proof evidence, and explicit configuration flags. It changes no compiler registry, rule, or binding.
 The main agent owns approval of any module-registration seam needed to deny replay substitution.
+
+The main agent reviewed all seven files containing the U1 test-only changes.
+The unfiltered red command ran `test-cli`, `test-precompile`, `test-project-config`, and `test-zruntime` with `-j2`.
+The command returned direct exit status 1. All four test artifacts compiled successfully.
+The current implementation accepted retired build, configuration, source, activation, and bundle facts instead of refusing them.
+Precompilation replaced the sentinel output. Replay and durable replay substituted recorded ledger successes.
+The direct instance also installed tool state. These observations establish the missing denial boundaries.
+The project-discovery test leaked its unexpectedly successful configuration during the red run.
+The worker corrected that test cleanup before production edits. The main agent will check the correction in the green run.
+
+The main agent authorized U1 production edits after the red result.
+The approved registration seam is `HandlerInstance.installVirtualModules`; ledger and tool use normal state-free bindings there.
+The worker must preserve `resolver.zig`, `trace.zig`, compiler metadata, and all recording identities.
+A separate read-only agent prepares the U2 deletion census. A kernel worker prepares U3 predecessor tests without production edits.
+
+The U2 census distinguishes the buffered `zttp:sse` binding from the removed agent transport.
+The binding has no provider, credential, turn, route, or module state. Decision 11 requires its compiler identity to remain.
+No new SSE-import refusal enters the shared predicate.
+
+U3 also reaches the schema pin in `packages/proof-checker/src/policy.zig`.
+The kernel worker owns that test-only pin update alongside the planned kernel files.
+The main agent found another measured floor in `packages/tools/src/proof_checker_mutants.zig`.
+Both kernel gates will use counts measured after subject removal, rather than their former invariant-inclusive baselines.
+
+The main agent reviewed the six kernel files containing the U3 test-only changes.
+The unfiltered `test-proof-checker` red command returned direct exit status 1 after successful compilation.
+It ran 289 tests: 280 passed and nine failed for the new retirement expectations.
+The decoder accepted schema 4, certificate section 11, graph kinds 17 through 20, and proof-IR tag 8.
+The schema pins and retired-number checks also failed as expected. No kernel production change preceded that result.
+
+For U1 isolation, the main agent saved the six U3 test files in `kernel-red-snapshot` under the private execution directory.
+The main agent temporarily restored their baseline text before running U1 checks. The prepared U3 tests remain intact in that snapshot.
+The first U1 implementation check returned direct exit status 1 at compilation.
+Zig refused the helper file because both `project_config` and `zts_cli` imported that file directly.
+The worker will use the named `project_config` surface and wire that dependency into the two standalone precompile roots.
+No behavior verdict follows from that compilation failure.
+
+The removal census is complete. The runtime and tooling workers have prepared disjoint U2 scopes without editing files.
+The invariant author, bridges, encoders, report, and drift gate must leave with U3 because retained artifact callers still reach them.
+The runtime worker also owns the retired invariant caller in `cli_shared.zig` before project methods leave.
+
+## U1 result
+
+The refusal unit is complete. The main agent reviewed the full diff line by line, including the retired test bodies.
+The shared predicate rejects ledger/tool modules, catalogs, authentication, credentials, classification declarations, ceilings, and retired project keys.
+Project discovery rejects retired keys by presence, including null values. Build and generated output refuse before writing artifacts.
+Activation refuses malformed contracts instead of treating a failed parse as absent authority.
+Source startup analyzes the complete module graph before replay, fixture execution, watching, scheduling, or pool initialization.
+The source tests cover ledger and tool imports through local dependencies.
+Live reload refuses a retired candidate. Ledger and tool bindings receive no installed state and bypass recorded-result wrappers.
+Replay and durable replay tests preserve the bindings' absence-of-authority errors for both modules.
+
+The second implementation run compiled successfully but returned exit status 1 on legacy product expectations.
+The worker removed sixteen obsolete build tests and nineteen obsolete runtime tests after the main agent examined the failures.
+The runtime-policy binding test now uses an ordinary handler. The producer ledger test now requires refusal before certificate construction.
+The third unfiltered run returned direct exit status 0 for `test-cli`, `test-precompile`, `test-project-config`, and `test-zruntime`.
+The CLI runner reported 805 passed and one skipped, with no failures, leaks, or logged errors.
+The other roots reported 212 precompile tests, 39 project tests, and 526 runtime tests passed, with one runtime test skipped.
+
+The module-boundary check returned exit status 0 without allowlist expansion.
+The error-discard gate required one new reviewed row for `retiredInputFeature`.
+That handler propagates allocation failure and maps all other parse failures to `InvalidContractSection`, which stops activation.
+The updated `test-proof-swallow` returned exit status 0 with zero unreviewed sites.
+The debug binary build returned exit status 0. Formatting and `git diff --check` passed.
+The metadata and specification hash match their exact baselines. All baseline hashes of model-visible source files still match.
+
+The six U3 tests remain saved separately during this isolated U1 check and commit.
+The main agent will restore those exact test files for the later coupled format transition.
+The next action belongs to the main agent: execute U2 runtime and tooling removal with the prepared ownership split.
