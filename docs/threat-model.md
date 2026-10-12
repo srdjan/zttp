@@ -46,9 +46,8 @@ repository is in scope.
   one directory. What it does not re-derive is published in
   `docs/verification.md` and pinned by `scripts/check-proof-ratchet.sh`.
 - A residual guard is consumer-owned runtime authority, not a static proof.
-  Certificate schema 4 binds the exact serialized runtime policy, residual
-  plan, invariant specification, and protected adapter into the executable
-  graph. The kernel reconstructs exact coverage before startup. The
+  Certificate schema 5 binds the exact serialized runtime policy and residual
+  plan into the executable graph. The kernel reconstructs exact coverage before startup. The
   authoritative sink then decides the actual resource under the request's
   pinned policy generation. Producer Properties, guard coverage, and live
   allow or deny outcomes never substitute for one another.
@@ -98,8 +97,7 @@ repository is in scope.
   then authorizes the resolved address scope before opening a socket. Every
   retry repeats both checks under one pinned generation.
 - Production starts no pool, prewarms no runtime, and serves no request until
-  schema 4 and `zttp_pcc_v3` proof acceptance includes exact guard and invariant
-  coverage.
+  schema 5 and `zttp_pcc_v3` proof acceptance includes exact guard coverage.
   Guarded generations cannot enter the certificate-free live-swap path.
 - A proof bundle is untrusted input. `zttp proofs verify` accepts only the
   `contract`, `binary`, `certificate`, and `replay` components, requires a `contract`, and
@@ -107,8 +105,9 @@ repository is in scope.
   sha256. Every path segment is opened without following symlinks, so a
   component that resolves outside the bundle directory is refused rather than
   hashed.
-- Self-extract format 6, `zttp-attest-v4`, and `zttp-bundle-3` are equality
-  checks. Immediate predecessors are refused with rebuild guidance.
+- Self-extract format 7, certificate schema 5, `zttp-attest-v4`, and
+  `zttp-bundle-3` are equality checks. Format 6 and schema 4 are refused with
+  rebuild guidance.
 
 ## Known Footguns
 

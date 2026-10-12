@@ -49,7 +49,7 @@ reproduced by the supervisor on a fresh build cache:
 - Disabling the executable-root comparison (`checker.zig:1537`) leaves all 183 kernel tests
   green. No `.zig` file in the repository names `executable_root_mismatch`,
   `graph_member_extra`, or `zero_commitment`.
-- Deleting the empty-ledger-id refusal (`invariant.zig:424`) leaves all 183 tests green.
+- Deleting the empty-ledger-id refusal (`pre-rebase:packages/proof-checker/src/invariant.zig:424`) leaves all 183 tests green.
 - Mutant C16 (an unknown non-zero evidence rule decodes as "no rule") survives. Production
   code refuses it today (`certificate.zig:513-516`), but no test holds that refusal, and
   `validEvidenceShape` (`checker.zig:1420-1421`) accepts a null rule for `trusted`, `tested`,
@@ -137,8 +137,8 @@ minimal parts and the parts with all 11 sections. The draft also removes the two
 `.identity => unreachable` prongs (`:776`, `:795`), which the early return at `:745` makes
 unreachable only through control flow.
 
-**M3. One shared wire reader (`declaration.zig`, `tool_catalog.zig`, `capability_policy.zig`).**
-`Reader` is copied word for word (`declaration.zig:151-174`, `tool_catalog.zig:156-185`).
+**M3. One shared wire reader (`pre-rebase:packages/proof-checker/src/declaration.zig`, `pre-rebase:packages/proof-checker/src/tool_catalog.zig`, `capability_policy.zig`).**
+`Reader` is copied word for word (`pre-rebase:packages/proof-checker/src/declaration.zig:151-174`, `pre-rebase:packages/proof-checker/src/tool_catalog.zig:156-185`).
 `capability_policy.zig:159-183` has a third copy as `Cursor`. Six iterators, two test
 writers, two `digest()` bodies, two header checks, and six "previous must be strictly less"
 loops repeat the same shape. Rederive them as a sibling `wire.zig` that imports only `std`,
@@ -238,11 +238,11 @@ explicitly. This deletes the two dead `orelse` branches in M8. It is included in
 `graph_member_out_of_order`. Give each function its own error set, and add
 `CountExceeded` to `push`.
 
-**T5. Before Phase 4, `invariant.Spec` carried states the decoder never produced (`invariant.zig:182-195`).**
+**T5. Before Phase 4, `invariant.Spec` carried states the decoder never produced (`pre-rebase:packages/proof-checker/src/invariant.zig:182-195`).**
 `schema: u16` admitted schema 7, which `recordAt` (`:237`) treated as v1. `Spec.kind` was always
 `.balance_conservation_v1` and had no production reader. Phase 4 uses
 `Schema = enum(u16) { v1 = 1, v2 = 2 }` with a `kinds: union(Schema)` field and removes
-`kind`. The external reader in `tools/src/invariant_config.zig` reads the tag.
+`kind`. The external reader in `pre-rebase:packages/tools/src/invariant_config.zig` reads the tag.
 
 **T6. Before Phase 4, `PropertyVerdicts` did not tie the accepted bit to the grade (`verdict.zig:428-453`).**
 `accept()` could set a bit whose grade slot was null. Phase 4 uses
@@ -290,13 +290,13 @@ Security-relevant, fail-open if the guarded line regresses:
   the constant), and an SQL flag byte or enabled byte of 2 (P02, P03). P03 is read as
   "disabled" today.
 - Invariant spec: an empty ledger id (I11), and the ledger id, currency, scale, matcher, and
-  kind-count bounds (I7, I8, I12, I13, I14, I1). `invariant.zig` has no decode-error census,
+  kind-count bounds (I7, I8, I12, I13, I14, I1). `pre-rebase:packages/proof-checker/src/invariant.zig` has no decode-error census,
   and 10 of its 26 `DecodeError` members are never asserted.
 
 Structural weaknesses in the suite:
 
-- The error censuses in `certificate.zig:1420`, `declaration.zig:638`, and
-  `tool_catalog.zig:753` need only one probe per error, so a second site that returns the
+- The error censuses in `certificate.zig:1420`, `pre-rebase:packages/proof-checker/src/declaration.zig:638`, and
+  `pre-rebase:packages/proof-checker/src/tool_catalog.zig:753` need only one probe per error, so a second site that returns the
   same error goes unprobed. Seven reserved-byte sites share `ReservedFieldNonZero` and
   survive for that reason. Change the census to count sites, not errors.
 - About 18 reason codes have no test anywhere in the repository. Only the tool-catalog and
@@ -372,8 +372,8 @@ its boundary.
   and add the missing patterns.
 - **Wire formats defined twice.** Declaration, tool catalog, capability policy, residual
   catalog, and endpoint normalization each have a producer copy. Each has a drift check,
-  with one exception: the tool-catalog magic is duplicated (`tools/src/tool_catalog_encoding.zig:17`
-  and `tool_catalog.zig:56`) and not compared at compile time. The schema is compared.
+  with one exception: the tool-catalog magic is duplicated (`pre-rebase:packages/tools/src/tool_catalog_encoding.zig:17`
+  and `pre-rebase:packages/proof-checker/src/tool_catalog.zig:56`) and not compared at compile time. The schema is compared.
 - **Panics a certificate might reach.** `checker.zig:105` (`std.debug.assert`, then undefined
   behavior in ReleaseFast; since ae26ba69 a `safety.check` that always panics) and `checker.zig:1509` must be shown to be unreachable from input
   bytes. M6 deletes the second. The `certificate.zig` prongs were checked and are guarded by
@@ -389,16 +389,16 @@ its boundary.
   sentence. Add `wire.zig` if M3 lands.
 - `residual.zig:301-303` says the producer and the checker call one function. The producer
   has its own copy in `zts/src/endpoint.zig`.
-- `docs/consumer-contract.md:486-545` (ZTCAT1 and ZTDCL1 layouts, bounds, decoder paths),
+- `pre-rebase:docs/consumer-contract.md:486-545` (ZTCAT1 and ZTDCL1 layouts, bounds, decoder paths),
   `:580-600` (generated alphabet table with kernel paths), and `:619-623`. The generated
   parts are regenerated, not hand-edited.
-- `docs/consumer-contract-envelope.json` (generated) if T2 removes a reason code.
+- `pre-rebase:docs/consumer-contract-envelope.json` (generated) if T2 removes a reason code.
 - `docs/internals/testing.md:318-340`, if the purity gate changes.
 - `docs/internals/architecture.md:23`, `docs/threat-model.md:42-46`: the leaf and
   one-directory claims, if the encoder policy changes.
 - `docs/verification.md:782` (`Property.consumerChecked`), if the ratchet gate changes.
-- Plans that cite kernel line numbers: `docs/plans/2026-09-22-m4-release-contract.md:46,112`
-  and `docs/plans/2026-09-23-m4-t3-catalog-binding-design.md:54,134,191-192`. These move on
+- Plans that cite kernel line numbers: `pre-rebase:docs/plans/2026-09-22-m4-release-contract.md:46,112`
+  and `pre-rebase:docs/plans/2026-09-23-m4-t3-catalog-binding-design.md:54,134,191-192`. These move on
   any edit. They are historical records, so leave them unless a plan is still in progress.
 
 ## 7. Additional re-basing tasks
@@ -452,7 +452,7 @@ The unreachable `rule_family_mismatch` branches are already gone.
 Verify: Phase 1 commands plus `zig build test-cli` (end-to-end acceptance in
 `build_command.zig`), `zig build test-proof-ratchet`, `zig build test-invariant-drift`.
 The invariant drift gate pins six exact `checker.zig` test names
-(`tools/src/invariant_drift_gate.zig:105-110`), so keep them.
+(`pre-rebase:packages/tools/src/invariant_drift_gate.zig:105-110`), so keep them.
 Expected: `checker.zig` 335 to 309 branches (measured), maxCC 59 to 39.
 
 **Phase 3: endpoint split (M7).**
@@ -477,8 +477,8 @@ Expected: the branch count may rise. Success means the compiler refuses the cont
   are type-driven tables with no duplicate.
 - The declaration decoder (11/12 mutants killed) and the guard per-field comparisons in
   `checker.zig` (all killed by the table test at `:2511`).
-- `limits.zig`, `policy.zig`, `Budget` stickiness, the comptime guards in `invariant.zig:139-164`
-  and `residual.zig:274-284`, and the pinned digest literals in `invariant.zig:867,884`.
+- `limits.zig`, `policy.zig`, `Budget` stickiness, the comptime guards in `pre-rebase:packages/proof-checker/src/invariant.zig:139-164`
+  and `residual.zig:274-284`, and the pinned digest literals in `pre-rebase:packages/proof-checker/src/invariant.zig:867,884`.
 - `DuplicateSection` in `certificate.zig`. The strict-order check subsumes it, but removing
   it changes a public reason code for no behavioral gain.
 - All 18 `else =>` prongs in the non-checker files. Each one switches on a raw wire integer,

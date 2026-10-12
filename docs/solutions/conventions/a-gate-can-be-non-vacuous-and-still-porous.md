@@ -34,14 +34,14 @@ The acceptance kernel in `packages/proof-checker/` decides whether a deployed
 artifact is accepted. One of its decisions is whether the adapter that this
 binary linked is the adapter the artifact's specification needs. That decision
 was once unable to fail. The bridge file states the history in its own header at
-`packages/runtime/src/invariant_adapter.zig:4-8`: before the file existed, "the
+`pre-rebase:packages/runtime/src/invariant_adapter.zig:4-8`: before the file existed, "the
 producer bound that member from `pcc.invariant`'s own constant and the consumer
 compared it against the same function, so an artifact whose specification named
 a kind the linked adapter did not enforce was undetectable: the comparison had
 one source."
 
 The repair gave the comparison two sources. `linked_manifest` is filled field by
-field from the native module at `packages/runtime/src/invariant_adapter.zig:44-49`,
+field from the native module at `pre-rebase:packages/runtime/src/invariant_adapter.zig:44-49`,
 `linkedDigest()` hashes that manifest at `:64-66`, and `require()` reads the
 consumer's expectation `pcc.invariant.adapterDigest()` at `:75-79` and compares
 the two. The bridge file was added by the commit "feat(invariant): bind the
@@ -56,7 +56,7 @@ not of what the code computes. A bridge that copies the kernel's constant into
 unit test passes. Every refusal test passes. The digests compare equal, because
 they are the same value arriving twice. There is no runtime symptom at all. Only
 a source-level gate can hold this property, and that gate is
-`packages/tools/src/invariant_drift_gate.zig`, run by the build as
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig`, run by the build as
 `zig build test-invariant-drift` (declared in `build/proof_gates.zig`).
 
 The friction is what happened next. The gate went through four review rounds. In
@@ -95,7 +95,7 @@ zig build invariant-gate          # writes zig-out/tooling/invariant-drift-gate
 ```
 
 **2. Copy the gate's inputs into an isolated directory.** This gate declares its
-inputs as a table: an `Input` enum at `packages/tools/src/invariant_drift_gate.zig:52`
+inputs as a table: an `Input` enum at `pre-rebase:packages/tools/src/invariant_drift_gate.zig:52`
 and a `paths` array at `:76` that gives one path per member. It finds its root by
 walking up from the working directory looking for `packages/proof-checker/src/invariant.zig`
 and `build.zig.zon`, in `findRepoRoot`. So a directory that holds those declared
@@ -117,7 +117,7 @@ exit=0
 **4. Apply one edit, run the real binary, read the exit status.** One edit. Not
 two. A mutation that changes two things cannot tell you which one the gate saw.
 The gate documents its own codes in its usage text at
-`packages/tools/src/invariant_drift_gate.zig:2912`: 0 accepted, 1 rejected, 2 the
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig:2912`: 0 accepted, 1 rejected, 2 the
 mutation slipped through under `--mutate`, 3 the probe could not find its anchor
 or the repository was not found.
 
@@ -150,7 +150,7 @@ ships exactly such a probe: `probeBridgeScanBlind` rewrites every `pcc.invariant
 to `kern.invariant.` throughout the bridge, which binds nothing and would not
 compile, and its purpose is to make the scan recognise zero reads so the
 `adapter_scan_blind` floor fires. That floor lives at
-`packages/tools/src/invariant_drift_gate.zig:1492-1505` and exists because, as
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig:1492-1505` and exists because, as
 the comment there says, "a spelling it cannot follow reads as a clean file".
 
 ### What to attack first
@@ -378,7 +378,7 @@ part of this work that keeps paying.
 
 Every result below was measured at this tree by copying the gate's 21 declared
 inputs plus `build.zig.zon` into an isolated directory, applying one edit to
-`packages/runtime/src/invariant_adapter.zig` in that copy, and running
+`pre-rebase:packages/runtime/src/invariant_adapter.zig` in that copy, and running
 `zig-out/tooling/invariant-drift-gate` from it.
 
 ### 1. One forbidden token is one spelling

@@ -321,7 +321,7 @@ rises past it.
   (:1072). Delete it and its CRC format if no non-test code uses it.
   Otherwise add a cap and a minimum-size check.
 - `deserializeBytecodeWithAtomsAndShapes` (:2119) is live, with two callers:
-  `handler_instance.zig:1334` and `invariant_observer.zig:79`. It has no CRC
+  `handler_instance.zig:1334` and `pre-rebase:packages/runtime/src/invariant_observer.zig:79`. It has no CRC
   (:1876). Add a depth bound to the `.nested_function` recursion (:338), caps
   on the lengths that size allocations (:360,378,468,1716,1849), and a
   checked conversion in place of `@intCast` at the atom remap (:1776).
@@ -386,7 +386,7 @@ Unknown flags print stderr text without JSON today (`zts_main.zig:44`), so
 that case asserts empty stdout. Project discovery walks every ancestor of the
 input path (`project_config.zig:159-165`), so the test asserts that no
 `zttp.json` exists in the temporary directory's ancestors. Model the spawn on
-`reference_tools_check.zig:304-358`.
+`pre-rebase:packages/runtime/src/reference_tools_check.zig:304-358`.
 
 **Deferred.** Ratio scaling tests (cost(2n)/cost(n)) move to Tier 3 with the
 R10 measurement work. They need a program generator and give a manual step,

@@ -16,7 +16,7 @@ overlapping plans at the same time.
 | 002 | Complete the local LFM measurement and default cutover (`pre-rebase:advisor-plans/002-local-lfm-default-cutover-plan.md`) | P1 | L | SUPERSEDED; historical measurement evidence only |
 | [003](003-zttp-zts-simplification-audit.md) | Simplify the zttp and zts foundation | P1 | L | DIRECTION ACCEPTED; preserve features and initial wire formats; shared analysis first |
 | [004](004-shared-analysis-first-unit.md) | Share single-module analysis between check and compile | P1 | M | ACCEPTED 2026-10-11; promoted to docs/plans |
-| [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | PROPOSED 2026-10-11; nine owner decisions open |
+| [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | Decisions accepted; Phases 1 and 2 complete; Phase 3 needs separate authorization |
 
 Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
 2026-08-14. Its measurement half stands, and the local corpus is still parked at

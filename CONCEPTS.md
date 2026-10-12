@@ -46,8 +46,7 @@ A call to a function with a Failure severity that the path enumeration cannot ho
 ### Deployment artifact
 A self-contained binary, also called a self-extracting binary: the runtime
 executable with one handler's payload appended - its bytecode, contract, policy,
-certificate, and the declaration and tool catalog when it has them - and a fixed
-trailer at the end that frames that payload.
+certificate, and a fixed trailer that frames that payload.
 
 Whether a binary is an artifact is decided once, from the trailer's framing
 alone. A binary whose trailer frames no payload is a plain runtime and may serve
@@ -127,35 +126,8 @@ A residual guard is not a Property. Its three answers stay separate: producer
 property facts, consumer coverage of the guard plan, and the live sink's allow
 or deny decision for one resource under one policy generation.
 
-### Application invariant
-A versioned condition that every committed change to protected application
-state must preserve. The catalog is closed and holds two: balance conservation
-for one declared ledger and its currencies, which acceptance requires of every
-specification, and a declared account set, which is optional and admits only
-the accounts a specification names by exact bytes or by prefix.
-
-The author confirms a structured specification. The executable graph binds
-that specification and the protected adapter. The acceptance kernel then
-matches the proof IR, translation witnesses, and ledger calls that the runtime
-finds independently in final bytecode. This produces an Invariant verdict. The
-verdict stays separate from Property and Residual guard verdicts.
-
-The invariant has two parts. Consumer coverage shows that all protected calls
-use the named native boundary. Runtime enforcement makes each posting atomic,
-rejects a posting whose signed entries do not sum to zero, and rejects one
-naming an account the specification does not declare. Coverage does
-not convert the native boundary into a static proof. The accepted artifact
-therefore records the native adapter as a trusted dependency.
-
-A status report over an Application invariant reads write applicability first,
-because coverage counts call sites and not calls that ran. It names the
-declared kinds, keeps coverage separate from the ledger baseline that only a
-live instance can validate, and always states that excluding other writers
-from the store is a deployment assumption nothing here verifies. It never
-calls a predicate proven, and it never renders the author's plain-language
-sentence as a checked claim.
-
 ### Guarded generation
+
 One immutable runtime tuple containing the executable root, proof-checked
 contract, residual plan, decoded policy index, and policy generation. Startup
 installs none of it until proof acceptance succeeds. Certificate-free live

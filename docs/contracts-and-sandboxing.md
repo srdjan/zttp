@@ -182,11 +182,12 @@ won't boot" and "individual requests get rejected".
   conservative policy because source contracts are not artifact
   certificates. The current production policy does not accept the
   lifecycle properties, so deployed artifacts also stay bounded.
-- Production accepts certificate schema 4 and `zttp_pcc_v3 = 3` only. For a
+- Production accepts self-extract format 7, certificate schema 5, and
+  `zttp_pcc_v3 = 3` only. For a
   guarded artifact, the kernel independently decodes the exact serialized
   runtime policy and requires exact residual-plan coverage before pool init or
-  prewarm. A predecessor or mismatched plan produces rebuild guidance and the
-  process serves nothing.
+  prewarm. Format 6, schema 4, or a mismatched plan produces rebuild guidance.
+  The process serves nothing after these refusals.
 - Attestation envelope (`Zttp-Attest`) is materialized for
   `GET /.well-known/zttp-attest`.
 
@@ -337,64 +338,6 @@ simulation, expert verification, live-reload candidates, and recorded proof
 capsules. A missing, unreadable, or malformed policy is an error; no command
 substitutes an unrestricted policy and publishes a clean verdict or artifact.
 
-### Outbound credentials
-
-A tool route can send an upstream credential that its code never sees. The
-deployment names the credential in zttp.json. The reference holds the name of
-the environment variable and the rules for the requests the value may go into,
-never the value:
-
-```json
-"credentials": {
-  "weather": {
-    "env": "WEATHER_API_KEY",
-    "endpoint": "https://api.weather.example",
-    "header": "authorization",
-    "scheme": "Bearer",
-    "methods": ["GET"],
-    "paths": ["/v1/forecast"]
-  }
-}
-```
-
-The tool names the credential with a string literal in the `zttp:fetch` options:
-
-```ts
-const res = fetch("https://api.weather.example/v1/forecast", {
-  credential: "weather",
-  query: { lat: input.lat }
-});
-```
-
-The build refuses a `credential` that is not a string literal, a name that
-zttp.json does not define, and a call whose URL is at another endpoint. Each
-tool can use only the credentials that its own route names. The server reads
-every value once at startup and does not start when a variable is unset or
-empty.
-
-The runtime adds the header only after it checks the exact request that it is
-about to send: the active tool holds the credential, the endpoint is the
-reference's endpoint, the method is in `methods`, the path matches a prefix in
-`paths` at a segment boundary, the handler did not set the header itself, and
-the scheme is `https` or the host is a loopback IP literal. A path with a `.` or
-`..` segment, an empty segment, or an encoded `/` or `\` does not match. A
-refusal is a 599 fetch error with the code `CredentialRefused` and one of these
-details: `not_granted`, `not_configured`, `endpoint_mismatch`,
-`method_not_allowed`, `path_not_allowed`, `header_collision`, `plaintext`, or
-`path_unsupported`. No detail holds the value.
-
-Only the synchronous `fetch` injects a credential. `fetchWithRetry`, a durable
-fetch, the `zttp:io` parallel path, and `httpRequest` refuse one with
-`path_unsupported`, so no retry loop can send a credentialed request twice. A
-credentialed request is sent once. When the send completed and no response head
-arrived, the code is `OutcomeUnknown`, because the upstream may have acted. The
-runtime does not follow a redirect: a 3xx answer returns to the tool.
-
-An upstream that returns the value in its response head or its decoded body is
-refused with `CredentialReflected` before the tool can read the response. The
-runtime finds only the exact bytes of the value. It does not find an encoded
-echo, such as base64, a hash, or a compression that it does not decode.
-
 ## Deterministic Replay (`--trace`, `--replay`)
 
 The restricted JS subset (no async, no exceptions, no side-effecting
@@ -522,22 +465,3 @@ The restricted JS subset has no back-edges and no exceptions, so path
 enumeration is finite and exhaustive. Comparing two behavioral
 contracts shows which paths were preserved, which changed response
 codes, which were removed, and which are new.
-
-## Consumer declaration
-
-`-Ddeclaration=<path>` gives the consumer declaration to the flow
-check (`--declaration` on `zts compile` and `zts check`, or the
-`declaration` key in `zttp.json`). Each classification assigns
-`secret` or `credential` to a path in the value that a `fetch:<host>`
-or `service:<name>` source returns. A declared value that reaches a
-sink fails with ZTS400 to ZTS403. The contract records the status of
-each entry (`matched`, `indeterminate`, or `absent`) in its
-`classifications` section. A required entry that the analysis never
-saw stops the build. The loader refuses a malformed file with a named
-reason and the entry index. A version 2 declaration can also select a
-capability `ceiling` (`boundary`, `adapter`, or `ledger`, with an
-optional `exclude` list of modules). The build stops with a named
-reason when a capability of the handler is outside the profile, when
-an imported module is excluded, or when the profile requires
-`read_only` and the handler does not prove it. The contract records
-the applied ceiling in its `ceiling` section, or `null`.

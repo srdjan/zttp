@@ -95,7 +95,7 @@ needs to be measured.
   (`http.zig:199`). So a 3xx reaches the handler with `ok` false. By code
   reading (not measured), Zig's HTTP client also returns a 1xx head other than
   100-continue, and the fetch path has no 1xx handling.
-- Status comparisons after a call: `examples/tools/tools.ts:76` (`fetch`), and
+- Status comparisons after a call: `pre-rebase:examples/tools/tools.ts:76` (`fetch`), and
   four after `serviceCall` (`system/gateway.ts:33`, `users.ts:27`,
   `gateway-static.ts:17,23`). None in the DeepSeek corpus. The Claude corpus
   case `durable-order` has one; that corpus is frozen and off-headline.

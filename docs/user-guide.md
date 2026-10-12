@@ -143,349 +143,15 @@ Result-producing virtual-module calls must be checked before `.value` access.
 Optional-producing calls must be narrowed before use. The verifier enforces both
 patterns.
 
-## Tool Routes
+## Buffered SSE
 
-A tool route is an HTTP route that a model or an agent can call, with a closed
-input, a closed output, and a caller the runtime has verified. The handler
-declares its tools with `toolCatalog` from `zttp:tool`, and the runtime checks
-every tool request before and after the handler runs. `examples/tools/` is a
-complete project with two tools; this section walks through it.
-
-**The catalog.** Call `toolCatalog` once at module scope with an object
-literal. Each entry names a `routerMatch` route, a description, an input and an
-output schema registered with `schemaCompile`, and `maxInputBytes`. Every route
-in the table must have an entry. Tool schemas use a closed subset: every object
-has `"additionalProperties": false`, every string has `maxLength`, and every
-array has `maxItems`. The build refuses a catalog that breaks a rule (ZTS513).
-
-```ts
-import { toolCatalog, toolInput } from "zttp:tool";
-
-toolCatalog({
-  convert: {
-    route: "POST /tools/convert",
-    description: "Convert a temperature between Celsius, Fahrenheit, and Kelvin.",
-    input: "ConvertInput",
-    output: "ConvertOutput",
-    maxInputBytes: 128
-  }
-});
-```
-
-**The input.** Before the handler runs, the runtime refuses an input that is
-larger than `maxInputBytes` (413) or that the input schema refuses (400). The
-tool reads the validated input with `toolInput(name, req)`, which returns a
-`Result` whose value type comes from the schema. It answers `ok` only on a tool
-request that the runtime validated against exactly that schema, and the build
-refuses a `toolInput` that names another schema than the route's own input.
-`zttp:validate` cannot compile a closed catalog schema, so do not read a tool
-input with `validateJson`; the build refuses that call (ZTS514).
-
-```ts
-function convert(req: Request): Response {
-  const parsed = toolInput("ConvertInput", req);
-  if (!parsed.ok) {
-    return Response.json({ error: "invalid input" }, { status: 400 });
-  }
-  const input = parsed.value;
-  return Response.json({ value: fromCelsius(toCelsius(input.value, input.from), input.to), unit: input.to });
-}
-```
-
-**The output.** The runtime validates every 2xx answer of a tool against the
-output schema and answers 500 `tool output refused` when the schema refuses it.
-Non-2xx answers pass unchanged.
-
-**The caller.** A tool request carries a bearer token, an HS256 JWT. zttp.json
-names the environment variable that holds the key and the claim that holds the
-tenant:
-
-```json
-"auth": { "keyEnv": "TOOLS_JWT_KEY", "tenantClaim": "tenant" }
-```
-
-A request with no token, a bad signature, an unexpected `alg`, an expired
-token, or no `sub` or tenant claim gets 401 before the handler runs. The handler receives
-`req.subject` and `req.tenant` from the verified claims, and the request it sees
-has no `authorization` header. A catalog `scope` binds an input field to the
-verified identity, and a request whose field differs gets 403:
-
-```ts
-scope: { tenant: "tenant_id" }
-```
-
-**The grant and the ceiling.** Each tool may call only the module exports its
-own route reaches, which the build lists into the catalog. A tool may not read
-state that a separate call wrote (`zttp:cache` reads, `zttp:sql`, `zttp:queue`
-receive, a durable signal wait). A declaration file can also set a capability
-ceiling that the whole handler must stay inside; `examples/tools` uses the
-`adapter` profile and excludes `zttp:crypto`. The catalog and the declaration
-are bound into the built artifact, and an artifact whose bound sections change
-refuses to start.
-
-**Credentials.** A tool can call an upstream with a credential that its code
-never sees. zttp.json names each credential and the requests it may go into,
-and the tool names it with a string literal in the `fetch` options. See
-[Outbound credentials](contracts-and-sandboxing.md#outbound-credentials) for the
-reference format, the checks the runtime makes before it adds the header, and
-the refusals.
-
-**Build and run.** `zttp build` emits a self-contained binary. It refuses to
-start when the key variable or a credential variable is unset or empty. A tool
-that calls an upstream also needs an egress policy that names the endpoint and
-an address scope, and the operator allows outbound requests with
-`--outbound-http` or `--outbound-host`.
-`zig build test-reference-tools` builds `examples/tools`, runs the binary, and
-checks the positive path and each boundary case with real requests.
-
-### Agent turns
-
-An admitted agent request has a turn deadline and a round budget. Each provider
-fetch attempt consumes one round after the recorder accepts its pre-record.
-The runtime also checks `providerRequestBytes` before that record. It never
-retries a provider fetch automatically.
-
-A refused fetch returns status 599, `error: "AgentTurnRefused"`, and one stable
-`details` tag: `deadline_exceeded`, `budget_exhausted`,
-`recorder_unavailable`, `outcome_unknown`, `tool_denied`, or `tool_failed`.
-The last two tags are reserved for tool dispatch. The first refusal closes the
-turn. Later provider fetches return that same tag without a new connection.
-A failure after the request write starts is `outcome_unknown` unless the full
-response is usable. A complete non-2xx response leaves the turn open.
-
-For agent handlers, `zttp serve` and self-contained binaries require
-`--agent-turn-recorder-dir <DIR>`, `--agent-turn-recorder-max-bytes <SIZE>`, and
-`--max-agent-turns <COUNT>`. The cap must be positive and less than the pool size
-minus one. A full cap returns 503. The recorder writes metadata only, reserves
-space for each terminal record, and flushes each record before it returns.
-After a write or flush failure, `/_readiness` returns 503 and names the recorder.
-Restart the process after recorder failure or when its byte ceiling is reached.
-
-An agent handler can call `callTool(callId, name, argsJson)` from `zttp:tool`.
-`name` must be in that agent entry's `tools` list. The call runs the tool's
-route in the same runtime under that tool's grant. The tool receives a new
-request with the verified subject and tenant and `argsJson` as its body. The
-request has no client headers, query, or agent prompt. `toolInput` reads the
-validated arguments from that body.
-
-Each admitted call spends one tool call from the turn and round budgets before
-the runtime resolves `name`. Invalid arguments and unknown names also spend a
-call. A repeated `callId` in one round is refused. The runtime records the
-call before it runs the tool and records its outcome after it returns. A tool
-that does not return, including one interrupted by the turn deadline, gives
-`outcome_unknown`. A non-2xx response or a response that fails the tool's
-output schema gives `tool_failed`. The error arm contains only a tag:
-`unknown_tool`, `invalid_arguments`, `tool_denied`, `tool_failed`,
-`budget_exhausted`, `deadline_exceeded`, or `outcome_unknown`.
-
-The verifier labels a successful `callTool` value with the labels of
-`argsJson` and the union of the return labels of every tool that the agent
-entry lists. `callId` and `name` do not label that value. If it cannot resolve
-a listed tool route, it does not prove the affected flow properties.
-
-Use `sseEvents(body, bounds)` from `zttp:sse` to frame a buffered event stream
-from a provider. Set positive `maxBodyBytes`, `maxBlockBytes`, and `maxEvents`
-bounds. The success arm contains an array of `{ event, data, id }` records.
-The error arm contains a `tag` and byte `offset`, including
-`unterminated_event` when the body ends inside an event block. Check `ok`
-before reading the events. The framer does not retry or read from a socket.
-
-`zttp dev` uses unmeasured development values: `<project>/.zttp/turns`, 16 MiB,
-and one concurrent turn. Its default pool has at least three slots; an explicit
-smaller pool is refused for an agent handler. These values do not apply to
-serve or deployed binaries. Replay uses an in-memory recorder and needs no
-recorder settings. Agent traces without transport phase metadata replay as
-`outcome_unknown`.
-
-## Application Invariants
-
-An application invariant states what must remain true after a committed state
-change. Two templates are supported. `balance_conservation_v1`: for each
-declared currency in one ledger, all signed account balances sum to zero. Every
-specification must declare it. `declared_accounts_v1`: every entry account in
-every committed posting group matches at least one rule you declare, each rule
-either an exact account or a non-empty prefix. It is optional. Neither proves
-correct recipients, authorization, sufficient funds, or correct business
-amounts.
-
-Add both paths to `zttp.json`. Paths are relative to that file:
-
-```json
-{
-  "entry": "src/handler.ts",
-  "invariants": "invariant.json",
-  "ledger": "ledger.sqlite"
-}
-```
-
-Review and save the structured claim in `invariant.json`:
-
-```json
-{
-  "version": 1,
-  "kind": "balance_conservation_v1",
-  "statement": "The sum of all balances in this ledger is zero",
-  "ledger": "main",
-  "currencies": [{ "code": "USD", "scale": 2 }]
-}
-```
-
-The structured fields define the claim. `statement` is a human annotation.
-Currency codes must contain three uppercase ASCII letters. Scale is between
-0 and 18. Scale 2 means that `"100"` represents one major unit. Currencies are
-checked separately. There is no conversion between currencies.
-
-To declare more than balance conservation, use `"version": 2`, which lists the
-templates in `kinds` and lets each carry its own fields:
-
-```json
-{
-  "version": 2,
-  "ledger": "main",
-  "currencies": [{ "code": "USD", "scale": 2 }],
-  "kinds": [
-    { "kind": "balance_conservation_v1" },
-    { "kind": "declared_accounts_v1",
-      "accounts": [{ "exact": "clearing:main" }, { "prefix": "asset:" }] }
-  ]
-}
-```
-
-Account matching is case-sensitive over bytes, with no wildcard, no regular
-expression and no normalization: the prefix `asset:` admits `asset:cash` and
-`asset:` itself, and refuses `assets:cash`. A posting naming an undeclared
-account is refused whole, with the tag `undeclared_account`, before anything is
-written, and a zero-amount entry or a pair that cancels on one account is
-checked like any other. An existing store that already holds an undeclared
-account does not open.
-
-Use the protected module for every posting:
-
-```ts
-import { post } from "zttp:ledger";
-
-export function handler(req: Request): Proof<Response, "state_isolated"> {
-    const result = post({
-        ledger: "main",
-        currency: "USD",
-        idempotencyKey: req.url,
-        entries: [
-            { account: "cash", amount: "100" },
-            { account: "clearing", amount: "-100" }
-        ]
-    });
-    if (!result.ok) {
-        return Response.text("posting refused", { status: 400 });
-    }
-    return Response.text(result.value.replayed ? "replayed" : "posted");
-}
-```
-
-This example uses the URL as the retry key. A real application must select a
-stable key for each business operation. A retry with the same key and ordered
-entries returns `{ replayed: true }`. Reuse with different entries returns an
-`idempotency_conflict` error. The key is scoped to the ledger and currency.
-
-`balance(ledger, currency, account)` returns `Result<string>`. An account with
-no postings has balance `"0"`. Amounts and returned balances are canonical
-signed decimal integer strings in the signed 64-bit range. Numbers, leading
-zeros, `+1`, `-0`, fractions, and exponent notation are refused. Group totals use
-checked signed 128-bit arithmetic. Each account balance must remain in the
-signed 64-bit range. An unbalanced or overflowing posting leaves no committed
-entries, balance changes, or retry record.
-
-Expected failures are Results with an `error.tag`, such as `unbalanced`,
-`balance_overflow`, `idempotency_conflict`, or `storage_busy`. A busy transaction
-can be retried with the same key. Balance results carry a secret label. Both
-exports preserve argument labels. A handler that declares `no_secret_leakage`
-cannot expose a labelled result through its response.
-
-Build the project, then select the protected store on the target host:
-
-```bash
-zttp build
-./.zttp/build/my-app --ledger /srv/my-app/ledger.sqlite
-```
-
-The artifact carries the exact specification. Startup checks its certificate
-and operation coverage, then validates the stored schema, configuration,
-posting groups, and materialized balances under a write lock. Only then can
-the runtime serve requests. A new empty store starts with zero balances.
-An unreadable or invalid existing store is refused. A changed specification
-cannot reopen the old store. Automatic migration is not supported.
-
-Adding a kind is a changed specification. A selection beyond balance
-conservation is written under invariant wire schema 2, which hashes under its
-own domain, so it never matches the digest a store recorded under balance
-conservation alone. Declare `declared_accounts_v1` against a fresh store. A
-specification that names balance conservation alone is unaffected: it encodes
-the bytes it always did and reopens the store it has been using.
-
-Upgrading zttp can change the adapter manifest by itself, without any edit to
-your specification. An artifact built by an older zttp is then refused at
-startup at artifact binding, because the serving binary recomputes the adapter
-member and the executable graph no longer matches, and must be rebuilt with the
-new zttp. The store is unaffected, because `ledger_meta.invariant_digest` binds
-the specification digest and not the adapter digest.
-
-`zttp proofs verify` prints one invariant status line for an accepted
-artifact, and startup prints the same line, from the same renderer, once a
-configured invariant is installed. It reads write applicability first, then
-the declared kinds by name, then coverage over protected call sites with its
-write and read split, then that native enforcement is a trusted assumption,
-then the ledger baseline. `covered` write applicability means a covered call
-site can modify ledger state; `vacuous` means none can, which reports an
-absence rather than a failure. Baseline reads `not checked` in a bundle
-report, because that report opens no store, and reports validation only from
-an instance that opened one. Every
-line ends by saying that keeping other writers off the store is a deployment
-assumption the checker does not verify. None of it says a predicate was
-proven, because acceptance never examines one.
-
-This release requires a built artifact for an invariant project. Source
-`serve`, `dev`, and certificate-free live replacement are refused. Rebuild and
-restart after a change. Analyzer success alone does not establish invariant
-coverage or store readiness. Only direct calls through a ledger import are supported. Local aliases and
-indirect ledger calls are refused when the artifact is built. Invariant
-artifacts also refuse `--system`: separately loaded handlers do not carry the
-main artifact's invariant coverage.
-
-General SQLite and SDK file access cannot open the protected database or its
-journal files. Startup also rejects log paths that share those files and a
-ledger inside the durable output directory. Create the parent directories for
-configured storage and log paths before startup.
-The host must prevent external writers, filesystem aliases that bypass these
-path checks (including hard links), and
-filesystem replacement while the application runs. The guarantee depends on
-the native ledger adapter, SQLite transactions, and this deployment isolation.
-It is separate from a static handler property and from resource-policy guards.
-See [Verification](verification.md#application-invariants) for the checked evidence.
-
-To see which invariant kinds exist and draft a candidate:
-
-```bash
-zttp invariant list
-zttp invariant author --kind balance_conservation_v1 --ledger main --currency USD:2
-zttp invariant author --kind balance_conservation_v1 --kind declared_accounts_v1 \
-  --ledger main --currency USD:2 \
-  --account-exact clearing:main --account-prefix asset:
-```
-
-`--kind` is required and repeatable, and the selection must name
-`balance_conservation_v1`. A plain-language sentence names no predicate, so
-there is no path from a sentence alone to a candidate. Pass the sentence with
-`--statement` to record it beside the candidate as an annotation. Repeat
-`--account-exact` and `--account-prefix` to fill the declared account set;
-either flag needs `--kind declared_accounts_v1`, and that kind needs at least
-one of them. Review the result and save only its `candidate` object as the
-configured invariant JSON.
-
-Add `--advise` to send only the sentence, and the catalog's published
-descriptions, to TypeSafe Jev for advisory template selection. This requires
-`--statement` and `TYPESAFE_API_KEY`. A missing, malformed, or disagreeing
-answer produces no candidate. Jev confidence is not proof. Builds, certificate
-checks, and posting acceptance never call a model. Live Jev classification
-quality and latency need to be measured for your statements.
+Use `sseEvents(body, bounds)` from `zttp:sse` to frame a buffered event stream.
+Set positive `maxBodyBytes`, `maxBlockBytes`, and `maxEvents` bounds.
+The success arm contains an array of `{ event, data, id }` records.
+The error arm contains a `tag` and byte `offset`.
+The `unterminated_event` tag means that the body ends inside an event block.
+Check `ok` before reading the events.
+The framer is pure and does not read from a socket.
 
 ## TypeScript Source Profile
 
@@ -738,6 +404,9 @@ Virtual modules are native Zig APIs exposed through `import { ... } from
 "zttp:*"`. The current module list and runtime requirements are in
 [Virtual Modules](virtual-modules/README.md).
 
+The compiler still exposes `zttp:ledger` and `zttp:tool` until Phase 3.
+The runtime refuses handlers that use either module.
+
 Common runtime flags:
 
 | Need | Flag |
@@ -837,12 +506,15 @@ production policy, the process refuses to serve and says at which stage and for
 what reason. That check happens before any runtime is warmed, so a refused
 artifact never has a handler ready.
 
-Production artifacts use certificate schema `4`, proof system
-`zttp_pcc_v3 = 3`, self-extract format `6`, attestation
-`zttp-attest-v4`, and bundle format `zttp-bundle-3`. Immediate predecessor
-formats are refused with a rebuild instruction. A guarded artifact must also
-have exact residual-plan and runtime-policy coverage before startup. Guarded
-installed generations cannot use the certificate-free live-swap path.
+Production artifacts use certificate schema `5`, proof system
+`zttp_pcc_v3 = 3`, self-extract format `7`, attestation
+`zttp-attest-v4`, and bundle format `zttp-bundle-3`. Readers require an exact
+match for each identity. Schema 4 and format 6 are refused with a rebuild instruction.
+Existing self-contained binaries keep their embedded runtime.
+Format 7 requires bytecode and a complete policy section.
+The reader refuses truncated dependency records and bytes after the declared records.
+A guarded artifact must have exact residual-plan and runtime-policy coverage before startup.
+Guarded generations cannot use the certificate-free live-swap path.
 
 Two commands answer two different questions:
 

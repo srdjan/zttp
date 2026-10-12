@@ -42,6 +42,9 @@ Use `zttp modules --json` for the live export list from the built binary.
 | `zttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |
 <!-- END GENERATED: module catalog -->
 
+The compiler keeps the `zttp:ledger` and `zttp:tool` rows until Phase 3.
+The runtime refuses a handler that imports either module.
+
 ## Common Usage
 
 ```ts
@@ -76,6 +79,8 @@ durability boundary need configuration:
 | `zttp:workflow` | Run with `--system <file>`: the orchestrator dispatches to co-located sub-handlers in-process. Every local handler path in the manifest must be readable at startup. Durable `call`/`saga`/`fanout`/`follow` replay also needs `--durable <dir>`. Add `--workflow-queue` to force durable top-level `call`, `follow`, and `fanout` child dispatch through the persisted queue; `saga()` is rejected in that mode because step closures would hide direct dispatch inside the flat oplog. Dead letters stay under `<durable>/workflow-queue/dead` until `zttp workflow-queue replay` or `discard`. |
 | `zttp:queue` | Run with `--actor-queue` for server-owned in-memory actor mailboxes. Exports `send`, `request`, `receive`, `ack`, `nack`, and `reply`; all return `Result` objects. Messages own JSON snapshots of payloads and remain retained until ack, requeue, or dead-lettering, but the current backend is not durable across process restart. This is separate from the persisted workflow queue used by `--workflow-queue`. |
 | `zttp:durable` | Run with `--durable <dir>`. Durable workflow proof properties appear under `durable.workflow.properties` in `contract.json` and under `durableWorkflow*` fields in proof receipts. |
+| `zttp:ledger` | Runtime execution is unavailable. The compiler binding remains until Phase 3. |
+| `zttp:tool` | Runtime execution is unavailable. The compiler binding remains until Phase 3. |
 | `zttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
 
 ## Effects

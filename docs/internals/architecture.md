@@ -205,16 +205,17 @@ contract, residual plan, policy, and in-flight request pins remain together.
 
 `zttp deploy` builds a self-contained local binary under
 `.zttp/deploy/<project-name>`. The output starts with the `zttp-runtime`
-template and appends a payload (format v4) containing bytecode, dependency
+template and appends a payload in format 7. The payload contains bytecode, dependency
 bytecode, contract JSON, runtime policy, a proof certificate, and optional JWS
 attestation. `self_extract.zig` validates the trailer, loads the payload, and
 starts the runtime. The payload version is checked for equality and an unknown
 section is refused: a section this reader does not know is a malformed artifact,
 not a future one.
 
-The certificate is schema 4 under `zttp_pcc_v3 = 3`. Attestations use
-`zttp-attest-v4`, and proof bundles use `zttp-bundle-3`. Immediate predecessors
-are refused with rebuild guidance rather than compatibility decoding.
+The certificate is schema 5 under `zttp_pcc_v3 = 3`. Attestations use
+`zttp-attest-v4`, and proof bundles use `zttp-bundle-3`.
+The runtime refuses schema 4 and format 6 with rebuild guidance.
+An existing self-contained binary keeps the runtime that it embeds.
 
 Attestation signs the contract, bytecode, policy, and capability hashes, plus
 the root of the artifact's executable graph. The running server emits proof

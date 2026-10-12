@@ -306,316 +306,6 @@ from real function bodies, never an assumed claim. The opt-in
 `zts check --require-export-capsules` docs mode additionally warns
 (**ZTS508**) when an exported helper carries no `Proof<...>` capsule.
 
-## Application Invariants
-
-An application invariant is a condition that must hold after each committed
-change to protected state. The catalog is closed and holds two kinds.
-
-`balance_conservation_v1` requires the signed entries in each posting group to
-sum to zero for one declared ledger and currency. Acceptance requires it of
-every specification: a document that omits it is refused.
-
-`declared_accounts_v1` requires every entry account in every committed posting
-group to match at least one declared rule. It is optional, so a specification
-declares it only when it wants it, and it carries a payload: a non-empty set of
-rules, each either an exact account or a non-empty prefix. Matching is over
-bytes and is case-sensitive. There is no wildcard, no regular expression, no
-locale rule and no normalization: the prefix `asset:` accepts `asset:cash` and
-`asset:` itself, and refuses `assets:cash` and `Asset:cash`. The set is
-canonicalized by matcher tag and then by byte value, and a repeated rule is
-refused.
-
-Every entry is checked, including one whose amount is zero and a pair that
-cancels on one account: the rule is over the account a posting names, not over
-the balance it leaves behind. One failing entry refuses the whole group before
-any write. An existing store is checked the same way before it is served, over
-every historical entry account and every materialized balance account, so a
-specification that stops declaring an account already in the store refuses the
-store rather than serving it.
-
-The author confirms a structured invariant in project configuration. ZTTP
-stores the ledger identifier and the sorted currency scales in a canonical
-binary section. The plain-language sentence helps the author select the
-template. It is not proof input. Jev can help classify the sentence, but its
-answer cannot approve an artifact or remove an obligation.
-
-### Invariant wire schemas
-
-The canonical binary section has two wire schemas.
-
-An invariant wire schema 1 section names one kind in its header and ends after
-the currency records. An invariant wire schema 2 section keeps the same ledger
-and currency region byte for byte, spends the header field that schema 1 gives
-its kind on a declared kind count, and appends that many records of wire
-ordinal, payload length, and payload, sorted by ordinal with each ordinal
-appearing once. Balance conservation is mandatory under both. A schema 2
-document that omits it is refused, and because a schema 1 header has room for
-exactly one kind, a schema 1 section that names any other kind is refused as
-well. The authoring boundary refuses the same documents, but the decoder is
-where the rule is enforced: a consumer reads artifact bytes, not the JSON that
-produced them.
-
-The two hash under different digest domains, so the same ledger declared under
-both produces two different digests and a schema 2 document cannot answer a
-commitment made over schema 1 bytes. Schema 1 documents encode exactly as they
-always have, because every deployed artifact and every existing protected
-ledger store is bound to the digest of those exact bytes.
-
-A JSON document selects the schema with its `version` field. Schema 1 names
-its kind in `kind`; schema 2 lists its kinds in `kinds`. A document that omits
-the field its schema owns, or carries the other schema's field, is refused
-rather than defaulted. A kind that carries a payload names its own fields in
-its `kinds` entry:
-
-```json
-{"version":2,"ledger":"main","currencies":[{"code":"USD","scale":2}],
- "kinds":[{"kind":"balance_conservation_v1"},
-          {"kind":"declared_accounts_v1","accounts":[{"exact":"clearing:main"},{"prefix":"asset:"}]}]}
-```
-
-`zttp invariant author` drafts such a document. `--kind` is repeatable and
-`--account-exact` and `--account-prefix` fill the declared account set; the
-candidate is emitted under schema 2 as soon as the selection names anything
-beyond balance conservation.
-
-The consumer checks four related inputs:
-
-- The executable graph binds the invariant section and the manifest of the
-  protected ledger adapter that the binary linked.
-- The proof IR names each `zttp:ledger` operation from a closed catalog.
-- A translation witness relates each named operation to its final bytecode
-  position.
-- The runtime loader independently finds each `post` and `balance` call in the
-  final bytecode. The loader does not use the compiler effect summary for this
-  search.
-
-The acceptance kernel requires an exact match. A missing, extra, reordered, or
-changed operation refuses the artifact. The result is an invariant verdict. It
-is separate from Property verdicts and residual guard verdicts. A ready
-invariant verdict states that the consumer covered all protected operations. It
-does not turn a runtime check into a static proof.
-
-### Write applicability
-
-Coverage counts call sites. It does not count calls that executed. The verdict
-therefore reports write applicability beside the coverage counts, and a report
-reads that value first. An accepted artifact reports `covered` when at least
-one covered call site can modify protected ledger state, and `vacuous` when no
-covered call site can. An artifact with no configured invariant reports
-`not_applicable`.
-
-A `vacuous` report is a missing write-applicability report. It is not a
-demonstrated conservation failure. A handler that reads balances and never
-posts still has a genuinely covered call site, still validates the ledger
-baseline on real stored input at startup, and still serves. ZTTP reports the
-gap rather than refusing the artifact, because refusing it would break a
-legitimate read-only topology and would push an author to add a posting group
-the application does not want.
-
-Write applicability never changes a verdict. It is absent from invariant
-readiness, from the runtime coverage-readiness test, and from the activation
-condition those feed. A declared write that independent observation did not
-find is a different case entirely: the acceptance kernel refuses that artifact,
-and a refused artifact reports no applicability at all.
-
-Each declared kind reports its own write applicability. Both kinds in the
-current catalog constrain operations that write, so today every declared kind
-reports what the artifact reports, and only a kind the specification does not
-declare differs. That is what the catalog says, not a separate measurement of
-the artifact.
-
-### What a status report states
-
-One renderer produces every invariant status line,
-`packages/runtime/src/proofs/invariant_report.zig`. `zttp proofs verify`
-prints it for a bundle and a serving instance logs it once its pool is warm,
-so both read the same sentences and a sentence that stops being true stops
-being printed in both places at once.
-
-A line for an accepted configured artifact states, in this order: write
-applicability, the kinds the accepted specification declared, by name; the
-coverage counts over protected call sites with their write and read split;
-that native enforcement is a trusted assumption rather than a checked one;
-and the ledger baseline status. Every line then ends with the statement that
-keeping other writers off a protected ledger store is a deployment assumption
-which this checker does not verify. That clause is written from outside every
-branch of the renderer. No status value, argument or build option drops it,
-and `zig build test-invariant-drift` pins the two statements that make that
-true.
-
-Write applicability comes first because coverage counts call sites. A reader
-who meets `coverage 1 of 1` first reads it as "the conservation predicate
-ran", and the value that says whether any covered call site can write at all
-is what corrects that reading before it forms.
-
-Baseline status reads `not checked` in an offline report, and says why: the
-report did not open a store. Only an instance that opened one and validated
-its baseline reports the validated form. Acceptance never opens a store, so a
-bundle report can never state readiness.
-
-Only an accepted artifact is rendered at all. `zttp proofs verify` reports a
-rejection and stops before the invariant line, and a serving instance renders
-a promoted contract, which only acceptance produces. So the line that says no
-invariant is declared says exactly that, and does not hedge about a refusal
-that cannot reach it.
-
-A refused artifact has no single invariant status to report in any case. A
-rejection raised before evidence checking - artifact binding, obligation set,
-translation, invariant coverage, guard coverage, or a limit - leaves the
-verdict at its defaults. A rejection raised inside evidence checking, whatever
-stage it names, carries the coverage the consumer had already reached, because
-`run` assigns that coverage onto the outcome `checkEvidence` returns. Read a
-refused artifact's invariant numbers, where a consumer of the assessment
-exposes them, as "what was established before the refusal", never as a status
-of the artifact.
-
-No author-supplied sentence is rendered, and no rendering calls a predicate
-proven, verified or guaranteed. What acceptance establishes is that the linked
-adapter carries a row per expected kind at the expected predicate version,
-that the declared call sites match the ones the loader found on its own in
-final bytecode, and, at instance open, that a store validated its baseline.
-Whether a predicate decides the right thing is not among them, and neither is
-the exclusion of a writer the runtime cannot see.
-
-### Changing a specification under an existing store
-
-`ledger_meta.invariant_digest` binds the specification digest. A store opened
-under one specification refuses an artifact carrying another, and startup
-never rewrites that metadata to make a mismatch pass.
-
-Adding a kind is such a change. A selection beyond balance conservation moves
-the section to the second wire schema, which hashes under its own digest
-domain, so the digest differs from the schema 1 digest of the same ledger and
-currencies. Declaring `declared_accounts_v1` on a deployment that has been
-running under balance conservation alone therefore needs a fresh store. There
-is no migration, and the old store is left as it was rather than upgraded in
-place.
-
-Schema 1 stays compatible in the other direction. A specification that names
-balance conservation alone encodes exactly the bytes it always did and hashes
-under the schema 1 domain, so an artifact built before the catalog grew still
-opens the store it has been using.
-
-### The advisory boundary
-
-`zttp invariant author --advise` sends the author's sentence and the catalog's
-published descriptions to TypeSafe Jev, which may suggest a template selection
-or withhold one. That answer is authoring input. It cannot approve an
-artifact, discharge an obligation or relax a decoder, and no output labels an
-advisory sentence, or any other prose, as verified. A build, a certificate
-check and a posting admission call no model at all.
-
-The native ledger uses canonical signed decimal strings at the handler
-boundary. It converts them to checked integers. It commits all entries and the
-idempotency record in one SQLite transaction. It rejects a posting group when
-the exact sum is not zero. The runtime also validates an existing ledger before
-it serves requests. These native actions enforce the invariant. The native
-adapter remains a disclosed trusted boundary.
-
-### The linked adapter manifest
-
-The native ledger holds a dispatch table of the predicates it enforces. Each
-row names an invariant kind by its wire ordinal, the version of the predicate
-it implements, the function that admits one posting group, and one or both of
-the function that validates an existing store and the function that admits one
-account name that store already holds. Every enforcement path iterates that
-table, so a row that is added starts deciding and a row that is removed stops.
-
-A per-account predicate runs from inside the single exclusive walk the store
-validation already makes, at each of the two places that walk already reads an
-account. It therefore costs processing over the rows the walk reads and no
-additional query: the baseline of a store with no declared account set runs
-exactly the statements it ran before this kind existed.
-
-From that table, together with the store schema version and the export names
-the module publishes, the adapter derives an adapter manifest at compile time.
-The runtime hashes the manifest under its own digest domain and binds the
-result as the executable graph's adapter member. The acceptance kernel holds
-its own expected manifest, derived from the closed kind catalog, and compares
-the member against the digest of that. Three parties must agree: the adapter
-the building binary linked, the adapter the serving binary linked, and the
-kernel's table. No party reads another's value.
-
-**What the check detects.** A kind, a predicate version, a store schema
-version, an adapter identity, or an export name that the kernel expects and
-the linked dispatch table does not carry. A serving binary whose linked adapter
-is older than the artifact it is asked to serve: it computes a different
-member, the executable root does not match, and the artifact is refused rather
-than served.
-
-**What the check cannot detect.** A dispatch row whose predicate is wrong. A
-row whose function decides the wrong thing hashes exactly like a row whose
-function decides the right thing, because the manifest records what is
-enforced and not how. Nothing in acceptance examines predicate behaviour. That
-gap is closed only by the predicate's own tests, and the native adapter
-therefore remains a disclosed trusted boundary.
-
-**What the drift gate claims about all this.** `zig build test-invariant-drift`
-checks that the runtime-side bridge derives the adapter member from the linked
-native module rather than from the acceptance kernel, by denying every
-namespace-qualified read of the kernel outside an argued per-region allowlist,
-following renamed imports to a fixed point. It is a text scan over source, so it
-is scoped to an accidental regression by a developer and does not claim to stop
-deliberate evasion such as `@field(pcc.invariant, "...")` or a re-export of the
-kernel through a third module.
-
-The two sides of the comparison are guarded differently, and only one of them
-is guarded structurally. On the native side the guarantee is the package graph
-rather than the gate: `packages/modules/build.zig` gives `zttp-modules` one
-import, `zttp-sdk`, which declares none, so the native module importing the
-acceptance kernel does not compile, whatever anybody writes. The bridge has no
-such guarantee. It lives in the runtime package, which imports both the kernel
-and the native module by design, so nothing in the build constrains where it
-reads a value from. The gate is the only automated check that watches, and
-being a source scan it is aimed at an accidental regression. A deliberate
-change to the bridge is caught by nothing else: every test in the bridge and
-the gate's own value comparison all compare manifests, and none of them
-watches how the bridge obtained the values it compares. On that
-side the last line of defence is human review.
-
-The adapter manifest names no invariant wire schema. The adapter never decodes
-a specification, so a wire schema stated there would be a value copied from
-the consumer and compared against itself. The wire schemas are bound where the
-decoding happens, through the specification digest and its per-schema domain.
-
-Changing the manifest changes the adapter digest, which changes the executable
-root of every artifact that declares an invariant. Certificates built before
-such a change are refused afterwards at artifact binding, because the serving
-binary recomputes the adapter member and the executable graph no longer
-matches. The adapter identity check is reached only when the artifact and the
-serving binary agree on the adapter and the acceptance kernel does not.
-Existing protected ledger stores are unaffected:
-`ledger_meta.invariant_digest` binds the specification digest, not the adapter
-digest.
-
-The current certificate format is certificate schema 4 with proof system
-`zttp_pcc_v3`. An older consumer refuses this evidence instead of interpreting
-it as an older certificate.
-
-The following rows are the published closed operation catalog. The build gate
-compares them with the kernel, compiler resolver, native exports, bytecode
-observer, and adapter identity.
-
-<!-- application-invariants: catalog -->
-- `0|post|ledger_post|0x4c500001|write`
-- `1|balance|ledger_balance|0x4c420001|read`
-<!-- application-invariants: evidence -->
-
-`zig build test-invariant-drift` requires the source drift gate, proof-checker,
-compiler, native module, runtime activation, and project-configuration test
-roots to pass. The project-configuration root is where the `zttp invariant
-author` tests live: a plain-language sentence with no explicit `--kind`
-selection produces no candidate, and an advisory classifier answer can withhold
-a candidate but never stand in for structured confirmation. The gate requires
-nonempty evidence for accepted coverage, missing and extra evidence, a forged
-operation, executable graph binding, exact zero-sum arithmetic, and canonical
-configuration. It also deletes and changes catalog rows in temporary probes
-and requires each probe to fail. `zig build test-zruntime` separately runs the
-end-to-end protected-store behavior because that suite must remain outside the
-aggregate on macOS.
-
-<!-- application-invariants: end -->
-
 ### Runtime Optimizations from Verification
 
 Some verified facts control runtime behavior, but they cross different trust
@@ -644,7 +334,7 @@ The `FaultCoverageChecker` (`packages/zts/src/fault_coverage.zig`) analyzes the 
 |----------|-----------|---------|
 | `critical` | `jwtVerify`, `validateJson`, `validateObject`, `coerceJson`, `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart`, `verifyWebhookSignature`, `rateCheck` | Auth, validation, signature, and rate-limit failures must not produce 2xx |
 | `expected` | `cacheGet`, `env`, `cacheSet`, `signal`, `signalAt` | Cache misses and missing env vars are normal degradation. A failed `cacheSet` (capacity, a clock error) can leave an earlier value in place, and `signal` fails when the target run does not exist |
-| `upstream` | `fetch`, `fetchWithRetry`, `serviceCall`, `workflow.call`, `callTool` | An external service or tool failure. `serviceCall` and `workflow.call` return the `fetch` response record, so `res.ok` and the status fork cover them. An agent handler reports a `callTool` failure inside a 2xx stream. A 2xx answer on the failure path may be an intended fallback, so the checker does not warn: the site stays covered, and the trace fact `upstreamFallbackSites` counts these sites. |
+| `upstream` | `fetch`, `fetchWithRetry`, `serviceCall`, `workflow.call` | An external service failure. These calls return the `fetch` response record. The `res.ok` and status forks cover them. A 2xx answer can be an intended fallback. The checker records that fallback without a warning. |
 
 The checker warns when a critical I/O failure path (e.g., `jwtVerify` returning `{ok: false}`) produces a 2xx response. This is a structural pattern overwhelmingly correlated with bugs. Cache misses returning 200 are correctly classified as graceful degradation and do not trigger warnings.
 
@@ -743,16 +433,12 @@ has a rejection, the stage it reached, and an optional development flag. The
 flag is absent when certificate decoding did not return an identity. A rejection
 at `proof_checked` can have a grade or no grade. A rejection at an earlier stage
 has no grade. Provenance, work spent, property verdicts, disclosed edge count,
-guard verdicts, and invariant verdicts remain on `Assessment` because a
-rejection can report work completed before it stopped.
+and guard verdicts remain on `Assessment`. A rejection can report completed
+work.
 
 Each property verdict is one of `none`, `graded`, or `accepted`. The latter two
 carry a grade. An accepted property therefore always has a grade. The public
 `gradeFor` and `accepted` methods report these values.
-
-The decoded invariant `Spec` has a schema-tagged `kinds` field. Schema 1 names
-its one kind in the field. Schema 2 reads the kind records from the document.
-This in-memory type does not change the invariant wire bytes or digests.
 
 A signature says who signed. It does not say what was signed is safe. An
 unsigned artifact whose certificate this consumer accepts is accepted; a signed
@@ -925,12 +611,11 @@ artifact, so that command reports provenance and says so.
 
 ### Format cutover
 
-Production accepts certificate schema `4` and proof system `zttp_pcc_v3 = 3`
-only. The self-extract payload is v4, the attestation envelope is
+Production accepts certificate schema `5` and proof system `zttp_pcc_v3 = 3`
+only. The self-extract payload is format 7, the attestation envelope is
 `zttp-attest-v4`, and the proof bundle is `zttp-bundle-3`. Every identity is
-checked for equality rather than a lower bound. An immediate predecessor is
-refused with a rebuild diagnostic instead of being reinterpreted under the
-current proof, guard, and invariant rules.
+checked for equality rather than a lower bound. Schema 4 and format 6 are
+refused with a rebuild diagnostic. The runtime does not reinterpret them.
 
 ## Running Tests
 

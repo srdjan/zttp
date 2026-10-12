@@ -55,11 +55,6 @@ and superseded execution records live in the `pre-rebase` git tag, under
 - [Performance](performance.md) - current benchmark claims and tuning notes.
 - [Reliability](reliability.md) - limits, failure behavior, and exit codes.
 - [Threat Model](threat-model.md) - current trust boundaries and non-goals.
-- [Consumer Contract](consumer-contract.md) - proposed: the declaration a downstream
-  application writes, the admissibility, adjudication, and acceptance stages, and the
-  closed vocabularies both sides pin. [Roadmap](roadmap.md#proposal-decisions) owns its
-  status.
-
 ## Internals
 
 - [Architecture](internals/architecture.md) - runtime, engine, request flow,

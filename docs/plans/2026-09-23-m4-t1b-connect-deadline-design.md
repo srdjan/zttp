@@ -2,7 +2,8 @@
 
 Status: accepted and implemented on 2026-09-23. The owner accepted the file
 extension, one shared budget, and DNS out of scope (section 6). The result is
-recorded under T1b in the [M4 release contract](2026-09-22-m4-release-contract.md).
+recorded under T1b in the M4 release contract
+(`pre-rebase:docs/plans/2026-09-22-m4-release-contract.md`).
 This note answers the design-note condition of T1b and names the approach that
 check C1b is written against.
 
@@ -49,7 +50,7 @@ query, but this needs verification. The contract text for T1b names only the
 connect and the handshake. DNS stays out of scope, and question 3 below asks
 the owner to confirm this.
 
-`invariant_cli.zig` connects by name (`invariant_cli.zig:220-227`), so its DNS
+`pre-rebase:packages/runtime/src/invariant_cli.zig` connects by name (`pre-rebase:packages/runtime/src/invariant_cli.zig:220-227`), so its DNS
 runs inside the connect. It is not an owned file of T1b.
 
 ## 3. Approaches
@@ -222,7 +223,7 @@ process-wide SIGIO handler at startup.
    wrapper. Review note: the parallel path does not share the handler's
    backend. Each `zttp:io` worker creates its own `Threaded`
    (`runtime_http.zig:1970`), so one fetch runs on each worker backend, and
-   step 3 must cover both sites. `invariant_cli.zig:185` creates a third
+   step 3 must cover both sites. `pre-rebase:packages/runtime/src/invariant_cli.zig:185` creates a third
    backend. It moves to the wrapper too unless the owner keeps that name-based
    connect out of T1b (question 3).
 4. At the three sites in `runtime_http.zig`, create the `FetchDeadline` before
@@ -260,4 +261,4 @@ process-wide SIGIO handler at startup.
 2. Should connect, handshake, and exchange share one `timeout_ms` budget
    (recommended), or does each phase get its own?
 3. Do you confirm that DNS stays out of T1b, including the name-based connect
-   in `invariant_cli.zig`? If not, a bounded resolver is a separate unit.
+   in `pre-rebase:packages/runtime/src/invariant_cli.zig`? If not, a bounded resolver is a separate unit.

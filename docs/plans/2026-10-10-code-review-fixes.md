@@ -65,7 +65,7 @@ replay path ignores a stub `ok` field or agrees with it. Update the doc comment
 of `okRecordStub`. Update every pinned copy of the old strings
 (`git grep -n '"statusText"'` under `packages/`: `counterexample.zig`,
 `flow_checker.zig`, `severity_census.zig`, `path_generator.zig`,
-`replay_turn.zig`, `test_runner.zig`, `zruntime_tests.zig`); change only the
+`pre-rebase:packages/runtime/src/replay_turn.zig`, `test_runner.zig`, `zruntime_tests.zig`); change only the
 copies that are generator output, not hand-written fixtures that model a real
 recorded fetch.
 

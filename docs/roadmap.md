@@ -10,22 +10,23 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 ## Milestones
 
 M1, M2, and M3 are complete.
-M4 is complete: T1a to T7 are delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 1 of plan 005 is complete. No release date is assigned.
+M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
 
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | M1: accurate active backlog | Complete, 2026-09-21 | Codebase review at `1b0686a1` | Select the next milestone | Completion record (`pre-rebase:docs/archive/plans/2026-09-21-active-backlog-cleanup.md`); documentation gates pass and remaining work is classified |
 | M2: bounded correctness and assurance | Complete, 2026-09-22 | Three implementation units committed and reviewed; affected suites and mutation probes pass | Select the next milestone | Completion record (`pre-rebase:docs/archive/plans/2026-09-21-bounded-correctness-assurance.md`); full local gate passed at `181d31d4`; public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
 | M3: provable-set reach measurement | Complete, 2026-09-21 | Current DeepSeek default; pilot and full run authorized | Keep the used suite as regression evidence; select a new suite before a new holdout claim | [Full fresh report](provable-reach.md#first-full-measurement): 8/8 reached, 4/4 in each mode, with all selected tasks and source, policy, model, budget, and runtime evidence retained |
-| M4: next release boundary | Contract accepted 2026-09-22; T1a to T7 complete | M1 proposal inventory and current strategy | Delivered T1a to T7 of the [release contract](plans/2026-09-22-m4-release-contract.md) in order | One accepted release contract states scope, threat model, dependencies, and completion checks |
-| M5: agent handlers | Stopped 2026-10-11 by decision 3 of plan 005; contract accepted 2026-09-27, A1 to A4 complete, A5 not implemented | Plan 005 Phase 2 removes the M4 and M5 code | None. Do not implement [A5, the buffered reference agent](plans/2026-09-28-m5-a5-reference-agent-design.md) | Reopening M5 needs a new owner decision |
+| M4: next release boundary | Contract accepted 2026-09-22; T1a to T7 completed; runtime product removed in Phase 2 | M1 proposal inventory and current strategy | None | Historical release contract at `pre-rebase:docs/plans/2026-09-22-m4-release-contract.md` |
+| M5: agent handlers | Stopped 2026-10-11; A1 to A4 completed; A5 not implemented; runtime product removed in Phase 2 | Owner decision | None | Reopening M5 needs a new owner decision; historical A5 design at `pre-rebase:docs/plans/2026-09-28-m5-a5-reference-agent-design.md` |
 
 M2's source evidence is `packages/zts/src/http.zig`,
 `packages/runtime/src/server_response.zig`, and the conditional test gaps in
 the completed rederive record (`pre-rebase:docs/archive/plans/2026-09-20-rederive-implementation-plan.md`).
 M3 establishes bounded reach for the frozen suite in [STRATEGY.md](../STRATEGY.md#key-metrics).
-M4 compares the [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md)
-with the tool-profile recommendation (`pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md`).
+M4 compared the agent-handler specification
+(`pre-rebase:docs/plans/2026-09-19-feat-agent-handler-spec.md`) with the tool-profile recommendation.
+The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x-roadmap.md`.
 
 ## Supported Now
 
@@ -46,8 +47,6 @@ with the tool-profile recommendation (`pre-rebase:docs/zttp-next/zttp-v1.0-scope
   [Virtual Modules](virtual-modules/README.md).
 - Consumer-checked residual guards for computed environment keys, egress
   endpoints, and cache namespaces under an explicit capability policy.
-- Protected local ledger invariants: mandatory balance conservation and
-  optional declared-account matching, with independently checked coverage.
 
 ## Current Limitations
 
@@ -101,7 +100,6 @@ contract must identify which ones it needs.
 | Server rate limiting | Conditional | Standalone unproxied server selected as a product target | Decide whether application limits through `zttp:ratelimit` are insufficient | Approved server policy and accept-path tests, or a recorded decision to retain application limits |
 | Computed SQL guards | Deferred | Policy preserves read/write authority | Design that policy distinction before enabling the family | Consumer coverage and sink tests reject cross-authority use; guard drift gate passes |
 | Certificate assurance | Open, incremental | Select one property or opcode family | Add a producer case and an independent checker rule or witness | Checker rejects a mutation; `test-proof-ratchet` and `test-proof-ratchet-drift` pass with the revised disclosed boundary |
-| Protected-ledger startup cost | Measurement required | Representative ledger and pool sizes; current store exclusion rules | Measure repeated baseline validation and statement preparation before changing ownership | Retained startup and contention measurements justify statement reuse or validation per generation; invariant behavior remains unchanged |
 
 Socket health/readiness, in-flight shutdown-drain, and grace-expiry tests exist in
 `packages/runtime/src/server.zig`. The file split and server adapter also
@@ -113,10 +111,6 @@ is closed for env, egress, and cache. SQL remains deferred in the table above.
 CLI and module documentation derive from `zttp help --all` and the typed
 bindings exposed through `packages/zts/src/builtin_modules.zig`.
 `zttp module-spec-render --check` checks the generated module specifications.
-The ledger foundation record (`pre-rebase:docs/archive/plans/2026-09-18-feat-application-invariants-plan.md`)
-describes the startup measurement question. General predicates, distributed
-ledger stores, currency conversion, and automatic migration remain outside
-the supported invariant scope.
 
 ## Agent-Compiler Agenda
 
@@ -298,8 +292,11 @@ and the dead code those removals left behind. Groups G1 to G15 changed no model-
 input, and the policy, module registry, and spec hashes equal their baselines.
 The [worklog](plans/2026-10-11-feature-removal-worklog.md) records each group, the
 deleted and kept plans, and the recount of files and lines.
-Studio and edge are not part of "Supported Now". Phase 2 removes the M4 and M5 code,
-and Phase 3 removes the model-visible surface that waits for one re-record.
+Studio and edge are not part of "Supported Now".
+Phase 2 is complete. It removed runtime tool routes, agent turns, application invariants, and consumer declarations.
+New artifacts use payload format 7 and certificate schema 5. The updated reader refuses the previous formats.
+The [Phase 2 worklog](plans/2026-10-12-feature-removal-phase-2-worklog.md) records offline verification, unchanged compiler identities, and review limits.
+Phase 3 needs separate authorization for model-visible removals and one re-record.
 
 The owner approved the [first shared-analysis unit](plans/2026-10-11-shared-analysis-first-unit.md) on 2026-10-11.
 The unit preserves documented features and initial wire formats. Its [worklog](plans/2026-10-11-shared-analysis-worklog.md) records execution evidence.
@@ -349,11 +346,10 @@ Reopening a removal requires a product decision and current usage evidence.
 
 | Proposal | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
-| Custom agent handlers and tool-profile v1 | Reconciled: M4 delivered the tool profile; M5 resumption stopped 2026-10-11 by decision 3 of plan 005 | Plan 005 Phase 2 | See the M5 row | One accepted contract and reconciled implementation scope, or an explicit deferral |
+| Custom agent handlers and tool-profile v1 | Retired in Phase 2 after M4 delivery and the M5 stop | New owner decision | None | The M4 and M5 milestone rows preserve the release facts |
 | Broader tool platform, confidential hosting, and cloud adapters | Parked | A customer need and an accepted threat model | Evaluate separately from the current handler product | Recorded accept/defer decision and a bounded plan for any accepted work |
 | Predictable-performance advisory plan (`pre-rebase:advisor-plans/001-tigerbeetle-inspired-predictable-performance-plan.md`) | Proposed; old baseline | Fresh process-level measurements | Revalidate the measurement unit before any optimization | Retained receipts identify a current bottleneck and justify a selected change |
-| [Consumer contract v1](consumer-contract.md) | Proposed | A consumer that commits to lowering into the declaration | Decide whether to accept producer obligations P1 to P14, starting with the published vocabulary envelope and its drift gate | The envelope exists, a gate compares a source-derived inventory against it for equality and fails on a missing or empty input, and one consumer's declaration reaches an admissibility answer |
 
-The proposal index (`pre-rebase:docs/zttp-next/README.md`), [agent-handler specification](plans/2026-09-19-feat-agent-handler-spec.md),
-and [advisory index](../advisor-plans/README.md) hold the supporting documents.
+The proposal index (`pre-rebase:docs/zttp-next/README.md`) and
+[advisory index](../advisor-plans/README.md) hold the supporting documents.
 Their presence does not schedule them.

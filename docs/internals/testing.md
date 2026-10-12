@@ -42,7 +42,6 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-module-audit` | `packages/tools/src/module_audit.zig` |
 | `test-verify-paths-core` | `packages/tools/src/verify_paths_core.zig` |
 | `test-project-config` | `packages/tools/src/project_config.zig` |
-| `test-vocab-envelope` | `packages/tools/src/vocab_envelope.zig` |
 | `test-instruction-counter` | `packages/tools/src/instruction_counter.zig` |
 | `test-expert-app` | `packages/pi/src/tests.zig` |
 | `test-cassette` | `packages/pi/src/cassette_tests.zig` |
@@ -160,7 +159,7 @@ every run, and probes every failure kind through a small synthetic census.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-checker-purity`, `test-kernel-safety`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
-`test-residual-guards-drift`, `test-invariant-drift`, `test-proof-swallow`,
+`test-residual-guards-drift`, `test-proof-swallow`,
 `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
 `test-docs-drift`, `test-doc-links`, `test-diagnostic-corpus`, `test-flow-census`,
@@ -267,29 +266,25 @@ in `scripts/manual-scripts.allow` saying why a developer runs it by hand. It
 found `scripts/test-zruntime.sh`, which invoked `zig test` on
 `packages/runtime/src/zruntime.zig`, a file deleted in the monorepo
 restructure, and which nothing had called since; the real path is
-`zig build test-zruntime`. Six scripts are declared manual: two publish or
-build outside the tree, two block on a server or a model run, one is machine
-setup, and one regenerates a doc whose drift is already gated.
+`zig build test-zruntime`. Three scripts are declared manual.
+One configures a machine, one runs expert qualification, and one regenerates a gated document.
 
 The build-step form of the same question is `zig build test-step-coverage`,
 which lives in `build/step_coverage.zig` because only a build can answer it. A named step is
 not what the aggregate step depends on: `test_step.dependOn(&run_server_tests
 .step)` names the Run step, and `b.step("test-server", ...)` names a separate
 top-level step over the same Run, so "is `test-server` reachable from `test`"
-is the wrong question. The gate walks the real dependency graph instead and
-asks, for each of the 94 top-level steps, whether every step in its closure is
-run by something: reached by `zig build test`, reached by a step
-`scripts/verify.sh` or a CI workflow invokes, or - for five steps that only
-wrap a shell gate - the same script run directly by one of those. The workflow
+is the wrong question. The gate walks the real dependency graph instead.
+It asks whether another entry point runs every step in each closure.
+An entry point is `zig build test` or a step that `scripts/verify.sh` or CI invokes.
+For five shell gates, the entry point can invoke the same script directly. The workflow
 directory is read rather than listed, so a workflow added later becomes a
 coverage source without anyone remembering this gate.
 
-Thirteen steps are declared manual in `scripts/manual-steps.allow`: two
-interactive run commands, one blocking server, three measurements that pass
-regardless, one that spends real model time, two that need a local MLX server
-or a browser, three release operations, and one release-artifact producer. Both
-directions are enforced, and a row for a step something now runs fails the same
-gate.
+Twelve steps are declared manual in `scripts/manual-steps.allow`.
+They cover two interactive runs, one server, three measurements, and one model run.
+They also cover one MLX run, two release operations, one mutation probe, and one regeneration step.
+Both directions are enforced. A row for an automated step fails the same gate.
 
 Four floors sit under it, because a coverage check over an empty input reports
 that everything is covered: the CI workflow read must find at least one file,
@@ -400,17 +395,18 @@ the first reports a pass over zero tests. It fails in both directions: a new
 forbidden import fails it, and so does a source file that `src/test_root.zig`
 does not reference or that carries no test. It also refuses mutable statics,
 `extern`, `asm`, and `@embedFile` anywhere in the kernel and `std.debug.print`
-outside tests. Its floors are 14 source files and 265 tests. Its reason-code
+outside tests. Its floors are 13 source files and 195 tests. Its reason-code
 census requires every `ReasonCode` member to be named inside a kernel test
 block, or to carry a row in the script that states why no input produces it.
 
 `zig build test-kernel-safety` keeps runtime safety on in the kernel inside
 ReleaseFast release binaries. On Zig 0.16.0 a dependency module's optimize
 mode does not isolate safety from the root module, so every non-test kernel
-function begins with `@setRuntimeSafety(true)`. The gate parses each kernel file
-and fails on a function without that first statement, on `std.debug.assert` or
-`@setRuntimeSafety(false)` outside a test, and on fewer than 16 files or 300
-functions. A ReleaseFast probe must abort on an out-of-bounds index in an
+function begins with `@setRuntimeSafety(true)`. The gate parses each kernel file.
+It fails when a function omits that first statement. It also refuses
+`std.debug.assert` or `@setRuntimeSafety(false)` outside a test.
+Its floors are 13 files and 248 non-test functions.
+A ReleaseFast probe must abort on an out-of-bounds index in an
 annotated function of an imported module, which only happens when the setting
 works.
 
@@ -448,65 +444,6 @@ missing-row and extra-row probes make a vacuous comparison fail. The stand-in
 dependency makes a compile failure fail the named gate and executes the
 positive env, egress, and cache conversions. Each conversion must preserve the
 exact proven Property set.
-
-`zig build test-invariant-drift` runs the Zig gate at
-`packages/tools/src/invariant_drift_gate.zig`. The build target also requires
-the proof-checker, ZTS, native module, runtime activation,
-project-configuration, and developer CLI test roots to pass, plus the gate's
-own tests under `zig build test-invariant-gate`.
-`scripts/check-invariants.sh` is now only a wrapper that invokes the build
-step. The developer CLI root is `cli_main.zig`, and `build/runtime_tests.zig` names it
-because it is the only root that compiles and runs the tests in
-`packages/runtime/src/proofs/invariant_report.zig`; without it the gate's
-evidence table would name a test nothing made run.
-
-The gate imports the surfaces that are data - the kernel operation catalog, the
-kind table, the linked native binding, and the authoring renderer - and
-text-scans only the surfaces that are code. It compares the closed `post` and
-`balance` catalog with the compiler resolver, proof IR tag, native exports and
-effects, final-bytecode observer, producer mapping, the kernel's expected
-adapter and the executable-graph member bound from it, and the machine-marked
-rows in `docs/verification.md`. It compares the kind table against the wire
-ordinals, the confirmed template `packages/tools/src/invariant_config.zig`
-accepts, and the listing `zttp invariant list` prints. It requires nonempty
-compiled evidence for acceptance and for missing, extra, and forged evidence.
-
-Every invocation runs one in-memory mutation probe per independent input, and
-each probe names the check that must reject it, so a mutation caught by an
-unrelated comparison is reported as a probe failure rather than as agreement.
-The probes never touch the working tree: the step depends on six compiled
-suites, so a deleted input would fail their compile and the nonzero exit would
-come from the Zig compiler rather than from any comparison the gate makes. The
-developer CLI root is the sixth. It costs about 8 s on its own from a warm
-cache, and the drift step still measures about 11 s with it, because the roots
-build and run in parallel; both figures are measured on the developer machine
-and will differ on another. `zig build invariant-gate` builds the binary alone
-into `zig-out/tooling`, where `--mutate <input>` runs one probe and
-`--list-probes` names them all.
-
-Coverage over the probe table is asserted two ways. One test requires a probe
-per independent input, and one requires every `Check` the gate can return to be
-named by a probe or to carry a row in `deliberately_unprobed` with the reason
-it has none. The second exists because the first counts inputs, not checks: 23
-checks had never been observed rejecting anything, and one of them shipped on
-this branch with review as the only thing that caught it. The allowlist holds
-eleven rows today, all of them absence floors that fire when an input is gone
-or empty; it cannot be emptied, and a row for a check a probe now covers fails
-the same test.
-
-The gate's run step sets `has_side_effects`. A Run step is cached on its
-executable and its arguments, never on the files the program reads, so without
-it the gate would report a cached pass after `docs/verification.md` changed.
-
-The project-configuration root carries the authoring tests for `zttp invariant
-list` and `zttp invariant author`, which prove that a sentence with no kind
-selection produces no candidate and that an advisory response cannot bypass
-structured confirmation.
-Those tests live in `packages/tools/src/invariant_author.zig`, which is reached
-only through the `project_config` re-export, so only `zig build
-test-project-config` collects them. `zig build test-zruntime` separately runs
-end-to-end protected-store behavior. It is not a dependency of the drift target
-because the ZRuntime suite must not overlap the aggregate on macOS.
 
 Discarding an error inside the analysis files that decide whether a program is
 proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot
