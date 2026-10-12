@@ -225,9 +225,8 @@ ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=claude \
 Registered models: `claude-sonnet-4-6` (default), `claude-opus-4-8`,
 `claude-sonnet-5`, and `claude-haiku-4-5-20251001`.
 
-Artifacts: `packages/pi/src/simulator/testdata/empirical/codegen/`. The flat
-pre-cutover cassettes under `packages/pi/src/providers/testdata/codegen/` are a
-frozen baseline and are not re-recorded.
+The Claude corpus is retired. Its flow artifacts and the flat pre-cutover
+cassettes live at the `pre-rebase` tag and are not re-recorded.
 
 ### OpenAI
 

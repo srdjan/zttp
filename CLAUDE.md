@@ -114,8 +114,8 @@ mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
 `ZTTP_CODEGEN_PROVIDER=local` selects it for recording, which is the recorder's
 default when the variable is unset. Local recordings land under
 `packages/pi/src/simulator/testdata/empirical/local/codegen/`. The frozen Claude
-corpus under `packages/pi/src/providers/testdata/codegen/` is the pre-cutover
-baseline and is not re-recorded.
+corpus is retired: it no longer exists on `main` and lives at the `pre-rebase`
+tag.
 
 DeepSeek is the one permitted remote provider, added 2026-08-14 by explicit
 decision. `--provider deepseek` runs the expert loop against it and

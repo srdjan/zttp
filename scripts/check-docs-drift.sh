@@ -438,7 +438,7 @@ fi
 legacy_types_hits="$({
   git ls-files -z |
     xargs -0 rg -n -F -- 'zttp:types' 2>/dev/null || true
-} | grep -v -E '^(CHANGELOG\.md:|docs/(archive|plans|solutions)/|docs/(convergence|restrictions-to-proofs)\.md:|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|packages/zts/src/(stripper|restriction_registry)\.zig:|packages/tools/src/precompile\.zig:|packages/pi/src/expert_persona\.zig:|scripts/check-docs-drift\.sh:|tests/corpus/[a-z]+/bad/)' || true)"
+} | grep -v -E '^(CHANGELOG\.md:|docs/(archive|plans|solutions)/|docs/(convergence|restrictions-to-proofs)\.md:|packages/pi/src/simulator/testdata/empirical/|packages/zts/src/(stripper|restriction_registry)\.zig:|packages/tools/src/precompile\.zig:|packages/pi/src/expert_persona\.zig:|scripts/check-docs-drift\.sh:|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${legacy_types_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$legacy_types_hits" >&2
   fail "live source still references removed zttp:types; use ambient Proof<T, P> and Effects<T, R>"
@@ -504,7 +504,7 @@ fi
 removed_declaration_destructuring_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n -U --pcre2 -- '(?s)\b(?:const|let|var)\s+(?:\{|\[)' 2>/dev/null || true
-} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
+} | grep -v -E '^(docs/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_declaration_destructuring_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_declaration_destructuring_hits" >&2
   fail "tracked TypeScript still uses declaration destructuring; bind one name and read members or indexed elements explicitly"
@@ -516,7 +516,7 @@ fi
 removed_record_field_hits="$({
   git ls-files -z -- '*.ts' |
     xargs -0 rg -n -U --pcre2 -- '(?s)(?:(?:=|return|\(|,)\s*\{\s*(?:\.\.\.[^,}]+,\s*)?(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|(?:return|Response\.json\(|=>|=)\s*\{(?:(?![{}()]).)*,\s*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|\{\s*\[[^]]+\]\s*:)' 2>/dev/null || true
-} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
+} | grep -v -E '^(docs/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
 if [[ -n "${removed_record_field_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_record_field_hits" >&2
   fail "tracked TypeScript still uses object shorthand or a computed record key; spell fields explicitly or use Dict"
@@ -528,7 +528,7 @@ fi
 removed_expression_form_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 rg -n -U --pcre2 -- '(?m)(?:\?\.\s*[\[(]|(?:^|[=(:,;!?{}\[])\s*\+\s*(?:[A-Za-z_$]|\()|(?:\b[A-Za-z_$][A-Za-z0-9_$]*|\)|\])\s+in\s+(?:[A-Za-z_$]|\(|\{|\[))' 2>/dev/null || true
-} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' | grep -v -E ':[[:space:]]*(//|\*)' || true)"
+} | grep -v -E '^(docs/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' | grep -v -E ':[[:space:]]*(//|\*)' || true)"
 if [[ -n "${removed_expression_form_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_expression_form_hits" >&2
   fail "tracked TypeScript still uses in, unary plus, optional call, or optional computed access; use explicit predicates, conversions, and absence branches"

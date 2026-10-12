@@ -723,3 +723,36 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches, with outp
 - Invariant 3: `git diff --stat` over `tool_registry.zig`, `expert_persona.zig`, `skills/`, and `prompts/` is empty.
 - Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 8: `git grep -n "openai-responses-sse\|v1/responses" -- docs README.md CLAUDE.md AGENTS.md .github scripts build build.zig packages` leaves only `agent.zig` URL tests, `providers/cassette_record.zig:440`, and `providers/openai/client.zig:30` (all G13c or G13d), plus the plan files.
+
+## G13c Claude corpus, flat-cassette lane, and the record-tee test
+
+### Removed
+
+- The directories `packages/pi/src/providers/testdata/codegen/` and `packages/pi/src/simulator/testdata/empirical/codegen/` (`git rm -r`). Measured before removal: 127 tracked files (115 and 12), 22,470 lines, 3,972,840 bytes. They live at the `pre-rebase` tag.
+- In `expert_codegen_record.zig` (5,412 lines and 246,733 bytes before, 5,166 lines and 235,007 bytes after): `CassetteSequenceClient`; `StepSource.flat_cassette`; the `steps` field of `ResolvedSteps`; `readCaseSteps`; the `cassette_root` and `claude_empirical_flow_root` constants; the flat branch of `resolveCaseSteps`; the `.flat` variant of `CorpusReplayClient` (now a plain struct around the flow client); the non-flow tail of `replayCorpusTurn`; the flat branch of `artifactIdentity` (it now takes only `resolved`); `cassetteModel` and its test; `anthropic_coverage_baseline`, `anthropic_coverage_legacy_corpus_version`, `legacyCoverageBaseline`, and their assertions in the test "coverage baselines are input provider and model qualified"; the test "anthropic flat cassette fallback resolves at least one recorded case"; the flat-cassette fixture in "a broken flow artifact is refused rather than falling back" and the Anthropic assertion in "a case with neither recording resolves to no steps"; the `anthropic` client import.
+- The `from a flat cassette` count in the `[codegen-replay]` summary line. It now reads `19/19 case(s) replayed from a flow artifact`.
+- The two dead alternatives for `providers/testdata/codegen/` in the exclusion patterns of `scripts/check-docs-drift.sh`.
+
+### Rewritten
+
+- The test "record-tee captures a faithful anthropic cassette offline" is now "record-tee captures a faithful local cassette offline". The `LocalHttpServer` serves a non-streaming Chat Completions JSON body with `Content-Type: application/json`, `local.Client.initWithCapture` posts to its loopback root, `CodegenResponseCapture` writes `step_0.jsonl`, and the test loads and replays that cassette and asserts the reply is the same `final_text` `OK`. The local client is used, as in G13b, because `deepseek.validateBaseUrl` requires HTTPS. No URL policy changed.
+- `flowRoot` maps both `.anthropic` and `.openai` to the (nonexistent) OpenAI root, with a comment that G13d removes the members.
+- Text: `scripts/update-coverage.sh:337` and `docs/coverage.md:23` now say "a loopback Chat Completions response passes through the production local record tee, disk cassette, loader, and replay client". The two lines are byte-equal. `CLAUDE.md` Models section says the frozen Claude corpus is retired and lives at the `pre-rebase` tag. `docs/internals/cassette-recording.md` says the same under the Claude section.
+
+### Counts
+
+`test-expert-app` went from 1048 of 1049 passed to 1046 of 1047 passed (1 skipped): the fallback test and the `cassetteModel` test are gone. `zig build test` went from 9132 of 9138 to 9130 of 9136. `test-standin` stays 56/56.
+
+### Left for G13d
+
+`providers/cassette_record.zig:440` (`/v1/responses` in a recorder-lane test that serves OpenAI SSE) stays: it exercises `providers/openai/` and goes with it. `ReplayRequestContext`, `recordingProvider`, and the `.anthropic` and `.openai` switch arms in `expert_codegen_record.zig` stay with the enum.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `test-expert-app`, `test-cassette` (425/425), `test-simulator` (927/927), `test-standin` (56/56), `test-convergence-emitter`, `test-evidence-marker` (4/4), `test-docs-drift`, `test-doc-links`, `test-step-coverage`, `test-script-reachability`, `test-module-boundary`, `test-residual-guards-drift` (56/56), `zig build`, and `zig build test`. `zig fmt --check packages/pi/src/expert_codegen_record.zig`: exit 0.
+- Invariant 2: the coverage gate reports no drift. `coverage.json is stale` and `response_order_mismatch` do not appear. The two `model_context_mismatch at turn 0/2` lines are the known negative tests. The replay line reads `19/19 case(s) replayed from a flow artifact` and `proof-coverage` reports `corpusCases":19`. `corpusVersion` did not change.
+- Invariant 3: nothing changed under `tool_registry.zig`, `expert_persona.zig`, `skills/`, or `prompts/`.
+- Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 8: `git grep -n -E "providers/testdata/codegen|empirical/codegen|cassette_root|claude_empirical_flow_root|flat_cassette|CassetteSequenceClient|anthropic_coverage|legacyCoverageBaseline" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages` returns nothing outside `docs/plans/`.

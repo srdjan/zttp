@@ -20,7 +20,7 @@ What the offline suite proves, and what it does not.
 
 | Path | Offline | How |
 |---|---|---|
-| Recorder transport and replay | yes | a loopback Anthropic SSE response passes through the production record tee, disk cassette, loader, and replay client |
+| Recorder transport and replay | yes | a loopback Chat Completions response passes through the production local record tee, disk cassette, loader, and replay client |
 | Loop, veto, apply | yes | every entry in the declared range, driven through the real server and the real loop |
 | Veto retry | yes | defect seeds whose bad draft the veto rejects and whose good draft lands on the retry |
 | Salvage-on-reject | yes | canonical-band seeds, asserted against the exact bytes normalizing the draft produces |

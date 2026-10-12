@@ -13,7 +13,6 @@
 const std = @import("std");
 const zts = @import("zts");
 const zts_cli = @import("zts_cli");
-const anthropic = @import("providers/anthropic/client.zig");
 const anthropic_tools = @import("providers/anthropic/tools_schema.zig");
 const local = @import("providers/local/client.zig");
 const openai = @import("providers/openai/client.zig");
@@ -86,67 +85,35 @@ const CodegenResponseCapture = struct {
     }
 };
 
-/// Replays a recorded multi-roundtrip session: each model request is served the
-/// next committed cassette step (step_0, step_1, ...), parsed through the same
-/// assembler the live client uses. The transcript is ignored - the recorded
-/// responses are authoritative - so the loop re-executes the recorded tool calls
-/// and re-vetoes the recorded edit deterministically and offline.
-const CassetteSequenceClient = struct {
-    steps: []const []const u8,
-    index: usize = 0,
-
-    fn requestFn(
-        ctx: *anyopaque,
-        arena: std.mem.Allocator,
-        tr: *const transcript_mod.Transcript,
-        extra_user_text: ?[]const u8,
-    ) anyerror!loop.ModelCallResult {
-        const self: *CassetteSequenceClient = @ptrCast(@alignCast(ctx));
-        _ = tr;
-        _ = extra_user_text;
-        if (self.index >= self.steps.len) return error.CassetteSequenceExhausted;
-        const cassette = try cassette_client.loadCassetteFromBytes(arena, self.steps[self.index], null);
-        self.index += 1;
-        return try cassette_client.replay(arena, cassette);
-    }
-
-    pub fn asClient(self: *CassetteSequenceClient) loop.ModelClient {
-        return .{ .context = self, .request_fn = requestFn };
-    }
-};
-
 /// Where one case's provider responses were read from.
-pub const StepSource = enum { flow_artifact, flat_cassette, missing };
+pub const StepSource = enum { flow_artifact, missing };
 
 pub const ResolvedSteps = struct {
-    steps: [][]u8,
     source: StepSource,
     flow_case: ?flow_artifact.FlowCase = null,
 
     pub fn deinit(self: *ResolvedSteps, allocator: std.mem.Allocator) void {
+        _ = allocator;
         if (self.flow_case) |*flow_case| flow_case.deinit();
-        for (self.steps) |step| allocator.free(step);
-        allocator.free(self.steps);
         self.* = undefined;
     }
 
     pub fn responseCount(self: *const ResolvedSteps) usize {
         if (self.flow_case) |flow_case| return flow_case.manifest.model_responses.len;
-        return self.steps.len;
+        return 0;
     }
 
     pub fn model(self: *const ResolvedSteps) ?[]const u8 {
         if (self.flow_case) |flow_case| return flow_case.manifest.model;
-        if (self.steps.len == 0) return null;
-        return cassetteModel(self.steps[0]);
+        return null;
     }
 };
 
 /// True when `name` has a recorded flow artifact, which is the descriptor's
 /// presence and nothing more. Whether that artifact loads is a separate
 /// question, and one this must not answer: a case with a descriptor and a
-/// broken generation is a corrupt corpus, and falling back to its old flat
-/// cassette would replay stale bytes under a fresh recording's name.
+/// broken generation is a corrupt corpus, and silently treating it as absent
+/// would report a half-written recording as a missing one.
 fn hasFlowArtifact(allocator: std.mem.Allocator, case_root_abs: []const u8) bool {
     const descriptor = std.fmt.allocPrint(allocator, "{s}/case.json", .{case_root_abs}) catch return false;
     defer allocator.free(descriptor);
@@ -155,21 +122,13 @@ fn hasFlowArtifact(allocator: std.mem.Allocator, case_root_abs: []const u8) bool
     return true;
 }
 
-/// One case's provider responses, preferring the recorded flow artifact over
-/// the flat cassette.
-///
-/// The recorder writes flow artifacts and has since `71c7bbf4`; the flat
-/// cassettes are what every case recorded before it still carries. They are not
-/// convertible - re-recording a case to change its storage format redraws the
-/// sample, which is the re-rolling `docs/convergence.md` forbids - so both are
-/// read here and neither is ever written twice. A case has one or the other,
-/// the flat set only shrinks, and the split closes as cases are re-recorded for
-/// their own reasons.
+/// One case's provider responses, read from its recorded flow artifact.
 ///
 /// Reading the artifact through `artifact.loadCase` rather than by globbing
 /// `responses/` is the point: it resolves the descriptor's active generation
 /// and checks every fixture against its recorded digest, so a corpus edited by
-/// hand fails here instead of replaying as a recording.
+/// hand fails here instead of replaying as a recording. A case with no
+/// descriptor resolves to `.missing`, which the caller reports.
 fn resolveCaseSteps(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
@@ -190,7 +149,6 @@ fn resolveCaseSteps(
                 var owned_flow_case = flow_case;
                 errdefer owned_flow_case.deinit();
                 return .{
-                    .steps = try allocator.alloc([]u8, 0),
                     .source = .flow_artifact,
                     .flow_case = owned_flow_case,
                 };
@@ -213,17 +171,7 @@ fn resolveCaseSteps(
         }
     }
 
-    if (provider != .anthropic) {
-        return .{ .steps = try allocator.alloc([]u8, 0), .source = .missing };
-    }
-
-    const cassette_case_root = try std.fmt.allocPrint(
-        allocator,
-        "{s}/{s}/{s}",
-        .{ repo_root, cassette_root, name },
-    );
-    defer allocator.free(cassette_case_root);
-    return .{ .steps = try readCaseSteps(allocator, cassette_case_root), .source = .flat_cassette };
+    return .{ .source = .missing };
 }
 
 /// Empirical replay tests cannot reinterpret a pre-change-set recording as
@@ -247,33 +195,9 @@ fn resolveCurrentCaseStepsForTest(
     };
 }
 
-/// Read step_0.jsonl, step_1.jsonl, ... from an absolute case directory until a
-/// step is missing. Returns an empty slice when the case has no cassette yet.
-fn readCaseSteps(allocator: std.mem.Allocator, dir_abs: []const u8) ![][]u8 {
-    var list: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (list.items) |s| allocator.free(s);
-        list.deinit(allocator);
-    }
-    var i: usize = 0;
-    while (true) : (i += 1) {
-        const path = try std.fmt.allocPrint(allocator, "{s}/step_{d}.jsonl", .{ dir_abs, i });
-        defer allocator.free(path);
-        // An absent step ends the sequence (and an absent step_0 means no
-        // cassette); any other read error must surface, not masquerade as "missing".
-        const bytes = zts.file_io.readFile(allocator, path, 4 * 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound => break,
-            else => return err,
-        };
-        try list.append(allocator, bytes);
-    }
-    return list.toOwnedSlice(allocator);
-}
-
-/// Where committed cassettes live, relative to the repo root (the cwd when the
-/// recorder runs via `zig build`).
-pub const cassette_root = "packages/pi/src/providers/testdata/codegen";
-pub const claude_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/codegen";
+/// Where committed empirical flow artifacts live, relative to the repo root (the
+/// cwd when the recorder runs via `zig build`). The retired Claude and OpenAI
+/// corpora are not here: they live at the `pre-rebase` tag.
 pub const local_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/local/codegen";
 pub const openai_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/openai/codegen";
 pub const deepseek_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/deepseek/codegen";
@@ -286,8 +210,8 @@ pub const empirical_flow_root = flowRoot(headline_provider);
 fn flowRoot(provider: agent.Provider) []const u8 {
     return switch (provider) {
         .local => local_empirical_flow_root,
-        .anthropic => claude_empirical_flow_root,
-        .openai => openai_empirical_flow_root,
+        // Both retired providers have no corpus; G13d removes the members.
+        .anthropic, .openai => openai_empirical_flow_root,
         .deepseek => deepseek_empirical_flow_root,
     };
 }
@@ -487,49 +411,34 @@ const ReplayRequestContext = struct {
     }
 };
 
-const CorpusReplayClient = union(enum) {
+const CorpusReplayClient = struct {
     flow: simulator_model_client.Client,
-    flat: CassetteSequenceClient,
 
     fn init(
         resolved: *const ResolvedSteps,
         request_config: ?model_request.Config,
     ) !CorpusReplayClient {
-        if (resolved.flow_case) |*flow_case| {
-            return .{ .flow = simulator_model_client.Client.init(
-                simulator_model_client.Script.fromFlowCase(flow_case),
-                request_config orelse return error.MissingFlowRequestConfig,
-            ) };
-        }
-        return .{ .flat = .{ .steps = resolved.steps } };
+        const flow_case = if (resolved.flow_case) |*case| case else return error.ExpectedFlowArtifact;
+        return .{ .flow = simulator_model_client.Client.init(
+            simulator_model_client.Script.fromFlowCase(flow_case),
+            request_config orelse return error.MissingFlowRequestConfig,
+        ) };
     }
 
     fn asModelClient(self: *CorpusReplayClient) loop.ModelClient {
-        return switch (self.*) {
-            .flow => |*client| client.asModelClient(),
-            .flat => |*client| client.asClient(),
-        };
+        return self.flow.asModelClient();
     }
 
     fn asSummarizer(self: *CorpusReplayClient) ?@import("compaction.zig").Summarizer {
-        return switch (self.*) {
-            .flow => |*client| client.asSummarizer(),
-            .flat => null,
-        };
+        return self.flow.asSummarizer();
     }
 
     fn finish(self: *CorpusReplayClient) !void {
-        return switch (self.*) {
-            .flow => |*client| client.finish(),
-            .flat => {},
-        };
+        return self.flow.finish();
     }
 
     fn lastFlowMismatch(self: *const CorpusReplayClient) ?flow_artifact.ReplayMismatch {
-        return switch (self.*) {
-            .flow => |*client| client.lastMismatch(),
-            .flat => null,
-        };
+        return self.flow.lastMismatch();
     }
 };
 
@@ -547,8 +456,6 @@ const CorpusReplayOutcome = struct {
 /// compaction controller as a live session. Flow artifacts record standalone
 /// summarizer calls as part of the model script, so bypassing this controller
 /// makes every compacted recording diverge at its first summary checkpoint.
-/// Legacy flat Anthropic cassettes predate that controller and retain their
-/// direct model-client path until they are deliberately re-recorded.
 fn replayCorpusTurn(
     allocator: std.mem.Allocator,
     resolved: *const ResolvedSteps,
@@ -561,41 +468,22 @@ fn replayCorpusTurn(
     var transcript: transcript_mod.Transcript = .{};
     errdefer transcript.deinit(allocator);
 
-    if (resolved.flow_case) |*flow_case| {
-        const config = request_config orelse return error.MissingFlowRequestConfig;
-        const selected_model = try models.resolveForProvider(provider, flow_case.manifest.model);
-        var session = agent.AgentSession.initControlled(allocator, selected_model, config);
-        defer session.deinit(allocator);
-        var controller: agent.RequestController = .{
-            .allocator = allocator,
-            .session = &session,
-            .raw_client = client.asModelClient(),
-            .summarizer = client.asSummarizer(),
-        };
-        const result = try loop.runTurnWith(
-            allocator,
-            controller.asModelClient(),
-            registry,
-            &session.transcript,
-            prompt,
-            .{
-                .workspace_root = ".",
-                .max_attempts = loop.interactive_max_attempts,
-                .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
-                .replay_mode = false,
-                .turn_timeout_ms = 0,
-            },
-        );
-        transcript = session.transcript;
-        session.transcript = .{};
-        return .{ .result = result, .transcript = transcript };
-    }
-
+    const flow_case = if (resolved.flow_case) |*case| case else return error.ExpectedFlowArtifact;
+    const config = request_config orelse return error.MissingFlowRequestConfig;
+    const selected_model = try models.resolveForProvider(provider, flow_case.manifest.model);
+    var session = agent.AgentSession.initControlled(allocator, selected_model, config);
+    defer session.deinit(allocator);
+    var controller: agent.RequestController = .{
+        .allocator = allocator,
+        .session = &session,
+        .raw_client = client.asModelClient(),
+        .summarizer = client.asSummarizer(),
+    };
     const result = try loop.runTurnWith(
         allocator,
-        client.asModelClient(),
+        controller.asModelClient(),
         registry,
-        &transcript,
+        &session.transcript,
         prompt,
         .{
             .workspace_root = ".",
@@ -605,6 +493,8 @@ fn replayCorpusTurn(
             .turn_timeout_ms = 0,
         },
     );
+    transcript = session.transcript;
+    session.transcript = .{};
     return .{ .result = result, .transcript = transcript };
 }
 
@@ -677,33 +567,26 @@ test "required-green recording refuses unapplied and failed-intent turns" {
     );
 }
 
-// Smoke test: prove the production Anthropic record tee writes a cassette that
+// Smoke test: prove the production local record tee writes a cassette that
 // replays to the same reply. The wire response is loopback-local so harness
-// changes never need provider credit merely to reach capture and replay.
-test "record-tee captures a faithful anthropic cassette offline" {
-    // Both provider parsers intentionally use leaky arena JSON parsing because
+// changes never need provider credit merely to reach capture and replay. The
+// local client is the one with a plain-HTTP loopback endpoint policy, so it
+// stands in for the Chat Completions clients here; DeepSeek requires HTTPS.
+test "record-tee captures a faithful local cassette offline" {
+    // The provider parser intentionally uses leaky arena JSON parsing because
     // one model turn owns the entire result. Match that production lifetime.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     const response_body =
-        "event: message_start\n" ++
-        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n" ++
-        "event: content_block_start\n" ++
-        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" ++
-        "event: content_block_delta\n" ++
-        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n" ++
-        "event: content_block_stop\n" ++
-        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
-        "event: message_delta\n" ++
-        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" ++
-        "event: message_stop\n" ++
-        "data: {\"type\":\"message_stop\"}\n\n";
+        "{\"choices\":[{\"index\":0,\"finish_reason\":\"stop\"," ++
+        "\"message\":{\"role\":\"assistant\",\"content\":\"OK\"}}]," ++
+        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
 
-    var server = try cassette_record.LocalHttpServer.init(allocator, response_body, "text/event-stream");
+    var server = try cassette_record.LocalHttpServer.init(allocator, response_body, "application/json");
     try server.start();
     errdefer server.join() catch {};
-    const endpoint = try server.url(allocator, "/v1/messages");
+    const endpoint = try server.url(allocator, "");
     defer allocator.free(endpoint);
 
     var tmp = testing.tmpDir(.{});
@@ -720,8 +603,7 @@ test "record-tee captures a faithful anthropic cassette offline" {
         .context = &capture,
         .record_fn = CodegenResponseCapture.record,
     };
-    var client = anthropic.Client.initWithCapture(.{
-        .api_key = "unused-loopback-key",
+    var client = local.Client.initWithCapture(.{
         .system_prompt = "You are a terse assistant. Reply with exactly one word.",
         .model = "deterministic-recorder-smoke",
         .base_url = endpoint,
@@ -3722,38 +3604,6 @@ test "record codegen baseline corpus (live, gated)" {
     );
 }
 
-/// The model a committed cassette was recorded against, read from the header
-/// line every recording writes (`{"v":1,...,"model":"..."}`).
-///
-/// The published model column used to be `headline_model`, a compile-time
-/// constant, while `ZTTP_CODEGEN_MODEL` was advertised for recording "a second
-/// row against another tier". Those two together publish a Haiku measurement
-/// under Sonnet's name, which is the one thing the column exists to prevent.
-/// Read it from the artefact instead, so the column is measured rather than
-/// asserted.
-fn cassetteModel(step_0: []const u8) ?[]const u8 {
-    const line_end = std.mem.indexOfScalar(u8, step_0, '\n') orelse step_0.len;
-    const header = step_0[0..line_end];
-    const needle = "\"model\":\"";
-    const start = std.mem.indexOf(u8, header, needle) orelse return null;
-    const rest = header[start + needle.len ..];
-    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
-    if (end == 0) return null;
-    return rest[0..end];
-}
-
-test "cassetteModel reads the recorded model from a cassette header" {
-    const header =
-        \\{"v":1,"provider":"anthropic","scenario":"health","stream":true,"model":"claude-haiku-4-5"}
-        \\{"sse":"event: message_start\n"}
-    ;
-    try testing.expectEqualStrings("claude-haiku-4-5", cassetteModel(header).?);
-    // A header without the field, and an empty value, are both "unknown"
-    // rather than a silent empty string that would publish as a blank column.
-    try testing.expect(cassetteModel("{\"v\":1}\n") == null);
-    try testing.expect(cassetteModel("{\"model\":\"\"}\n") == null);
-}
-
 // Offline ratchet: replay every committed cassette through the real veto and
 // require its recorded first-attempt-green observation to stay stable. Runs in
 // normal CI (no network, no key): it reproduces the recorded baseline
@@ -3770,20 +3620,6 @@ test "cassetteModel reads the recorded model from a cassette header" {
 /// on this file - the per-case pin only sees a flipped verdict, never a fence
 /// that stopped being felt.
 ///
-/// Five of seventy-two, measured 2026-08-04. That is the finding, not a failure:
-/// the corpus was grown to separate builds the headline could not, and it does
-/// that on five rules. Four flow rules and one spec-discharge rule, which is a
-/// fair description of what these prompts ask for and a poor description of what
-/// the compiler proves.
-const anthropic_coverage_baseline = [_][]const u8{
-    "ZTS400",
-    "ZTS401",
-    "ZTS407",
-    "ZTS500",
-    "ZTS502",
-};
-const anthropic_coverage_legacy_corpus_version = "83c9c0c040e8e6f1f659ddc7d853f9f21bc4c0e1db1837f8cedfb11bad1baf08";
-
 /// Two of seventy-two, measured 2026-08-26 over the 19-case DeepSeek corpus
 /// recorded that day, and also the intersection of the three recordings made
 /// against this prompt set. Read from the recording rather than carried over:
@@ -3866,49 +3702,18 @@ fn coverageBaseline(
     };
 }
 
-/// Historical Anthropic evidence predates the separated identities. It remains
-/// queryable by its exact legacy hash but is never accepted by the live path.
-fn legacyCoverageBaseline(provider: agent.Provider, model: []const u8, legacy_id: []const u8) ?[]const []const u8 {
-    if (provider != .anthropic) return null;
-    if (!std.mem.eql(u8, model, models.defaultForProvider(.anthropic).id)) return null;
-    if (!std.mem.eql(u8, legacy_id, anthropic_coverage_legacy_corpus_version)) return null;
-    return &anthropic_coverage_baseline;
-}
-
 test "coverage baselines are input provider and model qualified" {
     const headline_input = headlineInputIdentity();
     try testing.expectEqualStrings(deepseek_coverage_headline_input_id, headline_input.slice());
-    try testing.expectEqual(
-        @as(?[]const []const u8, &anthropic_coverage_baseline),
-        legacyCoverageBaseline(.anthropic, models.defaultForProvider(.anthropic).id, anthropic_coverage_legacy_corpus_version),
-    );
     try testing.expectEqual(
         @as(?[]const []const u8, &deepseek_coverage_baseline),
         coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, headline_input),
     );
     try testing.expect(coverageBaseline(.local, local.default_model, headline_input) == null);
-    try testing.expect(legacyCoverageBaseline(.anthropic, "claude-other", anthropic_coverage_legacy_corpus_version) == null);
     try testing.expect(coverageBaseline(.deepseek, "deepseek-v4-pro", headline_input) == null);
     var changed_input = headline_input;
     changed_input.bytes[0] = if (changed_input.bytes[0] == '0') '1' else '0';
     try testing.expect(coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, changed_input) == null);
-    // The two sets are measurements of different models, not copies.
-    //
-    // Equal length used to be asserted alongside this and is not the claim: two
-    // models can trip the same count and different rules, or different counts
-    // entirely, and the second is what happened - the DeepSeek list is now four
-    // where the Anthropic one is five. Pairing the slices to compare them also
-    // required equal length, so the assertion propped up its own comparison.
-    var identical = anthropic_coverage_baseline.len == deepseek_coverage_baseline.len;
-    if (identical) {
-        for (anthropic_coverage_baseline, 0..) |claude_code, index| {
-            if (!std.mem.eql(u8, claude_code, deepseek_coverage_baseline[index])) {
-                identical = false;
-                break;
-            }
-        }
-    }
-    try testing.expect(!identical);
 }
 
 /// Sorted code slice for stable JSON evidence.
@@ -3988,16 +3793,9 @@ fn manifestRuntime(manifest: *const flow_artifact.FlowManifest) !?evidence_ident
     return null;
 }
 
-fn artifactIdentity(
-    allocator: std.mem.Allocator,
-    resolved: *const ResolvedSteps,
-) !evidence_identity.ContentDigest {
-    if (resolved.flow_case) |flow_case| {
-        return evidence_identity.contentDigest("flow-artifact", flow_case.flow_version.slice());
-    }
-    const parts = try allocator.alloc([]const u8, resolved.steps.len);
-    for (resolved.steps, 0..) |step, index| parts[index] = step;
-    return evidence_identity.contentDigestParts("flat-cassette-responses", parts);
+fn artifactIdentity(resolved: *const ResolvedSteps) !evidence_identity.ContentDigest {
+    const flow_case = resolved.flow_case orelse return error.ExpectedFlowArtifact;
+    return evidence_identity.contentDigest("flow-artifact", flow_case.flow_version.slice());
 }
 
 const SourceIdentity = struct {
@@ -4550,10 +4348,8 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     var models_read: usize = 0;
     var model_revision: OptionalStringConsensus = .{};
     var provider_runtime: RuntimeConsensus = .{};
-    // How far the migration off flat cassettes has got. Reported rather than
-    // asserted: the count moves only when a case is re-recorded for its own
-    // reasons, so a target here would be a reason to re-record, which is the
-    // one thing the corpus rules forbid.
+    // How many cases replayed from a flow artifact. Reported with the case
+    // count so a case that resolved from nothing shows as a gap.
     var flow_backed: usize = 0;
     // Which fences the corpus actually stands on, accumulated across cases.
     // Published under its own marker: this is a fact about the corpus and the
@@ -4580,7 +4376,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         }
         if (resolved.source == .flow_artifact) flow_backed += 1;
 
-        const case_artifact_identity = try artifactIdentity(ca, &resolved);
+        const case_artifact_identity = try artifactIdentity(&resolved);
         if (resolved.flow_case) |flow_case| {
             if (flow_case.manifest.provider != replay_provider) return error.MixedProviderCorpus;
             try model_revision.observe(a, flow_case.manifest.model_revision);
@@ -4659,9 +4455,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         };
         try codegen.collectCodes(a, tr, &tripped, &off_registry);
 
-        // Ratchet each provider against its own recorded observation. Claude's
-        // historical flat cassettes predate provider-qualified turn metadata,
-        // so their immutable corpus pin remains the compatibility source.
+        // Ratchet each provider against its own recorded observation.
         const recorded_draft: ?flow_artifact.DraftExpectation = if (resolved.flow_case) |flow_case| blk: {
             const expectation = flow_case.manifest.turns[0].draftExpectation() catch unreachable;
             break :blk switch (expectation) {
@@ -4782,8 +4576,8 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     }
     try testing.expectEqual(record_corpus.len, passes);
     std.debug.print(
-        "[codegen-replay] {d}/{d} case(s) replayed from a flow artifact, {d} from a flat cassette\n",
-        .{ flow_backed, record_corpus.len, record_corpus.len - flow_backed },
+        "[codegen-replay] {d}/{d} case(s) replayed from a flow artifact\n",
+        .{ flow_backed, record_corpus.len },
     );
 
     // Floor on the model read, before the column it feeds means anything. A
@@ -5231,34 +5025,8 @@ test "every current corpus case resolves to exactly one recording source" {
         try std.testing.expect(resolved.responseCount() > 0);
         if (resolved.source == .flow_artifact) flow_backed += 1;
     }
-    // The headline corpus is recorded in one shape, so every case resolves the
-    // same way. This is a floor on the flow path, not a claim that the flat one
-    // is gone.
+    // Every case resolves to a flow artifact; the flat-cassette lane is retired.
     try std.testing.expectEqual(record_corpus.len, flow_backed);
-}
-
-test "anthropic flat cassette fallback resolves at least one recorded case" {
-    const allocator = std.testing.allocator;
-    const repo_root = try cwdPathAlloc(allocator);
-    defer allocator.free(repo_root);
-
-    // The flat-cassette path is anthropic-only by construction, so it has to be
-    // exercised against that provider or not at all. Checking it here keeps a
-    // resolver that silently stopped reading flat cassettes from passing on the
-    // strength of a headline that no longer uses them.
-    var flat_backed: usize = 0;
-    for (record_corpus) |rc| {
-        var resolved = resolveCaseSteps(allocator, repo_root, .anthropic, rc.name) catch |err| switch (err) {
-            // A descriptor always shadows the flat cassette, including when
-            // its schema is stale. That case is quarantined, never silently
-            // replayed from the older storage lane.
-            error.StaleFlowArtifact => continue,
-            else => return err,
-        };
-        defer resolved.deinit(allocator);
-        if (resolved.source == .flat_cassette and resolved.responseCount() > 0) flat_backed += 1;
-    }
-    try std.testing.expect(flat_backed > 0);
 }
 
 test "flow-backed replay validates the current request checkpoint" {
@@ -5377,13 +5145,6 @@ test "a broken flow artifact is refused rather than falling back" {
             "\"active_generation\":\"0000000000000000000000000000000000000000000000000000000000000000\"}",
     );
 
-    // The same case still has its previous flat cassette, which is exactly the
-    // situation a fallback would paper over: replaying last week's bytes under
-    // this week's recording.
-    const step = try std.fmt.allocPrint(allocator, "{s}/{s}/step_0.jsonl", .{ cassette_root, name });
-    defer allocator.free(step);
-    try tmp.writeFile(allocator, step, "{\"v\":1,\"model\":\"stale\"}\n");
-
     try std.testing.expectError(
         error.UnloadableFlowArtifact,
         resolveCaseSteps(allocator, tmp.abs_path, headline_provider, name),
@@ -5400,13 +5161,6 @@ test "a case with neither recording resolves to no steps" {
     var resolved = try resolveCaseSteps(allocator, tmp.abs_path, headline_provider, "never-recorded");
     defer resolved.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), resolved.responseCount());
-    // A provider with no flat-cassette lane has nowhere else to look, so the
-    // absence is named `.missing`. Anthropic falls through to its flat lane and
-    // reports that source with zero steps instead.
+    // The absence is named `.missing`.
     try std.testing.expectEqual(StepSource.missing, resolved.source);
-
-    var anthropic_resolved = try resolveCaseSteps(allocator, tmp.abs_path, .anthropic, "never-recorded");
-    defer anthropic_resolved.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), anthropic_resolved.responseCount());
-    try std.testing.expectEqual(StepSource.flat_cassette, anthropic_resolved.source);
 }
