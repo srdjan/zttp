@@ -54,9 +54,7 @@ zts-contracts contract_json_parser.zig
 zts-contracts contracts_root.zig
 zts-contracts contract_json_writer.zig
 zts-contracts contract_types.zig
-zts-contracts equivalence_receipt.zig
 zts-contracts handler_contract.zig
-zts-contracts perf_receipt.zig
 zts-contracts service_types.zig
 zts-contracts system_config.zig
 

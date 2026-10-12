@@ -705,7 +705,7 @@ Results appear in:
 - The `cost_bounded` proof chip and `Proof<Response, "cost_bounded">` discharge
 - The `contract_diff` cost lane: widening a bound to `unbounded` is breaking, a
   bounded widening (`constant` to `linear`) is additive; this reaches
-  `prove`, `prove-behavior`, the expert equivalence receipt, and `proofs gate`
+  `prove-behavior` and `proofs gate`
 - Deployment manifest tags (`zttp:costClass`, `zttp:costBound`,
   `zttp:costSource`, `zttp:costWorstCase` evaluated at `--max-body-size`)
   and the `kind=deploy` receipt

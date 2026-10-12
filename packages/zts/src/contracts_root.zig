@@ -38,12 +38,6 @@ pub const system_config = @import("system_config.zig");
 /// Types describing a service call's request and response shapes.
 pub const service_types = @import("service_types.zig");
 
-/// The signed record of a measured performance claim.
-pub const perf_receipt = @import("perf_receipt.zig");
-
-/// The signed record of a proved behavioral equivalence.
-pub const equivalence_receipt = @import("equivalence_receipt.zig");
-
 test {
     @import("std").testing.refAllDecls(@This());
 }

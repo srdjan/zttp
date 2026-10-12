@@ -47,7 +47,6 @@ runtime declaration
 # both must canonicalize `scheme://host:port` identically; a second copy in the
 # runtime is the drift this row exists to avoid.
 runtime endpoint
-runtime equivalence_receipt
 runtime file_io
 runtime handler_contract
 # The compiler's mirror of the acceptance kernel's guard catalog. The pin test
@@ -68,7 +67,6 @@ runtime module_binding
 # own return value.
 runtime module_slots
 runtime modules
-runtime perf_receipt
 runtime pipeline
 runtime policy
 runtime security_events

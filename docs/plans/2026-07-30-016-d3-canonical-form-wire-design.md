@@ -28,7 +28,7 @@ method taxonomy.
 | JSX disambiguation is prefix-position only: `<` at expression start is JSX, `<` in infix position is comparison | `parse.zig:1739` | **The spec's TSX comparison requirement (5.8) is already satisfied.** No parser work needed. |
 | `jsx_*` token kinds and `newline` are declared but never produced | `token.zig:96-102, 166-168` | Dead enum members; ASI has no token-level support (but `parse.zig` has `return`-ASI). |
 | `prove-behavior` compares extracted **contracts**, not code or traces | `prove_behavior.zig:106-133` | Usable as a validator method, but blind to pure-computation changes. |
-| Four validated-rewrite notions already exist (snapshot re-validation, edit-simulate veto, band-decreasing gate, signed equivalence receipts) | `canonicalize.zig:770, 2125-2149, 2315-2330`; `equivalence_probe_lib.zig` | The validator taxonomy has real material to build on. |
+| Four validated-rewrite notions already exist (snapshot re-validation, edit-simulate veto, band-decreasing gate, signed equivalence receipts) | `canonicalize.zig:770, 2125-2149, 2315-2330`; `pre-rebase:packages/runtime/src/equivalence_probe_lib.zig` | The validator taxonomy has real material to build on. |
 
 ---
 

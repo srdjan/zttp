@@ -172,4 +172,5 @@ Added during execution. Each item lost its last production caller in an earlier 
 - From G7: the proof card keeps a three-column frame whose third column is now blank after the audit ring went. Reflow it to two columns, together with the lens cleanup in the same file.
 - From G8: `witness_corpus.synthesizeStructural` with `spec_discharge.isCauseOnly`, `witness_corpus.pin`, `witness_corpus.prune`, and `witness_corpus.selectFewShot`, each once `git grep` confirms that only tests call it. `isPinned` stays. `pi_witnesses` may call some of these: check before deletion, and leave any that a pi tool reaches for Phase 3.
 - From G9: `module_audit.verifyManifestPath`, which has no caller and no test.
+- From G10: `handler_corpus.zig` and its `zruntime_tests.zig` import; `cli_shared.nowUnixMs`; the `perf` and `equivalence` writer paths in `proof_ledger.appendEvent`, once the round-trip tests read raw rows (the reader and the two legacy-row tests stay).
 - Further items that later groups report go in this list before G15 runs.

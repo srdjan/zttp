@@ -95,12 +95,8 @@ fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8)
         std.process.exit(2);
     };
     const witness_replay_lib = @import("witness_replay_lib.zig");
-    const perf_probe_lib = @import("perf_probe_lib.zig");
-    const equivalence_probe_lib = @import("equivalence_probe_lib.zig");
     pi_app.setInvocationArgv(expert_args);
     pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
-    pi_app.perf_probe.setProbeFn(perf_probe_lib.recordPerfReceipt);
-    pi_app.equivalence_probe.setProbeFn(equivalence_probe_lib.recordEquivalenceReceipt);
     try pi_app.run(allocator);
 }
 

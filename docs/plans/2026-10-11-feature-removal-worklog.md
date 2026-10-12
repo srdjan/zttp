@@ -513,3 +513,54 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - The text `model_context_mismatch` appears in the output of `test-expert-app` and `zig build test`. It comes from replay tests that force a mismatch, and both steps exit 0.
 - Invariant 4 after G9: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
 - Invariant 3: no change under `packages/pi/src/skills/`, `prompts/`, `tool_registry.zig`, or `expert_persona.zig`.
+
+## G10 Perf and equivalence receipts
+
+### Removed
+
+- `packages/zts/src/perf_receipt.zig`, `equivalence_receipt.zig`, `packages/pi/src/perf_probe.zig`, `equivalence_probe.zig`, `capsule_probe.zig`, `packages/runtime/src/perf_probe_lib.zig`, `equivalence_probe_lib.zig`
+- The `perf_receipt` and `equivalence_receipt` exports in `contracts_root.zig` and `root.zig`, and their rows in `scripts/zts-tiers.allow` and `scripts/module-boundary.allow`
+- The flags `--perf-receipt`, `--no-perf-receipt`, `--equivalence-receipt`, and `--no-equivalence-receipt`: the `cli_args.zig` bare-flag list and its test, the `cli_help.zig` lines, the `ExpertFlags` fields, the parser lines, and three tests in `packages/pi/src/app.zig`, and the two rows in `docs/cli.md`. `zttp expert --no-perf-receipt` is now an unknown flag.
+- The three probe exports, the two `setEnabled` calls, and the `setProbeFn` registrations in `app.zig` and `dev_cli.zig`. The `tests.zig` and `cli_main.zig` imports.
+- In `packages/runtime/src/proofs/pr_gate.zig`: the best-effort `recordEquivalenceReceiptFromContracts` call, the `sign` parameter of `analyzeHandler`, the `signed`, `sign_failure`, and `receipt_withheld` fields, the `signed_rows` parameter of `renderMarkdown`, the "No signed receipt" and "Signed receipt appended" report lines, the stderr line "no signed receipt for", and the `signed` key in each JSON handler object.
+
+### Model-visible check
+
+`pi_app.perf_probe.record`, `equivalence_probe.record`, and `capsule_probe` had no caller anywhere in `packages/pi`. The probes were only registered, never invoked, and they built no text for a model request, transcript, persona, or tool description. No file under `packages/pi/src/skills/`, `prompts/`, `tool_registry.zig`, or `expert_persona.zig` changed. The frozen cassettes mention none of the removed flags (`git grep` over `packages` finds no hit).
+
+### Ledger compatibility
+
+`proof_ledger.zig` still parses `kind=perf` and `kind=equivalence`, and `appendEvent` still serializes both (existing round-trip tests use it). Nothing in production writes them. Two new tests, "a legacy kind=perf row written by the removed probe still loads" and "a legacy kind=equivalence row written by the removed probe still loads", read raw row bytes. I captured those bytes from the deleted writers before deletion: a temporary test called `recordPerfReceiptWithKey` and `recordEquivalenceReceiptWithKey` with a fixed Ed25519 seed (32 bytes of 0x42) and dumped `.zttp/proofs.jsonl`. The rows hold a real facts object and a real JWS. Sabotaging an expected value in each test made `zig build test-cli` fail on that test, so both tests run.
+
+### Judgments the plan did not settle
+
+- `--no-sign` stays accepted and does nothing. The plan says to keep it. `Options.no_sign`, the `proofs_cli.zig` parser, the help text, and `docs/proofs-and-receipts.md` now say "accepted and ignored".
+- The JSON `signed` key per handler is gone. It was `false` whenever signing was off or failed, and it can never be `true` now. The schema name `zttp.proof-gate.v1` is unchanged, and `docs/cli.md` never listed the key. A consumer that reads `signed` sees it missing. If the root session prefers the lowest-deletion option, restore `"signed": false` in `renderJson`.
+- The run test "a critical lost proof fails the gate ... writes no receipt" became "... writes no ledger row". It runs with `no_sign = false` and still asserts that no `.zttp/proofs.jsonl` exists and now also that stderr is empty. This guards against signing coming back. It keeps `HomeOverride`.
+- `proof_ledger.appendEvent` keeps its `perf` and `equivalence` parameters, and `handler_corpus.zig` stays. I delete less when the plan is silent. Both are G15 candidates (below).
+- `docs/verification.md:708` listed "the expert equivalence receipt" and `prove`. G6 removed `prove`, so I rewrote the line to "`prove-behavior` and `proofs gate`".
+- `docs/plans/2026-07-30-016-d3-canonical-form-wire-design.md:31` now cites `pre-rebase:packages/runtime/src/equivalence_probe_lib.zig`.
+
+### Dead code for G15
+
+- `packages/runtime/src/handler_corpus.zig` (`runHandlerCorpus`, `runHandlerCorpusFromSource`, `HandlerCorpusStats`) and its import in `zruntime_tests.zig:642`: the perf probe was the only production caller. Only its own tests reach it now. I rewrote the header comment.
+- `proof_ledger.AppendParams.perf` and `.equivalence`, and the serializer blocks for them in `appendEvent`: only tests write these kinds. Removing them means rewriting the two round-trip tests and the `.perf` use in three other ledger tests onto raw rows. `PerfPayload` and `EquivalencePayload` stay for the reader.
+- `cli_shared.nowUnixMs` (`packages/runtime/src/cli_shared.zig:81`): the gate was its last caller.
+- `instruction_counter.zig` stays, as the plan says.
+
+### Invariant 8 patterns
+
+```
+git grep -n -i -E "perf_receipt|equivalence_receipt|perf_probe|equivalence_probe|capsule_probe|perf-receipt|equivalence-receipt|recordPerfReceipt|recordEquivalenceReceipt" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling examples advisor-plans
+```
+
+Remaining hits: plan text of this series, earlier worklog sections, `pre-rebase:` citations in `proof_ledger.zig` and the 2026-07-30 plan, and one sentence in `handler_corpus.zig` that names the removed probe.
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `test-cli` (823 passed, 1 skipped, 0 failed), `test-expert-app`, `test-zts`, `test-zts-layering`, `test-module-boundary` ("module boundary: OK (82 internal modules, 65 allowed package reaches)"), `test-docs-drift`, `test-step-coverage`, `test-proof-review`, `test-script-reachability`, `test-doc-links`, `test-release-check`, `test-zruntime`, `test-runtime-purity`, `test-standin`, and `zig build test`.
+- `zig fmt --check build.zig build packages tooling` and `bash scripts/audit-docs.sh`: exit 0.
+- Invariant 4 after G10: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 3: nothing changed under `packages/pi/src/skills/`, `prompts/`, `tool_registry.zig`, or `expert_persona.zig`. `test-expert-app` replays offline with exit 0.

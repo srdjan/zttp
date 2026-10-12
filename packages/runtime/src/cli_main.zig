@@ -28,8 +28,6 @@ test {
     _ = proof_review.state;
 
     _ = @import("proof_ledger.zig");
-    _ = @import("perf_probe_lib.zig");
-    _ = @import("equivalence_probe_lib.zig");
     _ = @import("proofs_cli.zig");
     // `proofs_cli` imports the bundle path, which imports this, and neither
     // hop is enough on its own: a deliberate break in its tests left `zig

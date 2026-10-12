@@ -24,19 +24,6 @@ const gate_record = @import("gate_record.zig");
 /// The host binary registers its replay function via
 /// `pi_app.witness_replay.setReplayFn` at startup.
 pub const witness_replay = @import("witness_replay.zig");
-/// Re-exported so the runtime stack can register the engine-backed perf
-/// probe via `pi_app.perf_probe.setProbeFn` at startup (Slice H wiring).
-pub const perf_probe = @import("perf_probe.zig");
-
-/// Proof-carrying changes: the runtime host registers the signed
-/// equivalence-receipt probe via `pi_app.equivalence_probe.setProbeFn` at
-/// startup, mirroring the perf-probe seam.
-pub const equivalence_probe = @import("equivalence_probe.zig");
-
-/// Proof Flight Recorder: the runtime host registers the capsule-replay probe
-/// via `pi_app.capsule_probe.setProbeFn` at startup, mirroring the perf-probe
-/// seam. The expert loop uses it to flag edits that regress a recorded capsule.
-pub const capsule_probe = @import("capsule_probe.zig");
 
 pub fn checkLocalReadiness(allocator: std.mem.Allocator) !void {
     const raw = if (std.c.getenv("ZTTP_MLX_BASE_URL")) |value| std.mem.sliceTo(value, 0) else null;
@@ -79,9 +66,6 @@ pub fn setInvocationArgv(argv: []const []const u8) void {
 pub fn run(allocator: std.mem.Allocator) !void {
     const argv = captured_argv orelse &[_][]const u8{};
     const flags = parseExpertFlags(argv) catch |err| exitWithMessage(flagErrorMessage(err), 2);
-
-    perf_probe.setEnabled(flags.perf_receipt);
-    equivalence_probe.setEnabled(flags.equivalence_receipt);
 
     var registry = switch (flags.tools_preset) {
         .full => try buildRegistry(allocator),
@@ -369,15 +353,6 @@ pub const ExpertFlags = struct {
     /// Handler path the autoloop operates on. Required whenever `goals` is
     /// set; ignored otherwise.
     handler: ?[]const u8 = null,
-    /// Emit a signed perf-as-proof receipt (`kind=perf` row in
-    /// `.zttp/proofs.jsonl`) on every applied edit. Default on, matching
-    /// the attestation default; `--no-perf-receipt` opts out. No effect when
-    /// the runtime probe is not registered (analyzer-only builds, tests).
-    perf_receipt: bool = true,
-    /// Emit a signed `kind=equivalence` receipt after each applied edit: the
-    /// behavioral verdict between the pre- and post-edit handler. Default on,
-    /// matching the attestation default; `--no-equivalence-receipt` opts out.
-    equivalence_receipt: bool = true,
     /// Launch-scoped provider override. The public Claude name maps to the
     /// existing Anthropic adapter without changing its internal identity.
     provider: ?models_registry.Provider = null,
@@ -493,10 +468,6 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
             const value = arg["--provider=".len..];
             out.provider = models_registry.Provider.parsePublic(value) orelse return error.UnsupportedProvider;
         }
-        if (std.mem.eql(u8, arg, "--no-perf-receipt")) out.perf_receipt = false;
-        if (std.mem.eql(u8, arg, "--perf-receipt")) out.perf_receipt = true;
-        if (std.mem.eql(u8, arg, "--no-equivalence-receipt")) out.equivalence_receipt = false;
-        if (std.mem.eql(u8, arg, "--equivalence-receipt")) out.equivalence_receipt = true;
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
     if (out.resume_latest and out.session_id != null) return error.MutuallyExclusiveResumeFlags;
@@ -624,24 +595,6 @@ test "parseExpertFlags: empty argv yields defaults" {
     try testing.expect(flags.policy == null);
     try testing.expectEqual(false, flags.no_session);
     try testing.expectEqual(false, flags.no_persist_tool_output);
-    // Perf receipts are on by default, matching the attestation default.
-    try testing.expectEqual(true, flags.perf_receipt);
-}
-
-test "parseExpertFlags: --no-perf-receipt opts out" {
-    const argv = [_][]const u8{ "zts", "expert", "--no-perf-receipt" };
-    const flags = try parseExpertFlags(argv[0..]);
-    try testing.expectEqual(false, flags.perf_receipt);
-}
-
-test "parseExpertFlags: equivalence receipt defaults on, --no- opts out" {
-    const default_argv = [_][]const u8{ "zts", "expert" };
-    const default_flags = try parseExpertFlags(default_argv[0..]);
-    try testing.expectEqual(true, default_flags.equivalence_receipt);
-
-    const off_argv = [_][]const u8{ "zts", "expert", "--no-equivalence-receipt" };
-    const off_flags = try parseExpertFlags(off_argv[0..]);
-    try testing.expectEqual(false, off_flags.equivalence_receipt);
 }
 
 test "parseExpertFlags: --yes yields auto_approve" {

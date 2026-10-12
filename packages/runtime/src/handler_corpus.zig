@@ -1,10 +1,8 @@
-//! Fixed-budget latency probe over a handler, shared by the perf-receipt
-//! path and the benchmark harness.
+//! Fixed-budget latency probe over a handler.
 //!
-//! This is product code, not measurement tooling: `perf_probe_lib.zig` calls
-//! `runHandlerCorpusFromSource` on every applied edit to sign the `kind=perf`
-//! receipt. It lived inside `benchmark.zig` until the harness moved out of
-//! `src/`; the probe stayed behind because the product depends on it.
+//! The perf-receipt probe that called `runHandlerCorpusFromSource` on every
+//! applied edit was removed (plan 005 G10), so only this file's tests reach
+//! it now.
 
 const std = @import("std");
 const compat = @import("zts").compat;
@@ -16,11 +14,10 @@ const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 const readFilePosix = zq.file_io.readFile;
 
 /// Result of `runHandlerCorpus`. p50/p99 are reported in microseconds so the
-/// values fit a `u64` comfortably and serialise into the perf-receipt JWS
-/// without floating-point. `sample_count == 0` means the probe could not
-/// gather a useful measurement (handler crashed on the first call or the
-/// budget was so small no iteration completed); callers should treat that
-/// as a skipped probe and record the row accordingly.
+/// values fit a `u64` comfortably without floating-point.
+/// `sample_count == 0` means the probe could not gather a useful measurement
+/// (handler crashed on the first call or the budget was so small no
+/// iteration completed); callers should treat that as a skipped probe.
 pub const HandlerCorpusStats = struct {
     p50_us: u64 = 0,
     p99_us: u64 = 0,

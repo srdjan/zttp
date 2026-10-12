@@ -188,8 +188,8 @@ critical proven property is lost: `retry_safe`, `injection_safe`,
 proof under "Lost proofs". A lost proof outside that set is listed and does
 not change the verdict. The JSON report adds `lostProperties` to each handler:
 an array of `{"property", "severity"}` objects, empty when nothing was lost.
-When a critical proof is lost, the gate writes no signed receipt for that
-handler. See [Proofs and receipts](proofs-and-receipts.md#proof-gate).
+The gate writes no ledger row. `--no-sign` is still accepted and does nothing.
+See [Proofs and receipts](proofs-and-receipts.md#proof-gate).
 
 `zttp verify <url>`
 verifies a live endpoint's attestation. `zttp proofs verify <bundle-dir>`
@@ -516,8 +516,6 @@ zttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--no-session` | Do not persist this run to `~/.zttp/sessions`. |
 | `--no-persist-tool-output` | Persist the session without tool output bodies. |
 | `--no-context-files` | Skip the `AGENTS.md` / `CLAUDE.md` project-context walk. The persona and live snapshots still ship. |
-| `--no-perf-receipt` | Do not sign a `kind=perf` receipt on an applied edit. On by default. |
-| `--no-equivalence-receipt` | Do not sign a `kind=equivalence` receipt on an applied edit. On by default. |
 | `--print <text>` | Non-interactive: send one message, print the response, and exit. |
 | `--mode json` | Emit JSON-encoded turn events to stdout (pairs with `--print`). |
 | `--mode rpc` | Run in RPC mode for editor integrations. |

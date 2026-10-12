@@ -289,6 +289,7 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                   and emit a PR-ready report. Exit 1 on `breaking`.
         \\                   Flags: [--base REF] [--head REF] [--format md|json]
         \\                          [--out PATH] [--no-sign].
+        \\                   --no-sign is accepted and ignored.
         \\                   Defaults: --base origin/main (then main), head is the
         \\                   working tree, --format md.
         \\

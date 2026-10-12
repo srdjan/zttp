@@ -18,16 +18,14 @@
 //! The analysis is entirely reused: `diffContracts` + `behavioralVerdict` for
 //! the per-handler verdict, the lost-property table of `contract_diff` for the
 //! critical-loss rule (every lost monotonic proven boolean is listed; only a
-//! critical one makes the handler breaking), and `equivalence_probe_lib` for
-//! the signed `kind=equivalence` ledger rows (best-effort, skipped under
-//! `--no-sign` and withheld when a critical proof was lost).
+//! critical one makes the handler breaking). The gate writes no ledger row;
+//! `--no-sign` is still accepted so CI scripts that pass it keep working.
 //! Only the git-range discovery, multi-handler aggregation, and the
 //! PR-oriented rendering are new here.
 
 const std = @import("std");
 const zts = @import("zts");
 const zts_cli = @import("zts_cli");
-const equivalence_probe_lib = @import("../equivalence_probe_lib.zig");
 const shared = @import("../cli_shared.zig");
 
 const contract_diff = zts.contract_diff;
@@ -48,8 +46,9 @@ pub const Options = struct {
     format: Format = .md,
     /// Write the report to this file instead of stdout.
     out: ?[]const u8 = null,
-    /// Skip appending signed kind=equivalence ledger rows. CI runners have no
-    /// persistent attest identity, so the Action passes this.
+    /// Accepted and ignored. The gate used to append signed kind=equivalence
+    /// ledger rows and this flag skipped them; it writes none now, but the
+    /// Action and `scripts/proof-gate.sh` still pass the flag.
     no_sign: bool = false,
 };
 
@@ -136,13 +135,6 @@ pub const HandlerResult = struct {
     counterexamples: []const Counterexample = &.{},
     /// Every monotonic proven boolean the edit lost, in `effect_changes` order.
     lost_properties: []const LostProperty = &.{},
-    /// True when a signed receipt was requested and withheld because a
-    /// critical proof was lost: the receipt would record `equivalent`.
-    receipt_withheld: bool = false,
-    signed: bool = false,
-    /// Why a requested receipt was not written. The verdict does not depend
-    /// on it; the gate reports it on stderr.
-    sign_failure: ?anyerror = null,
 };
 
 pub const Skipped = struct {
@@ -189,7 +181,6 @@ pub fn renderMarkdown(
     results: []const HandlerResult,
     skipped: []const Skipped,
     verdict: Classification,
-    signed_rows: usize,
 ) !void {
     try w.writeAll(sticky_marker);
     try w.writeAll("\n## zttp proof gate\n\n");
@@ -224,9 +215,6 @@ pub fn renderMarkdown(
                 }
                 if (hasCriticalLoss(r.lost_properties)) {
                     try w.writeAll("\nA critical proof was lost, so the gate fails this handler.\n");
-                    if (r.receipt_withheld) {
-                        try w.writeAll("No signed receipt was written because a proof was lost.\n");
-                    }
                 } else {
                     try w.writeAll("\nNo lost proof is critical, so the verdict is unchanged.\n");
                 }
@@ -247,10 +235,6 @@ pub fn renderMarkdown(
         try w.print("\n<details><summary>{d} file{s} skipped (not a handler)</summary>\n\n", .{ skipped.len, plural(skipped.len) });
         for (skipped) |s| try w.print("- `{s}`\n", .{s.path});
         try w.writeAll("\n</details>\n");
-    }
-
-    if (signed_rows > 0) {
-        try w.print("\n_Signed `kind=equivalence` receipt{s} appended to `.zttp/proofs.jsonl` ({d} row{s})._\n", .{ plural(signed_rows), signed_rows, plural(signed_rows) });
     }
 }
 
@@ -395,8 +379,6 @@ pub fn renderJson(
             try json.endObject();
         }
         try json.endArray();
-        try json.objectField("signed");
-        try json.write(r.signed);
         try json.endObject();
     }
     try json.endArray();
@@ -742,7 +724,6 @@ pub fn run(
 
     var results: std.ArrayList(HandlerResult) = .empty;
     var skipped: std.ArrayList(Skipped) = .empty;
-    var signed_rows: usize = 0;
 
     for (paths) |path| {
         const before = try readAtRef(arena, cwd, base, path);
@@ -794,7 +775,7 @@ pub fn run(
             continue;
         }
 
-        const result = analyzeHandler(gpa, arena, cwd, base, opts.head, path, before.?, after.?, !opts.no_sign) catch |err| {
+        const result = analyzeHandler(gpa, arena, cwd, base, opts.head, path, before.?, after.?) catch |err| {
             // analyzeHandler returns null (handled below) for genuine
             // non-handler / no-contract files; reaching here means an analysis
             // or allocation failure. Swallowing it as `no_contract` drops the
@@ -807,10 +788,6 @@ pub fn run(
             try skipped.append(arena, .{ .path = path, .reason = "no_contract" });
             continue;
         };
-        if (hr.signed) signed_rows += 1;
-        if (hr.sign_failure) |err| {
-            try stderr.print("zttp proofs gate: no signed receipt for `{s}`: {s}\n", .{ path, @errorName(err) });
-        }
         try results.append(arena, hr);
     }
 
@@ -818,7 +795,7 @@ pub fn run(
 
     var report: std.Io.Writer.Allocating = .init(arena);
     switch (opts.format) {
-        .md => try renderMarkdown(&report.writer, base, head_label, results.items, skipped.items, verdict, signed_rows),
+        .md => try renderMarkdown(&report.writer, base, head_label, results.items, skipped.items, verdict),
         .json => try renderJson(&report.writer, base, head_label, results.items, skipped.items, verdict),
     }
     const bytes = report.writer.buffered();
@@ -934,9 +911,7 @@ fn checkSides(
 /// Compile before/after to contracts, diff them, and project the result into
 /// the arena-owned data model. Returns null when either side has no contract
 /// (not a handler). The ContractDiff and compile results live only for the
-/// duration of this call; everything kept is copied into the arena. When
-/// `sign` is set, a signed `kind=equivalence` row is appended here, while both
-/// contracts are still in scope, so the receipt path does not recompile them.
+/// duration of this call; everything kept is copied into the arena.
 fn analyzeHandler(
     gpa: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -946,7 +921,6 @@ fn analyzeHandler(
     path: []const u8,
     before_src: []const u8,
     after_src: []const u8,
-    sign: bool,
 ) !?HandlerResult {
     var sides = try checkSides(gpa, cwd, base, head, path, before_src, after_src);
     defer sides.deinit(gpa);
@@ -990,24 +964,10 @@ fn analyzeHandler(
     var diff = try contract_diff.diffContracts(gpa, before_contract.?, after_contract.?);
     defer diff.deinit(gpa);
 
-    // A critical lost proof makes the handler breaking. Compute it before the
-    // receipt: the signed receipt classifies from `behavioralVerdict()` alone
-    // and would record `equivalent` for an edit the gate fails.
+    // A critical lost proof makes the handler breaking, whatever
+    // `behavioralVerdict()` says about the behavior alone.
     const lost = try lostProperties(arena, &diff);
     const critical_loss = hasCriticalLoss(lost);
-
-    var signed = false;
-    var sign_failure: ?anyerror = null;
-    if (sign and !critical_loss) {
-        // Append a signed kind=equivalence row from the contracts already in
-        // hand. A failure never changes the verdict, but the report must not
-        // claim a receipt that was not written.
-        if (equivalence_probe_lib.recordEquivalenceReceiptFromContracts(gpa, path, before_contract.?, after_contract.?, shared.nowUnixMs())) |_| {
-            signed = true;
-        } else |err| {
-            sign_failure = err;
-        }
-    }
 
     return .{
         .path = try arena.dupe(u8, path),
@@ -1016,9 +976,6 @@ fn analyzeHandler(
         .surface = try extractSurface(arena, &diff),
         .counterexamples = try extractCounterexamples(arena, &diff),
         .lost_properties = lost,
-        .receipt_withheld = sign and critical_loss,
-        .signed = signed,
-        .sign_failure = sign_failure,
     };
 }
 
@@ -1218,7 +1175,7 @@ test "renderMarkdown: breaking report carries header, table, and counterexample"
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try renderMarkdown(&aw.writer, "origin/main", "working tree", &results, &.{}, .breaking, 0);
+    try renderMarkdown(&aw.writer, "origin/main", "working tree", &results, &.{}, .breaking);
     const out = aw.writer.buffered();
 
     try testing.expect(std.mem.indexOf(u8, out, sticky_marker) != null);
@@ -1233,7 +1190,7 @@ test "renderMarkdown: breaking report carries header, table, and counterexample"
 test "renderMarkdown: empty range states no changed handlers" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try renderMarkdown(&aw.writer, "origin/main", "working tree", &.{}, &.{}, .equivalent, 0);
+    try renderMarkdown(&aw.writer, "origin/main", "working tree", &.{}, &.{}, .equivalent);
     try testing.expect(std.mem.indexOf(u8, aw.writer.buffered(), "_No changed handlers in this range._") != null);
 }
 
@@ -1245,7 +1202,6 @@ test "renderJson: shape carries schema, verdict, safe, and behaviorDiff keys" {
             .verdict = .additive,
             .behavior = .{ .preserved = 2, .added = 2 },
             .surface = .{ .added_routes = &added_routes },
-            .signed = true,
         },
     };
 
@@ -1266,7 +1222,6 @@ test "renderJson: shape carries schema, verdict, safe, and behaviorDiff keys" {
     try testing.expectEqualStrings("api/orders.ts", handler.get("path").?.string);
     const bd = handler.get("behaviorDiff").?.object;
     try testing.expectEqual(@as(i64, 2), bd.get("added").?.integer);
-    try testing.expect(handler.get("signed").?.bool);
     const surface_routes = handler.get("surface").?.object.get("routes").?.object;
     try testing.expectEqualStrings("/v2/orders", surface_routes.get("added").?.array.items[0].string);
 }
@@ -1503,14 +1458,14 @@ test "renderMarkdown: a lost proof is listed, counted in the table, and named as
         .{ .field = "pure", .severity = .info },
     };
     const results = [_]HandlerResult{
-        .{ .path = "api/users.ts", .verdict = .breaking, .lost_properties = &lost, .receipt_withheld = true },
+        .{ .path = "api/users.ts", .verdict = .breaking, .lost_properties = &lost },
         // A non-critical loss keeps its verdict and still gets a section.
         .{ .path = "api/health.ts", .verdict = .equivalent, .lost_properties = lost[1..] },
     };
 
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
-    try renderMarkdown(&aw.writer, "origin/main", "working tree", &results, &.{}, .breaking, 0);
+    try renderMarkdown(&aw.writer, "origin/main", "working tree", &results, &.{}, .breaking);
     const out = aw.writer.buffered();
 
     try testing.expect(std.mem.indexOf(u8, out, "| `api/users.ts` | `breaking` | 2 proofs lost |") != null);
@@ -1518,7 +1473,6 @@ test "renderMarkdown: a lost proof is listed, counted in the table, and named as
     try testing.expect(std.mem.indexOf(u8, out, "**Lost proofs**") != null);
     try testing.expect(std.mem.indexOf(u8, out, "- `fault_covered`: proven → not proven (critical)") != null);
     try testing.expect(std.mem.indexOf(u8, out, "- `pure`: proven → not proven (info)") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "No signed receipt was written because a proof was lost.") != null);
     try testing.expect(std.mem.indexOf(u8, out, "No lost proof is critical, so the verdict is unchanged.") != null);
     // The health section exists although its verdict is a safe no-op.
     try testing.expect(std.mem.indexOf(u8, out, "### `api/health.ts` — equivalent") != null);
@@ -1597,8 +1551,8 @@ const clock_handler_head =
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
-/// Points HOME at the temporary repository so a signed receipt, if the gate
-/// wrongly tries one, creates its key there and not in the developer's home.
+/// Points HOME at the temporary repository so a signing key, if the gate
+/// wrongly creates one, lands there and not in the developer's home.
 const HomeOverride = struct {
     previous: ?[:0]u8,
 
@@ -1622,7 +1576,7 @@ const HomeOverride = struct {
     }
 };
 
-test "run: a critical lost proof fails the gate, lists the loss, and writes no receipt" {
+test "run: a critical lost proof fails the gate, lists the loss, and writes no ledger row" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1657,11 +1611,9 @@ test "run: a critical lost proof fails the gate, lists the loss, and writes no r
     try testing.expect(std.mem.indexOf(u8, report, "**Verdict: `breaking`**") != null);
     try testing.expect(std.mem.indexOf(u8, report, "**Lost proofs**") != null);
     try testing.expect(std.mem.indexOf(u8, report, "- `fault_covered`: proven → not proven (critical)") != null);
-    try testing.expect(std.mem.indexOf(u8, report, "No signed receipt was written because a proof was lost.") != null);
-    // The receipt would have recorded `equivalent`: none is written, and the
-    // gate does not report a signing failure either.
+    // The gate writes no ledger row, with signing left on or off.
     try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, ".zttp/proofs.jsonl", .{}));
-    try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "no signed receipt") == null);
+    try testing.expectEqualStrings("", err.writer.buffered());
 }
 
 test "run: a loss of only non-critical proofs is listed and does not fail the gate" {

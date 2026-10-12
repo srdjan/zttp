@@ -18,17 +18,16 @@ const json_util = @import("zttp_proof_review").json_util;
 pub const EventKind = enum {
     deploy,
     swap,
-    /// Slice H: a signed perf-as-proof receipt attached to an applied edit.
-    /// Carries a `perf` JSON object alongside `facts` (callers building a
-    /// perf row supply a minimal ReviewFacts whose only meaningful field
-    /// is `contract_sha`). Existing consumers that only know `deploy` and
-    /// `swap` keep working: they ignore the extra `perf` key.
+    /// Legacy: a signed perf-as-proof receipt attached to an applied edit.
+    /// Nothing writes this kind any more (the probe was removed in plan 005
+    /// G10), but existing ledgers hold such rows and `parseLine` rejects an
+    /// unknown kind, so it stays readable. Carries a `perf` JSON object
+    /// alongside `facts`.
     perf,
-    /// A signed behavioral-equivalence verdict (proof-carrying changes):
-    /// the classification `contract_diff` computes between two handler
-    /// versions, promoted into a signed `equivalence` JSON object alongside
-    /// `facts`. Existing consumers that only know the earlier kinds keep
-    /// working: they ignore the extra `equivalence` key.
+    /// Legacy: a signed behavioral-equivalence verdict, the classification
+    /// `contract_diff` computed between two handler versions, in a signed
+    /// `equivalence` JSON object alongside `facts`. Nothing writes this kind
+    /// any more (plan 005 G10); it stays readable for existing ledgers.
     equivalence,
 
     pub fn toString(self: EventKind) []const u8 {
@@ -49,10 +48,10 @@ pub const EventKind = enum {
     }
 };
 
-/// Payload of a `kind=perf` row. The `sig` field is the compact JWS
-/// produced by `zts.perf_receipt.sign` over the same numeric fields;
-/// downstream verifiers re-hash the handler bytes and call
-/// `zts.perf_receipt.verify` to confirm the operator's signature.
+/// Payload of a legacy `kind=perf` row. The `sig` field is the compact JWS
+/// that the removed `zts.perf_receipt.sign` produced over the same numeric
+/// fields (see `pre-rebase:packages/zts/src/perf_receipt.zig`). This code
+/// never verifies it.
 ///
 /// `sample_count == 0` means the probe was skipped (handler capabilities
 /// disqualified it: see proof_enrichment.zig). The row still records the
@@ -72,10 +71,11 @@ pub const PerfPayload = struct {
     }
 };
 
-/// Payload of a `kind=equivalence` row (proof-carrying changes). The `sig`
-/// field is the compact JWS produced by `zts.equivalence_receipt.sign`
-/// over the verdict-defining fields; a verifier re-derives the signing input
-/// and checks the operator's signature. `classification` is one of
+/// Payload of a legacy `kind=equivalence` row. The `sig` field is the
+/// compact JWS that the removed `zts.equivalence_receipt.sign` produced over
+/// the verdict-defining fields (see
+/// `pre-rebase:packages/zts/src/equivalence_receipt.zig`). This code never
+/// verifies it. `classification` is one of
 /// equivalent / equivalent_modulo_laws / additive / breaking, and
 /// `claim_scope` (pure / deterministic / structural) records how strong the
 /// claim is, so an effectful handler never reads as a clean behavioral
@@ -843,4 +843,82 @@ test "appendEvent round-trips a kind=equivalence row" {
 test "equivalence event kind round-trips through string" {
     try testing.expectEqual(EventKind.equivalence, EventKind.fromString("equivalence").?);
     try testing.expectEqualStrings("equivalence", EventKind.equivalence.toString());
+}
+
+// The perf and equivalence probes were removed and nothing writes these kinds
+// any more. Ledgers on disk still hold such rows, and `parseLine` rejects an
+// unknown kind, so both kinds must stay readable. The two rows below are the
+// bytes the removed writers produced (captured from their own tests, with a
+// fixed signing key), not rows built by `appendEvent`.
+const legacy_perf_row =
+    \\{"ts":1700000002000,"kind":"perf","handlerPath":"handler.ts","facts":{"contractSha":"91b697dc8adcc528386f9f6e70843eeb6522b304491e685b8a5e780cb0a5ba68","proofLevel":"none","envKeys":[],"egressEndpoints":[],"cacheNamespaces":[],"capabilities":[],"routes":[],"properties":{"retrySafe":false,"readOnly":false,"deterministic":true,"injectionSafe":true,"idempotent":false,"stateIsolated":true,"noSecretLeakage":true,"noCredentialLeakage":true,"inputValidated":true,"piiContained":true,"resultsSafe":false,"faultCovered":false},"declaredSpecs":[],"intentAssertionCount":0,"intentDynamic":false,"behaviorPathCount":0,"failurePathCount":0},"perf":{"handlerHash":"91b697dc8adcc528386f9f6e70843eeb6522b304491e685b8a5e780cb0a5ba68","p50Us":2,"p99Us":3,"allocBytes":0,"sampleCount":4096,"sig":"eyJhbGciOiJFZERTQSIsInR5cCI6Inp0dHAtcGVyZitqd3MiLCJraWQiOiIzMDk3ZTJkZWUyY2I0YTM0YjUzODQwY2RiNzA1YWVkNzEwNjdjMzZmNjhkYjBlMGY1NTljM2YzZmEwNDMzMTVmIiwiandrIjp7Imt0eSI6Ik9LUCIsImNydiI6IkVkMjU1MTkiLCJ4IjoiSVZMNDBadDVIU1JGTWtMaFh5NnJiTGZQLW50cVh0TUFsNVlPQnBpQjJ4SSJ9fQ.eyJ2IjoienR0cC1wZXJmLXYxIiwiaGFuZGxlckhhc2giOiI5MWI2OTdkYzhhZGNjNTI4Mzg2ZjlmNmU3MDg0M2VlYjY1MjJiMzA0NDkxZTY4NWI4YTVlNzgwY2IwYTViYTY4IiwicDUwVXMiOjIsInA5OVVzIjozLCJhbGxvY0J5dGVzIjowLCJzYW1wbGVDb3VudCI6NDA5Niwic2lnbmVkQXQiOjE3MDAwMDAwMDJ9.3pdG3LPmo6Uh7fFU5GC26J_l0v6HSSIRRx8TbJJPOpKk7Tdurd1CBGRa2BZo-eC4JBGOqoBcWD3k0C8p4APnBQ"}}
+;
+
+const legacy_equivalence_row =
+    \\{"ts":1700000003000,"kind":"equivalence","handlerPath":"handler.ts","facts":{"contractSha":"d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24","proofLevel":"none","envKeys":[],"egressEndpoints":[],"cacheNamespaces":[],"capabilities":[],"routes":[],"properties":{"retrySafe":false,"readOnly":false,"deterministic":true,"injectionSafe":true,"idempotent":false,"stateIsolated":true,"noSecretLeakage":true,"noCredentialLeakage":true,"inputValidated":true,"piiContained":true,"resultsSafe":false,"faultCovered":false},"declaredSpecs":[],"intentAssertionCount":0,"intentDynamic":false,"behaviorPathCount":0,"failurePathCount":0},"equivalence":{"beforeContractHash":"d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24","afterContractHash":"d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24","classification":"equivalent","lawsFired":[],"behaviorDiff":{"preserved":1,"responseChanged":0,"added":0,"removed":0},"claimScope":"pure","sig":"eyJhbGciOiJFZERTQSIsInR5cCI6Inp0dHAtZXF1aXZhbGVuY2UrandzIn0.enR0cC1lcXVpdmFsZW5jZS12MQpkMTEwMjEwYTJhNWJmMmVlY2M1ZWEwOWEwMTI1OGNkZGFlNDA4YzY2Mzk4NmQ4N2YyYmE3ZmZjOTkwOTgyYjI0CmQxMTAyMTBhMmE1YmYyZWVjYzVlYTA5YTAxMjU4Y2RkYWU0MDhjNjYzOTg2ZDg3ZjJiYTdmZmM5OTA5ODJiMjQKZXF1aXZhbGVudApwdXJlCjEKMAowCjA.uyIK6MazyH96t8-7z-N6HanREgdUfcAwZY8JtBQyaEAupdOWkUG5KVfulL0iXnG6_2CZVzYCApv7TC24ERU2Bg"}}
+;
+
+test "a legacy kind=perf row written by the removed probe still loads" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try state.ensureStateDir();
+    try zts.file_io.writeFile(testing.allocator, ledgerPath(), legacy_perf_row ++ "\n");
+
+    const events = try readEvents(testing.allocator);
+    defer freeEvents(testing.allocator, events);
+
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(EventKind.perf, events[0].kind);
+    try testing.expectEqual(@as(i64, 1_700_000_002_000), events[0].ts_unix_ms);
+    try testing.expectEqualStrings("handler.ts", events[0].handler_path);
+    try testing.expectEqualStrings(
+        "91b697dc8adcc528386f9f6e70843eeb6522b304491e685b8a5e780cb0a5ba68",
+        events[0].facts.contract_sha,
+    );
+    try testing.expect(events[0].equivalence == null);
+    const perf = events[0].perf orelse return error.MissingPerfPayload;
+    try testing.expectEqualStrings(events[0].facts.contract_sha, perf.handler_hash);
+    try testing.expectEqual(@as(u64, 2), perf.p50_us);
+    try testing.expectEqual(@as(u64, 3), perf.p99_us);
+    try testing.expectEqual(@as(u64, 0), perf.alloc_bytes);
+    try testing.expectEqual(@as(u64, 4096), perf.sample_count);
+    try testing.expect(std.mem.startsWith(u8, perf.sig, "eyJhbGciOiJFZERTQSIs"));
+}
+
+test "a legacy kind=equivalence row written by the removed probe still loads" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try state.ensureStateDir();
+    try zts.file_io.writeFile(testing.allocator, ledgerPath(), legacy_equivalence_row ++ "\n");
+
+    const events = try readEvents(testing.allocator);
+    defer freeEvents(testing.allocator, events);
+
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expectEqual(EventKind.equivalence, events[0].kind);
+    try testing.expectEqual(@as(i64, 1_700_000_003_000), events[0].ts_unix_ms);
+    try testing.expectEqualStrings("handler.ts", events[0].handler_path);
+    try testing.expect(events[0].perf == null);
+    const eq = events[0].equivalence orelse return error.MissingEquivalencePayload;
+    try testing.expectEqualStrings(
+        "d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24",
+        eq.before_contract_hash,
+    );
+    try testing.expectEqualStrings(eq.before_contract_hash, eq.after_contract_hash);
+    try testing.expectEqualStrings("equivalent", eq.classification);
+    try testing.expectEqualStrings("pure", eq.claim_scope);
+    try testing.expectEqual(@as(usize, 0), eq.laws_fired.len);
+    try testing.expectEqual(@as(u32, 1), eq.preserved);
+    try testing.expectEqual(@as(u32, 0), eq.response_changed);
+    try testing.expectEqual(@as(u32, 0), eq.added);
+    try testing.expectEqual(@as(u32, 0), eq.removed);
+    try testing.expect(std.mem.startsWith(u8, eq.sig, "eyJhbGciOiJFZERTQSIs"));
 }

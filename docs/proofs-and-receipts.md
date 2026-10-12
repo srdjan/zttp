@@ -460,9 +460,8 @@ would turn ordinary additive edits into failures.
 
 The report lists each lost proof under **Lost proofs** with its severity, and
 the summary table shows `N proofs lost` in the "Δ behavior" column. When a
-critical proof is lost, the gate writes no signed `kind=equivalence` receipt
-for the handler, because that receipt classifies from the behavior alone and
-would record `equivalent`.
+critical proof is lost, the handler is `breaking` whatever its behavior diff
+says.
 
 The gate acts on a lost proof only when the handler still analyzes. A handler
 without a `Proof<...>` capsule must prove the whole default profile, and a
@@ -495,9 +494,9 @@ Flags:
 - `--head <ref>` after side. Default: the working tree.
 - `--format md|json` default `md`.
 - `--out <path>` write the report to a file instead of stdout.
-- `--no-sign` skip the signed `kind=equivalence` ledger rows. Run locally with
-  signing on (the default) to append a signed receipt to `.zttp/proofs.jsonl`;
-  CI passes `--no-sign` because runners hold no persistent attest identity.
+- `--no-sign` accepted and ignored. The gate used to append signed
+  `kind=equivalence` ledger rows; it writes none now. CI scripts that pass the
+  flag keep working.
 
 Files that are not handlers (a changed `.ts`/`.tsx` with no routes and no
 behavior paths, i.e. a config or library module) and files under `tests/`,

@@ -167,10 +167,6 @@ fn isExpertBareFlag(arg: []const u8) bool {
         std.mem.eql(u8, arg, "--no-session") or
         std.mem.eql(u8, arg, "--no-persist-tool-output") or
         std.mem.eql(u8, arg, "--no-context-files") or
-        std.mem.eql(u8, arg, "--perf-receipt") or
-        std.mem.eql(u8, arg, "--no-perf-receipt") or
-        std.mem.eql(u8, arg, "--equivalence-receipt") or
-        std.mem.eql(u8, arg, "--no-equivalence-receipt") or
         std.mem.eql(u8, arg, "--resume") or
         std.mem.eql(u8, arg, "--continue");
 }
@@ -225,10 +221,6 @@ test "validateExpertArgs accepts documented expert launch forms" {
     try ok(&.{ "--handler", "handler.ts", "--goal", "no_secret_leakage", "--max-iters", "4" });
     try ok(&.{ "--tools", "minimal", "--yes", "--no-context-files" });
     try ok(&.{ "--no-session", "--no-persist-tool-output", "--no-edit" });
-    try ok(&.{"--no-perf-receipt"});
-    try ok(&.{"--perf-receipt"});
-    try ok(&.{"--no-equivalence-receipt"});
-    try ok(&.{"--equivalence-receipt"});
 }
 
 test "validateExpertArgs rejects unknown expert flags and subcommands" {
