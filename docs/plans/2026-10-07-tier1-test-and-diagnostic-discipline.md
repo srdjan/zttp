@@ -512,7 +512,7 @@ decision before it gets a plan.
     `true + 1` all pass `zts check` when they sit inside a function, handler
     or helper. At module scope they report ZTS100 to ZTS106. The
     `bool_*` cases in `tests/corpus/check/bad/` therefore use module-scope
-    statements. `docs/sound-mode.md` says conditions in `if`, `assert` and `?:`
+    statements. `pre-rebase:docs/sound-mode.md` says conditions in `if`, `assert` and `?:`
     must be boolean.
 11. **`String(p.z)` passes for a record `p` with no `z`** (U2.3 observation).
     `const z = p.z;` reports ZTS201, but the same read as a call argument

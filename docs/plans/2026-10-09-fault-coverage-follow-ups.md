@@ -1,7 +1,7 @@
 # Plan: fault coverage follow-ups (R4)
 
 Status: complete 2026-10-10 (section 9), revision 2. Source: the follow-ups of the
-[R3 plan](2026-10-09-fault-coverage-for-upstream-calls.md), section 7 and
+R3 plan (pre-rebase:docs/plans/2026-10-09-fault-coverage-for-upstream-calls.md), section 7 and
 section 9. Code references are to local `main` at `1d821395`. Revision 1 was
 reviewed by Fable and Codex astra (section 8).
 

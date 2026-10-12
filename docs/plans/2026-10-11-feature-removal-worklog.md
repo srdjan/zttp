@@ -885,3 +885,98 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - Invariant 2: `coverage.json is stale` and `response_order_mismatch` do not appear. The `model_context_mismatch at turn 0/2` lines are the known negative tests. The replay line reads `19/19 case(s) replayed from a flow artifact`.
 - Invariant 3: nothing changed under `tool_registry.zig`, `expert_persona.zig`, `skills/`, or `prompts/`. The `Surface.rpc` removal leaves the provider-neutral tool catalog bytes and digest unchanged: `tool_catalog_consolidation_test.zig` runs inside `test-expert-app` and passes.
 - Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+
+## G14 Plan index and sound-mode merge
+
+G14 ran after G15. It deletes completed plans that nothing outside `docs/plans/` cites, folds `docs/sound-mode.md` into `docs/typescript.md`, updates the roadmap, and recounts the repository. It changes no Zig file.
+
+### Plan deletion verdicts
+
+The rule has three conditions. `docs/plans/README.md` must mark the plan complete or implemented. `docs/roadmap.md` must not call it open. `git grep -l "<file name>" -- ':!docs/plans'` must find no tracked file. The README, the plan 005 plan and worklog, and the plan 004 shared-analysis and multi-module plans and worklogs are kept by dispatch rule, whatever the three conditions say.
+
+Deleted (7). Each stays readable at `pre-rebase:docs/plans/<name>`, and the links from kept plans now use that form.
+
+| Plan | Reason |
+|---|---|
+| `2026-09-21-0955-feat-provable-set-reach-plan.md` (M3) | README: Complete. Roadmap: M3 complete. The grep finds nothing. |
+| `2026-09-24-m4-t7-reference-tools-design.md` | README: Implemented. The grep finds nothing. The M4 release contract linked it; that link is now a `pre-rebase:` citation. |
+| `2026-09-27-m5-a1-agent-entry-design.md` | README: Implemented. The grep finds nothing. |
+| `2026-09-27-m5-a2-turn-state-design.md` | README: Implemented. The grep finds nothing. |
+| `2026-09-27-m5-a3-sse-framer-design.md` | README: Implemented. The grep finds nothing. |
+| `2026-09-28-m5-a4-call-tool-design.md` | README: Implemented. The grep finds nothing. |
+| `2026-10-09-fault-coverage-for-upstream-calls.md` | README: Complete. The grep finds nothing. The follow-ups plan linked it; that link is now a `pre-rebase:` citation. |
+
+Kept (25 plan and worklog files, plus the README), with the reason for each:
+
+| Plan | Reason kept |
+|---|---|
+| `README.md`, `2026-10-11-feature-removal-phase-1.md`, `2026-10-11-feature-removal-worklog.md` | Dispatch rule. |
+| `2026-10-11-shared-analysis-first-unit.md`, `2026-10-11-shared-analysis-worklog.md`, `2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md`, `2026-10-11-multi-module-analysis-worklog.md` | Plan 004 files. The advisor plans cite them and they are the most recent completed work. The rule would delete none of them, because the roadmap cites each by name. |
+| `2026-07-30-014-d1-type-system-design.md` | Cited by two `docs/solutions/` files. |
+| `2026-07-30-015-d2-effects-purity-design.md` | No tracked file cites it, and the README says "Retained design reference; language phases complete". I read "retained" and the roadmap line "D1, D2, and D3 remain design references" as a keep decision. Judgment: the plan did not settle this, so I chose the option that deletes less. |
+| `2026-07-30-016-d3-canonical-form-wire-design.md` | Cited by `docs/internals/agent-protocol-v2.md`. |
+| `2026-09-19-feat-agent-handler-spec.md` | README: Proposed, not complete. The roadmap cites it. |
+| `2026-09-22-m4-release-contract.md` | The roadmap cites it. |
+| `2026-09-23-m4-t1b-connect-deadline-design.md`, `2026-09-23-m4-t2-tool-catalog-design.md`, `2026-09-23-m4-t3-catalog-binding-design.md`, `2026-09-23-m4-t4-declared-labels-design.md`, `2026-09-23-m4-t5-scope-and-grants-design.md`, `2026-09-24-m4-t6-credential-injection-design.md` | Source files or `docs/consumer-contract.md` cite each as specification. They stay until Phase 2 removes the M4 code. |
+| `2026-09-24-proof-checker-rederive-review.md` | Two `docs/solutions/` files cite it. |
+| `2026-09-27-m5-agent-handler-release-contract.md` | README: Accepted, not complete. Stopped by plan 005 decision 3. Phase 2 removes the code. |
+| `2026-09-28-m5-a5-reference-agent-design.md` | README: Accepted, never implemented. The roadmap cites it. Stopped by decision 3. |
+| `2026-10-07-beni-retrofit-study.md` | README: Research, with no implementation authority. It is not marked complete. |
+| `2026-10-07-tier1-test-and-diagnostic-discipline.md`, `2026-10-08-boolean-and-arity-checks.md` | Marked complete, but a `docs/solutions/` file cites each. |
+| `2026-10-08-flow-checker-sinks-in-callees.md` | Marked complete, but `packages/tools/src/flow_census_probes.zig` and `scripts/flow-census.allow` cite it. |
+| `2026-10-08-minimal-design-audit.md` | README: "Research complete" with the implementation scope unselected. It is not marked complete or implemented. Judgment: kept. |
+| `2026-10-09-fault-coverage-follow-ups.md` | Not in the README table, and a `docs/solutions/` file cites it. |
+| `2026-10-10-code-review-fixes.md` | Not in the README table, and a `docs/solutions/` file cites it. |
+| `2026-10-10-minimal-design-worklog.md` | `advisor-plans/003-zttp-zts-simplification-audit.md` cites it. |
+| `2026-10-11-gate-fails-on-a-lost-property.md`, `vocabulary-envelope.md`, `zttp-evidence-model-implementation-plan.md` | Not in the README table, so nothing marks them complete or implemented. Judgment: kept. |
+
+Source comments still cite M4 and M5 design plans by label (for example "M4 T7" and "M5 A1 U2"), not by file name. The grep rule keys on file name, so these labels did not block deletion of the M4 T7 and M5 A1 to A4 plans. The labels in those comments now point at `pre-rebase:`. Phase 2 removes the code and the comments.
+
+README edits: removed the seven deleted rows. Marked the M5 contract and A5 rows "Stopped 2026-10-11 by plan 005 decision 3". Marked the Plan 005 row complete. Updated the agent-handler specification row. Added a note that the deleted plans stay readable at `pre-rebase`.
+
+### Sound-mode merge
+
+`docs/sound-mode.md` is now the section "Sound Mode" in `docs/typescript.md`, between Type Checking and Compile-Time Evaluation. All of its rules, tables, examples, and diagnostics moved. Headings dropped one level. The four duplicate headings "What is rejected" and "What works" under arithmetic and `+` became "Rejected arithmetic", "Accepted arithmetic", "Rejected `+` forms", and "Accepted `+` forms", so every anchor is unique. The Narrowing subsection lost its example, which repeats the Optional Narrowing example in Type Checking; it now links there and keeps the statement that a value reverts to its optional type outside the narrowed branch. Links retargeted: `AGENTS.md` (table row removed; the `docs/typescript.md` row now names sound mode), `CLAUDE.md`, `README.md`, `docs/README.md`, `docs/internals/api-reference.md`, `docs/proofs-and-receipts.md`, `docs/user-guide.md`, and two self-links in `docs/typescript.md`. `docs/plans/2026-10-07-tier1-test-and-diagnostic-discipline.md` now cites `pre-rebase:docs/sound-mode.md`. `advisor-plans/005-feature-removal-rebase.md:106` still names `sound-mode.md` as the instruction to fold it; I left that history as written.
+
+### Roadmap edits
+
+`docs/roadmap.md` now says Phase 1 of plan 005 is complete and points at the plan and this worklog. The M5 row and the milestone summary say decision 3 of plan 005 stopped M5. The proposal row for custom agent handlers says the same. "Supported Now" never listed Studio or edge, so it needed no change; the Reset And Simplification section now says so. The sentence that said no removal of edge, demo, or Studio views was selected described them as current; it now says plan 005 superseded the keep-everything default. I added no milestone.
+
+### Recount
+
+Plan 003 reproduction command, run on the tree at `HEAD` (`git ls-files`) for "after" and on a `git archive pre-rebase` extraction (`find packages -name '*.zig'`) for "before". `pre-rebase` is the tag for `b33cac5c`.
+
+| Package | Files before | Lines before | Files after | Lines after |
+|---|---|---|---|---|
+| modules | 25 | 8,706 | 25 | 8,706 |
+| pi | 164 | 87,546 | 142 | 77,150 |
+| proof-checker | 17 | 13,548 | 17 | 13,548 |
+| proof-review | 10 | 2,687 | 10 | 2,613 |
+| runtime | 122 | 84,882 | 105 | 74,392 |
+| tools | 59 | 55,814 | 43 | 45,331 |
+| zts | 198 | 187,682 | 187 | 184,098 |
+| zttp-sdk | 21 | 1,855 | 21 | 1,855 |
+| Zig total | 616 | 442,720 | 550 | 407,693 |
+
+| Measure | Before | After |
+|---|---|---|
+| Tracked files under `docs/` (all types) | 221 files, 87,184 lines | 114 files, 34,570 lines |
+| Markdown files under `docs/` | 201 files, 62,711 lines | 109 files, 33,533 lines |
+| Files under `scripts/` | 65 files, 10,120 lines | 57 files, 9,055 lines |
+| Files under `docs/plans/` | 37 | 32 |
+| Tracked files in the repository | 2,125 | 1,802 |
+| Build steps named `test*` in `zig build -l` (`grep -c '^  test'`) | 85 | 74 |
+| All steps in `zig build -l` | 113 | 95 |
+| Entries in `zttp help --all` (lines starting with two spaces and `zttp `) | 56 | 41 |
+| Distinct command names in `zttp help --all` | 50 | 38 |
+
+The "before" tree was built with `zig build` from the archive, and its `zttp help --all` and `zig build -l` gave the "before" step and command values. The "after" values come from the working tree at G14, built with `zig build` (exit 0).
+
+### Checks
+
+All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit status was read from a redirected run.
+
+- Exit 0, unfiltered: `zig build`, `zig build test`, `zig build test-docs-drift` ("docs drift: OK (29 builtin virtual modules, 1 allowlist row-count claim(s))"), `zig build test-doc-links` ("documentation links ok"), and `bash scripts/audit-docs.sh`.
+- Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
+- Invariant 8: `git grep -n -E "sound-mode\.md|<the seven deleted plan names>" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling`, filtered to drop `pre-rebase:` citations, returns only historical text in plan 005 and its worklog.
+- Invariants 2 and 3: no Zig, corpus, tool, persona, skill, or prompt file changed in G14.

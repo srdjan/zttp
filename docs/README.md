@@ -45,7 +45,7 @@ and superseded execution records live in the `pre-rebase` git tag, under
   features.
 - [Restrictions to Proofs](restrictions-to-proofs.md) - why each language cut
   exists.
-- [Sound Mode](sound-mode.md) - boolean-only control flow, arithmetic, and
+- [Sound Mode](typescript.md#sound-mode) - boolean-only control flow, arithmetic, and
   comparison diagnostics.
 - [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) - canonical
   ZigTS rules and `zttp normalize`.

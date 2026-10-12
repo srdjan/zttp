@@ -10,7 +10,7 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 ## Milestones
 
 M1, M2, and M3 are complete.
-M4 is complete: T1a to T7 are delivered. M5 has an accepted release contract and is in progress. No release date is assigned.
+M4 is complete: T1a to T7 are delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 1 of plan 005 is complete. No release date is assigned.
 
 | Milestone | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
@@ -18,7 +18,7 @@ M4 is complete: T1a to T7 are delivered. M5 has an accepted release contract and
 | M2: bounded correctness and assurance | Complete, 2026-09-22 | Three implementation units committed and reviewed; affected suites and mutation probes pass | Select the next milestone | Completion record (`pre-rebase:docs/archive/plans/2026-09-21-bounded-correctness-assurance.md`); full local gate passed at `181d31d4`; public response regression test; selected lifecycle and decoder cases reject deliberate wrong behavior; affected unfiltered suites pass |
 | M3: provable-set reach measurement | Complete, 2026-09-21 | Current DeepSeek default; pilot and full run authorized | Keep the used suite as regression evidence; select a new suite before a new holdout claim | [Full fresh report](provable-reach.md#first-full-measurement): 8/8 reached, 4/4 in each mode, with all selected tasks and source, policy, model, budget, and runtime evidence retained |
 | M4: next release boundary | Contract accepted 2026-09-22; T1a to T7 complete | M1 proposal inventory and current strategy | Delivered T1a to T7 of the [release contract](plans/2026-09-22-m4-release-contract.md) in order | One accepted release contract states scope, threat model, dependencies, and completion checks |
-| M5: agent handlers | Contract accepted 2026-09-27; A1 to A4 complete; A5 design accepted 2026-09-28 | M4 complete | Implement [A5, the buffered reference agent](plans/2026-09-28-m5-a5-reference-agent-design.md), in the next session; run C-A5 before A6 | M5a: a buffered agent route passes checks C-A1 to C-A6; M5b then adds streaming |
+| M5: agent handlers | Stopped 2026-10-11 by decision 3 of plan 005; contract accepted 2026-09-27, A1 to A4 complete, A5 not implemented | Plan 005 Phase 2 removes the M4 and M5 code | None. Do not implement [A5, the buffered reference agent](plans/2026-09-28-m5-a5-reference-agent-design.md) | Reopening M5 needs a new owner decision |
 
 M2's source evidence is `packages/zts/src/http.zig`,
 `packages/runtime/src/server_response.zig`, and the conditional test gaps in
@@ -290,6 +290,17 @@ or generic-instantiation case. This is an investigation, not a confirmed bypass.
 
 ## Reset And Simplification
 
+Phase 1 of [plan 005](plans/2026-10-11-feature-removal-phase-1.md) is complete (2026-10-12).
+It removed Studio, the demo and proof quest, the edge runtime, the AOT native-handler path,
+the WASM playground, the Claude and OpenAI providers, the SMT layer, RPC mode,
+the performance and equivalence receipt writers, the provable-reach tooling,
+and the dead code those removals left behind. Groups G1 to G15 changed no model-visible
+input, and the policy, module registry, and spec hashes equal their baselines.
+The [worklog](plans/2026-10-11-feature-removal-worklog.md) records each group, the
+deleted and kept plans, and the recount of files and lines.
+Studio and edge are not part of "Supported Now". Phase 2 removes the M4 and M5 code,
+and Phase 3 removes the model-visible surface that waits for one re-record.
+
 The owner approved the [first shared-analysis unit](plans/2026-10-11-shared-analysis-first-unit.md) on 2026-10-11.
 The unit preserves documented features and initial wire formats. Its [worklog](plans/2026-10-11-shared-analysis-worklog.md) records execution evidence.
 The unit is complete. Single-module coordinators own their analysis, and private contract operations consume completed results.
@@ -329,17 +340,16 @@ benefit. The bounded rederive (`pre-rebase:docs/archive/plans/2026-09-20-rederiv
 closed the selected schema-writer, journal-decoding, and recovery-planning work.
 
 The reset ledger's owner-decision and retention sections are historical
-suggestions. Their default remains to keep the capabilities still present.
-No removal of extension support, edge, demo, Studio views, proof commands,
-receipt signing, expectation inputs, providers, module governance, code
-generation, or the separate analyzer is selected. Reopening a removal requires
-a product decision and current usage evidence.
+suggestions. Plan 005 superseded their default of keeping every capability that
+was still present. The owner accepted its nine decisions on 2026-10-11 with
+"your recommendations", and Phase 1 removed the surfaces it listed.
+Reopening a removal requires a product decision and current usage evidence.
 
 ## Proposal Decisions
 
 | Proposal | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
-| Custom agent handlers and tool-profile v1 | Reconciled: M4 delivered the tool profile; M5 resumes agent handlers | M5 in progress | See the M5 row | One accepted contract and reconciled implementation scope, or an explicit deferral |
+| Custom agent handlers and tool-profile v1 | Reconciled: M4 delivered the tool profile; M5 resumption stopped 2026-10-11 by decision 3 of plan 005 | Plan 005 Phase 2 | See the M5 row | One accepted contract and reconciled implementation scope, or an explicit deferral |
 | Broader tool platform, confidential hosting, and cloud adapters | Parked | A customer need and an accepted threat model | Evaluate separately from the current handler product | Recorded accept/defer decision and a bounded plan for any accepted work |
 | Predictable-performance advisory plan (`pre-rebase:advisor-plans/001-tigerbeetle-inspired-predictable-performance-plan.md`) | Proposed; old baseline | Fresh process-level measurements | Revalidate the measurement unit before any optimization | Retained receipts identify a current bottleneck and justify a selected change |
 | [Consumer contract v1](consumer-contract.md) | Proposed | A consumer that commits to lowering into the declaration | Decide whether to accept producer obligations P1 to P14, starting with the published vocabulary envelope and its drift gate | The envelope exists, a gate compares a source-derived inventory against it for equality and fails on a missing or empty input, and one consumer's declaration reaches an admissibility answer |

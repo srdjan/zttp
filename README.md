@@ -153,7 +153,7 @@ Start at the [Documentation Index](docs/README.md).
 - [Contracts and Sandboxing](docs/contracts-and-sandboxing.md) - contract
   extraction, runtime policy, replay, and `Proof<T, P>`.
 - [Verification](docs/verification.md), [TypeScript](docs/typescript.md),
-  [Sound Mode](docs/sound-mode.md), and
+  [Sound Mode](docs/typescript.md#sound-mode), and
   [Restrictions to Proofs](docs/restrictions-to-proofs.md).
 - [Performance](docs/performance.md), [Reliability](docs/reliability.md),
   [Roadmap](docs/roadmap.md), and

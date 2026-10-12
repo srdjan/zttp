@@ -3,10 +3,10 @@
 Status: accepted by the owner on 2026-09-27, with decisions 1 to 5 of section 2.
 This authorizes A1 to A6 in order. Each unit gets a design note that the owner
 accepts before its code starts, as in M4. A1 to A4 are complete
-([A1 note](2026-09-27-m5-a1-agent-entry-design.md), section 11;
-[A2 note](2026-09-27-m5-a2-turn-state-design.md), section 12;
-[A3 note](2026-09-27-m5-a3-sse-framer-design.md), section 10;
-[A4 note](2026-09-28-m5-a4-call-tool-design.md), section 8). The
+(A1 note (pre-rebase:docs/plans/2026-09-27-m5-a1-agent-entry-design.md), section 11;
+A2 note (pre-rebase:docs/plans/2026-09-27-m5-a2-turn-state-design.md), section 12;
+A3 note (pre-rebase:docs/plans/2026-09-27-m5-a3-sse-framer-design.md), section 10;
+A4 note (pre-rebase:docs/plans/2026-09-28-m5-a4-call-tool-design.md), section 8). The
 [A5 design note](2026-09-28-m5-a5-reference-agent-design.md) was accepted on
 2026-09-28 and is next to implement in a fresh session. Two review rounds (a
 design critique and a citation check) are folded in.

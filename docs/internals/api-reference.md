@@ -139,7 +139,7 @@ const obj = try ctx.createObject(null); // takes an optional prototype
 `toConditionBool()` is the one conversion the engine exposes, and it is the
 sound-mode truthiness rule rather than JavaScript's: it returns `null` for a
 value with no falsy state instead of coercing it. See
-[Sound Mode](../sound-mode.md).
+[Sound Mode](../typescript.md#sound-mode).
 
 ### Error Handling
 

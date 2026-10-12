@@ -577,7 +577,7 @@ References:
 - [Feature Detection](feature-detection.md)
 - [Restrictions to Proofs](restrictions-to-proofs.md)
 - [Canonicalize And Normalize](cli.md#canonicalize-and-normalize)
-- [Sound Mode](sound-mode.md)
+- [Sound Mode](typescript.md#sound-mode)
 
 ## JSX And TSX
 

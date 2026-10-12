@@ -275,7 +275,7 @@ pinning and pruning, and the persisted-on-disk layout that the `[s]`
 keystroke ultimately writes into.
 [`verification.md`](verification.md) describes the property classifier
 that produces the demotions in the first place.
-[`sound-mode.md`](sound-mode.md) covers the type-directed analyses that
+[Sound Mode](typescript.md#sound-mode) covers the type-directed analyses that
 sit upstream of the flow-driven property set.
 
 ## Witness Corpus
