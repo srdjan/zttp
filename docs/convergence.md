@@ -11,55 +11,6 @@ retry. **First-attempt green** is reported beside it and includes compiler
 normalization or repair on that attempt. Both are counted results over a frozen
 corpus, not estimates.
 
-## Repeatability
-
-A row is one run of a sampling model, so the figure moves between runs with the
-corpus, the model and the request policy all held fixed. Measured on 2026-09-20
-at commit `e2644fc2` over corpus `0012ad8ca6d5`, by three report-only
-qualification cohorts that promoted nothing:
-
-| Cohort | Raw first-draft pass | First-attempt green | Median round-trips | Intent pass |
-|---|---|---|---|---|
-| 1 | 13/19 | 14/19 | 4 | 16/18 |
-| 2 | 15/19 | 15/19 | 5 | 15/18 |
-| 3 | 13/19 | 13/19 | 4 | 16/18 |
-
-The published row for that corpus is 13/19, which is the low value of the
-spread and was matched exactly twice. Read the headline as stable to about one
-case rather than as exact, and do not read a one-case difference between two
-rows as a change in the compiler or the agent.
-
-Three cases behaved identically in every cohort: `cache-counter-holes` applied
-no edit, `workflow-nested-dispatch-avoidance` failed its runtime intent, and
-`parallel-secret` stayed compiler-veto-only by design. Those are properties of
-the case, not samples.
-
-Two of those three were defects in the case rather than in the agent, and both
-are now closed. `cache-counter-holes` seeded a Proof capsule naming
-`no_secret_leakage` and `no_credential_leakage`, which no fill could discharge
-once `cacheGet` began declaring `.unknown` return labels: the response sink
-clears every property it decides when an `.unknown` value reaches it. The model
-spent its whole tool budget on fills that could not pass and then reported that
-it had applied no edit rather than inventing one, which is the right answer to
-an impossible request. `workflow-nested-dispatch-avoidance` asserted a step
-named `reserve` its prompt never stated, and required an egress call to
-`https://inventory.internal/reserve` that no line of the prompt asks for. Both
-were fixed on the side they belong to, the corpus was re-recorded, and the
-2026-09-20 row below is the first measurement of the amended inputs. Intent
-pass moved to 18/18 there.
-
-Read the cohort table as a record of the corpus `0012ad8ca6d5` it was measured
-over. The spread it reports still stands as the repeatability claim - a figure
-stable to about one case - but its 13/19 and the 12/19 below are measurements
-of two different prompt sets and must not be differenced. Neither is a change
-in the compiler or the agent.
-
-Those cohorts report `qualified: false`, because
-`expert_qualification.minimum_raw_first_draft_passes` is 14 and two of the three
-fell below it. That floor authorizes a change of the product default. It is not
-a statement about whether the published figure is correct, and no cohort
-proposed moving a default that already names this provider and model.
-
 ## Results
 
 | Recorded | Commit | Corpus | Cases | Provider | Model | Policy | Raw first-draft pass | First-attempt green | Median round-trips | Intent pass |
@@ -129,6 +80,7 @@ proposed moving a default that already names this provider and model.
 | 2026-10-11 | `08c4aeff` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `b2038448f90d` | 68% (13/19) | 68% (13/19) | 4 | 100% (18/18) |
 | 2026-10-11 | `56f77fcf` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `b2038448f90d` | 68% (13/19) | 68% (13/19) | 4 | 100% (18/18) |
 | 2026-10-11 | `eaf796fc` | `e6801afae099` | 19 | deepseek | deepseek-v4-flash | `b2038448f90d` | 68% (13/19) | 68% (13/19) | 4 | 100% (18/18) |
+| 2026-10-12 | `0b4741a0` | `db16cf2221a6` | 13 | deepseek | deepseek-v4-flash | `81e39e8a575d` | 69% (9/13) | 69% (9/13) | 4 | 100% (13/13) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
