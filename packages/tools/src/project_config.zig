@@ -16,18 +16,6 @@ test {
     _ = invariant_author;
 }
 
-/// zttp.json's `auth` object (M4 T5 design note, section 4). Both strings are
-/// owned and non-empty.
-pub const AuthConfig = struct {
-    key_env: []const u8,
-    tenant_claim: []const u8,
-
-    pub fn deinit(self: *AuthConfig, allocator: std.mem.Allocator) void {
-        allocator.free(self.key_env);
-        allocator.free(self.tenant_claim);
-    }
-};
-
 pub const ProjectConfig = struct {
     root_dir: []const u8,
     manifest_path: []const u8,
@@ -36,11 +24,6 @@ pub const ProjectConfig = struct {
     host: []const u8 = "127.0.0.1",
     static_dir: ?[]const u8 = null,
     sqlite: ?[]const u8 = null,
-    invariants: ?[]const u8 = null,
-    /// Path to the consumer declaration JSON (M4 T4). Resolved like `invariants`:
-    /// relative to the manifest directory.
-    declaration: ?[]const u8 = null,
-    ledger: ?[]const u8 = null,
     /// Path to the capability-policy JSON this project's handlers are checked
     /// against. Resolved like `sqlite`: relative to the manifest directory.
     policy: ?[]const u8 = null,
@@ -48,15 +31,6 @@ pub const ProjectConfig = struct {
     system: ?[]const u8 = null,
     outbound_http: bool = false,
     outbound_hosts: []const []const u8 = &.{},
-    /// The identity source a tool handler verifies callers against (M4 T5):
-    /// `auth.keyEnv` names the environment variable that holds the HS256 key,
-    /// and `auth.tenantClaim` names the claim that carries the tenant. Names
-    /// only; the key itself never appears in zttp.json.
-    auth: ?AuthConfig = null,
-    /// The credential references (M4 T6): zttp.json's `credentials`, validated
-    /// and sorted by name. Names and rules only; no value ever appears in
-    /// zttp.json. Empty when the project configures none. Owned.
-    credentials: []zts.handler_contract.CredentialRef = &.{},
 
     pub fn deinit(self: *ProjectConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.root_dir);
@@ -65,16 +39,11 @@ pub const ProjectConfig = struct {
         allocator.free(self.host);
         if (self.static_dir) |path| allocator.free(path);
         if (self.sqlite) |path| allocator.free(path);
-        if (self.invariants) |path| allocator.free(path);
-        if (self.declaration) |path| allocator.free(path);
-        if (self.ledger) |path| allocator.free(path);
         if (self.policy) |path| allocator.free(path);
         if (self.durable_dir) |path| allocator.free(path);
         if (self.system) |path| allocator.free(path);
         for (self.outbound_hosts) |host| allocator.free(host);
         allocator.free(self.outbound_hosts);
-        if (self.auth) |*auth| auth.deinit(allocator);
-        zts.handler_contract.credential_ref.freeAll(allocator, self.credentials);
     }
 
     pub fn resolvePath(self: *const ProjectConfig, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -96,35 +65,6 @@ pub const ProjectConfig = struct {
     pub fn resolvedSqlitePath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
         const path = self.sqlite orelse return null;
         return try self.resolvePath(allocator, path);
-    }
-
-    pub fn resolvedInvariantsPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
-        return if (self.invariants) |path| try self.resolvePath(allocator, path) else null;
-    }
-
-    pub fn resolvedLedgerPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
-        return if (self.ledger) |path| try self.resolvePath(allocator, path) else null;
-    }
-
-    pub fn readInvariantSpec(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
-        const path = try self.resolvedInvariantsPath(allocator) orelse return null;
-        defer allocator.free(path);
-        return try invariant_config.loadFile(allocator, path);
-    }
-
-    pub fn resolvedDeclarationPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
-        return if (self.declaration) |path| try self.resolvePath(allocator, path) else null;
-    }
-
-    /// Read the configured declaration's raw bytes. Null means the manifest
-    /// names no declaration; a configured path that cannot be read is an error.
-    /// The read is bounded by the loader's own document cap, so a file over it
-    /// fails here with `error.FileTooBig`. Validation is
-    /// `zts.declaration.parse`, which the caller runs. Caller frees.
-    pub fn readDeclaration(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
-        const path = try self.resolvedDeclarationPath(allocator) orelse return null;
-        defer allocator.free(path);
-        return try zts.file_io.readFile(allocator, path, zts.declaration.max_document_bytes);
     }
 
     pub fn resolvedPolicyPath(self: *const ProjectConfig, allocator: std.mem.Allocator) !?[]u8 {
@@ -218,9 +158,6 @@ pub fn loadAbsolute(
         .host = host,
         .static_dir = try dupOptionalStringField(allocator, obj, "staticDir"),
         .sqlite = try dupOptionalStringField(allocator, obj, "sqlite"),
-        .invariants = try dupOptionalStringField(allocator, obj, "invariants"),
-        .declaration = try dupOptionalStringField(allocator, obj, "declaration"),
-        .ledger = try dupOptionalStringField(allocator, obj, "ledger"),
         .policy = try dupOptionalStringField(allocator, obj, "policy"),
         .durable_dir = try dupOptionalStringField(allocator, obj, "durableDir"),
         .system = try dupOptionalStringField(allocator, obj, "system"),
@@ -228,17 +165,6 @@ pub fn loadAbsolute(
         .outbound_hosts = try dupStringArrayField(allocator, obj, "outboundHosts"),
     };
     errdefer config.deinit(allocator);
-    config.auth = try parseAuthField(allocator, obj);
-    config.credentials = try parseCredentialsField(allocator, obj);
-
-    if ((config.invariants == null) != (config.ledger == null)) return error.IncompleteInvariantConfig;
-    // Every project-aware command rejects an unreadable or unsupported
-    // invariant. Analysis alone does not establish operation coverage.
-    if (try config.readInvariantSpec(allocator)) |spec| allocator.free(spec);
-    if (config.ledger) |path| {
-        if (path.len == 0) return error.InvalidLedgerPath;
-    }
-
     if (config.static_dir == null) {
         const public_path = try std.fs.path.resolve(allocator, &.{ config.root_dir, "public" });
         defer allocator.free(public_path);
@@ -356,46 +282,6 @@ fn dupStringArrayField(
     return items;
 }
 
-/// Read the `auth` object: exactly `keyEnv` and `tenantClaim`, both non-empty
-/// strings. A missing key, an unknown key, or any other shape is refused rather
-/// than defaulted - an identity source read half right is not one.
-fn parseAuthField(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !?AuthConfig {
-    const value = obj.get("auth") orelse return null;
-    if (value != .object) return error.InvalidAuthConfig;
-    var it = value.object.iterator();
-    while (it.next()) |entry| {
-        const known = std.mem.eql(u8, entry.key_ptr.*, "keyEnv") or std.mem.eql(u8, entry.key_ptr.*, "tenantClaim");
-        if (!known) return error.InvalidAuthConfig;
-        if (entry.value_ptr.* != .string or entry.value_ptr.string.len == 0) return error.InvalidAuthConfig;
-    }
-    const key_env = value.object.get("keyEnv") orelse return error.InvalidAuthConfig;
-    const tenant_claim = value.object.get("tenantClaim") orelse return error.InvalidAuthConfig;
-    const owned_key_env = try allocator.dupe(u8, key_env.string);
-    errdefer allocator.free(owned_key_env);
-    return .{ .key_env = owned_key_env, .tenant_claim = try allocator.dupe(u8, tenant_claim.string) };
-}
-
-/// Read the `credentials` object (M4 T6 design note, section 3). A reference
-/// that breaks a rule refuses the whole manifest and names the rule and the
-/// reference, because a credential read half right could reach the wrong
-/// destination.
-fn parseCredentialsField(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ![]zts.handler_contract.CredentialRef {
-    const value = obj.get("credentials") orelse return &.{};
-    return switch (try zts.handler_contract.credential_ref.parseConfig(allocator, value)) {
-        .ok => |refs| refs,
-        .refused => |refused| {
-            if (!@import("builtin").is_test) {
-                std.debug.print("zttp.json credential '{s}' refused ({s}): {s}\n", .{
-                    refused.name(),
-                    @tagName(refused.reason),
-                    refused.reason.sentence(),
-                });
-            }
-            return error.InvalidCredentialConfig;
-        },
-    };
-}
-
 fn parseBoolField(obj: std.json.ObjectMap, key: []const u8, default_value: bool) !bool {
     const value = obj.get(key) orelse return default_value;
     return switch (value) {
@@ -497,22 +383,6 @@ test "discover finds manifest from relative handler path" {
 
     try std.testing.expectEqualStrings(expected_root, config.root_dir);
     try std.testing.expectEqualStrings("src/handler.ts", config.entry);
-}
-
-test "project config without a declaration key reads no declaration" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(io, .{ .sub_path = "zttp.json", .data = "{}" });
-    const manifest = try tmp.dir.realPathFileAlloc(io, "zttp.json", a);
-    defer a.free(manifest);
-
-    var config = (try discover(a, io, manifest)).?;
-    defer config.deinit(a);
-    try std.testing.expect(config.declaration == null);
-    try std.testing.expect((try config.resolvedDeclarationPath(a)) == null);
-    try std.testing.expect((try config.readDeclaration(a)) == null);
 }
 
 test "project discovery rejects every retired authority configuration" {

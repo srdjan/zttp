@@ -39,6 +39,8 @@ pub const registerVirtualModule = resolver.registerVirtualModule;
 pub const registerVirtualModuleTraced = resolver.registerVirtualModuleTraced;
 pub const registerVirtualModuleReplay = resolver.registerVirtualModuleReplay;
 pub const registerVirtualModuleDurable = resolver.registerVirtualModuleDurable;
+pub const registerVirtualModuleReplayWithOuter = resolver.registerVirtualModuleReplayWithOuter;
+pub const registerVirtualModuleDurableWithOuter = resolver.registerVirtualModuleDurableWithOuter;
 pub const validateImports = resolver.validateImports;
 // `populateModuleTypes` moved to `module_types.zig`. It fills a TypeEnv from
 // the module bindings and is called only by the type checker, the handler

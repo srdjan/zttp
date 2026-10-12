@@ -172,11 +172,6 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .sql_schema_path = compile_context.sql_schema_path,
         .system_path = compile_context.system_path,
         .policy = compile_context.policyPtr(),
-        .invariant_spec = compile_context.invariant_spec,
-        .declaration = compile_context.declarationPtr(),
-        .protected_ledger_path = compile_context.ledger_path,
-        .tool_auth = compile_context.tool_auth,
-        .credentials = compile_context.credentials,
         .attest_requested = opts.attest_requested,
     });
 }
@@ -185,19 +180,6 @@ const ProjectCompileContext = struct {
     sql_schema_path: ?[]u8 = null,
     system_path: ?[]u8 = null,
     policy: ?zts.HandlerPolicy = null,
-    invariant_spec: ?[]u8 = null,
-    ledger_path: ?[]u8 = null,
-    /// The consumer declaration zttp.json names (M4 T4), validated. It lives as
-    /// long as the context, which outlives the build that borrows it.
-    declaration: ?zts.declaration.Declaration = null,
-    /// zttp.json's `auth` names (M4 T5), owned. The build writes them into
-    /// the contract, which the executable graph binds, so a deployed artifact
-    /// reads the names it was built with and nothing else.
-    tool_auth: ?zts.handler_contract.ToolAuth = null,
-    /// zttp.json's credential references (M4 T6), owned. The build writes
-    /// them into the contract, so the graph member that binds the contract
-    /// binds them too.
-    credentials: []zts.handler_contract.CredentialRef = &.{},
 
     fn init(
         allocator: std.mem.Allocator,
@@ -208,41 +190,6 @@ const ProjectCompileContext = struct {
 
         context.sql_schema_path = try project.resolvedSqlitePath(allocator);
         context.system_path = try project.resolvedSystemPath(allocator);
-        context.ledger_path = try project.resolvedLedgerPath(allocator);
-        if (project.auth) |auth| {
-            const names = zts.handler_contract.ToolAuth{ .key_env = auth.key_env, .tenant_claim = auth.tenant_claim };
-            context.tool_auth = try names.dupe(allocator);
-        }
-        context.credentials = try zts.handler_contract.credential_ref.dupeAll(allocator, project.credentials);
-        context.invariant_spec = project.readInvariantSpec(allocator) catch |err| {
-            std.debug.print(
-                "Configured invariant specification '{s}' could not be loaded: {s}\n",
-                .{ project.invariants orelse "", @errorName(err) },
-            );
-            return error.InvariantContextFailed;
-        };
-
-        const declaration_bytes = project.readDeclaration(allocator) catch |err| {
-            std.debug.print(
-                "Configured declaration '{s}' could not be loaded: {s}\n",
-                .{ project.declaration orelse "", @errorName(err) },
-            );
-            return error.DeclarationContextFailed;
-        };
-        defer if (declaration_bytes) |bytes| allocator.free(bytes);
-        if (declaration_bytes) |bytes| {
-            context.declaration = precompile.parseDeclarationBytes(
-                allocator,
-                bytes,
-                project.declaration orelse "zttp.json declaration",
-                null,
-            ) catch |err| switch (err) {
-                // parseDeclarationBytes printed the reason tag and the entry.
-                error.DeclarationRefused => return error.DeclarationContextFailed,
-                else => return err,
-            };
-        }
-
         const policy_source = project.readPolicySource(allocator) catch |err| {
             std.debug.print(
                 "Configured capability policy '{s}' could not be loaded: {s}\n",
@@ -269,20 +216,11 @@ const ProjectCompileContext = struct {
         if (self.sql_schema_path) |path| allocator.free(path);
         if (self.system_path) |path| allocator.free(path);
         if (self.policy) |*policy| policy.deinit(allocator);
-        if (self.invariant_spec) |bytes| allocator.free(bytes);
-        if (self.ledger_path) |path| allocator.free(path);
-        if (self.declaration) |*decl| decl.deinit();
-        if (self.tool_auth) |*auth| auth.deinit(allocator);
-        zts.handler_contract.credential_ref.freeAll(allocator, self.credentials);
         self.* = .{};
     }
 
     fn policyPtr(self: *const ProjectCompileContext) ?*const zts.HandlerPolicy {
         return if (self.policy) |*policy| policy else null;
-    }
-
-    fn declarationPtr(self: *const ProjectCompileContext) ?*const zts.declaration.Declaration {
-        return if (self.declaration) |*decl| decl else null;
     }
 };
 
@@ -420,28 +358,7 @@ fn failBuildCommandArgs(err: CommandArgError) !void {
 }
 
 fn projectRunCommand(allocator: std.mem.Allocator, artifact: *const ProjectArtifact) ![]u8 {
-    const ledger_path = try artifact.project.resolvedLedgerPath(allocator) orelse
-        return allocator.dupe(u8, artifact.output_path);
-    defer allocator.free(ledger_path);
-    const output_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{
-        if (std.fs.path.isAbsolute(artifact.output_path)) "" else "./", artifact.output_path,
-    });
-    defer allocator.free(output_path);
-    var command: std.ArrayList(u8) = .empty;
-    errdefer command.deinit(allocator);
-    for ([_][]const u8{ output_path, ledger_path }, 0..) |argument, index| {
-        if (index != 0) try command.appendSlice(allocator, " --ledger ");
-        try command.append(allocator, '\'');
-        for (argument) |char| {
-            if (char == '\'') {
-                try command.appendSlice(allocator, "'\\''");
-            } else {
-                try command.append(allocator, char);
-            }
-        }
-        try command.append(allocator, '\'');
-    }
-    return command.toOwnedSlice(allocator);
+    return allocator.dupe(u8, artifact.output_path);
 }
 
 pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -466,11 +383,6 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         .sql_schema_path = artifact.compile_context.sql_schema_path,
         .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
-        .invariant_spec = artifact.compile_context.invariant_spec,
-        .declaration = artifact.compile_context.declarationPtr(),
-        .protected_ledger_path = artifact.compile_context.ledger_path,
-        .tool_auth = artifact.compile_context.tool_auth,
-        .credentials = artifact.compile_context.credentials,
         .attest_requested = opts.attest_requested,
     });
 
@@ -582,11 +494,6 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .sql_schema_path = artifact.compile_context.sql_schema_path,
         .system_path = artifact.compile_context.system_path,
         .policy = artifact.compile_context.policyPtr(),
-        .invariant_spec = artifact.compile_context.invariant_spec,
-        .declaration = artifact.compile_context.declarationPtr(),
-        .protected_ledger_path = artifact.compile_context.ledger_path,
-        .tool_auth = artifact.compile_context.tool_auth,
-        .credentials = artifact.compile_context.credentials,
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
     });

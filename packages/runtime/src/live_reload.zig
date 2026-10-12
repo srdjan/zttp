@@ -80,13 +80,6 @@ fn readConfiguredPolicySource(
     return try zts.file_io.readFile(allocator, path, 1024 * 1024);
 }
 
-/// The dev capability ceiling for `hc`: its ceiling report lowered with the
-/// deployment's code, or null when the contract reports none.
-fn devCeilingFor(allocator: std.mem.Allocator, hc: *const HandlerContract) !?contract_runtime.AcceptedCeiling {
-    const report = if (hc.ceiling) |*r| r else return null;
-    return try contract_runtime.lowerProducerCeiling(allocator, report);
-}
-
 fn shouldSkipContract(config: *const LiveReloadConfig) bool {
     _ = config;
     return false;
@@ -106,13 +99,11 @@ const SwapRefusal = enum {
     none,
     candidate_uses_retired_authority,
     installed_generation_is_guarded,
-    installed_generation_has_invariant,
     candidate_computes_a_capability_resource,
 };
 
 fn swapRefusal(
     installed_generation_is_guarded: bool,
-    installed_generation_has_invariant: bool,
     candidate: ?*const HandlerContract,
     candidate_policy_checked: bool,
 ) SwapRefusal {
@@ -120,9 +111,6 @@ fn swapRefusal(
         if (retired_authority.first(retired_authority.contractFacts(contract)) != null) {
             return .candidate_uses_retired_authority;
         }
-    }
-    if (installed_generation_has_invariant) {
-        return .installed_generation_has_invariant;
     }
     if (installed_generation_is_guarded and !candidate_policy_checked) {
         return .installed_generation_is_guarded;
@@ -140,11 +128,6 @@ fn swapRefusal(
         return .candidate_computes_a_capability_resource;
     }
     return .none;
-}
-
-fn contractHasAgent(contract: *const HandlerContract) bool {
-    for (contract.tools.items) |entry| if (entry.agent != null) return true;
-    return false;
 }
 
 pub const LiveReloadState = struct {
@@ -534,26 +517,8 @@ pub const LiveReloadState = struct {
         self.current_contract = new_contract;
     }
 
-    /// A dev catalog can arrive after the server started, so the startup refusal
-    /// (M4 T5) cannot see it. Say so here; the request path refuses every tool
-    /// request until the key is configured.
-    fn warnToolAuthMissing(self: *LiveReloadState) void {
-        if (self.server.activeToolCatalog() == null or self.server.tool_auth != null) return;
-        printReload(
-            "tool handler requires auth: set zttp.json \"auth\" and export its keyEnv variable, then restart. Tool requests answer 503 until then.\n",
-            .{},
-        );
-    }
-
     fn installRuntimeContract(self: *LiveReloadState, configured_policy: ?*const HandlerPolicy) void {
         if (self.current_contract) |*hc| {
-            const has_catalog = hc.tools.items.len != 0;
-            const has_agent = contractHasAgent(hc);
-            // These facts come from the handler contract, not from a catalog
-            // that may fail to lower. Install them first so the request path
-            // and null-grant gate fail closed throughout the dev window.
-            self.server.setCatalogRequirement(has_catalog, has_agent);
-            if (self.server.pool) |*pool| pool.setCatalogContract(has_catalog, has_agent);
             const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
                 printReload("Failed to build runtime contract: {}.\n", .{err});
                 return;
@@ -562,44 +527,12 @@ pub const LiveReloadState = struct {
                 printReload("Contract failed validation: {}.\n", .{err});
                 return;
             };
-            // The producer's tool catalog, lowered with the deployment's code so
-            // dev answers a tool request as a deployment would (M4 T3, Q4). A
-            // catalog that does not lower installs nothing rather than serving
-            // tool routes unchecked.
-            var dev_tool_catalog = contract_runtime.lowerProducerToolCatalog(self.allocator, hc.tools.items) catch |err| {
-                printReload("Failed to lower the tool catalog: {}.\n", .{err});
-                self.server.updateContractWithTools(validated, null, null);
-                return;
-            };
-            if (dev_tool_catalog) |*catalog| {
-                contract_runtime.validateAgentDeadlines(catalog, .{
-                    .handler_deadline_ms = self.server.config.timeout_ms,
-                    .outbound_timeout_ms = self.server.config.runtime_config.outbound_timeout_ms,
-                }) catch |err| {
-                    catalog.deinit();
-                    printReload("Failed to install the agent catalog deadline policy: {}.\n", .{err});
-                    self.server.updateContractWithTools(validated, null, null);
-                    return;
-                };
-            }
-            // The producer's ceiling report, lowered with the deployment's code
-            // (M4 T5b). The live-reload compile passes no declaration today, so
-            // the report is null and dev installs no ceiling.
-            var dev_ceiling = devCeilingFor(self.allocator, hc) catch |err| {
-                if (dev_tool_catalog) |*catalog| catalog.deinit();
-                validated.deinit();
-                printReload("Failed to lower the capability ceiling: {}.\n", .{err});
-                return;
-            };
             self.server.setDevCapabilityPolicy(hc, configured_policy) catch |err| {
-                if (dev_ceiling) |*ceiling| ceiling.deinit();
-                if (dev_tool_catalog) |*catalog| catalog.deinit();
                 validated.deinit();
                 printReload("Failed to install runtime policy generation: {}.\n", .{err});
                 return;
             };
-            self.server.updateContractWithTools(validated, dev_tool_catalog, dev_ceiling);
-            self.warnToolAuthMissing();
+            self.server.updateContract(validated);
         }
     }
 
@@ -743,7 +676,6 @@ pub const LiveReloadState = struct {
 
         switch (swapRefusal(
             self.server.generationIsGuarded(),
-            self.server.generationHasInvariant(),
             runtime_contract,
             configured_policy != null,
         )) {
@@ -762,13 +694,6 @@ pub const LiveReloadState = struct {
                 );
                 return false;
             },
-            .installed_generation_has_invariant => {
-                printReload(
-                    "Running artifact has accepted application-invariant coverage. Live swap refused; the old handler stays active.\n",
-                    .{},
-                );
-                return false;
-            },
             .candidate_computes_a_capability_resource => {
                 printReload(
                     "New handler computes a capability resource, which only a checked build can install. Live swap refused; the old handler stays active.\n",
@@ -780,8 +705,6 @@ pub const LiveReloadState = struct {
 
         var validated_contract: ?contract_runtime.ValidatedRuntimeContract = null;
         var dev_policy: ?RuntimePolicy = null;
-        var dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null;
-        var dev_ceiling: ?contract_runtime.AcceptedCeiling = null;
         if (runtime_contract) |hc| {
             const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
                 printReload("Failed to build runtime contract: {}. Keeping previous handler active.\n", .{err});
@@ -794,32 +717,6 @@ pub const LiveReloadState = struct {
                 printReload("Contract failed validation: {}. Keeping previous handler active.\n", .{err});
                 return false;
             };
-            // Lowered with the deployment's code (M4 T3, Q4). A catalog that does
-            // not lower keeps the previous handler rather than serving the new
-            // one's tool routes unchecked.
-            dev_tool_catalog = contract_runtime.lowerProducerToolCatalog(self.allocator, hc.tools.items) catch |err| {
-                if (validated_contract) |*validated| validated.deinit();
-                printReload("Failed to lower the tool catalog: {}. Keeping previous handler active.\n", .{err});
-                return false;
-            };
-            if (dev_tool_catalog) |*catalog| {
-                contract_runtime.validateAgentDeadlines(catalog, .{
-                    .handler_deadline_ms = self.server.config.timeout_ms,
-                    .outbound_timeout_ms = self.server.config.runtime_config.outbound_timeout_ms,
-                }) catch |err| {
-                    catalog.deinit();
-                    dev_tool_catalog = null;
-                    if (validated_contract) |*validated| validated.deinit();
-                    printReload("Failed to install the agent catalog deadline policy: {}. Keeping previous handler active.\n", .{err});
-                    return false;
-                };
-            }
-            dev_ceiling = devCeilingFor(self.allocator, hc) catch |err| {
-                if (dev_tool_catalog) |*catalog| catalog.deinit();
-                if (validated_contract) |*validated| validated.deinit();
-                printReload("Failed to lower the capability ceiling: {}. Keeping previous handler active.\n", .{err});
-                return false;
-            };
             dev_policy = self.server.stageDevCapabilityPolicy(hc, configured_policy);
         }
 
@@ -828,12 +725,8 @@ pub const LiveReloadState = struct {
         // prior generation is it safe to retire older code. Freeing before
         // the swap (the previous bug) raced a concurrent worker reading the
         // freed handler_code in ensureRuntime on a rapid second save.
-        const has_catalog = if (runtime_contract) |hc| hc.tools.items.len != 0 else false;
-        const has_agent = if (runtime_contract) |hc| contractHasAgent(hc) else false;
-        const invalidated = pool.reloadHandlerWithCatalogPolicy(new_code, self.handler_path, dev_policy, has_catalog, has_agent) catch |err| {
+        const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy) catch |err| {
             if (validated_contract) |*validated| validated.deinit();
-            if (dev_tool_catalog) |*catalog| catalog.deinit();
-            if (dev_ceiling) |*ceiling| ceiling.deinit();
             printReload("Failed to install handler generation: {}. Keeping previous handler active.\n", .{err});
             return false;
         };
@@ -841,8 +734,7 @@ pub const LiveReloadState = struct {
         self.rotateGenerations(new_code);
 
         if (validated_contract) |validated| {
-            self.server.updateContractWithTools(validated, dev_tool_catalog, dev_ceiling);
-            self.warnToolAuthMissing();
+            self.server.updateContract(validated);
             if (self.server.proof_cache != null) {
                 printProve("Proof cache: enabled (deterministic + read_only)\n", .{});
             }
@@ -1154,20 +1046,20 @@ test "a swap that would strand a guard is refused from either side" {
     defer contract.deinit(allocator);
 
     // Nothing guarded on either side: an ordinary dev swap.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, false, &contract, false));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, false));
     // The plain-swap and missing-contract branches, which carry no candidate.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, false, null, false));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null, false));
 
     // Without a checked candidate policy, the running generation's guard
     // coverage belongs to the executable being replaced. No candidate, not
     // even a static one or none at all, may take over.
     try std.testing.expectEqual(
         SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, false, &contract, false),
+        swapRefusal(true, &contract, false),
     );
     try std.testing.expectEqual(
         SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, false, null, false),
+        swapRefusal(true, null, false),
     );
 
     // A candidate that computes a capability resource has no coverage at all,
@@ -1175,44 +1067,32 @@ test "a swap that would strand a guard is refused from either side" {
     contract.env.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, false, &contract, false),
+        swapRefusal(false, &contract, false),
     );
     contract.env.dynamic = false;
     contract.egress.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, false, &contract, false),
+        swapRefusal(false, &contract, false),
     );
     contract.egress.dynamic = false;
     contract.cache.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, false, &contract, false),
+        swapRefusal(false, &contract, false),
     );
     contract.cache.dynamic = false;
     contract.sql.dynamic = true;
     try std.testing.expectEqual(
         SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, false, &contract, false),
+        swapRefusal(false, &contract, false),
     );
 
     // A candidate checked against an explicit policy may replace either a
     // static or guarded generation because the checked pair is installed as
     // one pool generation.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, false, &contract, true));
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, false, &contract, true));
-
-    // A capability-policy verdict does not cover an application invariant.
-    // This live-reload path has no invariant acceptance step, so it always
-    // keeps the installed invariant generation.
-    try std.testing.expectEqual(
-        SwapRefusal.installed_generation_has_invariant,
-        swapRefusal(true, true, &contract, true),
-    );
-    try std.testing.expectEqual(
-        SwapRefusal.installed_generation_has_invariant,
-        swapRefusal(true, true, null, true),
-    );
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, true));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, &contract, true));
 }
 
 test "a retired authority candidate cannot replace the serving generation" {
@@ -1224,7 +1104,7 @@ test "a retired authority candidate cannot replace the serving generation" {
 
     try std.testing.expectEqual(
         SwapRefusal.candidate_uses_retired_authority,
-        swapRefusal(false, false, &contract, true),
+        swapRefusal(false, &contract, true),
     );
 }
 

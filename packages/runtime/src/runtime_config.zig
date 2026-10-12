@@ -6,7 +6,6 @@ const std = @import("std");
 const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
-const credential_store = @import("credential_store.zig");
 
 const cost_meter = zq.CostMeter;
 
@@ -32,18 +31,7 @@ pub const CostCeilings = struct {
     }
 };
 
-/// The environment variable that holds the HS256 key and the claim that names
-/// the tenant. Names only; the key is read from the process environment at
-/// startup and never stored here.
-pub const ToolAuthNames = struct {
-    key_env: []const u8,
-    tenant_claim: []const u8,
-};
-
 pub const RuntimeConfig = struct {
-    /// Derived from the handler contract, even before catalog installation.
-    contract_has_catalog: bool = false,
-    contract_has_agent: bool = false,
     memory_limit: usize = 0,
     nursery_size: usize = 64 * 1024,
     use_hybrid_allocation: bool = true,
@@ -54,7 +42,6 @@ pub const RuntimeConfig = struct {
     outbound_max_response_bytes: usize = 1024 * 1024,
     outbound_timeout_ms: u32 = 10_000,
     sqlite_path: ?[]const u8 = null,
-    ledger_path: ?[]const u8 = null,
     /// Exact consumer-checked bytes, borrowed for the runtime generation.
     invariant_section: ?[]const u8 = null,
     /// Exact `ZTCAT1` tool catalog section loaded with the artifact, borrowed
@@ -66,21 +53,6 @@ pub const RuntimeConfig = struct {
     /// accepted ceiling is lowered only from there. Null when the handler has
     /// no declaration.
     declaration_section: ?[]const u8 = null,
-    invariant_coverage_accepted: bool = false,
-    /// Where a tool handler finds its bearer-token key and tenant claim (M4
-    /// T5): zttp.json's `auth` names for `zttp dev` and `serve`. A deployed
-    /// artifact ignores this and reads the names from its own contract, which
-    /// the executable graph binds. Borrowed.
-    tool_auth: ?ToolAuthNames = null,
-    /// The credential references for `zttp dev` and `serve` (M4 T6): zttp.json's
-    /// `credentials`. A deployed artifact ignores this and reads the references
-    /// from its own contract, which the executable graph binds. Borrowed.
-    credentials: []const zq.handler_contract.CredentialRef = &.{},
-    /// The loaded credential values (M4 T6), which the server owns for its
-    /// lifetime and sets before it builds the pool. Null when no reference is
-    /// configured or no server loaded them; a credentialed fetch is then
-    /// refused with `not_configured`. Borrowed.
-    credential_store: ?*const credential_store.Store = null,
     trace_file_path: ?[]const u8 = null,
     /// Opt-in JSONL sink for runtime soundness incidents (`--incident-log`).
     /// `incident_log_path` is the CLI-supplied path; the server opens it once at
@@ -151,14 +123,6 @@ pub const RuntimeConfig = struct {
 
 pub fn openTraceFile(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
     return zq.file_io.openAppend(allocator, path);
-}
-
-pub fn validateLedgerOutputPaths(allocator: std.mem.Allocator, config: RuntimeConfig, security_log_path: ?[]const u8) !void {
-    const ledger = config.ledger_path orelse return;
-    for ([_]?[]const u8{ security_log_path, config.trace_file_path, config.incident_log_path, config.sqlite_path }) |path| {
-        if (path) |output| try zq.module_binding.validateLedgerOutputPath(allocator, ledger, output);
-    }
-    if (config.durable_oplog_dir) |directory| try zq.module_binding.validateLedgerOutputDirectory(allocator, ledger, directory);
 }
 
 fn openOplogWritable(allocator: std.mem.Allocator, path: []const u8, truncate: bool) !std.c.fd_t {

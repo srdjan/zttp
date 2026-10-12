@@ -101,31 +101,6 @@ pub fn addIntegration(ctx: Context, bins: artifacts.Binaries, test_step: *std.Bu
     examples_test_step.dependOn(&examples_cmd.step);
     test_step.dependOn(&examples_cmd.step);
 
-    // M4 T7, check C7: build examples/tools with the real zttp binary, run the
-    // artifact, and drive it over loopback with no replay. The example suite
-    // above counts suites, so it cannot notice this one going missing; this
-    // step fails on its own when it runs fewer cases than it declares.
-    const reference_tools_mod = b.createModule(.{
-        .root_source_file = b.path("packages/runtime/src/reference_tools_check.zig"),
-        .target = b.graph.host,
-        .optimize = ctx.optimize,
-        .link_libc = true,
-    });
-    reference_tools_mod.addImport("zts", ctx.zts_host_mod);
-    const reference_tools_exe = b.addExecutable(.{
-        .name = "reference-tools-check",
-        .root_module = reference_tools_mod,
-    });
-    const reference_tools_cmd = b.addRunArtifact(reference_tools_exe);
-    reference_tools_cmd.addFileArg(bins.cli_exe.getEmittedBin());
-    // `zttp build` wraps the runtime template it finds beside its own binary.
-    reference_tools_cmd.addFileArg(bins.runtime_exe.getEmittedBin());
-    reference_tools_cmd.addDirectoryArg(b.path("examples/tools"));
-    reference_tools_cmd.has_side_effects = true;
-    const reference_tools_step = b.step("test-reference-tools", "Build examples/tools, run the artifact, and check each boundary case over loopback");
-    reference_tools_step.dependOn(&reference_tools_cmd.step);
-    test_step.dependOn(&reference_tools_cmd.step);
-
     // U5.3: run the built `zts` against hostile input in a new temporary
     // directory and pin exit status, deadline, and JSON completeness. The
     // check fails on its own when it runs fewer cases than it defines.

@@ -58,10 +58,21 @@ const bytecode_cache = zq.bytecode_cache;
 const http_types = @import("http_types.zig");
 const OutboundIo = @import("outbound_io.zig").OutboundIo;
 const queue_callbacks = @import("queue_runtime_callbacks.zig");
-const invariant_adapter = @import("invariant_adapter.zig");
-const contract_runtime = @import("contract_runtime.zig");
-const tool_auth = @import("tool_auth.zig");
-const turn_state = @import("turn_state.zig");
+
+/// Replay and durable wrappers are outermost. Apply the retired credential
+/// check outside those wrappers, so recorded results cannot bypass refusal.
+fn fetchCredentialOuter(
+    comptime binding: zq.module_binding.ModuleBinding,
+    comptime exp: zq.module_binding.FunctionBinding,
+    comptime inner: zq.NativeFn,
+) zq.NativeFn {
+    if (comptime std.mem.eql(u8, binding.specifier, "zttp:fetch") and
+        (std.mem.eql(u8, exp.name, "fetch") or std.mem.eql(u8, exp.name, "fetchWithRetry")))
+    {
+        return http.credentialOptionGuard(inner);
+    }
+    return inner;
+}
 const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 
@@ -155,10 +166,6 @@ pub const HandlerInstance = struct {
     trace_mutex: ?*zq.trace.TraceMutex,
     trace_recorder: ?*zq.TraceRecorder,
     active_request: ?HttpRequestView,
-    /// One request and grant stack. The engine slot and active_request are
-    /// borrowed views of its top, updated together by syncFrame.
-    frames: [2]Frame = undefined,
-    frame_depth: usize = 0,
     active_durable_run: ?ActiveDurableRun,
     pending_durable_recovery: ?PendingDurableRecovery,
     // Hybrid allocation support
@@ -183,61 +190,6 @@ pub const HandlerInstance = struct {
     queue_system_ref: ?*actor_queue.ActorQueue = null,
 
     const Self = @This();
-
-    pub const Frame = struct {
-        request: HttpRequestView,
-        /// Reserved for A4. U3 does not dispatch a nested tool.
-        pending_args: ?[]const u8 = null,
-    };
-
-    fn syncFrame(self: *Self) void {
-        const request = if (self.frame_depth == 0) null else self.frames[self.frame_depth - 1].request;
-        self.active_request = request;
-        self.ctx.active_tool_grant = if (request) |view| blk: {
-            const grant = view.tool_grant orelse break :blk null;
-            break :blk .{
-                .context = grant.context,
-                .allows = grant.allows,
-                .input_schema = grant.input_schema,
-                .agent_prompt = if (grant.agent != null) view.agent_prompt else null,
-            };
-        } else null;
-    }
-
-    pub fn enterNested(self: *Self, frame: Frame) !void {
-        if (self.frame_depth != 1) return error.InvalidGrantFrameDepth;
-        var nested = frame;
-        nested.request.turn = null;
-        self.frames[1] = nested;
-        self.frame_depth = 2;
-        self.syncFrame();
-    }
-
-    pub fn leaveNested(self: *Self) !void {
-        if (self.frame_depth != 2) return error.InvalidGrantFrameDepth;
-        self.frame_depth = 1;
-        self.syncFrame();
-    }
-
-    /// The frame-0 turn while a tool runs in frame 1. Nested effects use this
-    /// only for the absolute turn deadline; they do not spend provider rounds.
-    pub fn nestedToolTurn(self: *Self) ?*turn_state.TurnState {
-        if (self.frame_depth != 2) return null;
-        const turn = self.frames[0].request.turn orelse return null;
-        if (!turn.tool_in_flight) return null;
-        return turn;
-    }
-
-    fn resetFrames(self: *Self) void {
-        self.frame_depth = 0;
-        self.syncFrame();
-    }
-
-    fn checkResponseDepth(self: *Self) !void {
-        if (self.frame_depth == 1) return;
-        if (!builtin.is_test) std.log.err("handler completed with grant frame depth {d}", .{self.frame_depth});
-        return error.InvalidGrantFrameDepth;
-    }
 
     pub const PendingDurableWait = union(enum) {
         timer: i64,
@@ -313,7 +265,6 @@ pub const HandlerInstance = struct {
 
     pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig) !*Self {
         if (config.outbound_timeout_ms == 0) return error.ZeroOutboundTimeout;
-        try runtime_config_mod.validateLedgerOutputPaths(allocator, config, null);
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -773,11 +724,11 @@ pub const HandlerInstance = struct {
         const fetch_replay_stub = comptime zq.trace.makeReplayStub("http", "fetchSync");
         const fetch_durable_wrapper = comptime zq.trace.makeDurableWrapper("http", "fetchSync", fetchSyncNative);
         const func: zq.NativeFn = if (self.config.replay_file_path != null)
-            fetch_replay_stub
+            comptime http.credentialOptionGuard(fetch_replay_stub)
         else if (self.config.durable_oplog_dir != null)
-            fetch_durable_wrapper
+            comptime http.credentialOptionGuard(fetch_durable_wrapper)
         else
-            fetchSyncNative;
+            comptime http.credentialOptionGuard(fetchSyncNative);
         const fn_obj = try zq.JSObject.createNativeFunction(
             self.allocator,
             pool,
@@ -900,12 +851,12 @@ pub const HandlerInstance = struct {
                     if (self.queue_system_ref != null) {
                         try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
                     } else {
-                        try zq.modules.registerVirtualModuleReplay(binding, self.ctx, self.allocator);
+                        try zq.modules.registerVirtualModuleReplayWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
                     }
                 } else if (comptime retired_authority.isRetiredModule(binding.specifier)) {
                     try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
                 } else {
-                    try zq.modules.registerVirtualModuleReplay(binding, self.ctx, self.allocator);
+                    try zq.modules.registerVirtualModuleReplayWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
                 }
             }
         } else if (self.config.durable_oplog_dir != null) {
@@ -914,7 +865,7 @@ pub const HandlerInstance = struct {
                 if (comptime retired_authority.isRetiredModule(binding.specifier)) {
                     try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
                 } else {
-                    try zq.modules.registerVirtualModuleDurable(binding, self.ctx, self.allocator);
+                    try zq.modules.registerVirtualModuleDurableWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
                 }
             }
         } else if (self.config.trace_file_path != null) {
@@ -1022,62 +973,6 @@ pub const HandlerInstance = struct {
         try zq.modules.sql.installStore(self.ctx, self.config.sqlite_path);
     }
 
-    fn installLedgerModuleState(self: *Self) !void {
-        const bytes = self.config.invariant_section orelse {
-            if (self.config.ledger_path != null) return error.MissingInvariantSpec;
-            return;
-        };
-        if (!self.config.invariant_coverage_accepted) return error.InvariantCoverageNotAccepted;
-        const path = self.config.ledger_path orelse return error.LedgerNotConfigured;
-        // Before anything is allocated and before `installStore` opens a
-        // database: the adapter this binary linked must be the one the
-        // acceptance kernel expects. An artifact accepted against one adapter
-        // and served by another is the case this refuses, and refusing it
-        // after the store is open would mean a store had already been
-        // validated under an adapter the consumer does not accept.
-        try invariant_adapter.requireLinked();
-        const invariant = @import("zttp_proof_checker").invariant;
-        const spec = try invariant.decode(bytes);
-        // `defer`, not `errdefer`: the slice is borrowed by `installStore`,
-        // which copies it, so it is freed on the success path and on every
-        // failure path alike. An `errdefer` beside this would free it twice.
-        const currencies = try self.allocator.alloc(zq.modules.ledger.Currency, spec.currency_count);
-        defer self.allocator.free(currencies);
-        for (currencies, 0..) |*currency, i| {
-            const start = i * invariant.currency_record_size;
-            currency.* = .{ .code = spec.currency_bytes[start..][0..3], .scale = spec.currency_bytes[start + 3] };
-        }
-        // The declared account set, when the specification carries one. Null
-        // and empty are different here, as they are in the module's own
-        // `Config`: a document that declares the kind always carries at least
-        // one matcher, because the decoder refuses an empty set, so a null
-        // here can only mean the document declared no such kind.
-        var accounts: ?[]zq.modules.ledger.AccountMatcher = null;
-        defer if (accounts) |owned| self.allocator.free(owned);
-        if (try spec.payloadFor(.declared_accounts_v1)) |payload| {
-            const declared = try invariant.decodeAccountMatchers(payload);
-            const rows = try self.allocator.alloc(zq.modules.ledger.AccountMatcher, declared.count);
-            errdefer self.allocator.free(rows);
-            for (rows, 0..) |*row, i| {
-                const matcher = try declared.at(@intCast(i));
-                row.* = .{
-                    .tag = switch (matcher.tag) {
-                        .exact => .exact,
-                        .prefix => .prefix,
-                    },
-                    .value = matcher.value,
-                };
-            }
-            accounts = rows;
-        }
-        try zq.modules.ledger.installStore(self.ctx, path, .{
-            .ledger = spec.ledger_id,
-            .currencies = currencies,
-            .accounts = accounts,
-            .invariant_digest = invariant.digest(bytes),
-        });
-    }
-
     fn installServiceModuleState(self: *Self) !void {
         const system_path = self.config.system_config_path orelse return;
         try zq.modules.service.installState(self.ctx, system_path, self, serviceCallCallback);
@@ -1085,10 +980,6 @@ pub const HandlerInstance = struct {
 
     fn installFetchModuleState(self: *Self) !void {
         try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback, http.fetchModuleRefusal);
-    }
-
-    fn installToolModuleState(self: *Self) !void {
-        try zq.modules.tool.installState(self.ctx, self, callToolCallback);
     }
 
     fn verifyBytecodeRecursive(func: *const zq.FunctionBytecode) !void {
@@ -1496,34 +1387,20 @@ pub const HandlerInstance = struct {
     }
 
     fn executeHandlerInternal(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
-        self.frames[0] = .{ .request = request };
-        self.frame_depth = 1;
-        self.syncFrame();
-        defer self.resetFrames();
-        self.ctx.contract_has_agent = self.config.contract_has_agent;
-        defer self.ctx.contract_has_agent = false;
+        self.active_request = request;
+        defer self.active_request = null;
         var response = try self.executeHandlerFrame(request, request_id, borrow_body);
         errdefer response.deinit();
-        try self.checkResponseDepth();
         return response;
     }
 
     fn executeHandlerFrame(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
-        const nested_tool = self.frame_depth == 2;
-        const outer_request_body_len = self.last_request_body_len;
-        const outer_hole_reached = self.ctx.hole_reached;
-        const outer_durable_recovery = self.pending_durable_recovery;
-        defer if (nested_tool) {
-            self.last_request_body_len = outer_request_body_len;
-            self.ctx.hole_reached = outer_hole_reached;
-            self.pending_durable_recovery = outer_durable_recovery;
-        };
         self.last_request_body_len = if (request.body) |b| b.len else 0;
-        defer if (!nested_tool) {
+        defer {
             if (self.pending_durable_recovery != null) {
                 self.pending_durable_recovery = null;
             }
-        };
+        }
 
         if (self.cached_handler_obj == null) {
             try self.refreshHandlerCache();
@@ -1552,13 +1429,13 @@ pub const HandlerInstance = struct {
             tracked = true;
         }
         defer if (tracked) self.active_request_id.store(0, .release);
-        var reset_after = self.owns_resources and !nested_tool;
+        var reset_after = self.owns_resources;
         defer if (reset_after) self.resetForNextRequest();
         defer self.recordCostFuseIncidents();
 
         // === TRACE RECORDING: Set up per-request recorder ===
-        const trace_timer = if (nested_tool) null else trace_request_recorder.setupRequestRecorder(self, request);
-        defer if (!nested_tool) trace_request_recorder.finishRequestRecorder(self, trace_timer);
+        const trace_timer = trace_request_recorder.setupRequestRecorder(self, request);
+        defer trace_request_recorder.finishRequestRecorder(self, trace_timer);
 
         // === FAST PATH: Native dispatch for static routes ===
         if (self.cached_dispatch) |dispatch| {
@@ -1600,7 +1477,7 @@ pub const HandlerInstance = struct {
                     if (borrow_body and response.requires_runtime) {
                         reset_after = false;
                     }
-                    if (!nested_tool) trace_request_recorder.recordResponse(self, &response);
+                    trace_request_recorder.recordResponse(self, &response);
                     return response;
                 }
             }
@@ -1608,14 +1485,12 @@ pub const HandlerInstance = struct {
 
         // === SLOW PATH: Full bytecode execution ===
 
-        // Set callback for JSX function component rendering. It lives on this
-        // Context, so a nested sub-handler dispatch on another Context cannot
-        // clear it.
-        if (!nested_tool) zq.http.setCallFunctionCallback(self.ctx, callFunctionWrapper);
-        defer if (!nested_tool) zq.http.clearCallFunctionCallback(self.ctx);
+        // Set the callback for JSX function component rendering.
+        zq.http.setCallFunctionCallback(self.ctx, callFunctionWrapper);
+        defer zq.http.clearCallFunctionCallback(self.ctx);
 
-        if (!nested_tool) try zq.modules.scope.beginRequest(self.ctx);
-        defer if (!nested_tool) zq.modules.scope.endRequest(self.ctx);
+        try zq.modules.scope.beginRequest(self.ctx);
+        defer zq.modules.scope.endRequest(self.ctx);
 
         self.ctx.hole_reached = false;
         const result = self.callFunction(handler_obj, args) catch |err| {
@@ -1650,13 +1525,6 @@ pub const HandlerInstance = struct {
         // extractResponseInternal return an empty default. This guards against
         // the "silent empty 200" class of bug.
         if (self.ctx.hasException()) {
-            if (nested_tool) {
-                // A thrown tool did not establish an HTTP outcome. Signal the
-                // nested caller explicitly so callTool reports outcome_unknown
-                // instead of treating the synthesized outer 500 as non-2xx.
-                self.ctx.clearException();
-                return error.NestedHandlerException;
-            }
             const exc = self.ctx.exception;
             self.ctx.clearException();
             var err_response = HttpResponse.init(self.allocator);
@@ -1681,7 +1549,7 @@ pub const HandlerInstance = struct {
             if (diag.verdict == .soundness_incident) {
                 self.recordSoundnessIncident(diag.namedChips(), exc_msg);
             }
-            if (!nested_tool) trace_request_recorder.recordResponse(self, &err_response);
+            trace_request_recorder.recordResponse(self, &err_response);
             return err_response;
         }
 
@@ -1691,7 +1559,7 @@ pub const HandlerInstance = struct {
             reset_after = false;
         }
 
-        if (!nested_tool) trace_request_recorder.recordResponse(self, &response);
+        trace_request_recorder.recordResponse(self, &response);
         return response;
     }
 
@@ -1885,16 +1753,12 @@ pub const HandlerInstance = struct {
             req_obj.setSlot(shapes.request.body_slot, zq.JSValue.undefined_val);
         }
 
-        // Verified identity (M4 T5): set only on a tool request, from claims the
-        // runtime verified before this object existed.
-        req_obj.setSlot(shapes.request.subject_slot, try self.optionalString(request.subject));
-        req_obj.setSlot(shapes.request.tenant_slot, try self.optionalString(request.tenant));
+        req_obj.setSlot(shapes.request.subject_slot, zq.JSValue.undefined_val);
+        req_obj.setSlot(shapes.request.tenant_slot, zq.JSValue.undefined_val);
 
-        // Headers. A tool request omits `authorization`, so the handler cannot
-        // decode the claims the runtime already verified.
+        // Copy request headers into the handler request object.
         const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, self.headers_prototype);
         for (request.headers.items) |header| {
-            if (request.strip_authorization and std.ascii.eqlIgnoreCase(header.key, "authorization")) continue;
             const key_atom = headerKeyToAtom(header.key) orelse
                 try self.ctx.atoms.intern(header.key);
             const value_str = try self.ctx.createString(header.value);
@@ -1943,16 +1807,8 @@ pub const HandlerInstance = struct {
             try self.ctx.setPropertyChecked(req_obj, zq.Atom.body, body_str);
         }
 
-        if (request.subject) |subject| {
-            try self.ctx.setPropertyChecked(req_obj, try self.ctx.atoms.intern("subject"), try self.ctx.createString(subject));
-        }
-        if (request.tenant) |tenant| {
-            try self.ctx.setPropertyChecked(req_obj, try self.ctx.atoms.intern("tenant"), try self.ctx.createString(tenant));
-        }
-
         const headers_obj = try self.ctx.createObject(self.headers_prototype);
         for (request.headers.items) |header| {
-            if (request.strip_authorization and std.ascii.eqlIgnoreCase(header.key, "authorization")) continue;
             const key_atom = headerKeyToAtom(header.key) orelse
                 try self.ctx.atoms.intern(header.key);
             const value_str = try self.ctx.createString(header.value);
@@ -1961,11 +1817,6 @@ pub const HandlerInstance = struct {
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.headers, headers_obj.toValue());
 
         return req_obj.toValue();
-    }
-
-    fn optionalString(self: *Self, str: ?[]const u8) !zq.JSValue {
-        const s = str orelse return zq.JSValue.undefined_val;
-        return self.ctx.createString(s);
     }
 
     pub fn createString(self: *Self, str: []const u8) !zq.JSValue {
@@ -2245,300 +2096,4 @@ test "a load parse failure renders its code, file, source line, and underline" {
     try std.testing.expect(std.mem.indexOf(u8, text, "  2 | const b = while;\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "   | ") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "^") != null);
-}
-
-const CallToolTag = enum {
-    unknown_tool,
-    invalid_arguments,
-    tool_denied,
-    tool_failed,
-    budget_exhausted,
-    deadline_exceeded,
-    outcome_unknown,
-};
-
-fn callToolResultErr(rt: *HandlerInstance, tag: CallToolTag) !zq.JSValue {
-    const value = try rt.ctx.createString(@tagName(tag));
-    return zq.builtins.createResultErr(rt.ctx, value);
-}
-
-fn publicCallToolLatchTag(tag: turn_state.TerminalTag) CallToolTag {
-    return switch (tag) {
-        .deadline_exceeded => .deadline_exceeded,
-        .budget_exhausted => .budget_exhausted,
-        .tool_denied => .tool_denied,
-        .tool_failed => .tool_failed,
-        .outcome_unknown => .outcome_unknown,
-        // `recorder_unavailable` remains an internal terminal reason. The
-        // public callTool contract has a closed tag set, so a recorder fault
-        // is reported conservatively as outcome_unknown. A failed pre-record
-        // still starts no tool effect and leaves the in-flight marker clear.
-        .recorder_unavailable, .completed, .failed => .outcome_unknown,
-    };
-}
-
-fn toolCallIdentity(
-    turn: *const turn_state.TurnState,
-    round: u32,
-    call_id: []const u8,
-) turn_state.CallIdentity {
-    var round_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &round_bytes, round, .big);
-    var call_len_bytes: [8]u8 = undefined;
-    std.mem.writeInt(u64, &call_len_bytes, @intCast(call_id.len), .big);
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(&turn.id);
-    hasher.update(&round_bytes);
-    hasher.update(&call_len_bytes);
-    hasher.update(call_id);
-    return hasher.finalResult();
-}
-
-fn findAgentTool(agent: *const contract_runtime.AcceptedAgent, name: []const u8) ?*const contract_runtime.AcceptedTool {
-    const tools = agent.resolved_tools orelse return null;
-    for (tools) |tool| {
-        if (std.mem.eql(u8, tool.name, name)) return tool;
-    }
-    return null;
-}
-
-fn appendToolPost(
-    turn: *turn_state.TurnState,
-    round: u32,
-    call_id_hex: []const u8,
-    class: turn_state.OutcomeClass,
-    status: ?u16,
-) void {
-    const now_ns = zq.monotonicNowNs() catch 0;
-    turn.recorder.appendToolPost(
-        turn.id,
-        turn.nextSequence(),
-        round,
-        call_id_hex,
-        class,
-        status != null,
-        status,
-        @intCast(now_ns),
-    ) catch {
-        turn.closeLatch(.recorder_unavailable);
-        return;
-    };
-    turn.recordSucceeded();
-}
-
-fn recordToolStart(
-    turn: *turn_state.TurnState,
-    round: u32,
-    call_id_hex: []const u8,
-    tool_name: []const u8,
-    now_ns: u64,
-) bool {
-    turn.recorder.appendToolPre(
-        turn.id,
-        turn.nextSequence(),
-        round,
-        call_id_hex,
-        tool_name,
-        @intCast(now_ns),
-    ) catch {
-        turn.closeLatch(.recorder_unavailable);
-        return false;
-    };
-    turn.recordSucceeded();
-    turn.beginTool();
-    return true;
-}
-
-fn finishToolRefusal(
-    rt: *HandlerInstance,
-    turn: *turn_state.TurnState,
-    round: u32,
-    call_id_hex: []const u8,
-    tag: CallToolTag,
-    class: turn_state.OutcomeClass,
-    status: ?u16,
-) !zq.JSValue {
-    switch (tag) {
-        .tool_denied => turn.closeLatch(.tool_denied),
-        .tool_failed => turn.closeLatch(.tool_failed),
-        .budget_exhausted => turn.closeLatch(.budget_exhausted),
-        .deadline_exceeded => turn.closeLatch(.deadline_exceeded),
-        .outcome_unknown => turn.closeLatch(.outcome_unknown),
-        .unknown_tool, .invalid_arguments => {},
-    }
-    appendToolPost(turn, round, call_id_hex, class, status);
-    turn.finishTool();
-    return callToolResultErr(rt, tag);
-}
-
-fn callToolCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
-    if (ctx != rt.ctx or rt.frame_depth != 1) {
-        return callToolResultErr(rt, .invalid_arguments);
-    }
-    const request = rt.frames[0].request;
-    const turn = request.turn orelse return callToolResultErr(rt, .invalid_arguments);
-    const grant = request.tool_grant orelse return callToolResultErr(rt, .invalid_arguments);
-    if (grant.agent == null) return callToolResultErr(rt, .invalid_arguments);
-    const agent: *const contract_runtime.AcceptedAgent = @ptrCast(@alignCast(grant.context));
-
-    if (turn.latch) |tag| return callToolResultErr(rt, publicCallToolLatchTag(tag));
-    const initial_now = zq.monotonicNowNs() catch {
-        turn.closeLatch(.deadline_exceeded);
-        return callToolResultErr(rt, .deadline_exceeded);
-    };
-    if (turn.deadlineExpired(initial_now)) {
-        turn.closeLatch(.deadline_exceeded);
-        return callToolResultErr(rt, .deadline_exceeded);
-    }
-
-    // The budget is checked and spent before the tool name is resolved. This
-    // makes unknown names and invalid arguments bounded attempts.
-    if (turn.toolBudgetExhausted()) {
-        turn.closeLatch(.budget_exhausted);
-        return callToolResultErr(rt, .budget_exhausted);
-    }
-    turn.spendToolCall();
-
-    if (args.len != 3) return callToolResultErr(rt, .invalid_arguments);
-    const call_id = getStringDataCtx(args[0], ctx) orelse return callToolResultErr(rt, .invalid_arguments);
-    const name = getStringDataCtx(args[1], ctx) orelse return callToolResultErr(rt, .invalid_arguments);
-    const args_json = getStringDataCtx(args[2], ctx) orelse return callToolResultErr(rt, .invalid_arguments);
-    const tool = findAgentTool(agent, name) orelse return callToolResultErr(rt, .unknown_tool);
-
-    const round = turn.provider_ordinal orelse turn.round;
-    const identity = toolCallIdentity(turn, round, call_id);
-    if (!turn.registerCallIdentity(identity)) return callToolResultErr(rt, .invalid_arguments);
-
-    if (args_json.len > turn.limits.argument_bytes) {
-        turn.closeLatch(.budget_exhausted);
-        return callToolResultErr(rt, .budget_exhausted);
-    }
-    switch (try contract_runtime.validateToolInput(rt.allocator, tool, args_json)) {
-        .ok => {},
-        .refused => return callToolResultErr(rt, .invalid_arguments),
-    }
-    const subject = request.subject orelse {
-        turn.closeLatch(.tool_denied);
-        return callToolResultErr(rt, .tool_denied);
-    };
-    const tenant = request.tenant orelse {
-        turn.closeLatch(.tool_denied);
-        return callToolResultErr(rt, .tool_denied);
-    };
-    if (tool_auth.checkScope(rt.allocator, tool, args_json, subject, tenant) != .ok) {
-        turn.closeLatch(.tool_denied);
-        return callToolResultErr(rt, .tool_denied);
-    }
-
-    const pre_now = zq.monotonicNowNs() catch {
-        turn.closeLatch(.deadline_exceeded);
-        return callToolResultErr(rt, .deadline_exceeded);
-    };
-    if (turn.deadlineExpired(pre_now)) {
-        turn.closeLatch(.deadline_exceeded);
-        return callToolResultErr(rt, .deadline_exceeded);
-    }
-    const identity_hex = std.fmt.bytesToHex(identity, .lower);
-    if (!recordToolStart(turn, round, &identity_hex, tool.name, pre_now)) {
-        // No pre-record means no tool effect. Keep tool_in_flight false.
-        return callToolResultErr(rt, .outcome_unknown);
-    }
-
-    const invoke_now = zq.monotonicNowNs() catch {
-        return finishToolRefusal(rt, turn, round, &identity_hex, .outcome_unknown, .outcome_unknown, null);
-    };
-    if (turn.deadlineExpired(invoke_now)) {
-        return finishToolRefusal(rt, turn, round, &identity_hex, .outcome_unknown, .outcome_unknown, null);
-    }
-
-    const nested_request = HttpRequestView{
-        .method = tool.method,
-        .url = tool.path,
-        .path = tool.path,
-        .query_params = &.{},
-        .headers = .empty,
-        .body = args_json,
-        .subject = request.subject,
-        .tenant = request.tenant,
-        .strip_authorization = true,
-        .tool_grant = tool_auth.grantFor(tool),
-        .agent_prompt = null,
-        .turn = null,
-        .capability_ceiling = request.capability_ceiling,
-    };
-    rt.enterNested(.{ .request = nested_request, .pending_args = args_json }) catch {
-        return finishToolRefusal(rt, turn, round, &identity_hex, .outcome_unknown, .outcome_unknown, null);
-    };
-
-    const previous_deadline = ctx.deadline_ns;
-    const previous_interrupt = ctx.interrupt_requested.load(.monotonic);
-    if (previous_deadline == 0 or turn.deadline_ns < previous_deadline) ctx.deadline_ns = turn.deadline_ns;
-    const response_result = rt.executeHandlerFrame(nested_request, 0, false);
-    ctx.deadline_ns = previous_deadline;
-    ctx.interrupt_requested.store(previous_interrupt, .monotonic);
-
-    var response = response_result catch {
-        rt.leaveNested() catch {};
-        return finishToolRefusal(rt, turn, round, &identity_hex, .outcome_unknown, .outcome_unknown, null);
-    };
-    defer response.deinit();
-    rt.leaveNested() catch {
-        return finishToolRefusal(rt, turn, round, &identity_hex, .outcome_unknown, .outcome_unknown, null);
-    };
-
-    const completed_now = zq.monotonicNowNs() catch turn.deadline_ns;
-    if (turn.tool_deadline_hit or turn.deadlineExpired(completed_now)) {
-        return finishToolRefusal(rt, turn, round, &identity_hex, .outcome_unknown, .outcome_unknown, response.status);
-    }
-    if (response.status < 200 or response.status >= 300 or response.body.len > turn.limits.result_bytes) {
-        return finishToolRefusal(rt, turn, round, &identity_hex, .tool_failed, .completed, response.status);
-    }
-    switch (try contract_runtime.validateToolOutput(rt.allocator, tool, response.body)) {
-        .ok => {},
-        .refused => return finishToolRefusal(rt, turn, round, &identity_hex, .tool_failed, .completed, response.status),
-    }
-    const parsed = zq.builtins.parseJsonValue(ctx, response.body) catch {
-        return finishToolRefusal(rt, turn, round, &identity_hex, .tool_failed, .completed, response.status);
-    };
-
-    appendToolPost(turn, round, &identity_hex, .completed, response.status);
-    turn.finishTool();
-    return zq.builtins.createResultOk(ctx, parsed);
-}
-
-test "failed tool pre-record starts no invocation and keeps the marker clear" {
-    var recorder = turn_state.Recorder.initMemory(std.testing.allocator, 64 * 1024);
-    defer recorder.deinit();
-    try recorder.failNextMemoryWrite();
-    const limits: zq.handler_contract.AgentLimits = .{
-        .rounds = 1,
-        .tool_calls = 1,
-        .tool_calls_per_round = 1,
-        .argument_bytes = 64,
-        .result_bytes = 64,
-        .turn_deadline_ms = 1000,
-        .provider_request_bytes = 64,
-    };
-    var turn = try turn_state.TurnState.init(
-        std.testing.allocator,
-        [_]u8{0x77} ** 16,
-        limits,
-        std.time.ns_per_s,
-        &recorder,
-    );
-    defer turn.deinit();
-
-    var invocations: u32 = 0;
-    if (recordToolStart(&turn, 0, "a" ** 64, "lookup", 1)) invocations += 1;
-
-    try std.testing.expectEqual(@as(u32, 0), invocations);
-    try std.testing.expect(!turn.tool_in_flight);
-    try std.testing.expectEqual(turn_state.TerminalTag.recorder_unavailable, turn.latch.?);
-    try std.testing.expectEqual(turn_state.TerminalTag.recorder_unavailable, turn.terminalTag(200, false));
-    try std.testing.expectEqual(CallToolTag.outcome_unknown, publicCallToolLatchTag(turn.latch.?));
 }

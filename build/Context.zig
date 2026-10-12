@@ -40,7 +40,6 @@ pub const PrecompileOptions = struct {
     sql_schema_path: ?[]const u8,
     policy_path: ?[]const u8,
     system_path: ?[]const u8,
-    declaration_path: ?[]const u8,
 };
 
 pub fn init(b: *std.Build) Context {
@@ -129,7 +128,6 @@ pub fn init(b: *std.Build) Context {
         .sql_schema_path = b.option([]const u8, "sql-schema", "SQLite schema snapshot (.sqlite) or schema SQL file for zttp:sql validation"),
         .policy_path = b.option([]const u8, "policy", "Capability policy JSON file for precompiled handlers"),
         .system_path = b.option([]const u8, "system", "System definition file for cross-handler contract linking"),
-        .declaration_path = b.option([]const u8, "declaration", "Consumer declaration JSON whose classifications the flow check enforces (M4 T4)"),
     };
 
     // Consumer acceptance kernel. Each function enables runtime safety with

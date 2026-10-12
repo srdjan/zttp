@@ -167,10 +167,6 @@ fn addPrecompileArgs(
         run_precompile.addArg("--policy");
         run_precompile.addArg(policy);
     }
-    if (opts.declaration_path) |dl| {
-        run_precompile.addArg("--declaration");
-        run_precompile.addArg(dl);
-    }
     if (git_commit_sha) |sha| {
         run_precompile.addArg("--git-commit");
         run_precompile.addArg(sha);

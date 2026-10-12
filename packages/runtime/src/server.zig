@@ -22,14 +22,8 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 const HttpHeader = http_types.HttpHeader;
 const QueryParam = http_types.QueryParam;
-const turn_recorder = @import("turn_recorder.zig");
-const turn_state = @import("turn_state.zig");
-const TurnRecorder = turn_recorder.Recorder;
-const TurnState = turn_state.TurnState;
 
 const contract_runtime = @import("contract_runtime.zig");
-const tool_auth_mod = @import("tool_auth.zig");
-const credential_store_mod = @import("credential_store.zig");
 const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
@@ -41,7 +35,6 @@ const durable_store_mod = @import("durable_store.zig");
 const proof_adapter = @import("proof_adapter.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const artifact_graph = @import("artifact_graph.zig");
-const invariant_report = @import("proofs/invariant_report.zig");
 const pcc = @import("zttp_proof_checker");
 const proof_activation = @import("proof_activation.zig");
 const attest_envelope = @import("attest/envelope.zig");
@@ -428,15 +421,6 @@ const ConnectionPool = struct {
         defer request.deinit(req_allocator);
 
         var access_status: u16 = 500;
-        var admitted_turn: ?*TurnState = null;
-        var agent_turn_slot_held = false;
-        var handler_timed_out = false;
-        defer {
-            if (admitted_turn) |turn| {
-                self.server.finishAgentTurn(turn, access_status, handler_timed_out);
-            }
-            if (agent_turn_slot_held) self.server.releaseAgentTurn();
-        }
         const access_started_ms = unixMillisNow();
         defer self.logAccess(request.method, request.path, request.headers.items, access_status, access_started_ms);
 
@@ -457,17 +441,6 @@ const ConnectionPool = struct {
         // so the static-file and well-known paths below can honor it too.
         const is_head = std.mem.eql(u8, request.method, "HEAD");
 
-        // A handler that declares any catalog entry cannot serve any route
-        // without the catalog for this generation. This also covers the dev
-        // install window and a dev lowering failure.
-        if (self.server.catalog_analysis_pending or
-            (self.server.contractHasCatalog() and self.server.activeToolCatalog() == null))
-        {
-            access_status = 503;
-            self.sendStatusSync(fd, 503, "tool catalog is not installed", keep_alive) catch {};
-            return outcome_if_alive;
-        }
-
         // Health and readiness probes - before WebSocket, static, and JS handler
         if (std.mem.eql(u8, request.path, "/_health")) {
             access_status = 200;
@@ -475,13 +448,6 @@ const ConnectionPool = struct {
             return outcome_if_alive;
         }
         if (std.mem.eql(u8, request.path, "/_readiness")) {
-            if (self.server.turn_recorder) |*recorder| {
-                if (!recorder.isHealthy()) {
-                    access_status = 503;
-                    self.sendStatusSync(fd, 503, "turn recorder unavailable", keep_alive) catch {};
-                    return outcome_if_alive;
-                }
-            }
             const pool_full = if (self.server.pool) |*pool|
                 pool.getInUse() >= pool.max_size
             else
@@ -546,141 +512,6 @@ const ConnectionPool = struct {
             }
         }
 
-        // Tool routes (M4 T3): the body is checked against the catalog's input
-        // schema and byte bound here, before the proof cache and before any JS
-        // value exists. A deployment checks only the catalog its certificate
-        // promoted; `zttp dev` checks the producer's with the same code.
-        var tool_route: ?*const contract_runtime.AcceptedTool = null;
-        var agent_route: ?*const contract_runtime.AcceptedAgent = null;
-        var agent_prompt: ?[]const u8 = null;
-        // The verified identity of a tool or agent request. Its arena lives in
-        // the request allocator, so it is released with the request.
-        var request_claims: ?tool_auth_mod.Claims = null;
-        defer if (request_claims) |*claims| claims.deinit();
-        if (self.server.activeToolCatalog()) |catalog| {
-            if (catalog.match(request.method, request.path)) |tool| {
-                tool_route = tool;
-
-                // Identity first (M4 T5): before input validation and before
-                // any JS value exists. A server with no key serves no tool.
-                const auth = if (self.server.tool_auth) |*loaded| loaded else {
-                    access_status = 503;
-                    self.sendStatusSync(fd, 503, "tool handler requires auth: no key is loaded", keep_alive) catch {};
-                    return outcome_if_alive;
-                };
-                const now_s = @divFloor(unixMillisNow(), std.time.ms_per_s);
-                const identity = tool_auth_mod.verifyRequest(req_allocator, auth, request.headers.items, now_s) catch {
-                    access_status = 500;
-                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
-                    return .close;
-                };
-                switch (identity) {
-                    .ok => |claims| request_claims = claims,
-                    .refused => |refusal| {
-                        var message_buf: [64]u8 = undefined;
-                        const message = std.fmt.bufPrint(&message_buf, "tool auth refused: {s}", .{refusal.name()}) catch "tool auth refused";
-                        access_status = 401;
-                        self.sendStatusSync(fd, 401, message, keep_alive) catch {};
-                        return outcome_if_alive;
-                    },
-                }
-
-                const verdict = contract_runtime.validateToolInput(req_allocator, tool, request.body orelse "") catch {
-                    access_status = 500;
-                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
-                    return .close;
-                };
-                switch (verdict) {
-                    .ok => {},
-                    .refused => |refused| {
-                        const status: u16 = if (refused.reason == .too_large) 413 else 400;
-                        var message_buf: [128]u8 = undefined;
-                        const message = std.fmt.bufPrint(&message_buf, "tool input refused: {s} at byte {d}", .{
-                            @tagName(refused.reason), refused.offset,
-                        }) catch "tool input refused";
-                        access_status = status;
-                        self.sendStatusSync(fd, status, message, keep_alive) catch {};
-                        return outcome_if_alive;
-                    },
-                }
-
-                // Scope (M4 T5, AE3): a field the entry binds must name the
-                // verified caller, compared by the platform before the handler.
-                const claims = request_claims.?;
-                switch (tool_auth_mod.checkScope(req_allocator, tool, request.body orelse "", claims.subject, claims.tenant)) {
-                    .ok => {},
-                    .tenant, .subject => |field| {
-                        var message_buf: [64]u8 = undefined;
-                        const message = std.fmt.bufPrint(&message_buf, "tool scope refused: {s}", .{@tagName(field)}) catch "tool scope refused";
-                        access_status = 403;
-                        self.sendStatusSync(fd, 403, message, keep_alive) catch {};
-                        return outcome_if_alive;
-                    },
-                }
-            } else if (catalog.matchAgent(request.method, request.path)) |agent| {
-                agent_route = agent;
-
-                // Agent identity precedes the body bound and schema check, as
-                // it does for tools. A server with no key serves no agent.
-                const auth = if (self.server.tool_auth) |*loaded| loaded else {
-                    access_status = 503;
-                    self.sendStatusSync(fd, 503, "tool handler requires auth: no key is loaded", keep_alive) catch {};
-                    return outcome_if_alive;
-                };
-                const now_s = @divFloor(unixMillisNow(), std.time.ms_per_s);
-                const identity = tool_auth_mod.verifyRequest(req_allocator, auth, request.headers.items, now_s) catch {
-                    access_status = 500;
-                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
-                    return .close;
-                };
-                switch (identity) {
-                    .ok => |claims| request_claims = claims,
-                    .refused => |refusal| {
-                        var message_buf: [64]u8 = undefined;
-                        const message = std.fmt.bufPrint(&message_buf, "tool auth refused: {s}", .{refusal.name()}) catch "tool auth refused";
-                        access_status = 401;
-                        self.sendStatusSync(fd, 401, message, keep_alive) catch {};
-                        return outcome_if_alive;
-                    },
-                }
-
-                const verdict = contract_runtime.validateAgentInput(req_allocator, agent, request.body orelse "") catch {
-                    access_status = 500;
-                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
-                    return .close;
-                };
-                switch (verdict) {
-                    .ok => {},
-                    .refused => |refused| {
-                        const status: u16 = if (refused.reason == .too_large) 413 else 400;
-                        var message_buf: [128]u8 = undefined;
-                        const message = std.fmt.bufPrint(&message_buf, "agent prompt refused: {s} at byte {d}", .{
-                            @tagName(refused.reason), refused.offset,
-                        }) catch "agent prompt refused";
-                        access_status = status;
-                        self.sendStatusSync(fd, status, message, keep_alive) catch {};
-                        return outcome_if_alive;
-                    },
-                }
-                agent_prompt = contract_runtime.admittedAgentPrompt(req_allocator, request.body orelse "") catch {
-                    access_status = 500;
-                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
-                    return .close;
-                };
-                const turn = self.server.admitAgentTurn(req_allocator, agent) catch |err| {
-                    access_status = 503;
-                    const message = if (err == error.AgentTurnCapacityExhausted)
-                        "agent turn capacity exhausted"
-                    else
-                        "agent turn recorder unavailable";
-                    self.sendStatusSync(fd, 503, message, keep_alive) catch {};
-                    return outcome_if_alive;
-                };
-                admitted_turn = turn;
-                agent_turn_slot_held = true;
-            }
-        }
-
         // Proof-driven response memoization: serve cached response without entering JS
         var proof_cache_key: ?u64 = null;
         if (self.server.proof_cache) |*cache| {
@@ -710,23 +541,11 @@ const ConnectionPool = struct {
                 .query_params = request.query_params,
                 .headers = request.headers,
                 .body = request.body,
-                .subject = if (request_claims) |claims| claims.subject else null,
-                .tenant = if (request_claims) |claims| claims.tenant else null,
-                .strip_authorization = tool_route != null or agent_route != null,
-                .tool_grant = if (tool_route) |tool|
-                    tool_auth_mod.grantFor(tool)
-                else if (agent_route) |agent|
-                    tool_auth_mod.agentGrantFor(agent)
-                else
-                    null,
-                .agent_prompt = agent_prompt,
-                .turn = admitted_turn,
-                // Every request, tool or not, runs under the generation's
-                // accepted capability ceiling (M4 T5b), when it has one.
+                // Every request runs under the generation's accepted
+                // capability ceiling, when the generation has one.
                 .capability_ceiling = self.server.activeCapabilityCeiling(),
             }, &fault_location) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else if (err == error.HandlerNotImplemented) 501 else 500;
-                handler_timed_out = err == error.RequestTimeout;
                 var fault_buf: [256]u8 = undefined;
                 var fault_loc_buf: [320]u8 = undefined;
                 const message: []const u8 = blk: {
@@ -764,32 +583,6 @@ const ConnectionPool = struct {
                 return .close;
             };
             defer handle.deinit();
-
-            // A tool's 2xx body must match its output schema (B8.4). Checked
-            // before the proof cache stores it, so a refused body is never
-            // cached. A non-2xx answer is the handler's own error and passes.
-            if (tool_route) |tool| {
-                const status = handle.response.status;
-                if (status >= 200 and status < 300) {
-                    const verdict = contract_runtime.validateToolOutput(req_allocator, tool, handle.response.body) catch {
-                        access_status = 500;
-                        self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
-                        return .close;
-                    };
-                    switch (verdict) {
-                        .ok => {},
-                        .refused => |refused| {
-                            var message_buf: [128]u8 = undefined;
-                            const message = std.fmt.bufPrint(&message_buf, "tool output refused: {s} at byte {d}", .{
-                                @tagName(refused.reason), refused.offset,
-                            }) catch "tool output refused";
-                            access_status = 500;
-                            self.sendErrorSync(fd, 500, message) catch {};
-                            return .close;
-                        },
-                    }
-                }
-            }
 
             // Store response in proof cache on miss
             if (proof_cache_key) |key| {
@@ -1232,18 +1025,6 @@ pub const ServerConfig = struct {
     /// Number of runtime instances in pool (0 = auto)
     pool_size: usize = 0,
 
-    /// Directory for the process-owned agent turn JSONL recorder. Required
-    /// when the accepted catalog serves an agent route.
-    agent_turn_recorder_dir: ?[]const u8 = null,
-
-    /// Maximum bytes the agent turn recorder may commit in this process.
-    /// Required and non-zero when the accepted catalog serves an agent route.
-    agent_turn_recorder_max_bytes: ?usize = null,
-
-    /// Maximum agent turns admitted concurrently. Required and non-zero when
-    /// the accepted catalog serves an agent route.
-    max_agent_turns: ?u32 = null,
-
     /// Log requests to stdout
     log_requests: bool = true,
 
@@ -1319,30 +1100,6 @@ pub const ServerConfig = struct {
 pub const HandlerSource = execution_spec.HandlerSource;
 pub const AppendedPayload = execution_spec.AppendedPayload;
 
-fn validateInvariantRuntimeTopology(config: RuntimeConfig) !void {
-    if (config.invariant_section != null and config.system_config_path != null) {
-        return error.UnsupportedInvariantSystem;
-    }
-}
-
-/// Validate the process settings required before an agent generation can
-/// serve. Source-mode callers use this before `Server.init`; accepted embedded
-/// catalogs use it in `Server.start`.
-pub fn validateAgentTurnSettings(config: ServerConfig) !void {
-    const directory = config.agent_turn_recorder_dir orelse
-        return error.AgentTurnRecorderDirectoryRequired;
-    if (directory.len == 0) return error.AgentTurnRecorderDirectoryRequired;
-
-    const ceiling = config.agent_turn_recorder_max_bytes orelse
-        return error.AgentTurnRecorderCeilingRequired;
-    if (ceiling == 0) return error.AgentTurnRecorderCeilingInvalid;
-
-    const cap = config.max_agent_turns orelse return error.MaxAgentTurnsRequired;
-    if (cap == 0) return error.MaxAgentTurnsInvalid;
-    const pool_size = if (config.pool_size == 0) defaultPoolSize() else config.pool_size;
-    if (pool_size <= 1 or @as(usize, cap) >= pool_size - 1) return error.MaxAgentTurnsInvalid;
-}
-
 // ============================================================================
 // Server Implementation
 // ============================================================================
@@ -1408,35 +1165,12 @@ pub const Server = struct {
     /// kernel says otherwise, and null again after any live swap: the swapped
     /// handler is not the artifact the certificate described.
     proof_checked: ?contract_runtime.ProofCheckedContract = null,
-    /// The tool catalog `zttp dev` validates tool routes against: the producer's,
-    /// lowered with the same code as an accepted one and claiming nothing (M4 T3,
-    /// decision Q4). Null for a deployment, which validates only the catalog its
-    /// certificate promoted. Replaced with the contract, under `contract_lock`.
-    dev_tool_catalog: ?contract_runtime.AcceptedCatalog = null,
-    /// Contract facts kept independently of catalog installation. Dev sets
-    /// them before lowering so every route refuses during the install window
-    /// and after a lowering failure.
-    contract_catalog_required: bool = false,
-    contract_agent_required: bool = false,
-    /// Dev starts fail-closed until the first source analysis establishes
-    /// whether this handler declares a catalog.
-    catalog_analysis_pending: bool = false,
     /// The capability ceiling `zttp dev` checks module calls against: the one
     /// the producer's contract reports, lowered with the same code as an
     /// accepted one and claiming nothing (M4 T5b). Null for a deployment,
     /// which checks only the ceiling its certificate promoted. Replaced with
     /// the contract, under `contract_lock`.
     dev_capability_ceiling: ?contract_runtime.AcceptedCeiling = null,
-    /// The HS256 key and tenant claim tool requests are verified against (M4
-    /// T5), loaded in `start`. A server whose active tool catalog is non-null
-    /// refuses to start without it; a request that matches a tool while it is
-    /// null is refused, never served unverified.
-    tool_auth: ?tool_auth_mod.KeyState = null,
-    /// The credential values for outbound requests (M4 T6), loaded in `start`
-    /// from the variables the references name. A server with a reference
-    /// whose variable is unset or empty refuses to start. Values are zeroed
-    /// on release and never logged.
-    credential_store: ?credential_store_mod.Store = null,
     /// Guards `contract`/`proof_cache` against the live-reload watcher thread
     /// freeing+rebuilding them (`updateContract`) while worker threads read
     /// them mid-request. Only engaged when `reload_active` is set, so the
@@ -1467,11 +1201,6 @@ pub const Server = struct {
     /// Process-owned in-memory actor queue for opt-in `zttp:queue` delivery.
     /// Deinitialised after handler pools so no runtime can hold a queue pointer.
     actor_queue: ?actor_queue.ActorQueue = null,
-    /// Process-owned turn recorder. It is initialized once in `start` and is
-    /// not replaced when a live reload installs a new handler generation.
-    turn_recorder: ?TurnRecorder = null,
-    active_agent_turns: std.atomic.Value(u32) = .init(0),
-    refused_agent_turns: std.atomic.Value(u64) = .init(0),
     const Self = @This();
     const IoBackend = Io.Threaded;
 
@@ -1530,9 +1259,6 @@ pub const Server = struct {
             .conn_pool = null,
             .contract = null,
             .proof_cache = null,
-            .contract_catalog_required = false,
-            .contract_agent_required = false,
-            .catalog_analysis_pending = false,
             .security_logger = null,
             .attestation_headers = null,
             .well_known_doc = null,
@@ -1544,7 +1270,6 @@ pub const Server = struct {
         if (self.conn_pool) |cp| cp.deinit();
 
         if (self.pool) |*p| p.deinit();
-        if (self.turn_recorder) |*recorder| recorder.deinit();
         // Pool drained: no runtime can still be writing to the incident log fd.
         if (self.incident_log_fd) |fd| std.Io.Threaded.closeFd(fd);
         // After the main pool: in-flight orchestrators (which dispatch into the
@@ -1554,8 +1279,6 @@ pub const Server = struct {
         if (self.proof_cache) |*pc| pc.deinit();
         self.clearProofChecked();
         if (self.contract) |*c| c.deinit();
-        if (self.tool_auth) |*auth| auth.deinit();
-        if (self.credential_store) |*store| store.deinit();
         if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
@@ -1583,155 +1306,6 @@ pub const Server = struct {
     /// Drop the promotion and release the accepted tool catalog it owns.
     /// The catalog tool routes are validated against: the accepted one when a
     /// certificate promoted this generation, else the dev one, else none.
-    pub fn activeToolCatalog(self: *const Self) ?*const contract_runtime.AcceptedCatalog {
-        if (self.proof_checked) |*promoted| {
-            if (promoted.tool_catalog) |*catalog| return catalog;
-        }
-        if (self.dev_tool_catalog) |*catalog| return catalog;
-        return null;
-    }
-
-    fn activeCatalogHasAgent(self: *const Self) bool {
-        const catalog = self.activeToolCatalog() orelse return false;
-        for (catalog.entries) |*entry| {
-            switch (entry.kind) {
-                .agent => return true,
-                .tool => {},
-            }
-        }
-        return false;
-    }
-
-    fn validateAgentTurnConfig(self: *const Self) !void {
-        if (!self.activeCatalogHasAgent()) return;
-        try validateAgentTurnSettings(self.config);
-    }
-
-    fn initAgentTurnRecorder(self: *Self) !void {
-        try self.validateAgentTurnConfig();
-        if (self.turn_recorder != null) return;
-        const directory = self.config.agent_turn_recorder_dir orelse return;
-        const ceiling = self.config.agent_turn_recorder_max_bytes orelse return;
-        if (directory.len == 0 or ceiling == 0) return;
-        self.turn_recorder = try TurnRecorder.initFile(self.allocator, directory, @intCast(ceiling));
-    }
-
-    fn tryAcquireAgentTurn(self: *Self) bool {
-        const cap = self.config.max_agent_turns orelse {
-            _ = self.refused_agent_turns.fetchAdd(1, .monotonic);
-            return false;
-        };
-        const pool_size = if (self.config.pool_size == 0) defaultPoolSize() else self.config.pool_size;
-        if (cap == 0 or pool_size <= 1 or @as(usize, cap) >= pool_size - 1) {
-            _ = self.refused_agent_turns.fetchAdd(1, .monotonic);
-            return false;
-        }
-        var current = self.active_agent_turns.load(.acquire);
-        while (current < cap) {
-            if (self.active_agent_turns.cmpxchgWeak(current, current + 1, .acq_rel, .acquire)) |actual| {
-                current = actual;
-            } else {
-                return true;
-            }
-        }
-        _ = self.refused_agent_turns.fetchAdd(1, .monotonic);
-        return false;
-    }
-
-    fn releaseAgentTurn(self: *Self) void {
-        const previous = self.active_agent_turns.fetchSub(1, .acq_rel);
-        std.debug.assert(previous > 0);
-    }
-
-    fn activeRuntimePolicyDigest(self: *Self, allocator: std.mem.Allocator) ![32]u8 {
-        const pool = if (self.pool) |*value| value else return error.ServerNotStarted;
-        pool.runtime_init_mutex.lock();
-        defer pool.runtime_init_mutex.unlock();
-        const serialized = try self_extract.serializePolicy(allocator, &pool.policy_generation.policy);
-        defer allocator.free(serialized);
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(serialized, &digest, .{});
-        return digest;
-    }
-
-    fn admitAgentTurn(
-        self: *Self,
-        allocator: std.mem.Allocator,
-        agent: *const contract_runtime.AcceptedAgent,
-    ) !*TurnState {
-        if (!self.tryAcquireAgentTurn()) return error.AgentTurnCapacityExhausted;
-        errdefer self.releaseAgentTurn();
-
-        const recorder = if (self.turn_recorder) |*value| value else return error.AgentTurnRecorderUnavailable;
-        if (!recorder.isHealthy()) return error.AgentTurnRecorderUnavailable;
-
-        var id: turn_recorder.TurnId = undefined;
-        try self.io_backend.io().randomSecure(&id);
-        const now_ns = try engine.monotonicNowNs();
-        const deadline_delta = @as(u64, agent.limits.turn_deadline_ms) * std.time.ns_per_ms;
-        const deadline_ns = std.math.add(u64, now_ns, deadline_delta) catch std.math.maxInt(u64);
-        const turn = try allocator.create(TurnState);
-        turn.* = try TurnState.init(allocator, id, agent.limits, deadline_ns, recorder);
-
-        const catalog = self.activeToolCatalog() orelse return error.AgentTurnRecorderUnavailable;
-        const catalog_digest = pcc.tool_catalog.digest(catalog.bytes);
-        const catalog_hex = std.fmt.bytesToHex(catalog_digest, .lower);
-        const policy_digest = try self.activeRuntimePolicyDigest(allocator);
-        const policy_hex = std.fmt.bytesToHex(policy_digest, .lower);
-        const wall_ms = unixMillisNow();
-        const wall_ns = @as(i128, wall_ms) * std.time.ns_per_ms;
-        try recorder.admit(.{
-            .turn_id = id,
-            .sequence = 0,
-            .kind = .admit,
-            .monotonic_ns = @intCast(now_ns),
-            .agent_name = agent.name,
-            .catalog_digest = &catalog_hex,
-            .runtime_policy_hash = &policy_hex,
-            .wall_time_unix_ns = wall_ns,
-        });
-        return turn;
-    }
-
-    fn finishAgentTurn(self: *Self, turn: *TurnState, status: u16, handler_timed_out: bool) void {
-        const recorder = if (self.turn_recorder) |*value| value else return;
-        const now_ns = engine.monotonicNowNs() catch 0;
-        recorder.terminal(.{
-            .turn_id = turn.id,
-            .sequence = turn.nextSequence(),
-            .kind = .terminal,
-            .terminal_tag = turn.terminalTag(status, handler_timed_out),
-            .monotonic_ns = @intCast(now_ns),
-        }) catch |err| {
-            std.log.err("agent turn terminal record failed: {}", .{err});
-        };
-    }
-
-    /// Whether the current handler contract declares a tool or agent entry.
-    /// The request path uses this independently of catalog installation.
-    pub fn contractHasCatalog(self: *const Self) bool {
-        if (self.contract_catalog_required) return true;
-        return if (self.contract) |*contract| contract.view().tools.len != 0 else false;
-    }
-
-    pub fn contractHasAgent(self: *const Self) bool {
-        if (self.contract_agent_required) return true;
-        const contract = if (self.contract) |*contract| contract else return false;
-        for (contract.view().tools) |entry| if (entry.agent != null) return true;
-        return false;
-    }
-
-    /// Install contract catalog facts before dev lowering. The live-reload
-    /// caller already marked this server reload-active, so request readers use
-    /// the shared side of this lock.
-    pub fn setCatalogRequirement(self: *Self, has_catalog: bool, has_agent: bool) void {
-        self.contract_lock.lock();
-        defer self.contract_lock.unlock();
-        self.contract_catalog_required = has_catalog;
-        self.contract_agent_required = has_agent;
-        self.catalog_analysis_pending = false;
-    }
-
     /// The capability ceiling every handler call of this generation runs
     /// under: the accepted one when a certificate promoted this generation,
     /// else the dev one, else none. The view borrows from the generation, so
@@ -1748,80 +1322,9 @@ pub const Server = struct {
         return null;
     }
 
-    /// Where this server reads the identity source names. A deployed artifact
-    /// reads them from its own contract, which the executable graph binds, and
-    /// ignores anything else; dev and `serve` read zttp.json's `auth`.
-    fn toolAuthNames(self: *const Self) ?tool_auth_mod.ToolAuthNames {
-        return switch (self.config.handler) {
-            .appended_payload => if (self.contract) |*contract| contract.view().tool_auth else null,
-            else => self.config.runtime_config.tool_auth,
-        };
-    }
-
-    /// Load the tool key from the environment (M4 T5 design note, section 4).
-    /// A server whose active tool catalog is non-null refuses to start without
-    /// `auth` or with its variable unset or empty. One without a catalog loads
-    /// the key when it can, so a dev catalog installed later finds it, and
-    /// otherwise starts: a tool request it then meets is refused. The key is
-    /// never logged.
-    pub fn loadToolAuth(self: *Self) !void {
-        if (self.tool_auth) |*auth| auth.deinit();
-        self.tool_auth = null;
-        const names = self.toolAuthNames();
-        self.tool_auth = tool_auth_mod.load(self.allocator, names) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.ToolAuthNotConfigured, error.ToolAuthKeyMissing => {
-                if (self.activeToolCatalog() == null) return;
-                if (!builtin.is_test) switch (err) {
-                    error.ToolAuthNotConfigured => std.log.err(
-                        "tool handler requires auth: zttp.json has no \"auth\" object naming the key variable and tenant claim; refusing to serve",
-                        .{},
-                    ),
-                    else => std.log.err(
-                        "tool handler requires auth: environment variable {s} is unset or empty; refusing to serve",
-                        .{names.?.key_env},
-                    ),
-                };
-                return err;
-            },
-        };
-    }
-
-    /// Where this server reads the credential references. A deployed artifact
-    /// reads them from its own contract, which the executable graph binds, and
-    /// ignores anything else; dev and `serve` read zttp.json's `credentials`.
-    fn credentialRefs(self: *const Self) []const credential_store_mod.CredentialRef {
-        return switch (self.config.handler) {
-            .appended_payload => if (self.contract) |*contract| contract.view().credentials else &.{},
-            else => self.config.runtime_config.credentials,
-        };
-    }
-
-    /// Load every credential value from the environment (M4 T6 design note,
-    /// section 3). A reference whose variable is unset or empty refuses the
-    /// start in every mode: a credential the operator configured and did not
-    /// supply is a missing secret binding, not an optional one. The message
-    /// names the reference and its variable, never a value.
-    pub fn loadCredentials(self: *Self) !void {
-        if (self.credential_store) |*store| store.deinit();
-        self.credential_store = null;
-        switch (try credential_store_mod.load(self.allocator, self.credentialRefs(), credential_store_mod.processEnv())) {
-            .ok => |store| self.credential_store = store,
-            .missing => |ref| {
-                if (!builtin.is_test) std.log.err(
-                    "credential '{s}' needs environment variable {s}, which is unset or empty; refusing to serve",
-                    .{ ref.name, ref.env },
-                );
-                return error.CredentialValueMissing;
-            },
-        }
-    }
-
     fn clearProofChecked(self: *Self) void {
         if (self.proof_checked) |*promoted| promoted.deinit();
         self.proof_checked = null;
-        if (self.dev_tool_catalog) |*catalog| catalog.deinit();
-        self.dev_tool_catalog = null;
         if (self.dev_capability_ceiling) |*ceiling| ceiling.deinit();
         self.dev_capability_ceiling = null;
     }
@@ -1831,28 +1334,9 @@ pub const Server = struct {
         return promoted.guards.required > 0 or promoted.invariants.configured;
     }
 
-    /// Whether the accepted generation depends on invariant coverage. A live
-    /// reload candidate has no invariant certificate and cannot replace it.
-    pub fn generationHasInvariant(self: *const Self) bool {
-        const promoted = self.proof_checked orelse return false;
-        return promoted.invariants.configured;
-    }
-
     /// Replace the runtime contract and reconfigure the proof cache.
     /// Called by live reload after a handler swap with a new contract.
     pub fn updateContract(self: *Self, new_contract: ValidatedRuntimeContract) void {
-        self.updateContractWithTools(new_contract, null, null);
-    }
-
-    /// Swap the contract and, in dev, the producer's tool catalog and capability
-    /// ceiling together, so no request sees the new contract without the
-    /// catalog and the ceiling that belong to it.
-    pub fn updateContractWithTools(
-        self: *Self,
-        new_contract: ValidatedRuntimeContract,
-        dev_tool_catalog: ?contract_runtime.AcceptedCatalog,
-        dev_capability_ceiling: ?contract_runtime.AcceptedCeiling,
-    ) void {
         // Exclusive: wait for any in-flight request readers to drain before
         // freeing+rebuilding the contract/proof_cache they may be reading.
         self.contract_lock.lock();
@@ -1860,21 +1344,11 @@ pub const Server = struct {
 
         if (self.contract) |*c| c.deinit();
         self.contract = new_contract;
-        self.contract_catalog_required = self.contract.?.view().tools.len != 0;
-        self.contract_agent_required = false;
-        for (self.contract.?.view().tools) |entry| {
-            if (entry.agent != null) {
-                self.contract_agent_required = true;
-                break;
-            }
-        }
         // The certificate described the artifact that was replaced. A live swap
         // therefore drops the promotion rather than carrying it across: the new
         // handler has not been checked by anything, and the proof cache,
         // unbounded reuse, and the durable-workflow guarantees all go with it.
         self.clearProofChecked();
-        self.dev_tool_catalog = dev_tool_catalog;
-        self.dev_capability_ceiling = dev_capability_ceiling;
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
         }
@@ -1911,8 +1385,6 @@ pub const Server = struct {
             c.deinit();
             self.contract = null;
         }
-        self.contract_catalog_required = false;
-        self.contract_agent_required = false;
         self.clearProofChecked();
         if (self.pool) |*pool| {
             pool.setDurableWorkflowProperties(.{});
@@ -2350,12 +1822,6 @@ pub const Server = struct {
     }
 
     pub fn start(self: *Self) !void {
-        // A system manifest loads independent handler source into child pools.
-        // Those executables are outside the accepted artifact graph and cannot
-        // inherit its invariant authority.
-        try validateInvariantRuntimeTopology(self.config.runtime_config);
-        try @import("runtime_config.zig").validateLedgerOutputPaths(self.allocator, self.config.runtime_config, self.config.security_log_path);
-
         try initIoBackend(&self.io_backend, self.allocator);
         self.evented_ready = true;
         const io = self.io_backend.io();
@@ -2418,14 +1884,6 @@ pub const Server = struct {
                 }
                 return err;
             };
-            self.contract_catalog_required = self.contract.?.view().tools.len != 0;
-            self.contract_agent_required = false;
-            for (self.contract.?.view().tools) |entry| {
-                if (entry.agent != null) {
-                    self.contract_agent_required = true;
-                    break;
-                }
-            }
         }
 
         // Self-extract artifacts carry the enforcement policy as section 4.
@@ -2440,31 +1898,11 @@ pub const Server = struct {
         // handler that is already warm when somebody reads the log line.
         try self.acceptEmbeddedCertificate();
 
-        // The recorder is process-owned and opened once. A live reload may
-        // replace the handler generation, but it must not replace the sink.
-        // Development supplies settings before the first source analysis, so
-        // the same initialization also prepares a later agent generation.
-        try self.initAgentTurnRecorder();
-
-        // Tool identity (M4 T5): a handler serving tools needs the key before
-        // it serves anything. Checked after acceptance, which is what installs
-        // a deployment's catalog.
-        try self.loadToolAuth();
-
-        // Credential values (M4 T6): read before any request can need one.
-        try self.loadCredentials();
-
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         // Wire the server-level request timeout into the runtime config so the
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
-        pool_rt_config.contract_has_catalog = self.contractHasCatalog();
-        pool_rt_config.contract_has_agent = self.contractHasAgent();
-        // The store lives as long as the server, which outlives the pool.
-        pool_rt_config.credential_store = if (self.credential_store) |*store| store else null;
-        pool_rt_config.invariant_coverage_accepted = self.config.runtime_config.invariant_section != null and
-            self.proof_checked != null;
         // Result and optional safety let the interpreter skip checks a handler
         // is proven not to need. That is only sound on a proof-checked
         // contract; an integrity-bound one has made a claim nobody checked.
@@ -2537,29 +1975,6 @@ pub const Server = struct {
             self.embedded_bytecode,
             self.runtime_dep_bytecodes,
         );
-        // Pool construction prewarms at least one runtime. A configured
-        // invariant cannot reach this point unless the ledger store opened,
-        // validated its baseline, and installed the accepted generation.
-        if (self.proof_checked) |*contract| {
-            if (contract.invariants.configured) {
-                contract.invariants.runtime_readiness = .ready;
-                if (!builtin.is_test) {
-                    // The same renderer the offline proof report uses. This
-                    // line printed its own counts before, so a vacuous
-                    // artifact logged "(0 write, 1 read)" and left the reader
-                    // to notice: the fact was there, the word was not. Going
-                    // through `invariant_report` means write applicability
-                    // leads here too, and a sentence that changes there
-                    // changes in both places at once. It sits behind
-                    // `!builtin.is_test` and carries no assertion; what the
-                    // renderer produces is asserted beside the renderer.
-                    var summary_buffer: [invariant_report.max_summary_bytes]u8 = undefined;
-                    var summary_writer = std.Io.Writer.fixed(&summary_buffer);
-                    invariant_report.writeSummary(&summary_writer, contract.invariants) catch {};
-                    std.log.info("Invariant: {s}", .{summary_writer.buffered()});
-                }
-            }
-        }
         if (pool_rt_config.debug_panic_path) |path| {
             self.pool.?.debug_panic_path = path;
         }
@@ -3235,88 +2650,6 @@ test "server preserves either source or artifact policy-index requirement" {
     try std.testing.expect(requiresRuntimePolicyIndex(true, true));
 }
 
-test "configured invariant refuses an unchecked system topology" {
-    try std.testing.expectError(error.UnsupportedInvariantSystem, validateInvariantRuntimeTopology(.{
-        .invariant_section = "canonical-spec",
-        .system_config_path = "system.json",
-        .invariant_coverage_accepted = true,
-    }));
-    try validateInvariantRuntimeTopology(.{ .system_config_path = "system.json" });
-    try validateInvariantRuntimeTopology(.{ .invariant_section = "canonical-spec" });
-}
-
-test "appended invariant refuses log and SQL collisions before opening files" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
-    defer allocator.free(dir);
-    const ledger = try std.fs.path.join(allocator, &.{ dir, "ledger.sqlite" });
-    defer allocator.free(ledger);
-    for ([_][]const u8{ "ledger.sqlite", "ledger.sqlite-wal", "ledger.sqlite-shm", "ledger.sqlite-journal", "LEDGER.SQLITE", "LEDGER.SQLITE-WAL" }) |name| {
-        const output = try std.fmt.allocPrint(allocator, "{s}/./{s}", .{ dir, name });
-        defer allocator.free(output);
-        for (0..4) |kind| {
-            var config: ServerConfig = .{
-                .handler = .{ .appended_payload = .{ .bytecode = "", .dep_bytecodes = &.{} } },
-                .runtime_config = .{ .ledger_path = ledger, .invariant_section = "spec" },
-            };
-            switch (kind) {
-                0 => config.security_log_path = output,
-                1 => config.runtime_config.trace_file_path = output,
-                2 => config.runtime_config.incident_log_path = output,
-                3 => config.runtime_config.sqlite_path = output,
-                else => unreachable,
-            }
-            var server = try Server.init(allocator, config);
-            defer server.deinit();
-            try std.testing.expectError(error.ProtectedLedgerPath, server.start());
-            try std.testing.expect(!server.evented_ready);
-            try std.testing.expect(server.security_logger == null);
-            try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(std.testing.io, output, .{}));
-        }
-    }
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "ledger.sqlite", .data = "existing store" });
-    var server = try Server.init(allocator, .{
-        .handler = .{ .appended_payload = .{ .bytecode = "", .dep_bytecodes = &.{} } },
-        .runtime_config = .{ .ledger_path = ledger, .invariant_section = "spec" },
-        .security_log_path = ledger,
-    });
-    defer server.deinit();
-    try std.testing.expectError(error.ProtectedLedgerPath, server.start());
-    const unchanged = try engine.readFile(allocator, ledger, 1024);
-    defer allocator.free(unchanged);
-    try std.testing.expectEqualStrings("existing store", unchanged);
-}
-
-test "appended invariant refuses the durable idempotency output directory" {
-    const allocator = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", allocator);
-    defer allocator.free(dir);
-    try tmp.dir.createDir(std.testing.io, "idempotency", .default_dir);
-    const relative = try std.fmt.allocPrint(allocator, "idempotency/idem-{x}.json", .{std.hash.Fnv1a_64.hash("request-key")});
-    defer allocator.free(relative);
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = relative, .data = "existing protected store" });
-    const ledger = try std.fs.path.join(allocator, &.{ dir, relative });
-    defer allocator.free(ledger);
-    var server = try Server.init(allocator, .{
-        .handler = .{ .appended_payload = .{ .bytecode = "", .dep_bytecodes = &.{} } },
-        .runtime_config = .{
-            .ledger_path = ledger,
-            .invariant_section = "spec",
-            .durable_oplog_dir = dir,
-        },
-    });
-    defer server.deinit();
-    try std.testing.expectError(error.ProtectedLedgerPath, server.start());
-    try std.testing.expect(!server.evented_ready);
-    const unchanged = try engine.readFile(allocator, ledger, 1024);
-    defer allocator.free(unchanged);
-    try std.testing.expectEqualStrings("existing protected store", unchanged);
-}
-
 fn logContractSummary(contract: *const ValidatedRuntimeContract) void {
     const inner = contract.view();
     const p = &inner.properties;
@@ -3849,7 +3182,6 @@ test "threaded health and readiness probes return over socket accept path" {
             server.contract = null;
             server.well_known_doc = null;
             server.pool = null;
-            server.turn_recorder = null;
 
             var pool = ConnectionPool{
                 .workers = &[_]std.Thread{},
@@ -4757,7 +4089,6 @@ test "self-extract runtime policy binding rejects a widened policy" {
         server.start(),
     );
 }
-
 test "self-extract runtime policy binding rejects an unpinned receipt" {
     const allocator = std.testing.allocator;
     const policy = engine.RuntimePolicy{
@@ -4811,1239 +4142,4 @@ test "attested appended payload requires a parsed runtime policy hash" {
         error.RuntimePolicySectionHashMissing,
         server.start(),
     );
-}
-
-// ---------------------------------------------------------------------------
-// Tool routes on the request path (M4 T3 U5, M4 T5 U3)
-// ---------------------------------------------------------------------------
-
-const tool_test_input_schema =
-    \\{"type":"object","additionalProperties":false,"required":["id"],"properties":{"id":{"type":"string","maxLength":8}}}
-;
-const tool_test_output_schema =
-    \\{"type":"object","additionalProperties":false,"required":["ok"],"properties":{"ok":{"type":"boolean"}}}
-;
-
-/// The environment variable the tool tests name as `auth.keyEnv`, and the key
-/// they export under it.
-const tool_test_key_env = "ZTTP_SERVER_TOOL_TEST_KEY";
-const tool_test_key = "server-tool-test-key-0123456789";
-const tool_test_tenant_claim = "tenant";
-
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-
-test "a server refuses to start when a credential's variable is unset, and loads it once set" {
-    const allocator = std.testing.allocator;
-    const env_name = "ZTTP_SERVER_CREDENTIAL_TEST_KEY";
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator,
-        \\{"weather": {"env": "ZTTP_SERVER_CREDENTIAL_TEST_KEY", "endpoint": "https://api.weather.example",
-        \\  "header": "authorization", "scheme": "Bearer", "methods": ["GET"], "paths": ["/v1"]}}
-    , .{});
-    defer parsed.deinit();
-    const refs = (try credential_store_mod.credential_ref.parseConfig(allocator, parsed.value)).ok;
-    defer credential_store_mod.credential_ref.freeAll(allocator, refs);
-
-    var srv = try Server.init(allocator, .{
-        .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" },
-        .log_requests = false,
-        .runtime_config = .{ .credentials = refs },
-    });
-    defer srv.deinit();
-
-    _ = unsetenv(env_name);
-    try std.testing.expectError(error.CredentialValueMissing, srv.loadCredentials());
-    try std.testing.expect(srv.credential_store == null);
-
-    _ = setenv(env_name, "", 1);
-    try std.testing.expectError(error.CredentialValueMissing, srv.loadCredentials());
-
-    _ = setenv(env_name, "server-credential-test-value", 1);
-    defer _ = unsetenv(env_name);
-    try srv.loadCredentials();
-    try std.testing.expectEqualStrings("server-credential-test-value", srv.credential_store.?.value("weather").?);
-}
-
-/// One tool entry for a test catalog. `exports` is the grant, sorted by module
-/// then name as the catalog stores it.
-const ToolTestSpec = struct {
-    input_schema: []const u8 = tool_test_input_schema,
-    output_schema: []const u8 = tool_test_output_schema,
-    scope_tenant: ?[]const u8 = null,
-    exports: []const [2][]const u8 = &.{},
-    /// The credential grant, as (name, endpoint) pairs sorted by name.
-    credentials: []const [2][]const u8 = &.{},
-    /// The pooled runtimes' config.
-    pool_config: RuntimeConfig = .{},
-};
-
-fn toolTestCatalogFor(allocator: std.mem.Allocator, spec: ToolTestSpec) !contract_runtime.AcceptedCatalog {
-    var entry = contract_runtime.ToolEntry{
-        .name = &.{},
-        .route = &.{},
-        .description = &.{},
-        .input_schema_name = &.{},
-        .input_schema_json = &.{},
-        .output_schema_name = &.{},
-        .output_schema_json = &.{},
-        .max_input_bytes = 64,
-    };
-    defer entry.deinit(allocator);
-    entry.name = try allocator.dupe(u8, "lookup");
-    entry.route = try allocator.dupe(u8, "POST /tools/lookup");
-    entry.description = try allocator.dupe(u8, "Look up one order.");
-    entry.input_schema_name = try allocator.dupe(u8, "In");
-    entry.input_schema_json = try allocator.dupe(u8, spec.input_schema);
-    entry.output_schema_name = try allocator.dupe(u8, "Out");
-    entry.output_schema_json = try allocator.dupe(u8, spec.output_schema);
-    if (spec.scope_tenant) |field| entry.scope_tenant = try allocator.dupe(u8, field);
-    for (spec.exports) |pair| {
-        const module = try allocator.dupe(u8, pair[0]);
-        errdefer allocator.free(module);
-        const name = try allocator.dupe(u8, pair[1]);
-        errdefer allocator.free(name);
-        try entry.reachable_exports.append(allocator, .{ .module = module, .name = name });
-    }
-    for (spec.credentials) |pair| {
-        const name = try allocator.dupe(u8, pair[0]);
-        errdefer allocator.free(name);
-        const endpoint = try allocator.dupe(u8, pair[1]);
-        errdefer allocator.free(endpoint);
-        try entry.credentials.append(allocator, .{ .name = name, .endpoint = endpoint });
-    }
-    const catalog = try contract_runtime.lowerProducerToolCatalog(allocator, &.{entry});
-    return catalog orelse error.TestExpectedCatalog;
-}
-
-fn toolTestCatalog(allocator: std.mem.Allocator) !contract_runtime.AcceptedCatalog {
-    return toolTestCatalogFor(allocator, .{});
-}
-
-/// Serve one raw request through the real request path, with the tool
-/// catalog `spec` describes installed as the dev catalog and the test key
-/// loaded the way `start` loads it, and return the start of the response.
-fn serveToolRequestWith(spec: ToolTestSpec, handler_code: []const u8, raw_request: []const u8, out: []u8) ![]const u8 {
-    const allocator = std.testing.allocator;
-    var srv = try Server.init(allocator, .{
-        .handler = .{ .inline_code = handler_code },
-        .log_requests = false,
-        .pool_size = 1,
-        .max_body_size = 4096,
-        .runtime_config = .{ .tool_auth = .{ .key_env = tool_test_key_env, .tenant_claim = tool_test_tenant_claim } },
-    });
-    defer srv.deinit();
-    srv.pool = try HandlerPool.init(allocator, spec.pool_config, handler_code, "<tool-test>", 1, 0);
-    srv.dev_tool_catalog = try toolTestCatalogFor(allocator, spec);
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    try srv.loadToolAuth();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    var pool = ConnectionPool{
-        .workers = &[_]std.Thread{},
-        .queue = ConnectionPool.BoundedQueue.init(),
-        .running = std.atomic.Value(bool).init(true),
-        .server = &srv,
-        .allocator = allocator,
-    };
-
-    const fds = try createUnixSocketPair();
-    defer std.Io.Threaded.closeFd(fds[0]);
-    defer std.Io.Threaded.closeFd(fds[1]);
-    try writeAllFd(fds[1], raw_request);
-
-    var pending: ConnectionPool.PendingRequestBytes = .{};
-    defer pending.deinit(pool.allocator);
-    _ = try pool.handleSingleRequestSync(fds[0], 0, arena.allocator(), &pending);
-
-    const n = try std.posix.read(fds[1], out);
-    return out[0..n];
-}
-
-fn serveToolRequest(handler_code: []const u8, raw_request: []const u8, out: []u8) ![]const u8 {
-    return serveToolRequestWith(.{}, handler_code, raw_request, out);
-}
-
-/// Builds tool requests and HS256 tokens for the tests. Everything it returns
-/// lives until `deinit`.
-const ToolRequests = struct {
-    arena: std.heap.ArenaAllocator,
-
-    fn init() ToolRequests {
-        return .{ .arena = std.heap.ArenaAllocator.init(std.testing.allocator) };
-    }
-
-    fn deinit(self: *ToolRequests) void {
-        self.arena.deinit();
-    }
-
-    fn b64(self: *ToolRequests, bytes: []const u8) ![]const u8 {
-        const encoder = std.base64.url_safe_no_pad.Encoder;
-        const out = try self.arena.allocator().alloc(u8, encoder.calcSize(bytes.len));
-        return encoder.encode(out, bytes);
-    }
-
-    /// A compact JWS over `header_json` and `payload_json`, signed with `key`.
-    fn tokenWith(self: *ToolRequests, header_json: []const u8, payload_json: []const u8, key: []const u8) ![]const u8 {
-        const a = self.arena.allocator();
-        const signing_input = try std.fmt.allocPrint(a, "{s}.{s}", .{ try self.b64(header_json), try self.b64(payload_json) });
-        var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
-        std.crypto.auth.hmac.sha2.HmacSha256.create(&mac, signing_input, key);
-        return std.fmt.allocPrint(a, "{s}.{s}", .{ signing_input, try self.b64(&mac) });
-    }
-
-    fn token(self: *ToolRequests, payload_json: []const u8) ![]const u8 {
-        return self.tokenWith("{\"alg\":\"HS256\",\"typ\":\"JWT\"}", payload_json, tool_test_key);
-    }
-
-    fn bearer(self: *ToolRequests, payload_json: []const u8) ![]const u8 {
-        return std.fmt.allocPrint(self.arena.allocator(), "Bearer {s}", .{try self.token(payload_json)});
-    }
-
-    /// A POST to the test tool route with `authorization` as the header value,
-    /// or no header when it is null.
-    fn postWith(self: *ToolRequests, authorization: ?[]const u8, body: []const u8) ![]const u8 {
-        const a = self.arena.allocator();
-        const auth_line = if (authorization) |value|
-            try std.fmt.allocPrint(a, "Authorization: {s}\r\n", .{value})
-        else
-            "";
-        return std.fmt.allocPrint(a, "POST /tools/lookup HTTP/1.1\r\nHost: t\r\n{s}Content-Length: {d}\r\n\r\n{s}", .{ auth_line, body.len, body });
-    }
-
-    /// A POST carrying a valid token for subject `user-1` in tenant `acme`.
-    fn post(self: *ToolRequests, body: []const u8) ![]const u8 {
-        return self.postWith(try self.bearer(valid_claims), body);
-    }
-};
-
-const valid_claims = "{\"sub\":\"user-1\",\"tenant\":\"acme\",\"exp\":4102444800}";
-
-const tool_ok_handler = "function handler(req) { return Response.json({ ok: true }); }";
-
-fn expectResponse(response: []const u8, status: []const u8, needle: []const u8) !void {
-    if (!std.mem.startsWith(u8, response, status) or std.mem.indexOf(u8, response, needle) == null) {
-        std.debug.print("expected {s} with {s}, got:\n{s}\n", .{ status, needle, response });
-        return error.TestUnexpectedResponse;
-    }
-}
-
-test "a valid tool input reaches the handler and its matching output is sent" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var buf: [1024]u8 = undefined;
-    const response = try serveToolRequest(tool_ok_handler, try reqs.post("{\"id\":\"a1\"}"), &buf);
-    try expectResponse(response, "HTTP/1.1 200", "{\"ok\":true}");
-}
-
-test "tool inputs the schema refuses are answered before the handler runs" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    // The handler would answer 200 to anything; every case below must be
-    // refused by the gate, never reach it.
-    const cases = [_]struct { request: []const u8, status: []const u8, reason: []const u8 }{
-        .{ .request = try reqs.post("{\"id\":\"a\",\"id\":\"b\"}"), .status = "HTTP/1.1 400", .reason = "duplicate_key" },
-        .{ .request = try reqs.post("{\"id\":\"a\",\"extra\":1}"), .status = "HTTP/1.1 400", .reason = "unknown_field" },
-        .{ .request = try reqs.post("{}"), .status = "HTTP/1.1 400", .reason = "missing_required" },
-        .{ .request = try reqs.post("{\"id\":\"123456789\"}"), .status = "HTTP/1.1 400", .reason = "string_too_long" },
-        .{ .request = try reqs.post("{\"id\":"), .status = "HTTP/1.1 400", .reason = "invalid_json" },
-        .{ .request = try reqs.post(""), .status = "HTTP/1.1 400", .reason = "invalid_json" },
-        .{ .request = try reqs.post("{\"id\":\"a\",                                                                  \"id\":\"b\"}"), .status = "HTTP/1.1 413", .reason = "too_large" },
-    };
-    for (cases) |case| {
-        var buf: [1024]u8 = undefined;
-        const response = try serveToolRequest(tool_ok_handler, case.request, &buf);
-        try expectResponse(response, case.status, case.reason);
-    }
-}
-
-test "a tool's 2xx body that breaks its output schema is refused with 500" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var buf: [1024]u8 = undefined;
-    const response = try serveToolRequest(
-        "function handler(req) { return Response.json({ ok: \"yes\" }); }",
-        try reqs.post("{\"id\":\"a1\"}"),
-        &buf,
-    );
-    try expectResponse(response, "HTTP/1.1 500", "tool output refused: type_mismatch");
-}
-
-/// A loopback upstream for one request: it records the request's
-/// `authorization` header and answers 200 with `body`.
-const CredentialTestUpstream = struct {
-    io_backend: std.Io.Threaded,
-    listener: std.Io.net.Server,
-    body: []const u8,
-    thread: ?std.Thread = null,
-    authorization_buf: [256]u8 = undefined,
-    authorization_len: usize = 0,
-    connections: usize = 0,
-    requests: usize = 0,
-
-    fn init(body: []const u8) !CredentialTestUpstream {
-        var io_backend = std.Io.Threaded.init(std.testing.allocator, .{ .environ = .empty });
-        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-        const listener = try address.listen(io_backend.io(), .{ .reuse_address = true });
-        return .{ .io_backend = io_backend, .listener = listener, .body = body };
-    }
-
-    fn port(self: *const CredentialTestUpstream) u16 {
-        return self.listener.socket.address.getPort();
-    }
-
-    fn start(self: *CredentialTestUpstream) !void {
-        self.thread = try std.Thread.spawn(.{}, run, .{self});
-    }
-
-    /// Send `/__stop`, which the upstream does not count, and join. A fetch
-    /// the runtime refused sends nothing, and the thread would otherwise wait
-    /// in `accept` forever; after a real request the stop sits unread in the
-    /// backlog.
-    fn join(self: *CredentialTestUpstream) void {
-        const thread = self.thread orelse return;
-        self.sendStop() catch {};
-        thread.join();
-        self.thread = null;
-    }
-
-    fn sendStop(self: *CredentialTestUpstream) !void {
-        const io = self.io_backend.io();
-        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port());
-        var stream = try address.connect(io, .{ .mode = .stream });
-        defer stream.close(io);
-        var out_buf: [64]u8 = undefined;
-        var writer = stream.writer(io, &out_buf);
-        try writer.interface.writeAll("GET /__stop HTTP/1.1\r\n\r\n");
-        try writer.interface.flush();
-    }
-
-    fn deinit(self: *CredentialTestUpstream) void {
-        self.join();
-        self.listener.deinit(self.io_backend.io());
-        self.io_backend.deinit();
-    }
-
-    fn authorization(self: *const CredentialTestUpstream) []const u8 {
-        return self.authorization_buf[0..self.authorization_len];
-    }
-
-    fn run(self: *CredentialTestUpstream) void {
-        self.serveOne() catch {};
-    }
-
-    fn serveOne(self: *CredentialTestUpstream) !void {
-        const io = self.io_backend.io();
-        var stream = try self.listener.accept(io);
-        defer stream.close(io);
-        self.connections += 1;
-        var head: [4096]u8 = undefined;
-        var len: usize = 0;
-        while (std.mem.indexOf(u8, head[0..len], "\r\n\r\n") == null and len < head.len) {
-            var vecs: [1][]u8 = .{head[len..]};
-            const n = try io.vtable.netRead(io.userdata, stream.socket.handle, &vecs);
-            if (n == 0) break;
-            len += n;
-        }
-        if (std.mem.startsWith(u8, head[0..len], "GET /__stop ")) {
-            self.connections -= 1;
-            return;
-        }
-        self.requests += 1;
-        var lines = std.mem.splitSequence(u8, head[0..len], "\r\n");
-        while (lines.next()) |line| {
-            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
-            if (!std.ascii.eqlIgnoreCase(line[0..colon], "authorization")) continue;
-            const value = std.mem.trim(u8, line[colon + 1 ..], " ");
-            const n = @min(value.len, self.authorization_buf.len);
-            @memcpy(self.authorization_buf[0..n], value[0..n]);
-            self.authorization_len = n;
-        }
-        var out_buf: [512]u8 = undefined;
-        var writer = stream.writer(io, &out_buf);
-        try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ self.body.len, self.body });
-        try writer.interface.flush();
-    }
-};
-
-const credential_test_env = "ZTTP_SERVER_TOOL_CREDENTIAL_KEY";
-const credential_test_value = "server-tool-credential-marker";
-const credential_output_schema =
-    \\{"type":"object","additionalProperties":false,"required":["body"],"properties":{"body":{"type":"string","maxLength":16}}}
-;
-
-/// Serve one tool request whose handler fetches `upstream` with the
-/// credential `weather`, which the tool is granted, and returns the upstream
-/// body as its output.
-fn serveCredentialedTool(upstream: *CredentialTestUpstream, out: []u8) ![]const u8 {
-    const allocator = std.testing.allocator;
-    var endpoint_buf: [64]u8 = undefined;
-    const endpoint = try std.fmt.bufPrint(&endpoint_buf, "http://127.0.0.1:{d}", .{upstream.port()});
-    var paths = [_][]const u8{"/v1"};
-    const refs = [_]credential_store_mod.CredentialRef{.{
-        .name = "weather",
-        .env = credential_test_env,
-        .endpoint = endpoint,
-        .header = "authorization",
-        .scheme = "Bearer",
-        .methods = std.EnumSet(credential_store_mod.credential_ref.Method).initOne(.GET),
-        .paths = &paths,
-    }};
-    _ = setenv(credential_test_env, credential_test_value, 1);
-    defer _ = unsetenv(credential_test_env);
-    var store = (try credential_store_mod.load(allocator, &refs, credential_store_mod.processEnv())).ok;
-    defer store.deinit();
-
-    var handler_buf: [512]u8 = undefined;
-    const handler_code = try std.fmt.bufPrint(&handler_buf,
-        \\import {{ fetch }} from "zttp:fetch";
-        \\function handler(req) {{
-        \\  const res = fetch("{s}/v1/forecast", {{ credential: "weather" }});
-        \\  return Response.json({{ body: res.body }});
-        \\}}
-    , .{endpoint});
-
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    try upstream.start();
-    const response = try serveToolRequestWith(.{
-        .output_schema = credential_output_schema,
-        .exports = &.{.{ "zttp:fetch", "fetch" }},
-        .credentials = &.{.{ "weather", endpoint }},
-        .pool_config = .{
-            .outbound_http_enabled = true,
-            .credential_store = &store,
-            .dev_capability_policy = .{ .egress_scopes = (engine.endpoint.ScopeSet{}).with(.loopback) },
-        },
-    }, handler_code, try reqs.post("{\"id\":\"a1\"}"), out);
-    upstream.join();
-    return response;
-}
-
-test "a granted tool's fetch carries its credential through the server request path" {
-    var upstream = try CredentialTestUpstream.init("sunny");
-    defer upstream.deinit();
-    var buf: [1024]u8 = undefined;
-    const response = try serveCredentialedTool(&upstream, &buf);
-    try expectResponse(response, "HTTP/1.1 200", "{\"body\":\"sunny\"}");
-    try std.testing.expectEqual(@as(usize, 1), upstream.requests);
-    try std.testing.expectEqualStrings("Bearer " ++ credential_test_value, upstream.authorization());
-    try std.testing.expect(std.mem.indexOf(u8, response, credential_test_value) == null);
-}
-
-test "a credentialed tool whose 2xx body is too large for its output schema is refused (B8.3)" {
-    var upstream = try CredentialTestUpstream.init("0123456789abcdef0123456789abcdef");
-    defer upstream.deinit();
-    var buf: [1024]u8 = undefined;
-    const response = try serveCredentialedTool(&upstream, &buf);
-    try expectResponse(response, "HTTP/1.1 500", "tool output refused: string_too_long");
-    try std.testing.expectEqual(@as(usize, 1), upstream.requests);
-}
-
-test "a tool reads its gate-validated input with toolInput on the server request path" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    const handler_code =
-        \\import { toolInput } from "zttp:tool";
-        \\function handler(req) {
-        \\  const r = toolInput("In", req);
-        \\  if (!r.ok) return Response.json({ ok: false });
-        \\  return Response.json({ ok: r.value.id === "a1" });
-        \\}
-    ;
-    var buf: [1024]u8 = undefined;
-    const response = try serveToolRequestWith(.{ .exports = &.{.{ "zttp:tool", "toolInput" }} }, handler_code, try reqs.post("{\"id\":\"a1\"}"), &buf);
-    try expectResponse(response, "HTTP/1.1 200", "{\"ok\":true}");
-}
-
-test "a tool's non-2xx answer and a non-tool route pass the gate untouched" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var buf: [1024]u8 = undefined;
-    const not_found = try serveToolRequest(
-        "function handler(req) { return Response.json({ error: \"none\" }, { status: 404 }); }",
-        try reqs.post("{\"id\":\"a1\"}"),
-        &buf,
-    );
-    try std.testing.expect(std.mem.startsWith(u8, not_found, "HTTP/1.1 404"));
-
-    // A route outside the catalog needs no token.
-    var buf2: [1024]u8 = undefined;
-    const other = try serveToolRequest(tool_ok_handler, "GET /health-check HTTP/1.1\r\nHost: t\r\n\r\n", &buf2);
-    try std.testing.expect(std.mem.startsWith(u8, other, "HTTP/1.1 200"));
-}
-
-const identity_output_schema =
-    \\{"type":"object","additionalProperties":false,"required":["s","t","a"],"properties":{"s":{"type":"string","maxLength":64},"t":{"type":"string","maxLength":64},"a":{"type":"string","maxLength":64}}}
-;
-
-test "a verified tool request carries req.subject and req.tenant and no authorization header" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var buf: [1024]u8 = undefined;
-    const response = try serveToolRequestWith(
-        .{ .output_schema = identity_output_schema },
-        "function handler(req) { return Response.json({ s: req.subject, t: req.tenant, a: req.headers.authorization ?? \"absent\" }); }",
-        try reqs.post("{\"id\":\"a1\"}"),
-        &buf,
-    );
-    try expectResponse(response, "HTTP/1.1 200", "\"s\":\"user-1\"");
-    try expectResponse(response, "HTTP/1.1 200", "\"t\":\"acme\"");
-    try expectResponse(response, "HTTP/1.1 200", "\"a\":\"absent\"");
-}
-
-/// One 401 case: the Authorization value (null for none) and the reason the
-/// response must name.
-const AuthRefusalCase = struct { authorization: ?[]const u8, reason: []const u8 };
-
-fn authRefusalCases(reqs: *ToolRequests) ![]const AuthRefusalCase {
-    const hs256 = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
-    const cases = [_]AuthRefusalCase{
-        .{ .authorization = null, .reason = "missing_token" },
-        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Basic {s}", .{try reqs.token(valid_claims)}), .reason = "missing_token" },
-        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Bearer  {s}", .{try reqs.token(valid_claims)}), .reason = "missing_token" },
-        .{ .authorization = "Bearer not-a-token", .reason = "malformed" },
-        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Bearer {s}", .{try reqs.tokenWith("{\"alg\":\"none\",\"typ\":\"JWT\"}", valid_claims, tool_test_key)}), .reason = "unsupported_alg" },
-        .{ .authorization = try std.fmt.allocPrint(reqs.arena.allocator(), "Bearer {s}", .{try reqs.tokenWith(hs256, valid_claims, "some-other-key")}), .reason = "bad_signature" },
-        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"tenant\":\"acme\",\"exp\":1000}"), .reason = "expired" },
-        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"tenant\":\"acme\",\"nbf\":4102444800}"), .reason = "not_yet_valid" },
-        .{ .authorization = try reqs.bearer("{\"tenant\":\"acme\",\"exp\":4102444800}"), .reason = "missing_sub" },
-        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"exp\":4102444800}"), .reason = "missing_tenant" },
-        .{ .authorization = try reqs.bearer("{\"sub\":7,\"tenant\":\"acme\",\"exp\":4102444800}"), .reason = "claim_not_string" },
-        .{ .authorization = try reqs.bearer("{\"sub\":\"user-1\",\"tenant\":\"acme\",\"exp\":\"soon\"}"), .reason = "invalid_time_claim" },
-    };
-    return reqs.arena.allocator().dupe(AuthRefusalCase, &cases);
-}
-
-test "every tool auth refusal is a 401 naming its reason, before the handler runs" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    for (try authRefusalCases(&reqs)) |case| {
-        var buf: [1024]u8 = undefined;
-        const response = try serveToolRequest(tool_ok_handler, try reqs.postWith(case.authorization, "{\"id\":\"a1\"}"), &buf);
-        var needle_buf: [64]u8 = undefined;
-        const needle = try std.fmt.bufPrint(&needle_buf, "tool auth refused: {s}", .{case.reason});
-        try expectResponse(response, "HTTP/1.1 401", needle);
-    }
-}
-
-test "the tool auth refusal census observes every reason through the request path" {
-    // Floor, then census: every verifier refusal and `missing_token` must
-    // have a case above, and each case's reason must be observed on the wire.
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    const cases = try authRefusalCases(&reqs);
-    var observed = std.EnumSet(tool_auth_mod.VerifyRefusal).initEmpty();
-    var missing_token_observed = false;
-    for (cases) |case| {
-        var buf: [1024]u8 = undefined;
-        const response = try serveToolRequest(tool_ok_handler, try reqs.postWith(case.authorization, "{\"id\":\"a1\"}"), &buf);
-        const marker = "tool auth refused: ";
-        const at = std.mem.indexOf(u8, response, marker) orelse return error.TestNoRefusal;
-        const rest = response[at + marker.len ..];
-        const end = std.mem.indexOfAny(u8, rest, "\r\n") orelse rest.len;
-        const reason = rest[0..end];
-        try std.testing.expectEqualStrings(case.reason, reason);
-        if (std.mem.eql(u8, reason, "missing_token")) {
-            missing_token_observed = true;
-        } else {
-            const tag = std.meta.stringToEnum(tool_auth_mod.VerifyRefusal, reason) orelse return error.TestUnknownReason;
-            observed.insert(tag);
-        }
-    }
-    try std.testing.expect(missing_token_observed);
-    for (std.enums.values(tool_auth_mod.VerifyRefusal)) |tag| {
-        if (!observed.contains(tag)) {
-            std.debug.print("refusal {s} was never observed through the request path\n", .{@tagName(tag)});
-            return error.TestRefusalNotCensused;
-        }
-    }
-}
-
-const scoped_input_schema =
-    \\{"type":"object","additionalProperties":false,"required":["tenant_id"],"properties":{"tenant_id":{"type":"string","maxLength":16}}}
-;
-
-test "a scoped tool refuses another tenant's identifier with 403 and serves its own (AE3)" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    const spec = ToolTestSpec{ .input_schema = scoped_input_schema, .scope_tenant = "tenant_id" };
-
-    var buf: [1024]u8 = undefined;
-    const other = try serveToolRequestWith(spec, tool_ok_handler, try reqs.post("{\"tenant_id\":\"globex\"}"), &buf);
-    try expectResponse(other, "HTTP/1.1 403", "tool scope refused: tenant");
-
-    var buf2: [1024]u8 = undefined;
-    const own = try serveToolRequestWith(spec, tool_ok_handler, try reqs.post("{\"tenant_id\":\"acme\"}"), &buf2);
-    try expectResponse(own, "HTTP/1.1 200", "{\"ok\":true}");
-}
-
-const grant_probe_handler =
-    \\import { sha256 } from "zttp:crypto";
-    \\function handler(req) {
-    \\  const digest = sha256("probe");
-    \\  return Response.json({ ok: digest.length > 0 });
-    \\}
-;
-
-test "a tool handler cannot call an export outside its tool's grant (B8.7)" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-
-    // The grant lacks zttp:crypto.sha256: the call is refused and the request
-    // fails the way a capability denial fails it.
-    var buf: [1024]u8 = undefined;
-    const denied = try serveToolRequestWith(.{}, grant_probe_handler, try reqs.post("{\"id\":\"a1\"}"), &buf);
-    try std.testing.expect(std.mem.startsWith(u8, denied, "HTTP/1.1 500"));
-
-    // The same handler with the export in the grant succeeds.
-    var buf2: [1024]u8 = undefined;
-    const granted = try serveToolRequestWith(
-        .{ .exports = &.{.{ "zttp:crypto", "sha256" }} },
-        grant_probe_handler,
-        try reqs.post("{\"id\":\"a1\"}"),
-        &buf2,
-    );
-    try expectResponse(granted, "HTTP/1.1 200", "{\"ok\":true}");
-}
-
-test "a tool handler's routerMatch dispatch runs under any grant" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var buf: [1024]u8 = undefined;
-    const response = try serveToolRequestWith(
-        .{},
-        \\import { routerMatch } from "zttp:router";
-        \\function lookup(req) { return Response.json({ ok: true }); }
-        \\const routes = { "POST /tools/lookup": lookup };
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
-        \\  return Response.json({ ok: false }, { status: 404 });
-        \\}
-    ,
-        try reqs.post("{\"id\":\"a1\"}"),
-        &buf,
-    );
-    try expectResponse(response, "HTTP/1.1 200", "{\"ok\":true}");
-}
-
-/// Serve one plain GET through the real request path with `ceiling`, lowered
-/// from `ZTDCL1` bytes with the code a deployment uses, installed as the
-/// generation's capability ceiling, and return the start of the response.
-fn serveUnderCeiling(ceiling_bytes: ?[]const u8, handler_code: []const u8, out: []u8) ![]const u8 {
-    const allocator = std.testing.allocator;
-    var srv = try Server.init(allocator, .{
-        .handler = .{ .inline_code = handler_code },
-        .log_requests = false,
-        .pool_size = 1,
-        .max_body_size = 4096,
-    });
-    defer srv.deinit();
-    srv.pool = try HandlerPool.init(allocator, .{}, handler_code, "<ceiling-test>", 1, 0);
-    if (ceiling_bytes) |bytes| {
-        srv.dev_capability_ceiling = (try contract_runtime.lowerAcceptedCeiling(allocator, bytes)) orelse
-            return error.TestExpectedCeiling;
-    }
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    var pool = ConnectionPool{
-        .workers = &[_]std.Thread{},
-        .queue = ConnectionPool.BoundedQueue.init(),
-        .running = std.atomic.Value(bool).init(true),
-        .server = &srv,
-        .allocator = allocator,
-    };
-
-    const fds = try createUnixSocketPair();
-    defer std.Io.Threaded.closeFd(fds[0]);
-    defer std.Io.Threaded.closeFd(fds[1]);
-    try writeAllFd(fds[1], "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-
-    var pending: ConnectionPool.PendingRequestBytes = .{};
-    defer pending.deinit(pool.allocator);
-    _ = try pool.handleSingleRequestSync(fds[0], 0, arena.allocator(), &pending);
-
-    const n = try std.posix.read(fds[1], out);
-    return out[0..n];
-}
-
-test "a request under a ceiling that excludes the module its handler calls fails, and succeeds with no ceiling" {
-    const handler_code =
-        \\import { uuid } from "zttp:id";
-        \\function handler(req) {
-        \\  return Response.text(String(uuid().length));
-        \\}
-    ;
-    // A `boundary` ceiling that excludes `zttp:id` by name. The profile admits
-    // `random` and `clock`, so only the exclusion can refuse the call.
-    var decl_buf: [256]u8 = undefined;
-    var w = pcc.declaration.test_support.Writer{ .buf = &decl_buf };
-    pcc.declaration.test_support.writeDeclaration(&w, &.{}, .{ .profile = 0, .exclude = &.{"zttp:id"} });
-
-    var denied_buf: [1024]u8 = undefined;
-    const denied = try serveUnderCeiling(w.bytes(), handler_code, &denied_buf);
-    try std.testing.expect(std.mem.startsWith(u8, denied, "HTTP/1.1 500"));
-
-    // A `boundary` ceiling that does not exclude it: the call runs.
-    var open_buf: [256]u8 = undefined;
-    var open = pcc.declaration.test_support.Writer{ .buf = &open_buf };
-    pcc.declaration.test_support.writeDeclaration(&open, &.{}, .{ .profile = 0 });
-    var inside_buf: [1024]u8 = undefined;
-    try expectResponse(try serveUnderCeiling(open.bytes(), handler_code, &inside_buf), "HTTP/1.1 200", "36");
-
-    // No ceiling at all: the call runs.
-    var none_buf: [1024]u8 = undefined;
-    try expectResponse(try serveUnderCeiling(null, handler_code, &none_buf), "HTTP/1.1 200", "36");
-}
-
-fn startToolServer(runtime_config: engine.RuntimeConfig) !void {
-    const allocator = std.testing.allocator;
-    var srv = try Server.init(allocator, .{
-        .handler = .{ .inline_code = tool_ok_handler },
-        .log_requests = false,
-        .pool_size = 1,
-        .runtime_config = runtime_config,
-    });
-    defer srv.deinit();
-    srv.dev_tool_catalog = try toolTestCatalog(allocator);
-    try srv.start();
-}
-
-test "a tool handler refuses to start without auth or without its key" {
-    try std.testing.expectError(error.ToolAuthNotConfigured, startToolServer(.{}));
-
-    const unset_env = "ZTTP_SERVER_TOOL_TEST_UNSET_KEY";
-    _ = unsetenv(unset_env);
-    try std.testing.expectError(
-        error.ToolAuthKeyMissing,
-        startToolServer(.{ .tool_auth = .{ .key_env = unset_env, .tenant_claim = tool_test_tenant_claim } }),
-    );
-}
-
-const AgentTestSpec = struct {
-    provider_endpoint: []const u8 = "https://provider.example:443",
-    allow_provider_fetch: bool = false,
-    pool_config: RuntimeConfig = .{},
-};
-
-// Agent admission uses the same request driver and token builder as tools.
-fn agentTestServerFor(handler_code: []const u8, install_catalog: bool, spec: AgentTestSpec) !Server {
-    const allocator = std.testing.allocator;
-    var names = [_][]const u8{"lookup"};
-    // The catalog decoder requires exports in strictly increasing (module,
-    // name) order, so the optional provider fetch comes first and is skipped
-    // by offset when the spec does not allow it.
-    var exports = [_]engine.ToolExport{
-        .{ .module = "zttp:fetch", .name = "fetch" },
-        .{ .module = "zttp:tool", .name = "agentPrompt" },
-        .{ .module = "zttp:tool", .name = "toolInput" },
-    };
-    const export_start: usize = if (spec.allow_provider_fetch) 0 else 1;
-    const export_count: usize = exports.len - export_start;
-    var entries = [_]contract_runtime.ToolEntry{
-        .{
-            .name = "assistant",
-            .route = "POST /agent",
-            .description = "Answer.",
-            .input_schema_name = "",
-            .input_schema_json = "",
-            .output_schema_name = "",
-            .output_schema_json = "",
-            .max_input_bytes = 64,
-            .reachable_exports = .{ .items = exports[export_start..], .capacity = export_count },
-            .agent = .{
-                .tools = .{ .items = &names, .capacity = names.len },
-                .provider_endpoint = spec.provider_endpoint,
-                .provider_credential = "provider",
-                .limits = .{ .rounds = 4, .tool_calls = 8, .tool_calls_per_round = 4, .argument_bytes = 4096, .result_bytes = 16384, .turn_deadline_ms = 20000, .provider_request_bytes = 32768 },
-            },
-        },
-        .{
-            .name = "lookup",
-            .route = "POST /tools/lookup",
-            .description = "Look up.",
-            .input_schema_name = "In",
-            .input_schema_json = tool_test_input_schema,
-            .output_schema_name = "Out",
-            .output_schema_json = tool_test_output_schema,
-            .max_input_bytes = 64,
-        },
-    };
-    // These fixture entries borrow literals. Both runtime projections copy
-    // their fields, so no borrowed entry is deinitialized as owned data.
-    var hc = engine.emptyContract("<agent-test>");
-    hc.source_identity = engine.sourceIdentityForPath("handler.ts");
-    hc.tools = .{ .items = &entries, .capacity = entries.len };
-    var srv = try Server.init(allocator, .{
-        .handler = .{ .inline_code = handler_code },
-        .log_requests = false,
-        .pool_size = 3,
-        .max_agent_turns = 1,
-        .max_body_size = 4096,
-        .runtime_config = .{ .tool_auth = .{ .key_env = tool_test_key_env, .tenant_claim = tool_test_tenant_claim } },
-    });
-    errdefer srv.deinit();
-    srv.contract = try contract_runtime.validate(try contract_runtime.fromHandlerContract(allocator, &hc), .{});
-    var pool_config = spec.pool_config;
-    pool_config.contract_has_catalog = true;
-    pool_config.contract_has_agent = true;
-    srv.pool = try HandlerPool.init(allocator, pool_config, handler_code, "<agent-test>", 3, 0);
-    srv.turn_recorder = TurnRecorder.initMemory(allocator, 64 * 1024);
-    try initIoBackend(&srv.io_backend, allocator);
-    srv.evented_ready = true;
-    if (install_catalog) srv.dev_tool_catalog = try contract_runtime.lowerProducerToolCatalog(allocator, &entries);
-    return srv;
-}
-
-fn agentTestServer(handler_code: []const u8, install_catalog: bool) !Server {
-    return agentTestServerFor(handler_code, install_catalog, .{});
-}
-
-fn serveAgentTestRequest(srv: *Server, raw_request: []const u8, out: []u8) ![]const u8 {
-    const allocator = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    var pool = ConnectionPool{
-        .workers = &[_]std.Thread{},
-        .queue = ConnectionPool.BoundedQueue.init(),
-        .running = std.atomic.Value(bool).init(true),
-        .server = srv,
-        .allocator = allocator,
-    };
-    const fds = try createUnixSocketPair();
-    defer std.Io.Threaded.closeFd(fds[0]);
-    defer std.Io.Threaded.closeFd(fds[1]);
-    try writeAllFd(fds[1], raw_request);
-    var pending: ConnectionPool.PendingRequestBytes = .{};
-    defer pending.deinit(allocator);
-    _ = try pool.handleSingleRequestSync(fds[0], 0, arena.allocator(), &pending);
-    const n = try std.posix.read(fds[1], out);
-    return out[0..n];
-}
-
-fn agentTestPost(reqs: *ToolRequests, authorization: ?[]const u8, body: []const u8) ![]const u8 {
-    const request = try reqs.postWith(authorization, body);
-    return std.mem.replaceOwned(u8, reqs.arena.allocator(), request, "/tools/lookup", "/agent");
-}
-
-threadlocal var agent_test_invocations: usize = 0;
-fn countAgentTestInvocation(_: *engine.Context, _: []const engine.JSValue) anyerror!engine.JSValue {
-    agent_test_invocations += 1;
-    return error.AotBail;
-}
-
-fn latchUnknownAgentTestInvocation(ctx: *engine.Context, _: []const engine.JSValue) anyerror!engine.JSValue {
-    const rt: *engine.HandlerInstance = @ptrCast(@alignCast(ctx.host orelse return error.AotBail));
-    const request = rt.active_request orelse return error.AotBail;
-    const turn = request.turn orelse return error.AotBail;
-    turn.closeLatch(.outcome_unknown);
-    return error.AotBail;
-}
-
-const agent_prompt_handler =
-    \\import { agentPrompt, toolInput } from "zttp:tool";
-    \\function handler(req) {
-    \\  const prompt = agentPrompt();
-    \\  const input = toolInput("In", req);
-    \\  return Response.json({ prompt: prompt.ok ? prompt.value : prompt.error,
-    \\    input: input.ok ? "unexpected" : input.error,
-    \\    subject: req.subject, tenant: req.tenant, auth: req.headers.authorization ?? "absent" });
-    \\}
-;
-
-test "agent admission verifies identity and prompt before running the handler" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(agent_prompt_handler, true);
-    defer srv.deinit();
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-    const authorized = try reqs.bearer(valid_claims);
-    const cases = [_]struct { auth: ?[]const u8, body: []const u8, status: []const u8, reason: []const u8 }{
-        .{ .auth = null, .body = "invalid", .status = "HTTP/1.1 401", .reason = "missing_token" },
-        .{ .auth = "Bearer broken", .body = "invalid", .status = "HTTP/1.1 401", .reason = "malformed" },
-        .{ .auth = authorized, .body = " " ** 65, .status = "HTTP/1.1 413", .reason = "too_large" },
-        .{ .auth = authorized, .body = "{\"version\":2,\"prompt\":\"hello\"}", .status = "HTTP/1.1 400", .reason = "enum" },
-        .{ .auth = authorized, .body = "{\"version\":1,\"prompt\":\"hello\",\"extra\":1}", .status = "HTTP/1.1 400", .reason = "unknown_field" },
-        .{ .auth = authorized, .body = "{\"version\":1}", .status = "HTTP/1.1 400", .reason = "missing_required" },
-        .{ .auth = authorized, .body = "{\"version\":1,\"prompt\":\"\"}", .status = "HTTP/1.1 400", .reason = "string_too_short" },
-    };
-    agent_test_invocations = 0;
-    engine.setAotOverrideForTest(countAgentTestInvocation);
-    defer engine.setAotOverrideForTest(null);
-    for (cases) |case| {
-        var buf: [2048]u8 = undefined;
-        const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, case.auth, case.body), &buf);
-        try expectResponse(response, case.status, case.reason);
-        if (std.mem.eql(u8, case.status, "HTTP/1.1 400")) try std.testing.expect(std.mem.indexOf(u8, response, "at byte ") != null);
-        try std.testing.expectEqual(@as(usize, 0), agent_test_invocations);
-    }
-    var buf: [2048]u8 = undefined;
-    const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, authorized, "{\"version\":1,\"prompt\":\"hello\\nworld\"}"), &buf);
-    try expectResponse(response, "HTTP/1.1 200", "\"prompt\":\"hello\\nworld\"");
-    try expectResponse(response, "HTTP/1.1 200", "not_a_tool_request");
-    try expectResponse(response, "HTTP/1.1 200", "\"subject\":\"user-1\"");
-    try expectResponse(response, "HTTP/1.1 200", "\"tenant\":\"acme\"");
-    try expectResponse(response, "HTTP/1.1 200", "\"auth\":\"absent\"");
-    try std.testing.expectEqual(@as(usize, 1), agent_test_invocations);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        try srv.turn_recorder.?.memoryBytes(),
-        "\"terminalTag\":\"completed\"",
-    ) != null);
-}
-
-test "agent catalog requires auth and catalog handlers refuse every route before installation" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(agent_prompt_handler, true);
-    defer srv.deinit();
-    srv.config.runtime_config.tool_auth = null;
-    try std.testing.expectError(error.ToolAuthNotConfigured, srv.loadToolAuth());
-    var buf: [2048]u8 = undefined;
-    const no_key = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, null, "invalid"), &buf);
-    try expectResponse(no_key, "HTTP/1.1 503", "tool handler requires auth: no key is loaded");
-
-    var before_install = try agentTestServer(agent_prompt_handler, false);
-    defer before_install.deinit();
-    agent_test_invocations = 0;
-    engine.setAotOverrideForTest(countAgentTestInvocation);
-    defer engine.setAotOverrideForTest(null);
-    for ([_][]const u8{ "/agent", "/tools/lookup", "/unmatched", "/_health", "/_readiness", "/static/file.txt" }) |path| {
-        const raw = try std.fmt.allocPrint(reqs.arena.allocator(), "GET {s} HTTP/1.1\r\nHost: t\r\n\r\n", .{path});
-        try expectResponse(try serveAgentTestRequest(&before_install, raw, &buf), "HTTP/1.1 503", "tool catalog is not installed");
-    }
-    try std.testing.expectEqual(@as(usize, 0), agent_test_invocations);
-
-    // Before the watcher knows even the contract, all requests stay closed.
-    srv.catalog_analysis_pending = true;
-    try expectResponse(try serveAgentTestRequest(&srv, "GET /_health HTTP/1.1\r\nHost: t\r\n\r\n", &buf), "HTTP/1.1 503", "tool catalog is not installed");
-}
-
-test "agent requests enforce the catalog export grant" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(grant_probe_handler, true);
-    defer srv.deinit();
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-    var buf: [2048]u8 = undefined;
-    const response = try serveAgentTestRequest(&srv, try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"), &buf);
-    try expectResponse(response, "HTTP/1.1 500", "Internal Server Error");
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        try srv.turn_recorder.?.memoryBytes(),
-        "\"terminalTag\":\"failed\"",
-    ) != null);
-}
-
-test "agent unknown outcome stays terminal when the handler returns 200" {
-    const handler = "function handler(req) { return Response.text('caught'); }";
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(handler, true);
-    defer srv.deinit();
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-    engine.setAotOverrideForTest(latchUnknownAgentTestInvocation);
-    defer engine.setAotOverrideForTest(null);
-
-    var buf: [2048]u8 = undefined;
-    const response = try serveAgentTestRequest(
-        &srv,
-        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
-        &buf,
-    );
-    try expectResponse(response, "HTTP/1.1 200", "caught");
-    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        try srv.turn_recorder.?.memoryBytes(),
-        "\"terminalTag\":\"outcome_unknown\"",
-    ) != null);
-}
-
-test "agent turn startup settings require a recorder ceiling and reserved pool capacity" {
-    var startup = try agentTestServer(agent_prompt_handler, true);
-    defer startup.deinit();
-    startup.io_backend.deinit();
-    startup.evented_ready = false;
-    try std.testing.expectError(error.AgentTurnRecorderDirectoryRequired, startup.start());
-
-    var srv = try agentTestServer(agent_prompt_handler, true);
-    defer srv.deinit();
-
-    try std.testing.expectError(error.AgentTurnRecorderDirectoryRequired, srv.validateAgentTurnConfig());
-    srv.config.agent_turn_recorder_dir = "/tmp";
-    try std.testing.expectError(error.AgentTurnRecorderCeilingRequired, srv.validateAgentTurnConfig());
-    srv.config.agent_turn_recorder_max_bytes = 0;
-    try std.testing.expectError(error.AgentTurnRecorderCeilingInvalid, srv.validateAgentTurnConfig());
-    srv.config.agent_turn_recorder_max_bytes = 4096;
-    srv.config.max_agent_turns = null;
-    try std.testing.expectError(error.MaxAgentTurnsRequired, srv.validateAgentTurnConfig());
-    srv.config.max_agent_turns = 0;
-    try std.testing.expectError(error.MaxAgentTurnsInvalid, srv.validateAgentTurnConfig());
-    srv.config.max_agent_turns = 2;
-    try std.testing.expectError(error.MaxAgentTurnsInvalid, srv.validateAgentTurnConfig());
-    srv.config.max_agent_turns = 1;
-    try srv.validateAgentTurnConfig();
-    try validateAgentTurnSettings(.{
-        .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" },
-        .agent_turn_recorder_dir = "/tmp",
-        .agent_turn_recorder_max_bytes = 4096,
-        .max_agent_turns = 1,
-    });
-
-    var ordinary = try Server.init(std.testing.allocator, .{
-        .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" },
-        .pool_size = 1,
-        .agent_turn_recorder_dir = "/tmp",
-        .agent_turn_recorder_max_bytes = 4096,
-        .max_agent_turns = 1,
-    });
-    defer ordinary.deinit();
-    try ordinary.validateAgentTurnConfig();
-}
-
-test "agent turn cap refuses before handler pool acquisition and counts the refusal" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(agent_prompt_handler, true);
-    defer srv.deinit();
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-
-    try std.testing.expect(srv.tryAcquireAgentTurn());
-    defer srv.releaseAgentTurn();
-    var buf: [2048]u8 = undefined;
-    const response = try serveAgentTestRequest(
-        &srv,
-        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
-        &buf,
-    );
-    try expectResponse(response, "HTTP/1.1 503", "agent turn capacity exhausted");
-    try std.testing.expectEqual(@as(u64, 1), srv.refused_agent_turns.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), (try srv.turn_recorder.?.memoryBytes()).len);
-    try std.testing.expectEqual(@as(usize, 0), srv.pool.?.getInUse());
-}
-
-test "agent recorder ceiling refusal releases the cap and keeps readiness healthy" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(agent_prompt_handler, true);
-    defer srv.deinit();
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-    srv.turn_recorder.?.deinit();
-    srv.turn_recorder = TurnRecorder.initMemory(std.testing.allocator, 1);
-
-    var buf: [2048]u8 = undefined;
-    const refused = try serveAgentTestRequest(
-        &srv,
-        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
-        &buf,
-    );
-    try expectResponse(refused, "HTTP/1.1 503", "agent turn recorder unavailable");
-    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
-    try std.testing.expect(srv.turn_recorder.?.isHealthy());
-
-    const ready = try serveAgentTestRequest(&srv, "GET /_readiness HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n", &buf);
-    try expectResponse(ready, "HTTP/1.1 200", "OK");
-}
-
-const AgentProviderAdmissionRefusal = enum { cap, recorder_ceiling };
-
-fn expectAgentAdmissionRefusesBeforeProvider(upstream: *CredentialTestUpstream, refusal: AgentProviderAdmissionRefusal) !void {
-    var endpoint_buf: [64]u8 = undefined;
-    const endpoint = try std.fmt.bufPrint(&endpoint_buf, "http://127.0.0.1:{d}", .{upstream.port()});
-    var paths = [_][]const u8{"/v1"};
-    const refs = [_]credential_store_mod.CredentialRef{.{
-        .name = "provider",
-        .env = credential_test_env,
-        .endpoint = endpoint,
-        .header = "authorization",
-        .scheme = "Bearer",
-        .methods = std.EnumSet(credential_store_mod.credential_ref.Method).initOne(.POST),
-        .paths = &paths,
-    }};
-    _ = setenv(credential_test_env, credential_test_value, 1);
-    defer _ = unsetenv(credential_test_env);
-    var store = (try credential_store_mod.load(std.testing.allocator, &refs, credential_store_mod.processEnv())).ok;
-    defer store.deinit();
-
-    var handler_buf: [512]u8 = undefined;
-    const handler = try std.fmt.bufPrint(&handler_buf,
-        \\import {{ fetch }} from "zttp:fetch";
-        \\function handler(req) {{
-        \\  const response = fetch("{s}/v1/chat", {{ method: "POST", credential: "provider", body: "request" }});
-        \\  return Response.text(response.body);
-        \\}}
-    , .{endpoint});
-    var srv = try agentTestServerFor(handler, true, .{
-        .provider_endpoint = endpoint,
-        .allow_provider_fetch = true,
-        .pool_config = .{
-            .outbound_http_enabled = true,
-            .credential_store = &store,
-            .dev_capability_policy = .{ .egress_scopes = (engine.endpoint.ScopeSet{}).with(.loopback) },
-        },
-    });
-    defer srv.deinit();
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-
-    var cap_slot_held = false;
-    defer if (cap_slot_held) srv.releaseAgentTurn();
-    switch (refusal) {
-        .cap => {
-            try std.testing.expect(srv.tryAcquireAgentTurn());
-            cap_slot_held = true;
-        },
-        .recorder_ceiling => {
-            srv.turn_recorder.?.deinit();
-            srv.turn_recorder = TurnRecorder.initMemory(std.testing.allocator, 1);
-        },
-    }
-
-    try upstream.start();
-    defer upstream.join();
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var response_buf: [2048]u8 = undefined;
-    const response = try serveAgentTestRequest(
-        &srv,
-        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
-        &response_buf,
-    );
-    switch (refusal) {
-        .cap => try expectResponse(response, "HTTP/1.1 503", "agent turn capacity exhausted"),
-        .recorder_ceiling => try expectResponse(response, "HTTP/1.1 503", "agent turn recorder unavailable"),
-    }
-    upstream.join();
-    try std.testing.expectEqual(@as(usize, 0), upstream.connections);
-    try std.testing.expectEqual(@as(usize, 0), upstream.requests);
-}
-
-test "agent admission cap and recorder ceiling contact no provider" {
-    var capped_upstream = try CredentialTestUpstream.init("provider response");
-    defer capped_upstream.deinit();
-    try expectAgentAdmissionRefusesBeforeProvider(&capped_upstream, .cap);
-
-    var ceiling_upstream = try CredentialTestUpstream.init("provider response");
-    defer ceiling_upstream.deinit();
-    try expectAgentAdmissionRefusesBeforeProvider(&ceiling_upstream, .recorder_ceiling);
-}
-
-test "unhealthy agent recorder makes readiness name the recorder" {
-    var srv = try agentTestServer(agent_prompt_handler, true);
-    defer srv.deinit();
-    try srv.turn_recorder.?.failNextMemoryWrite();
-    try std.testing.expectError(error.RecorderWriteFailed, srv.turn_recorder.?.admit(.{
-        .turn_id = [_]u8{0x7a} ** 16,
-        .sequence = 0,
-        .kind = .admit,
-        .monotonic_ns = 1,
-        .agent_name = "assistant",
-        .catalog_digest = "00",
-        .runtime_policy_hash = "11",
-        .wall_time_unix_ns = 2,
-    }));
-
-    var buf: [1024]u8 = undefined;
-    const response = try serveAgentTestRequest(&srv, "GET /_readiness HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n", &buf);
-    try expectResponse(response, "HTTP/1.1 503", "turn recorder unavailable");
-}
-
-test "agent terminal precedence maps timeout and latch outcomes" {
-    var recorder = TurnRecorder.initMemory(std.testing.allocator, 4096);
-    defer recorder.deinit();
-    const limits = AgentLimits{
-        .rounds = 1,
-        .tool_calls = 1,
-        .tool_calls_per_round = 1,
-        .argument_bytes = 1,
-        .result_bytes = 1,
-        .turn_deadline_ms = 1,
-        .provider_request_bytes = 1,
-    };
-    var turn = try TurnState.init(std.testing.allocator, [_]u8{0} ** 16, limits, 1, &recorder);
-    defer turn.deinit();
-
-    try std.testing.expectEqual(turn_recorder.TerminalTag.completed, turn.terminalTag(200, false));
-    try std.testing.expectEqual(turn_recorder.TerminalTag.failed, turn.terminalTag(500, false));
-    try std.testing.expectEqual(turn_recorder.TerminalTag.failed, turn.terminalTag(501, false));
-    try std.testing.expectEqual(turn_recorder.TerminalTag.deadline_exceeded, turn.terminalTag(500, true));
-    turn.closeLatch(.budget_exhausted);
-    try std.testing.expectEqual(turn_recorder.TerminalTag.deadline_exceeded, turn.terminalTag(504, true));
-
-    var unknown = try TurnState.init(std.testing.allocator, [_]u8{1} ** 16, limits, 1, &recorder);
-    defer unknown.deinit();
-    unknown.closeLatch(.outcome_unknown);
-    try std.testing.expectEqual(turn_recorder.TerminalTag.outcome_unknown, unknown.terminalTag(504, true));
-}
-
-test "agent handler timeout writes a deadline terminal before releasing the cap" {
-    const slow_handler =
-        "function handler(req) { let x = 0; for (let i of range(1000000000)) { x = x + 1; } return Response.text('unreachable'); }";
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(slow_handler, true);
-    defer srv.deinit();
-    srv.pool.?.deinit();
-    srv.pool = try HandlerPool.init(
-        std.testing.allocator,
-        .{ .contract_has_catalog = true, .contract_has_agent = true, .request_timeout_ms = 10 },
-        slow_handler,
-        "<agent-timeout-test>",
-        3,
-        0,
-    );
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-
-    var buf: [2048]u8 = undefined;
-    const response = try serveAgentTestRequest(
-        &srv,
-        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
-        &buf,
-    );
-    try expectResponse(response, "HTTP/1.1 504", "Gateway Timeout");
-    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
-    const records = try srv.turn_recorder.?.memoryBytes();
-    try std.testing.expect(std.mem.indexOf(u8, records, "\"kind\":\"admit\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"deadline_exceeded\"") != null);
-}
-
-test "agent pool refusal still writes a failed terminal and releases the cap" {
-    var reqs = ToolRequests.init();
-    defer reqs.deinit();
-    var srv = try agentTestServer(agent_prompt_handler, true);
-    defer srv.deinit();
-    _ = setenv(tool_test_key_env, tool_test_key, 1);
-    defer _ = unsetenv(tool_test_key_env);
-    try srv.loadToolAuth();
-    var leases: [3]HandlerPool.WorkerRuntimeLease = undefined;
-    for (&leases) |*lease| lease.* = try srv.pool.?.acquireWorkerRuntime();
-    defer for (&leases) |*lease| lease.deinit();
-
-    var buf: [2048]u8 = undefined;
-    const response = try serveAgentTestRequest(
-        &srv,
-        try agentTestPost(&reqs, try reqs.bearer(valid_claims), "{\"version\":1,\"prompt\":\"hello\"}"),
-        &buf,
-    );
-    try expectResponse(response, "HTTP/1.1 503", "Service Unavailable");
-    try std.testing.expectEqual(@as(u32, 0), srv.active_agent_turns.load(.acquire));
-    const records = try srv.turn_recorder.?.memoryBytes();
-    try std.testing.expect(std.mem.indexOf(u8, records, "\"kind\":\"admit\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, records, "\"terminalTag\":\"failed\"") != null);
 }

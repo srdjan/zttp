@@ -316,7 +316,7 @@ fn serveCommandWithDebugPanicPath(
 
     // Source analysis must run before replay, fixture execution, scheduling,
     // watching, or pool initialization can exercise recorded authority.
-    try validateSourceAgentSettings(allocator, config);
+    try validateSourceAuthority(allocator, config);
 
     if (config.runtime_config.replay_file_path != null) {
         replay_runner.run(allocator, config.executionSpec()) catch |err| {
@@ -390,9 +390,6 @@ fn serveCommandWithDebugPanicPath(
         );
         defer live_reload.deinit();
 
-        // Source contracts arrive from the watcher after Server.start. Refuse
-        // requests until that first analysis establishes the catalog facts.
-        server.catalog_analysis_pending = true;
         server.runWithBackgroundWork(&live_reload, watcherThread) catch |err| {
             reportServerError(err, config.port);
             std.process.exit(1);
@@ -405,7 +402,7 @@ fn serveCommandWithDebugPanicPath(
     }
 }
 
-fn validateSourceAgentSettings(allocator: std.mem.Allocator, config: ServerConfig) !void {
+fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !void {
     switch (config.handler) {
         .file_path, .inline_code => {
             const source = try @import("handler_loader.zig").load(allocator, config.handler);
@@ -426,12 +423,6 @@ fn validateSourceAgentSettings(allocator: std.mem.Allocator, config: ServerConfi
                     std.log.err("Source uses retired runtime authority: {s}", .{feature.sentence()});
                 }
                 return error.UnsupportedRuntimeAuthority;
-            }
-            for (contract.tools.items) |entry| {
-                if (entry.agent != null) {
-                    try @import("server.zig").validateAgentTurnSettings(config);
-                    break;
-                }
             }
         },
         else => {},
@@ -549,10 +540,6 @@ fn parseCommonServeFlag(
         config.runtime_config.queue_actor_enabled = true;
         return true;
     }
-    if (std.mem.eql(u8, arg, "--ledger")) {
-        config.runtime_config.ledger_path = try shared.takeArg(i, argv, error.MissingLedgerPath);
-        return true;
-    }
     if (std.mem.eql(u8, arg, "--outbound-http")) {
         config.runtime_config.outbound_http_enabled = true;
         return true;
@@ -560,26 +547,6 @@ fn parseCommonServeFlag(
     if (std.mem.eql(u8, arg, "--outbound-host")) {
         config.runtime_config.outbound_http_enabled = true;
         config.runtime_config.outbound_allow_host = try shared.takeArg(i, argv, error.MissingOutboundHost);
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--agent-turn-recorder-dir")) {
-        const value = try shared.takeArg(i, argv, error.MissingAgentTurnRecorderDir);
-        if (value.len == 0) return error.InvalidAgentTurnRecorderDir;
-        config.agent_turn_recorder_dir = value;
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--agent-turn-recorder-max-bytes")) {
-        const value = try shared.takeArg(i, argv, error.MissingAgentTurnRecorderMaxBytes);
-        const bytes = shared.parseSize(value) catch return error.InvalidAgentTurnRecorderMaxBytes;
-        if (bytes == 0) return error.InvalidAgentTurnRecorderMaxBytes;
-        config.agent_turn_recorder_max_bytes = bytes;
-        return true;
-    }
-    if (std.mem.eql(u8, arg, "--max-agent-turns")) {
-        const value = try shared.takeArg(i, argv, error.MissingMaxAgentTurns);
-        const cap = std.fmt.parseInt(u32, value, 10) catch return error.InvalidMaxAgentTurns;
-        if (cap == 0) return error.InvalidMaxAgentTurns;
-        config.max_agent_turns = cap;
         return true;
     }
     if (std.mem.eql(u8, arg, "--no-env-check")) {
@@ -628,12 +595,6 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         config.host = cfg.host;
         config.static_dir = cfg.static_dir;
         config.runtime_config.sqlite_path = cfg.sqlite;
-        config.runtime_config.ledger_path = try cfg.resolvedLedgerPath(allocator);
-        config.runtime_config.invariant_section = try cfg.readInvariantSpec(allocator);
-        if (cfg.auth) |auth| {
-            config.runtime_config.tool_auth = .{ .key_env = auth.key_env, .tenant_claim = auth.tenant_claim };
-        }
-        config.runtime_config.credentials = cfg.credentials;
         config.runtime_config.durable_oplog_dir = cfg.durable_dir;
         config.runtime_config.system_config_path = cfg.system;
         config.runtime_config.outbound_http_enabled = cfg.outbound_http;
@@ -828,10 +789,6 @@ fn printAppendedHelp() void {
         \\  --durable <DIR>       Enable durable execution with write-ahead oplog
         \\  --workflow-queue      Queue durable workflow dispatch; requires --system and --durable
         \\  --actor-queue         Enable in-memory zttp:queue actor mailboxes
-        \\  --ledger <FILE>       Protected ledger store for the embedded invariant
-        \\  --agent-turn-recorder-dir <DIR>  Required for agent handlers
-        \\  --agent-turn-recorder-max-bytes <SIZE>  Recorder byte ceiling
-        \\  --max-agent-turns <COUNT>  Agent cap, less than pool size minus 1
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
@@ -881,9 +838,6 @@ fn printServeHelp() void {
         \\  --outbound-http       Enable native outbound HTTP bridge
         \\  --outbound-host <H>   Restrict outbound bridge to exact host H (host only, not port)
         \\  --outbound-timeout-ms Outbound fetch deadline in ms, greater than 0
-        \\  --agent-turn-recorder-dir <DIR>  Required for agent handlers
-        \\  --agent-turn-recorder-max-bytes <SIZE>  Recorder byte ceiling
-        \\  --max-agent-turns <COUNT>  Agent cap, less than pool size minus 1
         \\  --outbound-max-response <SIZE>
         \\  --sqlite <FILE>       SQLite database path for zttp:sql
         \\  --trace <FILE>        Record handler I/O traces to JSONL file
@@ -969,41 +923,6 @@ test "parseServeArgs refuses a zero outbound timeout" {
     try std.testing.expectEqual(@as(u32, 1), config.runtime_config.outbound_timeout_ms);
 }
 
-test "serve and self-contained binaries parse explicit agent turn settings" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const args = [_][]const u8{ "--agent-turn-recorder-dir", "/tmp/turns", "--agent-turn-recorder-max-bytes", "16M", "--max-agent-turns", "1" };
-    const config = try parseServeArgs(arena.allocator(), &(args ++ .{"handler.ts"}));
-    var appended: ServerConfig = .{ .handler = .{ .inline_code = "" } };
-    try parseAppendedServeArgs(&args, &appended, false);
-    for ([_]ServerConfig{ config, appended }) |parsed| {
-        try std.testing.expectEqualStrings("/tmp/turns", parsed.agent_turn_recorder_dir.?);
-        try std.testing.expectEqual(@as(?usize, 16 * 1024 * 1024), parsed.agent_turn_recorder_max_bytes);
-        try std.testing.expectEqual(@as(?u32, 1), parsed.max_agent_turns);
-    }
-    const ordinary = try parseServeArgs(arena.allocator(), &.{"handler.ts"});
-    try std.testing.expect(ordinary.agent_turn_recorder_dir == null);
-    try std.testing.expect(ordinary.agent_turn_recorder_max_bytes == null);
-    try std.testing.expect(ordinary.max_agent_turns == null);
-}
-
-test "agent turn flags refuse missing empty zero and invalid values" {
-    const cases = .{
-        .{ "--agent-turn-recorder-dir", "", error.MissingAgentTurnRecorderDir, error.InvalidAgentTurnRecorderDir },
-        .{ "--agent-turn-recorder-max-bytes", "0", error.MissingAgentTurnRecorderMaxBytes, error.InvalidAgentTurnRecorderMaxBytes },
-        .{ "--max-agent-turns", "0", error.MissingMaxAgentTurns, error.InvalidMaxAgentTurns },
-    };
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    inline for (cases) |case| {
-        var config: ServerConfig = .{ .handler = .{ .inline_code = "" } };
-        try std.testing.expectError(case[2], parseAppendedServeArgs(&.{case[0]}, &config, false));
-        try std.testing.expectError(case[3], parseAppendedServeArgs(&.{ case[0], case[1] }, &config, false));
-        try std.testing.expectError(case[2], parseServeArgs(arena.allocator(), &.{ "handler.ts", case[0] }));
-        try std.testing.expectError(case[3], parseServeArgs(arena.allocator(), &.{ "handler.ts", case[0], case[1] }));
-    }
-}
-
 test "source retired authority is refused before replay watch or pool startup" {
     const source =
         \\import { toolCatalog } from "zttp:tool";
@@ -1030,15 +949,12 @@ test "source retired authority is refused before replay watch or pool startup" {
     const config: ServerConfig = .{
         .handler = .{ .inline_code = source },
         .pool_size = 3,
-        .agent_turn_recorder_dir = "/tmp/turns",
-        .agent_turn_recorder_max_bytes = 16 * 1024 * 1024,
-        .max_agent_turns = 1,
     };
     try std.testing.expectError(
         error.UnsupportedRuntimeAuthority,
-        validateSourceAgentSettings(std.testing.allocator, config),
+        validateSourceAuthority(std.testing.allocator, config),
     );
-    try validateSourceAgentSettings(std.testing.allocator, .{ .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" } });
+    try validateSourceAuthority(std.testing.allocator, .{ .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" } });
 }
 
 test "source startup refuses retired authority in a local dependency" {
@@ -1067,7 +983,7 @@ test "source startup refuses retired authority in a local dependency" {
         defer allocator.free(handler_path);
         try std.testing.expectError(
             error.UnsupportedRuntimeAuthority,
-            validateSourceAgentSettings(allocator, .{ .handler = .{ .file_path = handler_path } }),
+            validateSourceAuthority(allocator, .{ .handler = .{ .file_path = handler_path } }),
         );
     }
 }

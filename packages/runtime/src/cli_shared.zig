@@ -137,15 +137,11 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             std.mem.eql(u8, arg, "--static") or
             std.mem.eql(u8, arg, "--outbound-host") or
             std.mem.eql(u8, arg, "--outbound-timeout-ms") or
-            std.mem.eql(u8, arg, "--agent-turn-recorder-dir") or
-            std.mem.eql(u8, arg, "--agent-turn-recorder-max-bytes") or
-            std.mem.eql(u8, arg, "--max-agent-turns") or
             std.mem.eql(u8, arg, "--outbound-max-response") or
             std.mem.eql(u8, arg, "--max-body-size") or
             std.mem.eql(u8, arg, "--security-log") or
             std.mem.eql(u8, arg, "--lifecycle") or
             std.mem.eql(u8, arg, "--sqlite") or
-            std.mem.eql(u8, arg, "--ledger") or
             std.mem.eql(u8, arg, "--trace") or
             std.mem.eql(u8, arg, "--incident-log") or
             std.mem.eql(u8, arg, "--replay") or
@@ -160,12 +156,6 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
         return arg;
     }
     return null;
-}
-
-test "agent turn setting values are not handler paths" {
-    const args = [_][]const u8{ "--agent-turn-recorder-dir", "turns", "--agent-turn-recorder-max-bytes", "16M", "--max-agent-turns", "1" };
-    try std.testing.expect(findPositionalPath(&args) == null);
-    try std.testing.expectEqualStrings("handler.ts", findPositionalPath(&(args ++ .{"handler.ts"})).?);
 }
 
 pub fn hasFlag(argv: []const []const u8, name: []const u8) bool {
@@ -251,9 +241,6 @@ pub fn buildWatchSet(allocator: std.mem.Allocator, argv: []const []const u8) !Wa
         }
         if (try cfg.resolvedPolicyPath(allocator)) |policy_path| {
             try paths.append(allocator, policy_path);
-        }
-        if (try cfg.resolvedInvariantsPath(allocator)) |invariant_path| {
-            try paths.append(allocator, invariant_path);
         }
     } else if (explicit_path) |path| {
         if (looksLikeHandlerFile(path)) {

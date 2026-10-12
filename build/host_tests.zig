@@ -68,7 +68,6 @@ const host_test_roots = [_]HostTestRoot{
     .{ .owner = .tools, .src = "src/module_audit.zig", .step = "test-module-audit", .desc = "Run module-contract audit tests", .project_config = true },
     .{ .owner = .tools, .src = "src/verify_paths_core.zig", .step = "test-verify-paths-core", .desc = "Run behavior-path verification core tests", .project_config = true },
     .{ .owner = .tools, .src = "src/project_config.zig", .step = "test-project-config", .desc = "Run project config discovery tests" },
-    .{ .owner = .tools, .src = "src/vocab_envelope.zig", .step = "test-vocab-envelope", .desc = "Run published vocabulary envelope derivation tests" },
     .{ .owner = .tools, .src = "src/instruction_counter.zig", .step = "test-instruction-counter", .desc = "Run retired-instruction counter tests" },
     .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true, .needs_install = true },
     // Focused subset covering only the record/replay layer: runs offline,

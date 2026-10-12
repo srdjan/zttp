@@ -1,12 +1,10 @@
 //! HTTP protocol types shared between server and runtime layers.
 //!
-//! These types define the HTTP request/response contract. Agent requests also
-//! borrow runtime-owned turn state. The runtime layer converts the HTTP values
-//! into JS objects.
+//! These types define the HTTP request/response contract. The runtime layer
+//! converts the HTTP values into JS objects.
 
 const std = @import("std");
 const ascii = std.ascii;
-const TurnState = @import("turn_state.zig").TurnState;
 
 /// A single query parameter key-value pair (references into string_storage)
 pub const QueryParam = struct {
@@ -23,19 +21,6 @@ pub const HttpRequestView = struct {
     query_params: []const QueryParam = &.{},
     headers: std.ArrayListUnmanaged(HttpHeader),
     body: ?[]const u8,
-    /// The verified subject and tenant of a tool or agent request, borrowed
-    /// from the claims the server verified. Null on every other request.
-    subject: ?[]const u8 = null,
-    tenant: ?[]const u8 = null,
-    /// True on a tool or agent request: Request omits `authorization`.
-    strip_authorization: bool = false,
-    /// The served tool or agent grant, held for the duration of the call.
-    tool_grant: ?ToolGrant = null,
-    /// The validated prompt, borrowed for this agent request only.
-    agent_prompt: ?[]const u8 = null,
-    /// State for the admitted frame-0 agent turn. Nested tool frames must set
-    /// this to null so their effects do not count as provider rounds.
-    turn: ?*TurnState = null,
     /// The accepted capability ceiling of the served generation (M4 T5b),
     /// held for the duration of the call. Null when the generation has none.
     capability_ceiling: ?CapabilityCeiling = null,
@@ -49,28 +34,6 @@ pub const HttpRequestView = struct {
 pub const CapabilityCeiling = struct {
     categories: u32,
     excluded_modules: []const []const u8,
-};
-
-/// A tool's export grant, as the server hands it to the runtime. The same
-/// shape as the engine's `ToolGrant`, restated so this file stays free of the
-/// engine: `allows(context, module, name)` answers for the tool `context`
-/// points at, which the caller keeps alive for the call.
-/// `allows_credential(context, name)` answers whether that tool's credential
-/// grant (M4 T6) holds `name`; only the runtime's fetch asks it.
-pub const ToolGrant = struct {
-    context: *const anyopaque,
-    allows: *const fn (context: *const anyopaque, module: []const u8, name: []const u8) bool,
-    allows_credential: *const fn (context: *const anyopaque, name: []const u8) bool,
-    /// The input schema the gate validated this request against (M4 T7).
-    /// `toolInput` answers only for this name.
-    input_schema: []const u8 = "",
-    agent: ?AgentGrant = null,
-};
-
-pub const AgentGrant = struct {
-    provider_endpoint: []const u8,
-    provider_credential: []const u8,
-    no_durable: bool = true,
 };
 
 pub const HttpRequestOwned = struct {

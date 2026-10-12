@@ -16,32 +16,6 @@ const cli_doctor = @import("cli_doctor.zig");
 const doctorPathExists = cli_doctor.doctorPathExists;
 const printCheckStageFailures = cli_doctor.printCheckStageFailures;
 
-/// Unmeasured development value, never used outside zttp dev.
-const dev_turn_recorder_subdir = ".zttp/turns";
-/// Unmeasured development value, never used outside zttp dev.
-const dev_turn_recorder_max_bytes: usize = 16 * 1024 * 1024;
-/// Unmeasured development value, never used outside zttp dev.
-const dev_max_agent_turns: u32 = 1;
-
-fn appendDevTurnSettings(
-    allocator: std.mem.Allocator,
-    argv: []const []const u8,
-    child_args: *std.ArrayList([]const u8),
-    directory: []const u8,
-) !void {
-    if (optionValue(argv, "--agent-turn-recorder-dir") == null) {
-        try child_args.appendSlice(allocator, &.{ "--agent-turn-recorder-dir", directory });
-    }
-    if (optionValue(argv, "--agent-turn-recorder-max-bytes") == null) {
-        try child_args.appendSlice(allocator, &.{ "--agent-turn-recorder-max-bytes", std.fmt.comptimePrint("{d}", .{dev_turn_recorder_max_bytes}) });
-    }
-    if (optionValue(argv, "--max-agent-turns") == null) {
-        try child_args.appendSlice(allocator, &.{ "--max-agent-turns", std.fmt.comptimePrint("{d}", .{dev_max_agent_turns}) });
-    }
-    // defaultPoolSize has a floor of eight. Explicit smaller pools retain
-    // their value and the server refuses them when the catalog has an agent.
-}
-
 pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
     try runDevPreflight(allocator, argv, "dev");
 
@@ -58,19 +32,8 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
 
     var child_args = std.ArrayList([]const u8).empty;
     defer child_args.deinit(allocator);
-    var turn_io_backend = shared.threadedIo(allocator);
-    defer turn_io_backend.deinit();
-    const turn_io = turn_io_backend.io();
-    var turn_project = try project_config_mod.discover(allocator, turn_io, shared.findPositionalPath(argv));
-    defer if (turn_project) |*project| project.deinit(allocator);
-    const turn_directory = try std.fs.path.join(allocator, &.{ if (turn_project) |project| project.root_dir else ".", dev_turn_recorder_subdir });
-    defer allocator.free(turn_directory);
-    if (optionValue(argv, "--agent-turn-recorder-dir") == null) {
-        try std.Io.Dir.cwd().createDirPath(turn_io, turn_directory);
-    }
     try child_args.append(allocator, serve_binary);
     try child_args.append(allocator, "serve");
-    try appendDevTurnSettings(allocator, argv, &child_args, turn_directory);
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--no-prove")) continue;
         try child_args.append(allocator, arg);
@@ -187,21 +150,10 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
     );
     defer if (policy_source) |source| allocator.free(source);
 
-    // The consumer declaration zttp.json names (M4 T4). A refused or unreadable
-    // one stops the preflight; the loader printed the file and the reason.
-    var declaration = zts_cli.loadCheckDeclaration(allocator, null, explicit_path) catch |err| {
-        if (!builtin.is_test) {
-            std.debug.print("zttp {s} preflight failed: the configured declaration could not be loaded ({s})\n", .{ command, @errorName(err) });
-        }
-        return error.CheckFailed;
-    };
-    defer if (declaration) |*decl| decl.deinit();
-
     var check = precompile.runCheckOnlyWithOptions(allocator, target, .{
         .sql_schema_path = sqlite_path,
         .system_path = system_path,
         .policy_source = policy_source,
-        .declaration = if (declaration) |*decl| decl else null,
     }) catch |err| {
         if (!builtin.is_test) {
             std.debug.print("zttp {s} preflight could not run for {s}: {}\n", .{ command, target, err });
@@ -260,24 +212,8 @@ pub fn printDevHelp() void {
         \\  --help                Show this help
         \\
         \\If no handler path is passed, the entry in zttp.json is used.
-        \\Agent turns use unmeasured dev values: .zttp/turns, 16 MiB, cap 1.
-        \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-test "dev supplies labelled turn settings and preserves explicit settings" {
-    var args: std.ArrayList([]const u8) = .empty;
-    defer args.deinit(std.testing.allocator);
-    try appendDevTurnSettings(std.testing.allocator, &.{}, &args, "/project/.zttp/turns");
-    try std.testing.expectEqualStrings("/project/.zttp/turns", optionValue(args.items, "--agent-turn-recorder-dir").?);
-    try std.testing.expectEqualStrings("16777216", optionValue(args.items, "--agent-turn-recorder-max-bytes").?);
-    try std.testing.expectEqualStrings("1", optionValue(args.items, "--max-agent-turns").?);
-    try std.testing.expect(dev_max_agent_turns < @import("posix_util.zig").defaultPoolSize() - 1);
-    args.clearRetainingCapacity();
-    const explicit = &.{ "--agent-turn-recorder-dir", "/custom", "--agent-turn-recorder-max-bytes", "32M", "--max-agent-turns", "2" };
-    try appendDevTurnSettings(std.testing.allocator, explicit, &args, "/project/.zttp/turns");
-    try std.testing.expectEqual(@as(usize, 0), args.items.len);
 }
 
 test "childExitCode propagates a failed serve child but not a clean stop" {

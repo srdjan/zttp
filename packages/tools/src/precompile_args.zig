@@ -30,7 +30,6 @@ pub const PrecompileOptions = struct {
     sql_schema_path: ?[]const u8 = null,
     system_path: ?[]const u8 = null,
     policy_path: ?[]const u8 = null,
-    declaration_path: ?[]const u8 = null,
     /// ISO-8601 build timestamp injected as `__BUILD_TIME__` during TS strip.
     /// When null, compileHandler falls back to the wall clock at compile time.
     build_time: ?[]const u8 = null,
@@ -67,10 +66,6 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             opts.policy_path = try takeArg(&index, argv, "Missing path after --policy");
             continue;
         }
-        if (std.mem.eql(u8, arg, "--declaration")) {
-            opts.declaration_path = try takeArg(&index, argv, "Missing path after --declaration");
-            continue;
-        }
         if (std.mem.eql(u8, arg, "--build-time")) {
             opts.build_time = try takeArg(&index, argv, "Missing value after --build-time");
             continue;
@@ -102,7 +97,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--verify] [--contract] [--sql-schema path] [--system path] [--policy policy.json] [--declaration declaration.json] [--module-manifest path] <handler.ts> <output.zig>\n";
+    const usage = "Usage: precompile [--verify] [--contract] [--sql-schema path] [--system path] [--policy policy.json] [--module-manifest path] <handler.ts> <output.zig>\n";
     opts.handler_path = handler_path orelse {
         errPrint(usage, .{});
         errPrint("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
@@ -202,11 +197,9 @@ test "parsePrecompileArgSlice consumes module manifest flags" {
     try std.testing.expectEqualStrings("embedded_handler.zig", opts.output_path);
 }
 
-test "parsePrecompileArgSlice captures the declaration path" {
+test "parsePrecompileArgSlice refuses the deleted declaration flag as unknown" {
     const argv = [_][]const u8{ "--declaration", "declaration.json", "handler.ts", "out.zig" };
-    const opts = try parsePrecompileArgSlice(&argv);
-    try std.testing.expectEqualStrings("declaration.json", opts.declaration_path.?);
-    try std.testing.expectEqualStrings("handler.ts", opts.handler_path);
+    try std.testing.expectError(error.UnknownFlag, parsePrecompileArgSlice(&argv));
 }
 
 test "parsePrecompileArgSlice refuses the deleted --data-labels flag as unknown" {

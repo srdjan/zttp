@@ -28,8 +28,6 @@ test {
     // on macOS. Compile coverage of the instance itself is unaffected either
     // way, because `test_runner.zig` above imports `handler_instance.zig`.
     _ = @import("server.zig");
-    _ = @import("tool_auth.zig");
-    _ = @import("credential_store.zig");
     _ = @import("proof_adapter.zig");
     // Named here rather than reached. Its floor test is the one assertion
     // standing between the invariant adapter comparison and a comparison that

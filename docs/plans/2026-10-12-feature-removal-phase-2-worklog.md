@@ -69,7 +69,8 @@ Agent capacity prevents an additional lessons thread. The main agent owns that s
 ## Current and next action
 
 The implementation plan is `2026-10-12-1109-refactor-feature-removal-phase-two-plan.md`.
-The dependency research and plan validation are complete. The main agent owns the current action: execute the retired-authority refusal unit.
+The dependency research, plan validation, and retired-authority refusal unit are complete.
+The main agent owns the current action: coordinate and review runtime and tooling removal.
 The main agent will record direct verification results here.
 
 ## Plan validation and execution intake
@@ -176,3 +177,51 @@ The metadata and specification hash match their exact baselines. All baseline ha
 The six U3 tests remain saved separately during this isolated U1 check and commit.
 The main agent will restore those exact test files for the later coupled format transition.
 The next action belongs to the main agent: execute U2 runtime and tooling removal with the prepared ownership split.
+
+## U2 execution checkpoint
+
+U1 is committed locally as `601703e2`. Runtime and tooling removal now run in separate owned scopes.
+The tooling cut removes public declaration flags, vocabulary tooling, reference tool examples, and their dedicated build wiring.
+The invariant author and artifact drift gate remain until their U3 callers leave.
+
+The runtime review found a credential-option boundary outside the contract predicate.
+An ordinary `fetch(url, { credential: "name" })` has no tool catalog or project reference for the predicate to inspect.
+The compiler records credential use only within tool or agent routes. Native option parsing must therefore refuse this retained call shape.
+Recorded-result substitution can bypass that native refusal, so the refusal must also run before replay and durable wrappers.
+The worker proposed normal registration for the complete fetch binding. The main agent's source review rejected that mechanism.
+Replay already uses the native path for `fetch`, but it stubs `fetchWithRetry`. Durable recording still relies on its outer wrapper.
+Normal registration for the entire binding would remove retained durable behavior. The runtime worker will propose a smaller outer guard.
+The advisor preflight again returned `parent_runtime_unavailable`. No consultation or model-provider call ran.
+
+The main agent authorized replay and durable registration overloads with an outer native-function guard.
+Existing registrations use an identity guard. Handler registration selects the credential guard only for fetch exports.
+The global fetch callback receives the same guard outside its selected wrapper. Compiler bindings and trace identities stay unchanged.
+
+The main agent reviewed the full U2 runtime and tooling diff line by line.
+The first unfiltered check returned exit status 1 because four removed-state references remained.
+The worker removed those references and all remaining nested-tool branches.
+The review also found three ordinary network tests inside the removed credential test block.
+The worker preserved retry, bodyless-send, and service-call assertions with the ordinary HTTP test server.
+The ordinary replay control moved from the deleted agent replay module into `replay_runner.zig`.
+
+The second unfiltered run passed server, project configuration, precompile, and ZTS CLI checks.
+CLI still expected the retired agent round budget in one fixture test. That obsolete expectation will leave.
+The separate runtime check returned exit status 1: the credential test expected three response-body matches and found two.
+The worker will assert each export's public response shape separately before the main agent repeats that check.
+The example census contains 60 surviving TypeScript sources after the approved tool example leaves.
+The pipeline mutation floor now names those 60 sources. The corpus floor and mutation checks stay unchanged.
+The module-boundary and proof-error-discard checks returned direct exit status 0 without any allowlist change.
+The main agent delegated live documentation cleanup separately. No compiler-visible source enters that scope.
+
+## U2 result
+
+The runtime removal unit is complete. It deletes seven dedicated runtime files, vocabulary tooling, and the tool example.
+The runtime keeps ordinary routing, fetch, durable execution, queues, buffered SSE, pool isolation, and static path checks.
+Credential options refuse before replay and durable substitution. The tests assert each export's exact public error and details.
+The final runtime check returned direct exit status 0: 432 tests passed and one was skipped.
+The final CLI check returned direct exit status 0: 725 tests passed and one was skipped, with no failures or leaks.
+The server, project configuration, precompile, and ZTS CLI checks already passed their second unfiltered run.
+The binary build, module-boundary check, and proof-error-discard check returned direct exit status 0.
+Current metadata and specification output match the exact baselines. All baseline hashes of model-visible source files still match.
+No provider call ran. The compiler export removal remains deferred to Phase 3.
+The main agent owns the next action: restore the prepared predecessor tests and execute the coupled codec removal.

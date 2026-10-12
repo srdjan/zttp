@@ -91,6 +91,15 @@ pub fn registerVirtualModuleTraced(comptime binding: mb.ModuleBinding, ctx: *con
 
 /// Register module exports with replay stubs.
 pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    return registerVirtualModuleReplayWithOuter(binding, ctx, allocator, identityOuter);
+}
+
+pub fn registerVirtualModuleReplayWithOuter(
+    comptime binding: mb.ModuleBinding,
+    ctx: *context.Context,
+    allocator: std.mem.Allocator,
+    comptime outer: anytype,
+) !void {
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     inline for (binding.exports) |exp| {
@@ -107,12 +116,21 @@ pub fn registerVirtualModuleReplay(comptime binding: mb.ModuleBinding, ctx: *con
                 comptime trace.makeReplayStub(binding.name, exp.name))
         else
             base_func;
-        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, comptime outer(binding, exp, func));
     }
 }
 
 /// Register module exports with durable execution wrappers.
 pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *context.Context, allocator: std.mem.Allocator) !void {
+    return registerVirtualModuleDurableWithOuter(binding, ctx, allocator, identityOuter);
+}
+
+pub fn registerVirtualModuleDurableWithOuter(
+    comptime binding: mb.ModuleBinding,
+    ctx: *context.Context,
+    allocator: std.mem.Allocator,
+    comptime outer: anytype,
+) !void {
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     inline for (binding.exports) |exp| {
@@ -121,8 +139,16 @@ pub fn registerVirtualModuleDurable(comptime binding: mb.ModuleBinding, ctx: *co
             comptime trace.makeDurableWrapper(binding.name, exp.name, base_func)
         else
             base_func;
-        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, func);
+        try registerNativeExportForBinding(binding, exp, ctx, allocator, pool, comptime outer(binding, exp, func));
     }
+}
+
+fn identityOuter(
+    comptime _: mb.ModuleBinding,
+    comptime _: mb.FunctionBinding,
+    comptime inner: object.NativeFn,
+) object.NativeFn {
+    return inner;
 }
 
 fn registerNativeExportForBinding(

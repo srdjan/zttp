@@ -65,14 +65,6 @@ invariant-gate mutation-harness
 # a publication operation a human asks for.
 coverage-union release-operation
 
-# Regenerates docs/consumer-contract-envelope.json from the Zig declarations.
-# The verdict lives in `test-vocab-envelope-drift`, which scripts/verify.sh runs
-# and which fails when the published file and the tree disagree. This step is the
-# write half: a human runs it after changing an alphabet, reads the diff, and
-# commits it. Wiring it into a check would defeat the gate, because a build that
-# regenerates its own expected output can never disagree with itself.
-vocab-envelope-write regeneration
-
 # A mutation run uses a fresh Zig cache for each row. The 231-row run took
 # 98.81 seconds on this machine. Run this explicit gate while strengthening
 # the acceptance suite.

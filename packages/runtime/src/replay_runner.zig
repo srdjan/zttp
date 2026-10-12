@@ -147,7 +147,7 @@ pub fn replayOne(
     const target = runtime_natives.parseRequestTarget(allocator, group.request.url);
     defer target.deinit(allocator);
 
-    var request = HttpRequestView{
+    const request = HttpRequestView{
         .method = group.request.method,
         .url = group.request.url,
         .path = target.path,
@@ -156,12 +156,8 @@ pub fn replayOne(
         .body = ub.slice,
     };
 
-    const turn = try @import("replay_turn.zig").ReplayTurn.prepare(allocator, rt, handler_code, handler_filename, &request);
-    defer if (turn) |active| active.deinit();
-
     // Execute handler
     var response = rt.executeHandler(request) catch |err| {
-        if (turn) |active| try active.finish(if (err == error.RequestTimeout) 504 else 500, err == error.RequestTimeout);
         return ReplayResult{
             .match = false,
             .expected_status = if (group.response) |r| r.status else 200,
@@ -175,7 +171,6 @@ pub fn replayOne(
         };
     };
     defer response.deinit();
-    if (turn) |active| try active.finish(response.status, false);
 
     const expected = group.response orelse {
         // Witness case: no expected response was recorded. Hand back the
@@ -867,4 +862,24 @@ test "all-identical replay returns success" {
     };
 
     try run(allocator, spec);
+}
+
+test "replayOne preserves an ordinary replay" {
+    const group = trace.RequestTraceGroup{
+        .request = .{ .method = "GET", .url = "/", .headers_json = "{}", .body = null },
+        .io_calls = &.{},
+        .response = null,
+        .meta = null,
+    };
+    var result = try replayOne(
+        std.testing.allocator,
+        .{ .replay_file_path = "memory", .enforce_arena_escape = false },
+        "function handler(req) { return Response.text(\"ordinary\"); }",
+        "ordinary.ts",
+        &group,
+    );
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.match);
+    try std.testing.expectEqualStrings("ordinary", result.actual_body_owned);
+    try std.testing.expectEqual(@as(u32, 0), result.io_total);
 }

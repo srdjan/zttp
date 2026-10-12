@@ -939,14 +939,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         };
     }
 
-    // The consumer declaration (M4 T4). Loaded before compilation and kept
-    // alive until the build ends: the flow checker borrows it.
-    var declaration: ?zts.declaration.Declaration = null;
-    defer if (declaration) |*decl| decl.deinit();
-    if (opts.declaration_path) |path| {
-        declaration = try loadDeclarationFile(allocator, path, null);
-    }
-
     debugPrint("Compiling handler: {s} ({d} bytes)\n", .{ handler_path_final, source.len });
 
     // Compile the handler to bytecode (+ optional verification + optional contract)
@@ -959,7 +951,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
         .manifest_registry = registry_ptr,
         .build_time = opts.build_time,
         .git_commit = opts.git_commit,
-        .declaration = if (declaration) |*decl| decl else null,
     }) catch |err| {
         debugPrint("Compilation failed: {}\n", .{err});
         return err;
@@ -968,7 +959,6 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
 
     var retired_facts: retired_authority.Facts = .{};
     if (compiled.contract) |*contract| retired_facts = retired_authority.contractFacts(contract);
-    retired_facts.declaration_config = opts.declaration_path != null;
     if (compiled.proof_evidence) |*evidence| {
         for (evidence.proof.nodes) |node| {
             if (node.tag == .ledger_call) retired_facts.ledger_module = true;
@@ -7708,7 +7698,7 @@ const tax_id_declaration =
 ;
 
 /// A declaration and a handler written to a temporary directory, the
-/// declaration loaded from its file exactly as `--declaration` loads it.
+/// declaration loaded from a test file.
 const DeclaredFixture = struct {
     tmp: std.testing.TmpDir,
     handler_path: [:0]u8,

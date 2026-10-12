@@ -19,7 +19,6 @@ const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const http_parser = @import("http_parser.zig");
 const retry_backoff = @import("retry_backoff.zig");
-const credential_store = @import("credential_store.zig");
 
 const HandlerInstance = handler_instance.HandlerInstance;
 const http_types = @import("http_types.zig");
@@ -30,8 +29,6 @@ const QueryParam = http_types.QueryParam;
 const HttpHeader = http_types.HttpHeader;
 const ResponseHeader = http_types.ResponseHeader;
 const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
-const turn_state = @import("turn_state.zig");
-const TurnState = turn_state.TurnState;
 
 const FetchResponseObjects = struct {
     value: zq.JSValue,
@@ -45,17 +42,6 @@ const unixMillis = zq.trace.unixMillis;
 
 fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
     var timeout_ms = rt.config.outbound_timeout_ms;
-    if (rt.nestedToolTurn()) |turn| {
-        const now_ns = zq.monotonicNowNs() catch return 1;
-        timeout_ms = turn.effectiveOutboundTimeoutMs(timeout_ms, now_ns);
-    }
-    if (rt.active_request) |request| {
-        if (request.turn) |turn| {
-            if (turn.provider_timeout_ms) |turn_timeout_ms| {
-                if (turn_timeout_ms < timeout_ms) timeout_ms = turn_timeout_ms;
-            }
-        }
-    }
     if (rt.active_durable_run) |active| {
         if (active.step_timeout_deadline_ms) |deadline_ms| {
             const remaining_ms = deadline_ms - unixMillis();
@@ -67,17 +53,6 @@ fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
         }
     }
     return timeout_ms;
-}
-
-fn nestedToolDeadlinePassed(rt: *HandlerInstance) bool {
-    const turn = rt.nestedToolTurn() orelse return false;
-    const now_ns = zq.monotonicNowNs() catch {
-        turn.markToolDeadlineHit();
-        return true;
-    };
-    if (!turn.deadlineExpired(now_ns)) return false;
-    turn.markToolDeadlineHit();
-    return true;
 }
 
 fn stepDeadlinePassed(rt: *HandlerInstance) bool {
@@ -627,35 +602,17 @@ fn resolvedScopeDecision(
 pub fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx_for_host: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
     const rt = HandlerInstance.fromContext(ctx_for_host) orelse return error.RuntimeUnavailable;
-    if (rt.ctx.active_tool_grant != null) {
-        return createFetchErrorResponse(rt, "ToolGrantRefused", "ambient_http_forbidden");
-    }
     return fetchAndRecord(rt, args);
 }
 
 fn fetchAndRecord(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
-    const result = fetch_result: {
-        const fetched = fetchSyncResult(rt, args) catch |err| {
-            const internal = try createFetchErrorResponse(rt, "InternalError", @errorName(err));
-            const is_agent_provider = if (rt.active_request) |request| request.turn != null else false;
-            if (is_agent_provider) break :fetch_result internal;
-            return internal;
-        };
-        break :fetch_result fetched;
-    };
+    const result = fetchSyncResult(rt, args) catch |err|
+        return createFetchErrorResponse(rt, "InternalError", @errorName(err));
 
     // Record fetchSync to trace (it's outside virtual module dispatch)
     const ctx = rt.ctx;
     if (ctx.getModuleState(zq.TraceRecorder, zq.TRACE_STATE_SLOT)) |recorder| {
-        const provider_phase: ?zq.trace.ProviderPhase = if (rt.active_request) |request|
-            if (request.turn) |turn| turn.provider_phase else null
-        else
-            null;
-        const provider_status = if (rt.active_request) |request|
-            if (request.turn) |turn| turn.provider_status else null
-        else
-            null;
-        recorder.recordIOWithProviderPhase("http", "fetchSync", ctx, args, result, provider_phase, provider_status);
+        recorder.recordIO("http", "fetchSync", ctx, args, result);
     }
 
     return result;
@@ -679,9 +636,6 @@ const FetchInitOptions = struct {
     body: ?[]const u8 = null,
     max_response_bytes: usize,
     headers: std.ArrayList(std.http.Header) = .empty,
-    /// The credential the call names (M4 T6). Borrowed from the JS string.
-    credential: ?[]const u8 = null,
-
     fn deinit(self: *FetchInitOptions, allocator: std.mem.Allocator) void {
         self.headers.deinit(allocator);
     }
@@ -876,10 +830,7 @@ fn parseFetchInitOptions(
             // to be valid UTF-8.
             options.body = zq.bytes.data(raw);
         } else {
-            const body_string = if (activeAgentGrant(rt) != null)
-                getStringDataCtx(body_val, rt.ctx)
-            else
-                getStringData(body_val);
+            const body_string = getStringData(body_val);
             options.body = body_string orelse {
                 return fetchInitError(rt, allocator, &options, "InvalidBody", "body must be string|Bytes|null");
             };
@@ -931,229 +882,41 @@ fn parseFetchInitOptions(
         }
     }
 
-    if (credentialOption(rt, init, pool)) |credential_val| {
-        const name = getStringData(credential_val) orelse {
-            return fetchInitError(rt, allocator, &options, "InvalidCredential", "credential must be a string");
-        };
-        if (name.len == 0) {
-            return fetchInitError(rt, allocator, &options, "InvalidCredential", "credential must be a non-empty string");
-        }
-        options.credential = name;
+    if (hasCredentialOption(rt, init, pool)) {
+        return fetchInitError(rt, allocator, &options, "CredentialRefused", "path_unsupported");
     }
 
     return .{ .ok = options };
 }
 
-/// The `credential` value of a fetch init, or null when the init names none.
-/// Every sender reads it through here, so a sender that does not inject a
-/// credential refuses exactly the calls the synchronous path would act on.
-fn credentialOption(rt: *HandlerInstance, init: *zq.JSObject, pool: *const zq.HiddenClassPool) ?zq.JSValue {
-    const credential_val = getDynamicProperty(rt.ctx, init, pool, "credential") orelse return null;
-    if (credential_val.isUndefined()) return null;
-    return credential_val;
+/// Report whether a fetch init requests removed credential authority.
+fn hasCredentialOption(rt: *HandlerInstance, init: *zq.JSObject, pool: *const zq.HiddenClassPool) bool {
+    return getDynamicProperty(rt.ctx, init, pool, "credential") != null;
 }
 
-/// The one refusal every sender other than the synchronous `fetch` gives a
-/// credentialed call (M4 T6 design note, section 5, and Q2).
-fn credentialPathUnsupported(rt: *HandlerInstance) !zq.JSValue {
-    return createFetchErrorResponse(rt, "CredentialRefused", @tagName(credential_store.Refusal.path_unsupported));
+fn credentialOptionRefusal(rt: *HandlerInstance) !zq.JSValue {
+    return createFetchErrorResponse(rt, "CredentialRefused", "path_unsupported");
 }
 
-/// Authorize the credential a call names against the exact request the
-/// runtime is about to send (M4 T6 design note, section 5). The active tool's
-/// grant answers check 1; the store checks the rest. Runs after every other
-/// check and before the connect.
-fn authorizeCredential(rt: *HandlerInstance, name: []const u8, url: []const u8, options: *const FetchInitOptions) credential_store.Decision {
-    const granted = blk: {
-        const request = rt.active_request orelse break :blk false;
-        const grant = request.tool_grant orelse break :blk false;
-        break :blk grant.allows_credential(grant.context, name);
-    };
-    return credential_store.authorize(rt.config.credential_store, granted, name, .{
-        .url = url,
-        .method = options.method,
-        .headers = options.headers.items,
-    });
-}
-
-const AgentFetchRefusal = enum {
-    provider_endpoint_mismatch,
-    provider_credential_required,
-    durable_forbidden,
-};
-
-fn agentFetchRefusal(grant: http_types.AgentGrant, url: []const u8, credential: ?[]const u8, durable: bool) ?AgentFetchRefusal {
-    var normalized: [zq.endpoint.max_endpoint_bytes]u8 = undefined;
-    const endpoint = zq.endpoint.normalize(url, &normalized) catch return .provider_endpoint_mismatch;
-    if (!std.mem.eql(u8, endpoint, grant.provider_endpoint)) return .provider_endpoint_mismatch;
-    const name = credential orelse return .provider_credential_required;
-    if (!std.mem.eql(u8, name, grant.provider_credential)) return .provider_credential_required;
-    if (grant.no_durable and durable) return .durable_forbidden;
-    return null;
-}
-
-/// Run before replay, durable dispatch, DNS, or connect. These paths must not
-/// bypass an agent's endpoint and credential restrictions.
-fn checkAgentFetch(rt: *HandlerInstance, args: []const zq.JSValue) !?zq.JSValue {
-    const request = rt.active_request orelse return null;
-    const grant = request.tool_grant orelse return null;
-    const agent = grant.agent orelse return null;
-    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-    const parsed = switch (try parseFetchArgs(rt, pool, args)) {
-        .ok => |value| value,
-        .err => |value| return value,
-    };
-    defer rt.allocator.free(parsed.url);
-    var credential: ?[]const u8 = null;
-    var durable = false;
-    if (parsed.init_obj) |init| {
-        if (credentialOption(rt, init, pool)) |value| credential = getStringData(value);
-        if (getDynamicProperty(rt.ctx, init, pool, "durable")) |value| durable = !value.isUndefined();
-    }
-    if (agentFetchRefusal(agent, parsed.url, credential, durable)) |reason| {
-        return try createFetchErrorResponse(rt, "AgentGrantRefused", @tagName(reason));
-    }
-    return null;
-}
-
-const AgentProviderHook = union(enum) {
-    none,
-    active: *TurnState,
-    refused: zq.JSValue,
-};
-
-fn activeAgentGrant(rt: *HandlerInstance) ?http_types.AgentGrant {
-    const request = rt.active_request orelse return null;
-    const grant = request.tool_grant orelse return null;
-    return grant.agent;
+/// Keep removed credential authority outside replay and durable wrappers.
+/// Those wrappers can return a recorded result without calling the fetch body.
+pub fn credentialOptionGuard(comptime inner: zq.NativeFn) zq.NativeFn {
+    return struct {
+        fn guarded(ctx_ptr: *anyopaque, this_value: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+            const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+            const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
+            const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+            if (fetchInitObject(args)) |init| {
+                if (hasCredentialOption(rt, init, pool)) return credentialOptionRefusal(rt);
+            }
+            return inner(ctx_ptr, this_value, args);
+        }
+    }.guarded;
 }
 
 fn fetchInitObject(args: []const zq.JSValue) ?*zq.JSObject {
     if (args.len >= 1 and args[0].isObject()) return args[0].toPtr(zq.JSObject);
     if (args.len >= 2 and args[1].isObject()) return args[1].toPtr(zq.JSObject);
-    return null;
-}
-
-/// Return the byte length only when the body has a valid fetch body type.
-/// Invalid bodies reach the normal parser after the pre-record and classify as
-/// not_started; they cannot open a connection.
-fn providerRequestBodyLength(rt: *HandlerInstance, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) ?usize {
-    const init = fetchInitObject(args) orelse return 0;
-    const value = getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body") orelse return 0;
-    if (value.isNull() or value.isUndefined()) return 0;
-    if (zq.bytes.asBytes(value)) |raw| return zq.bytes.data(raw).len;
-    const body = getStringDataCtx(value, rt.ctx) orelse return null;
-    return body.len;
-}
-
-fn agentTurnRefusal(rt: *HandlerInstance, tag: turn_state.TerminalTag) !zq.JSValue {
-    return createFetchErrorResponse(rt, "AgentTurnRefused", @tagName(tag));
-}
-
-/// Apply the accepted A2 provider hook in its security-relevant order. A
-/// durable pre-record is the admission point for one provider round.
-fn beginAgentProviderFetch(
-    rt: *HandlerInstance,
-    pool: *const zq.HiddenClassPool,
-    args: []const zq.JSValue,
-) !AgentProviderHook {
-    _ = activeAgentGrant(rt) orelse return .none;
-    const request = rt.active_request.?;
-    const turn = request.turn orelse {
-        return .{ .refused = try agentTurnRefusal(rt, .recorder_unavailable) };
-    };
-
-    if (turn.latch) |tag| return .{ .refused = try agentTurnRefusal(rt, tag) };
-
-    const now_ns = zq.monotonicNowNs() catch {
-        turn.closeLatch(.deadline_exceeded);
-        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
-    };
-    if (turn.deadlineExpired(now_ns)) {
-        turn.closeLatch(.deadline_exceeded);
-        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
-    }
-    if (turn.roundBudgetExhausted()) {
-        turn.closeLatch(.budget_exhausted);
-        return .{ .refused = try agentTurnRefusal(rt, .budget_exhausted) };
-    }
-    if (providerRequestBodyLength(rt, pool, args)) |body_len| {
-        if (body_len > turn.limits.provider_request_bytes) {
-            turn.closeLatch(.budget_exhausted);
-            return .{ .refused = try agentTurnRefusal(rt, .budget_exhausted) };
-        }
-    }
-
-    const ordinal = turn.round;
-    turn.recorder.appendPre(turn.id, turn.nextSequence(), ordinal, @intCast(now_ns)) catch {
-        turn.closeLatch(.recorder_unavailable);
-        return .{ .refused = try agentTurnRefusal(rt, .recorder_unavailable) };
-    };
-    turn.recordSucceeded();
-    turn.spendRound();
-    const budget_now_ns = zq.monotonicNowNs() catch {
-        turn.closeLatch(.deadline_exceeded);
-        turn.provider_started_ns = now_ns;
-        finishAgentProviderFetch(turn);
-        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
-    };
-    turn.provider_started_ns = budget_now_ns;
-    if (turn.deadlineExpired(budget_now_ns)) {
-        turn.closeLatch(.deadline_exceeded);
-        finishAgentProviderFetch(turn);
-        return .{ .refused = try agentTurnRefusal(rt, .deadline_exceeded) };
-    }
-    turn.setProviderTimeout(rt.config.outbound_timeout_ms, budget_now_ns);
-    return .{ .active = turn };
-}
-
-fn finishAgentProviderFetch(turn: *TurnState) void {
-    const class = turn.providerOutcome();
-    if (class == .outcome_unknown) turn.closeLatch(.outcome_unknown);
-    const now_ns = zq.monotonicNowNs() catch turn.provider_started_ns;
-    turn.recorder.appendPost(
-        turn.id,
-        turn.nextSequence(),
-        turn.provider_ordinal.?,
-        class,
-        turn.provider_status != null,
-        turn.provider_status,
-        @intCast(now_ns),
-    ) catch {
-        turn.closeLatch(.recorder_unavailable);
-        return;
-    };
-    turn.recordSucceeded();
-}
-
-fn markProviderRequestStarted(rt: *HandlerInstance) void {
-    const request = rt.active_request orelse return;
-    const turn = request.turn orelse return;
-    turn.requestStarted();
-}
-
-fn markProviderHeadReceived(rt: *HandlerInstance, status: u16) void {
-    const request = rt.active_request orelse return;
-    const turn = request.turn orelse return;
-    turn.headReceived(status);
-}
-
-fn markProviderResponseCompleted(rt: *HandlerInstance) void {
-    const request = rt.active_request orelse return;
-    const turn = request.turn orelse return;
-    turn.responseCompleted();
-}
-
-/// Where an upstream response echoed the credential value, or null. Only the
-/// exact bytes are found: an encoded echo (base64, a hash, or a compression
-/// the runtime does not decode) is not (design note, section 7, and Q4).
-fn credentialReflection(value: []const u8, head: *const OwnedResponseHead, body: []const u8) ?[]const u8 {
-    if (std.mem.indexOf(u8, head.reason, value) != null) return "response_head";
-    for (head.headers.items) |header| {
-        if (std.mem.indexOf(u8, header.name, value) != null) return "response_head";
-        if (std.mem.indexOf(u8, header.value, value) != null) return "response_head";
-    }
-    if (std.mem.indexOf(u8, body, value) != null) return "response_body";
     return null;
 }
 
@@ -1274,58 +1037,14 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         .unresolved => |details| return createFetchErrorResponse(rt, "ConnectFailed", details),
     }
 
-    // The credential (M4 T6) is added only here, after every other check and
-    // before the connect, and only when the exact request passes each check
-    // of `authorizeCredential`. The header value is zeroed on every exit.
-    var credential_header: ?[]u8 = null;
-    defer if (credential_header) |header_value| credential_store.releaseHeaderValue(rt.allocator, header_value);
-    const credential_value: ?[]const u8 = if (options.credential) |name| switch (authorizeCredential(rt, name, fetch_args.url, &options)) {
-        .refused => |reason| return createFetchErrorResponse(rt, "CredentialRefused", @tagName(reason)),
-        .granted => |entry| granted: {
-            credential_header = try credential_store.headerValue(rt.allocator, entry);
-            try options.headers.append(rt.allocator, .{ .name = entry.ref.header, .value = credential_header.? });
-            break :granted entry.value;
-        },
-    } else null;
-
-    // Name resolution and validation happen after the turn pre-record. Refresh
-    // the cap immediately before connect so that work cannot restore the old
-    // full timeout or start an effect after the absolute turn deadline.
-    if (rt.active_request) |request| {
-        if (request.turn) |turn| {
-            const budget_now_ns = zq.monotonicNowNs() catch {
-                turn.closeLatch(.deadline_exceeded);
-                return agentTurnRefusal(rt, .deadline_exceeded);
-            };
-            if (turn.deadlineExpired(budget_now_ns)) {
-                turn.closeLatch(.deadline_exceeded);
-                return agentTurnRefusal(rt, .deadline_exceeded);
-            }
-            turn.setProviderTimeout(rt.config.outbound_timeout_ms, budget_now_ns);
-        }
-    }
-    if (nestedToolDeadlinePassed(rt)) {
-        return createFetchErrorResponse(rt, "TimedOut", "exceeded agent turn deadline");
-    }
-
     // One budget for connect, handshake, and exchange, starting after name
     // resolution. The backend arms the watchdog when the connect succeeds.
-    const nested_turn = rt.nestedToolTurn();
     const fetch_timeout_ms = effectiveOutboundTimeoutMs(rt);
-    const turn_cap_applied = if (nested_turn) |turn| blk: {
-        const cap_now = zq.monotonicNowNs() catch break :blk true;
-        break :blk turn.effectiveOutboundTimeoutMs(rt.config.outbound_timeout_ms, cap_now) < rt.config.outbound_timeout_ms;
-    } else false;
     var deadline: FetchDeadline = .{ .timeout_ms = fetch_timeout_ms, .io = client.io };
     backend.beginFetch(&deadline) catch |err| return createFetchErrorResponse(rt, "DeadlineUnavailable", @errorName(err));
     // Declared after the client's deinit defer, so the watchdog is joined
     // before the client closes any connection.
-    defer {
-        if (turn_cap_applied and deadline.expired()) {
-            if (nested_turn) |turn| turn.markToolDeadlineHit();
-        }
-        backend.endFetch();
-    }
+    defer backend.endFetch();
 
     const connection = client.connectTcpOptions(.{
         // Connect to the address that passed, name the destination for TLS.
@@ -1357,7 +1076,6 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
 
     if (outboundBody(options.method, options.body)) |payload| {
         req.transfer_encoding = .{ .content_length = payload.len };
-        markProviderRequestStarted(rt);
         var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
             return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
@@ -1371,21 +1089,14 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
             return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
     } else {
-        markProviderRequestStarted(rt);
         req.sendBodiless() catch |err| {
             return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
         };
     }
 
-    var response = req.receiveHead(&.{}) catch |err| {
-        // The send completed, so a credentialed request may have reached the
-        // upstream and acted. Its outcome is unknown, and nothing retries it
-        // (design note, section 6). Other fetches keep their codes.
-        const code = if (credential_value != null) "OutcomeUnknown" else deadline.failCode("ResponseHeadFailed");
-        return createFetchErrorResponse(rt, code, @errorName(err));
-    };
+    var response = req.receiveHead(&.{}) catch |err|
+        return createFetchErrorResponse(rt, deadline.failCode("ResponseHeadFailed"), @errorName(err));
     const status = @intFromEnum(response.head.status);
-    markProviderHeadReceived(rt, status);
     var owned_head = try snapshotResponseHead(rt.allocator, response.head);
     defer owned_head.deinit(rt.allocator);
 
@@ -1401,29 +1112,12 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         return createFetchErrorResponse(rt, "TimedOut", "exceeded outbound_timeout_ms");
     }
 
-    // An upstream that echoes the credential would hand it to tool code.
-    // Refuse before any JS value holds the response (design note, Q4).
-    if (credential_value) |value| {
-        if (credentialReflection(value, &owned_head, response_body)) |where| {
-            // The copies hold the value; zero them before the defers free them.
-            std.crypto.secureZero(u8, response_body);
-            std.crypto.secureZero(u8, owned_head.reason);
-            for (owned_head.headers.items) |header| {
-                std.crypto.secureZero(u8, header.name);
-                std.crypto.secureZero(u8, header.value);
-            }
-            return createFetchErrorResponse(rt, "CredentialReflected", where);
-        }
-    }
-
     const created = try createFetchResponse(rt, status, owned_head.reason, response_body, owned_head.contentType());
     for (owned_head.headers.items) |header| {
         const key_atom = try getHeaderAtom(rt.ctx, header.name);
         const value_str = try rt.ctx.createString(header.value);
         try rt.ctx.setPropertyChecked(created.headers, key_atom, value_str);
     }
-
-    markProviderResponseCompleted(rt);
 
     return created.value;
 }
@@ -1457,16 +1151,6 @@ fn collectFetchForParallel(rt: *HandlerInstance, collector: *zq.modules.io.Paral
         .err => |err_val| return err_val,
     };
     errdefer options.deinit(a);
-    // The worker threads that send a parallel descriptor do not inject a
-    // credential (M4 T6, Q2).
-    if (options.credential != null) {
-        // Reset after the deinit, so the errdefer is a no-op if building the
-        // refusal fails.
-        options.deinit(a);
-        options.headers = .empty;
-        return credentialPathUnsupported(rt);
-    }
-
     const owned_url = try a.dupe(u8, url);
     errdefer a.free(owned_url);
 
@@ -1533,37 +1217,7 @@ pub fn fetchModuleCallback(
     _ = ctx;
     const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-
-    if (try checkAgentFetch(rt, args)) |refusal| return refusal;
-
-    const hook = try beginAgentProviderFetch(rt, pool, args);
-    switch (hook) {
-        .refused => |refusal| return refusal,
-        .none, .active => {},
-    }
-
-    const result = dispatchFetchModule(rt, pool, args) catch |err| {
-        switch (hook) {
-            .active => |turn| {
-                const internal = createFetchErrorResponse(rt, "InternalError", @errorName(err)) catch |response_err| {
-                    finishAgentProviderFetch(turn);
-                    return response_err;
-                };
-                finishAgentProviderFetch(turn);
-                return internal;
-            },
-            .none => return err,
-            .refused => unreachable,
-        }
-    };
-    return switch (hook) {
-        .active => |turn| blk: {
-            finishAgentProviderFetch(turn);
-            break :blk result;
-        },
-        .none => result,
-        .refused => unreachable,
-    };
+    return dispatchFetchModule(rt, pool, args);
 }
 
 fn dispatchFetchModule(
@@ -1581,12 +1235,7 @@ fn dispatchFetchModule(
         switch (try parseDurableFetchOpts(rt, obj, pool)) {
             .none => {},
             .err => |err_val| return err_val,
-            .ok => |opts| {
-                // A durable fetch retries every 5xx, a transport failure
-                // included, so it never carries a credential (M4 T6, Q2).
-                if (credentialOption(rt, obj, pool) != null) return credentialPathUnsupported(rt);
-                return runDurableFetch(rt, args, opts);
-            },
+            .ok => |opts| return runDurableFetch(rt, args, opts),
         }
     }
     return fetchAndRecord(rt, args);
@@ -1625,22 +1274,6 @@ fn fetchModuleReplay(rt: *HandlerInstance) !zq.JSValue {
 
     const status_raw = zq.trace.findJsonIntValue(entry.result_json, "\"status\"") orelse 200;
     const status: u16 = @intCast(@max(100, @min(599, status_raw)));
-    // Old traces have no provider phase. Under an admitted agent turn, treat
-    // that absence as outcome_unknown. Do not infer transport state from an
-    // error name or status.
-    var provider_phase = entry.provider_phase orelse .request_started;
-    if ((provider_phase == .head_received or provider_phase == .completed) and entry.provider_status == null) {
-        provider_phase = .request_started;
-    }
-    switch (provider_phase) {
-        .not_started => {},
-        .request_started => markProviderRequestStarted(rt),
-        .head_received, .completed => {
-            markProviderRequestStarted(rt);
-            markProviderHeadReceived(rt, entry.provider_status.?);
-        },
-    }
-
     const status_text_raw = zq.trace.findJsonStringValue(entry.result_json, "\"statusText\"") orelse "OK";
     const status_text = try zq.trace.unescapeJson(rt.allocator, status_text_raw);
     defer rt.allocator.free(status_text);
@@ -1668,26 +1301,7 @@ fn fetchModuleReplay(rt: *HandlerInstance) !zq.JSValue {
     if (headers_json) |headers| {
         try copyRecordedFetchHeaders(rt, created.headers, headers);
     }
-    if (rt.active_request) |request| {
-        if (request.turn != null) {
-            try copyRecordedFetchError(rt, created.response, entry.result_json);
-        }
-    }
-    if (provider_phase == .completed) markProviderResponseCompleted(rt);
     return created.value;
-}
-
-fn copyRecordedFetchError(rt: *HandlerInstance, response: *zq.JSObject, result_json: []const u8) !void {
-    const error_raw = zq.trace.findJsonStringValue(result_json, "\"error\"") orelse return;
-    const details_raw = zq.trace.findJsonStringValue(result_json, "\"details\"") orelse "";
-    const error_text = try zq.trace.unescapeJson(rt.allocator, error_raw);
-    defer rt.allocator.free(error_text);
-    const details_text = try zq.trace.unescapeJson(rt.allocator, details_raw);
-    defer rt.allocator.free(details_text);
-    const error_atom = try rt.ctx.atoms.intern("error");
-    const details_atom = try rt.ctx.atoms.intern("details");
-    try rt.ctx.setPropertyChecked(response, error_atom, try rt.ctx.createString(error_text));
-    try rt.ctx.setPropertyChecked(response, details_atom, try rt.ctx.createString(details_text));
 }
 
 fn replayNextIs(state: *const zq.trace.ReplayState, module_name: []const u8, fn_name: []const u8) bool {
@@ -2687,9 +2301,6 @@ pub fn httpRequestNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JS
 
 fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![]u8 {
     const a = rt.allocator;
-    if (rt.ctx.active_tool_grant != null) {
-        return httpRequestErrorJsonAlloc(a, "ToolGrantRefused", "ambient_http_forbidden");
-    }
     if (!rt.config.outbound_http_enabled) {
         return try httpRequestErrorJsonAlloc(a, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
@@ -2707,9 +2318,9 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
     }
     const obj = parsed.value.object;
 
-    // This sender never injects a credential (M4 T6, Q2).
+    // The runtime refuses the removed credential option before sending.
     if (obj.get("credential") != null) {
-        return try httpRequestErrorJsonAlloc(a, "CredentialRefused", @tagName(credential_store.Refusal.path_unsupported));
+        return try httpRequestErrorJsonAlloc(a, "CredentialRefused", "path_unsupported");
     }
 
     const url_v = obj.get("url") orelse {
@@ -3064,114 +2675,4 @@ test "the endpoint decides, not the host" {
     const refused = outboundEndpointViolation(rt, "https://api.example.com@evil.example", "evil.example") orelse
         return error.TestUnexpectedResult;
     try testing.expectEqualStrings("url names no endpoint this policy can decide", refused);
-}
-
-test "agent fetch bounds endpoint credential and durable without sockets" {
-    const grant: http_types.AgentGrant = .{
-        .provider_endpoint = "https://provider.example:443",
-        .provider_credential = "provider",
-    };
-    try std.testing.expectEqual(@as(?AgentFetchRefusal, .provider_endpoint_mismatch), agentFetchRefusal(grant, "https://other.example/chat", "provider", false));
-    try std.testing.expectEqual(@as(?AgentFetchRefusal, .provider_credential_required), agentFetchRefusal(grant, "https://provider.example/chat", null, false));
-    try std.testing.expectEqual(@as(?AgentFetchRefusal, .provider_credential_required), agentFetchRefusal(grant, "https://provider.example/chat", "other", false));
-    try std.testing.expectEqual(@as(?AgentFetchRefusal, .durable_forbidden), agentFetchRefusal(grant, "https://provider.example/chat", "provider", true));
-    try std.testing.expectEqual(@as(?AgentFetchRefusal, null), agentFetchRefusal(grant, "HTTPS://PROVIDER.EXAMPLE./chat", "provider", false));
-}
-
-const FrameTestGrant = struct {
-    name: []const u8,
-    fn allows(ptr: *const anyopaque, _: []const u8, name: []const u8) bool {
-        const self: *const FrameTestGrant = @ptrCast(@alignCast(ptr));
-        return std.mem.eql(u8, self.name, name);
-    }
-    fn credential(ptr: *const anyopaque, name: []const u8) bool {
-        return allows(ptr, "", name);
-    }
-    fn grant(self: *const FrameTestGrant) http_types.ToolGrant {
-        return .{ .context = self, .allows = allows, .allows_credential = credential };
-    }
-};
-const outer_frame_grant: FrameTestGrant = .{ .name = "outer" };
-const inner_frame_grant: FrameTestGrant = .{ .name = "inner" };
-
-fn expectFrameReaders(rt: *HandlerInstance, name: []const u8, other: []const u8) !void {
-    const engine = rt.ctx.active_tool_grant orelse return error.TestUnexpectedResult;
-    try std.testing.expect(engine.allows(engine.context, "test", name));
-    try std.testing.expect(!engine.allows(engine.context, "test", other));
-    if (std.mem.eql(u8, name, "outer")) {
-        try std.testing.expectEqualStrings("outer prompt", engine.agent_prompt orelse return error.TestUnexpectedResult);
-    } else {
-        try std.testing.expect(engine.agent_prompt == null);
-    }
-    const options: FetchInitOptions = .{ .max_response_bytes = 1024 };
-    // No store is loaded. Only the credential the runtime grant allows gets
-    // past the first check and reaches not_configured.
-    try std.testing.expectEqual(credential_store.Refusal.not_configured, authorizeCredential(rt, name, "https://provider.example", &options).refused);
-    try std.testing.expectEqual(credential_store.Refusal.not_granted, authorizeCredential(rt, other, "https://provider.example", &options).refused);
-    try std.testing.expectEqualStrings(name, rt.active_request.?.subject.?);
-    try std.testing.expectEqualStrings(name, rt.active_request.?.tenant.?);
-}
-
-fn frameTestNestedError(rt: *HandlerInstance, nested: HandlerInstance.Frame) !void {
-    try rt.enterNested(nested);
-    defer rt.leaveNested() catch unreachable;
-    try expectFrameReaders(rt, "inner", "outer");
-    return error.FrameTestUnwind;
-}
-
-fn frameTestTransitions(ctx: *zq.Context, _: []const zq.JSValue) !zq.JSValue {
-    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
-    try expectFrameReaders(rt, "outer", "inner");
-    var nested = rt.active_request.?;
-    nested.tool_grant = inner_frame_grant.grant();
-    nested.subject = "inner";
-    nested.tenant = "inner";
-    const frame: HandlerInstance.Frame = .{ .request = nested, .pending_args = "unused" };
-    try rt.enterNested(frame);
-    try expectFrameReaders(rt, "inner", "outer");
-    try std.testing.expectError(error.InvalidGrantFrameDepth, rt.enterNested(frame));
-    try expectFrameReaders(rt, "inner", "outer");
-    try rt.leaveNested();
-    try expectFrameReaders(rt, "outer", "inner");
-    try std.testing.expectError(error.FrameTestUnwind, frameTestNestedError(rt, frame));
-    try expectFrameReaders(rt, "outer", "inner");
-    return error.AotBail;
-}
-
-fn frameTestUnbalanced(ctx: *zq.Context, _: []const zq.JSValue) !zq.JSValue {
-    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
-    try rt.enterNested(.{ .request = rt.active_request.? });
-    return error.AotBail;
-}
-
-test "frame push pop and error unwind keep engine and credential readers together" {
-    const rt = try HandlerInstance.init(std.testing.allocator, .{});
-    defer rt.deinit();
-    try rt.loadHandler("function handler(req) { return Response.text(req.method); }", "<frames>");
-    var outer_grant = outer_frame_grant.grant();
-    outer_grant.agent = .{ .provider_endpoint = "https://provider.example:443", .provider_credential = "outer" };
-    const request: HttpRequestView = .{
-        .method = "POST",
-        .url = "/agent",
-        .headers = .empty,
-        .body = null,
-        .subject = "outer",
-        .tenant = "outer",
-        .tool_grant = outer_grant,
-        .agent_prompt = "outer prompt",
-    };
-    handler_instance.setAotOverrideForTest(frameTestTransitions);
-    defer handler_instance.setAotOverrideForTest(null);
-    var response = try rt.executeHandler(request);
-    defer response.deinit();
-    try std.testing.expectEqualStrings("POST", response.body);
-    try std.testing.expectEqual(@as(usize, 0), rt.frame_depth);
-    try std.testing.expect(rt.ctx.active_tool_grant == null);
-    try std.testing.expect(rt.active_request == null);
-
-    handler_instance.setAotOverrideForTest(frameTestUnbalanced);
-    try std.testing.expectError(error.InvalidGrantFrameDepth, rt.executeHandler(request));
-    try std.testing.expectEqual(@as(usize, 0), rt.frame_depth);
-    try std.testing.expect(rt.ctx.active_tool_grant == null);
-    try std.testing.expect(rt.active_request == null);
 }
