@@ -37,6 +37,12 @@ The main agent will use unfiltered named steps as verification evidence.
 
 ## Current work and next action
 
-A Sol high worker owns the type-storage guard and its tests in `packages/zts/src/pipeline.zig`.
+The type-storage guard refuses repeated initialization before allocation or mutation.
+The regression retains the original environment, confirms pool health, and checks that no allocation failure occurs.
+The tests also preserve initialization after cleanup and retry after an allocation failure.
+The main agent reviewed every changed line and ran the unfiltered `test-zts` step.
+That run passes 2,378 of 2,379 tests, with one existing skip and exit status zero.
+The standalone formatter check passes. No test was removed.
 The main agent owns import-scan cleanup and its tests in `packages/tools/src/precompile.zig`.
+The public import-scan measurement remains in progress under `/private/tmp/zttp-check-oom-probe`.
 The main agent will measure the public import-scan probe next.

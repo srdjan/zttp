@@ -454,6 +454,7 @@ pub const TypeEnvStorage = struct {
         allocator: std.mem.Allocator,
         type_map: ?*const TypeMap,
     ) !void {
+        if (self.initialized) return error.TypeEnvironmentAlreadyInitialized;
         self.pool = TypePool.init(allocator);
         errdefer self.pool.deinit(allocator);
         try self.pool.ensureHealthy();
@@ -1149,6 +1150,8 @@ test "TypeEnvStorage rejects a poisoned TypePool" {
 
     try testing.expectError(error.OutOfMemory, storage.init(failing.allocator(), &type_map));
     try testing.expect(storage.envPtr() == null);
+    try storage.init(allocator, &type_map);
+    try testing.expect(storage.envPtr() != null);
 }
 
 test "TypeEnvStorage rejects a late poisoned TypePool" {
@@ -1190,6 +1193,31 @@ test "TypeEnvStorage initializes module types without a TypeMap" {
 
     try storage.init(allocator, null);
     try testing.expect(storage.envPtr() != null);
+}
+
+test "TypeEnvStorage rejects a second initialization before allocation" {
+    const allocator = testing.allocator;
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+
+    try storage.init(allocator, null);
+    const original_env = storage.envPtr().?;
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+
+    try testing.expectError(
+        error.TypeEnvironmentAlreadyInitialized,
+        storage.init(failing.allocator(), null),
+    );
+    try testing.expectEqual(@as(usize, 0), failing.alloc_index);
+    try testing.expect(!failing.has_induced_failure);
+    try testing.expectEqual(original_env, storage.envPtr().?);
+    try storage.pool.ensureHealthy();
+
+    storage.deinit(allocator);
+    try testing.expect(storage.envPtr() == null);
+    try storage.init(allocator, null);
+    try testing.expect(storage.envPtr() != null);
+    try storage.pool.ensureHealthy();
 }
 
 fn rejectingContractTypeCheck(_: *TypeChecker, _: NodeIndex) anyerror!u32 {
