@@ -149,6 +149,13 @@ Recount the repository. Then continue plan 003's shared analysis and typed front
 That work gets smaller, because `contract_builder.zig` loses its workflow span and `precompile.zig` loses its generator branches.
 Correct the CLAUDE.md sentence about the single execution path once 1b lands.
 
+The owner selected Phase 4 on 2026-10-13.
+The [bounded CHECK facts plan](../docs/plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md) records the current recount and next implementation unit.
+Both graph contract producers already share one completed owner.
+The next unit removes duplicate root facts construction from CHECK path analysis while preserving every imported reader call.
+Loaded-graph convergence, binding semantics, and typed frontend work remain later units.
+`CLAUDE.md` now identifies the interpreter as the single execution path.
+
 ## What stays that a reviewer proposed to cut
 
 - Local MLX provider. Codex marked it KEEP until the owner decides whether local inference is part of the thesis. The local corpus does not drive the headline.
@@ -167,4 +174,4 @@ Correct the CLAUDE.md sentence about the single execution path once 1b lands.
 8. History. Option A: tag the current state as `pre-rebase`, then delete `docs/archive/` and completed plans. Option B: keep them in the tree. Recommendation: A.
 9. Coordination with plan 004, which another session is implementing now. Option A: finish the current 004 unit, pause 004, run Phases 1 to 3, then resume. Option B: run Phase 1 groups that do not touch `precompile.zig` in parallel with 004. Recommendation: A. The plan index forbids two overlapping plans at once.
 
-Next action: the root session executes the selected Phase 2 implementation plan and records evidence in its companion worklog.
+Next action: the owner selects execution of the reviewed Phase 4 unit.

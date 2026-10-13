@@ -190,7 +190,8 @@ Phase 2 is complete. It removed runtime tool routes, agent turns, application in
 New artifacts use payload format 7 and certificate schema 5. The updated reader refuses the previous formats.
 The [Phase 2 worklog](plans/2026-10-12-feature-removal-phase-2-worklog.md) records offline verification, unchanged compiler identities, and review limits.
 Phase 3 source cuts removed orchestration, TSX, source `comptime()`, hypermedia,
-and the deferred PI tools. Coupling cleanup and final evidence remain.
+and the deferred PI tools. Phase 3 is complete, including coupling cleanup and offline evidence publication.
+The 0.22.0 convergence and coverage pages carry the current published evidence.
 
 The owner approved the [first shared-analysis unit](plans/2026-10-11-shared-analysis-first-unit.md) on 2026-10-11.
 The unit preserves documented features and initial wire formats. Its [worklog](plans/2026-10-11-shared-analysis-worklog.md) records execution evidence.
@@ -209,8 +210,12 @@ Production code grows by 186 lines in this phase. The change consolidates analys
 
 CHECK retains its current import traversal because strict graph reuse would change its verdicts and revision reads.
 Full convergence between CHECK and compilation remains follow-up work.
-The owner owns the next action: review and publish the local commits.
-Further CHECK convergence requires a separate bounded plan.
+The owner selected Phase 4 on 2026-10-13.
+The [CHECK facts plan](plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md) prepares the first bounded unit.
+That unit removes duplicate root facts construction from CHECK path analysis through the existing borrowed-input mechanism.
+It preserves imported traversal, reader calls, public verdicts, and current formats.
+Implementation remains pending the owner's selection of the reviewed plan.
+Later Phase 4 units address imported analysis, binding semantics, and a typed frontend prototype.
 
 The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`) is historical.
 The shared import and binding index shipped. The old parser-deletion estimate
