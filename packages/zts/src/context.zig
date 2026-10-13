@@ -87,43 +87,6 @@ pub const CallFrame = struct {
     this: value.JSValue,
 };
 
-/// The accepted capability ceiling of the handler (M4 T5b design note,
-/// section 8): the categories of the declaration's profile and the modules the
-/// profile and the declaration exclude. The runtime lowers it from the
-/// accepted declaration section and owns the strings; this struct only
-/// borrows them, so the engine names no runtime type. The module call wrapper
-/// refuses an export whose module is excluded or whose required capability is
-/// outside `categories`.
-pub const CapabilityCeiling = struct {
-    /// Bit `@intFromEnum(capability)` is set when the ceiling admits that
-    /// capability category.
-    categories: u32,
-    /// Module specifiers refused by name. Borrowed.
-    excluded_modules: []const []const u8,
-
-    pub fn categoryMask(capabilities: []const module_authorization.ModuleCapability) u32 {
-        var mask: u32 = 0;
-        for (capabilities) |capability| mask |= categoryBit(capability);
-        return mask;
-    }
-
-    pub fn admits(self: CapabilityCeiling, capability: module_authorization.ModuleCapability) bool {
-        return self.categories & categoryBit(capability) != 0;
-    }
-
-    pub fn excludes(self: CapabilityCeiling, specifier: []const u8) bool {
-        for (self.excluded_modules) |excluded| {
-            if (std.mem.eql(u8, excluded, specifier)) return true;
-        }
-        return false;
-    }
-
-    fn categoryBit(capability: module_authorization.ModuleCapability) u32 {
-        comptime std.debug.assert(module_authorization.capability_count <= 32);
-        return @as(u32, 1) << @intCast(@intFromEnum(capability));
-    }
-};
-
 pub const MAX_MODULE_STATE_SLOTS = 16;
 
 /// Host callback for invoking a JS function the engine holds: JSX function
@@ -249,11 +212,6 @@ pub const Context = struct {
     /// Authorization scope for the native module call executing in this
     /// Context. Nested wrappers restore the previous borrowed scope.
     active_module_scope: ?module_authorization.ActiveModuleScope,
-    /// The accepted capability ceiling of the handler. Null when the served
-    /// artifact carries no declaration ceiling, which leaves every module call
-    /// as it was. The runtime sets it for the duration of one handler call and
-    /// clears it on every exit path.
-    active_capability_ceiling: ?CapabilityCeiling = null,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,
     /// Immutable policy generation pinned by the owning runtime. Guard-denial
@@ -637,7 +595,6 @@ pub const Context = struct {
         // quarantined Context before module-state destructors run so teardown
         // cannot inherit authority from the failed call.
         self.active_module_scope = null;
-        self.active_capability_ceiling = null;
 
         // Clean up per-module state (caches, registries) before destroying objects
         for (&self.module_state) |*slot| {

@@ -10,7 +10,6 @@
 //! Split out of module_binding.zig, which re-exports every name here.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const object = @import("../object.zig");
 const value = @import("../value.zig");
 const context = @import("../context.zig");
@@ -71,71 +70,6 @@ pub fn wrapNativeFnWithCapabilities(
             defer popActiveModuleContext(token);
             ctx.cost_meter.bump(comptime cost_meter.classForSpecifier(specifier));
             return user_fn(ctx_ptr, this, args);
-        }
-    }.call;
-}
-
-/// The named denial a module call gets when the accepted capability ceiling
-/// excludes its module or does not admit a capability it requires.
-pub const CapabilityCeilingError = error{CapabilityCeilingDenied};
-
-/// Refuse a call into `specifier` when the active capability ceiling excludes
-/// the module or does not admit one of `required_capabilities` (M4 T5b design
-/// note, section 8). No active ceiling allows the call. A denial is recorded
-/// in the security event stream and logged, naming the module and the reason
-/// (compile-time identities only, never request data).
-pub fn checkCapabilityCeiling(
-    ctx: *const context.Context,
-    specifier: []const u8,
-    required_capabilities: []const ModuleCapability,
-) CapabilityCeilingError!void {
-    const ceiling = ctx.active_capability_ceiling orelse return;
-    if (ceiling.excludes(specifier)) {
-        if (!builtin.is_test) std.log.err(
-            "capability ceiling: {s} is excluded by the accepted ceiling; call refused",
-            .{specifier},
-        );
-        security_events.emitGlobal(security_events.SecurityEvent.initPolicyDenied(
-            specifier,
-            "call",
-            "module",
-            specifier,
-            "capability_ceiling",
-            ctx.policy_generation,
-        ));
-        return error.CapabilityCeilingDenied;
-    }
-    for (required_capabilities) |capability| {
-        if (ceiling.admits(capability)) continue;
-        if (!builtin.is_test) std.log.err(
-            "capability ceiling: {s} requires capability {s}, which the accepted ceiling does not admit; call refused",
-            .{ specifier, @tagName(capability) },
-        );
-        security_events.emitGlobal(security_events.SecurityEvent.initPolicyDenied(
-            specifier,
-            "call",
-            "capability",
-            @tagName(capability),
-            "capability_ceiling",
-            ctx.policy_generation,
-        ));
-        return error.CapabilityCeilingDenied;
-    }
-}
-
-/// Wrap an export so it runs only inside the accepted capability ceiling. The
-/// check runs before any capability scope is pushed and before the export does
-/// anything. `required_capabilities` is the binding's module-level list.
-pub fn wrapNativeFnWithCapabilityCeiling(
-    comptime inner: object.NativeFn,
-    comptime specifier: []const u8,
-    comptime required_capabilities: []const ModuleCapability,
-) object.NativeFn {
-    return struct {
-        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-            try checkCapabilityCeiling(ctx, specifier, required_capabilities);
-            return inner(ctx_ptr, this, args);
         }
     }.call;
 }
@@ -650,38 +584,6 @@ test "module call bumps the context cost meter" {
 
     try std.testing.expectEqual(@as(u32, 2), ctx.cost_meter.count(.sql));
     try std.testing.expectEqual(@as(u32, 2), ctx.cost_meter.total());
-}
-
-test "checkCapabilityCeiling allows inside the ceiling and refuses an excluded module or a capability outside it" {
-    const allocator = std.testing.allocator;
-    var gc_state = try gc.GC.init(allocator, .{});
-    defer gc_state.deinit();
-    const ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // No ceiling: every call is allowed, whatever it requires.
-    try checkCapabilityCeiling(ctx, "zttp:cache", &.{ .clock, .policy_check });
-    try checkCapabilityCeiling(ctx, "zttp:fetch", &.{.network});
-
-    const excluded = [_][]const u8{ "zttp:cache", "zttp:ratelimit" };
-    ctx.active_capability_ceiling = .{
-        .categories = context.CapabilityCeiling.categoryMask(&.{ .env, .clock, .crypto, .policy_check }),
-        .excluded_modules = &excluded,
-    };
-    defer ctx.active_capability_ceiling = null;
-
-    // Inside: the module is not excluded and every capability is admitted.
-    try checkCapabilityCeiling(ctx, "zttp:env", &.{.env});
-    try checkCapabilityCeiling(ctx, "zttp:crypto", &.{ .crypto, .clock });
-    try checkCapabilityCeiling(ctx, "zttp:json", &.{});
-
-    // An excluded module is refused even when its capabilities are admitted.
-    try std.testing.expectError(error.CapabilityCeilingDenied, checkCapabilityCeiling(ctx, "zttp:cache", &.{ .clock, .policy_check }));
-    try std.testing.expectError(error.CapabilityCeilingDenied, checkCapabilityCeiling(ctx, "zttp:ratelimit", &.{}));
-
-    // One capability outside the categories refuses the call.
-    try std.testing.expectError(error.CapabilityCeilingDenied, checkCapabilityCeiling(ctx, "zttp:fetch", &.{.network}));
-    try std.testing.expectError(error.CapabilityCeilingDenied, checkCapabilityCeiling(ctx, "zttp:sql", &.{ .clock, .sqlite }));
 }
 
 test "wrapNativeFnWithCapabilities activates context for built-in native fns" {

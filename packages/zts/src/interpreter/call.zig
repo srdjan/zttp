@@ -77,11 +77,8 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
             .parse_float => builtins.numberParseFloat(self.ctx, this_val, args[0..argc]),
             .none => blk: {
                 break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
-                    // A capability ceiling denial is logged where it is decided.
-                    if (err != error.CapabilityCeilingDenied) {
-                        const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
-                        std.log.err("Native function '{s}' error: {}", .{ func_name, err });
-                    }
+                    const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
+                    std.log.err("Native function '{s}' error: {}", .{ func_name, err });
                     self.ctx.throwException(value.JSValue.exception_val);
                     return error.NativeFunctionError;
                 };

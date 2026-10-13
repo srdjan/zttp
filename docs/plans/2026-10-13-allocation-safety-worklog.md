@@ -2,6 +2,29 @@
 
 ## Current objective and authority
 
+The owner selected runtime capability ceiling cleanup with "next" after obsolete refusal branch completion.
+The current baseline is `5ce252c9` on local `main`, with a clean tree.
+The unit removes the runtime ceiling path that only tests activate.
+The main agent owns review, unfiltered verification, and the isolated local commit.
+The owner owns publication. No push is part of this unit.
+
+## Current plan and compatibility boundary
+
+I will remove the ceiling type, Context field, wrapper, denial error, internal exports, and interpreter suppression for that denial.
+I will fold the live resolver implementation into `wrappedExportFn` and retain its authorization and metering behavior.
+I will remove the two tests that install retired declaration ceilings.
+
+I will preserve `RuntimePolicy`, active module scope, SDK capability checks, state ownership, teardown isolation, tracing, and replay.
+I will preserve the parser's raw ceiling refusal and every artifact compatibility field.
+I will retain the tests for capability propagation, cost counts, scope restoration, context isolation, and resource denial before effects.
+
+The source scope contains five files under `packages/zts/src`: `context.zig`, `module_binding.zig`, `module_binding/capabilities.zig`, `modules/internal/resolver.zig`, and `interpreter/call.zig`.
+The verification set is `test-zts`, `test-sdk`, `test-modules`, `test-zruntime`, `test-cli`, `test-module-boundary`, formatting, and the whitespace check.
+The standalone runtime suite will run separately from other runtime suites.
+The analysis-owner migration and raw state API remain separate units.
+
+## Completed refusal unit: objective and authority
+
 The owner selected obsolete refusal branch cleanup with "go ahead" after allocation safety completion.
 The current baseline is `d52885de` on local `main`, with a clean tree.
 The unit removes eight unused contract facts and the unused refusal wrapper in `retired_authority.zig`.
@@ -9,7 +32,7 @@ The eight facts are `durable_contract`, `scope_contract`, `service_contract`, `w
 The main agent owns review, unfiltered verification, and the isolated local commit.
 The owner owns publication. No push is part of this unit.
 
-## Current plan and compatibility boundary
+## Completed refusal plan and compatibility boundary
 
 I will confirm that the eight facts have no producers and that `Feature` has no serialized representation.
 I will remove each unused enum member, fact field, sentence arm, and refusal branch.
@@ -152,3 +175,41 @@ The formatter and whitespace checks pass. No source or wire format changes outsi
 The bounded refusal branch unit is complete. No push or release verification occurs.
 The capability ceiling, analysis-owner migration, and raw state API remain separate units.
 The main agent owns the next bounded review of the runtime capability ceiling.
+
+## Runtime ceiling source and review checkpoint
+
+The production search finds no non-null ceiling installation.
+The removed checker test installed categories and excluded modules directly on `Context`.
+The removed resolver test installed the same retired state to check native denial and meter immobility.
+The accepted Phase 3 removal retired declarations, and the parser still rejects a non-null raw ceiling before projection.
+
+The live resolver body moves into `wrappedExportFn` without changing its scope or metering operations.
+Module functions still receive opaque handles, and capability-bearing native functions retain their scope wrapper.
+Capability-free native functions return their existing function pointer.
+Context teardown still clears active module authority before module-state cleanup.
+The interpreter preserves exception marking and `NativeFunctionError`; generic logging replaces suppression of the retired denial name.
+
+The two deleted tests concern the retired declaration product.
+Retained tests cover exact meter counts, capability propagation, scope restoration, context isolation, SDK state ownership, and denial before effects.
+The independent Sol high review reports no actionable finding and requires the planned verification set.
+On physical source lines, production adds two lines and removes 128; test code adds one line and removes 84.
+The retained test's added line changes its call to the surviving resolver function.
+No runtime speed or memory improvement is claimed.
+
+## Runtime ceiling verification and completion
+
+The main agent reviewed every changed line and ran all checks independently.
+The unfiltered ZTS suite passes 2,376 of 2,377 tests, with one skip and exit status zero.
+The two removed ceiling tests account for the reduction from the prior ZTS count.
+The SDK and module suites pass all 10 and 146 tests respectively, with exit status zero.
+
+The standalone runtime suite passes all 226 tests, with exit status zero.
+That suite observes environment, cache, SQL, and egress denial before effects, plus state-slot ownership through real handlers.
+The unfiltered CLI suite passes 594 of 595 tests, with one skip and no failures or leaks.
+Its raw retired contract tests still refuse ceiling declarations through the retained parser.
+
+The module-boundary gate passes with 73 internal modules and 54 allowed package reaches.
+The formatter and whitespace checks pass. No allowlist, wire, descriptor, policy, or SDK ABI file changes.
+The bounded runtime ceiling unit is complete. No push or release verification occurs.
+The analysis-owner migration and raw state API remain separate units.
+The main agent owns the next bounded plan for single-file analysis-owner reuse.
