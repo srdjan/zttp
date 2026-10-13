@@ -16,7 +16,7 @@ overlapping plans at the same time.
 | 002 | Complete the local LFM measurement and default cutover (`pre-rebase:advisor-plans/002-local-lfm-default-cutover-plan.md`) | P1 | L | SUPERSEDED; historical measurement evidence only |
 | [003](003-zttp-zts-simplification-audit.md) | Simplify the zttp and zts foundation | P1 | L | DIRECTION ACCEPTED; preserve features and initial wire formats; shared analysis first |
 | [004](004-shared-analysis-first-unit.md) | Share single-module analysis between check and compile | P1 | M | ACCEPTED 2026-10-11; promoted to docs/plans |
-| [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | Phases 1 to 3 complete; Phase 4 selected; bounded CHECK facts plan prepared for review |
+| [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | Phases 1 to 3 complete; first Phase 4 source unit complete; offline evidence and final release check follow source closure |
 
 Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
 2026-08-14. Its measurement half stands, and the local corpus is still parked at
@@ -24,4 +24,5 @@ Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
 
 Phase 4 starts with [CHECK facts reuse](../docs/plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md).
 The plan preserves current reader calls and removes one duplicate root facts producer.
+The owner authorized execution with "D12: 1". The [worklog](../docs/plans/2026-10-13-feature-removal-phase-4-worklog.md) records source checks and remaining release work.
 It does not complete loaded-graph convergence or authorize the later typed frontend migration.

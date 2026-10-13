@@ -211,10 +211,12 @@ Production code grows by 186 lines in this phase. The change consolidates analys
 CHECK retains its current import traversal because strict graph reuse would change its verdicts and revision reads.
 Full convergence between CHECK and compilation remains follow-up work.
 The owner selected Phase 4 on 2026-10-13.
-The [CHECK facts plan](plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md) prepares the first bounded unit.
+The [CHECK facts plan](plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md) defines the first bounded unit.
 That unit removes duplicate root facts construction from CHECK path analysis through the existing borrowed-input mechanism.
 It preserves imported traversal, reader calls, public verdicts, and current formats.
-Implementation remains pending the owner's selection of the reviewed plan.
+The owner selected execution with "D12: 1".
+The source change and focused checks are complete. Offline evidence publication and final release verification follow the source closure commit.
+The [Phase 4 worklog](plans/2026-10-13-feature-removal-phase-4-worklog.md) records exact output comparisons, reader characterization, cleanup measurements, and review limits.
 Later Phase 4 units address imported analysis, binding semantics, and a typed frontend prototype.
 
 The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`) is historical.

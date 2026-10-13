@@ -77,11 +77,12 @@ The final plan SHA-256 is `e321b80b6bf0d7a4418296a87076401d5803eeef8a8efeff7d1a7
 
 ## Remaining work and next action
 
-The bounded unit now needs public characterization, facts reuse, review, and the listed checks.
+The bounded source change and focused checks are complete.
+Offline evidence publication and the final release script remain pending at this source checkpoint.
 Further imported analysis consolidation, binding semantics, and typed frontend work remain later Phase 4 units.
-Current release evidence describes the inspected source baseline, not this new planning commit.
+Current release evidence describes the inspected source baseline, not the completed source change.
 The implementation plan includes offline evidence publication and final release verification when source commits require fresh provenance.
-The main agent owns the next action: execute the approved unit and record authoritative evidence.
+The main agent owns the next action: publish offline evidence and run the final release script.
 
 ## Execution checkpoint
 
@@ -123,3 +124,63 @@ That removes five allocations and 187 allocated bytes from this small fixture.
 Return retention stays at 3735 bytes, the reader still receives three calls, and result cleanup frees every counted byte.
 The probe source, source fixture, options, and measurement method remain fixed between both runs.
 The temporary probe is absent from the production commit. These measurements establish neither speed nor peak retention.
+
+## Compatibility and source closure checkpoint
+
+The combined unfiltered CHECK and ZTS run passes 2567 of 2568 tests, with one existing skip.
+That run includes the temporary allocation probe. The final source passes all 189 precompile tests without the probe.
+Both debug builds return exit status 0.
+The fixed public CLI fixture returns exit status 0 before and after the change.
+Exact comparisons of its JSON output and serialized contract both return exit status 0.
+
+The compiling wrong-facts mutation removes import records only from the path and fault consumers.
+The unfiltered run then passes 171 of 189 tests and fails 18 tests, with exit status 1.
+Failures include imported fault counts, unresolved dependency outcomes, routed results, and the new reader count.
+The restored control passes all 189 tests, with exit status 0.
+This probe distinguishes valid facts from omitted imports. It does not establish complete proof soundness.
+
+Two independent Sol high reviewers inspect compatibility and lifecycle against the frozen source.
+Neither reviewer finds a production defect. The lifecycle review confirms equivalent inputs, nested cleanup, owned projections, and unchanged early returns.
+The compatibility reviewer finds one gap in the reader test.
+If fault scanning runs between the summary reads, the original clean revisions permit that changed order to pass.
+The corrected first two revisions include an unrelated helper with an unchecked fetch. Only the final revision remains fault-clean.
+The reviewer confirms that the exact fault record rejects the changed order.
+
+A temporary negative probe also adds that helper to the final revision.
+The probe compiles and fails only the reader test: 188 of 189 tests pass, with exit status 1.
+The unchanged fault assertion expects zero unseen calls and observes two.
+The restored final source passes all 189 tests, with exit status 0.
+This probe confirms the sentinel's public effect. It does not mutate the traversal order itself.
+
+The main agent's line-by-line scan also corrects ownership in the test reader.
+If an extra read returns an error after path insertion, the original error cleanup can free the recorded path twice.
+The corrected reader frees the copy only when insertion fails. Its destructor owns every inserted path.
+The final source restores the missing final newline and passes the standalone formatter check, with exit status 0.
+Temporary probes and mutations remain outside the committed source.
+
+Code review: skipped (ce-code-review unavailable).
+The attempted CE review terminates without a completed receipt because its required Python helpers conflict with the repository's Python prohibition.
+The [scope rule](/Users/srdjans/.codex/plugins/cache/compound-engineering-plugin/compound-engineering/3.30.5/skills/ce-code-review/references/scope.md) requires:
+"Derive deterministic facts once with `scripts/review-scope.py`."
+The native reviews and manual diff scan are separate checks. They are not a CE review receipt.
+
+Three Sol high simplification reviewers then inspect the complete final code diff for reuse, quality, and efficiency.
+All three return no findings. No simplification edit follows that review.
+The main agent rereads the canonical plan and scans every final changed line against its requirements and definition of done.
+The code remains explicit, uses the existing borrowed-input mechanism, and keeps the two traversal policies separate.
+
+| Requirement | Source checkpoint evidence |
+|---|---|
+| R1: preserve public results | Existing public tests, exact CLI JSON and contract comparisons |
+| R2: preserve reader calls | Three exact resolved paths, revision-sensitive flow summaries, fault sentinel, unchanged traversal source |
+| R3: preserve early stops | Existing public tests and independent review of unchanged returns |
+| R4: reuse root facts | Required private argument, direct generator injection, direct fault collector input |
+| R5: preserve ownership | Independent lifecycle review, result serialization, testing allocator cleanup |
+| R6: preserve failure outcomes | Unfiltered public failure tests, existing allocation failure coverage, full measured cleanup |
+| R7: preserve retained boundaries | Only the private CHECK operation and its caller change; compilation, runtime, and wire code stay unchanged |
+
+The canonical plan remains unchanged at SHA-256 `e321b80b6bf0d7a4418296a87076401d5803eeef8a8efeff7d1a7a793775160c`.
+The source closure commit precedes evidence publication so generated evidence can bind to a stable source identity.
+The final release script owns the remaining aggregate, revision-backed CHECK, standalone runtime, release build, and provenance checks.
+Publication commits will change only the four generated evidence files. The final report will state their actual results.
+No live model recording or push occurs in this unit.

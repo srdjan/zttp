@@ -7539,8 +7539,10 @@ const TracingImportReader = struct {
         const self: *TracingImportReader = @ptrCast(@alignCast(context));
         const read_index = self.paths.items.len;
         const path_copy = try allocator.dupe(u8, path);
-        errdefer allocator.free(path_copy);
-        try self.paths.append(allocator, path_copy);
+        self.paths.append(allocator, path_copy) catch |err| {
+            allocator.free(path_copy);
+            return err;
+        };
         if (read_index >= self.sources.len) return error.UnexpectedRead;
         return allocator.dupe(u8, self.sources[read_index]);
     }
@@ -7559,9 +7561,11 @@ test "CHECK keeps the reader trace for two names imported from one file" {
         \\}
         \\
     ;
+    // Only the final revision is fault-clean. Earlier fault reads must fail
+    // the public unseen-call assertion, even when their flow summaries match.
     const reader_sources = [_][]const u8{
-        "export function first(): string { return \"first\"; }\n",
-        "export function second(): string { return \"second\"; }\n",
+        "export function first(): string { return \"first\"; }\n" ++ fault_unchecked_helper,
+        "export function second(): string { return \"second\"; }\n" ++ fault_unchecked_helper,
         "export function first(): string { return \"first\"; }\n" ++
             "export function second(): string { return \"second\"; }\n",
     };
