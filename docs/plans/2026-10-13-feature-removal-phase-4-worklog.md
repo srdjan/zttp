@@ -3,7 +3,8 @@
 ## Objective and authority
 
 The owner selected Phase 4 after the main agent offered a bounded implementation plan.
-The current task prepares that plan. It does not start product implementation.
+The owner selected execution with "D12: 1" on 2026-10-13.
+That selection authorizes the bounded code change, checks, and offline evidence publication.
 Canonical plan: [CHECK facts reuse](2026-10-13-1113-refactor-check-facts-reuse-plan.md).
 The inspected baseline is `1bae15bb8b4c7bb36995e698d7e35d9a94b861d4` on local `main`.
 The initial tree is clean.
@@ -76,8 +77,34 @@ The final plan SHA-256 is `e321b80b6bf0d7a4418296a87076401d5803eeef8a8efeff7d1a7
 
 ## Remaining work and next action
 
-The bounded unit still needs implementation authorization, public characterization, facts reuse, review, and the listed checks.
+The bounded unit now needs public characterization, facts reuse, review, and the listed checks.
 Further imported analysis consolidation, binding semantics, and typed frontend work remain later Phase 4 units.
 Current release evidence describes the inspected source baseline, not this new planning commit.
 The implementation plan includes offline evidence publication and final release verification when source commits require fresh provenance.
-The owner owns the next action: select execution of the reviewed bounded plan.
+The main agent owns the next action: execute the approved unit and record authoritative evidence.
+
+## Execution checkpoint
+
+Execution starts at `d95fbfe5` on local `main` with a clean tree.
+The native engine uses sequential units because all product writes share one file and depend on the previous unit.
+A fresh Sol high worker owns the added reader-trace test. The main agent owns the code migration, verification, and local commits.
+The execution directory is `/private/tmp/zttp-phase4-exec.lXg12B`.
+No push, live recording, provider change, import cache, or new analysis owner is authorized by this unit.
+
+## Characterization checkpoint
+
+The reader-trace test observes three requests for `/virtual/lib.ts` through the public CHECK API.
+Its reader supplies a different source version for each request, so a changed binding order or shared read changes the proof outcome.
+The main agent reviewed the complete worker diff and retains the existing tests for other behavior.
+
+The initial unfiltered test run fails one new assertion: 188 of 189 tests pass.
+The compiled fixture has no narrow proof capsule and therefore receives the default-profile refusal.
+The corrected fixture selects its proven properties and expects `fault_covered` to remain false when no failable I/O exists.
+Production code remains unchanged during these corrections.
+
+The unfiltered baseline run then passes all 190 tests, including one temporary allocation probe.
+The small public CLI fixture also returns exit status 0 for JSON output and contract output.
+The baseline probe reports 800 allocations, 368969 allocated bytes, and 3735 retained bytes at CHECK return.
+The reader receives three calls. Result cleanup frees every counted byte.
+These values describe the fixed small fixture, not peak retention or speed.
+The temporary probe is absent from the characterization commit and remains in the private execution directory for the matching post-change measurement.

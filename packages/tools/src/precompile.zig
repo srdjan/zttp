@@ -7518,6 +7518,90 @@ test "formatProofCard: the card lists fault_covered and counts the call sites no
 }
 
 // ---------------------------------------------------------------------------
+// Public CHECK reader trace
+// ---------------------------------------------------------------------------
+
+/// Records each resolved request path and serves the matching source revision.
+const TracingImportReader = struct {
+    sources: []const []const u8,
+    paths: std.ArrayList([]u8) = .empty,
+
+    fn deinit(self: *TracingImportReader, allocator: std.mem.Allocator) void {
+        for (self.paths.items) |path| allocator.free(path);
+        self.paths.deinit(allocator);
+    }
+
+    fn read(context: *anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+        const self: *TracingImportReader = @ptrCast(@alignCast(context));
+        const read_index = self.paths.items.len;
+        const path_copy = try allocator.dupe(u8, path);
+        errdefer allocator.free(path_copy);
+        try self.paths.append(allocator, path_copy);
+        if (read_index >= self.sources.len) return error.UnexpectedRead;
+        return allocator.dupe(u8, self.sources[read_index]);
+    }
+
+    fn reader(self: *TracingImportReader) ImportReader {
+        return .{ .context = self, .read = read };
+    }
+};
+
+test "CHECK keeps the reader trace for two names imported from one file" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { first, second } from "./lib.ts";
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage" | "canonical" | "cost_bounded"> {
+        \\  return Response.json({ first: first(), second: second() });
+        \\}
+        \\
+    ;
+    const reader_sources = [_][]const u8{
+        "export function first(): string { return \"first\"; }\n",
+        "export function second(): string { return \"second\"; }\n",
+        "export function first(): string { return \"first\"; }\n" ++
+            "export function second(): string { return \"second\"; }\n",
+    };
+    var tracing_reader: TracingImportReader = .{ .sources = &reader_sources };
+    defer tracing_reader.deinit(allocator);
+
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, handler_source, "/virtual/handler.ts", .{
+        .json_mode = true,
+        .import_reader = tracing_reader.reader(),
+    });
+    defer result.deinit(allocator);
+
+    const expected_paths = [_][]const u8{
+        "/virtual/lib.ts",
+        "/virtual/lib.ts",
+        "/virtual/lib.ts",
+    };
+    try std.testing.expectEqual(expected_paths.len, tracing_reader.paths.items.len);
+    for (expected_paths, tracing_reader.paths.items) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(u32, 1), result.paths_enumerated);
+    try std.testing.expect(result.paths_exhaustive);
+    try std.testing.expect(result.proof_trace_json != null);
+
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(properties.no_secret_leakage);
+    try std.testing.expectEqual(false, properties.fault_covered);
+    try std.testing.expectEqual(@as(usize, 1), contract.behaviors.items.len);
+    try std.testing.expect(contract.behaviors_exhaustive);
+    try std.testing.expectEqual(handler_contract.FaultCoverageInfo{
+        .total_failable = 0,
+        .covered = 0,
+        .warnings = 0,
+        .unseen_calls = 0,
+        .upstream_fallback_sites = 0,
+        .analysis_complete = true,
+    }, contract.fault_coverage orelse return error.TestUnexpectedResult);
+}
+
+// ---------------------------------------------------------------------------
 // One loader for an imported file
 // ---------------------------------------------------------------------------
 
