@@ -2463,7 +2463,8 @@ const BuildProbe = struct {
         if (self.compile_error) |err| return err;
         const bytecode = try allocator.dupe(u8, self.bytecode);
         errdefer allocator.free(bytecode);
-        var contract: ?zts.HandlerContract = if (self.with_contract)
+        // A retired module needs a contract to carry it.
+        var contract: ?zts.HandlerContract = if (self.with_contract or self.retired_module != null)
             try emptyProbeContract(allocator)
         else
             null;
