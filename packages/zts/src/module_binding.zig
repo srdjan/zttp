@@ -557,22 +557,177 @@ test "allowsEnvForActiveModule fails closed when active module lacks policy_chec
     );
 }
 
+const sdk = @import("zttp-sdk");
+
+const SdkStateProbe = struct {
+    handle: *sdk.ModuleHandle,
+    slot: usize,
+    cleanup_count: usize = 0,
+    callback_tag: ?CallbackTag = null,
+    read_returned_null_during_cleanup: bool = false,
+
+    const CallbackTag = enum { first, second };
+
+    fn cleanupFirst(ptr: *anyopaque) callconv(.c) void {
+        recordCleanup(ptr, .first);
+    }
+
+    fn cleanupSecond(ptr: *anyopaque) callconv(.c) void {
+        recordCleanup(ptr, .second);
+    }
+
+    fn recordCleanup(ptr: *anyopaque, tag: CallbackTag) void {
+        const probe: *SdkStateProbe = @ptrCast(@alignCast(ptr));
+        probe.cleanup_count += 1;
+        probe.callback_tag = tag;
+        probe.read_returned_null_during_cleanup = sdk.getModuleState(
+            probe.handle,
+            SdkStateProbe,
+            probe.slot,
+        ) == null;
+    }
+};
+
 test "SDK module state slots are active-module scoped" {
     const allocator = std.testing.allocator;
     var gc_state = try gc.GC.init(allocator, .{});
     defer gc_state.deinit();
     const ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
+    var ctx_live = true;
+    defer if (ctx_live) ctx.deinit();
     const handle = contextToHandle(ctx);
+    const sdk_handle: *sdk.ModuleHandle = @ptrCast(ctx);
+    const sql_slot = @intFromEnum(module_slots.Slot.sql);
+    const cache_slot = @intFromEnum(module_slots.Slot.cache);
+    var installed: SdkStateProbe = .{ .handle = sdk_handle, .slot = sql_slot };
+    var rejected: SdkStateProbe = .{ .handle = sdk_handle, .slot = sql_slot };
 
-    try std.testing.expect(!activeModuleOwnsStateSlot(handle, @intFromEnum(module_slots.Slot.sql)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle, sql_slot));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sdk.setModuleState(sdk_handle, sql_slot, &rejected, SdkStateProbe.cleanupSecond),
+    );
+    try std.testing.expect(sdk.getModuleState(sdk_handle, SdkStateProbe, sql_slot) == null);
 
-    const sql_token = pushActiveModuleContext(ctx, "zttp:sql", &.{});
-    defer popActiveModuleContext(sql_token);
+    _ = pushActiveModuleContext(ctx, "zttp:cache", &.{});
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle, sql_slot));
+    try std.testing.expect(activeModuleOwnsStateSlot(handle, cache_slot));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sdk.setModuleState(sdk_handle, sql_slot, &rejected, SdkStateProbe.cleanupSecond),
+    );
 
-    try std.testing.expect(activeModuleOwnsStateSlot(handle, @intFromEnum(module_slots.Slot.sql)));
-    try std.testing.expect(!activeModuleOwnsStateSlot(handle, @intFromEnum(module_slots.Slot.cache)));
+    _ = pushActiveModuleContext(ctx, "zttp:sql", &.{});
+    try std.testing.expect(activeModuleOwnsStateSlot(handle, sql_slot));
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle, cache_slot));
     try std.testing.expect(!activeModuleOwnsStateSlot(handle, 15));
+    try std.testing.expect(sdk.getModuleState(sdk_handle, SdkStateProbe, sql_slot) == null);
+    try sdk.setModuleState(sdk_handle, sql_slot, &installed, SdkStateProbe.cleanupFirst);
+    try std.testing.expect(sdk.getModuleState(sdk_handle, SdkStateProbe, sql_slot) == &installed);
+
+    _ = pushActiveModuleContext(ctx, "zttp:cache", &.{});
+    try std.testing.expect(sdk.getModuleState(sdk_handle, SdkStateProbe, sql_slot) == null);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sdk.setModuleState(sdk_handle, sql_slot, &rejected, SdkStateProbe.cleanupSecond),
+    );
+
+    // Discard restore tokens because teardown must clear the final SQL scope.
+    _ = pushActiveModuleContext(ctx, "zttp:sql", &.{});
+    try std.testing.expect(sdk.getModuleState(sdk_handle, SdkStateProbe, sql_slot) == &installed);
+
+    inline for (.{ context.MAX_MODULE_STATE_SLOTS, std.math.maxInt(usize) }) |invalid_slot| {
+        try std.testing.expect(sdk.getModuleState(sdk_handle, SdkStateProbe, invalid_slot) == null);
+        try std.testing.expectError(
+            error.OutOfMemory,
+            sdk.setModuleState(sdk_handle, invalid_slot, &rejected, SdkStateProbe.cleanupSecond),
+        );
+    }
+
+    ctx.deinit();
+    ctx_live = false;
+    try std.testing.expectEqual(@as(usize, 1), installed.cleanup_count);
+    try std.testing.expectEqual(SdkStateProbe.CallbackTag.first, installed.callback_tag.?);
+    try std.testing.expect(installed.read_returned_null_during_cleanup);
+    try std.testing.expectEqual(@as(usize, 0), rejected.cleanup_count);
+    try std.testing.expect(rejected.callback_tag == null);
+}
+
+test "SDK module state is isolated by Context lifetime" {
+    const allocator = std.testing.allocator;
+    var gc_a = try gc.GC.init(allocator, .{});
+    defer gc_a.deinit();
+    const ctx_a = try context.Context.init(allocator, &gc_a, .{});
+    var ctx_a_live = true;
+    defer if (ctx_a_live) ctx_a.deinit();
+
+    var gc_b = try gc.GC.init(allocator, .{});
+    defer gc_b.deinit();
+    const ctx_b = try context.Context.init(allocator, &gc_b, .{});
+    var ctx_b_live = true;
+    defer if (ctx_b_live) ctx_b.deinit();
+
+    const handle_a: *sdk.ModuleHandle = @ptrCast(ctx_a);
+    const handle_b: *sdk.ModuleHandle = @ptrCast(ctx_b);
+    const sql_slot = @intFromEnum(module_slots.Slot.sql);
+    var probe_a: SdkStateProbe = .{ .handle = handle_a, .slot = sql_slot };
+    var probe_b: SdkStateProbe = .{ .handle = handle_b, .slot = sql_slot };
+
+    // Leave both SQL scopes active so each teardown must revoke its authority.
+    _ = pushActiveModuleContext(ctx_a, "zttp:sql", &.{});
+    _ = pushActiveModuleContext(ctx_b, "zttp:sql", &.{});
+    try sdk.setModuleState(handle_a, sql_slot, &probe_a, SdkStateProbe.cleanupFirst);
+    try sdk.setModuleState(handle_b, sql_slot, &probe_b, SdkStateProbe.cleanupSecond);
+    try std.testing.expect(sdk.getModuleState(handle_a, SdkStateProbe, sql_slot) == &probe_a);
+    try std.testing.expect(sdk.getModuleState(handle_b, SdkStateProbe, sql_slot) == &probe_b);
+
+    ctx_a.deinit();
+    ctx_a_live = false;
+    try std.testing.expectEqual(@as(usize, 1), probe_a.cleanup_count);
+    try std.testing.expectEqual(SdkStateProbe.CallbackTag.first, probe_a.callback_tag.?);
+    try std.testing.expect(probe_a.read_returned_null_during_cleanup);
+    try std.testing.expectEqual(@as(usize, 0), probe_b.cleanup_count);
+    try std.testing.expect(sdk.getModuleState(handle_b, SdkStateProbe, sql_slot) == &probe_b);
+
+    ctx_b.deinit();
+    ctx_b_live = false;
+    try std.testing.expectEqual(@as(usize, 1), probe_b.cleanup_count);
+    try std.testing.expectEqual(SdkStateProbe.CallbackTag.second, probe_b.callback_tag.?);
+    try std.testing.expect(probe_b.read_returned_null_during_cleanup);
+}
+
+test "SDK module state allocation failure preserves caller ownership" {
+    const backing_allocator = std.testing.allocator;
+    var failing = std.testing.FailingAllocator.init(backing_allocator, .{});
+    const allocator = failing.allocator();
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    var ctx_live = true;
+    defer if (ctx_live) ctx.deinit();
+
+    const sdk_handle: *sdk.ModuleHandle = @ptrCast(ctx);
+    const sql_slot = @intFromEnum(module_slots.Slot.sql);
+    var probe: SdkStateProbe = .{ .handle = sdk_handle, .slot = sql_slot };
+    _ = pushActiveModuleContext(ctx, "zttp:sql", &.{});
+
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        sdk.setModuleState(sdk_handle, sql_slot, &probe, SdkStateProbe.cleanupFirst),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(sdk.getModuleState(sdk_handle, SdkStateProbe, sql_slot) == null);
+    try std.testing.expectEqual(@as(usize, 0), probe.cleanup_count);
+
+    SdkStateProbe.cleanupFirst(&probe);
+    try std.testing.expectEqual(@as(usize, 1), probe.cleanup_count);
+    try std.testing.expect(probe.read_returned_null_during_cleanup);
+
+    // Keep SQL active until teardown. Context must not own the rejected probe.
+    ctx.deinit();
+    ctx_live = false;
+    try std.testing.expectEqual(@as(usize, 1), probe.cleanup_count);
 }
 
 test "SDK filesystem reads require canonical allowlist entry" {

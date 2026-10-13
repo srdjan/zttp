@@ -2,13 +2,48 @@
 
 ## Current objective and authority
 
+The owner selected real SDK state ownership and cleanup checks with "next" after raw facade deletion.
+The baseline is `737a0a25` on local `main`, with a clean tree.
+This unit closes the test gap for the published SDK state helpers across the real runtime ABI.
+The main agent owns the test plan, review, unfiltered verification, mutation restoration, and isolated local commit.
+The owner owns publication. No push is part of this unit.
+
+## Current plan and compatibility boundary
+
+The ZTS test roots import `zttp-sdk` and link the engine bridge without the SDK test shim.
+Tests can call the published `getModuleState` and `setModuleState` helpers through the real C ABI.
+The SDK currently maps every setter refusal to `error.OutOfMemory`; this unit preserves that API.
+
+I will strengthen the existing ownership test to exercise successful installation, exact retrieval, absent authority, wrong authority, and invalid slots.
+I will add two Contexts that install distinct states in the same owned slot.
+I will require one Context's teardown to preserve the other's state and call the correct cleanup callback once.
+I will also require SDK state reads to refuse during cleanup, after Context clears active authority.
+
+I will inject failure at the next allocation after Context setup and call the published SDK setter.
+I will require refusal, an empty slot, no bridge cleanup call, and caller-owned cleanup without a second callback at teardown.
+One shared test fixture will record callback identity, callback count, and reads during cleanup.
+The source scope is the tests in `packages/zts/src/module_binding.zig`.
+
+I will review every changed line and run unfiltered `test-zts` before fault probes.
+I will remove each ownership guard separately and require the strengthened test to fail.
+I will separately remove callback invocation and envelope destruction and require the lifecycle checks to fail.
+I will restore each mutation immediately and compare the bridge file with its baseline hash.
+I will take each verdict from the build's exit status and finish with an unfiltered passing run.
+
+No production behavior, SDK symbol, error tag, slot registry, or build graph change is planned.
+Successful same-slot replacement lacks an explicit cleanup contract and remains outside this unit.
+Internal bootstrap installation also lacks an explicit invalid-slot contract and remains outside this unit.
+The formatter, whitespace check, module-boundary gate, and layering gate complete the verification set.
+
+## Completed raw state unit: objective and authority
+
 The owner selected raw Zig state API review with "next" after single-file owner reuse completion.
 The baseline is `87ddffa7` on local `main`, with a clean tree.
 The candidate contains the engine facade's `getState` and `setState` functions and their bridge implementations.
 The main agent owns compatibility judgment, review, verification, and any isolated local commit.
 The owner owns publication. No push is part of this unit.
 
-## Current plan and compatibility boundary
+## Completed raw state plan and compatibility boundary
 
 I will first check callers, published APIs, and the supported SDK state interface.
 I will distinguish absent repository callers from evidence that an exported API has no supported consumers.
@@ -397,3 +432,82 @@ The main agent owns its isolated local commit; the owner owns publication.
 No push or release verification occurs.
 The resolved-session fallback remains for its direct callers.
 The main agent owns the next bounded check of real SDK state ownership and cleanup.
+
+## SDK lifecycle source and review checkpoint
+
+The test diff strengthens the existing ownership test and adds Context lifetime and allocation-failure tests.
+The tests call published SDK helpers through their real extern symbols, with no shim or direct bridge call.
+One shared probe records the cleanup callback's identity, count, and SDK getter result.
+Each stack probe remains live through its Context's teardown, and live flags prevent double teardown after an assertion failure.
+
+The first unfiltered baseline passes 2,379 of 2,380 ZTS tests, with one existing skip and exit status zero.
+The two new tests account for the increased count.
+The formatter and whitespace checks pass.
+
+The independent review identifies one missing effect check after setter refusal.
+A faulty setter could store the pointer but return false, while an unauthorized getter hides the stored value.
+The ownership test now checks an empty slot under SQL authority before the first permitted installation.
+The helper field now says that a cleanup read returned null, without attributing the empty-slot failure case to revoked authority.
+The main agent owns the repeated baseline and four fault probes.
+
+## SDK lifecycle fault probes
+
+The corrected unfiltered baseline passes 2,379 of 2,380 tests, with one existing skip and exit status zero.
+Each fault probe changes one bridge operation, compiles successfully, and runs the unfiltered `test-zts` step.
+The main agent reads each verdict from the build's exit status, not from a message search.
+
+Removing the getter ownership guard causes the ownership and Context lifetime tests to fail.
+That build exits with status one and reports two failed tests.
+Removing the setter ownership guard makes the refused installation succeed.
+That build exits with status one and reports one failed ownership test.
+
+Removing SDK callback invocation leaves both installed-state probes at zero cleanup calls instead of one.
+That build exits with status one and reports two failed tests.
+Removing envelope destruction leaks one allocation in the ownership test and two in the Context lifetime test.
+That build exits with status one despite reporting every non-skipped assertion test as passed.
+The leak report, rather than the assertion count, confirms envelope-release detection.
+
+The main agent restores each mutation immediately after its run.
+Every restored bridge hash matches `41fc4da6c383b94084413101088d45f88cd352f86c627611c3cef2b6e32b73b9`.
+The bridge has no diff against the committed baseline.
+The four probes establish detection for the four named mechanisms, not all possible SDK lifecycle defects.
+Temporary per-test timing and the final restored unfiltered run remain pending.
+
+## SDK lifecycle timing checkpoint
+
+A temporary `std.Io.Clock.awake` probe measures each test function, including its Context and GC teardown.
+The ownership test takes 81,946,334 nanoseconds in one unfiltered Debug run.
+The Context lifetime test takes 153,076,500 nanoseconds, and the allocation-failure test takes 79,050,125 nanoseconds.
+Each measured duration is below one second; this single run does not establish a distribution or a performance improvement.
+The timing run passes 2,379 of 2,380 tests, with one existing skip and exit status zero.
+
+The main agent removes the timing code before final verification.
+The restored test file matches its pre-timing hash, `ed159df7ba98a46680bf3962feea96a1bcebc8b385d6f7b8294c15c289066cc2`.
+No timing code or fault mutation belongs to the committed source.
+The final unfiltered run and repository gates remain pending.
+
+## SDK lifecycle final verification checkpoint
+
+The restored source passes the final unfiltered `test-zts` run.
+That run passes 2,379 of 2,380 tests, with one existing skip, no failure or leak report, and exit status zero.
+The formatter and whitespace checks pass.
+The main agent reviewed the complete test diff again after restoring the timing probe.
+The module-boundary and layering gates pass, with exit status zero.
+
+## SDK lifecycle completion
+
+On physical source lines, test code adds 161 lines and removes six, including the shared probe and the strengthened existing test.
+Two tests are new. No test is deleted, and production behavior remains unchanged.
+The callback fixture uses stack probes that remain alive until their Context cleanup finishes.
+The tests retain the SDK's existing error mapping and cross the real ABI rather than the shim.
+
+The main agent reviewed every changed line, resolved the independent findings, and ran all planned checks.
+The four temporary mutations and timing code are absent from the final source.
+The final bridge and test hashes match their restored baselines.
+No allowlist, SDK symbol, slot registry, wire format, or build graph change occurs.
+
+This bounded SDK lifecycle test unit is complete.
+The main agent owns its isolated local commit; the owner owns publication.
+No push, release verification, or general lifecycle proof is claimed.
+Successful same-slot replacement and invalid internal bootstrap slots remain separate contract decisions.
+The main agent owns the next bounded review of bootstrap slot validation.
