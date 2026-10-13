@@ -396,7 +396,8 @@ fn collectImportedFailableCalls(
                     while (keys.next()) |key| allocator.free(key.*);
                     visited.deinit(allocator);
                 }
-                try visited.put(allocator, try allocator.dupe(u8, handler_resolved), {});
+                try visited.ensureUnusedCapacity(allocator, 1);
+                visited.putAssumeCapacityNoClobber(try allocator.dupe(u8, handler_resolved), {});
 
                 const result = try scanImportedFileTree(allocator, &out, &visited, path, rec.module_specifier, handler_dir, 1, reader);
                 const key = try allocator.dupe(u8, path);
@@ -453,7 +454,8 @@ fn scanImportedFileTree(
     // that opened it. A whole-file scan is idempotent, so this loses nothing.
     if (visited.contains(path)) return .clean;
     if (depth >= max_import_depth) return blocked(display, .too_deep);
-    try visited.put(allocator, try allocator.dupe(u8, path), {});
+    try visited.ensureUnusedCapacity(allocator, 1);
+    visited.putAssumeCapacityNoClobber(try allocator.dupe(u8, path), {});
 
     var file: ImportedFile = undefined;
     file.load(allocator, reader, path) catch return blocked(display, .unreadable);
@@ -1489,7 +1491,10 @@ fn runCheckOnPreparedSource(
             if (json_mode) {
                 for (bool_diags) |diag| {
                     if (json_diag.fromCheckerDiagnostic(allocator, .boolean, diag, ir_view, handler_path)) |jd| {
-                        result.json_diagnostics.append(allocator, jd) catch {};
+                        result.json_diagnostics.append(allocator, jd) catch {
+                            var owned = jd;
+                            owned.deinit(allocator);
+                        };
                     }
                 }
             } else {
@@ -1516,7 +1521,10 @@ fn runCheckOnPreparedSource(
             if (json_mode) {
                 for (tc_diags) |diag| {
                     if (json_diag.fromCheckerDiagnostic(allocator, .type, diag, ir_view, handler_path)) |jd| {
-                        result.json_diagnostics.append(allocator, jd) catch {};
+                        result.json_diagnostics.append(allocator, jd) catch {
+                            var owned = jd;
+                            owned.deinit(allocator);
+                        };
                     }
                 }
             } else {
@@ -1554,7 +1562,10 @@ fn runCheckOnPreparedSource(
         if (strict_diags.len > 0) {
             for (strict_diags) |diag| {
                 if (json_diag.fromCheckerDiagnostic(allocator, .strict, diag, ir_view, handler_path)) |jd| {
-                    result.json_diagnostics.append(allocator, jd) catch {};
+                    result.json_diagnostics.append(allocator, jd) catch {
+                        var owned = jd;
+                        owned.deinit(allocator);
+                    };
                 }
             }
             if (!json_mode) {
@@ -1612,7 +1623,10 @@ fn runCheckOnPreparedSource(
             if (json_mode) {
                 for (verifier_diags) |diag| {
                     if (json_diag.fromCheckerDiagnostic(allocator, .verifier, diag, ir_view, handler_path)) |jd| {
-                        result.json_diagnostics.append(allocator, jd) catch {};
+                        result.json_diagnostics.append(allocator, jd) catch {
+                            var owned = jd;
+                            owned.deinit(allocator);
+                        };
                     }
                 }
             } else {
@@ -1650,7 +1664,10 @@ fn runCheckOnPreparedSource(
         if (json_mode) {
             for (flow_diags) |diag| {
                 if (json_diag.fromCheckerDiagnostic(allocator, .flow, diag, ir_view, handler_path)) |jd| {
-                    result.json_diagnostics.append(allocator, jd) catch {};
+                    result.json_diagnostics.append(allocator, jd) catch {
+                        var owned = jd;
+                        owned.deinit(allocator);
+                    };
                 }
             }
         }
@@ -3839,6 +3856,91 @@ test "runCheckOnly propagates path analysis allocation failure" {
             .{},
         ),
     );
+}
+
+const AllocationImportReader = struct {
+    file_count: usize,
+    reads: usize = 0,
+
+    fn read(raw: *anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+        const self: *AllocationImportReader = @ptrCast(@alignCast(raw));
+        self.reads += 1;
+        // The unused import needs no flow summary. A missing first read keeps
+        // the chain fixture focused on the whole-file fault scan.
+        if (self.file_count > 1 and self.reads == 1) return error.FileNotFound;
+        const name = std.fs.path.basename(path);
+        if (!std.mem.startsWith(u8, name, "lib") or !std.mem.endsWith(u8, name, ".ts")) return error.FileNotFound;
+        const index = try std.fmt.parseInt(usize, name[3 .. name.len - 3], 10);
+        if (index >= self.file_count) return error.FileNotFound;
+        if (index + 1 == self.file_count) return allocator.dupe(u8, "export function helper(): string { return 'ok'; }");
+        return std.fmt.allocPrint(
+            allocator,
+            "import {{ helper as next }} from './lib{d}.ts'; export function helper(): string {{ return next(); }}",
+            .{index + 1},
+        );
+    }
+};
+
+fn checkImportAllocationFixture(allocator: std.mem.Allocator, reader: *AllocationImportReader) !CheckResult {
+    const source =
+        \\import { helper } from "./lib0.ts";
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage" | "canonical" | "cost_bounded"> {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    return runCheckOnlyFromSourceWithOptions(allocator, source, "/virtual/handler.ts", .{
+        .json_mode = true,
+        .import_reader = .{ .context = reader, .read = AllocationImportReader.read },
+    });
+}
+
+fn expectImportAllocationCleanup(file_count: usize) !void {
+    var baseline_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer baseline_arena.deinit();
+    var counted = std.testing.FailingAllocator.init(baseline_arena.allocator(), .{});
+    var reader: AllocationImportReader = .{ .file_count = file_count };
+    var baseline = try checkImportAllocationFixture(counted.allocator(), &reader);
+    {
+        defer baseline.deinit(counted.allocator());
+        try std.testing.expectEqual(@as(u32, 0), baseline.totalErrors());
+        try std.testing.expectEqual(@as(u32, 1), baseline.paths_enumerated);
+        try std.testing.expectEqual(file_count + 1, reader.reads);
+        const contract = baseline.contract orelse return error.TestUnexpectedResult;
+        const coverage = contract.fault_coverage orelse return error.TestUnexpectedResult;
+        try std.testing.expect(coverage.analysis_complete);
+        try std.testing.expectEqual(@as(u32, 0), coverage.unseen_calls);
+    }
+    try std.testing.expect(counted.alloc_index > 0);
+    try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+
+    // Accounting checks every release through CHECK's allocator. The arena
+    // also reclaims a failed probe's storage before the next failure point.
+    for (0..counted.alloc_index) |fail_index| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        var failing = std.testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = fail_index });
+        var failed_reader: AllocationImportReader = .{ .file_count = file_count };
+        if (checkImportAllocationFixture(failing.allocator(), &failed_reader)) |value| {
+            var result = value;
+            result.deinit(failing.allocator());
+        } else |err| switch (err) {
+            error.OutOfMemory => {},
+            else => return err,
+        }
+        try std.testing.expect(failing.has_induced_failure);
+        if (failing.allocated_bytes != failing.freed_bytes) {
+            std.debug.print("CHECK import cleanup: files={d}, failure_index={d}\n", .{ file_count, fail_index });
+        }
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
+}
+
+test "CHECK releases allocations when a sibling import scan fails" {
+    try expectImportAllocationCleanup(1);
+}
+
+test "CHECK releases allocations when a nested import scan fails" {
+    try expectImportAllocationCleanup(max_import_depth - 1);
 }
 
 /// Determinism lives here rather than in `contract_builder.zig`: the contract
