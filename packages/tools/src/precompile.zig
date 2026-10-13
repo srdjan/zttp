@@ -882,6 +882,7 @@ fn analyzeHandlerPaths(
     output_allocator: std.mem.Allocator,
     ir_view: zts.IrView,
     atoms: *zts.AtomTable,
+    module_facts: *const zts.pipeline.ModuleFacts,
     handler_fn: ir.NodeIndex,
     handler_path: []const u8,
     include_behaviors: bool,
@@ -889,10 +890,12 @@ fn analyzeHandlerPaths(
 ) !PathAnalysis {
     var generator = zts.PathGenerator.init(state_allocator, ir_view, atoms);
     defer generator.deinit();
+    // The CHECK analysis owner keeps these facts alive through path cleanup.
+    generator.facts = module_facts;
     // Fault coverage reads every file the handler imports, because a failable
     // call there is on no path of this handler. A null scan (no filesystem)
     // leaves each such import counted as unseen.
-    var imported = try collectImportedFailableCalls(state_allocator, try generator.importFacts(), handler_path, import_reader);
+    var imported = try collectImportedFailableCalls(state_allocator, module_facts, handler_path, import_reader);
     defer if (imported) |*scan| scan.deinit(state_allocator);
     generator.setImportedScan(if (imported) |scan| scan.entries.items else null);
     try generator.generate(handler_fn);
@@ -1719,6 +1722,7 @@ fn runCheckOnPreparedSource(
                 allocator,
                 ir_view,
                 &atoms,
+                analysis.facts(),
                 hf,
                 handler_path,
                 result.contract != null,

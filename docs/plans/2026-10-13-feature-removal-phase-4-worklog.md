@@ -108,3 +108,18 @@ The baseline probe reports 800 allocations, 368969 allocated bytes, and 3735 ret
 The reader receives three calls. Result cleanup frees every counted byte.
 These values describe the fixed small fixture, not peak retention or speed.
 The temporary probe is absent from the characterization commit and remains in the private execution directory for the matching post-change measurement.
+
+## Facts reuse checkpoint
+
+The private path operation now requires borrowed root facts and injects them before generator work.
+The imported fault collector consumes the same value directly.
+The CHECK caller supplies the existing analysis owner's facts.
+The main agent reviewed all five added production lines and the replaced collector input.
+Both imported traversals and their loading operations remain unchanged.
+
+The unfiltered combined `test-precompile` and `test-zts` run returns exit status 0.
+The matching allocation probe reports 795 allocations and 368782 allocated bytes.
+That removes five allocations and 187 allocated bytes from this small fixture.
+Return retention stays at 3735 bytes, the reader still receives three calls, and result cleanup frees every counted byte.
+The probe source, source fixture, options, and measurement method remain fixed between both runs.
+The temporary probe is absent from the production commit. These measurements establish neither speed nor peak retention.
