@@ -1,6 +1,31 @@
-# Allocation safety worklog
+# Foundation cleanup worklog
 
-## Objective and authority
+## Current objective and authority
+
+The owner selected obsolete refusal branch cleanup with "go ahead" after allocation safety completion.
+The current baseline is `d52885de` on local `main`, with a clean tree.
+The unit removes eight unused contract facts and the unused refusal wrapper in `retired_authority.zig`.
+The eight facts are `durable_contract`, `scope_contract`, `service_contract`, `workflow_contract`, `saga_contract`, `tool_catalog`, `classification_declaration`, and `capability_ceiling`.
+The main agent owns review, unfiltered verification, and the isolated local commit.
+The owner owns publication. No push is part of this unit.
+
+## Current plan and compatibility boundary
+
+I will confirm that the eight facts have no producers and that `Feature` has no serialized representation.
+I will remove each unused enum member, fact field, sentence arm, and refusal branch.
+I will also remove the unused `refuse` wrapper.
+
+I will preserve module and project refusals, including the active auth and credentials facts.
+I will preserve raw JSON refusal before contract projection and empty compatibility placeholders.
+
+I will review every changed line and run the existing public refusal tests.
+I will retain all tests and commit the completed source unit locally.
+
+The verification set is `test-zts`, `test-project-config`, `test-precompile`, `test-cli`, formatting, and the whitespace check.
+The CLI suite includes build, activation, live reload, and bundle refusal tests.
+The capability ceiling, analysis-owner migration, and raw state API remain separate units.
+
+## Completed allocation unit: objective and authority
 
 The owner selected allocation safety with "go ahead" after the review on 2026-10-13.
 The baseline is `1c0b39ad` on local `main`, with a clean tree.
@@ -93,3 +118,24 @@ The scope closes the two import-key leaks, failed checker diagnostic insertion, 
 The diagnostic converter's borrowed fallback, resize failures, and separate deletion candidates remain outside this unit.
 The bounded allocation-safety unit is complete. No push or release verification occurs.
 The main agent owns the next plan for obsolete refusal branches.
+
+## Obsolete refusal branch completion
+
+The eight removed facts had no producers in the repository.
+Every typed-contract consumer receives only module facts from `contractFacts`; project configuration uses the retained project facts.
+The internal `Feature` type supplies named comparisons and refusal sentences, with no serialized ordinal use.
+Raw retired contract fields remain under `rejectRetiredFields`, which runs before projection allocates the current contract.
+The deletion preserves every retained sentence and the ordering of every retained predicate.
+The source diff deletes 36 production lines and adds none. Test code remains unchanged.
+
+The main agent reviewed the full worker diff and ran the checks independently.
+The standalone retired-module test passes, as do all five project-config tests.
+The unfiltered ZTS suite passes 2,378 of 2,379 tests, with one skip and exit status zero.
+The unfiltered precompile suite passes all 191 tests, with exit status zero.
+The unfiltered CLI suite passes 594 of 595 tests, with one skip and no failures or leaks.
+The CLI root reaches the public build, activation, reload, and bundle refusal tests through its explicit command anchors.
+The formatter and whitespace checks pass. No source or wire format changes outside this deletion occur.
+
+The bounded refusal branch unit is complete. No push or release verification occurs.
+The capability ceiling, analysis-owner migration, and raw state API remain separate units.
+The main agent owns the next bounded review of the runtime capability ceiling.

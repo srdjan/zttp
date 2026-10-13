@@ -11,16 +11,8 @@ pub const Feature = enum {
     service_module,
     ledger_module,
     tool_module,
-    durable_contract,
-    scope_contract,
-    service_contract,
-    workflow_contract,
-    saga_contract,
-    tool_catalog,
     tool_auth,
     credentials,
-    classification_declaration,
-    capability_ceiling,
     invariant_config,
     declaration_config,
     ledger_config,
@@ -37,16 +29,8 @@ pub const Feature = enum {
             .service_module => "the zttp:service module",
             .ledger_module => "the zttp:ledger module",
             .tool_module => "the zttp:tool module",
-            .durable_contract => "a durable contract obligation",
-            .scope_contract => "a scope contract obligation",
-            .service_contract => "a service-call contract obligation",
-            .workflow_contract => "a workflow-call contract obligation",
-            .saga_contract => "a saga contract obligation",
-            .tool_catalog => "a tool catalog",
             .tool_auth => "tool authorization",
             .credentials => "credential references",
-            .classification_declaration => "classification declarations",
-            .capability_ceiling => "a capability ceiling",
             .invariant_config => "the invariants project setting",
             .declaration_config => "the declaration project setting",
             .ledger_config => "the ledger project setting",
@@ -65,16 +49,8 @@ pub const Facts = struct {
     service_module: bool = false,
     ledger_module: bool = false,
     tool_module: bool = false,
-    durable_contract: bool = false,
-    scope_contract: bool = false,
-    service_contract: bool = false,
-    workflow_contract: bool = false,
-    saga_contract: bool = false,
-    tool_catalog: bool = false,
     tool_auth: bool = false,
     credentials: bool = false,
-    classification_declaration: bool = false,
-    capability_ceiling: bool = false,
     invariant_config: bool = false,
     declaration_config: bool = false,
     ledger_config: bool = false,
@@ -106,26 +82,14 @@ pub fn first(facts: Facts) ?Feature {
     if (facts.service_module) return .service_module;
     if (facts.ledger_module) return .ledger_module;
     if (facts.tool_module) return .tool_module;
-    if (facts.durable_contract) return .durable_contract;
-    if (facts.scope_contract) return .scope_contract;
-    if (facts.service_contract) return .service_contract;
-    if (facts.workflow_contract) return .workflow_contract;
-    if (facts.saga_contract) return .saga_contract;
-    if (facts.tool_catalog) return .tool_catalog;
     if (facts.tool_auth) return .tool_auth;
     if (facts.credentials) return .credentials;
-    if (facts.classification_declaration) return .classification_declaration;
-    if (facts.capability_ceiling) return .capability_ceiling;
     if (facts.invariant_config) return .invariant_config;
     if (facts.declaration_config) return .declaration_config;
     if (facts.ledger_config) return .ledger_config;
     if (facts.durable_config) return .durable_config;
     if (facts.system_config) return .system_config;
     return null;
-}
-
-pub fn refuse(facts: Facts) error{UnsupportedRuntimeAuthority}!void {
-    if (first(facts) != null) return error.UnsupportedRuntimeAuthority;
 }
 
 pub fn projectFacts(object: std.json.ObjectMap) Facts {
