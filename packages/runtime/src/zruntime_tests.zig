@@ -2148,13 +2148,37 @@ test "replay cannot replace retired tool refusals with recorded success" {
     try std.testing.expectEqual(@as(u32, 0), replay_state.cursor);
 }
 
-test "direct handler instances install no retired module state" {
-    const rt = try HandlerInstance.init(std.testing.allocator, .{});
+test "a handler exercising every stateful module fills only owned slots" {
+    const allocator = std.testing.allocator;
+    const Slot = zq.module_slots.Slot;
+    const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
+    try rt.loadHandler(
+        \\import { cacheSet } from "zttp:cache";
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\import { schemaCompile } from "zttp:validate";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", "v");
+        \\  rateCheck("k", 5, 60);
+        \\  schemaCompile("item", "{\"type\":\"object\"}");
+        \\  return Response.text("ok");
+        \\}
+    , "<stateful-modules>");
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
 
-    // Retired slots keep their ordinals and cannot acquire new owners.
-    for ([_]usize{ 0, 1, 6, 9, 10, 12, 13, 14, 15 }) |slot| {
-        try std.testing.expect(rt.ctx.module_state[slot] == null);
+    // Floor: each active module that keeps state has filled its slot, so the
+    // ownership check below runs against live state rather than an empty array.
+    for ([_]Slot{ .sql, .fetch, .cache, .ratelimit, .validate }) |slot| {
+        try std.testing.expect(rt.ctx.module_state[@intFromEnum(slot)] != null);
+    }
+    // Retired ordinals (ledger, tool, durable, and the rest) have no owner, so
+    // no runtime path may write state there.
+    for (rt.ctx.module_state, 0..) |entry, slot| {
+        if (entry != null) try std.testing.expect(zq.module_slots.ownerSpecifier(slot) != null);
     }
 }
 
