@@ -92,23 +92,6 @@ pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) 
     return util.throwError(ctx, name, message);
 }
 
-/// Get typed module state from a slot. Returns null if not initialized.
-pub fn getState(handle: *ModuleHandle, comptime T: type, slot: usize) ?*T {
-    const ctx = handleToContext(handle);
-    return ctx.getModuleState(T, slot);
-}
-
-/// Set module state in a slot with a cleanup callback.
-pub fn setState(
-    handle: *ModuleHandle,
-    slot: usize,
-    ptr: *anyopaque,
-    deinit_fn: *const fn (*anyopaque, std.mem.Allocator) void,
-) void {
-    const ctx = handleToContext(handle);
-    ctx.setModuleState(slot, ptr, deinit_fn);
-}
-
 /// Get the runtime allocator for persistent allocations.
 pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
     const ctx = handleToContext(handle);

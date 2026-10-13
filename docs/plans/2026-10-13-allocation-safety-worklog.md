@@ -2,13 +2,56 @@
 
 ## Current objective and authority
 
+The owner selected raw Zig state API review with "next" after single-file owner reuse completion.
+The baseline is `87ddffa7` on local `main`, with a clean tree.
+The candidate contains the engine facade's `getState` and `setState` functions and their bridge implementations.
+The main agent owns compatibility judgment, review, verification, and any isolated local commit.
+The owner owns publication. No push is part of this unit.
+
+## Current plan and compatibility boundary
+
+I will first check callers, published APIs, and the supported SDK state interface.
+I will distinguish absent repository callers from evidence that an exported API has no supported consumers.
+I will retain the candidate if its compatibility obligation remains unresolved.
+
+The raw facade forwards any slot directly to `Context` without the active-module ownership check.
+The SDK bridge checks ownership and wraps module state in an envelope.
+The engine facade's header calls its exports stable, so caller absence alone cannot authorize deletion.
+An independent Sol high review will check that compatibility conflict.
+
+If authoritative compatibility evidence permits deletion, I will remove only the two raw functions and their facade aliases.
+I will preserve Context access for bootstrap, SDK symbols, ownership checks, state envelopes, cleanup, and all existing tests.
+The source scope contains `packages/zts/src/module_binding.zig` and `packages/zts/src/module_binding/bridge.zig`.
+The verification set for a deletion is `test-zts`, `test-sdk`, `test-modules`, `test-zruntime`, and `test-cli`.
+The gates are `test-module-boundary` and `test-zts-layering`, plus formatting and whitespace checks.
+The resolved-session fallback remains a separate compatibility decision.
+
+## Raw state compatibility decision
+
+The independent review resolves the header conflict through the umbrella's explicit internal-tier contract.
+`packages/zts/src/root.zig` classifies `module_binding` as internal and gives that tier no stability guarantee across releases.
+The module-boundary allowlist also treats imports of this module as internal reaches.
+Generated extension projects import `zttp-sdk`, whose published state APIs are `getModuleState` and `setModuleState`.
+
+The tracked caller census finds no raw facade calls, aliases, documentation, examples, or generated scaffold references.
+The split commit `1cb0be9e` added the stable-header wording to preserve in-repository call sites during the file split.
+That wording does not override the umbrella's internal-tier contract.
+An unsupported direct source consumer can still break, and repository checks cannot establish that no such consumer exists.
+
+The accepted deletion removes the two raw functions and their facade aliases.
+I will also clarify the facade header so it names the SDK boundary and internal caller scope.
+The SDK exports, state envelopes, checked access, Context bootstrap methods, and existing tests remain unchanged.
+The main agent owns source deletion, line-by-line review, and the planned unfiltered verification.
+
+## Completed single-file unit: objective and authority
+
 The owner selected single-file analysis-owner reuse with "go ahead" after runtime ceiling completion.
 The baseline is `7ed1e1d7` on local `main`, with a clean tree.
 The unit replaces the repeated single-file lifecycle with the existing `ModuleContractAnalysis` sound-extraction profile.
 The main agent owns review, unfiltered verification, and the isolated local commit.
 The owner owns publication. No push is part of this unit.
 
-## Current plan and compatibility boundary
+## Completed single-file plan and compatibility boundary
 
 I will first characterize public single-file default and custom callback extraction on the current implementation.
 I will compare serialized contracts after extraction and require one custom callback invocation.
@@ -308,3 +351,49 @@ The main agent owns the isolated local commit; the owner owns publication.
 No push or release verification occurs.
 The resolved-session fallback remains for its direct callers.
 The main agent owns the next bounded review of raw state API callers.
+
+## Raw state source and coverage checkpoint
+
+The source diff deletes the two raw bridge functions and their two facade aliases.
+The facade header now directs external modules to the SDK and identifies trusted internal bootstrap access.
+The main agent reviewed every changed line.
+The supported SDK state exports, Context methods, state envelope, allocator access, and bootstrap helpers remain unchanged.
+No existing test is changed, and no new test is added for the unused raw path.
+
+The unfiltered ZTS suite passes 2,377 of 2,378 tests, with one existing skip and exit status zero.
+The formatter and whitespace checks pass, and neither source file retains a raw facade name.
+The remaining planned suites and gates pass as recorded below.
+
+The independent test review identifies a separate gap in the supported SDK state lifecycle.
+Existing tests cover the ownership predicate, Context authorization separation, teardown order, registered live slots, and pooled request fields.
+The SDK and module tests use a shim that ignores state cleanup callbacks.
+No existing test covers real SDK state installation, retrieval, and envelope cleanup together.
+
+The tests also lack real SDK slot bounds and state replacement checks.
+`Context.setModuleState` currently overwrites its old entry without cleaning that entry.
+Supported modules use get-or-create, so the review does not establish a current replacement leak from those callers.
+The pooled request test checks request fields and does not establish module-state isolation.
+The main agent owns the next bounded SDK lifecycle review after this deletion unit.
+
+## Raw state verification and completion
+
+The main agent reviewed the complete source diff and ran all planned checks independently.
+The unfiltered SDK and module suites pass all 10 and 146 tests respectively, with exit status zero.
+The standalone runtime suite passes all 226 tests, with exit status zero.
+The unfiltered CLI suite passes 594 of 595 tests, with one existing skip and no failures, leaks, or logged errors.
+
+The module-boundary and layering gates pass, with exit status zero.
+The formatter and whitespace checks also pass.
+No allowlist, SDK symbol, wire format, descriptor, or policy change occurs.
+
+On physical source lines, production adds six comment lines and removes 27 lines.
+Test code remains unchanged.
+The deletion removes the unused internal facade, while the supported SDK state path retains ownership checks and its envelope layout.
+Repository checks cannot establish compatibility for unsupported external source consumers.
+The recorded SDK lifecycle gaps remain outside this unit's verification claims.
+
+The bounded raw state facade deletion is complete.
+The main agent owns its isolated local commit; the owner owns publication.
+No push or release verification occurs.
+The resolved-session fallback remains for its direct callers.
+The main agent owns the next bounded check of real SDK state ownership and cleanup.

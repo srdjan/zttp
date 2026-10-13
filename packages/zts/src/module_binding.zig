@@ -8,16 +8,14 @@
 //! their existing `exports` array. Third-party modules depend on zttp-sdk
 //! and write functions using ModuleFn (opaque handle) instead of NativeFn.
 //!
-//! The ModuleHandle opaque type provides a capability-based sandbox:
-//! third-party modules cannot dereference the handle or access Context
-//! internals. All interaction goes through free functions in this file.
+//! Third-party modules use the SDK's opaque ModuleHandle and helpers.
+//! SDK helpers call the runtime ABI bridge. This internal facade also
+//! exposes Context access for trusted engine and runtime bootstrap code.
 //!
-//! This file is the stable surface: the specification vocabulary, the
-//! capability enforcement, and the runtime/ABI bridge live in
+//! This facade keeps in-repository callers independent of the file split.
+//! The specification vocabulary, capability enforcement, and runtime ABI bridge live in
 //! `module_binding/types.zig`, `module_binding/capabilities.zig`, and
-//! `module_binding/bridge.zig`, and every name is re-exported here so the
-//! thirty-odd `module_binding.X` call sites across zts, modules, tools, pi,
-//! and runtime are unaffected.
+//! `module_binding/bridge.zig`. Their facade exports remain here.
 
 const std = @import("std");
 const object = @import("object.zig");
@@ -96,8 +94,6 @@ pub const resultErr = bridge.resultErr;
 pub const resultErrValue = bridge.resultErrValue;
 pub const resultErrs = bridge.resultErrs;
 pub const throwError = bridge.throwError;
-pub const getState = bridge.getState;
-pub const setState = bridge.setState;
 pub const getAllocator = bridge.getAllocator;
 
 // The SDK bridge is part of the binary ABI. Referencing the module alone does
