@@ -522,7 +522,7 @@ fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u3
     return type_checker.check(root);
 }
 
-/// Owns the analysis that one graph module needs for contract extraction.
+/// Owns the analysis that one module needs for contract extraction.
 /// Initialize this value in final caller storage.
 /// Its checkers borrow the type environment and facts in this value.
 pub const ModuleContractAnalysis = struct {
@@ -893,36 +893,11 @@ pub fn extractContract(
         );
     }
 
-    var type_env_storage: TypeEnvStorage = .{};
-    defer type_env_storage.deinit(allocator);
-    if (effective_type_map) |type_map| {
-        try type_env_storage.init(allocator, type_map);
-    }
-
-    // One index for this module, owned here for the same reason precompile owns
-    // its own: the phase structs cannot hold a stable address for it.
-    var module_facts = try buildModuleFacts(allocator, parsed, null);
-    defer module_facts.deinit();
-
-    var resolved = try resolve(allocator, parsed, .{
-        .type_env = type_env_storage.envPtr(),
-        .strict = opts.strict,
-        .module_facts = &module_facts,
-    });
-    defer resolved.deinit();
-
-    if (resolved.bool_error_count > 0 or
-        resolved.typeErrorCount() > 0 or
-        resolved.strict_error_count > 0)
-    {
-        return error.SoundModeViolation;
-    }
-
-    contract_opts.resolved = &resolved;
-    var contract = try extractContractFromParsed(allocator, parsed, filename, contract_opts);
-    errdefer contract.deinit(allocator);
-    if (resolved.typeErrorCount() > 0) return error.SoundModeViolation;
-    return contract;
+    var analysis: ModuleContractAnalysis = .{};
+    try analysis.init(allocator, parsed, .sound_extraction, contract_opts);
+    defer analysis.deinit();
+    try analysis.complete();
+    return analysis.extractContract(filename);
 }
 
 fn hasFileImports(ir_view: IrView) bool {
@@ -1741,6 +1716,51 @@ test "extractContract strips TypeScript and honors strict opt out" {
     defer contract.deinit(testing.allocator);
 
     try testing.expectEqualStrings("handler.ts", contract.handler.path);
+}
+
+test "extractContract preserves single-file custom callback output" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Response {
+        \\  const value = env("TOKEN");
+        \\  return Response.json({ value: value });
+        \\}
+    ;
+    const Callback = struct {
+        var call_count: usize = 0;
+
+        fn check(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
+            const error_count = try type_checker.check(root);
+            try testing.expectEqual(@as(u32, 0), error_count);
+            try testing.expectEqual(@as(usize, 0), type_checker.getDiagnostics().len);
+            call_count += 1;
+            // Preserve acceptance of a nonzero callback count without diagnostics.
+            return 7;
+        }
+    };
+
+    var default_contract = try extractContract(allocator, source, "handler.ts", .{
+        .strict = false,
+    });
+    defer default_contract.deinit(allocator);
+
+    Callback.call_count = 0;
+    var custom_contract = try extractContract(allocator, source, "handler.ts", .{
+        .strict = false,
+        .type_check = Callback.check,
+    });
+    defer custom_contract.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), Callback.call_count);
+    try expectStringSlices(&.{"TOKEN"}, custom_contract.env.literal.items);
+    try expectStringSlices(&.{"zttp:env"}, custom_contract.modules.items);
+
+    const default_json = try serializeContractForTest(allocator, &default_contract);
+    defer allocator.free(default_json);
+    const custom_json = try serializeContractForTest(allocator, &custom_contract);
+    defer allocator.free(custom_json);
+    try testing.expectEqualStrings(default_json, custom_json);
 }
 
 test "extractContract rejects boolean diagnostics with strict disabled" {

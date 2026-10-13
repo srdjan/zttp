@@ -2,13 +2,41 @@
 
 ## Current objective and authority
 
+The owner selected single-file analysis-owner reuse with "go ahead" after runtime ceiling completion.
+The baseline is `7ed1e1d7` on local `main`, with a clean tree.
+The unit replaces the repeated single-file lifecycle with the existing `ModuleContractAnalysis` sound-extraction profile.
+The main agent owns review, unfiltered verification, and the isolated local commit.
+The owner owns publication. No push is part of this unit.
+
+## Current plan and compatibility boundary
+
+I will first characterize public single-file default and custom callback extraction on the current implementation.
+I will compare serialized contracts after extraction and require one custom callback invocation.
+I will preserve the current treatment of a callback's returned count when the checker has no diagnostics.
+
+I will then pass the effective extraction options into an in-place `ModuleContractAnalysis` value.
+I will complete that analysis, extract the owned contract, and clean up the analysis before returning.
+I will preserve strict refusal, inferred and explicit type maps, injected facts, manifest lookup, and callback errors.
+
+The source scope is `packages/zts/src/pipeline.zig`.
+The graph producer, owner states, `ExtractContractOptions.resolved`, and direct parsed-extraction fallback remain unchanged.
+The resolved-session fallback has direct callers and remains a separate compatibility decision.
+The raw state API remains a separate unit.
+
+I will review every changed line and run the unfiltered checks independently.
+The verification set is `test-zts`, `test-precompile`, `test-zruntime`, `test-cli`, and `test-contract-golden`.
+The gates are `test-proof-swallow`, `test-zts-layering`, and `test-module-boundary`, plus formatting and whitespace checks.
+No speed or memory improvement is claimed without measurement.
+
+## Completed runtime ceiling unit: objective and authority
+
 The owner selected runtime capability ceiling cleanup with "next" after obsolete refusal branch completion.
 The current baseline is `5ce252c9` on local `main`, with a clean tree.
 The unit removes the runtime ceiling path that only tests activate.
 The main agent owns review, unfiltered verification, and the isolated local commit.
 The owner owns publication. No push is part of this unit.
 
-## Current plan and compatibility boundary
+## Completed runtime ceiling plan and compatibility boundary
 
 I will remove the ceiling type, Context field, wrapper, denial error, internal exports, and interpreter suppression for that denial.
 I will fold the live resolver implementation into `wrappedExportFn` and retain its authorization and metering behavior.
@@ -214,3 +242,69 @@ The formatter and whitespace checks pass. No allowlist, wire, descriptor, policy
 The bounded runtime ceiling unit is complete. No push or release verification occurs.
 The analysis-owner migration and raw state API remain separate units.
 The main agent owns the next bounded plan for single-file analysis-owner reuse.
+
+## Single-file characterization checkpoint
+
+The compatibility review confirms that the graph branch already uses the selected analysis owner.
+Single-file extraction repeats type storage, resolution facts, sound refusal, extraction, and cleanup.
+The migration must pass `contract_opts`, which contains the effective frontend type map.
+Custom callbacks still use their existing separate checker, and the direct parsed-extraction fallback remains intact.
+
+The new public test compares default and custom contract JSON after extraction returns.
+The custom callback runs the checker, requires no diagnostics, and returns a nonzero count without changing acceptance.
+The test requires one callback invocation, the `TOKEN` environment capability, and the `zttp:env` module.
+No existing test is removed or weakened.
+
+The first baseline run refused the test fixture's `string | null` annotation before extraction.
+The environment binding can return `undefined`, which that annotation excludes.
+The corrected fixture infers the local value and retains the typed handler parameter and return.
+
+The next baseline reached extraction but failed the new secret-leakage assertion.
+That assertion targeted the wrong stage: extraction returns preliminary properties, and precompile fills flow properties after its completed flow walk.
+The test now checks module and environment extraction instead of asserting a flow verdict that this API does not produce.
+Exact serialized output comparison still includes all preliminary properties.
+No existing assertion changes. The main agent owns baseline verification before the production migration.
+
+## Single-file source checkpoint
+
+The corrected characterization passes on the original single-file lifecycle.
+The unfiltered baseline passes 2,377 of 2,378 ZTS tests, with one existing skip and exit status zero.
+
+Single-file extraction now initializes the existing sound-extraction owner in final caller storage.
+The owner receives the effective frontend options, completes sound analysis, extracts the owned contract, and cleans up before returning.
+The graph branch, owner states, resolved-session option, and direct parsed-extraction fallback remain unchanged.
+The owner comment now applies to one module rather than only graph modules.
+
+The main agent reviewed every changed line and requested an independent Sol high compatibility review.
+The planned unfiltered checks remain pending.
+
+## Single-file review and verification checkpoint
+
+The independent review finds no actionable compatibility issue.
+Resolution keeps registry-free facts, and default extraction preserves injected facts and separate registry-aware facts when required.
+Custom extraction still uses its separate checker and ignores the callback count without ignoring callback errors or checker health.
+The owner releases each checker before its environment and facts, and the returned contract retains its own copied data.
+
+The main agent ran the migrated code through the unfiltered ZTS suite.
+That run matches the characterized baseline: 2,377 of 2,378 tests pass, with one existing skip and exit status zero.
+All 191 precompile tests and all 226 standalone runtime tests pass, with exit status zero.
+The formatter and whitespace checks pass.
+The unfiltered CLI suite passes 594 of 595 tests, with one existing skip and no failures, leaks, or logged errors.
+The five contract golden commands pass through all eight build steps, with exit status zero.
+
+The proof-swallow gate passes across 16 files, with 162 reviewed swallows, 85 reviewed silent arms, and no unreviewed cases.
+The layering and module-boundary gates also pass, with exit status zero.
+No allowlist changes occur.
+
+## Single-file completion
+
+On physical source lines, production adds six lines and removes 31; test code adds 45 lines and removes none.
+The production additions include the owner comment's updated scope.
+The test confirms fixture output parity and callback acceptance after function-owned analysis cleanup.
+No existing test is deleted or weakened, and no new owner state or public option is added.
+
+The bounded single-file owner reuse unit is complete.
+The main agent owns the isolated local commit; the owner owns publication.
+No push or release verification occurs.
+The resolved-session fallback remains for its direct callers.
+The main agent owns the next bounded review of raw state API callers.
