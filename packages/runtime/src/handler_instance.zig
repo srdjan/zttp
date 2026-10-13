@@ -68,7 +68,6 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 
 const runtime_config_mod = @import("runtime_config.zig");
-const retired_authority = @import("project_config").retired_authority;
 const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
 const cost_meter = zq.CostMeter;
 
@@ -712,20 +711,12 @@ pub const HandlerInstance = struct {
         if (self.config.replay_file_path != null) {
             // Replay mode: stubs that return recorded values from ReplayState
             inline for (zq.builtinModules) |binding| {
-                if (comptime retired_authority.isRetiredModule(binding.specifier)) {
-                    try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
-                } else {
-                    try zq.modules.registerVirtualModuleReplayWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
-                }
+                try zq.modules.registerVirtualModuleReplayWithOuter(binding, self.ctx, self.allocator, fetchCredentialOuter);
             }
         } else if (self.config.trace_file_path != null) {
             // Use traced wrappers that record I/O to TraceRecorder
             inline for (zq.builtinModules) |binding| {
-                if (comptime retired_authority.isRetiredModule(binding.specifier)) {
-                    try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
-                } else {
-                    try zq.modules.registerVirtualModuleTraced(binding, self.ctx, self.allocator);
-                }
+                try zq.modules.registerVirtualModuleTraced(binding, self.ctx, self.allocator);
             }
         } else {
             inline for (zq.builtinModules) |binding| {
