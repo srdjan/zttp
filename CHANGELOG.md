@@ -10,6 +10,69 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-13
+
+### Highlights
+
+zttp 0.22.0 is a smaller product. It keeps one path: `zttp expert` drafts a
+handler inside the compiler fence, the compiler proves or refuses it, and the
+runtime serves only an artifact that the independent kernel accepts. This
+release removes orchestration, system linking, tool routes, application
+invariants, TSX, `comptime()`, Studio, the edge runtime, and many secondary
+commands. It also closes several cases in which the flow and fault-coverage
+analyses reported a property as proven when it was not. Rebuild every
+artifact.
+
+### Breaking changes
+
+- **Every artifact, certificate, and bundle built by 0.21.1 or earlier is
+  refused; rebuild and redeploy.** The self-extract payload format moved from
+  `6` to `7` and the certificate schema from `4` to `5`. The tool catalog
+  (section 9), application invariants (section 8), and consumer declaration
+  (section 10) sections are gone. An old binary exits with rebuild guidance
+  before it creates a runtime pool.
+- **Eight virtual modules are removed:** `zttp:durable`, `zttp:workflow`,
+  `zttp:queue`, `zttp:scope`, `zttp:io`, `zttp:service`, `zttp:ledger`, and
+  `zttp:tool`. The analyzer refuses an import of any of them with ZTS206, and
+  `dev`, `serve`, replay, `--test`, `--watch`, `build`, `deploy`, precompile,
+  proof bundles, and live reload all refuse source or contracts that use them.
+  Migration: move durable or multi-step work out of the handler, and call
+  other services with `zttp:fetch`.
+- **Retired project settings are refused.** `zttp.json` keys `invariants`,
+  `declaration`, `ledger`, `auth`, `credentials`, `durableDir`, and `system`
+  stop project discovery with an error, even when their value is `null`. A
+  `system.json` beside the project is refused too. Migration: delete the keys.
+- **Removed commands:** `demo`, `studio`, `edge`, `link`, `rollout`,
+  `invariant`, `durable dead-runs`, `workflow-queue`, `mock`,
+  `extension-status`, `verify-module-manifest`, `gate-report`, `review-patch`,
+  `witnesses`, `ratchet`, `prove`, `proofs replay` with proof capsules, and
+  `zts-training-export`. Migration: `zttp check` is the proof gate that
+  `ratchet check` was, and `prove-behavior` and `edit-simulate` remain.
+- **Removed run and expert flags:** `--durable`, `--system`,
+  `--workflow-queue`, `--actor-queue`, `--mode rpc`, `--no-perf-receipt`, and
+  `--no-equivalence-receipt`. Applied edits no longer sign `kind=perf` or
+  `kind=equivalence` receipts.
+- **Removed providers:** `--provider claude` and `--provider openai`. The
+  supported providers are `deepseek` and `local`.
+- **Removed build options:** `-Daot`, `-Ddeclaration`, `-Dedge`,
+  `-Dexpect-properties`, `-Dfault-severity`, `-Dgenerate-tests`,
+  `-Dgenerator-pack`, `-Dmanifest`, `-Dopenapi`, `-Dprove`, `-Dreplay`,
+  `-Dreport`, `-Dsdk`, `-Dstudio`, `-Dsystem`, and `-Dtest-file`. OpenAPI and
+  generated TypeScript client output go with them. The interpreter is now the
+  only execution path.
+- **TSX, `comptime()`, and hypermedia are removed.** A `.tsx` source is
+  refused with ZTS052, like `.js` and `.jsx`. `comptime()` folding, the global
+  `resource()` affordances, and the HTMX `zttp init` template are gone.
+  Migration: build HTML with `h()` and `renderToString()`, and compute
+  constants in ordinary module-level code.
+- **The analyzer refuses programs that it accepted before.** See Changed:
+  surplus call arguments (ZTS202), boolean checks inside function bodies
+  (ZTS100 to ZTS107), match arm placement (ZTS062), and deeper nesting limits
+  (ZTS044).
+- **Proofs can get weaker with no source change.** See Security. A handler
+  whose verdict rested on a closed analysis gap now reports the property as
+  unproven or refused.
+
 ### Security
 
 - **Flow properties now cover route functions dispatched through
@@ -32,6 +95,50 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   cannot resolve. **Artifacts built by 0.21.1 and earlier from a routed handler
   may carry any of these properties falsely as well.** A module-scope mutation
   now also fails a declared `state_isolated` capsule with ZTS500.
+- **The flow checker now reports sinks inside called functions.** A log,
+  egress, or response sink in a callee, in a closure passed to `map`,
+  `forEach`, or `filter`, on a return path, in a concise arrow body, or in a
+  nested expression was not reported. A handler that leaked through a helper
+  could prove `no_secret_leakage`, `no_credential_leakage`, `input_validated`,
+  `injection_safe`, `pii_contained`, and `deterministic`. A call that the
+  checker cannot enter now clears those properties, even when the handler
+  discards its result. Recursive summaries widen to a fixpoint. An unresolved
+  method, a call through a function value, and a depth or allocation cap all
+  fail closed.
+- **Imported helpers apply their sinks at each call site.** Only the labels
+  that an imported helper returned were kept, so a helper in another file that
+  logged or sent its argument proved clean.
+- **Captured values resolve lexically.** A closure that returned a captured
+  secret proved `no_secret_leakage`, because captures were resolved by slot.
+  Labels on module-level declarations and on re-declarations are also correct
+  now.
+- **Credential reads are labelled on every request binding.** A request
+  passed to a helper or aliased (`const r = req`) read its `Authorization`
+  header without the credential label.
+- **`mask()` declassifies only secret and credential.** It also dropped
+  `user_input`, so `fetch(url, { body: mask(req.url, 4) })` proved
+  `injection_safe`.
+- **Unvalidated HTML is tracked to the response.** `Response.html` of user
+  input now carries a fact that follows the value to the response sink.
+- **Stored data has unknown provenance.** Values read from the cache or a SQL
+  table carry `unknown`, because a separate write put them there.
+- **`fault_covered` was claimed falsely in five ways.** A failable call on no
+  enumerated path did not block it, and neither did a walk that was not
+  exhaustive. `fetch` and `fetchWithRetry` counted as zero failable sites. The
+  case "a true, b false" of `if (a && b)` never ran. Failable calls in
+  imported files were not scanned. A `res.status !== 200` test did not cover a
+  `fetch`. All five now fail closed.
+- **Analyzer versions are part of the policy hash.** The flow analyzer is
+  version 2 and the path analyzer version 3. A contract stamped by an older
+  analyzer no longer matches the runtime policy; rebuild it.
+- **The proof kernel keeps runtime safety in release builds.** Its ReleaseSafe
+  pin had no effect under a ReleaseFast root. Safety is now set per function
+  and checked by a gate.
+- **A certificate past the consumer limits is refused** with
+  `CertificateExceedsConsumerLimits`. A proof above about 18,700 IR nodes
+  reached undefined behavior in ReleaseFast.
+- **Match code generation no longer drops a record-pattern key.** When a key
+  could not be interned, the bytecode tested fewer fields than the proven IR.
 
 ### Changed
 
@@ -49,6 +156,63 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   proof is lost, the gate writes no signed `kind=equivalence` receipt for that
   handler. **A pull request that passed the gate while losing one of the eight
   properties now fails it.**
+- **ZTS408 (warning) refuses a credential in an egress body,** including one
+  passed through an opaque `init` object. A value with unknown provenance in
+  an egress body also clears `no_credential_leakage`.
+- **ZTS202 refuses surplus arguments** to source functions and to `zttp:*`
+  exports. Signatures are keyed by source position, so two functions on one
+  line no longer merge.
+- **ZTS601 fires for an anonymous arrow that annotates only some of its
+  parameters.**
+- **Boolean checks (ZTS100 to ZTS107) walk function bodies.** `if (5)` inside a
+  function now reports ZTS100. Guards after `&&` and `||` narrow the right
+  operand, parameters are typed, five false-positive sources are removed, and
+  each check stage reports once per node.
+- **Match:** a misplaced or second `default` arm reports ZTS062, a type-test
+  name below the top level of a pattern reports ZTS001, and an unreachable arm
+  reports ZTS216 (warning). The ZTS603 suggestion names the first missing case,
+  and a match that is not exhaustive has type `T | undefined`.
+- **ZTS044 bounds left-deep operator and call chains** and type-syntax
+  nesting. **ZTS031** refuses a constant pool past 65,535 entries. **ZTS046**
+  names the character it refuses. One type mistake gives one message, and
+  parser recovery reports once per offset.
+- **`zttp proofs gate` reports a signed receipt only when it wrote one,** and
+  prints the reason to stderr when it did not.
+- **`rateCheck` returns an error `Result` for every failure,** tagged
+  `invalid_arguments`, `rate_store_capacity`, or `rate_store_unavailable`. Bad
+  arguments and store failures returned `undefined` before.
+- **The cache and the rate limiter are bounded.** Each store holds at most
+  10,000 entries and 16 MiB. The cache rejects an oversized entry and evicts
+  older entries on overwrite. A full rate-limit store sweeps expired windows,
+  then refuses new keys.
+- **A `fetch` body shorter than its `Content-Length` fails** with
+  `ResponseReadFailed`. It came back as a complete response before.
+- **JSON strings refuse raw control bytes.** `parseJson`, `parseJsonBytes`, and
+  `requestJson` answer `invalid-syntax` at the offset of a byte from `0x00` to
+  `0x1F` inside a string.
+- **`zttp test` fails a scenario whose failure it cannot record.** It passed
+  before.
+
+### Added
+
+- **`zttp:sse` with `sseEvents`.** It splits a complete server-sent-events
+  body into events under the WHATWG rules. It refuses invalid UTF-8 and an
+  unterminated final block, and it ignores `retry`.
+- **Generated tests cover more handlers.** Fault-coverage tests now include
+  `fetch` handlers and `req.method` and `req.url` guards, and they drop paths
+  that no request can reach.
+
+### Fixed
+
+- **Crashes on hostile or very large input.** The analyzer no longer panics on
+  256 nested template braces, on a schema literal with a duplicate key, on
+  70,000 float constants, or on a left-deep chain of about 200,000 nodes. The
+  bytecode cache decoder no longer attempts a 50 GB allocation or overflows
+  its stack.
+- **Out-of-memory handling.** A parse fails on out-of-memory instead of
+  dropping the statement, a type check no longer loses a check on a transient
+  allocation failure, and about ten ownership paths free or keep their memory
+  correctly after an allocation failure.
 
 ## [0.21.1] - 2026-09-26
 
@@ -764,7 +928,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.21.1...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/srdjan/zigttp/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/srdjan/zigttp/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/srdjan/zigttp/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/srdjan/zigttp/compare/v0.19.0...v0.20.0
