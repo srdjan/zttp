@@ -1,5 +1,5 @@
 {
-  "runId": "3591710eb9ea-1791845176461-68962",
+  "runId": "d5e8936c5587-1791902444329-92452",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -25,7 +25,7 @@
   "securityProbeHash": "90d069bf5a0b79c142966f9e51a28e9d01226589fa34125239d7f63c2605e16a",
   "thresholdHash": "2a30bf25c891d98980e715232c7bba3c1134911c7d07b896c3dbde22803afee8",
   "manifestHash": "26bfe853a235cf145a234669c1b0c87de8f3565661c74cc192afe96e1d0dbadd",
-  "resultRunHash": "9999ce2948670ed871ed8c124ee5f4aefde12d9f99c20d4d4bb6f7e4124a3160",
+  "resultRunHash": "6d491b5083fd365d4811c6fe68659749e9a13d99464cb639ca7372aa60f464cf",
   "promptPersonaHash": "c14dd7a39fc83fcefac89b4110fa712bd0123333ab9b475b8fd2515c4438ac88",
   "providerNeutralCatalogHash": "5408889262673e6ecfed6c539ce9a743daacea8fd36d089668c57558c14ed208",
   "providerSerializedCatalogHash": "f0c27dd6c62f9929c0f617da78ecbc9f45e2df16b5cbc02a8a7e4d92534e855d",
@@ -35,7 +35,7 @@
   "semanticsHash": "83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8",
   "diagnosticHash": "657967a5eab118485ffc7038480ab754ab8f8f95782e7ffe4f52424056525d15",
   "policyHash": "81e39e8a575d5aaaabfb133bdb6ab16925425ab59e3a2e07fdb2dfa91198452c",
-  "sourceCommit": "3591710eb9ea16736b3ae5be24b0075d7dc60547",
+  "sourceCommit": "d5e8936c5587159d5dc70d55ef4f6a15e6f2ec88",
   "sourceDirty": false,
   "rulesTotal": 59,
   "rulesTripped": 2,
@@ -108,7 +108,7 @@
     "ZTS202",
     "ZTS203"
   ],
-  "recorded": "2026-10-12",
+  "recorded": "2026-10-13",
   "seedSuite": {
     "seedsTotal": 61,
     "verifiedRules": 58,
@@ -181,8 +181,8 @@
   },
   "corpusUnion": {
     "corpusVersion": "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e",
-    "sourceTreeHash": "049f8773ee06e006ff0654f4a6cc47916fbe5029",
-    "observations": 1,
+    "sourceTreeHash": "e76111517e1d7e6bd8ece129b7e13c398da223f1",
+    "observations": 2,
     "distinctSets": 1,
     "smallestSet": 2,
     "largestSet": 2,
