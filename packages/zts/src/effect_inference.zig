@@ -145,6 +145,17 @@ pub const Analyzer = struct {
     /// `fn_count + 1` entries with a trailing sentinel.
     callee_starts: std.ArrayListUnmanaged(u32),
     callee_storage: std.ArrayListUnmanaged(usize),
+    /// CSR-encoded function-value references per function, beside the call
+    /// edges. A reference to a function is not a call: `const t = [b]` makes
+    /// `b` reachable and charges its row to the owner, but it must not make the
+    /// owner recursive when `b` refers back. `propagate` and the reachability
+    /// walks read both stores; `detectRecursion` and `reachesRecursion` read
+    /// `callee_*` only.
+    value_starts: std.ArrayListUnmanaged(u32),
+    value_storage: std.ArrayListUnmanaged(usize),
+    /// Functions already recorded as value references of the function being
+    /// walked. Cleared per function.
+    seen_values: std.AutoHashMapUnmanaged(usize, void),
     /// The call node whose result the enclosing statement throws away, or
     /// `null_node`. Set only for the outermost call of an `expr_stmt`, so a
     /// nested call inside that statement is not mistaken for a discarded one.
@@ -173,6 +184,9 @@ pub const Analyzer = struct {
             .user_fn_by_slot = .empty,
             .callee_starts = .empty,
             .callee_storage = .empty,
+            .value_starts = .empty,
+            .value_storage = .empty,
+            .seen_values = .empty,
             .inline_route_stack = .empty,
         };
     }
@@ -184,6 +198,9 @@ pub const Analyzer = struct {
         self.user_fn_by_slot.deinit(self.allocator);
         self.callee_starts.deinit(self.allocator);
         self.callee_storage.deinit(self.allocator);
+        self.value_starts.deinit(self.allocator);
+        self.value_storage.deinit(self.allocator);
+        self.seen_values.deinit(self.allocator);
         self.inline_route_stack.deinit(self.allocator);
     }
 
@@ -357,8 +374,11 @@ pub const Analyzer = struct {
     fn computeBaseEffects(self: *Analyzer) !void {
         const fn_count = self.functions.items.len;
         try self.callee_starts.resize(self.allocator, fn_count + 1);
+        try self.value_starts.resize(self.allocator, fn_count + 1);
         for (0..fn_count) |i| {
             self.callee_starts.items[i] = @intCast(self.callee_storage.items.len);
+            self.value_starts.items[i] = @intCast(self.value_storage.items.len);
+            self.seen_values.clearRetainingCapacity();
             var seen_users: std.AutoHashMapUnmanaged(usize, void) = .empty;
             defer seen_users.deinit(self.allocator);
             var row: EffectRow = .{};
@@ -372,6 +392,7 @@ pub const Analyzer = struct {
             self.functions.items[i].direct_caps = row.capabilities;
         }
         self.callee_starts.items[fn_count] = @intCast(self.callee_storage.items.len);
+        self.value_starts.items[fn_count] = @intCast(self.value_storage.items.len);
     }
 
     fn calleeCount(self: *const Analyzer, fn_idx: usize) u32 {
@@ -384,6 +405,16 @@ pub const Analyzer = struct {
         const start = self.callee_starts.items[fn_idx];
         const end = self.callee_starts.items[fn_idx + 1];
         return self.callee_storage.items[start..end];
+    }
+
+    /// Functions that function `fn_idx` references as values without calling
+    /// them. A reachability walk must follow these as well as `calleesOf`: a
+    /// referenced helper can be called, so counting it reachable is the
+    /// conservative direction.
+    pub fn valueRefsOf(self: *const Analyzer, fn_idx: usize) []const usize {
+        const start = self.value_starts.items[fn_idx];
+        const end = self.value_starts.items[fn_idx + 1];
+        return self.value_storage.items[start..end];
     }
 
     const WalkError = std.mem.Allocator.Error;
@@ -486,16 +517,25 @@ pub const Analyzer = struct {
             .call, .method_call => {
                 try self.handleCall(node, owner, row, seen_users);
                 const call = self.ir_view.getCall(node) orelse return;
-                try self.walkBaseExpr(call.callee, owner, row, seen_users);
+                // A bare identifier callee was resolved and charged by
+                // `handleCall`. Walking it as a value reference as well would
+                // charge an import twice, and a discarded `logInfo(...)` would
+                // lose the sink exemption that call carries: the leaf charge
+                // has no discarded-call context. Every other callee shape
+                // (`items.filter(a).map(b)`, `f().g()`, `o.f`) is walked.
+                if (self.ir_view.getTag(call.callee) != .identifier) {
+                    try self.walkBaseExpr(call.callee, owner, row, seen_users);
+                }
                 for (0..call.args_count) |i| {
                     const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
                     // A named helper handed to a callback slot (`items.map(fmt)`)
                     // is called, but never through a call node this walk can
                     // see: the callee is `items.map`, and `fmt` is only an
                     // argument. Without an edge here the helper's capabilities
-                    // stay out of the caller's row entirely.
+                    // stay out of the caller's row entirely. This stays a call
+                    // edge, not a value reference: recursion through a callback
+                    // (`a` maps `b`, `b` calls `a`) is real recursion.
                     try self.recordFunctionValueArg(arg, owner, seen_users);
-                    self.recordImportValueArg(arg, row);
                     try self.walkBaseExpr(arg, owner, row, seen_users);
                 }
             },
@@ -539,11 +579,14 @@ pub const Analyzer = struct {
                     try self.walkBaseStmt(func.body, owner, row, seen_users);
                 }
             },
-            // exhaustive: the remaining tags are leaves - literals and bare
-            // identifiers - with no sub-expression that could reach a
-            // capability. The one identifier that does carry effect, a named
-            // helper passed as a callback, gets its call-graph edge from
-            // `recordFunctionValueArg` at the argument site above.
+            // A function value is charged where it is referenced, wherever it
+            // goes next: a callback slot, a local alias, an object member, an
+            // array element. Charging only at argument position left every
+            // other route (`const f = cacheSet; items.forEach(f)`,
+            // `{ f: w }.f()`) proving `read_only` for a write.
+            .identifier => try self.chargeValueReference(node, owner, row, seen_users),
+            // exhaustive: the remaining tags are literals and other leaves
+            // with no sub-expression that could reach a capability.
             else => {},
         }
     }
@@ -795,16 +838,52 @@ pub const Analyzer = struct {
         return null;
     }
 
-    /// Charge the owner for an imported export handed to a callback slot
-    /// (`items.forEach(cacheSet)`). The call happens inside the callee, never
-    /// at a call node this walk sees, so without this the export's write,
-    /// egress, and capabilities stay out of the row and `read_only` is proven
-    /// for a handler that writes. Like `recordFunctionValueArg`, this
-    /// over-approximates: handing an export over is taken as calling it.
-    fn recordImportValueArg(self: *Analyzer, arg: NodeIndex, row: *EffectRow) void {
-        if (self.ir_view.getTag(arg) != .identifier) return;
-        const binding = self.ir_view.getBinding(arg) orelse return;
-        const imported = self.importOf(binding) orelse return;
+    /// Charge a function value at the identifier that references it, in any
+    /// position but a bare callee (`handleCall` charges that one, with the
+    /// discarded-call context the sink exemption needs).
+    ///
+    /// An import is charged to the row as a call to it would be. A user
+    /// function other than the owner gets a value edge, so its row reaches the
+    /// owner through `propagate` without making the owner recursive. Like the
+    /// callback-argument edge this over-approximates: holding a function is
+    /// taken as calling it, which can only reject, never wrongly certify.
+    fn chargeValueReference(
+        self: *Analyzer,
+        node: NodeIndex,
+        owner: usize,
+        row: *EffectRow,
+        seen_users: *std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!void {
+        const binding = self.ir_view.getBinding(node) orelse return;
+        if (self.importOf(binding)) |imported| {
+            self.chargeImportValue(imported, row);
+            return;
+        }
+        if (self.userFnOf(binding)) |callee_idx| {
+            try self.addValueEdge(callee_idx, owner, seen_users);
+        }
+    }
+
+    /// Record a value edge from the function being walked to `callee_idx`. A
+    /// callee already recorded as a call edge needs none: `propagate` merges
+    /// that row already.
+    fn addValueEdge(
+        self: *Analyzer,
+        callee_idx: usize,
+        owner: usize,
+        seen_users: *const std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!void {
+        if (callee_idx == owner) return;
+        if (seen_users.contains(callee_idx)) return;
+        const gop = try self.seen_values.getOrPut(self.allocator, callee_idx);
+        if (!gop.found_existing) try self.value_storage.append(self.allocator, callee_idx);
+    }
+
+    /// Put an imported export's effects in `row` without a call node: the
+    /// capabilities, clock or randomness, write, and egress it reaches. The
+    /// determinism test reads the export's own set, not the row's delta, for
+    /// the reason the doc note on `reachesClockOrRandom` gives.
+    fn chargeImportValue(self: *const Analyzer, imported: ImportedFunction, row: *EffectRow) void {
         var reached: EffectRow = .{};
         self.insertModuleCapabilities(imported.module, imported.name, &reached);
         row.capabilities.setUnion(reached.capabilities);
@@ -978,6 +1057,13 @@ pub const Analyzer = struct {
                 for (0..count) |k| {
                     const callee_idx = self.callee_storage.items[start + k];
                     merged = merged.merge(self.functions.items[callee_idx].row);
+                }
+                // A referenced function's row reaches the referencing one the
+                // same way a called function's does. Recursion is the only
+                // field that must not follow a value edge, and it is reset
+                // below for both kinds.
+                for (self.valueRefsOf(i)) |ref_idx| {
+                    merged = merged.merge(self.functions.items[ref_idx].row);
                 }
                 // Recursion flag on a callee should not necessarily propagate
                 // to the caller; reset it back to the caller's own.
@@ -2318,6 +2404,159 @@ test "a closure declared in a body is charged to that body" {
     );
     try testing.expect(pure.readOnly());
     try testing.expect(pure.deterministic);
+}
+
+test "an import bound to a local and passed as a value is charged where it is referenced" {
+    // P1. `const f = cacheSet; items.forEach(f)`: the argument is a local, so
+    // neither the call-site lookup nor the argument special case saw an
+    // import. The reference in the initializer is the point at which the
+    // function value is created, and that is where it is charged.
+    const row = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(items) {
+        \\  const f = cacheSet;
+        \\  items.forEach(f);
+        \\  return 1;
+        \\}
+    );
+    try testing.expect(row.writes);
+    try testing.expect(!row.readOnly());
+}
+
+test "a user function reached through an object member or a local alias is charged" {
+    // P2 and P3. A value reference to `w` creates an edge to `w`, so `w`'s row
+    // reaches the owner however the value is called later.
+    const member = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function w(k) { cacheSet("ns", k, "v", 10); return 1; }
+        \\function handler(req) {
+        \\  const o = { f: w };
+        \\  return o.f("k");
+        \\}
+    );
+    try testing.expect(member.writes);
+    try testing.expect(!member.readOnly());
+
+    const alias = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function w(k) { cacheSet("ns", k, "v", 10); return 1; }
+        \\function handler(items) {
+        \\  const g = w;
+        \\  items.forEach(g);
+        \\  return 1;
+        \\}
+    );
+    try testing.expect(alias.writes);
+    try testing.expect(!alias.readOnly());
+
+    const indexed = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function w(k) { cacheSet("ns", k, "v", 10); return 1; }
+        \\function handler(req) {
+        \\  return [w][0]("k");
+        \\}
+    );
+    try testing.expect(indexed.writes);
+    try testing.expect(!indexed.readOnly());
+}
+
+test "a clock or egress export referenced as a value demotes the matching property" {
+    const clock = try analyzeHandlerRow(
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(items) {
+        \\  const f = jwtVerify;
+        \\  return items.map(f);
+        \\}
+    );
+    try testing.expect(!clock.deterministic);
+
+    const egress = try analyzeHandlerRow(
+        \\import { fetchSync } from "zttp:fetch";
+        \\function handler(items) {
+        \\  const f = fetchSync;
+        \\  return items.map(f);
+        \\}
+    );
+    try testing.expect(egress.has_egress);
+    try testing.expect(!egress.readOnly());
+
+    // The sink exemption is unchanged: a discarded log call with no other
+    // clock read stays deterministic and still writes.
+    const sunk = try analyzeHandlerRow(
+        \\import { logInfo } from "zttp:log";
+        \\function handler(req) {
+        \\  logInfo("served", {});
+        \\  return 1;
+        \\}
+    );
+    try testing.expect(sunk.deterministic);
+    try testing.expect(sunk.writes);
+}
+
+test "referencing a pure function or a runtime global as a value keeps the row read only" {
+    const row = try analyzeHandlerRow(
+        \\function fmt(x) { return x + 1; }
+        \\function handler(items, s) {
+        \\  const g = fmt;
+        \\  const a = items.map(String);
+        \\  const b = items.map(g);
+        \\  return s.toUpperCase();
+        \\}
+    );
+    try testing.expect(row.readOnly());
+    try testing.expect(row.deterministic);
+    try testing.expect(!row.lower_bound);
+}
+
+test "a value reference does not create recursion but a callback call still does" {
+    // R3. A reference to a function is not a call. Two functions that only
+    // hold each other as values are not recursive, and `total` must not be
+    // refused for them. A callback hand-off is a call edge, so recursion
+    // through `xs.map(b)` is still found.
+    const a_value = try analyzeNamedRow(
+        \\function a() { const t = [b]; return t; }
+        \\function b() { const u = [a]; return u; }
+    , "a");
+    try testing.expect(!a_value.recursive);
+
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator,
+        \\function a(xs) { return xs.map(b); }
+        \\function b(x) { return a([x]); }
+    );
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    const a_row = analyzer.lookup("a") orelse return error.FunctionNotFound;
+    const b_row = analyzer.lookup("b") orelse return error.FunctionNotFound;
+    try testing.expect(a_row.recursive);
+    try testing.expect(b_row.recursive);
+
+    // The value edge is visible to a reachability walk, the call edge is not
+    // widened by it.
+    var vparser = try JsParser.init(allocator,
+        \\function w() { return 1; }
+        \\function handler() { const t = [w]; return t; }
+    );
+    vparser.setAtomTable(&atoms);
+    defer vparser.deinit();
+    const vroot = try vparser.parse();
+    const vview = IrView.fromIRStore(&vparser.nodes, &vparser.constants);
+    var vanalyzer = Analyzer.init(allocator, vview, &atoms);
+    defer vanalyzer.deinit();
+    try vanalyzer.analyze(vroot);
+    var handler_idx: usize = 0;
+    for (vanalyzer.all(), 0..) |fe, i| {
+        if (std.mem.eql(u8, fe.name, "handler")) handler_idx = i;
+    }
+    try testing.expectEqual(@as(usize, 0), vanalyzer.calleesOf(handler_idx).len);
+    try testing.expectEqual(@as(usize, 1), vanalyzer.valueRefsOf(handler_idx).len);
 }
 
 test "a local colliding with a pure import keeps a pure closure read only" {

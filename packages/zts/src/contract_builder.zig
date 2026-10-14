@@ -1053,10 +1053,15 @@ pub const ContractBuilder = struct {
         reachable[h] = true;
         try stack.append(allocator, h);
         while (stack.pop()) |cur| {
-            for (analyzer.calleesOf(cur)) |callee| {
-                if (callee < reachable.len and !reachable[callee]) {
-                    reachable[callee] = true;
-                    try stack.append(allocator, callee);
+            // Follow function-value references as well as calls: a helper the
+            // handler holds can be called through that value, so counting it
+            // reachable is the conservative direction.
+            for ([_][]const usize{ analyzer.calleesOf(cur), analyzer.valueRefsOf(cur) }) |edges| {
+                for (edges) |callee| {
+                    if (callee < reachable.len and !reachable[callee]) {
+                        reachable[callee] = true;
+                        try stack.append(allocator, callee);
+                    }
                 }
             }
         }
@@ -1214,10 +1219,14 @@ pub const ContractBuilder = struct {
         reachable[h] = true;
         try stack.append(self.allocator, h);
         while (stack.pop()) |cur| {
-            for (analyzer.calleesOf(cur)) |callee| {
-                if (callee < reachable.len and !reachable[callee]) {
-                    reachable[callee] = true;
-                    try stack.append(self.allocator, callee);
+            // Value references count as reachable for the same reason as in
+            // `handlerReachability`.
+            for ([_][]const usize{ analyzer.calleesOf(cur), analyzer.valueRefsOf(cur) }) |edges| {
+                for (edges) |callee| {
+                    if (callee < reachable.len and !reachable[callee]) {
+                        reachable[callee] = true;
+                        try stack.append(self.allocator, callee);
+                    }
                 }
             }
         }
@@ -3427,6 +3436,39 @@ test "a write called through a local alias fails the handler properties closed" 
         const props = contract.properties orelse return error.MissingProperties;
         try std.testing.expect(!props.read_only);
         try std.testing.expect(!props.stateless);
+        try std.testing.expect(!props.retry_safe);
+        try std.testing.expect(!props.idempotent);
+    }
+}
+
+test "a write reached as a function value fails the handler properties closed" {
+    // P1: the export is stored in a local and handed to `forEach`, so no call
+    // node names it. P5: the fifth local shares a slot with the atom of the
+    // pure import `length`, so a slot-only lookup resolved the call to that
+    // import. Both proved `retry_safe` and `idempotent` for a cache write.
+    const value_ref =
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  const items = ["a", "b"];
+        \\  const f = cacheSet;
+        \\  items.forEach(f);
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const slot_collision =
+        \\import { cacheSet } from "zttp:cache";
+        \\import { parseBearer as length } from "zttp:auth";
+        \\function handler(a, b, c, d) {
+        \\  const f = cacheSet;
+        \\  f("ns", "key", "value", 10);
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const sources = [_][]const u8{ value_ref, slot_collision };
+    for (sources) |source| {
+        var contract = try buildTestContract(source);
+        defer contract.deinit(std.testing.allocator);
+        const props = contract.properties orelse return error.MissingProperties;
         try std.testing.expect(!props.retry_safe);
         try std.testing.expect(!props.idempotent);
     }
