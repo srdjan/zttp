@@ -59,3 +59,49 @@ Those measurements describe that fixture revision, rather than the final added s
 No timing assertion controls CI correctness.
 
 Next action owner: I will commit the native command, then finish the installation review and canonical gate authorization.
+
+## Installed policy and gate
+
+The manifest classifies all 91 live build steps exactly once.
+The ledger records eight standing decisions with source evidence for their dates.
+Eight marked area contracts connect ownership and invariants to existing gates.
+Ten solution notes have explicit source bindings.
+The documentation commit replaces source line citations in 56 files and adds the selected note bindings.
+Root instructions and the testing guide also receive stable source references with their installation updates.
+
+The main agent reviewed every changed citation and the native command source.
+The review corrected compound citation tails and historical references that crossed from bridge input to checker source.
+The review preserves the former transcript helper name as a historical fact.
+File references remain when a reliable declaration cannot be recovered.
+The checker recognizes complete inline source spans and Markdown link targets, rather than every possible prose citation spelling.
+
+The main agent added a missing-gate probe and rejected self-supersession in the ledger.
+The final rejection census covers all 12 failure kinds through 36 mutation scenarios.
+The final native suite has nine public behavior tests.
+The main agent ran the unfiltered spine suite and installed check after those changes.
+All nine tests passed, and the installed check passed.
+
+The main agent also ran documentation drift, documentation links, task coverage, script reachability, and module boundaries.
+Each check exited 0.
+Task coverage reports 91 steps and 13 manual steps with reasons.
+The new manual row covers the interactive navigation command, rather than an omitted verification gate.
+Formatting checks and Git whitespace checks exited 0.
+
+A fresh agent reached each selected authority, area, invariant, and gate in two hops.
+The drill covered runtime acceptance, flow analysis, and stand-in baseline recovery.
+The drill found invalid decision fragments in the first brief output.
+The corrected output names the ledger file and decision id without inventing a Markdown fragment.
+
+## Verification still pending
+
+`zig build release-check` exited 1 because release evidence provenance does not match the changed source tree.
+Its Release gates row passed, so the build-wiring check found no missing release route.
+This installation does not republish release evidence or claim release readiness.
+
+The full canonical script has not run for this installation.
+The repository records script runtimes above two minutes.
+The user's AGENTS.md instructions require a stop for scripts above that threshold.
+Decision 2 is whether to run `bash scripts/verify.sh` now.
+That approval authorizes the full local gate and fixes required for this installation, without a push or release.
+
+Next action owner: the user selects Decision 2. I will run the full local gate after approval.

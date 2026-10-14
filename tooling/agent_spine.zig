@@ -246,11 +246,6 @@ fn executeBrief(
         try stderr.print("brief: no marked area contracts found; add {s} to a nested {s}\n", .{ area_marker, ctx.spine.areaFile });
         return .rule_failure;
     }
-    if (ctx.decisions.len == 0) {
-        try stderr.print("brief: {s} holds no decisions\n", .{ctx.spine.docs.decisions});
-        return .rule_failure;
-    }
-
     if (options.paths.len == 0) {
         try writeOrientation(&ctx, stdout);
     } else {
@@ -874,10 +869,12 @@ fn checkLedger(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         }
         if (std.mem.eql(u8, decision.status, "superseded") and decision.superseded_by == null) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} is superseded but names no Superseded-by entry; add the reciprocal link", .{ ctx.spine.docs.decisions, decision.id });
         if (decision.supersedes) |id| {
+            if (!std.mem.lessThan(u8, id, decision.id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Supersedes {s}, which is not an older decision; add a new ascending entry", .{ ctx.spine.docs.decisions, decision.id, id });
             const old = findDecision(ctx.decisions, id);
             if (old == null or !std.mem.eql(u8, old.?.status, "superseded") or old.?.superseded_by == null or !std.mem.eql(u8, old.?.superseded_by.?, decision.id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Supersedes {s} without a superseded status and reciprocal Superseded-by link; update both entries", .{ ctx.spine.docs.decisions, decision.id, id });
         }
         if (decision.superseded_by) |id| {
+            if (!std.mem.lessThan(u8, decision.id, id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Superseded-by {s} is not a later decision; add a new ascending entry", .{ ctx.spine.docs.decisions, decision.id, id });
             const replacement = findDecision(ctx.decisions, id);
             if (!std.mem.eql(u8, decision.status, "superseded") or replacement == null or replacement.?.supersedes == null or !std.mem.eql(u8, replacement.?.supersedes.?, decision.id)) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} Superseded-by {s} lacks superseded status or a reciprocal Supersedes link; update both entries", .{ ctx.spine.docs.decisions, decision.id, id });
         }
@@ -1545,6 +1542,7 @@ const FixtureMutation = enum {
     generated_drift,
     write_refuses_other_failure,
     ledger_missing_gate,
+    ledger_self_supersession,
 };
 
 const RejectionScenario = struct {
@@ -1590,6 +1588,7 @@ const rejection_scenarios = [_]RejectionScenario{
     .{ .mutation = .generated_drift, .kind = .generated_drift, .diagnostic = "spine[generated_drift]: AGENTS.md's generated blocks disagree with agents.json; run zig build check-spine -- --write after other failures are clean\n" },
     .{ .mutation = .write_refuses_other_failure, .kind = .generated_drift, .diagnostic = "spine[command_policy]: agents.json lets verify mutate a remote store without explicit-user approval; change approval\n", .write = true },
     .{ .mutation = .ledger_missing_gate, .kind = .decision_ledger, .diagnostic = "spine[decision_ledger]: docs/decisions.md: D-001 has no Gate field; name a task or explicitly use none\n" },
+    .{ .mutation = .ledger_self_supersession, .kind = .decision_ledger, .diagnostic = "spine[decision_ledger]: docs/decisions.md: D-001 Supersedes D-001, which is not an older decision; add a new ascending entry\n" },
 };
 
 comptime {
@@ -1738,6 +1737,30 @@ test "public check reads an area marker before its title" {
         .root = root,
         .tasks_file = "tasks.txt",
     } }, &stdout.writer, &stderr.writer));
+}
+
+test "public brief navigates with an empty decision ledger" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCommandFixture(testing.io, &tmp, true);
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try runGitFixture(testing.allocator, testing.io, root, &.{ "git", "init", "-q" });
+    try runGitFixture(testing.allocator, testing.io, root, &.{ "git", "add", "." });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "docs/decisions.md", .data = "# Decisions\n" });
+
+    var stdout: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer stdout.deinit();
+    var stderr: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer stderr.deinit();
+    try testing.expectEqual(ExitCode.clean, try execute(testing.allocator, testing.io, .{ .brief = .{
+        .root = root,
+        .paths = &.{"core/file.zig"},
+    } }, &stdout.writer, &stderr.writer));
+    try testing.expect(std.mem.indexOf(u8, stdout.written(), "AREA  core (core/AGENTS.md)") != null);
+    try testing.expect(std.mem.indexOf(u8, stdout.written(), "DECISIONS\n  none\n") != null);
+    try testing.expectEqualStrings("", stderr.written());
 }
 
 test "public check names unreadable configuration inputs" {
@@ -1945,6 +1968,7 @@ fn applyFixtureMutation(
         .ledger_no_reciprocal_supersession,
         .ledger_stale_decision,
         .ledger_missing_gate,
+        .ledger_self_supersession,
         => try writeMutatedLedger(io, tmp, mutation),
         .missing_task_classification => try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify\nextra\n" }),
         .stale_solution_binding,
@@ -2016,6 +2040,7 @@ fn writeMutatedLedger(io: std.Io, tmp: *std.testing.TmpDir, mutation: FixtureMut
         .ledger_no_bindings => "# Decisions\n\n### D-001 Fixture rule\n\n- Status: standing\n- Decided: 2026-10-14\n- Binds: \n- Gate: zig build verify\n\nA reason remains.\n",
         .ledger_no_reason => "# Decisions\n\n### D-001 Fixture rule\n\n- Status: standing\n- Decided: 2026-10-14\n- Binds: src\n- Gate: zig build verify\n",
         .ledger_missing_gate => "# Decisions\n\n### D-001 Fixture rule\n\n- Status: standing\n- Decided: 2026-10-14\n- Binds: src\n\nA reason remains.\n",
+        .ledger_self_supersession => "# Decisions\n\n### D-001 Fixture rule\n\n- Status: superseded\n- Decided: 2026-10-14\n- Binds: src\n- Gate: none\n- Supersedes: D-001\n- Superseded-by: D-001\n\nA reason remains.\n",
         .ledger_no_reciprocal_supersession => "# Decisions\n\n### D-001 Old rule\n\n- Status: standing\n- Decided: 2026-10-14\n- Binds: src\n- Gate: zig build verify\n- Superseded-by: D-002\n\nOld reason.\n\n### D-002 New rule\n\n- Status: standing\n- Decided: 2026-10-15\n- Binds: src\n- Gate: zig build verify\n\nNew reason.\n",
         .ledger_stale_decision => "# Decisions\n\n### D-001 Fixture rule\n\n- Status: standing\n- Decided: 2026-10-14\n- Binds: src\n- Gate: zig build verify\n\nThe first reason remains.\n" ++
             "\n### D-002 Stale rule\n\n- Status: standing\n- Decided: 2026-10-15\n- Binds: missing/path\n- Gate: zig build verify\n\nThe stale rule has a reason.\n",

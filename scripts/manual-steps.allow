@@ -19,6 +19,7 @@
 # start a process for a human to interact with; there is no verdict to consume.
 run interactive
 cli interactive
+brief repository-navigation
 
 # Runs the deterministic playbook server and blocks. `zig build test` already
 # compiles the executable - deliberately, since nothing installs it and a break

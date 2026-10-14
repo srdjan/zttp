@@ -21,7 +21,12 @@
 
 const std = @import("std");
 
-pub fn add(b: *std.Build, test_step: *std.Build.Step) void {
+/// Register before the task census snapshots the complete graph.
+pub fn register(b: *std.Build) *std.Build.Step {
+    return b.step("test-step-coverage", "Check every build step's work is run by something");
+}
+
+pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.Build.Step) void {
     const coverage_sources = blk: {
         var acc: std.ArrayList(u8) = .empty;
         acc.appendSlice(b.allocator, @embedFile("../scripts/verify.sh")) catch @panic("OOM");
@@ -115,7 +120,6 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step) void {
         @panic("step coverage: scripts/manual-steps.allow parsed zero rows; the allowlist read is broken");
     }
 
-    const step_coverage_step = b.step("test-step-coverage", "Check every build step's work is run by something");
     if (violations > 0) {
         const message = std.fmt.allocPrint(b.allocator, "step coverage: {d} problem(s)\n{s}\nRun the step from scripts/verify.sh, a CI workflow, or `zig build test`; or add a row to scripts/manual-steps.allow with the reason a human asks for it.", .{ violations, report.items }) catch @panic("OOM");
         step_coverage_step.dependOn(&b.addFail(message).step);

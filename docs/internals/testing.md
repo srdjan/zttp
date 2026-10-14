@@ -49,7 +49,7 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-standin` | `packages/pi/src/standin_tests.zig` |
 
 `test-standin` compiles with its filters pinned to the literal `stand-in`
-(the `standin_only` row in `host_test_roots`, applied at `build/host_tests.zig:130`), so a
+(the `standin_only` row in `host_test_roots`, applied at `build/host_tests.zig`), so a
 test in that root whose name omits the token never runs.
 A gate in `packages/pi/src/standin_range_tests.zig` enforces the naming rule the
 filter depends on. See "Adding A Test Root" for the rule behind it.
@@ -217,6 +217,14 @@ The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and
 CI deliberately do not invoke them a second time.
 
+The native agent spine also runs in the aggregate test step.
+`check-spine` validates the installed manifest, area contracts, decisions, solution bindings, source anchors, and generated root blocks.
+`test-spine` exercises the public command with clean, rejected, and restored fixture states.
+The rejection census requires observed evidence for every failure kind.
+The build supplies task names from the completed graph, including install and uninstall.
+The spine checks structural links. The existing behavior suites remain the authority for the linked behavior.
+The [native spine guide](agent-spine.md) describes commands and evidence limits.
+
 Both benchmark binaries are compiled but not run. They import engine
 internals, so a change that removes an engine symbol breaks them even when no
 test references them. That is not hypothetical: when the JIT was removed,
@@ -350,7 +358,7 @@ Reassess this limitation when the pinned Zig toolchain changes.
 
 This is a shortening device for the edit loop, not a way to establish anything.
 A filtered run is never evidence: `-Dtest-filter` is wired to `.filters` on every
-test artifact (`build/Context.zig:62-73`), so an artifact holding no test the filter
+test artifact (`build/Context.zig`), so an artifact holding no test the filter
 matches runs zero tests and exits 0, and the aggregate step reports a pass for
 it. A filtered run was measured here reporting "2 passed" while the named test's
 assertion had been sabotaged to expect an impossible error, because that run

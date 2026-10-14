@@ -20,6 +20,7 @@ const runtime_tests = @import("build/runtime_tests.zig");
 const bench = @import("build/bench.zig");
 const smoke = @import("build/smoke.zig");
 const step_coverage = @import("build/step_coverage.zig");
+const agent_spine = @import("build/agent_spine.zig");
 
 pub fn build(b: *std.Build) void {
     const ctx = Context.init(b);
@@ -94,5 +95,10 @@ pub fn build(b: *std.Build) void {
     smoke.add(ctx);
     bench.addCompileBench(ctx, test_step, bench_exe);
 
-    step_coverage.add(b, test_step);
+    const spine = agent_spine.add(ctx);
+    test_step.dependOn(spine.check_step);
+    test_step.dependOn(spine.test_step);
+    const coverage_step = step_coverage.register(b);
+    agent_spine.attachTaskCensus(b, spine.check_run);
+    step_coverage.add(b, test_step, coverage_step);
 }

@@ -1,0 +1,765 @@
+{
+  "$comment": "The native agent spine reads this repository policy. Effects include compiler outputs. Measurements stay absent until measured.",
+  "runner": "zig build",
+  "root": "AGENTS.md",
+  "areaFile": "AGENTS.md",
+  "docsPolicy": "off",
+  "sourceExtensions": ["zig", "ts"],
+  "workspaces": [
+    { "manifest": "build.zig", "cwd": "", "kind": "zig-build" }
+  ],
+  "authorities": [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "README.md",
+    "CONCEPTS.md",
+    "STRATEGY.md",
+    "docs/decisions.md",
+    "docs/roadmap.md",
+    "docs/user-guide.md",
+    "docs/verification.md",
+    "docs/internals/agent-spine.md",
+    "docs/internals/architecture.md",
+    "docs/internals/testing.md"
+  ],
+  "vendored": [],
+  "skipDirs": [".git", ".zig-cache", "zig-out", ".context", "demos"],
+  "docs": {
+    "decisions": "docs/decisions.md",
+    "solutions": "docs/solutions",
+    "concepts": "CONCEPTS.md",
+    "canonicalGate": "scripts/verify.sh"
+  },
+  "commands": [
+    {
+      "task": "install",
+      "intent": "build",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "builds and installs configured artifacts under the selected local prefix",
+      "requiredWhen": "when local installed binaries are needed"
+    },
+    {
+      "task": "uninstall",
+      "intent": "operate",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "removes artifacts from the selected local install prefix",
+      "requiredWhen": "when installed build artifacts must be removed"
+    },
+    {
+      "task": "test-zts",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs all zts tier unit-test roots",
+      "requiredWhen": "after analyzer, compiler, interpreter, or binding changes"
+    },
+    {
+      "task": "test-sdk",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs zttp-sdk tests",
+      "requiredWhen": "after SDK contract changes"
+    },
+    {
+      "task": "test-modules",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs virtual-module implementation tests",
+      "requiredWhen": "after virtual-module behavior or binding changes"
+    },
+    {
+      "task": "test-proof-checker",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs consumer acceptance-kernel tests",
+      "requiredWhen": "after proof-checker or certificate changes"
+    },
+    {
+      "task": "test-proof-checker-mutants",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs committed acceptance-kernel mutants",
+      "requiredWhen": "after acceptance logic or mutation coverage changes"
+    },
+    {
+      "task": "test-proof-checker-purity",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks the kernel leaf boundary and suite floor",
+      "requiredWhen": "after proof-checker source or dependency changes"
+    },
+    {
+      "task": "test-script-reachability",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks that each repository script has a declared route",
+      "requiredWhen": "after script or build-graph changes"
+    },
+    {
+      "task": "test-diagnostic-producers",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks that each advertised diagnostic has a producer",
+      "requiredWhen": "after diagnostic-registry changes"
+    },
+    {
+      "task": "test-proof-ratchet-drift",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks the published trusted boundary against the kernel",
+      "requiredWhen": "after proof boundary or kernel changes"
+    },
+    {
+      "task": "test-residual-guards-drift",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks residual guard catalogs, evidence, and documentation",
+      "requiredWhen": "after residual-guard changes"
+    },
+    {
+      "task": "test-proof-ratchet",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks disclosed trust against kernel reconstruction",
+      "requiredWhen": "after proof-ratchet changes"
+    },
+    {
+      "task": "test-proof-review",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs proof-review package tests",
+      "requiredWhen": "after proof-review changes"
+    },
+    {
+      "task": "test-precompile",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs precompile and CHECK behavior tests",
+      "requiredWhen": "after precompile or CHECK changes"
+    },
+    {
+      "task": "test-canonicalize",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs canonicalize and normalize tests",
+      "requiredWhen": "after source-repair or normalization changes"
+    },
+    {
+      "task": "test-expert",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs expert command contract tests",
+      "requiredWhen": "after expert command changes"
+    },
+    {
+      "task": "test-zts-cli",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs analyzer dispatch and machine-command tests",
+      "requiredWhen": "after zts CLI changes"
+    },
+    {
+      "task": "test-deploy-manifest",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs deploy-manifest renderer tests",
+      "requiredWhen": "after deploy-manifest changes"
+    },
+    {
+      "task": "test-agent-identity",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs agent identity primitive tests",
+      "requiredWhen": "after agent identity changes"
+    },
+    {
+      "task": "test-module-graph-record",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs module graph and digest tests",
+      "requiredWhen": "after module graph record changes"
+    },
+    {
+      "task": "test-agent-protocol",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs agent protocol envelope tests",
+      "requiredWhen": "after agent protocol changes"
+    },
+    {
+      "task": "test-module-audit",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs module-contract audit tests",
+      "requiredWhen": "after module-contract audit changes"
+    },
+    {
+      "task": "test-verify-paths-core",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs behavior-path verification core tests",
+      "requiredWhen": "after verification path changes"
+    },
+    {
+      "task": "test-project-config",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs project configuration discovery tests",
+      "requiredWhen": "after configuration discovery changes"
+    },
+    {
+      "task": "test-instruction-counter",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs retired instruction-counter tests",
+      "requiredWhen": "after instruction counter changes"
+    },
+    {
+      "task": "test-expert-app",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs expert loop and provider integration tests",
+      "requiredWhen": "after expert loop or provider changes"
+    },
+    {
+      "task": "test-cassette",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the offline provider cassette harness",
+      "requiredWhen": "after cassette or provider wire changes"
+    },
+    {
+      "task": "test-recorder-smoke",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs provider-free recorder capture and replay",
+      "requiredWhen": "after recorder changes"
+    },
+    {
+      "task": "test-simulator",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the offline full-flow simulator",
+      "requiredWhen": "after simulator or fail-closed flow changes"
+    },
+    {
+      "task": "test-standin",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the deterministic stand-in through the expert loop",
+      "requiredWhen": "after stand-in, veto, or rule changes"
+    },
+    {
+      "task": "test-expert-mlx-e2e",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "explicit-user",
+      "does": "uses the operator's configured MLX server for a real model flow",
+      "requiredWhen": "only when the operator requests local model use"
+    },
+    {
+      "task": "test-diagnostic-corpus",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks diagnostic corpus cases against committed goldens",
+      "requiredWhen": "after diagnostics or corpus changes"
+    },
+    {
+      "task": "diagnostic-corpus-write",
+      "intent": "operate",
+      "effect": "local-write",
+      "approval": "explicit-user",
+      "does": "rewrites committed diagnostic corpus goldens",
+      "requiredWhen": "only when the operator requests golden regeneration"
+    },
+    {
+      "task": "test-flow-census",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks leak verdicts over the generated flow census",
+      "requiredWhen": "after flow-checker or binding-label changes"
+    },
+    {
+      "task": "test-capability-audit",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks capability helper declarations",
+      "requiredWhen": "after capability helper changes"
+    },
+    {
+      "task": "test-native-gates",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs native repository gate tests",
+      "requiredWhen": "after native gate changes"
+    },
+    {
+      "task": "evidence-publish",
+      "intent": "operate",
+      "effect": "local-write",
+      "approval": "explicit-user",
+      "does": "rewrites committed release evidence after validation",
+      "requiredWhen": "only when the operator requests evidence publication"
+    },
+    {
+      "task": "test-evidence-publish",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs native evidence publisher tests",
+      "requiredWhen": "after evidence publisher changes"
+    },
+    {
+      "task": "release-provenance",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "validates release evidence provenance",
+      "requiredWhen": "before release readiness is claimed"
+    },
+    {
+      "task": "test-release-provenance",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs release provenance tests",
+      "requiredWhen": "after provenance validation changes"
+    },
+    {
+      "task": "coverage-union",
+      "intent": "operate",
+      "effect": "local-write",
+      "approval": "explicit-user",
+      "does": "rewrites the committed union of published corpus coverage",
+      "requiredWhen": "only when the operator requests coverage regeneration"
+    },
+    {
+      "task": "test-coverage-union",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs coverage-union tests",
+      "requiredWhen": "after coverage-union changes"
+    },
+    {
+      "task": "release-check",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "prints the repository release-readiness passport",
+      "requiredWhen": "before release readiness is claimed"
+    },
+    {
+      "task": "test-release-check",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs release-passport tests",
+      "requiredWhen": "after release passport changes"
+    },
+    {
+      "task": "production-branch-metric",
+      "intent": "measure",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "measures branch points in tracked Zig production sources",
+      "requiredWhen": "when branch-complexity evidence is needed"
+    },
+    {
+      "task": "production-branch-metric-json",
+      "intent": "measure",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "emits the production branch metric as JSON",
+      "requiredWhen": "when machine-readable branch evidence is needed"
+    },
+    {
+      "task": "test-production-branch-metric",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "tests and runs the production branch metric",
+      "requiredWhen": "after branch metric changes"
+    },
+    {
+      "task": "zttp-standin",
+      "intent": "run",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the deterministic local playbook server",
+      "requiredWhen": "when an offline expert server is needed"
+    },
+    {
+      "task": "test-kernel-safety",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks acceptance-kernel runtime safety under release optimization",
+      "requiredWhen": "after kernel guards or build modes change"
+    },
+    {
+      "task": "test-module-boundary",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks consumer access to zts internals",
+      "requiredWhen": "after imports across the zts boundary change"
+    },
+    {
+      "task": "test-release-workflow",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks release workflow invariants",
+      "requiredWhen": "after release workflow changes"
+    },
+    {
+      "task": "test-proof-swallow",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks proof analysis for unreviewed discarded errors",
+      "requiredWhen": "after proof pipeline error handling changes"
+    },
+    {
+      "task": "test-zts-layering",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks that zts tiers import only lower tiers",
+      "requiredWhen": "after zts imports or tier assignments change"
+    },
+    {
+      "task": "test-convergence-emitter",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks the convergence marker producer and consumer",
+      "requiredWhen": "after convergence evidence changes"
+    },
+    {
+      "task": "test-evidence-marker",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks evidence marker and publisher boundaries",
+      "requiredWhen": "after evidence marker or publisher changes"
+    },
+    {
+      "task": "test-docs-drift",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks documentation against registries and build paths",
+      "requiredWhen": "after documented registries or paths change"
+    },
+    {
+      "task": "test-idiom-table",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks the specification idiom table against the registry",
+      "requiredWhen": "after idiom or rule changes"
+    },
+    {
+      "task": "test-canonical-style",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks canonical-style examples against the rule registry",
+      "requiredWhen": "after canonical rules or examples change"
+    },
+    {
+      "task": "test-grammar-drift",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks specification grammar against the registry",
+      "requiredWhen": "after grammar or registry changes"
+    },
+    {
+      "task": "test-decision-registry",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks that each published decision kind has a producer",
+      "requiredWhen": "after decision-kind changes"
+    },
+    {
+      "task": "test-meta-drift",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks published registry hashes against their pins",
+      "requiredWhen": "after registry identity changes"
+    },
+    {
+      "task": "test-doc-links",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks documentation links",
+      "requiredWhen": "after documentation path or link changes"
+    },
+    {
+      "task": "test-runtime-purity",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks shipped binaries for agent and provider surfaces",
+      "requiredWhen": "after runtime, analyzer, or provider changes"
+    },
+    {
+      "task": "test-module-governance",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the module governance audit",
+      "requiredWhen": "after module governance changes"
+    },
+    {
+      "task": "test-contract-golden",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks analyzer contract output against goldens",
+      "requiredWhen": "after contract output changes"
+    },
+    {
+      "task": "test-generic-intersection-cli-matrix",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs generic-intersection rejection and contrast fixtures",
+      "requiredWhen": "after generic intersection behavior changes"
+    },
+    {
+      "task": "test-expert-golden",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks the zts direct-tool contract against goldens",
+      "requiredWhen": "after expert tool output changes"
+    },
+    {
+      "task": "run",
+      "intent": "run",
+      "effect": "local-write",
+      "approval": "explicit-user",
+      "does": "builds and starts the requested local server; supplied handler code owns its effects",
+      "requiredWhen": "only when the operator requests the server"
+    },
+    {
+      "task": "cli",
+      "intent": "run",
+      "effect": "local-write",
+      "approval": "explicit-user",
+      "does": "builds and runs the selected CLI subcommand; that subcommand owns any external effect",
+      "requiredWhen": "only when the operator requests that CLI command"
+    },
+    {
+      "task": "test-cli",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs developer CLI unit tests",
+      "requiredWhen": "after CLI behavior changes"
+    },
+    {
+      "task": "test",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the aggregate unit and repository test graph",
+      "requiredWhen": "before any repository change is complete",
+      "always": true
+    },
+    {
+      "task": "test-zruntime",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the standalone ZRuntime test root",
+      "requiredWhen": "after runtime engine or artifact activation changes"
+    },
+    {
+      "task": "test-server",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs server and runtime facade integration tests",
+      "requiredWhen": "after server or runtime facade changes"
+    },
+    {
+      "task": "test-examples",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs example handler suites",
+      "requiredWhen": "after examples or public handler behavior changes"
+    },
+    {
+      "task": "test-cli-abuse",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the built analyzer against hostile CLI input",
+      "requiredWhen": "after analyzer process or machine output changes"
+    },
+    {
+      "task": "release",
+      "intent": "build",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "builds optimized release binaries",
+      "requiredWhen": "before release artifacts are inspected"
+    },
+    {
+      "task": "bench",
+      "intent": "measure",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs runtime performance benchmarks",
+      "requiredWhen": "when runtime performance needs measurement"
+    },
+    {
+      "task": "bench-check",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "compares benchmark results with the committed baseline",
+      "requiredWhen": "after performance-sensitive runtime changes"
+    },
+    {
+      "task": "bench-record",
+      "intent": "measure",
+      "effect": "local-write",
+      "approval": "explicit-user",
+      "does": "rewrites the committed five-run benchmark baseline",
+      "requiredWhen": "only when the operator requests baseline regeneration"
+    },
+    {
+      "task": "test-bench-diff",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs benchmark sampling and comparison tests",
+      "requiredWhen": "after benchmark tooling changes"
+    },
+    {
+      "task": "smoke-v1",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the v1 user flow in a temporary directory",
+      "requiredWhen": "after core CLI workflow changes"
+    },
+    {
+      "task": "test-module-scope-panic",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks module authorization isolation after a recovered panic",
+      "requiredWhen": "after module authorization or panic recovery changes"
+    },
+    {
+      "task": "test-panic-isolation",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs handler panic isolation end to end",
+      "requiredWhen": "after handler isolation or panic recovery changes"
+    },
+    {
+      "task": "smoke-getting-started",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the Getting Started guide in a temporary directory",
+      "requiredWhen": "after the guide or first-run workflow changes"
+    },
+    {
+      "task": "compile-bench",
+      "intent": "measure",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs compile-time microbenchmarks",
+      "requiredWhen": "when compiler performance needs measurement"
+    },
+    {
+      "task": "test-compile-bench",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs compile benchmark harness tests",
+      "requiredWhen": "after compile benchmark changes"
+    },
+    {
+      "task": "test-step-coverage",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks that every build step has an execution route",
+      "requiredWhen": "after build task or aggregate changes"
+    },
+    {
+      "task": "brief",
+      "intent": "operate",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "reports governing authorities, areas, decisions, notes, and gates",
+      "requiredWhen": "before work in an unfamiliar area"
+    },
+    {
+      "task": "check-spine",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks the installed agent spine against the live repository graph",
+      "requiredWhen": "before any repository change is complete",
+      "always": true
+    },
+    {
+      "task": "test-spine",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs agent-spine behavior tests and rejection probes",
+      "requiredWhen": "after agent-spine policy or tooling changes"
+    }
+  ]
+}
