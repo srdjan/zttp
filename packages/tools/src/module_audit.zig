@@ -56,6 +56,7 @@ pub const OwnedDiagnostic = struct {
         suggestion: ?[]const u8,
     ) !OwnedDiagnostic {
         const owned_message = try allocator.dupe(u8, message);
+        errdefer allocator.free(owned_message);
         const owned_suggestion = if (suggestion) |value| try allocator.dupe(u8, value) else null;
         return .{
             .diag = .{
@@ -799,7 +800,7 @@ fn appendDiagnostic(
     column: u32,
     suggestion: ?[]const u8,
 ) !void {
-    try diagnostics.append(allocator, try OwnedDiagnostic.initOwned(
+    var owned = try OwnedDiagnostic.initOwned(
         allocator,
         code,
         severity,
@@ -808,7 +809,9 @@ fn appendDiagnostic(
         line,
         column,
         suggestion,
-    ));
+    );
+    errdefer owned.deinit(allocator);
+    try diagnostics.append(allocator, owned);
 }
 
 fn parseBindingSpecifier(content: []const u8) ?[]const u8 {
@@ -1288,6 +1291,19 @@ test "verifyBuiltins reports the authoritative public module and spec set" {
     try std.testing.expectEqual(@as(usize, 0), result.diagnostics.items.len);
     try std.testing.expect(containsString(result.checked_files.items, "packages/modules/src/platform/env.zig"));
     try std.testing.expect(containsString(result.checked_files.items, "packages/modules/module-specs/platform/env.json"));
+}
+
+fn appendOneDiagnostic(allocator: std.mem.Allocator) !void {
+    var diags: std.ArrayList(OwnedDiagnostic) = .empty;
+    defer {
+        for (diags.items) |*diag| diag.deinit(allocator);
+        diags.deinit(allocator);
+    }
+    try appendDiagnostic(allocator, &diags, "ZVM002", "error", "message", "file.zig", 1, 1, "suggestion");
+}
+
+test "appendDiagnostic releases its copies on every failing allocation path" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, appendOneDiagnostic, .{});
 }
 
 test "pathMatchesCanonical requires a path-separator boundary" {
