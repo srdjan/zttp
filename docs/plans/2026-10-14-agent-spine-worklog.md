@@ -39,3 +39,23 @@ The main agent owns build integration, generated root blocks, review, and final 
 The installed gate and its rejection probes have not run.
 The full canonical gate needs authorization because its recorded runtime exceeds two minutes.
 Next action owner: I will dispatch the independent units and review their results.
+
+## Native command complete
+
+The native command lives in `tooling/agent_spine.zig`.
+The public command API drives clean, rejected, and restored fixtures.
+The main review replaced a vacuous rejection census with observed rejection evidence.
+The final suite covers all 12 failure kinds through 35 mutation scenarios.
+The main review also fixed nested declaration matching, marker overlap, per-invariant gates, and missing ledger gates.
+Git census paths retain their exact names, including whitespace.
+
+The main agent ran unfiltered `zig build test-spine check-spine --summary all`.
+All eight tests passed, and the installed spine check passed.
+A direct executable probe returned 0, 1, and 0 for clean, unreachable-decision, and restored states.
+The rejected run named the exact unreachable decision and its remedy.
+
+The worker measured the six rejection groups at 333 to 561 milliseconds before the final missing-gate probe.
+Those measurements describe that fixture revision, rather than the final added scenario.
+No timing assertion controls CI correctness.
+
+Next action owner: I will commit the native command, then finish the installation review and canonical gate authorization.
