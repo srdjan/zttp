@@ -47,6 +47,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
             );
             std.process.exit(1);
         },
+        error.NoProjectConfig => {
+            std.debug.print(
+                "No zttp.json found in the current directory or any parent.\n" ++
+                    "Pass a handler path, for example `zts {s} src/handler.ts`.\n",
+                .{if (user_args.len > 0) user_args[0] else ""},
+            );
+            std.process.exit(1);
+        },
         else => return err,
     };
 }

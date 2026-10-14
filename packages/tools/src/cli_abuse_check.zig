@@ -49,6 +49,8 @@ const Input = enum {
     nul_byte,
     deep_nesting,
     unknown_flag,
+    wrong_extension,
+    no_argument,
 };
 
 const Mode = enum { text, json };
@@ -64,12 +66,16 @@ const Case = struct {
     diagnostic_code: ?[]const u8 = null,
     /// For a JSON case: the value of the top-level `success` field.
     success: bool = false,
+    /// Text that standard error must contain, or null for no requirement.
+    stderr_contains: ?[]const u8 = null,
+    /// Zig stack-trace marker that standard error must not contain.
+    stderr_excludes: ?[]const u8 = null,
 };
 
 const cases = [_]Case{
     .{ .name = "empty file, text", .input = .empty_file, .mode = .text, .exit_code = 1 },
     .{ .name = "empty file, json", .input = .empty_file, .mode = .json, .exit_code = 1 },
-    .{ .name = "missing path, text", .input = .missing_path, .mode = .text, .exit_code = 1 },
+    .{ .name = "missing path, text", .input = .missing_path, .mode = .text, .exit_code = 1, .stderr_contains = "Next: check the handler path", .stderr_excludes = " in readFile" },
     .{ .name = "missing path, json", .input = .missing_path, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "directory as file, text", .input = .directory, .mode = .text, .exit_code = 1 },
     .{ .name = "directory as file, json", .input = .directory, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
@@ -83,6 +89,8 @@ const cases = [_]Case{
     .{ .name = "nesting past the limit, json", .input = .deep_nesting, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS044" },
     .{ .name = "unknown flag, text", .input = .unknown_flag, .mode = .text, .exit_code = 1 },
     .{ .name = "unknown flag, json", .input = .unknown_flag, .mode = .json, .exit_code = 1 },
+    .{ .name = "wrong extension, text", .input = .wrong_extension, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS052 source files must use the .ts extension", .stderr_excludes = "error.UnsupportedSourceExtension" },
+    .{ .name = "no handler outside a project, text", .input = .no_argument, .mode = .text, .exit_code = 1, .stderr_contains = "No zttp.json found", .stderr_excludes = " in defaultProjectEntry" },
 };
 
 const Check = struct {
@@ -180,6 +188,7 @@ fn findProjectConfigAbove(gpa: std.mem.Allocator, io: Io, start: []const u8) !?[
 fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     const cwd = Io.Dir.cwd();
     try writeInput(gpa, io, work, "empty.ts", "");
+    try writeInput(gpa, io, work, "handler.js", "const x = 1;\n");
     const dir_path = try std.fs.path.join(gpa, &.{ work, "dir.ts" });
     defer gpa.free(dir_path);
     try cwd.createDirPath(io, dir_path);
@@ -219,6 +228,8 @@ fn fileFor(input: Input) []const u8 {
         .deep_nesting => "nest.ts",
         // A valid, empty file: the flag is the hostile part.
         .unknown_flag => "empty.ts",
+        .wrong_extension => "handler.js",
+        .no_argument => "",
     };
 }
 
@@ -229,8 +240,10 @@ fn runCase(check: *Check, case: Case) void {
     argc += 1;
     argv[argc] = "check";
     argc += 1;
-    argv[argc] = fileFor(case.input);
-    argc += 1;
+    if (case.input != .no_argument) {
+        argv[argc] = fileFor(case.input);
+        argc += 1;
+    }
     if (case.mode == .json) {
         argv[argc] = "--json";
         argc += 1;
@@ -261,6 +274,19 @@ fn runCase(check: *Check, case: Case) void {
     if (code != case.exit_code) {
         check.fail(case.name, "exit code {d}, expected {d}\nstderr:\n{s}", .{ code, case.exit_code, result.stderr });
         return;
+    }
+
+    if (case.stderr_contains) |needle| {
+        if (std.mem.indexOf(u8, result.stderr, needle) == null) {
+            check.fail(case.name, "stderr lacks \"{s}\"\nstderr:\n{s}", .{ needle, result.stderr });
+            return;
+        }
+    }
+    if (case.stderr_excludes) |needle| {
+        if (std.mem.indexOf(u8, result.stderr, needle) != null) {
+            check.fail(case.name, "stderr contains \"{s}\"\nstderr:\n{s}", .{ needle, result.stderr });
+            return;
+        }
     }
 
     if (case.input == .unknown_flag) {

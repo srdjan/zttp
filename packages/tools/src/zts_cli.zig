@@ -221,6 +221,11 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
             if (json_mode) try writeMissingSqlSchemaJson(allocator, target);
             std.process.exit(1);
         },
+        error.FileNotFound => {
+            // precompile already printed `Error reading handler file`.
+            std.debug.print("Next: check the handler path, or run `check` with no argument inside a project.\n", .{});
+            std.process.exit(1);
+        },
         else => return err,
     };
     defer result.deinit(allocator);

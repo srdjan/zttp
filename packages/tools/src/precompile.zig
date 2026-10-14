@@ -1341,7 +1341,13 @@ fn runCheckOnPreparedSource(
         },
     ) catch |err| {
         result.stages_run.insert(.strip);
-        if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
+        if (!builtin.is_test) {
+            if (err == error.UnsupportedSourceExtension) {
+                debugPrint("{s}: ZTS052 source files must use the .ts extension. Rename the handler to .ts.\n", .{handler_path});
+            } else {
+                debugPrint("TypeScript strip error: {}\n", .{err});
+            }
+        }
         if (err == error.UnsupportedSourceExtension) {
             result.json_diagnostics.append(
                 allocator,
