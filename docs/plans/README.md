@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Zig agent spine](2026-10-14-agent-spine-plan.md) | Active 2026-10-14; progress and evidence in the [worklog](2026-10-14-agent-spine-worklog.md) | Owner selected Option A: native Zig installation |
 | [Plan 005 Phase 3: language and orchestration removal](2026-10-12-1444-refactor-feature-removal-phase-three-plan.md) | Active 2026-10-12; reviewed sequence and evidence in the [worklog](2026-10-12-feature-removal-phase-3-worklog.md) | Owner authorized Phase 3 and its complete DeepSeek recording with "go ahead with phase 3" |
 | [Plan 005 Phase 2: runtime and artifact removal](2026-10-12-1109-refactor-feature-removal-phase-two-plan.md) | Complete 2026-10-12; scope, decisions, and evidence in the [worklog](2026-10-12-feature-removal-phase-2-worklog.md) | Owner selected Decision 10, "Execute Phase 2" |
 | [Plan 005 Phase 1: feature removal](2026-10-11-feature-removal-phase-1.md) | Complete 2026-10-12; G1 to G15 done, results and recounts in the [worklog](2026-10-11-feature-removal-worklog.md) | Owner accepted plan 005 decisions 1 to 9 with "your recommendations" |
