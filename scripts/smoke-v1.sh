@@ -101,6 +101,15 @@ if missing_out=$(cd "$TMP_DIR/no-project" && "$ZTTP" build 2>&1); then
 fi
 printf '%s' "$missing_out" | grep -q "No zttp.json found" || fail "missing-project diagnostic did not mention zttp.json: $missing_out"
 
+step "negative: dev rejects a bad serve flag by its own name before analysis"
+# The handler path does not exist: if analysis ran first, the output would be
+# the preflight "handler not found" text instead of the flag message.
+dev_flag_status=0
+dev_flag_out=$(cd "$TMP_DIR/no-project" && "$ZTTP" dev -p abc missing-handler.ts 2>&1 </dev/null) || dev_flag_status=$?
+[ "$dev_flag_status" -eq 1 ] || fail "dev -p abc exited $dev_flag_status, expected 1: $dev_flag_out"
+dev_flag_want='zttp dev: the port must be a whole number from 0 to 65535 (-p, --port). Run `zttp dev --help` for usage.'
+[ "$dev_flag_out" = "$dev_flag_want" ] || fail "dev -p abc printed unexpected text: $dev_flag_out"
+
 step "negative: broken handler build fails without emitting an artifact"
 (cd "$TMP_DIR" && "$ZTTP" init "broken-app" >/dev/null 2>&1) || fail "init broken-app"
 printf 'function handler(req) {\n' > "$BROKEN_APP_DIR/src/handler.ts"

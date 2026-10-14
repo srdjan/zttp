@@ -534,18 +534,36 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
     }
 
     var handler_set = has_embedded or project != null;
+    try applyServeFlags(allocator, argv, &config, &handler_set);
 
+    if (!handler_set) {
+        std.log.err("No handler specified. Use `zttp init`, `zttp serve <file>`, or build with -Dhandler=<path>.", .{});
+        return error.NoHandler;
+    }
+
+    return config;
+}
+
+/// The `serve` flag grammar, applied to `config`. Split out of `parseServeArgs`
+/// so `validateServeFlags` checks the exact same rules without discovering a
+/// project. `handler_set` becomes true when a flag or path names a handler.
+fn applyServeFlags(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    config: *ServerConfig,
+    handler_set: *bool,
+) !void {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
-        if (try parseCommonServeFlag(arg, &i, argv, &config)) continue;
+        if (try parseCommonServeFlag(arg, &i, argv, config)) continue;
         if (std.mem.eql(u8, arg, "--help")) {
             printServeHelp();
             return error.HelpRequested;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--eval")) {
             const raw_eval = try shared.takeArg(&i, argv, error.MissingEvalCode);
             config.handler = .{ .inline_code = try shared.stripInlineSource(allocator, raw_eval) };
-            handler_set = true;
+            handler_set.* = true;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--memory")) {
             const value = try shared.takeArg(&i, argv, error.MissingMemoryValue);
             config.runtime_config.memory_limit = shared.parseSize(value) catch return error.InvalidMemorySize;
@@ -592,18 +610,73 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
             continue;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             config.handler = .{ .file_path = arg };
-            handler_set = true;
+            handler_set.* = true;
         } else {
             return error.UnknownOption;
         }
     }
+}
 
-    if (!handler_set) {
-        std.log.err("No handler specified. Use `zttp init`, `zttp serve <file>`, or build with -Dhandler=<path>.", .{});
-        return error.NoHandler;
-    }
+/// Check the `serve` flags that `zttp dev` forwards to its serve child, using
+/// the same grammar as `serve`, before any analysis runs. It reads no project
+/// and starts no server. It returns the first flag error `serve` would return.
+pub fn validateServeFlags(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    var handler_set = false;
+    try applyServeFlags(arena.allocator(), argv, &config, &handler_set);
+}
 
-    return config;
+/// Plain-language text for a `serve` flag-parse error. Unlisted errors keep the
+/// Zig error name, so no failure is hidden.
+pub fn serveFlagErrorMessage(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InvalidPort => "the port must be a whole number from 0 to 65535 (-p, --port)",
+        error.MissingPortValue => "-p and --port need a port number",
+        error.MissingHostValue => "-h and --host need a host name",
+        error.UnknownOption, error.UnknownArgument => "unknown option",
+        else => @errorName(err),
+    };
+}
+
+/// The one-line failure for a bad serve flag, as `command` ("serve" or "dev")
+/// reports it. The text lives in `buf`. If `buf` is too small, this returns
+/// the bare message.
+pub fn formatFlagFailure(buf: []u8, command: []const u8, err: anyerror) []const u8 {
+    const message = serveFlagErrorMessage(err);
+    return std.fmt.bufPrint(
+        buf,
+        "zttp {s}: {s}. Run `zttp {s} --help` for usage.",
+        .{ command, message, command },
+    ) catch message;
+}
+
+test "formatFlagFailure names the command in both places" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "zttp dev: the port must be a whole number from 0 to 65535 (-p, --port). Run `zttp dev --help` for usage.",
+        formatFlagFailure(&buf, "dev", error.InvalidPort),
+    );
+    try std.testing.expectEqualStrings(
+        "zttp serve: -h and --host need a host name. Run `zttp serve --help` for usage.",
+        formatFlagFailure(&buf, "serve", error.MissingHostValue),
+    );
+    try std.testing.expectEqualStrings(
+        "zttp dev: OutOfMemory. Run `zttp dev --help` for usage.",
+        formatFlagFailure(&buf, "dev", error.OutOfMemory),
+    );
+}
+
+test "validateServeFlags applies the serve grammar without a project" {
+    const a = std.testing.allocator;
+    try validateServeFlags(a, &.{ "-p", "3000", "handler.ts", "--watch", "--prove" });
+    try validateServeFlags(a, &.{});
+    try std.testing.expectError(error.InvalidPort, validateServeFlags(a, &.{ "-p", "abc", "handler.ts" }));
+    try std.testing.expectError(error.InvalidPort, validateServeFlags(a, &.{ "--port", "99999" }));
+    try std.testing.expectError(error.MissingPortValue, validateServeFlags(a, &.{"--port"}));
+    try std.testing.expectError(error.MissingHostValue, validateServeFlags(a, &.{"-h"}));
+    try std.testing.expectError(error.UnknownOption, validateServeFlags(a, &.{"--bogus"}));
 }
 
 fn watcherThread(live_reload: *live_reload_mod.LiveReloadState) void {

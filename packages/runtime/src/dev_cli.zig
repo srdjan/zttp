@@ -185,6 +185,8 @@ fn cmdDev(ctx: cli_help.Ctx) anyerror!void {
         return;
     }
     dev_command.devCommand(ctx.allocator, ctx.argv0, ctx.args) catch |err| {
+        // `devCommand` has already printed the flag failure.
+        if (err == error.InvalidServeFlags) std.process.exit(1);
         if (handlePreflightError(err, ctx.command)) std.process.exit(1);
         return err;
     };
@@ -196,32 +198,21 @@ fn cmdServe(ctx: cli_help.Ctx) anyerror!void {
     // Map parse/usage failures to a clean nonzero exit with a hint instead of
     // propagating a raw Zig error (which prints a stack trace).
     runtime_cli.serveCommandWithEnviron(ctx.allocator, ctx.args, ctx.environ) catch |err| {
-        std.debug.print("zttp serve: {s}. Run `zttp serve --help` for usage.\n", .{serveErrorMessage(err)});
+        var buf: [256]u8 = undefined;
+        std.debug.print("{s}\n", .{runtime_cli.formatFlagFailure(&buf, "serve", err)});
         std.process.exit(1);
     };
     return;
 }
 
-/// Plain-language text for a `serve` flag-parse error. Unlisted errors keep the
-/// Zig error name, so no failure is hidden.
-fn serveErrorMessage(err: anyerror) []const u8 {
-    return switch (err) {
-        error.InvalidPort => "the port must be a whole number from 0 to 65535 (-p, --port)",
-        error.MissingPortValue => "-p and --port need a port number",
-        error.MissingHostValue => "-h and --host need a host name",
-        error.UnknownOption, error.UnknownArgument => "unknown option",
-        else => @errorName(err),
-    };
-}
-
-test "serveErrorMessage explains flag errors and keeps unknown names" {
+test "serveFlagErrorMessage explains flag errors and keeps unknown names" {
     try std.testing.expectEqualStrings(
         "the port must be a whole number from 0 to 65535 (-p, --port)",
-        serveErrorMessage(error.InvalidPort),
+        runtime_cli.serveFlagErrorMessage(error.InvalidPort),
     );
-    try std.testing.expectEqualStrings("-p and --port need a port number", serveErrorMessage(error.MissingPortValue));
-    try std.testing.expectEqualStrings("unknown option", serveErrorMessage(error.UnknownOption));
-    try std.testing.expectEqualStrings("OutOfMemory", serveErrorMessage(error.OutOfMemory));
+    try std.testing.expectEqualStrings("-p and --port need a port number", runtime_cli.serveFlagErrorMessage(error.MissingPortValue));
+    try std.testing.expectEqualStrings("unknown option", runtime_cli.serveFlagErrorMessage(error.UnknownOption));
+    try std.testing.expectEqualStrings("OutOfMemory", runtime_cli.serveFlagErrorMessage(error.OutOfMemory));
 }
 
 fn cmdDoctor(ctx: cli_help.Ctx) anyerror!void {

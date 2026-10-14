@@ -10,13 +10,35 @@ const zts_cli = @import("zts_cli");
 const precompile = zts_cli.precompile;
 const shared = @import("cli_shared.zig");
 const project_config_mod = @import("project_config");
+const runtime_cli = @import("runtime_cli.zig");
 const cli_paths = @import("cli_paths.zig");
 const resolveDeveloperServeBinary = cli_paths.resolveDeveloperServeBinary;
 const cli_doctor = @import("cli_doctor.zig");
 const doctorPathExists = cli_doctor.doctorPathExists;
 const printCheckStageFailures = cli_doctor.printCheckStageFailures;
 
+/// Check the serve flags that `dev` forwards to its serve child. `dev` owns
+/// `--no-prove`, so the serve parser never sees it. A bad flag prints the same
+/// plain message as `zttp serve`, under the `dev` name, and returns
+/// `error.InvalidServeFlags`. This runs before the analyzer preflight.
+fn validateForwardedServeFlags(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    var forwarded = std.ArrayList([]const u8).empty;
+    defer forwarded.deinit(allocator);
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--no-prove")) continue;
+        try forwarded.append(allocator, arg);
+    }
+    runtime_cli.validateServeFlags(allocator, forwarded.items) catch |err| {
+        if (!builtin.is_test) {
+            var buf: [256]u8 = undefined;
+            std.debug.print("{s}\n", .{runtime_cli.formatFlagFailure(&buf, "dev", err)});
+        }
+        return error.InvalidServeFlags;
+    };
+}
+
 pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: []const []const u8) !void {
+    try validateForwardedServeFlags(allocator, argv);
     try runDevPreflight(allocator, argv, "dev");
 
     const serve_binary = try resolveDeveloperServeBinary(allocator, program_path);
@@ -218,6 +240,19 @@ test "childExitCode propagates a failed serve child but not a clean stop" {
     try std.testing.expectEqual(@as(?u8, 139), childExitCode(.{ .signal = .SEGV }));
     try std.testing.expectEqual(@as(?u8, 134), childExitCode(.{ .signal = .ABRT }));
     try std.testing.expectEqual(@as(?u8, 137), childExitCode(.{ .signal = .KILL }));
+}
+
+test "devCommand refuses a bad serve flag before the analyzer preflight" {
+    const testing = std.testing;
+    // The handler path does not exist. Preflight would return FileNotFound, so
+    // InvalidServeFlags proves the flag check ran first.
+    const missing = "no-such-dev-handler.ts";
+    try testing.expectError(error.InvalidServeFlags, devCommand(testing.allocator, "zttp", &.{ "-p", "abc", missing }));
+    try testing.expectError(error.InvalidServeFlags, devCommand(testing.allocator, "zttp", &.{ "-p", "99999", missing }));
+    try testing.expectError(error.InvalidServeFlags, devCommand(testing.allocator, "zttp", &.{ missing, "--port" }));
+    try testing.expectError(error.InvalidServeFlags, devCommand(testing.allocator, "zttp", &.{ "--bogus", missing }));
+    // A flag `dev` owns passes the check and reaches preflight.
+    try testing.expectError(error.FileNotFound, devCommand(testing.allocator, "zttp", &.{ "--no-prove", "-p", "3000", missing }));
 }
 
 test "runDevPreflight reports analyzer failure before starting dev loop" {
