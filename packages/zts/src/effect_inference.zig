@@ -565,7 +565,7 @@ pub const Analyzer = struct {
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
-        if (self.imports.get(binding.slot)) |imported| {
+        if (self.importOf(binding)) |imported| {
             var reached: EffectRow = .{};
             self.insertModuleCapabilities(imported.module, imported.name, &reached);
             row.capabilities.setUnion(reached.capabilities);
@@ -618,7 +618,7 @@ pub const Analyzer = struct {
             return;
         }
 
-        if (self.user_fn_by_slot.get(binding.slot)) |callee_idx| {
+        if (self.userFnOf(binding)) |callee_idx| {
             if (callee_idx == owner) {
                 // Self-recursion is captured here; non-self cycles are caught
                 // during the dedicated detectRecursion pass.
@@ -795,7 +795,7 @@ pub const Analyzer = struct {
     fn recordImportValueArg(self: *Analyzer, arg: NodeIndex, row: *EffectRow) void {
         if (self.ir_view.getTag(arg) != .identifier) return;
         const binding = self.ir_view.getBinding(arg) orelse return;
-        const imported = self.imports.get(binding.slot) orelse return;
+        const imported = self.importOf(binding) orelse return;
         var reached: EffectRow = .{};
         self.insertModuleCapabilities(imported.module, imported.name, &reached);
         row.capabilities.setUnion(reached.capabilities);
@@ -825,10 +825,36 @@ pub const Analyzer = struct {
     ) WalkError!void {
         if (self.ir_view.getTag(arg) != .identifier) return;
         const binding = self.ir_view.getBinding(arg) orelse return;
-        const callee_idx = self.user_fn_by_slot.get(binding.slot) orelse return;
+        const callee_idx = self.userFnOf(binding) orelse return;
         if (callee_idx == owner) return;
         const gop = try seen_users.getOrPut(self.allocator, callee_idx);
         if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
+    }
+
+    /// The import a reference names, or null.
+    ///
+    /// `imports` is keyed by slot, and only a module-level binding carries an
+    /// atom as its slot. A function local or parameter restarts at slot 0, so
+    /// the fifth local of a handler shares slot 4 with whichever module
+    /// binding happens to have atom 4 (`length`, for one). A slot-only lookup
+    /// resolved that local to the import, charged it that import's row, and
+    /// returned before `calleeIsUnresolvable` could mark the row a lower
+    /// bound: the same handler was refused or proved depending on what an
+    /// unrelated import was called. A module binding referenced from inside a
+    /// nested closure is still `.global`, not `.upvalue`, so the filter does not
+    /// lose it. A reference that precedes its declaration (`a` calling a later
+    /// `b`) resolves as `.undeclared_global`, whose slot is also the atom, so
+    /// that kind passes too; dropping it stopped mutual recursion being found.
+    fn importOf(self: *const Analyzer, binding: ir.BindingRef) ?ImportedFunction {
+        if (!slotIsAtom(binding)) return null;
+        return self.imports.get(binding.slot);
+    }
+
+    /// The collected user function a reference names, or null. Same slot
+    /// collision, same filter, as `importOf`.
+    fn userFnOf(self: *const Analyzer, binding: ir.BindingRef) ?usize {
+        if (!slotIsAtom(binding)) return null;
+        return self.user_fn_by_slot.get(binding.slot);
     }
 
     /// True when a callee identifier names something whose body this cannot
@@ -1045,6 +1071,14 @@ pub const Analyzer = struct {
         return null;
     }
 };
+
+/// Whether `binding.slot` is a name atom rather than a function-local index.
+/// Only a module-level binding (`.global`) or a reference to one that is not
+/// declared yet (`.undeclared_global`) keys on the atom; `.local`, `.argument`,
+/// and `.upvalue` restart at slot 0 in every function.
+fn slotIsAtom(binding: ir.BindingRef) bool {
+    return binding.kind == .global or binding.kind == .undeclared_global;
+}
 
 /// Shares `known_globals.varying_reads` with `flow_checker.isVaryingGlobalRead`
 /// rather than keeping a second copy. The two lists drifted apart once already:
@@ -2182,4 +2216,59 @@ test "this analyzer records imports from unresolved modules" {
     const entry = it.next().?;
     try std.testing.expectEqualStrings("zttp-ext:unknown", entry.value_ptr.module);
     try std.testing.expectEqualStrings("thing", entry.value_ptr.name);
+}
+
+test "a local whose slot equals an import's atom slot is not that import" {
+    // `length` is a predefined atom whose index equals the slot of the fifth
+    // local in a function body, because module bindings carry their atom as
+    // slot while function locals restart at zero. Looking up `imports` by slot
+    // alone resolved the local `f` (holding `cacheSet`) to `parseBearer`, and
+    // that import is pure, so the call returned before it could set
+    // `lower_bound`. Renaming the import made the same handler refused.
+    const row = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\import { parseBearer as length } from "zttp:auth";
+        \\function handler(a, b, c, d) {
+        \\  const f = cacheSet;
+        \\  f("ns", "k", "v", 10);
+        \\  return 1;
+        \\}
+    );
+    try testing.expect(row.lower_bound);
+}
+
+test "the slot filter keeps module bindings reached from a nested closure and from before their declaration" {
+    // A closure that names a module import is `.global`, not `.upvalue`, and a
+    // call to a function declared further down is `.undeclared_global`. Both
+    // must still resolve, or the kind filter trades one fail-open for another.
+    const closure = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(items) {
+        \\  return items.map((x) => cacheSet("ns", x, "v", 10));
+        \\}
+    );
+    try testing.expect(closure.writes);
+    try testing.expect(!closure.lower_bound);
+
+    const forward = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(k) { return later(k); }
+        \\function later(k) { return cacheSet("ns", k, "v", 10); }
+    );
+    try testing.expect(forward.writes);
+    try testing.expect(!forward.lower_bound);
+}
+
+test "a local colliding with a pure import keeps a pure closure read only" {
+    // Control for the slot filter: the fifth local holds a pure arrow that
+    // writes nothing. It is not the import `length`, and the row has nothing
+    // to charge for it.
+    const row = try analyzeHandlerRow(
+        \\import { parseBearer as length } from "zttp:auth";
+        \\function handler(a, b, c, d) {
+        \\  const f = (x) => x + 1;
+        \\  return f(a);
+        \\}
+    );
+    try testing.expect(row.readOnly());
 }
