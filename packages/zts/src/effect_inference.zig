@@ -31,6 +31,12 @@ const Capability = module_binding.ModuleCapability;
 
 pub const CapabilitySet = std.EnumSet(Capability);
 
+/// A callee that reads the clock or draws randomness can return a different
+/// value on the next run, so its caller is not deterministic.
+fn reachesClockOrRandom(caps: CapabilitySet) bool {
+    return caps.contains(.clock) or caps.contains(.random);
+}
+
 pub const EffectRow = struct {
     capabilities: CapabilitySet = CapabilitySet.initEmpty(),
     deterministic: bool = true,
@@ -560,8 +566,9 @@ pub const Analyzer = struct {
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
         if (self.imports.get(binding.slot)) |imported| {
-            const before = row.capabilities;
-            self.insertModuleCapabilities(imported.module, imported.name, row);
+            var reached: EffectRow = .{};
+            self.insertModuleCapabilities(imported.module, imported.name, &reached);
+            row.capabilities.setUnion(reached.capabilities);
             // A call that reads the clock or draws randomness returns something
             // different next time, so the enclosing function is not
             // deterministic. Only `Date.now` and `Math.random` cleared this
@@ -593,11 +600,11 @@ pub const Analyzer = struct {
             // `no_secret_leakage` already works; see the roadmap item.
             const result_discarded = node == self.discarded_call;
             const sinks_the_read = result_discarded and effect == .write;
-            if (!sinks_the_read) {
-                const added = row.capabilities.differenceWith(before);
-                if (added.contains(.clock) or added.contains(.random)) {
-                    row.deterministic = false;
-                }
+            // Test what this export reaches, not what it adds to the row: a
+            // discarded `logInfo` earlier in the body leaves `.clock` in the row
+            // without demoting it, and a later clock read would add nothing.
+            if (!sinks_the_read and reachesClockOrRandom(reached.capabilities)) {
+                row.deterministic = false;
             }
             row.pure = false;
             // A `.write`-classified export modifies external state; that
@@ -736,15 +743,15 @@ pub const Analyzer = struct {
 
         if (names.items.len == 0) return true; // no capsule: the empty row
 
-        const before = row.capabilities;
+        var declared = CapabilitySet.initEmpty();
         for (names.items) |name| {
             const cap = std.meta.stringToEnum(Capability, name) orelse return false;
-            row.capabilities.insert(cap);
+            declared.insert(cap);
         }
+        row.capabilities.setUnion(declared);
         // Same demotions a direct module call makes: reaching a capability is
         // not pure, and reaching the clock or the RNG is not deterministic.
-        const added = row.capabilities.differenceWith(before);
-        if (added.contains(.clock) or added.contains(.random)) row.deterministic = false;
+        if (reachesClockOrRandom(declared)) row.deterministic = false;
         row.pure = false;
         return true;
     }
@@ -789,10 +796,10 @@ pub const Analyzer = struct {
         if (self.ir_view.getTag(arg) != .identifier) return;
         const binding = self.ir_view.getBinding(arg) orelse return;
         const imported = self.imports.get(binding.slot) orelse return;
-        const before = row.capabilities;
-        self.insertModuleCapabilities(imported.module, imported.name, row);
-        const added = row.capabilities.differenceWith(before);
-        if (added.contains(.clock) or added.contains(.random)) row.deterministic = false;
+        var reached: EffectRow = .{};
+        self.insertModuleCapabilities(imported.module, imported.name, &reached);
+        row.capabilities.setUnion(reached.capabilities);
+        if (reachesClockOrRandom(reached.capabilities)) row.deterministic = false;
         row.pure = false;
         if (self.importEffect(imported.module, imported.name) == .write) row.writes = true;
         if (std.mem.eql(u8, imported.module, fetch_module_specifier) and
@@ -1711,6 +1718,41 @@ test "a bound write-effect result still demotes determinism" {
 
     const h = analyzer.lookup("handler") orelse return error.FunctionNotFound;
     try testing.expect(!h.deterministic);
+}
+
+test "a clock read after a discarded log call still demotes determinism" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // The discarded `logInfo` puts `.clock` in the row without demoting it.
+    // A later call that reaches the clock then adds no new capability, so a
+    // test on the newly added set saw nothing and the handler stayed
+    // deterministic. The test must be on what the callee itself reaches.
+    const source =
+        \\import { logInfo } from "zttp:log";
+        \\import { jwtVerify } from "zttp:auth";
+        \\function direct(t, s) {
+        \\  logInfo("served", {});
+        \\  return jwtVerify(t, s);
+        \\}
+        \\function callback(items) {
+        \\  logInfo("served", {});
+        \\  return items.map(jwtVerify);
+        \\}
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const direct = analyzer.lookup("direct") orelse return error.FunctionNotFound;
+    try testing.expect(!direct.deterministic);
+    const callback = analyzer.lookup("callback") orelse return error.FunctionNotFound;
+    try testing.expect(!callback.deterministic);
 }
 
 test "a read-effect clock or random call still demotes determinism" {
