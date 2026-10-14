@@ -110,6 +110,14 @@ dev_flag_out=$(cd "$TMP_DIR/no-project" && "$ZTTP" dev -p abc missing-handler.ts
 dev_flag_want='zttp dev: the port must be a whole number from 0 to 65535 (-p, --port). Run `zttp dev --help` for usage.'
 [ "$dev_flag_out" = "$dev_flag_want" ] || fail "dev -p abc printed unexpected text: $dev_flag_out"
 
+step "negative: help for an unknown command is an error"
+help_status=0
+help_out=$("$ZTTP" help bogus 2>&1 </dev/null) || help_status=$?
+[ "$help_status" -eq 1 ] || fail "help bogus exited $help_status, expected 1: $help_out"
+help_want="zttp help: unknown command 'bogus'. Run \`zttp help --all\` to list every command."
+[ "$help_out" = "$help_want" ] || fail "help bogus printed unexpected text: $help_out"
+"$ZTTP" help dev >/dev/null 2>&1 </dev/null || fail "help dev should still succeed"
+
 step "negative: broken handler build fails without emitting an artifact"
 (cd "$TMP_DIR" && "$ZTTP" init "broken-app" >/dev/null 2>&1) || fail "init broken-app"
 printf 'function handler(req) {\n' > "$BROKEN_APP_DIR/src/handler.ts"

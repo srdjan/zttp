@@ -403,7 +403,43 @@ fn cmdVersion(_: cli_help.Ctx) anyerror!void {
 }
 
 fn cmdHelp(ctx: cli_help.Ctx) anyerror!void {
-    if (cli_help.hasAllFlag(ctx.args)) cli_help.printHelpAll() else cli_help.printHelp();
+    if (cli_help.hasAllFlag(ctx.args)) {
+        cli_help.printHelpAll();
+        return;
+    }
+    if (unknownHelpTopic(ctx.args)) |topic| {
+        std.debug.print(
+            "zttp help: unknown command '{s}'. Run `zttp help --all` to list every command.\n",
+            .{topic},
+        );
+        std.process.exit(1);
+    }
+    cli_help.printHelp();
+}
+
+/// The first `help` argument that names no command, or null when the arguments
+/// name a known command or no command. A leading `-` marks a flag, which is
+/// not a topic.
+fn unknownHelpTopic(args: []const []const u8) ?[]const u8 {
+    for (args) |arg| {
+        if (std.mem.startsWith(u8, arg, "-")) continue;
+        if (zts_cli.isAnalyzerCommand(arg)) return null;
+        for (commands) |c| {
+            if (std.mem.eql(u8, arg, c.name)) return null;
+            if (c.alias) |alias| if (std.mem.eql(u8, arg, alias)) return null;
+        }
+        return arg;
+    }
+    return null;
+}
+
+test "unknownHelpTopic flags only a first argument that names no command" {
+    try std.testing.expectEqual(@as(?[]const u8, null), unknownHelpTopic(&.{}));
+    try std.testing.expectEqual(@as(?[]const u8, null), unknownHelpTopic(&.{"dev"}));
+    try std.testing.expectEqual(@as(?[]const u8, null), unknownHelpTopic(&.{"check"}));
+    try std.testing.expectEqual(@as(?[]const u8, null), unknownHelpTopic(&.{"expert"}));
+    try std.testing.expectEqual(@as(?[]const u8, null), unknownHelpTopic(&.{"--help"}));
+    try std.testing.expectEqualStrings("bogus", unknownHelpTopic(&.{"bogus"}).?);
 }
 
 const commands = [_]cli_help.Command{

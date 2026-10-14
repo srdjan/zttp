@@ -23,6 +23,9 @@ zttp help --all
 zttp <command> --help
 ```
 
+`zttp help <name>` with a name that is not a command prints
+`zttp help: unknown command '<name>'` on standard error and exits 1.
+
 ## Core Commands
 
 The default help shows the day-to-day workflow:
