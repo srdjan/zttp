@@ -908,13 +908,6 @@ pub const SliceReader = struct {
     data: []const u8,
     pos: usize = 0,
 
-    pub fn readBytesNoEof(self: *SliceReader, comptime n: usize) ![n]u8 {
-        if (self.pos + n > self.data.len) return error.EndOfStream;
-        const result: *const [n]u8 = @ptrCast(self.data[self.pos..][0..n]);
-        self.pos += n;
-        return result.*;
-    }
-
     pub fn readByte(self: *SliceReader) !u8 {
         if (self.pos >= self.data.len) return error.EndOfStream;
         const byte = self.data[self.pos];

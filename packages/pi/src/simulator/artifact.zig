@@ -101,10 +101,6 @@ pub const Diagnostic = struct {
     call_index: ?u32 = null,
     checkpoint_index: ?u32 = null,
 
-    pub fn caseName(self: *const Diagnostic) []const u8 {
-        return self.case_name[0..self.case_name_len];
-    }
-
     pub fn fixturePath(self: *const Diagnostic) []const u8 {
         return self.path[0..self.path_len];
     }

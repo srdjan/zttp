@@ -810,15 +810,6 @@ pub fn categoryLiteralLabel(category: PolicyCategory) []const u8 {
     };
 }
 
-pub fn categoryDynamicLabel(category: PolicyCategory) []const u8 {
-    return switch (category) {
-        .env => "env",
-        .egress => "outbound host",
-        .cache => "cache namespace",
-        .sql => "sql query",
-    };
-}
-
 test "parse policy json with all sections" {
     const allocator = std.testing.allocator;
     const source =

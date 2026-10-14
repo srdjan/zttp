@@ -55,19 +55,6 @@ pub const read_idle_timeout_ms: u64 = 120_000;
 /// body write (writeAll + flush) forever. Bounded via SO_SNDTIMEO.
 pub const write_idle_timeout_ms: u64 = 120_000;
 
-/// The connect/handshake timeout to pass to `connectTcpOptions`.
-pub fn connectTimeout() std.Io.Timeout {
-    return .{ .duration = .{ .raw = std.Io.Duration.fromMilliseconds(connect_timeout_ms), .clock = .awake } };
-}
-
-/// Best-effort SO_RCVTIMEO on a connection socket, so a blocking read returns an
-/// error once an idle gap exceeds `read_idle_timeout_ms` instead of blocking
-/// until the peer closes the stream. Mirrors the runtime server's slow-client
-/// guard. Failures are ignored: the connect timeout still bounds the request.
-pub fn setReadTimeout(fd: std.posix.fd_t) void {
-    setReadTimeoutMs(fd, read_idle_timeout_ms);
-}
-
 /// The same guard with an explicit budget, for a provider whose silence is not
 /// a stall. A non-streaming completion sends its response head at once and then
 /// nothing at all until generation finishes, so the default idle budget would
@@ -81,13 +68,6 @@ pub fn setReadTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
         .usec = @intCast((timeout_ms % 1000) * 1000),
     };
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
-}
-
-/// Best-effort SO_SNDTIMEO on a connection socket, so the body write returns an
-/// error once a stalled peer stops draining its receive window instead of
-/// blocking forever. Mirrors the runtime server's slow-client write guard.
-pub fn setWriteTimeout(fd: std.posix.fd_t) void {
-    setWriteTimeoutMs(fd, write_idle_timeout_ms);
 }
 
 /// True for the connect/read errors that mean a network stall, so the wire

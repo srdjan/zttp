@@ -510,23 +510,6 @@ pub const VerifiedChangeSetPayload = struct {
     }
 };
 
-fn cloneStringSlice(allocator: std.mem.Allocator, items: []const []u8) ![][]u8 {
-    const copy = try allocator.alloc([]u8, items.len);
-    errdefer allocator.free(copy);
-    var i: usize = 0;
-    errdefer {
-        while (i > 0) {
-            i -= 1;
-            allocator.free(copy[i]);
-        }
-        allocator.free(copy);
-    }
-    while (i < items.len) : (i += 1) {
-        copy[i] = try allocator.dupe(u8, items[i]);
-    }
-    return copy;
-}
-
 fn freeStringSlice(allocator: std.mem.Allocator, items: []const []u8) void {
     for (items) |item| allocator.free(item);
     allocator.free(items);
@@ -1263,34 +1246,6 @@ fn isLowerHex64(value: []const u8) bool {
     return true;
 }
 
-fn parseHash32(value_opt: ?std.json.Value) !?[32]u8 {
-    const value = value_opt orelse return null;
-    return switch (value) {
-        .null => null,
-        .string => |s| blk: {
-            if (s.len != 64) return error.InvalidUiPayload;
-            var out: [32]u8 = undefined;
-            var i: usize = 0;
-            while (i < 32) : (i += 1) {
-                const hi = hexNibble(s[i * 2]) orelse return error.InvalidUiPayload;
-                const lo = hexNibble(s[i * 2 + 1]) orelse return error.InvalidUiPayload;
-                out[i] = (hi << 4) | lo;
-            }
-            break :blk out;
-        },
-        else => error.InvalidUiPayload,
-    };
-}
-
-fn hexNibble(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
-}
-
 fn writeOptionalStringArray(
     writer: *std.Io.Writer,
     field_name: []const u8,
@@ -1404,84 +1359,6 @@ fn parsePropertiesSnapshot(value_opt: ?std.json.Value) !?PropertiesSnapshot {
             .result_safe = getBoolOrDefault(obj, "result_safe", false),
             .optional_safe = getBoolOrDefault(obj, "optional_safe", false),
             .canonical = getBoolOrDefault(obj, "canonical", false),
-        },
-        else => error.InvalidUiPayload,
-    };
-}
-
-fn parseDiffHunks(allocator: std.mem.Allocator, value_opt: ?std.json.Value) ![]DiffHunk {
-    const value = value_opt orelse return allocator.alloc(DiffHunk, 0);
-    if (value == .null) return allocator.alloc(DiffHunk, 0);
-    if (value != .array) return error.InvalidUiPayload;
-
-    const hunks = try allocator.alloc(DiffHunk, value.array.items.len);
-    errdefer allocator.free(hunks);
-    for (value.array.items, 0..) |item, i| {
-        if (item != .object) return error.InvalidUiPayload;
-        const item_obj = item.object;
-        hunks[i] = .{
-            .old_start = @intCast(getUnsigned(item_obj, "old_start") orelse return error.InvalidUiPayload),
-            .old_count = @intCast(getUnsigned(item_obj, "old_count") orelse return error.InvalidUiPayload),
-            .new_start = @intCast(getUnsigned(item_obj, "new_start") orelse return error.InvalidUiPayload),
-            .new_count = @intCast(getUnsigned(item_obj, "new_count") orelse return error.InvalidUiPayload),
-        };
-    }
-    return hunks;
-}
-
-fn parseViolationDeltaItems(allocator: std.mem.Allocator, value_opt: ?std.json.Value) ![]ViolationDeltaItem {
-    const value = value_opt orelse return allocator.alloc(ViolationDeltaItem, 0);
-    if (value == .null) return allocator.alloc(ViolationDeltaItem, 0);
-    if (value != .array) return error.InvalidUiPayload;
-
-    const violations = try allocator.alloc(ViolationDeltaItem, value.array.items.len);
-    errdefer allocator.free(violations);
-    for (violations) |*item| item.* = undefined;
-    var i: usize = 0;
-    errdefer {
-        while (i > 0) {
-            i -= 1;
-            violations[i].deinit(allocator);
-        }
-        allocator.free(violations);
-    }
-    while (i < value.array.items.len) : (i += 1) {
-        const item = value.array.items[i];
-        if (item != .object) return error.InvalidUiPayload;
-        const item_obj = item.object;
-        violations[i] = try ViolationDeltaItem.init(
-            allocator,
-            getString(item_obj, "stable_key") orelse return error.InvalidUiPayload,
-            getString(item_obj, "code") orelse return error.InvalidUiPayload,
-            getString(item_obj, "severity") orelse return error.InvalidUiPayload,
-            getString(item_obj, "message") orelse return error.InvalidUiPayload,
-            @intCast(getUnsigned(item_obj, "line") orelse return error.InvalidUiPayload),
-            @intCast(getUnsigned(item_obj, "column") orelse return error.InvalidUiPayload),
-            getBool(item_obj, "introduced_by_patch") orelse return error.InvalidUiPayload,
-        );
-    }
-    return violations;
-}
-
-fn parseProveSummary(allocator: std.mem.Allocator, value_opt: ?std.json.Value) !?ProveSummary {
-    const value = value_opt orelse return null;
-    return switch (value) {
-        .null => null,
-        .object => |obj| blk: {
-            const laws_used = try parseStringArrayField(allocator, obj.get("laws_used"));
-            errdefer freeStringSlice(allocator, laws_used);
-            const counterexample = blk_counterexample: {
-                const text = try getOptionalString(obj, "counterexample");
-                break :blk_counterexample if (text) |t| try allocator.dupe(u8, t) else null;
-            };
-            errdefer if (counterexample) |text| allocator.free(text);
-            break :blk .{
-                .classification = try allocator.dupe(u8, getString(obj, "classification") orelse return error.InvalidUiPayload),
-                .proof_level = try allocator.dupe(u8, getString(obj, "proof_level") orelse return error.InvalidUiPayload),
-                .recommendation = try allocator.dupe(u8, getString(obj, "recommendation") orelse ""),
-                .counterexample = counterexample,
-                .laws_used = laws_used,
-            };
         },
         else => error.InvalidUiPayload,
     };

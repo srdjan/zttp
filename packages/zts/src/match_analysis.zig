@@ -141,13 +141,6 @@ pub const MatchAnalysis = struct {
         };
     }
 
-    /// True when the arms are proved to cover every value of `discriminant_type`.
-    pub fn isMatchExhaustive(self: *const MatchAnalysis, discriminant_type: TypeIndex, me: ir.Node.MatchExpr) bool {
-        var coverage = self.analyze(self.allocator, discriminant_type, me, false) catch return false;
-        defer coverage.deinit(self.allocator);
-        return coverage.exhaustive;
-    }
-
     /// Decide exhaustiveness of `me`, and redundancy when `want_redundancy` is
     /// set. The witness in the result is allocated with `allocator`.
     pub fn analyze(

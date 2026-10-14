@@ -460,14 +460,6 @@ pub const TypeChecker = struct {
         self.narrowed.put(self.allocator, key, narrowed_type) catch self.markAllocationFailure();
     }
 
-    fn restoreNarrowed(self: *TypeChecker, key: u64, saved: ?TypeIndex) void {
-        if (saved) |s| {
-            self.putNarrowed(key, s);
-        } else {
-            self.killNarrowing(key);
-        }
-    }
-
     /// Kill rule 1. Any assignment to a binding drops its narrowing: the guard
     /// that installed it described the old value. Nothing killed these before,
     /// so a guard installed by an early return survived a later reassignment.

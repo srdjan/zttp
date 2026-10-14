@@ -248,22 +248,6 @@ pub const Transcript = struct {
         };
     }
 
-    pub fn installProjectionOwned(
-        self: *Transcript,
-        allocator: std.mem.Allocator,
-        summary: []u8,
-        first_kept_entry_id: EntryId,
-    ) void {
-        std.debug.assert(first_kept_entry_id > 0 and first_kept_entry_id <= self.nextEntryId());
-        if (self.projection) |*projection| projection.deinit(allocator);
-        self.projection = .{
-            .summary = summary,
-            .first_kept_entry_id = first_kept_entry_id,
-            .read_files = &.{},
-            .modified_files = &.{},
-        };
-    }
-
     pub fn installProjectionOwnedWithFiles(
         self: *Transcript,
         allocator: std.mem.Allocator,

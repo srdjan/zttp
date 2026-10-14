@@ -1418,27 +1418,6 @@ fn lineCount(text: []const u8) usize {
     return n;
 }
 
-/// Write the held (true) properties of the verified edit as a single line, e.g.
-/// "  proven: deterministic, read_only, input_validated". This is the trust
-/// signal that distinguishes an approved edit from a blind write.
-fn writeProvenProperties(props: anytype) void {
-    var buf: [1024]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    w.writeAll("  proven: ") catch {};
-    var first = true;
-    inline for (@typeInfo(@TypeOf(props)).@"struct".fields) |field| {
-        if (field.type == bool and @field(props, field.name)) {
-            if (!first) w.writeAll(", ") catch {};
-            w.writeAll(field.name) catch {};
-            first = false;
-        }
-    }
-    if (first) w.writeAll("(no properties established)") catch {};
-    w.writeAll("\n") catch {};
-    const out = w.buffered();
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
-}
-
 /// Write canonical-normalization rewrite names applied during salvage, e.g.
 /// "  normalized: ternary-redundancy-elimination (line 12), bool-compare-redundancy".
 fn writeRewriteTrace(trace: []const []u8) void {

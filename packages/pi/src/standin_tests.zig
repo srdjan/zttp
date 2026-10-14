@@ -981,19 +981,6 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
     }
 }
 
-fn expectValidJsonLines(allocator: std.mem.Allocator, content: []const u8) !void {
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    var parsed_lines: usize = 0;
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
-        defer parsed.deinit();
-        try testing.expectEqual(std.json.Value.object, std.meta.activeTag(parsed.value));
-        parsed_lines += 1;
-    }
-    try testing.expect(parsed_lines >= 6);
-}
-
 fn transcriptTextBytes(transcript: *const transcript_mod.Transcript) usize {
     var count: usize = 0;
     for (transcript.entries.items) |entry| {

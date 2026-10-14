@@ -68,17 +68,6 @@ pub const Kind = enum(u8) {
             .sql_read, .sql_write => "sql_execute",
         };
     }
-
-    /// What the author computed, in the words the diagnostic uses.
-    pub fn resourceNoun(self: Kind) []const u8 {
-        return switch (self) {
-            .env_key => "environment key",
-            .egress_endpoint => "egress endpoint",
-            .cache_namespace => "cache namespace",
-            .sql_read => "SQL query name",
-            .sql_write => "SQL query name",
-        };
-    }
 };
 
 pub const Entry = struct {

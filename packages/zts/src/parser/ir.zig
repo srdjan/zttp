@@ -947,11 +947,6 @@ pub const IRStore = struct {
         return self.addNode(.lit_float, loc, .{ .a = pool_idx, .b = 0 });
     }
 
-    /// Add string literal (idx into constant pool)
-    pub fn addLitString(self: *IRStore, loc: SourceLocation, pool_idx: u16) !NodeIndex {
-        return self.addNode(.lit_string, loc, .{ .a = pool_idx, .b = 0 });
-    }
-
     /// Add binary expression
     pub fn addBinary(self: *IRStore, loc: SourceLocation, op: BinaryOp, left: NodeIndex, right: NodeIndex) !NodeIndex {
         return self.addNode(.binary_op, loc, DataPayload.fromBinary(op, left, right));

@@ -438,12 +438,6 @@ pub fn concatRopeString(allocator: std.mem.Allocator, rope: *RopeNode, str: *JSS
     return try concatRopes(allocator, rope, right);
 }
 
-/// Concatenate a rope with a JSString using arena allocation
-pub fn concatRopeStringWithArena(arena: *arena_mod.Arena, rope: *RopeNode, str: *JSString) ?*RopeNode {
-    const right = createRopeLeafWithArena(arena, str) orelse return null;
-    return concatRopesWithArena(arena, rope, right);
-}
-
 /// Concatenate two JSStrings into a rope - O(1) operation
 pub fn createRopeFromStrings(allocator: std.mem.Allocator, a: *JSString, b: *JSString) !*RopeNode {
     const left = try createRopeLeaf(allocator, a);
@@ -1130,36 +1124,6 @@ pub fn createStringWithArena(arena: *arena_mod.Arena, s: []const u8) ?*JSString 
     return str;
 }
 
-/// Concatenate two strings using arena allocation
-pub fn concatStringsWithArena(arena: *arena_mod.Arena, a: *const JSString, b: *const JSString) ?*JSString {
-    // Checked add: a wraparound here would under-allocate and let the memcpy
-    // below write past the buffer (heap corruption).
-    const total_len = std.math.add(u32, a.len, b.len) catch return null;
-    const total_size = @sizeOf(JSString) + @as(usize, total_len);
-    const mem = arena.alloc(total_size) orelse return null;
-
-    const str: *JSString = @ptrCast(@alignCast(mem));
-    const data_a = a.data();
-    const data_b = b.data();
-
-    str.* = .{
-        .header = heap.MemBlockHeader.init(.string, total_size),
-        .flags = .{
-            .is_unique = false,
-            .is_ascii = a.flags.is_ascii and b.flags.is_ascii,
-            .is_numeric = false,
-            .hash_computed = false,
-        },
-        .len = total_len,
-        .hash = 0,
-    };
-
-    const data_mut = str.dataMut();
-    @memcpy(data_mut[0..a.len], data_a);
-    @memcpy(data_mut[a.len..], data_b);
-    return str;
-}
-
 /// Concatenate two strings
 pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const JSString) !*JSString {
     // Checked add: a wraparound here would under-allocate and let the memcpy
@@ -1220,56 +1184,6 @@ pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString
     const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
     const str: *JSString = @ptrCast(@alignCast(mem.ptr));
-    str.* = .{
-        .header = heap.MemBlockHeader.init(.string, total_size),
-        .flags = .{
-            .is_unique = false,
-            .is_ascii = all_ascii,
-            .is_numeric = false,
-            .hash_computed = false,
-        },
-        .len = total_len,
-        .hash = 0,
-    };
-
-    // Copy all strings into result
-    const data_mut = str.dataMut();
-    var offset: usize = 0;
-    for (strings) |s| {
-        @memcpy(data_mut[offset .. offset + s.len], s.data());
-        offset += s.len;
-    }
-
-    return str;
-}
-
-/// Concatenate multiple strings using arena allocation (single allocation, no intermediate strings)
-/// Returns null on allocation failure
-pub fn concatManyWithArena(arena: *arena_mod.Arena, strings: []const *const JSString) ?*JSString {
-    if (strings.len == 0) {
-        return createStringWithArena(arena, "");
-    }
-    if (strings.len == 1) {
-        return createStringWithArena(arena, strings[0].data());
-    }
-    if (strings.len == 2) {
-        return concatStringsWithArena(arena, strings[0], strings[1]);
-    }
-
-    // Calculate total length and check ASCII (checked add: a wraparound would
-    // under-allocate and let the per-string memcpy below run past the buffer).
-    var total_len: u32 = 0;
-    var all_ascii = true;
-    for (strings) |s| {
-        total_len = std.math.add(u32, total_len, s.len) catch return null;
-        all_ascii = all_ascii and s.flags.is_ascii;
-    }
-
-    // Single allocation for result
-    const total_size = @sizeOf(JSString) + @as(usize, total_len);
-    const mem = arena.alloc(total_size) orelse return null;
-
-    const str: *JSString = @ptrCast(@alignCast(mem));
     str.* = .{
         .header = heap.MemBlockHeader.init(.string, total_size),
         .flags = .{

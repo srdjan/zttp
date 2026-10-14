@@ -126,17 +126,6 @@ pub const GenericScope = struct {
         }
         return null;
     }
-
-    pub fn constraintOf(self: *const GenericScope, name: []const u8) TypeIndex {
-        for (0..self.count) |i| {
-            if (self.params[i].name_len == name.len and
-                std.mem.eql(u8, self.params[i].name[0..self.params[i].name_len], name))
-            {
-                return self.params[i].constraint;
-            }
-        }
-        return null_type_idx;
-    }
 };
 
 /// One declared type parameter of a function signature.
