@@ -3026,8 +3026,12 @@ pub const ContractBuilder = struct {
         var pure = !s.unknown and !s.has_any_call and !s.has_egress;
 
         if (handler_row) |row| {
-            read_only = read_only and row.readOnly();
-            pure = pure and row.pure;
+            // A lower-bound row calls through a value the walk could not
+            // resolve, so its `writes` and `has_egress` bits describe only the
+            // part it saw. Reading `readOnly()` off it would prove the claim
+            // for a handler whose hidden callee writes.
+            read_only = read_only and row.readOnly() and !row.lower_bound;
+            pure = pure and row.pure and !row.lower_bound;
         }
 
         const retry_safe = read_only;
@@ -3391,6 +3395,41 @@ test "routed writes match direct handler properties" {
     try std.testing.expect(!routed_props.read_only);
     try std.testing.expect(!direct_props.retry_safe);
     try std.testing.expect(!routed_props.retry_safe);
+}
+
+test "a write called through a local alias fails the handler properties closed" {
+    // `const f = cacheSet; f(...)` and `const g = write; g()` reach a write
+    // through a value the effect walk cannot resolve. The row is then a lower
+    // bound, and a lower bound proves no property. Reading `read_only` and
+    // `retry_safe` off it anyway reported a cache-writing handler as safe to
+    // retry.
+    const module_alias =
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  const f = cacheSet;
+        \\  f("ns", "key", "value", 10);
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const helper_alias =
+        \\import { cacheSet } from "zttp:cache";
+        \\function write() { cacheSet("ns", "key", "value", 10); return 1; }
+        \\function handler(req) {
+        \\  const g = write;
+        \\  const n = g();
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const sources = [_][]const u8{ module_alias, helper_alias };
+    for (sources) |source| {
+        var contract = try buildTestContract(source);
+        defer contract.deinit(std.testing.allocator);
+        const props = contract.properties orelse return error.MissingProperties;
+        try std.testing.expect(!props.read_only);
+        try std.testing.expect(!props.stateless);
+        try std.testing.expect(!props.retry_safe);
+        try std.testing.expect(!props.idempotent);
+    }
 }
 
 test "clean routed handler keeps effect-derived properties" {
