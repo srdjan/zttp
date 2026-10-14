@@ -868,6 +868,13 @@ pub const Analyzer = struct {
             {
                 row.has_egress = true;
             }
+            // Same fail-closed answer as `chargeImportValue`: an export of a
+            // module no registry knows has no effect class, and `.none` would
+            // leave `read_only` proven for a call that may write.
+            if (!self.moduleIsKnown(imported.module)) {
+                row.writes = true;
+                row.has_egress = true;
+            }
             return;
         }
 
@@ -1163,7 +1170,12 @@ pub const Analyzer = struct {
         }
     }
 
+    /// Whether some registry answers for `module`'s effect classes. A relative
+    /// specifier names a sibling user module, not a registry entry: the
+    /// sibling proof context analyzes its body, so it is not unknown here.
+    /// Treating it as unknown charged every sibling helper as a writer.
     fn moduleIsKnown(self: *const Analyzer, module: []const u8) bool {
+        if (std.mem.startsWith(u8, module, "./") or std.mem.startsWith(u8, module, "../")) return true;
         if (builtin_modules.fromSpecifier(module) != null) return true;
         const registry = self.manifest_registry orelse return false;
         return registry.fromSpecifier(module) != null;
@@ -3017,6 +3029,25 @@ test "an unknown module's export referenced as a value fails closed" {
     try testing.expect(unknown.writes);
     try testing.expect(unknown.has_egress);
     try testing.expect(!unknown.readOnly());
+
+    // The same export called directly: the call path had the same gap.
+    const called = try analyzeHandlerRow(
+        \\import { thing } from "zttp-ext:unregistered";
+        \\function handler(items) { const r = thing("a"); return 1; }
+    );
+    try testing.expect(called.writes);
+    try testing.expect(called.has_egress);
+    try testing.expect(!called.readOnly());
+
+    // Control: a sibling user module is no registry entry, but it is not
+    // unknown either. Charging it as a writer cost every handler that calls a
+    // pure sibling helper `read_only` and `idempotent`.
+    const sibling = try analyzeHandlerRow(
+        \\import { normalizeLabel } from "./label.ts";
+        \\function handler(items) { const r = normalizeLabel("a"); return items.map(normalizeLabel); }
+    );
+    try testing.expect(!sibling.writes);
+    try testing.expect(!sibling.has_egress);
 
     // Control: a known pure export referenced as a value stays read only.
     const known = try analyzeHandlerRow(
