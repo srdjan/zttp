@@ -917,6 +917,11 @@ pub const Analyzer = struct {
                     node = (self.ir_view.getMember(node) orelse return).object;
                 },
                 .identifier => break,
+                // exhaustive: only an access chain rooted at an identifier
+                // names a binding. A chain rooted at a call or a literal
+                // (`f().g()`, `[w][0]()`) has no receiver binding to test;
+                // its function values are charged where they are referenced
+                // by the callee walk, and the call-result case is left to R6.
                 else => return,
             }
         }
