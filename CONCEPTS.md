@@ -34,6 +34,11 @@ A capsule written into a fixture is a claim about a program that does not exist 
 ### Effects ceiling
 A declared upper bound on the Capabilities a function may reach. The inferred set must sit inside the ceiling; reaching past it is an error, and declaring a Capability never reached is a warning, so the ceiling stays honest in both directions.
 
+### Effect row
+The compiler's inferred summary of what one function does when it runs: the Capabilities it reaches, whether it writes or talks to the network, and whether it stays deterministic and pure. A Handler's effect-derived Properties, and the check against an Effects ceiling, are read from its row.
+
+A row is an over-approximation only when the analysis resolved every callee. A call through a value it could not resolve makes the row a lower bound, and a lower bound proves no Property. A demotion is decided from what the callee reaches, never from what the call added to the row, because an exemption earlier in the function can leave a bit in the row without its consequence.
+
 ### Failure severity
 How the fault-coverage Property treats a built-in function's failure: critical (a success response on the failure path is a warning), expected (a success response is normal degradation), upstream (an external service failed, and a success response is reported as a fallback), or none (the function is not counted). Every call to a function with a severity other than none must have an explicit failure path before the Handler is fault-covered.
 
