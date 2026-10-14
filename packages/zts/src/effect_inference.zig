@@ -1146,6 +1146,22 @@ pub const Analyzer = struct {
         {
             row.has_egress = true;
         }
+        // A module neither registry resolves has no effect class to read, and
+        // `importEffect` answers `.none` for it, which would leave `read_only`
+        // standing. `insertModuleCapabilities` already grants it every
+        // capability; its write and egress classes get the same answer. The
+        // case is real: `zts check` does not refuse a `zttp-ext:` specifier
+        // that nothing registers.
+        if (!self.moduleIsKnown(imported.module)) {
+            row.writes = true;
+            row.has_egress = true;
+        }
+    }
+
+    fn moduleIsKnown(self: *const Analyzer, module: []const u8) bool {
+        if (builtin_modules.fromSpecifier(module) != null) return true;
+        const registry = self.manifest_registry orelse return false;
+        return registry.fromSpecifier(module) != null;
     }
 
     /// Record a call-graph edge for a bare identifier passed as an argument
@@ -2981,6 +2997,28 @@ test "a member call on a receiver that holds no function stays resolved" {
     );
     try testing.expect(!row.lower_bound);
     try testing.expect(row.readOnly());
+}
+
+test "an unknown module's export referenced as a value fails closed" {
+    // R9. `zts check` does not refuse a `zttp-ext:` specifier that no registry
+    // knows, so the value path sees one. Its capabilities are already every
+    // capability; its write and egress classes are unknowable, and guessing
+    // none for them is the fail-open `insertModuleCapabilities` already
+    // refuses for the capability set.
+    const unknown = try analyzeHandlerRow(
+        \\import { thing } from "zttp-ext:unregistered";
+        \\function handler(items) { items.forEach(thing); return 1; }
+    );
+    try testing.expect(unknown.writes);
+    try testing.expect(unknown.has_egress);
+    try testing.expect(!unknown.readOnly());
+
+    // Control: a known pure export referenced as a value stays read only.
+    const known = try analyzeHandlerRow(
+        \\import { parseBearer } from "zttp:auth";
+        \\function handler(items) { return items.map(parseBearer); }
+    );
+    try testing.expect(known.readOnly());
 }
 
 test "a local colliding with a pure import keeps a pure closure read only" {
