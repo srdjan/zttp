@@ -20,19 +20,19 @@ Phase 5 (the decidable `Effects` ceiling rule), and every spec MUST that says
 
 | Fact | Location | Consequence |
 |---|---|---|
-| `EffectRow` = `EnumSet(ModuleCapability)` + `{deterministic, pure, recursive, has_egress, writes}` | `effect_inference.zig:46-85` | A real row exists; it needs atoms named in the spec, not new machinery. |
-| `ModuleCapability` has exactly 11 members | `module_binding.zig:1247-1259` | The atom set is already closed. Adopt verbatim. |
-| Capabilities are declared **per module**, unioned for a call to **any** export | `module_binding.zig:1581`; `effect_inference.zig:477-479` | `escapeHtml` from `zttp:text` carries the whole module's capabilities. Over-approximation that makes every ceiling wrong. |
-| `collectFunctionsIn` walks only top-level forms and does not recurse into bodies | `effect_inference.zig:236-262` | A function declared inside a function contributes **nothing** — effects are dropped, not attributed. |
-| `handleCall` returns unless the callee is an `.identifier` | `effect_inference.zig:474` | Calls through a parameter or a member contribute an empty row. Silent under-approximation. |
-| Inline arrows are inlined into the enclosing row; a closure bound to a local `const` is dropped | `effect_inference.zig:449-453` | Inline callbacks are handled; named local ones are not. |
-| `EffectRow.pure` is cleared by **any** module call, including `.effect = .none` helpers | `effect_inference.zig:481` | Function-level only, and stricter than the spec's notion in one direction, weaker in another. |
+| `EffectRow` = `EnumSet(ModuleCapability)` + `{deterministic, pure, recursive, has_egress, writes}` | `effect_inference.zig` | A real row exists; it needs atoms named in the spec, not new machinery. |
+| `ModuleCapability` has exactly 11 members | `module_binding.zig` | The atom set is already closed. Adopt verbatim. |
+| Capabilities are declared **per module**, unioned for a call to **any** export | `module_binding.zig`; `effect_inference.zig` | `escapeHtml` from `zttp:text` carries the whole module's capabilities. Over-approximation that makes every ceiling wrong. |
+| `collectFunctionsIn` walks only top-level forms and does not recurse into bodies | `effect_inference.zig` | A function declared inside a function contributes **nothing** — effects are dropped, not attributed. |
+| `handleCall` returns unless the callee is an `.identifier` | `effect_inference.zig` | Calls through a parameter or a member contribute an empty row. Silent under-approximation. |
+| Inline arrows are inlined into the enclosing row; a closure bound to a local `const` is dropped | `effect_inference.zig` | Inline callbacks are handled; named local ones are not. |
+| `EffectRow.pure` is cleared by **any** module call, including `.effect = .none` helpers | `effect_inference.zig` | Function-level only, and stricter than the spec's notion in one direction, weaker in another. |
 | Nine distinct "pure" mechanisms exist; none is expression-level | §7 of the ground-truth sweep | The spec's ~15 normative uses of "pure" have no single referent. |
-| `Effects<T, R>` is a built-in alias expanding to `T & { __zttp_effect__: R }`; erased by `stripProofMarkers` | `type_env.zig:170-176, 218-247, 769-791` | The capsule mechanism works. Keep it. |
-| A non-literal `R` extracts zero names and is indistinguishable from "no annotation"; no diagnostic | `spec_discharge.zig:627`; `contract_builder.zig:911` | Fail-open. The one hole that lets an unchecked program claim conformance. |
-| `Proof<T, P>`'s `P` **is** defined in code: `CapsuleProperty = { total, pure, read_only, deterministic }` | `spec_discharge.zig:475-484` | The spec's "P is undefined" gap is a *spec* gap, not a code gap. |
-| `CapsuleFacts.holds` returns false for every property when `recursive` | `spec_discharge.zig:504-506` | Matches spec 5.6: recursion yields no totality claim without a decreasing argument. |
-| Flow labels exist: 7 `DataLabel` members, `LabelSet` with `mergeConditional` AND-ing `validated` | `module_binding.zig:1283-1352`; `flow_checker.zig` | The `assert`-on-`user_input` rule has its analysis already. |
+| `Effects<T, R>` is a built-in alias expanding to `T & { __zttp_effect__: R }`; erased by `stripProofMarkers` | `type_env.zig` | The capsule mechanism works. Keep it. |
+| A non-literal `R` extracts zero names and is indistinguishable from "no annotation"; no diagnostic | `spec_discharge.zig`; `contract_builder.zig` | Fail-open. The one hole that lets an unchecked program claim conformance. |
+| `Proof<T, P>`'s `P` **is** defined in code: `CapsuleProperty = { total, pure, read_only, deterministic }` | `spec_discharge.zig` | The spec's "P is undefined" gap is a *spec* gap, not a code gap. |
+| `CapsuleFacts.holds` returns false for every property when `recursive` | `spec_discharge.zig` | Matches spec 5.6: recursion yields no totality claim without a decreasing argument. |
+| Flow labels exist: 7 `DataLabel` members, `LabelSet` with `mergeConditional` AND-ing `validated` | `module_binding.zig`; `flow_checker.zig` | The `assert`-on-`user_input` rule has its analysis already. |
 
 ---
 
@@ -47,16 +47,16 @@ sqlite  filesystem  network  policy_check  websocket
 ```
 
 `spec_discharge.effect_capability_names` already derives the `Effects<...>`
-vocabulary from this enum by `@typeInfo` (`spec_discharge.zig:593-598`), so
+vocabulary from this enum by `@typeInfo` (`spec_discharge.zig`), so
 source spelling and enum cannot drift. The spec's example row
 `"env" | "network"` is already valid under it.
 
 **Consequences to fix as part of adopting it:**
-- `rule_registry.zig:518` (the ZTS504 help string) lists 10 names and omits
+- `rule_registry.zig` (the ZTS504 help string) lists 10 names and omits
   `websocket`. Generate the help text from the enum instead of hand-listing.
-- `module_binding.zig:1244-1246` documents these as "not affecting handler-level
+- `module_binding.zig` documents these as "not affecting handler-level
   effect classification", which stopped being true at
-  `effect_inference.zig:478-479`. Delete the stale comment.
+  `effect_inference.zig`. Delete the stale comment.
 
 **Row atoms are capabilities only.** The five booleans on `EffectRow`
 (`deterministic`, `pure`, `recursive`, `has_egress`, `writes`) are **derived
@@ -65,7 +65,7 @@ are never written in an `Effects<...>` annotation, and they never appear in a
 digest of a row. Keeping them off the atom set is what lets the row be a plain
 set with a set join.
 
-**Row join** is `EffectRow.merge` (`effect_inference.zig:59-68`) unchanged:
+**Row join** is `EffectRow.merge` (`effect_inference.zig`) unchanged:
 capabilities union, `deterministic`/`pure` AND, the rest OR. It is already the
 lattice join the spec's "join of the callback's row and its operands' rows"
 (rev 4, 6.1) requires.
@@ -88,7 +88,7 @@ annotations that are wrong on their face, which is worse than no annotation.
 `required_capabilities: []const ModuleCapability = &.{}` alongside its existing
 `effect: EffectClass`. `effect_inference.handleCall` resolves the **export**
 (it already calls `builtin_modules.findExport` for `EffectClass` at
-`:531-536`) and unions that export's set.
+`effect_inference.zig`) and unions that export's set.
 
 **Migration is incremental and fail-closed.** A binding whose exports declare no
 capabilities keeps the module-level set as the per-export default, so nothing
@@ -99,7 +99,7 @@ subset of its module's declared set, so a tightening can never widen authority
 by accident.
 
 **`zttp-ext:` partner modules contribute the empty set today** because the union
-is guarded by `builtin_modules.fromSpecifier` (`effect_inference.zig:477`) while
+is guarded by `builtin_modules.fromSpecifier` (`effect_inference.zig`) while
 `EffectClass` comes from the partner registry. That is a fail-open hole in the
 authority story: an extension module's calls carry no capabilities at all. Fix
 with the same change — resolve capabilities from whichever registry resolved the
@@ -148,9 +148,9 @@ propagation, once `pure` stops being cleared by capability-free module calls
 
 **Function scope.** `EffectRow.pure` is redefined as
 `capabilities.count() == 0 and !writes and deterministic`. Today it is cleared
-unconditionally by any imported call (`effect_inference.zig:481`), which makes
+unconditionally by any imported call (`effect_inference.zig`), which makes
 `escapeHtml` impure and is why the flag cannot be used as the callback test. The
-`Date.now`/`Math.random` clearing (`:470`) is subsumed by `deterministic`.
+`Date.now`/`Math.random` clearing (`effect_inference.zig`) is subsumed by `deterministic`.
 
 **Consequence to accept:** `Proof<T, "pure">` becomes provable for more
 functions than today. That is the point — the current flag is not the property
@@ -170,15 +170,15 @@ the third needs a type-system change.
 **I1 — collect nested functions.** `collectFunctionsIn` recurses into function
 bodies, so a function declared inside another becomes its own unit with its own
 row, and the enclosing function gets a call edge to it. Today its effects vanish
-(`:236-262`, `:356-358`). Local named functions are admitted by the profile
+(`effect_inference.zig`). Local named functions are admitted by the profile
 (spec 5.5 statement set), so this is not a hypothetical.
 
 **I2 — closures bound to a local `const` are units.** Same fix, same reason:
 `const isDone = (t) => ...` inside a body is collected rather than skipped at
-`:352`.
+`effect_inference.zig`.
 
 **I3 — calls through function-typed values.** The callee-must-be-an-identifier
-guard (`:474`) silently under-approximates. The fix follows the spec rather than
+guard (`effect_inference.zig`) silently under-approximates. The fix follows the spec rather than
 inventing row variables:
 
 - **Function types carry an effect ceiling.** A `FunctionType` whose return type
@@ -204,20 +204,20 @@ checker, not a signature the source type system has to express. Same for
 ## 5. Decision: `Effects<T, R>` and `Proof<T, P>` keep their mechanism, lose their fail-open
 
 **Keep.** The built-in-alias expansion to `T & { __zttp_effect__: R }`
-(`type_env.zig:218-247`) with erasure via `stripProofMarkers` (`:769-791`) is a
+(`type_env.zig`) with erasure via `stripProofMarkers` (`type_env.zig`) is a
 working transparent capsule that costs no runtime representation. It stays, and
 this doc is the statement that it is intentional rather than incidental.
 
 **`R` is a closed literal union of atom names**, resolved through alias refs
-(`collectLiteralUnionStrings`, `type_env.zig:858-886`). Three fail-open holes
+(`collectLiteralUnionStrings`, `type_env.zig`). Three fail-open holes
 close:
 
 1. **A non-literal `R` is an error**, not zero names. Today
    `Effects<T, SomeComputedThing>` extracts nothing and is indistinguishable
-   from no annotation (`spec_discharge.zig:627`). New diagnostic:
+   from no annotation (`spec_discharge.zig`). New diagnostic:
    `effect_ceiling_not_literal`.
 2. **An all-invalid budget no longer suppresses the budget check**
-   (`contract_builder.zig:938`). ZTS504 fires per bad name **and** the budget
+   (`contract_builder.zig`). ZTS504 fires per bad name **and** the budget
    check proceeds against the empty ceiling, so an over-budget capability still
    reports.
 3. **An exported function with a nonempty inferred row and no ceiling is an
@@ -227,17 +227,17 @@ close:
    always-on check whose repair is computed from the inferred row.
 
 **`P`'s domain is `CapsuleProperty`, and the spec adopts it.** The four members
-`{ total, pure, read_only, deterministic }` (`spec_discharge.zig:475-484`) are
+`{ total, pure, read_only, deterministic }` (`spec_discharge.zig`) are
 already checked against `CapsuleFacts` derived from the row plus
 `functionAlwaysReturns`. The spec's open question ("what does `P` range over")
 is answered by the code; the spec text should be amended to name this enum.
 `CapsuleFacts.holds` returning false for every property under `recursive`
-(`:504-506`) is exactly spec 5.6's "no runtime stack cap may be presented as a
+(`spec_discharge.zig`) is exactly spec 5.6's "no runtime stack cap may be presented as a
 termination proof" and needs no change.
 
 **Direction asymmetry stays and gets documented in the spec:** `Effects` checks
 `inferred ⊆ declared`; `Proof`/`Spec` check `declared ⇒ proven`
-(`spec_discharge.zig:582-588`).
+(`spec_discharge.zig`).
 
 ---
 
@@ -248,7 +248,7 @@ ingress-derived. The analysis exists and needs no design: `DataLabel` has 7
 members, `LabelSet.mergeConditional` AND-s `validated` so an unvalidated branch
 cannot launder it, request parameters are seeded `user_input`, and unknown
 callee shapes fail closed with the union of receiver and argument labels
-(`flow_checker.zig:1277-1287`).
+(`flow_checker.zig`).
 
 **The rule:** `assert e;` is an error when `labelsOf(e)` contains `user_input`
 and does not contain `validated`. Exact repair: `if (!e) { return err(...); }`.
@@ -294,5 +294,5 @@ doc consumes the analysis; it does not redesign it.
 - Per-argument capability refinement (a call's capabilities depending on which
   literal argument it receives).
 - `has_egress`'s dead seed: the row's egress bit keys on a `fetchSync` export
-  that does not exist (`effect_inference.zig:485-489`); handler-level egress is
+  that does not exist (`effect_inference.zig`); handler-level egress is
   computed elsewhere. Harmless, worth a cleanup ticket.

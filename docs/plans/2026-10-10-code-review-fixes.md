@@ -20,13 +20,13 @@ Each unit is one commit. Unit letters name the implementer group.
 
 ### U1 (group A): a failable call in an `if` condition counts as walked
 
-Finding 0. `scanUnseenFailableCalls` (`packages/zts/src/path_generator.zig:532`)
+Finding 0. `scanUnseenFailableCalls` (`packages/zts/src/path_generator.zig`)
 puts only `io_stubs[*].call_site` in `seen`. A call used directly as an `if`
 condition, such as `if (!verifyWebhookSignature(b, s, sig)) return 401`, is
 never in `io_seq`: `walkPaths` runs `trackModuleCall` only for `var_decl`
 initializers and `expr_stmt`. `extractBooleanCallConstraint` still gives the
 call a `stub_truthy` or `stub_falsy` constraint with `call_site` set to the call
-node, and `FaultCoverageChecker.analyze` (`fault_coverage.zig:276`) counts and
+node, and `FaultCoverageChecker.analyze` (`fault_coverage.zig`) counts and
 covers a site from its constraints. The scan therefore lists a site that the
 checker counted, and `fault_covered` drops. R4 F5 gave `verifyWebhookSignature`,
 `cacheSet`, `signal`, and `signalAt` a severity, so this now fires on the
@@ -51,7 +51,7 @@ Tests (in `path_generator.zig` or `fault_coverage.zig`, through
 
 ### U2 (group A): ok-record stubs carry `ok`
 
-Finding 2. `okRecordStub` and `statusStub` (`packages/zts/src/status_check.zig:180-215`)
+Finding 2. `okRecordStub` and `statusStub` (`packages/zts/src/status_check.zig`)
 emit `{"status":...,"statusText":...,"headers":{},"body":...}` with no `ok`.
 Only `fetch` replays through `runtime_http`, which derives `ok` from `status`.
 `fetchWithRetry` and `serviceCall` are ok-record exports that replay through
@@ -59,7 +59,7 @@ Only `fetch` replays through `runtime_http`, which derives `ok` from `status`.
 undefined and the success path takes the failure branch.
 
 Fix: emit `"ok":true` or `"ok":false` in every ok-record stub, after
-`statusText`, matching the shape at `zruntime_tests.zig:3968`. The value is
+`statusText`, matching the shape at `zruntime_tests.zig`. The value is
 `isOkStatus(status)`. First confirm by reading `runtime_http.zig` that the fetch
 replay path ignores a stub `ok` field or agrees with it. Update the doc comment
 of `okRecordStub`. Update every pinned copy of the old strings
@@ -76,7 +76,7 @@ false.
 
 ### U3 (group A): a path with no satisfying request or stub is not emitted
 
-Finding 3. `applyStatusTests` (`path_generator.zig:2128`) keeps the old stub
+Finding 3. `applyStatusTests` (`path_generator.zig`) keeps the old stub
 when `chooseStatus` returns null, and `emitTestCase` still emits the path. The
 generated test then expects a status the stub cannot produce.
 
@@ -101,12 +101,12 @@ Tests:
 
 ### U4 (group A): `!==` on `req.method` and `req.url` constrains the false side
 
-Finding 4. `negateConstraint` (`path_generator.zig:1801`) returns null for
+Finding 4. `negateConstraint` (`path_generator.zig`) returns null for
 `req_method` and `req_url`. So `req.method !== "POST"` has no constraint where
 it is false, and every path after the guard `if (req.method !== "POST") return 405`
 sends `GET`.
 
-Fix, following `counterexample.zig:72-73` and `solveRequest` (`:251`):
+Fix, following `counterexample.zig` and `solveRequest` (`counterexample.zig`):
 - Add `req_method_not` and `req_url_not` to `path_generator.Constraint`.
   `negateConstraint` maps `req_method` and `req_method_not` to each other, and
   the same for `req_url`. `negateConstraint` then never returns null for these
@@ -135,10 +135,10 @@ Tests:
 
 Findings 5, 6, 7.
 
-5: `FaultCoverageInfo.isCovered` (`contract_types.zig:609`) includes
+5: `FaultCoverageInfo.isCovered` (`contract_types.zig`) includes
 `unseen_calls` but not path exhaustiveness or route-dispatch resolution, and
 `unseen_calls` is not serialized. The written `faultCoverage.isCovered` and
-`report.zig:159` `clean` can say true while `properties.fault_covered` is
+`report.zig` `clean` can say true while `properties.fault_covered` is
 false, and a decode-then-encode round trip can flip `isCovered`.
 
 Fix 5:
@@ -147,17 +147,17 @@ Fix 5:
   `covered == total_failable and total_failable > 0 and unseen_calls == 0 and analysis_complete`.
 - Both stamping sites set it from `faultAnalysisComplete()`.
 - `contract_json_parser.zig` reads the serialized `isCovered` (use the same
-  versioned key that `contract_json_writer.zig:797` writes through
+  versioned key that `contract_json_writer.zig` writes through
   `contractKey`) and restores `analysis_complete = isCovered or !(covered == total_failable and total_failable > 0)`.
   A decoded contract then writes the same `isCovered` that was read. A missing
   `isCovered` restores `analysis_complete = true`.
 - The writer output does not change shape: no new JSON key.
 
-6: the compile path (`precompile.zig:3065-3082`) sets `contract.fault_coverage`
+6: the compile path (`precompile.zig`) sets `contract.fault_coverage`
 only when `total_failable > 0` and never sets
 `property_provenance.fault_covered`. The check path
-(`analyzeHandlerPaths`, `precompile.zig:1607-1655`, and its stamping at
-`:2260-2283`) sets both.
+(`analyzeHandlerPaths`, `precompile.zig`, and its stamping at
+`precompile.zig`) sets both.
 
 Fix 6: extract the fault part of `analyzeHandlerPaths` (checker run, the
 `FaultCoverageInfo`, `fault_clean`, the unseen cause and its owned snippet)
@@ -169,7 +169,7 @@ condition), and sets `property_provenance.fault_covered` and
 check path writes `fault_coverage`; that would change every contract of a
 handler with no failable call.
 
-7: `zts check` text output (`precompile_check.zig:549`) prints
+7: `zts check` text output (`precompile_check.zig`) prints
 `Fault coverage: covered/total paths covered` from counts that exclude unseen
 calls, omits the line when `total` is 0, and the Properties block has no
 `fault_covered` line.
@@ -194,7 +194,7 @@ Tests:
 
 ### U6 (group B): read imported helpers at the revision under analysis
 
-Finding 1. `analyzeHandler` (`packages/runtime/src/proofs/pr_gate.zig:776`)
+Finding 1. `analyzeHandler` (`packages/runtime/src/proofs/pr_gate.zig`)
 checks the base source of a handler, but `collectImportedFailableCalls` and
 `collectImportedFnSummaries` read every imported helper from the working tree
 (`readFilePosix`). A PR that adds an unchecked `fetch` to `./lib.ts` therefore
@@ -229,8 +229,8 @@ changes. The gate reports the `fault_covered` true-to-false change.
 
 ### U7 (group B): one loader for an imported file
 
-Finding 9 (cleanup). `scanImportedFileTree` (`precompile.zig:694`) and
-`importedFunctionSummary` (`:784`) repeat the read, `PreparedSource`, parse,
+Finding 9 (cleanup). `scanImportedFileTree` (`precompile.zig`) and
+`importedFunctionSummary` (`precompile.zig`) repeat the read, `PreparedSource`, parse,
 and `buildModuleFacts` sequence. Extract one loader that both call, and that
 takes the U6 reader. The loader owns the source, the prepared source, the atom
 table, the parser, and the module facts, and is initialized in place because
@@ -241,9 +241,9 @@ walker; a shared cache is out of scope.
 
 Finding 8 is accepted as a comment defect only. When building the error value
 itself fails with `OutOfMemory`, `rateErrorResult` propagates the error, which
-the success path at `ratelimit.zig:236` also does with its own `try
+the success path at `ratelimit.zig` also does with its own `try
 sdk.createObject`. Returning `undefined` again would bring back the shape that
-R4 F6 removed. Change the comment at `ratelimit.zig:213` to say that every
+R4 F6 removed. Change the comment at `ratelimit.zig` to say that every
 failure is an error Result unless the error value cannot be allocated.
 
 ## Verification
@@ -262,7 +262,7 @@ These override the unit text above where they disagree.
 R1 (U3, Fable 1). Only `req_method` conflicts make a path infeasible: two
 different `req_method` values, or a `req_method` equal to a `req_method_not` on
 one path. `req_url` stands for both `req.url` and `req.path`
-(`path_generator.zig:1634`, `:1658`), which the runtime keeps distinct, so a
+(`path_generator.zig`), which the runtime keeps distinct, so a
 `req_url` conflict is not evidence of infeasibility. `req_url` keeps last-wins.
 When no `req_url` is on the path, `url` is a value that differs from every
 `req_url_not` value.
@@ -271,11 +271,11 @@ R2 (U1, Fable 2). Add `pub fn countedSite(self: Constraint) ?StubInfo` on
 `path_generator.Constraint`: the `StubInfo` for `stub_truthy`, `stub_falsy`,
 `result_ok`, and `result_not_ok`, and null for every other variant (an
 exhaustive switch, no `else`). `FaultCoverageChecker.analyze`
-(`fault_coverage.zig:276-285`) and the U1 scan both use it, so the set the
+(`fault_coverage.zig`) and the U1 scan both use it, so the set the
 scan treats as walked is exactly the set the checker counts. `status_is` is not
 in it.
 
-R3 (U4, Fable 3). `dupePathCondition` (`path_generator.zig:133`) maps
+R3 (U4, Fable 3). `dupePathCondition` (`path_generator.zig`) maps
 `req_method_not` and `req_url_not` to null, as it maps `status_is`.
 `PathCondition.Kind` does not change, and contract bytes do not gain a kind.
 
@@ -284,7 +284,7 @@ it, so the compiler names each one. Document on the field that after a decode a
 false value cannot be told apart from `unseen_calls > 0`.
 
 R5 (U6, Fable 5). A PR that changes only an imported helper is still not
-analyzed: `changedHandlers` (`pr_gate.zig:543`) lists only changed files, and
+analyzed: `changedHandlers` (`pr_gate.zig`) lists only changed files, and
 the helper classifies as a non-handler. U6 does not fix that. Record it in the
 U6 commit message and in `docs/roadmap.md` as a known gap of the gate.
 
@@ -301,14 +301,14 @@ starts with `..`, and runs `git show <ref>:./<rel>` with `cwd` as the git
 working directory. A refusal or a failed `git show` is the existing blocked or
 unresolved answer.
 
-R8 (U5, Fable 8). `proof_trace.zig:583` branches on `!paths_exhaustive` for the
+R8 (U5, Fable 8). `proof_trace.zig` branches on `!paths_exhaustive` for the
 "not exhaustive" summary. It branches on `!fc.analysis_complete` instead, with
 text that covers an unresolved route dispatch too.
 
 R9 (U8, Fable 9). U8 is done: commit `b738b911`.
 
 R10 (version, Fable). `path_analyzer_version` stays 3. The paragraph for 3 at
-`path_generator.zig:195-203` is amended to describe the fixed analysis: a
+`path_generator.zig` is amended to describe the fixed analysis: a
 failable call that a path condition tests is walked, an infeasible path is not
 emitted, and negative request constraints. The direction argument for the
 commit message: a pre-fix version 3 artifact under-claims `fault_covered`

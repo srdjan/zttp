@@ -20,6 +20,10 @@ tags:
   - vacuous-check
   - fail-open
   - verification
+binds:
+  - scripts/check-runtime-purity.sh
+  - scripts/check-docs-drift.sh
+  - build/packages.zig
 ---
 
 # A gate that counts nothing still reports a pass
@@ -40,7 +44,7 @@ Two scripts in this repo already carry the remedy locally. Neither states it as 
 
 **A gate asserts a floor on its own input before it trusts a count taken over that input.**
 
-`scripts/check-runtime-purity.sh` is the model, and it carries two floors rather than one. Before it reads the binary at all it checks its own marker list against the client directories under `packages/pi/src/providers/`, so a provider family that has a client and no marker fails instead of going unexamined (`:46-61`, whose comment says why: "a family added later is checked by nothing and this gate reports a pass over a binary it never examined for it"). Then, per family, it requires at least one marker to have matched before it reports anything (`:89-92`):
+`scripts/check-runtime-purity.sh` is the model, and it carries two floors rather than one. Before it reads the binary at all it checks its own marker list against the client directories under `packages/pi/src/providers/`, so a provider family that has a client and no marker fails instead of going unexamined (`scripts/check-runtime-purity.sh`, whose comment says why: "a family added later is checked by nothing and this gate reports a pass over a binary it never examined for it"). Then, per family, it requires at least one marker to have matched before it reports anything (`scripts/check-runtime-purity.sh`):
 
 ```bash
 if [ "$present" -eq 0 ]; then
@@ -51,7 +55,7 @@ if [ "$present" -eq 0 ]; then
 
 The four shapes below are that rule applied to four different kinds of gate.
 
-**A frozen corpus must be covered by the hash that guards it.** `range.negative_corpus` holds the prompts that must fall outside the stand-in's declared range, and it is the only thing asserting the range does not silently grow. It sat outside `contentHash()`, so emptying it changed no published number, while both gates looping over it fell to zero iterations and printed `0/4` as `0/0`. Fix: hash the corpus alongside the entries it guards (`packages/pi/src/standin/range.zig:247-248`, inside `contentHash()` at `:229`, over the corpus declared at `:117`), and assert a floor before trusting any count over it (`try testing.expect(range.negative_corpus.len >= 4);`).
+**A frozen corpus must be covered by the hash that guards it.** `range.negative_corpus` holds the prompts that must fall outside the stand-in's declared range, and it is the only thing asserting the range does not silently grow. It sat outside `contentHash()`, so emptying it changed no published number, while both gates looping over it fell to zero iterations and printed `0/4` as `0/0`. Fix: hash the corpus alongside the entries it guards (`packages/pi/src/standin/range.zig`, inside `contentHash()` at `packages/pi/src/standin/range.zig`, over the corpus declared at `packages/pi/src/standin/range.zig`), and assert a floor before trusting any count over it (`try testing.expect(range.negative_corpus.len >= 4);`).
 
 **A hand-written case list must be tied to the table it covers.** The stand-in's sequence gate is the only check on tool ordering and the at-most-one-edit rule, and it drove a literal array of six rows. A seventh range entry would have had no row, escaped the check, and left the gate reporting success. Fix is one line:
 

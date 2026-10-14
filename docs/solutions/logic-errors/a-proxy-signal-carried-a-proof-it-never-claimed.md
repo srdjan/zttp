@@ -31,7 +31,7 @@ tags:
 
 ## Problem
 
-`exportReadsVaryingSource` (`packages/zts/src/flow_checker.zig:903`) decided whether a virtual-module call returns a value that can differ between runs. It answered by looking at the export's capability set: `.clock` or `.random` present means varying, anything else means stable.
+`exportReadsVaryingSource` (`packages/zts/src/flow_checker.zig`) decided whether a virtual-module call returns a value that can differ between runs. It answered by looking at the export's capability set: `.clock` or `.random` present means varying, anything else means stable.
 
 That is a proxy. It is a good proxy for `Date.now`-shaped non-determinism and no proxy at all for the other kind, a read from state some other request wrote. `zttp:sql` declares `.sqlite` and `.policy_check` and no clock, so `sqlOne` and `sqlMany` answered "stable" and a handler returning a database row proved `deterministic`.
 
@@ -65,7 +65,7 @@ function handler(req: Request): Response {
 
 ## Solution
 
-`stateful` plus a `.read` effect is the test for "another request could have written what this returns" (`packages/zts/src/flow_checker.zig:922`):
+`stateful` plus a `.read` effect is the test for "another request could have written what this returns" (`packages/zts/src/flow_checker.zig`):
 
 ```zig
 fn exportReadsVaryingSource(
@@ -84,7 +84,7 @@ fn exportReadsVaryingSource(
 
 It selects exactly six exports - `cacheGet`, `cacheStats`, `sqlOne`, `sqlMany`, `getWebSockets`, `deserializeAttachment` - and excludes `zttp:validate`, whose exports are `.none` or `.write`. The `.write`-effect workflow modules are excluded with it: a `durable.step` result is recorded and replayed, so it is identical on every run.
 
-The label still only costs the property when it reaches the response sink (`packages/zts/src/flow_checker.zig:2002`), which is the rule item 2b established. A `sqlMany` result that reaches a log and stops keeps `deterministic`.
+The label still only costs the property when it reaches the response sink (`packages/zts/src/flow_checker.zig`), which is the rule item 2b established. A `sqlMany` result that reaches a log and stops keeps `deterministic`.
 
 Verified on the full gate:
 

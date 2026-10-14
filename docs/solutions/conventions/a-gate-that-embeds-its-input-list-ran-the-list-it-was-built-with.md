@@ -60,7 +60,7 @@ proof_checker_mutants_cmd.addDirectoryArg(proof_checker_dep.path(""));
 proof_checker_mutants_cmd.addFileArg(tools_dep.path("src/proof_checker_mutants.zon"));
 ```
 
-The runner takes the path (`packages/tools/src/proof_checker_mutants.zig:74`) and loads it into an arena before anything else runs (`:77-79`). `loadList` reads the file and parses it into the same typed schema the `@import` used (`:564-574`):
+The runner takes the path (`packages/tools/src/proof_checker_mutants.zig`) and loads it into an arena before anything else runs (`packages/tools/src/proof_checker_mutants.zig`). `loadList` reads the file and parses it into the same typed schema the `@import` used (`packages/tools/src/proof_checker_mutants.zig`):
 
 ```zig
 fn loadList(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const Mutant {
@@ -76,11 +76,11 @@ fn loadList(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const Mut
 }
 ```
 
-The argument for this shape does not need the cache mechanism. Whatever binary the build hands to the Run step, that binary opens the list in the tree and parses it. A stale runner can no longer carry a stale list, because the list is not in the runner. The `var mutants` declaration and the comment above it state the measurement that motivated the change (`:17-20`).
+The argument for this shape does not need the cache mechanism. Whatever binary the build hands to the Run step, that binary opens the list in the tree and parses it. A stale runner can no longer carry a stale list, because the list is not in the runner. The `var mutants` declaration and the comment above it state the measurement that motivated the change (`packages/tools/src/proof_checker_mutants.zig`).
 
-**Keep the typed schema when the input moves to run time.** The `Mutant` struct (`:9-15`) is the same one the `@import` filled. A malformed row now fails at load with a location instead of at compile time, and `Diagnostics` prints it. The floor over the loaded list is unchanged: an empty list fails (`:272-274`), and every row must carry an id, an anchor, a valid file, and a non-empty equivalent reason where it claims one (`:277-292`).
+**Keep the typed schema when the input moves to run time.** The `Mutant` struct (`packages/tools/src/proof_checker_mutants.zig`) is the same one the `@import` filled. A malformed row now fails at load with a location instead of at compile time, and `Diagnostics` prints it. The floor over the loaded list is unchanged: an empty list fails (`packages/tools/src/proof_checker_mutants.zig`), and every row must carry an id, an anchor, a valid file, and a non-empty equivalent reason where it claims one (`packages/tools/src/proof_checker_mutants.zig`).
 
-**Print the input count on every run.** The runner reports `running {d} rows` before it starts a worker (`:129-132`). That line was the only visible sign that the gate held a different list from the tree. A count that does not match the file you just edited is the earliest and cheapest signal this class gives.
+**Print the input count on every run.** The runner reports `running {d} rows` before it starts a worker (`packages/tools/src/proof_checker_mutants.zig`). That line was the only visible sign that the gate held a different list from the tree. A count that does not match the file you just edited is the earliest and cheapest signal this class gives.
 
 **`has_side_effects` reruns the executable. It does not rebuild it.** The Run step already carried `has_side_effects = true` before the fix (`proof_checker_mutants_cmd.has_side_effects` in `build/proof_gates.zig`). The comment on the invariant drift gate states what that flag covers (the "`has_side_effects` is load-bearing" comment in `build/proof_gates.zig`): a Run step is cached on its executable and its arguments, never on the files the program reads at run time, so a gate that reads files at run time needs the flag to rerun. This document is the other half of that pair. The flag reruns whatever executable the compile step produced, and when the executable itself is stale, rerunning it reruns the stale list. A file argument places the list on the run side, where the flag and the argument tracking both apply.
 
@@ -92,7 +92,7 @@ The three gate conventions this repository already holds cover an input that has
 
 The symptom that exposed it was a reported failure. It could as easily have been a reported pass. Thirteen new rows were written to show that the suite could see thirteen changes to the kernel. Under the stale binary none of them ran, and if the twelve deleted rows had still matched the source, the gate would have printed a green report over a list nobody could find in the repository. That report would then have been cited as evidence that the new rows were killed. A stale gate does not fail loudly. It answers yesterday's question with today's confidence.
 
-The same gate had already learned a narrower version of this lesson on the day it was introduced. `docs/internals/testing.md:340-341` records that a reused cache gave stale verdicts at the mutant level, which is why each row now compiles with its own `--cache-dir` (`packages/tools/src/proof_checker_mutants.zig:360-369`). That fix moved the cache one level down and left the level above it, the runner's own build, untouched.
+The same gate had already learned a narrower version of this lesson on the day it was introduced. `docs/internals/testing.md:340-341` records that a reused cache gave stale verdicts at the mutant level, which is why each row now compiles with its own `--cache-dir` (`packages/tools/src/proof_checker_mutants.zig`). That fix moved the cache one level down and left the level above it, the runner's own build, untouched.
 
 ## When to Apply
 
@@ -120,7 +120,7 @@ The next `zig build test-proof-checker-mutants` fails at load at once:
 
 No rebuild happened between the edit and the failure. The runner read the file it was handed, and the parser refused it with a location. The line was then removed and the list restored. Under the pre-fix `@import`, the same edit would have been a compile error in the runner, subject to whatever the compile step's cache decided to notice.
 
-The compile-versus-run separation, which the same session touched. A hand-run of the one row that did not compile, made by a subagent as `zig test` over the mutated copy, reported that mutant as killed. A compile error and a failing test both exit nonzero, and the hand-run read the exit code as a kill. The runner does not make that mistake. It compiles the suite first with `--test-no-exec` and `-femit-bin` (`packages/tools/src/proof_checker_mutants.zig:365-369`), classifies a nonzero exit there as `no_compile` (`:383-388`), and only then runs the emitted binary and reads killed or survived from its exit (`:390-405`). The header comment states the reason (`:3-5`). The general rule, that a probe which does not compile has run no check, is in [difference is not the claim, and a probe must compile](difference-is-not-the-claim-and-a-probe-must-compile.md); the runner is that rule built into the harness so a reviewer does not have to remember it per row.
+The compile-versus-run separation, which the same session touched. A hand-run of the one row that did not compile, made by a subagent as `zig test` over the mutated copy, reported that mutant as killed. A compile error and a failing test both exit nonzero, and the hand-run read the exit code as a kill. The runner does not make that mistake. It compiles the suite first with `--test-no-exec` and `-femit-bin` (`packages/tools/src/proof_checker_mutants.zig`), classifies a nonzero exit there as `no_compile` (`packages/tools/src/proof_checker_mutants.zig`), and only then runs the emitted binary and reads killed or survived from its exit (`packages/tools/src/proof_checker_mutants.zig`). The header comment states the reason (`packages/tools/src/proof_checker_mutants.zig`). The general rule, that a probe which does not compile has run no check, is in [difference is not the claim, and a probe must compile](difference-is-not-the-claim-and-a-probe-must-compile.md); the runner is that rule built into the harness so a reviewer does not have to remember it per row.
 
 ## Related Issues
 

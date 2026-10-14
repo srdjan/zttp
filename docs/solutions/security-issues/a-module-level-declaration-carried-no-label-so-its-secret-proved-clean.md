@@ -22,6 +22,9 @@ tags:
   - fail-open
   - module-scope
   - soundness
+binds:
+  - packages/zts/src/flow_checker.zig
+proves: zig build test-zts
 ---
 
 # A module-level declaration carried no label, so its secret proved clean

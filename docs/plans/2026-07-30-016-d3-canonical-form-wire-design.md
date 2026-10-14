@@ -18,17 +18,17 @@ method taxonomy.
 
 | Fact | Location | Consequence |
 |---|---|---|
-| **No formatter or pretty-printer exists anywhere.** Every rewrite splices byte spans into otherwise-verbatim source | `canonicalize.zig:719-757, 846-891`; repo-wide grep | The spec's "canonical ... unique to the byte" has no implementation. **Largest single cost in this doc.** |
-| Line-keyed rewrites reject any replacement containing a newline | `canonicalize.zig:725` | Multi-line idiom rewrites need the span path, not the line path. |
-| Two disjoint rewrite representations (`Refactor` line-keyed with a string `kind`; `StatementRewrite` span-keyed with a typed intent) | `canonicalize.zig:13-20, 793-813` | Three parallel repair vocabularies exist; the spec assumes one. |
-| Normalize loop: 64 iterations max, terminates on a strictly decreasing canonical-band count, **no idempotence check** | `canonicalize.zig:2245-2367, 2160` | Confluence is asserted in a comment (`:2238-2244`), never verified. |
-| `original_line` is never serialized to JSON | `canonicalize.zig:2581-2610` | A JSON consumer cannot re-validate staleness — the spec's repair binding requires it. |
-| Every hash is SHA-256, wire form `bytesToHex(.lower)`; policy hash uses a canonical field-wise pre-image, contract hash uses the serialized JSON with fixed key order | `rule_registry.zig:867-903`; `build_receipt.zig:72-74` | Algorithm and encoding are settled. Only pre-images need specifying. |
-| Identifiers are ASCII-only; no numeric separators; no BigInt; unknown escapes copy the byte verbatim; `\`+newline yields a literal newline | `tokenizer.zig:648-654, 431-468`; `parse.zig:3805-3810` | The lexical layer diverges from JS in ways that must be decided, not inherited. |
-| JSX disambiguation is prefix-position only: `<` at expression start is JSX, `<` in infix position is comparison | `parse.zig:1739` | **The spec's TSX comparison requirement (5.8) is already satisfied.** No parser work needed. |
-| `jsx_*` token kinds and `newline` are declared but never produced | `token.zig:96-102, 166-168` | Dead enum members; ASI has no token-level support (but `parse.zig` has `return`-ASI). |
-| `prove-behavior` compares extracted **contracts**, not code or traces | `prove_behavior.zig:106-133` | Usable as a validator method, but blind to pure-computation changes. |
-| Four validated-rewrite notions already exist (snapshot re-validation, edit-simulate veto, band-decreasing gate, signed equivalence receipts) | `canonicalize.zig:770, 2125-2149, 2315-2330`; `pre-rebase:packages/runtime/src/equivalence_probe_lib.zig` | The validator taxonomy has real material to build on. |
+| **No formatter or pretty-printer exists anywhere.** Every rewrite splices byte spans into otherwise-verbatim source | `canonicalize.zig`; repo-wide grep | The spec's "canonical ... unique to the byte" has no implementation. **Largest single cost in this doc.** |
+| Line-keyed rewrites reject any replacement containing a newline | `canonicalize.zig` | Multi-line idiom rewrites need the span path, not the line path. |
+| Two disjoint rewrite representations (`Refactor` line-keyed with a string `kind`; `StatementRewrite` span-keyed with a typed intent) | `canonicalize.zig` | Three parallel repair vocabularies exist; the spec assumes one. |
+| Normalize loop: 64 iterations max, terminates on a strictly decreasing canonical-band count, **no idempotence check** | `canonicalize.zig` | Confluence is asserted in a comment (`canonicalize.zig`), never verified. |
+| `original_line` is never serialized to JSON | `canonicalize.zig` | A JSON consumer cannot re-validate staleness — the spec's repair binding requires it. |
+| Every hash is SHA-256, wire form `bytesToHex(.lower)`; policy hash uses a canonical field-wise pre-image, contract hash uses the serialized JSON with fixed key order | `rule_registry.zig`; `build_receipt.zig` | Algorithm and encoding are settled. Only pre-images need specifying. |
+| Identifiers are ASCII-only; no numeric separators; no BigInt; unknown escapes copy the byte verbatim; `\`+newline yields a literal newline | `tokenizer.zig`; `parse.zig` | The lexical layer diverges from JS in ways that must be decided, not inherited. |
+| JSX disambiguation is prefix-position only: `<` at expression start is JSX, `<` in infix position is comparison | `parse.zig` | **The spec's TSX comparison requirement (5.8) is already satisfied.** No parser work needed. |
+| `jsx_*` token kinds and `newline` are declared but never produced | `token.zig` | Dead enum members; ASI has no token-level support (but `parse.zig` has `return`-ASI). |
+| `prove-behavior` compares extracted **contracts**, not code or traces | `prove_behavior.zig` | Usable as a validator method, but blind to pure-computation changes. |
+| Four validated-rewrite notions already exist (snapshot re-validation, edit-simulate veto, band-decreasing gate, signed equivalence receipts) | `canonicalize.zig`; `pre-rebase:packages/runtime/src/equivalence_probe_lib.zig` | The validator taxonomy has real material to build on. |
 
 ---
 
@@ -68,9 +68,9 @@ every place it silently accepts malformed input an error.**
 | Non-ASCII byte becomes a one-byte `.invalid` token, degrading an identifier into a token run | Error: `non_ascii_identifier`, reported once per run | The current failure mode is unreadable. |
 
 **Cleanup:** delete the seven never-produced `jsx_*` token kinds and the
-never-produced `newline` kind (`token.zig:96-102, 166-168`).
+never-produced `newline` kind (`token.zig`).
 
-**ASI.** Spec 5.5 mandates none; `parse.zig:1024-1031` implements `return`-ASI.
+**ASI.** Spec 5.5 mandates none; `parse.zig` implements `return`-ASI.
 Removal lands in Phase 6 together with the unique-parse-insertion repair
 (§4, method M2), so no program is left without a mechanical fix.
 
@@ -131,14 +131,14 @@ characters. This is already universal in the repo; adopting it needs no change.
 
 **Pre-images** — the part the spec leaves open. Each is a canonical byte string
 built field-wise with `\0` separators and a `\x01` record terminator, the shape
-the policy hash already uses (`rule_registry.zig:867-903`):
+the policy hash already uses (`rule_registry.zig`):
 
 | Digest | Pre-image |
 |---|---|
 | `source_digest` | The source file's **raw bytes**, uncanonicalized. Repair spans are byte offsets into these bytes, so any transformation before hashing would break span binding. |
 | `type_digest` | D1's `canonicalTypeString` (D1 §1). |
 | `policy_hash` | Unchanged: field-wise over `all_rules`. |
-| `semantics_hash` | Unchanged: the registry walk in `semantics.zig:465-535`. |
+| `semantics_hash` | Unchanged: the registry walk in `semantics.zig`. |
 | `module_graph_hash` | New. Canonical serialization of the **resolved** graph: for each module in ascending canonical-path order, `path \0 source_digest \0` then for each import in source order `specifier \0 resolved_kind \0 resolved_target \0`, record-terminated; then the builtin registry hash; then, for each `zttp-ext:` module, `manifest_digest \0 implementation_digest \0`. Ascending path order (not traversal order) makes the digest independent of which entry file was analyzed. |
 | `idiom_table_hash` | New. Field-wise over the idiom registry: `id \0 operation \0 idiomatic \0 superseded \0 precondition \0 rewrite_id-or-sentinel \x01`. |
 | `contract_hash` | Unchanged: SHA-256 of the serialized contract JSON, whose key order is fixed by `writeContractJson`. |
@@ -177,7 +177,7 @@ conditional branch over the same operands), the record-update row, the
 **M4 — declared law.** The rewrite instantiates an algebraic law registered on
 the intrinsics involved, discharged either by the existing SMT mechanism
 (`pre-rebase:packages/zts/src/semantics_smt.zig` with z3, removed in plan 005) or by an audited
-`Law` entry on a `FunctionBinding` (`module_binding.zig:1431-1449`), with the
+`Law` entry on a `FunctionBinding` (`module_binding.zig`), with the
 law's own preconditions carried into the row's precondition column.
 *Covers:* `indexOf(v) !== -1` → `includes(v)` (law: equal for element types
 excluding `NaN`), `find(p) !== undefined` → `some(p)` (law: equal for element
@@ -187,7 +187,7 @@ This is the method the interesting idiom rows need, and it is why every one of
 those rows carries a type-conditioned precondition in the spec table.
 
 **M5 — contract behavioral equivalence.** `prove-behavior`'s contract diff
-(`prove_behavior.zig:106-133`). **Advisory-only.** It compares extracted
+(`prove_behavior.zig`). **Advisory-only.** It compares extracted
 contracts, so it is blind to changes in pure computation the contract does not
 model — a rewrite that preserves every route, condition, response status and IO
 sequence is reported `equivalent` even if it changed arithmetic. A rewrite whose
@@ -241,7 +241,7 @@ vocabulary.
 
 **`original` is serialized.** The spec's binding list requires the original span
 digest or bytes; today `original_line` is dropped at the JSON boundary
-(`canonicalize.zig:2581-2610`), so a client cannot re-validate. Fix.
+(`canonicalize.zig`), so a client cannot re-validate. Fix.
 
 ---
 
@@ -310,7 +310,7 @@ not for an unbuilt operation. The response names the phase that builds it.
 
 **Determinism.** Response JSON on stdout, one object, trailing newline; logs to
 stderr; array order deterministic for identical authenticated inputs (spec 4.8).
-Serialization uses `std.json.Stringify` — `prove_behavior.zig:162-205` already
+Serialization uses `std.json.Stringify` — `prove_behavior.zig` already
 does, and hand-rolled writers are what produced the case inconsistency.
 
 ---

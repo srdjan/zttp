@@ -20,10 +20,10 @@ tags: [zts, sdk, module-state, envelope, zttp-fetch, zttp-service, layout-coinci
 ## Problem
 
 An SDK module (one under `packages/modules/src/`) reads its state with the
-SDK's `getModuleState` (`packages/zttp-sdk/src/context.zig:21`). On the zts
+SDK's `getModuleState` (`packages/zttp-sdk/src/context.zig`). On the zts
 side that goes through `zttpSdkGetModuleState`, which does not return the
 slot's pointer: it reads the slot as an `SdkStateEnvelope` and returns the
-envelope's `user_ptr` (`packages/zts/src/module_binding/bridge.zig:298-335`).
+envelope's `user_ptr` (`packages/zts/src/module_binding/bridge.zig`).
 The zts installers for `zttp:fetch` and `zttp:service` stored a bare pointer
 with `ctx.setModuleState` instead. The module therefore read the first word of
 its own state struct as `user_ptr`, and used whatever that word pointed at as
@@ -53,7 +53,7 @@ exposed the envelope read.
 ## Solution
 
 Install the state through the envelope, as `sql.zig` and `ledger.zig` already
-did (`packages/zts/src/modules/data/sql.zig:27`), and look up an existing state
+did (`packages/zts/src/modules/data/sql.zig`), and look up an existing state
 through `getSdkModuleStatePtr`:
 
 ```zig
@@ -66,8 +66,8 @@ try module_binding.sdk_bridge.installSdkModuleState(ctx, MODULE_STATE_SLOT, @ptr
 
 The deinit becomes a C-ABI `fn (*anyopaque) callconv(.c) void`, and the state
 keeps its own allocator because the envelope passes none. See
-`packages/zts/src/modules/net/fetch.zig:75-110` and
-`packages/zts/src/modules/net/service.zig:48-86`. Fixed on local main in
+`packages/zts/src/modules/net/fetch.zig` and
+`packages/zts/src/modules/net/service.zig`. Fixed on local main in
 commits `7c443a72` (fetch) and `b82fb912` (service). The tests
 `fetchWithRetry without a credential reaches the upstream once` and
 `serviceCall reaches the upstream a system file names` in

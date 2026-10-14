@@ -28,9 +28,9 @@ tags:
 
 ## Problem
 
-A self-extracting Zttp artifact stores the capability policy it will enforce as section 4 of its appended payload. Loading checks the appended payload with CRC-32, while artifact creation writes a freshly computed checksum into the trailer (`packages/runtime/src/self_extract.zig:90-115`, `packages/runtime/src/self_extract.zig:173`). CRC detects accidental corruption, but an attacker who can edit the artifact can change section 4 and recompute the checksum.
+A self-extracting Zttp artifact stores the capability policy it will enforce as section 4 of its appended payload. Loading checks the appended payload with CRC-32, while artifact creation writes a freshly computed checksum into the trailer (`packages/runtime/src/self_extract.zig`). CRC detects accidental corruption, but an attacker who can edit the artifact can change section 4 and recompute the checksum.
 
-The Ed25519 JWS did not commit to those section-4 bytes. Two existing claims sounded related but represented different data: `policySha256` is the diagnostic rule-registry hash, and `capabilityHash` is the contract capability-matrix hash (`packages/runtime/src/attest/build_receipt.zig:80-98`). Neither covered the serialized env names, egress hosts, cache namespaces, or SQL query policy consumed by the deployed runtime.
+The Ed25519 JWS did not commit to those section-4 bytes. Two existing claims sounded related but represented different data: `policySha256` is the diagnostic rule-registry hash, and `capabilityHash` is the contract capability-matrix hash (`packages/runtime/src/attest/build_receipt.zig`). Neither covered the serialized env names, egress hosts, cache namespaces, or SQL query policy consumed by the deployed runtime.
 
 That left a gap between what the attestation vouched for and what the artifact enforced. An attacker could widen the embedded policy, recompute CRC-32, and preserve a valid `Zttp-Attest` envelope.
 
@@ -38,50 +38,50 @@ This was an artifact data-authenticity failure, not a weakness in Ed25519: integ
 
 ## Symptoms
 
-- A modified self-extract payload could pass its checksum because the checksum was recomputable (`packages/runtime/src/self_extract.zig:103-115`).
-- The parsed section-4 policy is wired directly into `dev_capability_policy`, the enforcement source for the appended bytecode (`packages/runtime/src/runtime_cli.zig:706-721`). A successful mutation therefore changed live capability decisions rather than only metadata.
-- The attestation could still verify cryptographically because its existing policy- and capability-named claims described the analyzer registry and capability matrix, not section 4 (`packages/runtime/src/attest/build_receipt.zig:80, :95`).
+- A modified self-extract payload could pass its checksum because the checksum was recomputable (`packages/runtime/src/self_extract.zig`).
+- The parsed section-4 policy is wired directly into `dev_capability_policy`, the enforcement source for the appended bytecode (`packages/runtime/src/runtime_cli.zig`). A successful mutation therefore changed live capability decisions rather than only metadata.
+- The attestation could still verify cryptographically because its existing policy- and capability-named claims described the analyzer registry and capability matrix, not section 4 (`packages/runtime/src/attest/build_receipt.zig`).
 - Older receipts have no runtime-policy commitment. Treating absence as success for a deployed self-extract artifact would preserve the vulnerability.
 
 ## What Didn't Work
 
 ### Relying on CRC-32
 
-CRC-32 is appropriate as an accidental-corruption check, but it is not keyed and provides no authenticity. The same code that validates the checksum also shows why an attacker can satisfy it after changing the payload: the loader compares a plain CRC of the payload with the trailer value (`packages/runtime/src/self_extract.zig:90-112`).
+CRC-32 is appropriate as an accidental-corruption check, but it is not keyed and provides no authenticity. The same code that validates the checksum also shows why an attacker can satisfy it after changing the payload: the loader compares a plain CRC of the payload with the trailer value (`packages/runtime/src/self_extract.zig`).
 
 ### Reusing `policySha256` or `capabilityHash`
 
-Those claims have different meanings. `policySha256` comes from `rule_registry.policyHash()`, while `capabilityHash` comes from `contract.capabilities.hash` (`packages/runtime/src/attest/build_receipt.zig:80, :95`). Reinterpreting either would blur established contracts and still would not bind the exact bytes used by runtime enforcement.
+Those claims have different meanings. `policySha256` comes from `rule_registry.policyHash()`, while `capabilityHash` comes from `contract.capabilities.hash` (`packages/runtime/src/attest/build_receipt.zig`). Reinterpreting either would blur established contracts and still would not bind the exact bytes used by runtime enforcement.
 
 ### Re-deriving or independently re-serializing the policy
 
-Hashing a second encoding of `RuntimePolicy` would introduce two canonical forms that could drift. The signed value must cover the bytes actually written to section 4. The artifact writer now accepts already-serialized bytes and writes them directly, falling back to local serialization for callers that do not supply them (`packages/runtime/src/self_extract.zig:123-131`, `packages/runtime/src/self_extract.zig:277-284`).
+Hashing a second encoding of `RuntimePolicy` would introduce two canonical forms that could drift. The signed value must cover the bytes actually written to section 4. The artifact writer now accepts already-serialized bytes and writes them directly, falling back to local serialization for callers that do not supply them (`packages/runtime/src/self_extract.zig`).
 
 ### Checking only while publishing response headers
 
-Attestation integrity is a startup invariant, not a response-decoration concern. A deployed process must reject a bad artifact before its runtime pool is initialized or any request can be served. The check now runs at the start boundary before prewarming (`packages/runtime/src/server.zig:2137-2140`).
+Attestation integrity is a startup invariant, not a response-decoration concern. A deployed process must reject a bad artifact before its runtime pool is initialized or any request can be served. The check now runs at the start boundary before prewarming (`packages/runtime/src/server.zig`).
 
 ## Solution
 
 ### Add a distinct signed claim
 
-`Claims` now has `runtime_policy_sha256`, a commitment with an all-zero sentinel for callers that cannot pin a section (`packages/runtime/src/attest/envelope.zig:19-30`). The build path supplies a 64-character lowercase-hex digest, signing validates its 64-character length, and payload serialization emits it under the wire key `runtimePolicySha256` (`packages/runtime/src/attest/envelope.zig:100-109`, `packages/runtime/src/attest/envelope.zig:239-281`).
+`Claims` now has `runtime_policy_sha256`, a commitment with an all-zero sentinel for callers that cannot pin a section (`packages/runtime/src/attest/envelope.zig`). The build path supplies a 64-character lowercase-hex digest, signing validates its 64-character length, and payload serialization emits it under the wire key `runtimePolicySha256` (`packages/runtime/src/attest/envelope.zig`).
 
-Verification remains able to parse older JWS payloads: if the field is absent, `parseClaims` supplies the all-zero sentinel (`packages/runtime/src/attest/envelope.zig:327-343`). This is parsing compatibility only; deployed self-extract artifacts are still required to be pinned.
+Verification remains able to parse older JWS payloads: if the field is absent, `parseClaims` supplies the all-zero sentinel (`packages/runtime/src/attest/envelope.zig`). This is parsing compatibility only; deployed self-extract artifacts are still required to be pinned.
 
 ### Serialize once, then sign and embed the same bytes
 
-The build path derives the runtime policy and serializes it before constructing the receipt. It hashes that byte slice with SHA-256, passes the lowercase hex digest to the receipt signer, and then passes the same `policy_section` slice to artifact creation (`packages/runtime/src/build_command.zig:558-583`, `packages/runtime/src/build_command.zig:586-597`). `serializePayload` writes that supplied slice directly as section 4 (`packages/runtime/src/self_extract.zig:277-284`).
+The build path derives the runtime policy and serializes it before constructing the receipt. It hashes that byte slice with SHA-256, passes the lowercase hex digest to the receipt signer, and then passes the same `policy_section` slice to artifact creation (`packages/runtime/src/build_command.zig`). `serializePayload` writes that supplied slice directly as section 4 (`packages/runtime/src/self_extract.zig`).
 
-The receipt builder threads the digest into `Claims`. The dev/live-reload receipt path, which has no self-extract section 4, explicitly uses the all-zero sentinel (`packages/runtime/src/attest/build_receipt.zig:18-42`, `packages/runtime/src/attest/build_receipt.zig:45-61`, `packages/runtime/src/attest/build_receipt.zig:120-134`).
+The receipt builder threads the digest into `Claims`. The dev/live-reload receipt path, which has no self-extract section 4, explicitly uses the all-zero sentinel (`packages/runtime/src/attest/build_receipt.zig`).
 
 ### Hash raw section 4 before deserialization
 
-The self-extract parser hashes `section_data` as soon as it recognizes the policy section and before it deserializes the policy. It returns that digest alongside the parsed policy (`packages/runtime/src/self_extract.zig:305`, `packages/runtime/src/self_extract.zig:341-359`). This makes the comparison about the exact bytes carried by the artifact, independent of the later in-memory representation.
+The self-extract parser hashes `section_data` as soon as it recognizes the policy section and before it deserializes the policy. It returns that digest alongside the parsed policy (`packages/runtime/src/self_extract.zig`). This makes the comparison about the exact bytes carried by the artifact, independent of the later in-memory representation.
 
 ### Fail closed at production startup
 
-The appended-payload configuration carries both the JWS and the parsed section hash into `ServerConfig`, while the parsed policy remains the runtime enforcement source (`packages/runtime/src/runtime_cli.zig:706-721`). During `Server.start`, an attested appended payload must provide the section hash, the JWS must verify, the claim must not be the all-zero sentinel, and the claim must equal the lowercase SHA-256 of the parsed section bytes (`packages/runtime/src/server.zig:1913-1967`, `packages/runtime/src/server.zig:2137-2139`).
+The appended-payload configuration carries both the JWS and the parsed section hash into `ServerConfig`, while the parsed policy remains the runtime enforcement source (`packages/runtime/src/runtime_cli.zig`). During `Server.start`, an attested appended payload must provide the section hash, the JWS must verify, the claim must not be the all-zero sentinel, and the claim must equal the lowercase SHA-256 of the parsed section bytes (`packages/runtime/src/server.zig`).
 
 Failure modes are explicit:
 
@@ -90,18 +90,18 @@ Failure modes are explicit:
 - Changed section bytes: `RuntimePolicyClaimMismatch`.
 - Invalid embedded JWS: `InvalidEmbeddedAttestation`.
 
-The exemption is intentionally narrow: a non-appended dev/live-reload handler has no section 4, so a sentinel receipt remains valid for that path (`packages/runtime/src/server.zig:1924-1945`).
+The exemption is intentionally narrow: a non-appended dev/live-reload handler has no section 4, so a sentinel receipt remains valid for that path (`packages/runtime/src/server.zig`).
 
 ### Cover the security boundary with production-path tests
 
 The tests establish each part of the contract:
 
-- Signing and verifying preserves a pinned runtime-policy hash (`packages/runtime/src/attest/envelope.zig:414-437`).
-- A legacy JWS without the field verifies and yields the sentinel (`packages/runtime/src/attest/envelope.zig:466-488`).
-- The build probe asserts that the hash passed to signing equals the hash of the bytes handed to artifact creation (`packages/runtime/src/build_command.zig:923-971`, `packages/runtime/src/build_command.zig:1105-1110`).
-- Parsing a populated policy reports the SHA-256 of the serialized section supplied to payload assembly (`packages/runtime/src/self_extract.zig:820-840`).
-- The primary regression test signs the original policy, serializes a widened policy containing `evil.example`, parses the self-extract-shaped payload, and asserts that `Server.start()` returns `RuntimePolicyClaimMismatch` (`packages/runtime/src/server.zig:3754-3796`).
-- Additional startup tests reject both an unpinned receipt and an attested appended payload missing its parsed section hash (`packages/runtime/src/server.zig:3796-3825`).
+- Signing and verifying preserves a pinned runtime-policy hash (`packages/runtime/src/attest/envelope.zig`).
+- A legacy JWS without the field verifies and yields the sentinel (`packages/runtime/src/attest/envelope.zig`).
+- The build probe asserts that the hash passed to signing equals the hash of the bytes handed to artifact creation (`packages/runtime/src/build_command.zig`).
+- Parsing a populated policy reports the SHA-256 of the serialized section supplied to payload assembly (`packages/runtime/src/self_extract.zig`).
+- The primary regression test signs the original policy, serializes a widened policy containing `evil.example`, parses the self-extract-shaped payload, and asserts that `Server.start()` returns `RuntimePolicyClaimMismatch` (`packages/runtime/src/server.zig`).
+- Additional startup tests reject both an unpinned receipt and an attested appended payload missing its parsed section hash (`packages/runtime/src/server.zig`).
 
 The required `zig build test-zruntime` and `zig build` gates passed for this work session.
 
@@ -119,13 +119,13 @@ Ed25519-signed JWS
 
 Any change to an env name, egress host, cache namespace, SQL rule, field ordering, or any other serialized byte changes the section digest. Recomputing CRC-32 cannot repair the signed commitment.
 
-Local startup verification proves consistency, not operator identity: the JWS embeds its own public key, so an artifact writer who replaces both section 4 and the JWS can re-sign with a different key and pass self-verification. The guarantee therefore depends on external verifiers pinning or authorizing the expected signing identity (`packages/runtime/src/attest/envelope.zig:6-12`, `packages/runtime/src/attest/envelope.zig:227-236`). Artifacts built without `--attest` remain outside this guarantee (`packages/runtime/src/self_extract.zig:39-42`).
+Local startup verification proves consistency, not operator identity: the JWS embeds its own public key, so an artifact writer who replaces both section 4 and the JWS can re-sign with a different key and pass self-verification. The guarantee therefore depends on external verifiers pinning or authorizing the expected signing identity (`packages/runtime/src/attest/envelope.zig`). Artifacts built without `--attest` remain outside this guarantee (`packages/runtime/src/self_extract.zig`).
 
-Serializing once prevents encoder drift: the build hashes `policy_section` and gives that same slice to artifact creation (`packages/runtime/src/build_command.zig:562-582`, `packages/runtime/src/build_command.zig:586-597`). Hashing the raw parsed section before deserialization closes the other side of the chain (`packages/runtime/src/self_extract.zig:283-302`).
+Serializing once prevents encoder drift: the build hashes `policy_section` and gives that same slice to artifact creation (`packages/runtime/src/build_command.zig`). Hashing the raw parsed section before deserialization closes the other side of the chain (`packages/runtime/src/self_extract.zig`).
 
-Failing on the sentinel is necessary for deployed artifacts because every self-extract artifact has section 4. A sentinel or absent legacy field proves only that no runtime-policy binding was signed. The compatibility default lets older JWS documents parse, while the startup rule prevents them from serving under a false attestation (`packages/runtime/src/attest/envelope.zig:327-343`, `packages/runtime/src/server.zig:1913-1967`).
+Failing on the sentinel is necessary for deployed artifacts because every self-extract artifact has section 4. A sentinel or absent legacy field proves only that no runtime-policy binding was signed. The compatibility default lets older JWS documents parse, while the startup rule prevents them from serving under a false attestation (`packages/runtime/src/attest/envelope.zig`, `packages/runtime/src/server.zig`).
 
-Finally, validation occurs before runtime-pool initialization, so a bad artifact cannot become partially operational (`packages/runtime/src/server.zig:2070-2077`).
+Finally, validation occurs before runtime-pool initialization, so a bad artifact cannot become partially operational (`packages/runtime/src/server.zig`).
 
 ## Prevention
 
@@ -133,13 +133,13 @@ Finally, validation occurs before runtime-pool initialization, so a bad artifact
 - Sign the exact serialized bytes the consumer will parse. Do not maintain a parallel canonical encoder for attestation.
 - Give commitments names that reflect their data. Keep analyzer-policy, capability-matrix, and runtime-policy hashes distinct.
 - For deployed artifacts, distinguish “claim absent” from “claim valid.” Compatibility parsing may default a field, but the security boundary must reject an unpinned value.
-- Keep validation on the real startup path. Regression tests should construct the payload, parse it, initialize `Server`, and call `Server.start()` rather than testing only a private comparison helper (`packages/runtime/src/server.zig:3754-3825`).
+- Keep validation on the real startup path. Regression tests should construct the payload, parse it, initialize `Server`, and call `Server.start()` rather than testing only a private comparison helper (`packages/runtime/src/server.zig`).
 - Preserve both gates for future changes to this chain: `zig build test-zruntime` for runtime regressions and `zig build` for all binaries.
 
 ## Related Issues
 
-- `policySha256` remains the diagnostic rule-registry commitment and must not be treated as a runtime allowlist commitment (`packages/runtime/src/attest/build_receipt.zig:80, :95`).
-- `capabilityHash` remains the contract capability-matrix commitment and does not encode allowlist values (`packages/runtime/src/attest/build_receipt.zig:80, :95`).
-- Dev/live reload intentionally has no section-4 commitment and continues to use the sentinel (`packages/runtime/src/attest/build_receipt.zig:45-61`).
+- `policySha256` remains the diagnostic rule-registry commitment and must not be treated as a runtime allowlist commitment (`packages/runtime/src/attest/build_receipt.zig`).
+- `capabilityHash` remains the contract capability-matrix commitment and does not encode allowlist values (`packages/runtime/src/attest/build_receipt.zig`).
+- Dev/live reload intentionally has no section-4 commitment and continues to use the sentinel (`packages/runtime/src/attest/build_receipt.zig`).
 - [sub-handler-contract-extraction-strict-profile](sub-handler-contract-extraction-strict-profile.md) - the other end of a `RuntimePolicy`'s life. Both derive one through `contractToRuntimePolicy`: this record covers the deployed path, where the policy is serialized, hashed, signed, and embedded as section 4; that one covers in-process dispatch, where it is derived per sub-handler target and never leaves the process.
 - No external issue or pull-request reference was recorded for this solution.

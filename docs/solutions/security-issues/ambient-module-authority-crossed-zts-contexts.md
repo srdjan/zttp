@@ -93,14 +93,14 @@ pub fn popActiveModuleContext(token: ActiveModuleToken) void {
 Both native wrappers and SDK adapters push the receiving Context's scope,
 invoke the module, and restore through the owner-bound token. Independent
 Contexts can therefore restore in a non-global-LIFO order without disturbing
-one another. See `packages/zts/src/module_binding/capabilities.zig:62-148` and
-`packages/zts/src/module_binding_adapter.zig:196-218`.
+one another. See `packages/zts/src/module_binding/capabilities.zig` and
+`packages/zts/src/module_binding_adapter.zig`.
 
 Every bridge authorization also follows the handle. The crypto bridge converts
 its handle to a Context before calling the guarded implementation, while SDK
 module-state reads and writes verify slot ownership against the same handle
 before accessing that Context. See
-`packages/zts/src/module_binding/bridge.zig:260-325`.
+`packages/zts/src/module_binding/bridge.zig`.
 
 Panic recovery has a separate cleanup contract. The failed Context is
 quarantined instead of reused, and `Context.deinit` clears its active scope
@@ -109,7 +109,7 @@ real inner `@panic`, proves the outer Context retains only its own authority,
 asserts that the failed inner Context still holds the exact skipped scope, then
 deinitializes it and checks from a destructor callback that authority was
 already revoked. See
-`packages/runtime/src/module_scope_panic_probe.zig:32-112`.
+`packages/runtime/src/module_scope_panic_probe.zig`.
 
 Making crypto bridge calls handle-bound changed their native ABI. The SDK and
 runtime now use the distinct symbols `zttpSdkSha256WithHandle` and

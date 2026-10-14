@@ -26,6 +26,11 @@ applies_when:
   - "Deciding whether a module export clears, keeps, or re-labels the data passed into it"
   - "Auditing which calls can appear between a secret read and a response"
   - "Reading a PROVEN security property as evidence"
+binds:
+  - packages/zts/src/flow_checker.zig
+  - packages/modules/src/security/validate.zig
+  - packages/modules/src/security/decode.zig
+proves: zig build test-zts
 ---
 
 # validateJson strips the label it was asked to check

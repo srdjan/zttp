@@ -10,7 +10,7 @@ option a, after the code review fixes in
 handler's verdict from `diff.behavioralVerdict()` alone (`analyzeHandler`,
 about line 975). `contract_diff.diffContracts` records every change of a
 monotonic proven property in `diff.effect_changes`
-(`packages/zts/src/contract_diff.zig:640-685`), but the gate never reads it. A
+(`packages/zts/src/contract_diff.zig`), but the gate never reads it. A
 pull request that turns `fault_covered`, `no_secret_leakage`, or any other
 proven property from true to false therefore passes the gate as `equivalent`.
 
@@ -74,7 +74,7 @@ These override the sections above where they disagree.
 
 R1 (policy, owner decision 3). Only a **critical** loss makes the handler
 `breaking`. The critical set is the table in `upgrade_verifier.propertySeverity`
-(`packages/tools/src/upgrade_verifier.zig:92`): `retry_safe`,
+(`packages/tools/src/upgrade_verifier.zig`): `retry_safe`,
 `injection_safe`, `state_isolated`, `no_secret_leakage`,
 `no_credential_leakage`, `fault_covered`, `result_safe`, `optional_safe`.
 Every other lost monotonic boolean (for example `pure`, `read_only`,
@@ -125,7 +125,7 @@ R6 (tests, Fable 6).
   loss, a non-critical loss, a gain, a `max_io_depth` row, and a `cost_class`
   row. Say in the test that the `cost_class` row asserts the projection only.
 - One `run`-level test through a temporary git repo (helpers near
-  `pr_gate.zig:1241-1254`) with the `canonical` capsule fixture: `lib.ts`
+  `pr_gate.zig`) with the `canonical` capsule fixture: `lib.ts`
   gains an unchecked `fetch` and `handler.ts` changes. Assert exit 1, verdict
   `breaking`, `fault_covered` in the Lost proofs block, and that no
   equivalence receipt was written. Confirm the test fails before the change.

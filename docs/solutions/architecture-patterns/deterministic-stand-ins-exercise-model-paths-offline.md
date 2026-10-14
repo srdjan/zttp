@@ -59,31 +59,31 @@ reader to point `ZTTP_MLX_BASE_URL` at a real local model.
 For recorder coverage, send deterministic Anthropic SSE through the production
 client and recording tee, persist the cassette, load it, and replay it. The
 loopback smoke test follows that exact path without credentials
-(`packages/pi/src/expert_codegen_record.zig:162-224`). The shared local server
+(`packages/pi/src/expert_codegen_record.zig`). The shared local server
 knows only how to serve one HTTP response, not how to emulate a provider
-(`packages/pi/src/providers/cassette_record.zig:352-404`).
+(`packages/pi/src/providers/cassette_record.zig`).
 
 For repair coverage, seed a draft the real Veto rejects. Let the compiler author
 the candidate, run that candidate through the full Veto and approval gate, and
 apply it through the normal edit boundary. The result distinguishes this from a
 model retry, and the regression test requires both rejection and the exact
-on-disk repair (`packages/pi/src/loop.zig:200-210`,
-`packages/pi/src/standin_tests.zig:183-206`).
+on-disk repair (`packages/pi/src/loop.zig`,
+`packages/pi/src/standin_tests.zig`).
 
 For typed holes, make the compiler publisher authoritative. A deterministic
 turn must read the current file, call `zts_expert_holes`, parse its frame, call
 `zts_expert_fill_hole` at the published coordinate, and apply the proposal
-(`packages/pi/src/standin/playbook.zig:327-399`). Fill one site, persist it,
+(`packages/pi/src/standin/playbook.zig`). Fill one site, persist it,
 then begin the next turn from the changed file. The two-turn gate proves that
 the second frame describes the first accepted fill and that both expressions
-compose on disk (`packages/pi/src/standin_tests.zig:344-430`).
+compose on disk (`packages/pi/src/standin_tests.zig`).
 
 Keep failure semantics production-shaped too. The publisher reports a failed
 tool result when analysis produces no contract or any compiler errors, instead
 of treating either state as an empty hole set
-(`packages/pi/src/tools/zts_expert_holes.zig:117-145`). A stale, foreign, or
+(`packages/pi/src/tools/zts_expert_holes.zig`). A stale, foreign, or
 ambiguous source has no deterministic seed and must be refused
-(`packages/pi/src/standin/hole_seeds.zig:65-79`).
+(`packages/pi/src/standin/hole_seeds.zig`).
 
 Do not publish model-quality claims from these fixtures. Deterministic runs can
 prove protocol, path, state-transition, and outcome coverage. First-draft pass

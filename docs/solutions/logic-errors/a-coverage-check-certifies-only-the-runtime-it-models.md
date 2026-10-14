@@ -75,22 +75,22 @@ the two agree with tests that run values.
 
 1. **Runtime (U0).** On local `main`, not pushed as of 2026-10-08:
    - Store bindings at every depth of a pattern
-     (`packages/zts/src/parser/codegen.zig:2042`, `emitPatternBindings`, and
-     `:2051`).
+     (`packages/zts/src/parser/codegen.zig`, `emitPatternBindings`, and
+     `packages/zts/src/parser/codegen.zig`).
    - Test the shape of every record and array pattern before reading fields or
      the length. The test is a call to the engine-private global
-     `%matchShape` (`codegen.zig:2193`, `emitShapeTest`;
-     `packages/zts/src/builtins/number.zig:284`), because no opcode names a
+     `%matchShape` (`codegen.zig`, `emitShapeTest`;
+     `packages/zts/src/builtins/number.zig`), because no opcode names a
      value's class. `isRecord` names every object class
-     (`number.zig:295`), so a class added later is not a record by default.
+     (`number.zig`), so a class added later is not a record by default.
    - Refuse a `default` that is not last, and a second `default`, as ZTS062
-     (`packages/zts/src/parser/error.zig:37`).
+     (`packages/zts/src/parser/error.zig`).
    - Refuse a type-test name in a renamed binding or an array element as
-     ZTS001 (`packages/zts/src/parser/parse.zig:1098`).
+     ZTS001 (`packages/zts/src/parser/parse.zig`).
    - Restore `null_node` for a record field `_`. `IrView.getProperty` read the
      value through a 24-bit field, so the "no pattern" marker came back as
      `0xFFFFFF` and the presence test was lost
-     (`packages/zts/src/parser/ir.zig:1915`).
+     (`packages/zts/src/parser/ir.zig`).
 2. **Model (R1).** Rewrite `match_analysis.zig` as a usefulness walk whose
    rules state the runtime as it is after step 1: a record pattern needs a
    record, a field `_` is a presence test, a field binding matches
@@ -98,9 +98,9 @@ the two agree with tests that run values.
    needs an array of the exact length.
 3. **Agreement (R1).** Runtime soundness tests in
    `packages/zts/src/interpreter.zig` run every value of each covered type to
-   an arm and assert that none returns `undefined` (`:4483`, `:4522`,
-   `:4571`). A paired test shows that a match the analysis calls
-   non-exhaustive does fall through to `undefined` (`:4623`).
+   an arm and assert that none returns `undefined` (`packages/zts/src/interpreter.zig`,
+   `packages/zts/src/interpreter.zig`). A paired test shows that a match the analysis calls
+   non-exhaustive does fall through to `undefined` (`packages/zts/src/interpreter.zig`).
 
 ## Why This Works
 

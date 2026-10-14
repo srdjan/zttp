@@ -24,6 +24,10 @@ tags:
   - probes
   - mutation-testing
   - threat-model
+binds:
+  - packages/proof-checker/src/checker.zig
+  - scripts/check-proof-checker.sh
+  - tooling/repo_gate.zig
 ---
 
 # A gate can be non-vacuous and still porous, and only a mutation shows it
@@ -34,16 +38,16 @@ The acceptance kernel in `packages/proof-checker/` decides whether a deployed
 artifact is accepted. One of its decisions is whether the adapter that this
 binary linked is the adapter the artifact's specification needs. That decision
 was once unable to fail. The bridge file states the history in its own header at
-`pre-rebase:packages/runtime/src/invariant_adapter.zig:4-8`: before the file existed, "the
+`pre-rebase:packages/runtime/src/invariant_adapter.zig`: before the file existed, "the
 producer bound that member from `pcc.invariant`'s own constant and the consumer
 compared it against the same function, so an artifact whose specification named
 a kind the linked adapter did not enforce was undetectable: the comparison had
 one source."
 
 The repair gave the comparison two sources. `linked_manifest` is filled field by
-field from the native module at `pre-rebase:packages/runtime/src/invariant_adapter.zig:44-49`,
-`linkedDigest()` hashes that manifest at `:64-66`, and `require()` reads the
-consumer's expectation `pcc.invariant.adapterDigest()` at `:75-79` and compares
+field from the native module at `pre-rebase:packages/runtime/src/invariant_adapter.zig`,
+`linkedDigest()` hashes that manifest at `pre-rebase:packages/runtime/src/invariant_adapter.zig`, and `require()` reads the
+consumer's expectation `pcc.invariant.adapterDigest()` at `pre-rebase:packages/runtime/src/invariant_adapter.zig` and compares
 the two. The bridge file was added by the commit "feat(invariant): bind the
 linked adapter manifest, not the checker's constant". Every commit cited in this
 document is named by its subject and not by its hash, because this history was
@@ -95,8 +99,8 @@ zig build invariant-gate          # writes zig-out/tooling/invariant-drift-gate
 ```
 
 **2. Copy the gate's inputs into an isolated directory.** This gate declares its
-inputs as a table: an `Input` enum at `pre-rebase:packages/tools/src/invariant_drift_gate.zig:52`
-and a `paths` array at `:76` that gives one path per member. It finds its root by
+inputs as a table: an `Input` enum at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`
+and a `paths` array at `pre-rebase:packages/tools/src/invariant_drift_gate.zig` that gives one path per member. It finds its root by
 walking up from the working directory looking for `packages/proof-checker/src/invariant.zig`
 and `build.zig.zon`, in `findRepoRoot`. So a directory that holds those declared
 files plus `build.zig.zon` is a complete, isolated input set, and the binary runs
@@ -117,7 +121,7 @@ exit=0
 **4. Apply one edit, run the real binary, read the exit status.** One edit. Not
 two. A mutation that changes two things cannot tell you which one the gate saw.
 The gate documents its own codes in its usage text at
-`pre-rebase:packages/tools/src/invariant_drift_gate.zig:2912`: 0 accepted, 1 rejected, 2 the
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig`: 0 accepted, 1 rejected, 2 the
 mutation slipped through under `--mutate`, 3 the probe could not find its anchor
 or the repository was not found.
 
@@ -150,7 +154,7 @@ ships exactly such a probe: `probeBridgeScanBlind` rewrites every `pcc.invariant
 to `kern.invariant.` throughout the bridge, which binds nothing and would not
 compile, and its purpose is to make the scan recognise zero reads so the
 `adapter_scan_blind` floor fires. That floor lives at
-`pre-rebase:packages/tools/src/invariant_drift_gate.zig:1492-1505` and exists because, as
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig` and exists because, as
 the comment there says, "a spelling it cannot follow reads as a clean file".
 
 ### What to attack first
@@ -162,13 +166,13 @@ expensive way.
 machinery, and machinery is unprobed on the day it lands. Round 2 introduced the
 bridge region split and the alias resolver. Round 3's five holes were both in
 those two places, which is what its commit message says. The gate's own comment
-now records this at `:1443-1449`: "An earlier version stopped at the first test,
+now records this at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`: "An earlier version stopped at the first test,
 which was a second carve-out, unargued and unprobed."
 
 **2. Every carve-out.** A carve-out is a hole by construction. You built a region
 where the forbidden thing is allowed, so the only question is how wide it is.
 This gate has two: `require`'s body may read `adapterDigest` (the
-`comparison_kernel_surface` allowlist at `:678`), and the file's tests take the
+`comparison_kernel_surface` allowlist at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`), and the file's tests take the
 same surface. Both carve-outs now carry a probe of their own, and the probe
 comment states the reason: "A carve-out is a hole by construction, so it gets its
 own probe: without this, a carve-out widened to the whole file would show no
@@ -200,24 +204,24 @@ This gate had a second and separate gap, found by review rather than by mutation
 and it is the one that generalises furthest.
 
 The gate had two coverage tests. `test "every independent input carries a
-mutation probe"` at `:3090` loops over the `Input` enum, which has 21 members.
-`test "every adapter and manifest check is exercised by a probe"` at `:3103`
+mutation probe"` in `pre-rebase:packages/tools/src/invariant_drift_gate.zig` loops over the `Input` enum, which has 21 members.
+`test "every adapter and manifest check is exercised by a probe"` at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`
 loops over `Check` but only over the members whose names contain "adapter",
 "manifest", "dispatch" or "bridge", which is 19 of them at this tree.
 
 Neither test counts all of `Check`. So a check could be added with no probe and
 be invisible to both. The replacement test records the measured result at
-`:3134-3138`: "Neither counts checks, so a check added with no probe was
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig`: "Neither counts checks, so a check added with no probe was
 invisible to both: 23 of them had never been observed rejecting anything, and one
 such check shipped on this branch with review as the only thing that caught it."
 
 The fix is a census. `test "every check is either probed or allowlisted with a
-stated reason"` at `:3134` iterates `@typeInfo(Check).@"enum".fields` at `:3141`
+stated reason"` in `pre-rebase:packages/tools/src/invariant_drift_gate.zig` iterates `@typeInfo(Check).@"enum".fields` in the same file
 and requires each member to be either probed or to hold a row in
-`deliberately_unprobed` (`:2805`) whose reason is at least 80 bytes, so a row
+`deliberately_unprobed` (`pre-rebase:packages/tools/src/invariant_drift_gate.zig`) whose reason is at least 80 bytes, so a row
 cannot be a placeholder. It refuses a row that is stale, meaning a check that is
 both probed and allowlisted. It then asserts the values expected rather than a
-remainder (`:3175-3176`) and adds two ratchets (`:3190-3191`):
+remainder (`pre-rebase:packages/tools/src/invariant_drift_gate.zig`) and adds two ratchets (`pre-rebase:packages/tools/src/invariant_drift_gate.zig`):
 
 ```zig
 try testing.expectEqual(@typeInfo(Check).@"enum".fields.len, probed + allowlisted);
@@ -240,7 +244,7 @@ and the probe table holds 83 rows, which the binary confirms with
 ### Why the census, and not a better exit code
 
 The gate does report a probe that slips. Under `--mutate <name>` that is exit 2,
-documented in the usage text at `:2912`. In the full run the same condition exits
+documented in the usage text at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`. In the full run the same condition exits
 1 with the message "probe 'X' passed validation; Y checks nothing".
 
 Neither of those can help with an unprobed check, because both are reports about
@@ -268,7 +272,7 @@ gate something it should reject and see whether it does.
 **Passing probes prove that the probes fire. They prove nothing about what is
 unprobed.** A probe is an example the gate's author wrote, so the set of
 mutations the probes cover is exactly the set the author thought of. The floor
-`covered >= 19` at `:3131` is a floor on how many examples the author wrote. It
+`covered >= 19` at `pre-rebase:packages/tools/src/invariant_drift_gate.zig` is a floor on how many examples the author wrote. It
 is not a floor on the property. This is the same caution as in
 [docs/solutions/conventions/difference-is-not-the-claim-and-a-probe-must-compile.md](difference-is-not-the-claim-and-a-probe-must-compile.md).
 Here the weaker assertion is "these 83 edits are rejected", and the
@@ -291,7 +295,7 @@ be weakened by a spelling.
 *A bounded threat model, written down.* The bridge has no such guarantee, because
 it lives in the runtime package, which imports both sides by design. Round 4
 stopped widening the scan and instead bounded what the scan claims. The gate now
-states the bound in its own source at `:711-720`:
+states the bound in `pre-rebase:packages/tools/src/invariant_drift_gate.zig`:
 
 > Threat model: an accidental regression by a developer. Deliberate evasion -
 > `@field(pcc.invariant, "kindInfo")`, a re-export of the package through a third
@@ -309,7 +313,7 @@ it.** A rule that says "must not name X" is defeated by any new way to name X,
 and enumerating those ways is the unbounded problem above. A rule that says
 "this body must contain this derivation" does not need that enumeration, which
 is what makes it the cheaper half of the pair. The gate has one of each over
-`linkedDigest`, at `:1513-1523`: it requires exactly one definition, requires
+`linkedDigest`, in `pre-rebase:packages/tools/src/invariant_drift_gate.zig`: it requires exactly one definition, requires
 the body to contain `adapterManifestDigest(linked_manifest)`, and separately
 forbids `adapterDigest`.
 
@@ -350,7 +354,7 @@ these hold:
    exposure.
 2. **The gate scans text.** A gate that compares typed imported values cannot be
    evaded by a spelling, because a value has no spelling. The gate's own header
-   says this at `:11-14`: "A surface that is data is imported and compared as a
+   says this in `pre-rebase:packages/tools/src/invariant_drift_gate.zig`: "A surface that is data is imported and compared as a
    value: a typed import cannot be misparsed." Attack the text-scanning half.
 3. **The gate has a carve-out, an allowlist, or a positional region.** Each one
    is a hole you built on purpose, and the question is only its width.
@@ -360,7 +364,7 @@ these hold:
    addition.
 5. **Undoing the feature is one line.** If there is a single edit that restores
    the original hole whole, that edit deserves its own named check and its own
-   probe. The gate says so at `:1508-1511`: "This is the one line that, changed,
+   probe. The gate says so in `pre-rebase:packages/tools/src/invariant_drift_gate.zig`: "This is the one line that, changed,
    restores the original hole whole."
 6. **The gate is cheap to run in isolation.** A standalone binary, file inputs,
    seconds per run. If a mutation costs a full CI pass, attack a narrower unit.
@@ -436,7 +440,7 @@ deriving it from the linked adapter
 
 Two independent checks now cover this edit. The deny-by-default region scan
 answers first, because `linkedDigest` sits ahead of `require`. If the read were
-spelled in a form the region scan admitted, the name-pinned check at `:1513-1523`
+spelled in a form the region scan admitted, the name-pinned check at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`
 answers instead, as example 6 shows.
 
 ### 3. A name-substring heuristic admits every uppercase enum
@@ -466,8 +470,8 @@ admits it."
 .kind_ordinal = @intFromEnum(pcc.invariant.Kind.balance_conservation_v1),
 ```
 
-The inversion that closed the class is in `disallowedKernelRead` at `:821`, with
-the argument at `:658-667`: "The rule is therefore 'nothing, except these, and
+The inversion that closed the class is in `disallowedKernelRead` at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`, with
+the argument at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`: "The rule is therefore 'nothing, except these, and
 here is why each one is not a value', rather than 'anything, except these', which
 only ever catches the spelling it was written against."
 
@@ -509,8 +513,8 @@ probe 'bridge-digest-relocated' rejected by bridge_digest_derivation (expected b
 ```
 
 The fix was two-sided. The scan now covers the whole comment-stripped file in
-four regions (`:1467-1475`), and `linkedDigest` is additionally pinned by name,
-because, as `:1508-1510` says, "the region split above is positional and a
+four regions (`pre-rebase:packages/tools/src/invariant_drift_gate.zig`), and `linkedDigest` is additionally pinned by name,
+because, as `pre-rebase:packages/tools/src/invariant_drift_gate.zig` says, "the region split above is positional and a
 declaration can move".
 
 ### 5. Aliases, resolved to a fixed point
@@ -529,9 +533,9 @@ return @import("zttp_proof_checker").invariant.adapterDigest();   // inline
 
 Both are rejected at this tree, each with
 `adapter_value_copied: ... the bridge ahead of require reads the kernel's
-'adapterDigest'`. `kernelAliases` at `:754` seeds the inline spellings at
-`:760-763`, accepts both `const ` and `pub const ` in `boundDeclaration` at
-`:737-739`, and runs its resolution loop until nothing new appears.
+'adapterDigest'`. `kernelAliases` in `pre-rebase:packages/tools/src/invariant_drift_gate.zig` seeds the inline spellings at
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig`, accepts both `const ` and `pub const ` in `boundDeclaration` at
+`pre-rebase:packages/tools/src/invariant_drift_gate.zig`, and runs its resolution loop until nothing new appears.
 
 ### 6. The gap that remains, measured rather than assumed
 
@@ -586,7 +590,7 @@ exit=1
 application invariants: bridge_digest_derivation: linkedDigest does not hash the linked manifest
 ```
 
-The deny scan does not see that read. The requirement at `:1518-1520`, that
+The deny scan does not see that read. The requirement at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`, that
 `linkedDigest`'s body must contain `adapterManifestDigest(linked_manifest)`,
 catches it anyway, because the body no longer contains the derivation it is
 required to contain.
@@ -594,7 +598,7 @@ required to contain.
 Two further reads are caught by plain substring rather than by the namespace
 scan, and they survive an alias because they do not depend on one: any occurrence
 of `expected_adapter_manifest` anywhere in the bridge is refused by
-`bridge_reads_native` at `:1420-1422`. Measured, both of these exit 1 with
+`bridge_reads_native` at `pre-rebase:packages/tools/src/invariant_drift_gate.zig`. Measured, both of these exit 1 with
 "fills the linked manifest from the kernel's expected table":
 
 ```zig
@@ -621,7 +625,7 @@ test "every adapter and manifest check is exercised by a probe" {
 ```
 
 After, one test that accounts for every member of the verdict enum exactly once,
-at `:3134-3192`. Its shape is the transferable part:
+in `pre-rebase:packages/tools/src/invariant_drift_gate.zig`. Its shape is the transferable part:
 
 ```zig
 inline for (@typeInfo(Check).@"enum".fields) |field| {
@@ -634,7 +638,7 @@ try testing.expect(probed >= 67);
 try testing.expect(deliberately_unprobed.len <= 9);
 ```
 
-The nine allowlist rows at `:2805` are not a backlog. Each one argues a
+The nine allowlist rows in `pre-rebase:packages/tools/src/invariant_drift_gate.zig` are not a backlog. Each one argues a
 mechanism, not a conclusion, and the table's own header says why that distinction
 was added: "Each reason must state the mechanism it claims, not only the
 conclusion: three of these once named a mechanism that did not hold while

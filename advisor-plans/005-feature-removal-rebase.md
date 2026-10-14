@@ -48,18 +48,18 @@ The full reports are session scratch files. This document restates every finding
 
 The root session confirmed these claims:
 
-- Interactive `zttp demo` passes `--studio` (`packages/runtime/src/demo_command.zig:139`). The default build rejects that flag (`runtime_cli.zig:351`). The demo is therefore broken in a default build.
-- `demo.zig:3` imports `pi_app`. The demo is why the runtime module graph reaches the agent.
-- No caller runs `initSymbol` or `initWeakCollections` (`packages/zts/src/builtins/root.zig:57-58`).
+- Interactive `zttp demo` passes `--studio` (`packages/runtime/src/demo_command.zig`). The default build rejects that flag (`runtime_cli.zig`). The demo is therefore broken in a default build.
+- `demo.zig` imports `pi_app`. The demo is why the runtime module graph reaches the agent.
+- No caller runs `initSymbol` or `initWeakCollections` (`packages/zts/src/builtins/root.zig`).
 - No tracked file links to `docs/investor-precise.html`, `docs/investor-warm.html`, or the 14,722-line architecture HTML.
-- `packages/runtime/src/invariant_cli.zig:21-22` sends an advisory request to `https://api.typesafe.ai/v1/systemone` when `TYPESAFE_API_KEY` is set. CLAUDE.md permits DeepSeek and a local MLX server only.
-- The acceptance kernel (`packages/proof-checker/src`) has zero mentions of durable, workflow, or queue. The runtime acts on durable-workflow properties that come from the producer contract (`contract_runtime.zig:1142`), not from a kernel re-derivation.
-- `extension_bindings.all` is an empty array (`packages/zts/src/extension_bindings.zig:3`).
-- The optional native AOT path exists. `handler_instance.zig:1581` runs a native handler before the interpreter when `-Daot` built one. CLAUDE.md says "The interpreter is the single execution path". That sentence is wrong while AOT exists.
+- `packages/runtime/src/invariant_cli.zig` sends an advisory request to `https://api.typesafe.ai/v1/systemone` when `TYPESAFE_API_KEY` is set. CLAUDE.md permits DeepSeek and a local MLX server only.
+- The acceptance kernel (`packages/proof-checker/src`) has zero mentions of durable, workflow, or queue. The runtime acts on durable-workflow properties that come from the producer contract (`contract_runtime.zig`), not from a kernel re-derivation.
+- `extension_bindings.all` is an empty array (`packages/zts/src/extension_bindings.zig`).
+- The optional native AOT path exists. `handler_instance.zig` runs a native handler before the interpreter when `-Daot` built one. CLAUDE.md says "The interpreter is the single execution path". That sentence is wrong while AOT exists.
 
 The root session corrected three reviewer claims:
 
-- AOT risk. Fable rated the AOT cut as low risk. That rating is wrong. Contract building calls `analyzeAot` for route extraction even when AOT is off (`packages/tools/src/precompile.zig:3429`). `analyzeAot` is the `HandlerAnalyzer` dispatch pass, not the transpiler. The cut removes `transpiler.zig` and the runtime hook and keeps the analysis under a neutral name.
+- AOT risk. Fable rated the AOT cut as low risk. That rating is wrong. Contract building calls `analyzeAot` for route extraction even when AOT is off (`packages/tools/src/precompile.zig`). `analyzeAot` is the `HandlerAnalyzer` dispatch pass, not the transpiler. The cut removes `transpiler.zig` and the runtime hook and keeps the analysis under a neutral name.
 - Corpus counts. Fable said 7 of 19 DeepSeek cases import `zttp:durable`. The measured counts are 5 for `zttp:durable`, 3 for `zttp:workflow`, and 1 for `zttp:io`. The conclusion stands: 6 cases depend on orchestration (`durable-order`, the four `workflow-*` cases, and `parallel-secret`).
 - Shared runtime files. Fable listed `fetch_deadline.zig` and `outbound_io.zig` with tool routes. `runtime_http.zig` and `handler_instance.zig` also import them, so they stay.
 
@@ -109,7 +109,7 @@ Order constraints inside Phase 1:
 
 - 1a removes demo consumers before Studio, because each imports the other.
 - 1m moves `anthropic/propose_change_set.zig` and `anthropic/tools_schema.zig` to a neutral directory first. DeepSeek and local import them.
-- 1m ports the stand-in from the OpenAI wire (`packages/pi/src/standin/server.zig:1`) to the chat-completions wire before the OpenAI parsers go.
+- 1m ports the stand-in from the OpenAI wire (`packages/pi/src/standin/server.zig`) to the chat-completions wire before the OpenAI parsers go.
 - 1n re-records the recorder transport fixture on a surviving wire before it deletes the Anthropic fixture (`docs/coverage.md:22`).
 - 1b and 1d edit `precompile.zig`. They wait until the active plan 004 unit lands. See decision 9.
 - After the last group, reduce `docs/plans/` to open plans, and fold `sound-mode.md` into `typescript.md`.
@@ -117,7 +117,7 @@ Order constraints inside Phase 1:
 ## Phase 2: one payload format bump
 
 Three kernel-checked sections leave together, and `self_extract.zig` moves from format 6 to format 7.
-An old artifact then refuses to start, which is the documented behavior for a format mismatch (`self_extract.zig:17-22`).
+An old artifact then refuses to start, which is the documented behavior for a format mismatch (`self_extract.zig`).
 
 | Group | What goes | Whole-file lines | Proof effect |
 |---|---|---:|---|
@@ -141,7 +141,7 @@ Registry hashes change once. `policy-hash.txt`, `restrictions-to-proofs.md`, the
 The six orchestration cases leave the corpus. The 13 remaining cases are re-recorded against DeepSeek at `ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000` and must replay 13/13 offline.
 Convergence and then coverage are published in that order.
 This phase spends DeepSeek time and needs the owner's authorization.
-3b removes the `type_checker.zig:1299` import of the linker before it deletes the linker.
+3b removes the `type_checker.zig` import of the linker before it deletes the linker.
 
 ## Phase 4: resume plan 003 on the smaller tree
 

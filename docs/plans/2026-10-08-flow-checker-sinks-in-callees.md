@@ -50,12 +50,12 @@ gap a fail-open; that was wrong. Decision Q3 decides the scope.
 ### 2.1 Root causes
 
 1. **Sinks are silent during summaries.** `checkExprSinks` returns at once
-   while `summary_returns` is set (`packages/zts/src/flow_checker.zig:3240-3244`,
+   while `summary_returns` is set (`packages/zts/src/flow_checker.zig`,
    "diagnostics belong to the handler walk"). Called bodies are walked under a
    summary: `functionCallLabels`, `closureResultLabels`,
    `exportedReturnLabels`, `listedToolRouteLabels`, and route dispatch. The
    handler walk also enters nested declarations structurally
-   (`flow_checker.zig:1930`), but a `function` declaration is misread there
+   (`flow_checker.zig`), but a `function` declaration is misread there
    (the boolean and arity plan, unit B0), and every callee kind the census
    measured stayed silent. `check` walks only the handler
    and the `routerMatch` roots. A return value inside a summary is merged into
@@ -70,7 +70,7 @@ gap a fail-open; that was wrong. Decision Q3 decides the scope.
    when they are non-empty, so a callee walked once with a secret argument
    taints a later clean call.
 4. **Module-level declarations carry no label.** `check` walks only the
-   handler and the route roots (`flow_checker.zig:459-465`), so a
+   handler and the route roots (`flow_checker.zig`), so a
    module-level `var_decl` never runs and a read of a `.global` binding
    returns the empty set. Observed: `const token = env("API_TOKEN") ?? "";` at
    module scope, then `return Response.json({ k: token })` in `handler`,
@@ -83,17 +83,17 @@ gap a fail-open; that was wrong. Decision Q3 decides the scope.
    discarded, the unwalked body's sinks never fire (Fable probes: a chain of 9
    helpers ending in a log; a 9-parameter helper; `apply(f)` calling `f(t)`;
    the same through a record method). `unknownRouteCallLabels`
-   (`flow_checker.zig:2690-2697`) already clears the sink properties for an
+   (`flow_checker.zig`) already clears the sink properties for an
    unresolved route call; the other summary exits do not.
 6. **Recursion stops at the active frame.** When the callee is on the summary
    stack, `functionCallLabels` returns the argument union
-   (`flow_checker.zig:3093-3097`) and never re-walks with wider labels, so a
+   (`flow_checker.zig`) and never re-walks with wider labels, so a
    secret introduced in the recursive argument never reaches the sink in the
    base case (Fable probe).
-7. **Old artifacts stay proven.** `precompile.zig:3245-3251` copies the flow
+7. **Old artifacts stay proven.** `precompile.zig` copies the flow
    properties into the contract, and the acceptance kernel takes
    `no_secret_leakage` on the producer's word (`consumerChecked`,
-   `packages/proof-checker/src/proof_system.zig:92`). The only analysis hash is
+   `packages/proof-checker/src/proof_system.zig`). The only analysis hash is
    `policyHash()` over rule metadata, which the flow fixes do not move. So a
    certificate built before the fix for a leaking handler stays valid.
 8. History: `666b8a18` introduced summaries to stop wrapper functions from
@@ -120,14 +120,14 @@ All 147 clean controls stayed held in every build. Every refusal carries the
 sink-specific code (ZTS400 to ZTS407), reported once at the sink node.
 
 **The 26 remaining fail-opens:**
-- 14 rows for a helper imported from another file: `precompile.zig:588` walks
+- 14 rows for a helper imported from another file: `precompile.zig` walks
   the imported file in a separate `FlowChecker` through
   `exportedReturnLabels`, with unlabelled parameters, and discards its
   diagnostics and properties.
 - 12 credential rows where a helper receives `req`: the credential label is
   given to `req.headers.authorization` only for the request binding that the
   handler, a route walk, or a listed-tool summary installs
-  (`flow_checker.zig:483`, `:2633`), not for a `req` passed to a helper.
+  (`flow_checker.zig`), not for a `req` passed to a helper.
 
 **The 2 over-refusals:** a callee builds `Response.html(userInput)` and the
 caller discards it.
@@ -152,14 +152,14 @@ caller discards it.
 - Examples: only `examples/durable/approval.ts` changes, for the same reason.
   It already fails with ZTS500; no example is newly refused.
 - No existing flow-checker unit test failed: route-function tests cover routed
-  sinks (`flow_checker.zig:5678`), but no test covers a sink in a called
+  sinks (`flow_checker.zig`), but no test covers a sink in a called
   helper.
 
 ### 2.4 Stores, queues, and workflow calls
 
 - The flow sinks are the response helpers (global methods), `zttp:log`,
   `fetch`, and `zttp:service` `serviceCall` (`SinkKind`,
-  `flow_checker.zig:3388`; `serviceCall` at `:3280`). Probed with a secret and a
+  `flow_checker.zig`; `serviceCall` at `flow_checker.zig`). Probed with a secret and a
   credential, each of these holds today: `durable.signal`, `signalAt`, `step`,
   `run`, `queue.send`, `request`, `reply`, `cache.cacheSet`, `sql.sqlExec`,
   `ledger.post`, `workflow.call`, `workflow.follow`, `ratelimit.rateCheck`.
@@ -172,7 +172,7 @@ caller discards it.
   With new rule rows (ZTS408, ZTS409), `policy_hash` moves and 16 of 19
   cassettes fail replay. With reused codes (ZTS406, ZTS405), replay holds and
   the full suite passes, but the messages name a fetch body.
-- `workflow.call` declares its result `.external` (`workflow.zig:62`), which
+- `workflow.call` declares its result `.external` (`workflow.zig`), which
   is neither `.unknown` nor derived from its arguments, so a sub-handler that
   echoes its input launders the label (observed).
 - Store sinks inside a `durable.run` callback stay silent until the callee fix
@@ -283,7 +283,7 @@ again.
 
 **F2: captured values resolve lexically (precise part B).** Resolve a captured
 read against a stack of active declarations, the way the type checker does
-(`type_checker.zig:2950-3030` scans the active declarations backward by name
+(`type_checker.zig` scans the active declarations backward by name
 within scope), not by a whole-file name union. An unresolved capture carries
 `.unknown` (fail closed). Check: the name-union false positive from the
 research (a clean `x` in a helper refused because the handler has a secret
@@ -320,14 +320,14 @@ This moves the binding catalog (replay, K4).
 
 **F9: the promise for stores, queues, and other handlers.** Per decision Q3.
 Under Q3 (a), F9 writes the exclusion into the documented promise
-(`docs/proofs-and-receipts.md:75-76`, `flow_checker.zig:158`,
-`contract_types.zig:624`, and the `Sink` entry in `CONCEPTS.md`) and nothing
+(`docs/proofs-and-receipts.md:75-76`, `flow_checker.zig`,
+`contract_types.zig`, and the `Sink` entry in `CONCEPTS.md`) and nothing
 else. Under Q3 (b), it adds a `sink_args`
 binding field with a sink class, a store sink kind, the binding entries the
 scope decision selects, and an entry for each new diagnostic kind in the
-exhaustive `propertyTagForKind` (`flow_checker.zig:140`). Update the documented promise in
+exhaustive `propertyTagForKind` (`flow_checker.zig`). Update the documented promise in
 `docs/proofs-and-receipts.md:75-76`, the flow checker header
-(`flow_checker.zig:158`), `contract_types.zig:624`, and the `Sink` entry in
+(`flow_checker.zig`), `contract_types.zig`, and the `Sink` entry in
 `CONCEPTS.md`. Depends on F1, because the normal durable pattern puts the
 calls inside a `durable.run` callback. The current promise text does not name
 a log for secrets, but `secret_in_log` (ZTS402) refuses it; F9 adds the log
@@ -468,8 +468,8 @@ assignment; string `+` is refused by ZTS105, so it cannot launder.
   inside a closure, such as one passed to `durable.run` or returned from a
   nested arrow (observed in two probes and in the capture probe above). It is a
   separate defect in the handler verifier's reference counting
-  (`handler_verifier.zig:1322`), which the flow fixes do not repair.
-- `durable_dead_runs_cli.zig:170` prints a dead-run record verbatim. Whether
+  (`handler_verifier.zig`), which the flow fixes do not repair.
+- `durable_dead_runs_cli.zig` prints a dead-run record verbatim. Whether
   that record holds step values that may be secrets is not checked.
 
 Codex astra fact-checked revision 1 on 2026-10-08. Applied in revision 2: the

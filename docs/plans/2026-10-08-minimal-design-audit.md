@@ -34,13 +34,13 @@ The branch measurement is not a regression test.
 
 ### One writer for the proof JSON envelope
 
-`packages/tools/src/json_diagnostics.zig:288` and `:381` emit successful and failed check results.
+`packages/tools/src/json_diagnostics.zig` emit successful and failed check results.
 Both functions receive the same contract, diagnostics, witness block, and proof trace.
 Both functions serialize the same proof fields in the same order.
 Only the `success` value differs.
 
-`packages/tools/src/zts_cli.zig:311` and `:314` select these functions after checking the error count.
-The failed declaration tests also call the error writer in `packages/tools/src/precompile.zig:7019` and `:7038`.
+`packages/tools/src/zts_cli.zig` select these functions after checking the error count.
+The failed declaration tests also call the error writer in `packages/tools/src/precompile.zig`.
 
 Use one private envelope writer with an explicit success value.
 Keep both public entry points as small wrappers if callers require them.
@@ -48,33 +48,33 @@ Preserve field order, omitted optional blocks, raw JSON insertion, and the final
 This removes duplicate serialization decisions without adding a general serialization framework.
 
 Risk: low for control flow, but exact output bytes are part of the public contract.
-The contract goldens in `build/goldens.zig:47` check successful and failed handlers, exact bytes, and exit codes.
+The contract goldens in `build/goldens.zig` check successful and failed handlers, exact bytes, and exit codes.
 Add public-writer checks for absent contracts and optional blocks before consolidation.
 Required unfiltered checks: `zig build test-zts-cli`, `zig build test-precompile`, and `zig build test-contract-golden`.
 
 ### Remove withdrawn repair code
 
-`packages/tools/src/canonicalize.zig:170` defines `buildSemicolonRepairs` without a caller.
+`packages/tools/src/canonicalize.zig` defines `buildSemicolonRepairs` without a caller.
 Its comment explicitly withdraws the repair because source mapping and comment handling can produce incorrect edits.
 The active paths use `buildLineRepairs` and `buildSpanRepairs` instead.
 
 Remove the withdrawn implementation. Keep the reason for withdrawal in a solution note if future work needs it.
 Do not enable the withdrawn repair as part of cleanup.
-Classify the four unreferenced scanner helpers near `canonicalize.zig:1475` separately before removal.
+Classify the four unreferenced scanner helpers near `canonicalize.zig` separately before removal.
 
 Risk: low for the private implementation because no tracked caller reaches it.
-Required unfiltered check: `zig build test-canonicalize`, registered in `build/host_tests.zig:39`.
+Required unfiltered check: `zig build test-canonicalize`, registered in `build/host_tests.zig`.
 Also run the public canonicalize command goldens and `zig build test-module-boundary`.
 
 ### Remove obsolete WebSocket helper methods
 
 Commit `a89950a2` removed WebSocket support.
-`packages/runtime/src/handler_instance.zig:1373` still defines `armRequestDeadlineWithin`.
-`packages/runtime/src/runtime_pool.zig:135` still defines `WorkerRuntimeLease.recycleAfterTimeout`.
+`packages/runtime/src/handler_instance.zig` still defines `armRequestDeadlineWithin`.
+`packages/runtime/src/runtime_pool.zig` still defines `WorkerRuntimeLease.recycleAfterTimeout`.
 Neither function has a tracked caller or a reflection reference.
 
-Normal HTTP requests use `armRequestDeadline` at `handler_instance.zig:1367`.
-HTTP timeout handling still increments the timeout counter and recycles the slot at `runtime_pool.zig:451`.
+Normal HTTP requests use `armRequestDeadline` at `handler_instance.zig`.
+HTTP timeout handling still increments the timeout counter and recycles the slot at `runtime_pool.zig`.
 Remove only the obsolete methods and their obsolete comments.
 Correct the historical test claim in `docs/solutions/tooling-decisions/zig-dead-code-census.md:178` when this cleanup occurs.
 
@@ -83,7 +83,7 @@ Required unfiltered checks: `zig build test-zruntime` and `zig build test-server
 
 ### Collect closed catalog fields once
 
-`packages/zts/src/contract_builder.zig:1611`, `:1747`, `:1899`, and `:1973` repeat structural parsing for four catalog objects.
+`packages/zts/src/contract_builder.zig` repeats structural parsing for four catalog objects.
 Each reader resolves literal properties, maps names to slots, rejects duplicate or unknown fields, and checks required fields.
 The readers serve tool entries, agent entries, agent providers, and agent limits.
 
@@ -93,14 +93,14 @@ Preserve diagnostic order, source nodes, details, and suppression of dependent e
 This removes repeated object structure checks without combining different domain rules.
 
 Risk: medium because diagnostic order and refusal details are public output.
-Existing refusal checks start at `contract_builder.zig:7795`; successful catalog checks start at `:7860`.
+Existing refusal checks start at `contract_builder.zig`; successful catalog checks start at `contract_builder.zig`.
 Required unfiltered checks: `test-zts`, `test-contract-golden`, `test-diagnostic-corpus`, `test-proof-checker`, and `test-proof-checker-mutants` through `zig build`.
 
 ### Use the query tool as the single operation boundary
 
-`packages/pi/src/tools/zts_expert_query.zig:148` dispatches ten operations through separate `ToolDef` records.
-`packages/pi/src/tool_registry.zig:53` registers the query tool, not those separate records.
-For example, `zts_expert_meta.zig:9` repeats metadata, argument decoding, request JSON construction, and protocol projection.
+`packages/pi/src/tools/zts_expert_query.zig` dispatches ten operations through separate `ToolDef` records.
+`packages/pi/src/tool_registry.zig` registers the query tool, not those separate records.
+For example, `zts_expert_meta.zig` repeats metadata, argument decoding, request JSON construction, and protocol projection.
 
 Make the query tool validate operations and invoke `zts_agent_client` directly.
 Keep operation-specific filtering as private helpers where necessary.
@@ -112,7 +112,7 @@ Required unfiltered check: `zig build test-expert-app`, including catalog, decod
 
 ### Derive properties and proof identity from one receipt lookup
 
-`packages/pi/src/session_state.zig:44` and `:59` independently scan backward for the latest receipt touching a file.
+`packages/pi/src/session_state.zig` independently scan backward for the latest receipt touching a file.
 One function returns properties; the other decodes the receipt's transaction identity.
 Autoloop and application controls call these derivations repeatedly.
 
@@ -129,7 +129,7 @@ Preserve latest-receipt, file-scoping, malformed-identity, and projection-isolat
 
 ### Share runtime invocation policy while retaining response ownership
 
-`packages/runtime/src/runtime_pool.zig:428` and `:490` repeat acquisition, retry, timeout, panic, and invalid-handler decisions.
+`packages/runtime/src/runtime_pool.zig` repeat acquisition, retry, timeout, panic, and invalid-handler decisions.
 The owned path serves replay callers. The borrowed path serves edge and in-process dispatch callers.
 Both paths retry invalid handlers with the same limit and recycle or quarantine the same error cases.
 
@@ -140,19 +140,19 @@ The borrowed path must hold the runtime until `ResponseHandle.deinit`.
 Preserve fault-location capture, request identity, timeout counters, and the guarded-call mode.
 
 Risk: medium because incorrect release order can invalidate response bytes.
-Existing ownership and timeout tests occur at `server_test.zig:111`, `:253`, and `:293`, and `runtime_pool.zig:1506`.
+Existing ownership and timeout tests occur at `server_test.zig`, and `runtime_pool.zig`.
 Required unfiltered checks: `zig build test-server`, `zig build test-zruntime`, and `zig build test`.
 
 ### Retire unread latency telemetry only after checking its API
 
-`packages/runtime/src/runtime_pool.zig:40` stores latency counters; `:58` stores percentile trackers.
-`getMetrics` at `:801` returns ten latency fields.
+`packages/runtime/src/runtime_pool.zig` stores latency counters; `packages/runtime/src/runtime_pool.zig` stores percentile trackers.
+`getMetrics` at `packages/runtime/src/runtime_pool.zig` returns ten latency fields.
 Tracked callers only occur in tests and read operational counters rather than latency fields.
 The percentile module has no other importer.
 
 The runtime can remove latency recording if its fields have no supported external consumer.
 Retain request identity, exhaustion, audit, recycling, panic, and timeout counters.
-Retain the acquisition timer because it enforces `acquire_timeout_ms` at `runtime_pool.zig:652`.
+Retain the acquisition timer because it enforces `acquire_timeout_ms` at `runtime_pool.zig`.
 Unread telemetry does not establish a performance benefit; that benefit needs measurement.
 
 Risk: low within tracked callers, unknown for external direct imports of the runtime module.
@@ -161,8 +161,8 @@ Required unfiltered checks: `zig build test-server`, `zig build test-zruntime`, 
 
 ### Give provider request configuration one owner
 
-`packages/pi/src/agent.zig:305` holds a backend plus owned prompt, tool, endpoint, provider, and model fields.
-Constructors at `:396` through `:550` repeat allocation and provider configuration.
+`packages/pi/src/agent.zig` holds a backend plus owned prompt, tool, endpoint, provider, and model fields.
+Constructors in `packages/pi/src/agent.zig` repeat allocation and provider configuration.
 Destruction, destination reporting, normal requests, summary requests, and model changes repeat provider selection.
 
 A provider backend record could own common request configuration and its byte lifetimes.
@@ -176,22 +176,22 @@ Required unfiltered checks: `zig build test-expert-app` and `zig build test-cass
 
 ### Migrate positional check calls to named options
 
-`packages/tools/src/precompile.zig:1249` and `:1395` adapt positional arguments to the existing `CheckOptions` API.
+`packages/tools/src/precompile.zig` adapt positional arguments to the existing `CheckOptions` API.
 Canonicalize, the agent protocol, and runtime build commands still use positional wrappers.
 Use named options at repository call sites to remove repeated positional configuration.
 
 Do not remove the compatibility wrappers until their external API status is established.
-`packages/tools/src/zts_cli.zig:3` publicly re-exports the precompile module.
+`packages/tools/src/zts_cli.zig` publicly re-exports the precompile module.
 Risk: low for call migration, unknown for removing externally reachable wrappers.
 Required unfiltered checks: `test-precompile`, `test-zts-cli`, `test-canonicalize`, `test-agent-protocol`, `test-expert-app`, and `test` through `zig build`.
 
 ## Correctness issue separate from cleanup
 
-The check path uses `analyzeHandlerPaths` at `packages/tools/src/precompile.zig:1334`.
-The compile path repeats summary construction around `:2658`.
-The check path asks `PathGenerator.pathsExhaustive()`; the compile path reconstructs completeness from the path count at `:2702`.
+The check path uses `analyzeHandlerPaths` at `packages/tools/src/precompile.zig`.
+The compile path repeats summary construction around `packages/tools/src/precompile.zig`.
+The check path asks `PathGenerator.pathsExhaustive()`; the compile path reconstructs completeness from the path count at `packages/tools/src/precompile.zig`.
 
-`packages/zts/src/path_generator.zig:447` explicitly requires consumers to use `pathsExhaustive()`.
+`packages/zts/src/path_generator.zig` explicitly requires consumers to use `pathsExhaustive()`.
 That method also accounts for summarized constructs, such as loops and recursion.
 The compile predicate can therefore claim exhaustive behavior when the generator summarized a construct.
 This is a source-confirmed predicate difference; a public compile/check reproduction remains required.

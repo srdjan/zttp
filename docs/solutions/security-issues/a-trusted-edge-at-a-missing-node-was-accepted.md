@@ -27,6 +27,10 @@ tags:
   - "trusted-evidence"
   - "releasefast"
   - "tamper-probe"
+binds:
+  - packages/proof-checker/src/checker.zig
+  - packages/proof-checker/src/certificate.zig
+proves: zig build test-proof-checker
 ---
 
 # A trusted edge at a missing node was accepted
@@ -35,7 +39,7 @@ tags:
 
 `packages/proof-checker` is the consumer-side acceptance kernel. It must refuse any certificate whose evidence does not point at something the consumer can see. Before the fix, it accepted a certificate that disclosed a trusted edge at an IR node that does not exist, under the production policy.
 
-Three gaps combined. First, `checkEvidence` bounded `entry.node_id >= self.certificate.ir.len()` only inside `if (entry.rule) |rule|` (pre-fix `packages/proof-checker/src/checker.zig:1231`). A trusted edge must have `rule == null`, because the evidence-shape check requires it (pre-fix `validEvidenceShape`; now `classify`, `packages/proof-checker/src/checker.zig:1433-1434`, where both the `.solver` and `.trusted` arms require `entry.rule == null`). So the node id of a trusted edge was never bounded. Second, the trusted inventory loop in `checkEvidence` did not bound the `member_id` of a `.node` family entry. Third, `trustedEdgeDeclared` compared `edge.member_id == @as(u16, @truncate(node_id))` (pre-fix `checker.zig:1406`). `member_id` is `u16` on the wire (`packages/proof-checker/src/certificate.zig:320`) and `node_id` is `u32`, so node 65537 aliased node 1.
+Three gaps combined. First, `checkEvidence` bounded `entry.node_id >= self.certificate.ir.len()` only inside `if (entry.rule) |rule|` (pre-fix `packages/proof-checker/src/checker.zig`). A trusted edge must have `rule == null`, because the evidence-shape check requires it (pre-fix `validEvidenceShape`; now `classify`, `packages/proof-checker/src/checker.zig`, where both the `.solver` and `.trusted` arms require `entry.rule == null`). So the node id of a trusted edge was never bounded. Second, the trusted inventory loop in `checkEvidence` did not bound the `member_id` of a `.node` family entry. Third, `trustedEdgeDeclared` compared `edge.member_id == @as(u16, @truncate(node_id))` (pre-fix `checker.zig`). `member_id` is `u16` on the wire (`packages/proof-checker/src/certificate.zig`) and `node_id` is `u32`, so node 65537 aliased node 1.
 
 Fixed on local main in commit d8d31f06 (not yet pushed as of this writing, so the SHA can change on a rebase).
 
@@ -43,7 +47,7 @@ Fixed on local main in commit d8d31f06 (not yet pushed as of this writing, so th
 
 No test failed and no gate objected. A probe showed the defect: a certificate with 3 IR nodes, one trusted evidence entry at `node_id = 7`, and a trusted inventory that disclosed `.node` member 7. `check(fixture.inputs(), policy_mod.production)` returned `accepted = true` and `rejection = null`. The same result came from trusted evidence at `node_id = 65536` against an inventory that disclosed node 0.
 
-`scripts/check-proof-swallow.sh` covers `checker.zig` (line 59) and stayed green, because nothing was discarded. The kernel returned a wrong answer. `markDeclared` (`checker.zig:994`, the skip at `:1003`) skips out-of-range evidence with `continue`, and that skip has a row in `scripts/proof-swallow.allow` (line 61). The row was correct in isolation: an unmarked node costs the producer a declaration. But no other stage refused the same evidence, so the skip was the only place that saw the bad node id, and it said nothing.
+`scripts/check-proof-swallow.sh` covers `checker.zig` and stayed green, because nothing was discarded. The kernel returned a wrong answer. `markDeclared` and its skip are in `checker.zig`. The skip ignores out-of-range evidence with `continue`, and that skip has a row in `scripts/proof-swallow.allow`. The row was correct in isolation: an unmarked node costs the producer a declaration. But no other stage refused the same evidence, so the skip was the only place that saw the bad node id, and it said nothing.
 
 The defect is a wrong verdict, not undefined behavior: no out-of-range index is ever dereferenced, and `@truncate` is defined. The build mode matters for a different reason. Releases build with `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and when this defect was found the root build passed that `optimize` to the `zttp_proof_checker` dependency. Runtime safety was therefore off in production, and that is why the audit that found this defect inventoried every safety-sensitive builtin in the kernel. Commit 0384765a tried to fix this by compiling the kernel dependency ReleaseSafe, but on Zig 0.16.0 runtime safety follows the root module, so that pin changed nothing. Every non-test kernel function now begins with `@setRuntimeSafety(true)`, which does hold under a ReleaseFast root, and `zig build test-kernel-safety` enforces it; an unchecked site there is now a panic that refuses to serve rather than undefined behavior.
 
@@ -73,7 +77,7 @@ if (entry.rule) |rule| {
     const node = try self.certificate.ir.get(entry.node_id);
 ```
 
-After, for every entry, directly after the shape check. The checker was later restructured, so the bound now sits in `checkEvidenceEntry` right after `classify` (`checker.zig:1193-1195`):
+After, for every entry, directly after the shape check. The checker was later restructured, so the bound now sits in `checkEvidenceEntry` right after `classify` (`checker.zig`):
 
 ```zig
 if (entry.node_id >= self.certificate.ir.len()) {
@@ -81,7 +85,7 @@ if (entry.node_id >= self.certificate.ir.len()) {
 }
 ```
 
-**Bound inventory node members** in the trusted inventory loop (`checker.zig:1281-1283`):
+**Bound inventory node members** in the trusted inventory loop (`checker.zig`):
 
 ```zig
 if (edge.family == .node and edge.member_id >= self.certificate.ir.len()) {
@@ -89,7 +93,7 @@ if (edge.family == .node and edge.member_id >= self.certificate.ir.len()) {
 }
 ```
 
-**Widen the compare** in `trustedEdgeDeclared` (`checker.zig:1407`). Before:
+**Widen the compare** in `trustedEdgeDeclared` (`checker.zig`). Before:
 
 ```zig
 if (edge.family == .node and edge.member_id == @as(u16, @truncate(node_id))) return true;
@@ -105,7 +109,7 @@ The fix reuses the reason code `proof_node_unknown`. The published vocabulary en
 
 Three tests were added: "trusted evidence at a node the proof IR does not have rejects", "trusted evidence does not match an inventory node that differs above sixteen bits", and "an inventory node the proof IR does not have rejects".
 
-One limit is honest to state: the widened compare has no independent test. A node above 65535 needs more than the default `max_ir_nodes = 65_536` (`packages/proof-checker/src/limits.zig:24`). The second test rejects at the hoisted bound, not at the compare.
+One limit is honest to state: the widened compare has no independent test. A node above 65535 needs more than the default `max_ir_nodes = 65_536` (`packages/proof-checker/src/limits.zig`). The second test rejects at the hoisted bound, not at the compare.
 
 Verification: `zig build test-proof-checker` passed 186/186. `test-proof-checker-purity`, `test-proof-swallow`, `test-cli` (820 tests: 819 passed, 1 skipped), `test-proof-ratchet` (51), and `test-invariant-drift` all exited 0.
 

@@ -35,17 +35,17 @@ Decision P1 asks whether it is planned first.
 ### 2.1 Boolean checker
 
 - The parser stores a `function_decl` as `var_decl` data
-  `{binding, init = function node, kind}` (`packages/zts/src/parser/parse.zig:579-587`).
-- `bool_checker.zig:368` reads that node with `ir_view.getFunction(node)`,
+  `{binding, init = function node, kind}` (`packages/zts/src/parser/parse.zig`).
+- `bool_checker.zig` reads that node with `ir_view.getFunction(node)`,
   which reads six extra-data slots the declaration does not own
-  (`parser/ir.zig:1923-1940`). `func.body` is then unrelated data, or the read
-  returns null. `getBinding(node)` at `bool_checker.zig:375` is also wrong.
-  The same misread is at `bool_checker.zig:754` (`inferFunctionReturnType`).
+  (`parser/ir.zig`). `func.body` is then unrelated data, or the read
+  returns null. `getBinding(node)` at `bool_checker.zig` is also wrong.
+  The same misread is at `bool_checker.zig` (`inferFunctionReturnType`).
 - `walkStmt` has no `.export_decl` arm and falls to `else => {}`.
 - History: the misread arrived with the checker, `3cf1d634` (2026-03-16). No
   test uses a `function name() {}` declaration; all use arrows.
-- The same `getFunction` misread is at `contract_builder.zig:3173`
-  (`subtreeContains`) and `flow_checker.zig:1930` (`walkStmt`, nested
+- The same `getFunction` misread is at `contract_builder.zig`
+  (`subtreeContains`) and `flow_checker.zig` (`walkStmt`, nested
   function declarations).
 - Probes: `if (5)` inside `function f` or `function handler` passes `zts
   check`; inside an arrow it reports ZTS100.
@@ -61,27 +61,27 @@ Decision P1 asks whether it is planned first.
 
   ZTS103, 104, 106, and 107 see a typed parameter only through branch
   narrowing: `inferType` accepts a narrowed type first, and otherwise answers
-  `.unknown` for `.argument` bindings (`bool_checker.zig:640-649`).
-- **Narrowing.** `requireBoolean` (`bool_checker.zig:893-898`) calls
-  `inferTypeWithoutDiagnostics` (`type_checker.zig:281`) after the type
+  `.unknown` for `.argument` bindings (`bool_checker.zig`).
+- **Narrowing.** `requireBoolean` (`bool_checker.zig`) calls
+  `inferTypeWithoutDiagnostics` (`type_checker.zig`) after the type
   checker's walk, when its narrowing overlay is closed. A prototype that records
   each boolean-context operand's type during the type checker's walk removes
   the `!== undefined` and discriminant false positives.
 - **Proofs.** No proven property reads boolean diagnostics. Boolean errors
-  stop `check` before the verifier and flow stages (`precompile.zig:1687`),
-  abort the build (`:2286`), and make the runtime refuse the handler
-  (`runtime/src/handler_instance.zig:1194`). A wider walk is not monotone: it
+  stop `check` before the verifier and flow stages (`precompile.zig`),
+  abort the build (`precompile.zig`), and make the runtime refuse the handler
+  (`runtime/src/handler_instance.zig`). A wider walk is not monotone: it
   also teaches the checker more function return types
-  (`bool_checker.zig:373`, `:837`), which can remove existing refusals. B3
+  (`bool_checker.zig`), which can remove existing refusals. B3
   measures changes in both directions.
 - **Bytecode.** The boolean checker's `node_types` drive opcode
-  specialization (`codegen.zig:845-862`). Walking declaration bodies adds
+  specialization (`codegen.zig`). Walking declaration bodies adds
   specializations, so precompiled bytecode and artifact hashes move.
 - **Finding 15 was described backwards.** `check` reports the boolean stage
   first, then types, then strict, each with an early return on errors only
-  (`precompile.zig:1687`, `:1713`, `:1754`); warnings and advisories are
+  (`precompile.zig`); warnings and advisories are
   still shown. All three checkers have already run inside
-  `pipeline.resolve` (`pipeline.zig:197-257`). Only the reporting stops early.
+  `pipeline.resolve` (`pipeline.zig`). Only the reporting stops early.
 
 ### 2.2 Measured blast radius of the walk fix
 
@@ -93,7 +93,7 @@ With the walk fix and walk-time context types (prototype P2):
   `!isDict(document)`: a false positive), and `system/gateway-static.ts`
   (ZTS102 on `!health.ok` without `--system`; probable cause: an unknown type
   without the system file).
-- **Examples with a new warning:** `patterns/nominal-brand.ts:67` (ZTS107, a
+- **Examples with a new warning:** `patterns/nominal-brand.ts` (ZTS107, a
   tautology the example writes on purpose).
 - **Examples that already failed, with changed diagnostics:**
   `handler/handler-full.tsx` (true positive), `jsx/jsx-ssr.tsx` (false
@@ -112,10 +112,10 @@ With the walk fix and walk-time context types (prototype P2):
 
 ### 2.3 Arity
 
-- `checkCallArgs` (`type_checker.zig:3886`). The member path checks both
-  bounds (`:3900-3906`). The identifier path checks only the lower bound
-  (`:3992-3997`). The argument-type loop stops at the shorter count (`:4020`),
-  so surplus arguments are walked as expressions (`:861`) but never compared
+- `checkCallArgs` (`type_checker.zig`). The member path checks both
+  bounds (`type_checker.zig`). The identifier path checks only the lower bound
+  (`type_checker.zig`). The argument-type loop stops at the shorter count (`type_checker.zig`),
+  so surplus arguments are walked as expressions (`type_checker.zig`) but never compared
   with a parameter.
 - History: lower bound only since `630397e5` (2026-03-18, "For now, treat all
   params as required"). `7149c52c` (2026-08-15) removed default parameters but
@@ -125,7 +125,7 @@ With the walk fix and walk-time context types (prototype P2):
   `required_arg_count` for `zttp:*` exports; the ABI table for `requestBody`
   and siblings. Ambient globals (`String`, `Number`, `range`) have no
   signature and stay unchecked; builtin methods are unchecked except seven
-  array methods with modeled signatures (`type_checker.zig:2715`).
+  array methods with modeled signatures (`type_checker.zig`).
 - The spec requires fixed arity: "Every call supplies every declared argument"
   (`docs/zts-formal-spec-northstar-advanced.md:781-782`). Lines 1139-1141 still
   say "except for trailing defaults", which `7149c52c` made stale.
@@ -135,8 +135,8 @@ With the walk fix and walk-time context types (prototype P2):
   into one signature, and two nested functions with one name collide. Both
   already give a false ZTS202 for a correct call today.
 - **Binding defect.** `durable.signalAt` declares `arg_count = 3`
-  (`modules/workflow/durable.zig:69`), but `signalAtNative` reads `args[3]` as
-  a payload (`:251`). The flow checker probably never sees that payload. A
+  (`modules/workflow/durable.zig`), but `signalAtNative` reads `args[3]` as
+  a payload (`modules/workflow/durable.zig`). The flow checker probably never sees that payload. A
   probe (a secret as the fourth argument) can confirm it.
 - **Measured** (prototype v2: upper bound on the identifier path, reusing
   ZTS202, skipped when the annotation count differs from the declared count):
@@ -172,19 +172,19 @@ reads the `init` of a `function_decl`, and `getFunction` on a `function_decl`
 fails in both IR implementations (`Node.Data` is a bare union, so on the
 `.node_list` implementation that type-checker unit tests use the misread is a
 Debug panic today). Fix the sites:
-- `bool_checker.zig:368` and `:754`: read through the helper for the return
+- `bool_checker.zig`: read through the helper for the return
   type only, and keep returning before the body walk, so B0 changes no
   boolean diagnostic. B3 removes that return after B1 and B2 land.
-- `contract_builder.zig:3173` (`subtreeContains`, reached from about `:1093`):
+- `contract_builder.zig` (`subtreeContains`, reached from about `contract_builder.zig`):
   read through the helper. This widens the expert-loop scope summary for a
   hole, which moves prompts, not contracts; `test-expert-app` measures it.
-- `flow_checker.zig:1930`: return for a nested `function_decl`, exactly as the
+- `flow_checker.zig`: return for a nested `function_decl`, exactly as the
   summary path does today. Walking its body eagerly would report sinks with
   unlabelled parameters for a nested declaration but not for a nested arrow,
   and would pre-empt the walk policy that the section 7 plan owns.
 The other readers of `function_decl` already use `getVarDecl` (Fable review,
-2026-10-08: `type_checker.zig:760`, `strict_checker.zig:378`,
-`proof_ir.zig:216`, `effect_inference.zig:335`, `path_generator.zig:946`,
+2026-10-08: `type_checker.zig`, `strict_checker.zig`,
+`proof_ir.zig`, `effect_inference.zig`, `path_generator.zig`,
 `ir_identity.zig`, the transpiler). Probe set, run before and after:
 `if (5)` inside a `function`, an `export function`, a nested function, and an
 arrow inside `handler`; a nested declaration that sends an env secret to a
@@ -194,7 +194,7 @@ unchanged; one scope-summary golden.
 **B1: walk-time context types with operator guards.** Record the type of each
 boolean-context operand during the type checker's walk, while narrowing is
 live, and make `requireBoolean` prefer it. The type checker installs no
-narrowing for `&&` or `||` today (`type_checker.zig:1913` is the only `and_op`
+narrowing for `&&` or `||` today (`type_checker.zig` is the only `and_op`
 handling), so B1 must also narrow the right operand under the left operand's
 guard (negated for `||`), including in ternary conditions. Measured on the
 research prototype without this: `v !== undefined && v`,
@@ -214,7 +214,7 @@ records by node index: each node is walked once (if branches, `for ... of`, and
 
 True positives that B3 will expose and that need a written idiom, not a
 checker change: `.ok` read on an `unknown` result (`parallel` declares
-`returns = .object`, `io.zig:54`, and the examples type results `unknown`),
+`returns = .object`, `io.zig`, and the examples type results `unknown`),
 and `o?.flag` with `flag?: boolean`. B3 rewrites each mover to an explicit
 form; decision P5 picks between a narrowing idiom and a typed `parallel`.
 
@@ -242,11 +242,11 @@ refused. Depends on B1's operator guards. Measure the blast radius first, like
 ## 5. Units: arity
 
 **A0: signature identity.** Signatures are created in the stripper before a
-parser binding exists (`stripper.zig:2704-2708` sets `context_line` and
-`context_col`), and `type_env.zig:587-690` indexes them by line. Key them by
+parser binding exists (`stripper.zig` sets `context_line` and
+`context_col`), and `type_env.zig` indexes them by line. Key them by
 (signature line, column), match that key to the function node's location, and
 bind it through the existing `bindCallableMetadata`. Fix the same line keying
-in `hasCompleteFunctionAnnotation` (`strict_checker.zig:1559`), or the
+in `hasCompleteFunctionAnnotation` (`strict_checker.zig`), or the
 same-line case still trips ZTS601. Check: the two collision probes from the
 research (a function and an arrow on one line; two nested functions with one
 name) become passing corpus cases.
@@ -256,11 +256,11 @@ refuse surplus arguments with ZTS202 for declarations, `const` arrows, nested
 and generic functions, and function-typed parameters. For a source function,
 take the count from the IR `params_count` of the bound function. For a
 function-typed parameter, which has no body node, take `info.params.len` from
-its type (`type_checker.zig:2994`). Do not skip when the annotated count
+its type (`type_checker.zig`). Do not skip when the annotated count
 differs: the research prototype's skip is a fail-open, because ZTS601 fires
-only for a function with a name (`strict_checker.zig:1547-1548`), and its
+only for a function with a name (`strict_checker.zig`), and its
 completeness test accepts `sig.param_count >= params_count`
-(`strict_checker.zig:168`, `:1557`). Observed
+(`strict_checker.zig`). Observed
 today: `const f = (a: number, b): number => a; f(1, 2, 3)` passes with no
 diagnostic. So A1 also makes ZTS601 refuse a partly annotated anonymous
 arrow. Message: "expected N" or "expected N to M". Add
@@ -275,7 +275,7 @@ arguments; refusing at the native would break that example. Enforce the
 export upper bound. The research called the payload "unseen by the flow
 checker"; Fable measured that it is seen (returning it gives ZTS400). The real
 gap is that the flow checker has no durable or queue sink at all (`SinkKind`,
-`flow_checker.zig:3388`): `signal("k", "n", token)` with its declared payload
+`flow_checker.zig`): `signal("k", "n", token)` with its declared payload
 passes too. That gap moves to the section 7 plan. This unit breaks replay of
 16 cassettes, so it waits for decision P2.
 
@@ -309,14 +309,14 @@ A secret returned from a helper into the response is refused (ZTS400), so
 return-value summaries work.
 
 Cause, confirmed in source: `checkExprSinks` returns at once while
-`summary_returns` is set (`flow_checker.zig:3240-3243`, "diagnostics belong to
+`summary_returns` is set (`flow_checker.zig`, "diagnostics belong to
 the handler walk"), and every non-root body is walked only under a summary
 (`functionCallLabels`, `closureResultLabels`, `exportedReturnLabels`, route
 dispatch). `check` walks only the handler and the `routerMatch` roots. So no
 walk ever evaluates a sink inside a callee.
 
 A second gap belongs to the same plan: the flow checker has no durable or
-queue sink (`SinkKind`, `flow_checker.zig:3388`), so a secret passed as a
+queue sink (`SinkKind`, `flow_checker.zig`), so a secret passed as a
 `durable.signal` or `signalAt` payload passes too (Fable probes, 2026-10-08).
 
 This is the fail-open class in AGENTS.md: `no_secret_leakage` is PROVEN for a
@@ -357,7 +357,7 @@ it.
 Recommendation: (a). Without it, `s - 1` with `s: string` stays accepted
 everywhere a parameter is involved.
 
-**P4 (`nominal-brand.ts:67`, an intentional tautology).**
+**P4 (`nominal-brand.ts`, an intentional tautology).**
 Options: (a) rewrite the example so it does not trip ZTS107; (b) accept the
 warning.
 Recommendation: (a). Examples teach the model.
@@ -365,7 +365,7 @@ Recommendation: (a). Examples teach the model.
 **P5 (the `.ok` read on an `unknown` result from `zttp:io` `parallel`).** B3
 refuses it in two examples and in the `parallel-secret` cassette. The refusal
 is right by the sound-mode rule, but the root is that `parallel` returns an
-untyped `object` (`io.zig:54`).
+untyped `object` (`io.zig`).
 Options: (a) rewrite the movers with an explicit narrowing idiom now; (b) give
 `parallel` a typed result first, which moves the binding catalog (replay).
 Recommendation: (a), with (b) recorded as a later item.
@@ -387,7 +387,7 @@ type; ZTS601's completeness test accepts a longer signature. Recorded
 omissions: the egress-URL and opaque-egress sinks belong in the section 7
 census; declaring `signalAt`'s fourth parameter does not make its payload a
 flow sink, and the runtime serializes that payload
-(`runtime/src/durable_executor.zig:468`) with no encodability check in the
+(`runtime/src/durable_executor.zig`) with no encodability check in the
 binding, which A2 adds as a `param_types` entry if the binding vocabulary
 supports it.
 

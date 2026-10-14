@@ -63,7 +63,7 @@ the scan also listed it as unseen. The unseen listing blocked `fault_covered`.
 
 ## Solution
 
-`Constraint.countedSite()` (`packages/zts/src/path_generator.zig:62`) is now
+`Constraint.countedSite()` (`packages/zts/src/path_generator.zig`) is now
 the one definition of a counted call. It returns the `StubInfo` for
 `stub_truthy`, `stub_falsy`, `result_ok`, and `result_not_ok`, and null for
 every other variant. The switch has no `else` arm, so a new variant must be
@@ -92,9 +92,9 @@ that. A test in `packages/tools/src/pipeline_mutation_tests.zig` proves
 ## Why This Works
 
 The walk records a call in `io_seq` only when the call is a `const`
-initializer (`.var_decl`, `path_generator.zig:1362`) or a bare statement
-(`.expr_stmt`, `:1371`). A call that is itself the `if` condition is not in
-either position. `extractBooleanCallConstraint` (`:1735`) still gives that call
+initializer (`.var_decl`, `path_generator.zig`) or a bare statement
+(`.expr_stmt`, `path_generator.zig`). A call that is itself the `if` condition is not in
+either position. `extractBooleanCallConstraint` (`path_generator.zig`) still gives that call
 a `stub_truthy` or `stub_falsy` constraint, with the call node as its
 `call_site`, on each branch. The checker reads that constraint, counts the
 site, and finds the failure branch. The scan, which read only `io_stubs`, did

@@ -24,13 +24,17 @@ tags:
   - fail-open
   - proof-boundary
   - compiler-analysis
+binds:
+  - packages/zts/src/flow_checker.zig
+  - packages/zts/src/module_binding/types.zig
+proves: zig build test-zts
 ---
 
 # An empty label set claimed a value was clean
 
 ## Problem
 
-`LabelSet` (`packages/zts/src/module_binding/types.zig:107`) carries data provenance through the flow checker: `secret`, `credential`, `user_input`, and so on. The empty set means "this value carries nothing", and that is a load-bearing positive claim - it is what lets an ordinary handler discharge `no_secret_leakage` at all.
+`LabelSet` (`packages/zts/src/module_binding/types.zig`) carries data provenance through the flow checker: `secret`, `credential`, `user_input`, and so on. The empty set means "this value carries nothing", and that is a load-bearing positive claim - it is what lets an ordinary handler discharge `no_secret_leakage` at all.
 
 Five separate code paths returned the empty set for a different reason: the walk had not looked at the value. Absence of evidence was encoded identically to evidence of absence, so the compiler proved a security property for handlers that leak a secret into the HTTP response body.
 
@@ -63,29 +67,29 @@ const results = parallel([() => env("SECRET_KEY")]);
 
 **Trusting the standing soundness gate.** `scripts/check-proof-swallow.sh` scans the eleven analysis files between parsed IR and reported verdict and fails on any discarded error not carrying a reason. It was green through all five instances and is structurally blind to this class: nothing is swallowed, a function returns a value that is wrong. Its own header cites that "a taint fail-open in this repo once survived fourteen review passes" - the gate built from that lesson covers only the swallowed-error half of it.
 
-**Fixing one instance and assuming the class was closed.** After the closure arm landed (`packages/zts/src/flow_checker.zig:1516`), the same laundering still worked through `parallel([...])`, because a module export answers with its *declared* return labels and those cannot describe what a caller's callback returns.
+**Fixing one instance and assuming the class was closed.** After the closure arm landed (`packages/zts/src/flow_checker.zig`), the same laundering still worked through `parallel([...])`, because a module export answers with its *declared* return labels and those cannot describe what a caller's callback returns.
 
 ## Solution
 
 Every fix separates "carries nothing" from "could not look".
 
-**A label for not knowing.** `DataLabel` gained `unknown` (`packages/zts/src/module_binding/types.zig:102`), widening the enum to `u4` and `LabelSet` to `packed struct(u16)`. `userCallLabels` bails to it from every exit that cannot read a callee body (`packages/zts/src/flow_checker.zig:1653`):
+**A label for not knowing.** `DataLabel` gained `unknown` (`packages/zts/src/module_binding/types.zig`), widening the enum to `u4` and `LabelSet` to `packed struct(u16)`. `userCallLabels` bails to it from every exit that cannot read a callee body (`packages/zts/src/flow_checker.zig`):
 
 ```zig
 const unresolved = LabelSet.merge(arg_union, .{ .unknown = true });
 ```
 
-A sink that receives it clears every property that sink decides, rather than holding it (`packages/zts/src/flow_checker.zig:1987`, `2210`):
+A sink that receives it clears every property that sink decides, rather than holding it (`packages/zts/src/flow_checker.zig#FlowChecker`):
 
 ```zig
 if (labels.has(.unknown)) self.clearSinkProperties(sink);
 ```
 
-That widening exposed a sixth bug of the same family: `LabelSet.isEmpty` masked bit 7 off as padding (`packages/zts/src/module_binding/types.zig:165`), and `nondeterministic` had moved into that bit, so a set carrying only it read as empty.
+That widening exposed a sixth bug of the same family: `LabelSet.isEmpty` masked bit 7 off as padding (`packages/zts/src/module_binding/types.zig`), and `nondeterministic` had moved into that bit, so a set carrying only it read as empty.
 
-**A sink for an object the walk cannot read field by field.** A non-literal options argument, or a literal with a computed key, routes the whole object to `egress_opaque` (`packages/zts/src/flow_checker.zig:1925`, `2159`), which carries the same checks the URL and header arms carry. Detecting the computed key needs the `is_computed` flag, not a failed name lookup (`packages/zts/src/flow_checker.zig:2432`): `getPropertyKeyName` resolves `{ [field]: v }` to `"field"`, the *variable* holding the key, so a by-name search both misses the real field and answers for one that is not present.
+**A sink for an object the walk cannot read field by field.** A non-literal options argument, or a literal with a computed key, routes the whole object to `egress_opaque` (`packages/zts/src/flow_checker.zig#FlowChecker`), which carries the same checks the URL and header arms carry. Detecting the computed key needs the `is_computed` flag, not a failed name lookup (`packages/zts/src/flow_checker.zig#FlowChecker`): `getPropertyKeyName` resolves `{ [field]: v }` to `"field"`, the *variable* holding the key, so a by-name search both misses the real field and answers for one that is not present.
 
-**Closures carry what they produce**, both as a value (`packages/zts/src/flow_checker.zig:1516`) and as a callback a module invokes (`packages/zts/src/flow_checker.zig:1540`, `1554`). Only closure-derived labels are unioned into a module call's result, never all arguments - `cacheSet("ns", key, userInput)` answers a boolean that is not the user's data, and tainting it would demote handlers for nothing. For durable exports `nondeterministic` is dropped and only that label: a clock read inside `step("ts", () => Date.now())` is recorded and replayed, so it is identical on every run, while a secret the same callback returns is still a secret.
+**Closures carry what they produce**, both as a value and as a module callback (`packages/zts/src/flow_checker.zig#FlowChecker`). Only closure-derived labels are unioned into a module call's result, never all arguments - `cacheSet("ns", key, userInput)` answers a boolean that is not the user's data, and tainting it would demote handlers for nothing. For durable exports `nondeterministic` is dropped and only that label: a clock read inside `step("ts", () => Date.now())` is recorded and replayed, so it is identical on every run, while a secret the same callback returns is still a secret.
 
 Verified on the full gate after each change:
 
@@ -122,13 +126,13 @@ EOF
 
 Keep the probe type-correct or the type checker rejects it before the flow checker runs - `env()` returns an optional, so `?? "none"` is often needed. A probe that does not compile proves nothing.
 
-**Record the sweep per position, with the reason each unreachable one is unreachable.** `inferLabels` (`packages/zts/src/flow_checker.zig:1516` and the doc comment above it) now carries that table: what is carried, and what cannot be reached because object methods are rejected at parse, spread-in-call fails arity checking before expansion, and comma expressions have a tag and an IR arm but no parser path that emits them. It closes with the operative rule - a new expression kind gets probed, not reasoned about.
+**Record the sweep per position, with the reason each unreachable one is unreachable.** `inferLabels` (`packages/zts/src/flow_checker.zig` and the doc comment above it) now carries that table: what is carried, and what cannot be reached because object methods are rejected at parse, spread-in-call fails arity checking before expansion, and comma expressions have a tag and an IR arm but no parser path that emits them. It closes with the operative rule - a new expression kind gets probed, not reasoned about.
 
 **Do not let a green gate stand in for a class it cannot see.** Say what a gate covers, so its silence is not read as coverage it does not have.
 
 **Write the reason an `else` arm skips things.** The proof-swallow gate stopped two changes in this series and demanded a justification for a new silent `else`. Writing one of those justifications is what exposed a further gap: the draft claimed `inferLabels` already covered closures passed by name, testing that claim showed it did not, and the fix landed in the same change. A gate that forces you to state why you owe nothing catches you owing something.
 
-**Prefer `?T` over an empty value for "not found".** After the durable rule landed, `closuresWithin` returned an empty `LabelSet` for both "no closure here" and "a closure whose only label was just stripped". The caller tested emptiness to tell them apart, so `step("ts", () => Date.now())` fell into the eager-argument branch that put the label back. It returns `?LabelSet` now (`packages/zts/src/flow_checker.zig:498`). The conflation that caused the original class reappeared inside its own fix.
+**Prefer `?T` over an empty value for "not found".** After the durable rule landed, `closuresWithin` returned an empty `LabelSet` for both "no closure here" and "a closure whose only label was just stripped". The caller tested emptiness to tell them apart, so `step("ts", () => Date.now())` fell into the eager-argument branch that put the label back. It returns `?LabelSet` now (`packages/zts/src/flow_checker.zig`). The conflation that caused the original class reappeared inside its own fix.
 
 ## Related Issues
 

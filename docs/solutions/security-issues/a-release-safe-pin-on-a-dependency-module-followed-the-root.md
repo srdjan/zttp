@@ -29,6 +29,11 @@ tags:
   - gates
   - probes
 retire_when: "A Zig release after 0.16.0 makes a dependency module's own .optimize govern runtime safety under a ReleaseFast root. Check without touching the repo: build the two-module probe from the Prevention section with root ReleaseFast and an unannotated ReleaseSafe dependency that indexes a 3-byte slice out of bounds. Zig 0.16.0 exits 0; if the newer Zig aborts with an index-out-of-bounds panic, the pin would work again and this learning retires, though the per-function setting stays harmless."
+binds:
+  - packages/proof-checker/src/safety.zig
+  - build/kernel_safety_release_probe.zig
+  - scripts/check-proof-checker.sh
+proves: zig build test-kernel-safety
 ---
 
 # A ReleaseSafe pin on a dependency module followed the root
@@ -37,7 +42,7 @@ retire_when: "A Zig release after 0.16.0 makes a dependency module's own .optimi
 
 `packages/proof-checker` is the consumer-side acceptance kernel. It decodes certificate bytes that the consumer did not write, and its guards are what stand between those bytes and an out-of-range cast, an out-of-range slice, or an `unreachable`. Releases build with `zig build -Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`). Under ReleaseFast a guard that is missing is undefined behavior rather than a panic, so the kernel is the one module in the tree where runtime safety has to stay on.
 
-Commit 0384765a tried to keep it on by build mode. It computed `proof_checker_optimize = if (optimize == .Debug) .Debug else .ReleaseSafe` and passed that as the `.optimize` of the `zttp_proof_checker` dependency in all three places the dependency is declared (the root build, `packages/runtime/build.zig`, and `packages/tools/build.zig`). Its comment stated a measured cost: "about 30% per `check` call on the kernel fixture, roughly half a microsecond, paid once per start". The pin later moved with the rest of the root build into `build/Context.zig` and sat there at `build/Context.zig:163-174` (pre-fix tree, `ae26ba69^`).
+Commit 0384765a tried to keep it on by build mode. It computed `proof_checker_optimize = if (optimize == .Debug) .Debug else .ReleaseSafe` and passed that as the `.optimize` of the `zttp_proof_checker` dependency in all three places the dependency is declared (the root build, `packages/runtime/build.zig`, and `packages/tools/build.zig`). Its comment stated a measured cost: "about 30% per `check` call on the kernel fixture, roughly half a microsecond, paid once per start". The pin later moved with the rest of the root build into `build/Context.zig` and sat there at `build/Context.zig` (pre-fix tree, `ae26ba69^`).
 
 The pin did nothing. On Zig 0.16.0 the safety checks compiled into a dependency module follow the root module's optimize mode, not the dependency's. With a ReleaseFast root, every `unreachable`, bounds check, and `@intCast` in the ReleaseSafe kernel compiled to nothing. The build graph accepted the declaration, the tests passed, two documents credited the pin, and the guarantee it named did not exist.
 
@@ -60,15 +65,15 @@ Two documents had already recorded the pin as a fact. `docs/plans/2026-09-24-pro
 
 ## What Didn't Work
 
-**Reading the build file as proof.** The declaration was real. Three files set `.optimize` to ReleaseSafe for the kernel, the build graph deduplicated them into one module, and `std.Build.Module` does carry a per-module optimize mode. The language also reports a mode per module: the deprecation note on `std.debug.runtime_safety` at `/Users/srdjans/.zvm/0.16.0/lib/std/debug.zig:234-239` says the constant is deprecated "because it returns the optimization mode of the standard library, when the caller probably wants to use the optimization mode of their own module". A reader who knows that modules have modes concludes that a module's checks follow its mode. That inference is where the defect lived. What a module reports and what governs the checks emitted into it are two different questions, and only the second one matters. Only a probe answers it.
+**Reading the build file as proof.** The declaration was real. Three files set `.optimize` to ReleaseSafe for the kernel, the build graph deduplicated them into one module, and `std.Build.Module` does carry a per-module optimize mode. The language also reports a mode per module: the deprecation note on `std.debug.runtime_safety` at `/Users/srdjans/.zvm/0.16.0/lib/std/debug.zig` says the constant is deprecated "because it returns the optimization mode of the standard library, when the caller probably wants to use the optimization mode of their own module". A reader who knows that modules have modes concludes that a module's checks follow its mode. That inference is where the defect lived. What a module reports and what governs the checks emitted into it are two different questions, and only the second one matters. Only a probe answers it.
 
 **Trusting the pin's comment.** The comment carried a real measurement: about 1.5 us per `check` call under ReleaseFast against about 1.95 us under ReleaseSafe. Per the session that made it, that benchmark was a standalone program compiled once per optimize mode, so the kernel sat under a ReleaseSafe root in one run and a ReleaseFast root in the other (session history). In that shape the mode does take effect, and the difference is a plausible measure of what runtime safety costs the kernel. It is not a measurement of the shipped configuration, where the kernel is a dependency under a ReleaseFast root. The benchmark answered "what does safety cost" and was read as also answering "does the pin deliver safety", which it cannot. A true number about the price made the unverified claim about the mechanism more convincing.
 
 **Checking the wrong property of the pin.** The review that introduced the pin checked that the three declarations of the kernel dependency compute the same mode, so that they dedup into one module. It did not build a release binary and probe a guard. The same work probed every other gate it touched by injecting the fault the gate was meant to catch; the build-mode claim received no such probe, and later plan edits restated it as done (session history).
 
-**A probe that panics in every mode.** The first release probe, written by Codex from the brief, called only `safety.check(false)`. `safety.check` is `if (!ok) @panic(...)` (`packages/proof-checker/src/safety.zig:3`), and `@panic` fires in every optimize mode. That probe passed with the mechanism present and would have passed with it absent, so it could not detect the failure it was written to detect. Review added the `index` case: an out-of-bounds read inside a function that begins with `@setRuntimeSafety(true)`, in a separate module imported by the ReleaseFast root, which is the shape of the shipped binaries.
+**A probe that panics in every mode.** The first release probe, written by Codex from the brief, called only `safety.check(false)`. `safety.check` is `if (!ok) @panic(...)` (`packages/proof-checker/src/safety.zig`), and `@panic` fires in every optimize mode. That probe passed with the mechanism present and would have passed with it absent, so it could not detect the failure it was written to detect. Review added the `index` case: an out-of-bounds read inside a function that begins with `@setRuntimeSafety(true)`, in a separate module imported by the ReleaseFast root, which is the shape of the shipped binaries.
 
-**`std.debug.assert` as a guard.** `assert` is `if (!ok) unreachable` (`debug.zig:418-421`). Its body lives in the `std` module, so no setting in the calling function reaches it. In the probe's third column it stays silent under a ReleaseFast root even when the caller has enabled safety. The kernel had two `assert` sites; both were guards on kernel state.
+**`std.debug.assert` as a guard.** `assert` is `if (!ok) unreachable` (`debug.zig`). Its body lives in the `std` module, so no setting in the calling function reaches it. In the probe's third column it stays silent under a ReleaseFast root even when the caller has enabled safety. The kernel had two `assert` sites; both were guards on kernel state.
 
 ## Solution
 
@@ -84,7 +89,7 @@ The fix keeps the safety setting where the compiler honors it: inside each funct
 
 The last two rows bound the mechanism. The setting covers the body it is written in and nothing that body calls. So the fix has four parts: the annotation in every kernel function, a `@panic`-based replacement for `assert`, an AST gate that keeps both true, and a release probe that shows the mechanism holds under a ReleaseFast root.
 
-**Remove the pin.** Before, `build/Context.zig:163-174` at `ae26ba69^`:
+**Remove the pin.** Before, `build/Context.zig` at `ae26ba69^`:
 
 ```zig
 // Consumer acceptance kernel. A release build keeps runtime safety in the
@@ -101,7 +106,7 @@ const proof_checker_dep = b.dependency("zttp_proof_checker", .{
 });
 ```
 
-After, `build/Context.zig:163-170`:
+After, `build/Context.zig`:
 
 ```zig
 // Consumer acceptance kernel. Each function enables runtime safety with
@@ -114,9 +119,9 @@ const proof_checker_dep = b.dependency("zttp_proof_checker", .{
 });
 ```
 
-`packages/runtime/build.zig:45-50` and `packages/tools/build.zig:30-35` make the same change, each with the comment "Match the outer mode so this dependency dedups across build declarations. Each kernel function enables runtime safety; test-kernel-safety checks it."
+`packages/runtime/build.zig` and `packages/tools/build.zig` make the same change, each with the comment "Match the outer mode so this dependency dedups across build declarations. Each kernel function enables runtime safety; test-kernel-safety checks it."
 
-**Annotate every kernel function and replace `assert`.** `packages/proof-checker/src/safety.zig:1-4` is the replacement:
+**Annotate every kernel function and replace `assert`.** `packages/proof-checker/src/safety.zig` is the replacement:
 
 ```zig
 pub fn check(ok: bool) void {
@@ -134,7 +139,7 @@ fn pop(self: *RangeStack) void {
 }
 ```
 
-After, `packages/proof-checker/src/checker.zig:116-120`:
+After, `packages/proof-checker/src/checker.zig`:
 
 ```zig
 fn pop(self: *RangeStack) void {
@@ -144,17 +149,17 @@ fn pop(self: *RangeStack) void {
 }
 ```
 
-The second `assert` site is now `safety.check(result.ready())` at `checker.zig:686`. Every non-test function in `packages/proof-checker/src` begins with the statement: 367 functions in 16 files, which is the count the gate prints at this tree. The package doc comment states the rule and its reason at `packages/proof-checker/src/root.zig:13-15`.
+The second `assert` site is now `safety.check(result.ready())` at `checker.zig`. Every non-test function in `packages/proof-checker/src` begins with the statement: 367 functions in 16 files, which is the count the gate prints at this tree. The package doc comment states the rule and its reason at `packages/proof-checker/src/root.zig`.
 
-**Enforce it with the Zig AST.** `scripts/check-kernel-safety.sh:11-12` lists every kernel source file, tracked or untracked, and runs `scripts/kernel_safety_gate.zig` over the list. The gate parses each file with `std.zig.Ast` and refuses a file the parser cannot read (`scripts/kernel_safety_gate.zig:137-142`). It makes three checks:
+**Enforce it with the Zig AST.** `scripts/check-kernel-safety.sh:11-12` lists every kernel source file, tracked or untracked, and runs `scripts/kernel_safety_gate.zig` over the list. The gate parses each file with `std.zig.Ast` and refuses a file the parser cannot read (`scripts/kernel_safety_gate.zig`). It makes three checks:
 
-- `checkFunctions` (`:41-63`) visits every `fn_decl` outside a `test_decl` and requires that the first statement of its body is exactly the four tokens `@setRuntimeSafety ( true )` (`isRuntimeSafetyStatement`, `:25-35`).
-- `checkDebugAsserts` (`:65-89`) refuses the token sequence `std . debug . assert` outside a test, with the message "use safety.check".
-- `checkSafetyDisabled` (`:91-110`) refuses any `@setRuntimeSafety` whose argument is not `true` outside a test (`:101`). Its comment says why: "A leading @setRuntimeSafety(true) is worth nothing if a later statement in the same body turns safety back off".
+- `checkFunctions` (`scripts/kernel_safety_gate.zig`) visits every `fn_decl` outside a `test_decl` and requires that the first statement of its body is exactly the four tokens `@setRuntimeSafety ( true )` (`isRuntimeSafetyStatement`, `scripts/kernel_safety_gate.zig`).
+- `checkDebugAsserts` (`scripts/kernel_safety_gate.zig`) refuses the token sequence `std . debug . assert` outside a test, with the message "use safety.check".
+- `checkSafetyDisabled` (`scripts/kernel_safety_gate.zig`) refuses any `@setRuntimeSafety` whose argument is not `true` outside a test (`scripts/kernel_safety_gate.zig`). Its comment says why: "A leading @setRuntimeSafety(true) is worth nothing if a later statement in the same body turns safety back off".
 
-The gate asserts two floors before its pass means anything: at least 16 files and at least 300 non-test functions (`:3-4`, enforced at `:181-194`). A run that saw an empty file list or a tree where the parser skipped every body fails on the floor.
+The gate asserts two floors before its pass means anything: at least 16 files and at least 300 non-test functions (`scripts/kernel_safety_gate.zig`, enforced at `scripts/kernel_safety_gate.zig`). A run that saw an empty file list or a tree where the parser skipped every body fails on the floor.
 
-**Prove the mechanism under a ReleaseFast root.** `build/repo_gates.zig:29-60` wires the gate step `test-kernel-safety` and two probe runs, and `build.zig:45` attaches the step to `zig build test`. The probe module is compiled ReleaseFast (`repo_gates.zig:38`) and imports the real kernel (`:40`) and a stand-in module, also ReleaseFast (`:41-45`):
+**Prove the mechanism under a ReleaseFast root.** `build/repo_gates.zig` wires the gate step `test-kernel-safety` and two probe runs, and `build.zig` attaches the step to `zig build test`. The probe module is compiled ReleaseFast (`repo_gates.zig`) and imports the real kernel (`repo_gates.zig`) and a stand-in module, also ReleaseFast (`repo_gates.zig`):
 
 ```zig
 // build/kernel_safety_probe_dep.zig:6-9
@@ -164,7 +169,7 @@ pub fn indexAt(bytes: []const u8, index: usize) u8 {
 }
 ```
 
-`build/kernel_safety_release_probe.zig:15-23` derives the index from an argument so the optimizer cannot fold the bound, and calls through `@call(.never_inline, ...)`:
+`build/kernel_safety_release_probe.zig` derives the index from an argument so the optimizer cannot fold the bound, and calls through `@call(.never_inline, ...)`:
 
 ```zig
 if (std.mem.eql(u8, mode, "index")) {
@@ -178,9 +183,9 @@ if (std.mem.eql(u8, mode, "index")) {
 proof_checker.safety.check(false);
 ```
 
-The `check` run requires stderr to contain "proof-checker invariant violated" and the process to end on `SIGABRT` (`repo_gates.zig:51-53`). The `index` run requires "index out of bounds" and `SIGABRT` (`:57-59`). A probe that prints its "without a panic" line and exits 0 fails both expectations.
+The `check` run requires stderr to contain "proof-checker invariant violated" and the process to end on `SIGABRT` (`repo_gates.zig`). The `index` run requires "index out of bounds" and `SIGABRT` (`repo_gates.zig`). A probe that prints its "without a panic" line and exits 0 fails both expectations.
 
-**Adjust the two gates that read kernel bodies.** The invariant drift gate pins function bodies by text, so a new first statement in every body would have moved every pin. `normalizedBody` now strips the prefix `@setRuntimeSafety(true); ` when it is first (`pre-rebase:packages/tools/src/invariant_drift_gate.zig:912-913`), and leaves it in place anywhere else, which its test checks. The residual-guard gate's Python extractor could not parse a `switch` body that starts with the statement, so `scripts/check-residual-guards.sh:45-49` now runs a Zig extractor, `scripts/residual_guard_extract.zig`, which also retires one of the legacy `python3` heredocs.
+**Adjust the two gates that read kernel bodies.** The invariant drift gate pins function bodies by text, so a new first statement in every body would have moved every pin. `normalizedBody` now strips the prefix `@setRuntimeSafety(true); ` when it is first (`pre-rebase:packages/tools/src/invariant_drift_gate.zig`), and leaves it in place anywhere else, which its test checks. The residual-guard gate's Python extractor could not parse a `switch` body that starts with the statement, so `scripts/check-residual-guards.sh:45-49` now runs a Zig extractor, `scripts/residual_guard_extract.zig`, which also retires one of the legacy `python3` heredocs.
 
 **Mutations, each run against the built gate.** Removing the annotation from `kernel_safety_probe_dep.zig`: the probe prints "index probe read 0 without a panic" and the gate fails on the stderr match and the exit term. Adding `@setRuntimeSafety(false)` to a kernel function: the gate fails at that line. Dropping the leading statement from a kernel function: the gate fails at that function. At this tree the gate passes with `kernel safety OK: checked 367 non-test function bodies in 16 files`, exit 0.
 

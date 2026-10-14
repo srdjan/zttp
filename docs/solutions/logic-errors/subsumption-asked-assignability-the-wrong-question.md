@@ -34,7 +34,7 @@ the seven steps of the D1 join rule. Step 5 drops a member strictly assignable
 to another member, so that `"a" | string` collapses to `string`: the literal
 describes no value the base type does not. The step answers that question by
 calling `isAssignableTo(narrower, wider)` inside `unionMemberSubsumes`
-(`packages/zts/src/type_pool.zig:447`).
+(`packages/zts/src/type_pool.zig`).
 
 Between two record types, assignability is width subtyping, and it runs opposite
 to intuition. The record with more fields is assignable to the record with
@@ -53,7 +53,7 @@ the single record `{ id: string }`.
 ## Symptoms
 
 `zts check --json` writes its schema for a type from `getUnionMembers`
-(`packages/zts/src/api_schema.zig:194`). The `error` member was already gone
+(`packages/zts/src/api_schema.zig`). The `error` member was already gone
 before the schema writer saw the type, so the emitted contract for `Res`
 described one object shape where the source declares two.
 
@@ -86,7 +86,7 @@ case that would have caught the deletion never ran.
 
 `unionMemberSubsumes` gained a structural exclusion, alongside the intersection,
 nominal, and unresolved-name exclusions already there
-(`packages/zts/src/type_pool.zig:447` and `:458`):
+(`packages/zts/src/type_pool.zig` and `packages/zts/src/type_pool.zig`):
 
 ```zig
 fn unionMemberSubsumes(self: *const TypePool, wider: TypeIndex, narrower: TypeIndex) bool {
@@ -115,7 +115,7 @@ siblings, never one of the four excluded ones, so that path does not reach
 
 The regression pairs the fix with a positive control, so it cannot pass on a
 build where subsumption was simply switched off
-(`packages/zts/src/type_pool.zig:3551`):
+(`packages/zts/src/type_pool.zig`):
 
 ```zig
 test "a union keeps the wider of two records" {
@@ -160,7 +160,7 @@ underlying reason, without that reason being written down anywhere shared:
   `string & { __zttp_effect__: ... }`, so `Effects<string, "env"> | string` lost
   its capability-marker branch and read as though no capability ceiling had been
   declared. The test "a marker on one union branch reports non_literal, not an
-  empty set" (`packages/zts/src/type_env.zig:2427`) exists to catch that
+  empty set" (`packages/zts/src/type_env.zig`) exists to catch that
   fail-open.
 - A **nominal** member carries a brand its base does not, which is the entire
   point of a `distinct type`. Assignable-to-base is true and irrelevant.
@@ -173,7 +173,7 @@ underlying reason, without that reason being written down anywhere shared:
 
 Three separate symptoms had each been patched at the call site without the
 shared cause being named, and the fourth arrived anyway. The doc comment above
-`unionMemberSubsumes` (`packages/zts/src/type_pool.zig:418`) now states the
+`unionMemberSubsumes` (`packages/zts/src/type_pool.zig`) now states the
 general rule, so a fifth structural tag added later has something to check
 itself against instead of needing its own adversarial review.
 
@@ -228,5 +228,5 @@ no-op.
 - [a-proxy-signal-carried-a-proof-it-never-claimed](a-proxy-signal-carried-a-proof-it-never-claimed.md) - the closest match by cause rather than by file. A real, correctly computed signal is reused to answer a question it was never designed for, the two questions coincide in the common case, and they diverge in another.
 - [testing-effect-instead-of-form-refused-the-canonical-predicate](testing-effect-instead-of-form-refused-the-canonical-predicate.md) - the same conflation one subsystem over, found in the same review pass: an admission check asked whether narrowing machinery produced a result instead of whether the input matched the form it advertised.
 - `docs/plans/2026-07-30-014-d1-type-system-design.md` section 3 - the seven-step join rule step 5 belongs to, and the source of the wording the implementation followed.
-- `packages/zts/src/api_schema.zig:194` - the consumer that reads `getUnionMembers` into the published contract, and so the path by which a dropped member reached a shipped artifact.
+- `packages/zts/src/api_schema.zig` - the consumer that reads `getUnionMembers` into the published contract, and so the path by which a dropped member reached a shipped artifact.
 - Commit `4b08f093` - one of eight defects the same review pass found; the others sit in the stripper's angle-bracket scan, call-site generic-argument splitting, readonly-flag propagation, and narrowing scope.

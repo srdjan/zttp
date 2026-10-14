@@ -56,7 +56,7 @@ Third, delete the declaration and every null-preservation site in the same revie
 const dispatch_result = registry.dispatch(name, view);
 ```
 
-The actual panic state remains where it is owned. `packages/runtime/src/panic_recovery.zig:50-93` keeps a per-thread stack of address-taken recovery frames for nested guarded calls. On panic, it restores the enclosing frame before jumping. `packages/runtime/src/runtime_pool.zig:791-806` then treats only the address-taken frame as valid on the panic branch and returns `error.HandlerPanicked`; the pool's quarantine path recycles the failed runtime.
+The actual panic state remains where it is owned. `packages/runtime/src/panic_recovery.zig` keeps a per-thread stack of address-taken recovery frames for nested guarded calls. On panic, it restores the enclosing frame before jumping. `packages/runtime/src/runtime_pool.zig` then treats only the address-taken frame as valid on the panic branch and returns `error.HandlerPanicked`; the pool's quarantine path recycles the failed runtime.
 
 Finally, accept the secondary tightening the deletion exposes. Removing the interpreter import from runtime made the `runtime interpreter` entry in `scripts/module-boundary.allow` unused. The boundary gate correctly required deletion of that stale permission.
 

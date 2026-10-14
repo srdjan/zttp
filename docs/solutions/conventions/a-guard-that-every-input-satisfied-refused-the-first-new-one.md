@@ -57,8 +57,8 @@ The defect is what the condition means. `matching` is empty exactly when no
 published page carries the identity being published, which is the state every
 corpus identity is in the first time it is published. And the identity is not a
 stable name. `corpusVersion()` returns `headlineInputIdentity().bytes`
-(`packages/pi/src/expert_codegen_record.zig:1045-1047`), and that identity is
-built from each case's name, prompt, seed files and mode (`:976-981`). Edit one
+(`packages/pi/src/expert_codegen_record.zig`), and that identity is
+built from each case's name, prompt, seed files and mode (`packages/pi/src/expert_codegen_record.zig`). Edit one
 prompt and the identity moves. The repository's own workflow for a corpus
 defect is to edit the case, re-record, and republish, and the third step ran
 into this floor.
@@ -96,11 +96,11 @@ the two announced, is where the floor refused.
 
 That refusal was also a cycle, and its shape is worth stating exactly, because
 a bypass already existed on the same path and did not reach the floor.
-`assertCoveragePageCurrent` (`expert_codegen_record.zig:4454`) fails the replay
+`assertCoveragePageCurrent` (`packages/pi/src/expert_codegen_record.zig#assertCoveragePageCurrent`) fails the replay
 when the page's `corpusVersion`, `rulesTotal` or `rulesTripped` differ from the
-run (`:4490-4492`). It runs when `on_headline and !evidencePublicationMode()`
-(`:4901-4903`), and `evidencePublicationMode()` is `ZTTP_EVIDENCE_PUBLISH`
-equal to `"1"` (`:4058-4061`). `test-expert-app` is a host test root
+run (`packages/pi/src/expert_codegen_record.zig#assertCoveragePageCurrent`). It runs when `on_headline and !evidencePublicationMode()`
+(`packages/pi/src/expert_codegen_record.zig#assertCoveragePageCurrent`), and `evidencePublicationMode()` is `ZTTP_EVIDENCE_PUBLISH`
+equal to `"1"` (`packages/pi/src/expert_codegen_record.zig#evidencePublicationMode`). `test-expert-app` is a host test root
 (`host_test_roots` in `build/host_tests.zig`) and every host root is a dependency
 of the aggregate `test` step (`for (host.runs)` in `build.zig`), which `scripts/verify.sh:59-64` runs. So after the
 re-record every plain `zig build test` was red on the stale page and would stay
@@ -140,9 +140,9 @@ Apply it in three steps.
 
 **Sort every refusal into one of two kinds, in writing, beside the branch.** A
 refusal is either a defect the workflow must never produce, or a first that the
-workflow produces by construction. The deleted floor's comment at `:101-102`
+workflow produces by construction. The deleted floor's comment at `build.zig`
 says what the refusal protects against and not which kind it is. The port says
-which: `compute`'s doc comment at `tooling/coverage_union.zig:242-244` reads
+which: `compute`'s doc comment at `tooling/coverage_union.zig#compute` reads
 "Refusing instead - as the shell version did - makes the first publication of a
 new identity impossible, and the corpus identity moves by construction whenever
 a prompt is edited." That sentence is the sort. A branch that refuses a first
@@ -151,13 +151,13 @@ that would have to be wrong.
 
 The port sorts its own new refusal the same way, and it is worth walking
 through because it is also a guard on a first. `error.FirstRunWithoutCodes`
-(in the `Failure` set at `tooling/coverage_union.zig:87`, message at `:102`)
+(in the `Failure` set at `tooling/coverage_union.zig#Failure`, with its messages beside that declaration)
 refuses a new identity whose pending run names no codes, which is what the
 original floor was actually protecting against: counting an empty set as an
 observation. Is a first run with zero codes a legitimate first? It is not, and
 the reason is upstream rather than inside the union. The replay refuses a
 zero-tripped run before the publisher sees it, at
-`expert_codegen_record.zig:4840-4848`: "Zero tripped rules over a corpus this
+`expert_codegen_record.zig`: "Zero tripped rules over a corpus this
 size is a scan that stopped working, not a finding about the corpus." That
 floor makes the empty case a defect, so the union's refusal of it is sound.
 Without that upstream floor the same refusal would rest on an assumption.
@@ -165,9 +165,9 @@ Without that upstream floor the same refusal would rest on an assumption.
 **Admit a first by counting it, and let the output describe itself.** The fix
 does not weaken the intent. When history carries runs of the identity,
 `compute` unions the pending codes in without counting them as a published
-row, exactly as the shell version did (`:276-288`; the test at `:524`). When
+row, exactly as the shell version did (`expert_codegen_record.zig`; the test at `expert_codegen_record.zig`). When
 history carries none, the pending run is itself the one observation:
-`observations` is 1 and `distinct_sets` is 1 (the test at `:495`). The page
+`observations` is 1 and `distinct_sets` is 1 (the test at `expert_codegen_record.zig`). The page
 prints those counts, so a union of one says it is a union of one. The renderer
 was changed to say so in words: `scripts/update-coverage.sh:223-232` prints
 "the single published run" and "one shape" at a count of 1, in place of "1
@@ -185,14 +185,14 @@ provider. Apply it in a scratch copy. Then run the prescribed workflow from
 that step to its last step and read the last step's exit status. If a guard
 fires, you have found a first-occurrence guard with no first-occurrence branch,
 and you have found it before a re-record has left the tree red. The port's test
-at `tooling/coverage_union.zig:495`, "the first publication of an identity is
+at `tooling/coverage_union.zig`, "the first publication of an identity is
 one observation, not a refusal", is exactly this probe made permanent: it
 commits history under one identity and asks for a union under another, which is
 the state a prompt edit leaves behind.
 
 Two smaller rules follow from the same morning.
 
-**A refusal names its exit.** The deleted floor's message at `:105` named the
+**A refusal names its exit.** The deleted floor's message at `tooling/coverage_union.zig` named the
 identity and nothing else. Compare the step-coverage gate's failure text in
 `build/step_coverage.zig`, which ends "Run the step from scripts/verify.sh, a CI
 workflow, or `zig build test`; or add a row to scripts/manual-steps.allow with
@@ -293,7 +293,7 @@ claim, and can the inputs support that claim in every state that reaches it.
 Not needed when the guard's condition is a defect by construction and the
 construction is written beside it: an upstream floor that already refuses the
 state, or a step that cannot produce it. `FirstRunWithoutCodes` is that case,
-and its reason is `expert_codegen_record.zig:4840-4848`.
+and its reason is `expert_codegen_record.zig`.
 
 ## Examples
 
@@ -301,7 +301,7 @@ and its reason is `expert_codegen_record.zig:4840-4848`.
 
 Before, at `af447edd^:scripts/coverage-union.sh:99-106`: the refusal with no
 first-occurrence branch, quoted in Context. After, at
-`tooling/coverage_union.zig:276-289`:
+`tooling/coverage_union.zig`:
 
 ```zig
 if (published.items.len == 0) {
@@ -322,7 +322,7 @@ that this is a first at all.
 
 ### 2. The probe that would have found it
 
-The test at `tooling/coverage_union.zig:495`:
+The test at `tooling/coverage_union.zig`:
 
 ```zig
 // History exists but carries a different identity - exactly the state a
@@ -338,16 +338,16 @@ It builds a throwaway git repository and commits a real `docs/coverage.json`,
 so the thing under test is the same `git log` and `git show` path the tool
 runs. That is the first legitimate input from Guidance, and it is the test the
 original script did not have. The refusals are covered by a census over the
-error set (`:581`, iterating `@typeInfo(Failure).error_set` at `:589`), which
+error set (`tooling/coverage_union.zig`, iterating `@typeInfo(Failure).error_set` at `tooling/coverage_union.zig`), which
 requires a message for every member and probes each one the library entry
-point can reach; the comment at `:632` names the two it cannot.
+point can reach; the comment at `tooling/coverage_union.zig` names the two it cannot.
 
 ### 3. The publisher reads a marker, with a floor
 
 `scripts/update-coverage.sh:131-142`. `zig build` owns the step's stdout, so
 the union is read from one `[coverage-union] ` line
-(`tooling/coverage_union.zig:37`) and the reader requires exactly one such
-line, matching the `[seed-coverage]` reader at `:107-109`. This is the rule
+(`tooling/coverage_union.zig`) and the reader requires exactly one such
+line, matching the `[seed-coverage]` reader at `tooling/coverage_union.zig`. This is the rule
 from
 [a-gate-that-counts-nothing-still-reports-a-pass](a-gate-that-counts-nothing-still-reports-a-pass.md)
 applied to the new reader, so that the fix did not introduce the failure that
@@ -355,7 +355,7 @@ document describes.
 
 ### 4. The sentence a union of one prints
 
-`scripts/update-coverage.sh:223-232` and `:374-376`. The page says "the single
+`scripts/update-coverage.sh:223-232` and `tooling/coverage_union.zig`. The page says "the single
 published run" and "one shape" when the counts are 1, and the current
 `docs/coverage.json` carries `"observations": 1`, `"distinctSets": 1` and
 `"unionCount": 3` for `e6801afae099`. A reader can see it is a first. That is
@@ -382,6 +382,6 @@ exits, and each step got the exit that fit it.
 - [a-gate-can-be-non-vacuous-and-still-porous](a-gate-can-be-non-vacuous-and-still-porous.md) - porosity, and the mutation harness; its "apply the edit and run the real gate" method is the one this document turns toward legitimate firsts rather than illegitimate edits
 - [difference-is-not-the-claim-and-a-probe-must-compile](difference-is-not-the-claim-and-a-probe-must-compile.md) - a probe's verdict is read from an exit status; the cheap test in Guidance is read the same way
 - [a-stale-cassette-is-loud-and-an-unsatisfiable-seed-is-silent](../logic-errors/a-stale-cassette-is-loud-and-an-unsatisfiable-seed-is-silent.md) - the same morning's other finding, `78b3005f`, on a seed no fill could satisfy; that one was silent where this one was loud
-- `tooling/coverage_union.zig` - the port, with the sort written at `:242-244` and the first-occurrence branch at `:276-289`
+- `tooling/coverage_union.zig` - the port, with the sort written at `tooling/coverage_union.zig` and the first-occurrence branch at `tooling/coverage_union.zig`
 - `git show af447edd^:scripts/coverage-union.sh` - the pre-fix script; it exists at no later tree
 - Commits are cited by SHA because this repository works on local `main` and opens no pull requests. Of those named here only `d5a0193b` has reached `origin/main`; the rest are local and may be rewritten if they are ever rebased.

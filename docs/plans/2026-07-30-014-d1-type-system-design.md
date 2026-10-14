@@ -18,19 +18,19 @@ aliases), Phase 4 (Dict/JSON typing, `Schema<T>`), and D3's type digests.
 
 | Fact | Location | Consequence for this doc |
 |---|---|---|
-| Types are **not interned**; `addNode` always appends | `type_pool.zig:209-221` | `TypeIndex` equality is not structural identity. Every spec rule phrased as "identical" or "duplicate identities" needs a structural key. **This is the doc's central problem.** |
-| 22 `TypeTag` members; no readonly-array tag exists | `type_pool.zig:42-76` | `readonly T[]` is currently unrepresentable; spec 5.7 admits it. |
-| `isAssignableTo` returns **true** for unresolved `t_ref`/`t_generic_param` on either side | `type_pool.zig:1201-1202` | Direct violation of gate 14.1 "never falls back to `unknown`". |
-| No recursion guard or memo in assignability | `type_pool.zig:1207-1232` | Contractive recursive aliases (spec 5.7) would not terminate. |
-| Union dedup is by `TypeIndex` equality into a 16-slot buffer; >16 members stores raw and lossy | `type_pool.zig:374-410` | `"a" \| string` keeps both members; no `never` elimination; no ordering. |
-| `t_literal_number` stores `@bitCast(i16)`; out-of-range literals silently widen to `number` | `type_pool.zig`, `type_checker.zig:1177-1181` | Literal types are unsound above 32767. Named below as a known limit. |
-| Two narrowing systems: `TypeIndex`-based in `type_checker.zig`, `ExprType`-based in `bool_checker.zig` | `type_checker.zig:109,130`; `bool_checker.zig:30-58,162` | `typeof` narrowing exists **only** in the coarse system. The spec's closed list needs both or one. |
-| Narrowing is **never invalidated** on assignment, aliasing, or loop back edge | `type_checker.zig:530-545` | A guard installed by early return survives a later reassignment. Unsound. |
-| `NarrowingGuard.key` defaults to 0 and callers test `!= 0` | `type_checker.zig:318,381` | Binding at scope 0 slot 0 can never narrow. |
-| `instantiate` omits `t_function` and `t_tuple` from its switch | `type_pool.zig:564-668` | `type F<T> = (x: T) => T` never substitutes. |
-| No type-argument inference anywhere; no constraint storage | `type_env.zig:54-78,892-908` | Spec 5.6 inference must be built, not fixed. |
-| `formatType` truncates into a caller buffer and returns `"?"` on overflow | `type_pool.zig:1351-1356` | Unusable as an identity function. |
-| Eight ad-hoc join sites already exist (ternary, `&&`, `??`, match arms, ...) | `type_checker.zig:1198,1393,1408,1711,1472,1597` | One `joinTypes` subsumes all of them. |
+| Types are **not interned**; `addNode` always appends | `type_pool.zig` | `TypeIndex` equality is not structural identity. Every spec rule phrased as "identical" or "duplicate identities" needs a structural key. **This is the doc's central problem.** |
+| 22 `TypeTag` members; no readonly-array tag exists | `type_pool.zig` | `readonly T[]` is currently unrepresentable; spec 5.7 admits it. |
+| `isAssignableTo` returns **true** for unresolved `t_ref`/`t_generic_param` on either side | `type_pool.zig` | Direct violation of gate 14.1 "never falls back to `unknown`". |
+| No recursion guard or memo in assignability | `type_pool.zig` | Contractive recursive aliases (spec 5.7) would not terminate. |
+| Union dedup is by `TypeIndex` equality into a 16-slot buffer; >16 members stores raw and lossy | `type_pool.zig` | `"a" \| string` keeps both members; no `never` elimination; no ordering. |
+| `t_literal_number` stores `@bitCast(i16)`; out-of-range literals silently widen to `number` | `type_pool.zig`, `type_checker.zig` | Literal types are unsound above 32767. Named below as a known limit. |
+| Two narrowing systems: `TypeIndex`-based in `type_checker.zig`, `ExprType`-based in `bool_checker.zig` | `type_checker.zig`; `bool_checker.zig` | `typeof` narrowing exists **only** in the coarse system. The spec's closed list needs both or one. |
+| Narrowing is **never invalidated** on assignment, aliasing, or loop back edge | `type_checker.zig` | A guard installed by early return survives a later reassignment. Unsound. |
+| `NarrowingGuard.key` defaults to 0 and callers test `!= 0` | `type_checker.zig` | Binding at scope 0 slot 0 can never narrow. |
+| `instantiate` omits `t_function` and `t_tuple` from its switch | `type_pool.zig` | `type F<T> = (x: T) => T` never substitutes. |
+| No type-argument inference anywhere; no constraint storage | `type_env.zig` | Spec 5.6 inference must be built, not fixed. |
+| `formatType` truncates into a caller buffer and returns `"?"` on overflow | `type_pool.zig` | Unusable as an identity function. |
+| Eight ad-hoc join sites already exist (ternary, `&&`, `??`, match arms, ...) | `type_checker.zig` | One `joinTypes` subsumes all of them. |
 
 ---
 
@@ -108,12 +108,12 @@ fixing it is a `TypeData` layout change worth its own ticket.
 
 ## 2. Decision: the assignability relation
 
-The existing relation (`type_pool.zig:1061-1205`) is **kept as the base** and
+The existing relation (`type_pool.zig`) is **kept as the base** and
 amended by six changes. It is already a reasonable structural subtyping
 relation; the amendments close soundness holes the spec's gates test for.
 
 **A1 — unresolved names are an error, not `true`.** Delete the
-`t_ref`/`t_generic_param` blanket-true at `:1201-1202`. Callers must resolve
+`t_ref`/`t_generic_param` blanket-true at `type_pool.zig`. Callers must resolve
 refs through `TypeEnv.resolveType` before asking. An unresolved name at an
 assignability site raises a diagnostic (new code in the ZTS5xx band,
 `unresolved_type_reference`) rather than silently accepting. This is the
@@ -134,27 +134,27 @@ mutable case and is the same trade TypeScript makes; the spec does not require
 element invariance and the corpus does not exercise it.
 
 **A4 — readonly fields stay write-site-enforced.** Record assignability ignores
-the `readonly` flag (current behavior at `:1207-1232`); assigning **through** a
+the `readonly` flag (current behavior at `type_pool.zig`); assigning **through** a
 readonly field is rejected at the assignment site
-(`type_checker.zig:546-568`). Deliberate: field-variance would reject the
+(`type_checker.zig`). Deliberate: field-variance would reject the
 `Pick`/`Omit`/`Partial` flows the spec admits, for no proof the profile claims.
 
 **A5 — nominal direction is asymmetric and stays that way.** `UserId` is
 assignable to `string` (spec 5.7: "a distinct value supports the operations of
 its base type"); `string` is **not** assignable to `UserId`, and neither is
-`OrderId` (spec 5.7, enforced today by the nominal check at `:1079-1084`).
+`OrderId` (spec 5.7, enforced today by the nominal check at `type_checker.zig`).
 Formalize by consulting `node.nominal` on the **source** as well: if the target
 is nominal and the source is not the same nominal node, reject unless both are
 records reaching `isRecordAssignable` — which is current behavior, now
 documented as intentional rather than incidental.
 
 **A6 — `t_null` becomes live.** The type parser maps `"null"` to `unknown`
-(`type_pool.zig:1861`) and inference maps `lit_null` to `undefined`
-(`type_checker.zig:1189`). Both are removed in Phase 3 when source `null` is
+(`type_pool.zig`) and inference maps `lit_null` to `undefined`
+(`type_checker.zig`). Both are removed in Phase 3 when source `null` is
 admitted; `t_null` then behaves as an ordinary primitive, assignable only to
 itself, to `unknown`, and to unions containing it. `t_nullable` keeps meaning
 `T | undefined` — note its display bug (`writeType` prints `T | null` at
-`:1416-1418`) is fixed at the same time, since the canonical key would otherwise
+`type_checker.zig`) is fixed at the same time, since the canonical key would otherwise
 disagree with what a human reads.
 
 Everything else in the existing relation — width subtyping, optional-field
@@ -200,7 +200,7 @@ First-appearance order is display order only; the canonical key sorts (section
 author wrote it.
 
 **Overflow fails closed.** Today >16 members abandons dedup and stores the raw
-sequence (`type_pool.zig:396-399`), which silently produces a type whose key is
+sequence (`type_pool.zig`), which silently produces a type whose key is
 not canonical. Replace with a diagnostic (`union_too_wide`, ZTS5xx) at the
 existing `MAX_UNION_MEMBERS = 16`. Raising the cap is a separate measured
 decision; failing closed at the current cap is the correct default for a profile
@@ -253,7 +253,7 @@ that an explicit type argument is required — which the spec already permits.
 
 **Explicit type arguments** skip inference entirely and are checked against
 constraints. Arity mismatch is an error (today it silently leaves the
-application uninstantiated, `type_env.zig:539`).
+application uninstantiated, `type_env.zig`).
 
 **Checked instantiation.** After binding, substitute and re-check every value
 argument against its substituted parameter type. This is the "every
@@ -281,7 +281,7 @@ in the checker, not a language ambiguity.
 
 **Narrowing store.** Separate `narrowed` from `binding_types`. Today
 `binding_types` doubles as declared-type store and flow store
-(`type_checker.zig:109`), which is why nothing can be invalidated without losing
+(`type_checker.zig`), which is why nothing can be invalidated without losing
 the declaration. After the split: `binding_types` is the declared/inferred type,
 `narrowed` is the flow-sensitive overlay, and killing a narrowing means dropping
 the overlay entry.
@@ -290,29 +290,29 @@ the overlay entry.
 
 | Test | Status |
 |---|---|
-| `=== / !==` vs `undefined`, `null`, literal | exists (`:1244-1299`), extend to `null` in Phase 3 |
-| `typeof x === "..."` | **migrate** from `bool_checker.zig:1395-1415` into the TypeIndex system |
+| `=== / !==` vs `undefined`, `null`, literal | exists (`type_checker.zig`), extend to `null` in Phase 3 |
+| `typeof x === "..."` | **migrate** from `bool_checker.zig` into the TypeIndex system |
 | `Array.isArray(x)` | new |
 | `isDict(x)`, `isBytes(x)` | new, Phase 4/5 with the types |
-| literal discriminant field test | exists (`:1317-1371`) |
+| literal discriminant field test | exists (`bool_checker.zig`) |
 | bare boolean discriminant read (`if (r.ok)`) | new — required by the spec's `ok`-guard idiom |
 | `!` of any admitted test | new — required by `if (!r.ok) return` |
 | validated type predicate `x is T` | new; predicate-body validation below |
 
 **Positions:** `if`/`else` **both** branches (today the else branch narrows
-nothing, `:348-350`), `?:` both branches, `match` arms, after `assert`, after an
+nothing, `bool_checker.zig`), `?:` both branches, `match` arms, after `assert`, after an
 early-exit guard, and the right operand of `&&`/`||`. This is the spec list
 verbatim.
 
 **Kill rules — the half the spec omits:**
 
 1. **Assignment kills.** Any assignment to binding `k` drops every narrowing
-   entry for `k`. Today `walkExpr .assignment` (`:530-545`) does not touch the
+   entry for `k`. Today `walkExpr .assignment` (`bool_checker.zig`) does not touch the
    store; this is a real unsoundness fix, not a refactor.
 2. **Aliasing does not propagate and does not need to.** Narrowing keys are
    `(scope, slot)` bindings, never member paths, and the language has no
    references, so a narrowed binding cannot be mutated through another name.
-   `const y = x` snapshots the type at declaration (`:269-307`) and is unaffected
+   `const y = x` snapshots the type at declaration (`bool_checker.zig`) and is unaffected
    by later narrowing of `x` — correct, and now documented.
 3. **Member-path scrutinees are not narrowed.** Spec 5.5 allows a member path as
    a `match` scrutinee; narrowing binds to the **arm-scoped binding pattern**,
@@ -324,13 +324,13 @@ verbatim.
    only if the binding is not assigned anywhere in the body. Implementation: scan
    the body for assignments once, kill those keys at loop entry.
 5. **Scope exit kills.** Truncate `narrowed` on scope pop, as
-   `active_declared_types` already does (`:255-256`).
+   `active_declared_types` already does (`bool_checker.zig`).
 6. **Calls do not kill.** No capability call can reach a local binding, since the
    language has no references and module state is immutable (spec 5.1). This is
    what makes the `ok`-guard idiom sound across an intervening call.
 
 **Fix the sentinel.** `NarrowingGuard.key` uses 0 as "absent"
-(`:318,381`), which makes scope-0 slot-0 unnarrowable. Replace with an optional
+(`bool_checker.zig`), which makes scope-0 slot-0 unnarrowable. Replace with an optional
 (`?u32`).
 
 **Type-predicate validation** (spec 5.7: "the checker validates the predicate

@@ -81,30 +81,30 @@ This report supplies none of those projections.
 Raw textual branch counts are not used as complexity measurements.
 
 The current architecture document contains stale artifact-format prose.
-`packages/runtime/src/self_extract.zig:22` defines format 6, matching `docs/user-guide.md:847`.
+`packages/runtime/src/self_extract.zig` defines format 6, matching `docs/user-guide.md:847`.
 `docs/internals/architecture.md:209` still describes format 4.
 Source and current public behavior must settle compatibility questions when documents disagree.
 
 ## Existing simplifications that must not be proposed again
 
 The JIT tiers are gone.
-`packages/zts/src/tests/opcode_parity.zig:7` explains that its corpus now checks one interpreter against expected values.
+`packages/zts/src/tests/opcode_parity.zig` explains that its corpus now checks one interpreter against expected values.
 The archived VM-loop plan describes removed JIT code and cannot justify current work.
 The native runtime still executes handlers through bytecode, with selected embedded AOT paths where configured.
-`packages/runtime/src/handler_instance.zig:1582` retains that AOT attempt and fallback.
+`packages/runtime/src/handler_instance.zig` retains that AOT attempt and fallback.
 
-Source preparation already has one owner in `packages/zts/src/source_frontend.zig:1`.
-Compile-time evaluation already uses the main parser and IR in `packages/zts/src/comptime.zig:1`.
+Source preparation already has one owner in `packages/zts/src/source_frontend.zig`.
+Compile-time evaluation already uses the main parser and IR in `packages/zts/src/comptime.zig`.
 The remaining separate compile-time value model does not imply a separate parser.
 
-Route resolution already has a shared implementation in `packages/zts/src/route_resolution.zig:1`.
-The compiler already shares module facts and has typed phase wrappers in `packages/zts/src/pipeline.zig:1`.
+Route resolution already has a shared implementation in `packages/zts/src/route_resolution.zig`.
+The compiler already shares module facts and has typed phase wrappers in `packages/zts/src/pipeline.zig`.
 The September work already consolidated schema literals, journal decoding, transaction recovery, and the acceptance kernel.
 `docs/plans/2026-10-10-minimal-design-worklog.md` records completion of its ten reductions and the compile-completeness correction.
 Those reports are historical evidence, not this audit's test results.
 
 The three public binaries already isolate the expert agent from deployment.
-`build/artifacts.zig:35` excludes `pi_app`, deployment commands, and analyzer commands from the runtime template.
+`build/artifacts.zig` excludes `pi_app`, deployment commands, and analyzer commands from the runtime template.
 Extracting `pi` into another repository would not remove those runtime dependencies because they already do not exist.
 
 ## Contracts that define success
@@ -114,17 +114,17 @@ The following contracts remain mandatory unless the owner explicitly selects a p
 
 | Contract | Required preservation | Current evidence |
 |---|---|---|
-| Source profile | Current `.ts` and `.tsx` acceptance, refusal, and source identities | `docs/user-guide.md:492`; `packages/zts/src/source_frontend.zig:16` |
+| Source profile | Current `.ts` and `.tsx` acceptance, refusal, and source identities | `docs/user-guide.md:492`; `packages/zts/src/source_frontend.zig` |
 | Types | Generics, recursive aliases, narrowing, `null` versus `undefined`, Result and optional handling | `docs/user-guide.md:511`; `docs/user-guide.md:546` |
 | Handler behavior | Request fields, response bodies, headers, statuses, routing, and native calls | `docs/user-guide.md:56`; `docs/user-guide.md:90` |
 | Proof honesty | Unknown input never becomes a proven property | `CONCEPTS.md:167`; `docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md` |
 | Independent acceptance | Consumer derives obligations and checks the loaded artifact independently | `CONCEPTS.md:78`; `packages/proof-checker/src/checker.zig` |
 | Authority separation | Integrity, provenance, property proof, residual guards, and invariant enforcement remain distinct | `docs/user-guide.md:854`; `CONCEPTS.md:121` |
-| Request isolation | Arena reset, owned module state, timeout invalidation, panic quarantine, and pool generations | `docs/internals/architecture.md:80`; `packages/runtime/src/handler_instance.zig:2161` |
-| Native execution | Local native Zig binaries and current handler execution behavior | `build/artifacts.zig:35`; `packages/zts/src/interpreter.zig:193` |
-| Filesystem safety | Static-file path checks remain on the serving path | `packages/runtime/src/server.zig:669`; `packages/runtime/src/server_static.zig:62` |
+| Request isolation | Arena reset, owned module state, timeout invalidation, panic quarantine, and pool generations | `docs/internals/architecture.md:80`; `packages/runtime/src/handler_instance.zig` |
+| Native execution | Local native Zig binaries and current handler execution behavior | `build/artifacts.zig`; `packages/zts/src/interpreter.zig` |
+| Filesystem safety | Static-file path checks remain on the serving path | `packages/runtime/src/server.zig`; `packages/runtime/src/server_static.zig` |
 | Persistence | Durable replay, queue ownership, protected ledger rules, and exact authority-bearing bytes | `docs/user-guide.md:656`; `docs/user-guide.md:700` |
-| Tooling | Public command outputs, diagnostic codes and locations, contracts, receipts, and editor protocol | `build/goldens.zig:47`; `build/host_tests.zig:61` |
+| Tooling | Public command outputs, diagnostic codes and locations, contracts, receipts, and editor protocol | `build/goldens.zig`; `build/host_tests.zig` |
 
 `docs/consumer-contract.md:26` explicitly separates implemented mechanisms from the proposed consumer contract.
 Its three integrated declaration stages are not implemented conformance claims.
@@ -141,11 +141,11 @@ Confidence measures the source evidence, not a guaranteed benefit from the propo
 **Category:** architecture and direction. **Impact:** high. **Effort:** large. **Risk:** high. **Confidence:** high for divergence, medium for consolidation cost.
 
 Current checking and compilation choose different analysis paths.
-The check-only path shares module facts at `packages/tools/src/precompile.zig:2041` and installs imported summaries at `:2195`.
-`compileHandler` branches into `compileMultiModule` before its single-module analysis at `:2674`.
+The check-only path shares module facts at `packages/tools/src/precompile.zig` and installs imported summaries at `packages/tools/src/precompile.zig`.
+`compileHandler` branches into `compileMultiModule` before its single-module analysis at `packages/tools/src/precompile.zig`.
 That branch explicitly refuses declarations because the multi-module build performs no flow check.
-`compileMultiModule` independently builds and compiles a graph at `:3423`.
-`buildContractWithPolicy` accepts optional completed analysis, or constructs missing analysis itself, at `:3594`.
+`compileMultiModule` independently builds and compiles a graph at `packages/tools/src/precompile.zig`.
+`buildContractWithPolicy` accepts optional completed analysis, or constructs missing analysis itself, at `packages/tools/src/precompile.zig`.
 
 This structure makes feature support and analysis completion depend on the command path.
 A new import-aware analysis must reach several coordinators before checking and artifact production agree.
@@ -161,9 +161,9 @@ Native Zig error unions and explicit allocator ownership remain the failure and 
 
 This does not require one visitor or a new generic compiler framework.
 The existing `ResolvedModule`, `CheckedModule`, `ModuleFacts`, and route resolver provide the starting pieces.
-Stable caller-owned storage must preserve the pointer lifetimes documented at `packages/zts/src/pipeline.zig:103`.
+Stable caller-owned storage must preserve the pointer lifetimes documented at `packages/zts/src/pipeline.zig`.
 
-The previous orchestration migration was declined for lack of a concrete consumer at `packages/zts/src/pipeline.zig:18`.
+The previous orchestration migration was declined for lack of a concrete consumer at `packages/zts/src/pipeline.zig`.
 This proposal has a narrower justification: current check/build divergence for imported handlers.
 It must first show that shared results remove actual decision paths.
 Moving all of `precompile.zig` into `zts` would violate the documented I/O boundary and is not recommended.
@@ -182,10 +182,10 @@ Artifact acceptance also requires `test-proof-checker`, `test-proof-ratchet`, `t
 **Category:** architecture and direction. **Impact:** high potential. **Effort:** large. **Risk:** high. **Confidence:** high for duplicated representation, medium for net reduction.
 
 Typed source currently becomes stripped text plus a `TypeMap`, then parser IR, then reconstructed types.
-`packages/zts/src/source_frontend.zig:87` invokes stripping; `:91` applies TSX lowering and composes coordinate edits.
-`packages/zts/src/type_map.zig:36` records annotation positions and signature identities separately from parser nodes.
-`packages/zts/src/type_env.zig:569` reconnects signatures through those offsets.
-`packages/zts/src/type_pool.zig:2164` parses type expressions from source text again.
+`packages/zts/src/source_frontend.zig` invokes stripping; `packages/zts/src/source_frontend.zig` applies TSX lowering and composes coordinate edits.
+`packages/zts/src/type_map.zig` records annotation positions and signature identities separately from parser nodes.
+`packages/zts/src/type_env.zig` reconnects signatures through those offsets.
+`packages/zts/src/type_pool.zig` parses type expressions from source text again.
 
 This design preserves an older untyped parser while surrounding it with increasingly precise typed-source machinery.
 Adding syntax can require changes to scanning, source maps, signature matching, parsing, and type reconstruction.
@@ -219,11 +219,11 @@ Compile `wasm` because the browser analyzer is a real second consumer of the fro
 **Category:** architecture and trust modeling. **Impact:** medium to high. **Effort:** medium to large. **Risk:** high. **Confidence:** high for structural coupling.
 
 Binding metadata and runtime callbacks currently occupy the same records.
-`packages/zts/src/module_binding/types.zig:395` mixes native pointers, signatures, capabilities, trace behavior, and provenance rules.
-The SDK defines parallel metadata in `packages/zttp-sdk/src/binding.zig:201`.
-`packages/zts/src/module_binding_adapter.zig:108` adapts those records into engine bindings.
-The freestanding analyzer replaces callbacks with stubs at `packages/zts/src/builtin_modules.zig:101`.
-`packages/zts/build.zig:66` makes the compiler depend on the engine tier.
+`packages/zts/src/module_binding/types.zig` mixes native pointers, signatures, capabilities, trace behavior, and provenance rules.
+The SDK defines parallel metadata in `packages/zttp-sdk/src/binding.zig`.
+`packages/zts/src/module_binding_adapter.zig` adapts those records into engine bindings.
+The freestanding analyzer replaces callbacks with stubs at `packages/zts/src/builtin_modules.zig`.
+`packages/zts/build.zig` makes the compiler depend on the engine tier.
 
 The analyzer requires semantic facts but must import a structure that also names executable implementations.
 New binding fields cross the SDK, adapter, engine, analyzer projection, specification renderer, and governance checks.
@@ -239,7 +239,7 @@ Replace compatible provenance flag combinations with an explicit tagged return-o
 Candidate cases are fixed labels, argument-derived data, persistent-state reads, and bounded declassification.
 The exact cases need a binding census before selection.
 Do not infer persistent-state provenance from arguments, and do not replace unknown provenance with empty labels.
-`packages/zts/src/module_binding/types.zig:489` through `:517` states why those distinctions matter.
+`packages/zts/src/module_binding/types.zig` states why those distinctions matter.
 
 The first extraction should preserve current labels and serialized identities exactly.
 A provenance redesign is a separate change after the descriptor boundary is stable.
@@ -257,9 +257,9 @@ Also run `test-flow-census`, `test-contract-golden`, `test-residual-guards-drift
 **Category:** architecture. **Impact:** medium. **Effort:** large. **Risk:** high. **Confidence:** high for dependency coupling.
 
 The runtime already has an engine adapter, but that adapter mostly exposes implementation types.
-`packages/runtime/src/engine_adapter.zig:11` exports `HandlerInstance`, pools, contracts, and runtime configuration.
-`packages/runtime/src/handler_instance.zig:23` imports HTTP, workflow, and native-call siblings.
-`packages/runtime/src/runtime_http.zig:17`, `packages/runtime/src/runtime_workflow.zig:15`, and `packages/runtime/src/runtime_natives.zig:13` import `handler_instance.zig` back.
+`packages/runtime/src/engine_adapter.zig` exports `HandlerInstance`, pools, contracts, and runtime configuration.
+`packages/runtime/src/handler_instance.zig` imports HTTP, workflow, and native-call siblings.
+`packages/runtime/src/runtime_http.zig`, `packages/runtime/src/runtime_workflow.zig`, and `packages/runtime/src/runtime_natives.zig` import `handler_instance.zig` back.
 These are concrete dependency cycles, not a complaint about file size.
 
 **Simpler design:** let `HandlerInstance` own the execution lifecycle and pass explicit borrowed capabilities to its helpers.
@@ -270,13 +270,13 @@ It should not need the engine's complete object model.
 
 Do not replace the interpreter, value representation, hidden classes, or allocator strategy in this phase.
 Those changes would expand the behavioral surface before ownership is stable.
-The serving path disables collection through `packages/zts/src/context.zig:414`.
+The serving path disables collection through `packages/zts/src/context.zig`.
 That does not prove the collector is unused by other execution modes or unnecessary for retained state.
 
 **Acceptance checks:** exact responses and errors across direct requests, workflow calls, queue calls, replay, and AOT fallback.
 Retain response borrowing rules, lease release, timeout invalidation, panic quarantine, and generation pinning.
 Run real accept-path tests, not only mocked engine calls.
-Preserve static path validation through `packages/runtime/src/server.zig:669` and `packages/runtime/src/server_static.zig:62`.
+Preserve static path validation through `packages/runtime/src/server.zig` and `packages/runtime/src/server_static.zig`.
 
 Required unfiltered steps: `test-server`, `test-zruntime`, `test-cli`, `test-module-scope-panic`, `test-panic-isolation`, and `test-module-boundary`.
 The final suite must run sequentially where the repository requires that ordering.
@@ -286,7 +286,7 @@ The final suite must run sequentially where the repository requires that orderin
 **Category:** product direction. **Impact:** potentially high maintenance reduction. **Effort:** decision-dependent. **Risk:** high compatibility risk. **Confidence:** high for separable surfaces, unknown for user demand.
 
 `pi` is a large package, but deployment already excludes it.
-Studio and edge are optional in `build/Context.zig:78` and `packages/runtime/src/runtime_features.zig:1`.
+Studio and edge are optional in `build/Context.zig` and `packages/runtime/src/runtime_features.zig`.
 Durable workflows, actor queues, tool routes, and ledger invariants are public features in `docs/user-guide.md`.
 Moving those features out of the default build can simplify a distribution without simplifying their implementation.
 Deleting them reduces maintenance only by removing documented behavior.
@@ -314,7 +314,7 @@ The owner must decide removals before an executor writes a deletion plan.
 
 **Category:** verification and tooling. **Impact:** medium. **Effort:** medium. **Risk:** medium to high. **Confidence:** high for current constraints.
 
-The build already uses a host-test table at `build/host_tests.zig:36`.
+The build already uses a host-test table at `build/host_tests.zig`.
 `build/step_coverage.zig` checks the actual build graph rather than names alone.
 The aggregate deliberately excludes pool-heavy runtime tests; `docs/internals/testing.md:337` explains the measured macOS failure.
 `scripts/verify.sh:5` preserves sequential process boundaries for that reason.
@@ -534,8 +534,8 @@ A rewrite needs public negative cases, safe contrasts, and exact expected values
 ## Tempting changes to reject now
 
 Do not merge producer proof logic into the acceptance kernel.
-The proof IR deliberately models fewer concepts than parser IR at `packages/zts/src/proof_ir.zig:1`.
-`packages/zts/src/translation_witness.zig:1` relates that projection to final bytecode.
+The proof IR deliberately models fewer concepts than parser IR at `packages/zts/src/proof_ir.zig`.
+`packages/zts/src/translation_witness.zig` relates that projection to final bytecode.
 Those representations serve different trust purposes and are not ordinary duplication.
 
 Do not merge all analysis passes into one visitor.
@@ -617,12 +617,12 @@ These counts are maintenance signals, not reducible amounts, per-function comple
 The metric includes test helpers defined outside test blocks in its production count.
 No percentage of removable code or predicted performance improvement follows from these results.
 
-The root agent confirmed check/build divergence at `packages/tools/src/precompile.zig:2674`.
-The root agent confirmed frontend reconstruction at `packages/zts/src/source_frontend.zig:87`, `packages/zts/src/type_env.zig:569`, and `packages/zts/src/type_pool.zig:2164`.
+The root agent confirmed check/build divergence at `packages/tools/src/precompile.zig`.
+The root agent confirmed frontend reconstruction at `packages/zts/src/source_frontend.zig`, `packages/zts/src/type_env.zig`, and `packages/zts/src/type_pool.zig`.
 The root agent confirmed binding metadata coupling, analyzer callback substitution, and the compiler's engine dependency.
-The corrected dependency citation is `packages/zts/build.zig:66`.
-The SDK binding record begins at `packages/zttp-sdk/src/binding.zig:201`.
-The engine mapping begins at `packages/zts/src/module_binding_adapter.zig:108`.
+The corrected dependency citation is `packages/zts/build.zig`.
+The SDK binding record begins at `packages/zttp-sdk/src/binding.zig`.
+The engine mapping begins at `packages/zts/src/module_binding_adapter.zig`.
 
 The root agent also confirmed runtime back-imports, deployment exclusion of `pi`, gate sequencing, and the artifact-format discrepancy.
 These checks strengthen the architectural evidence but do not establish behavioral equivalence for any proposed replacement.

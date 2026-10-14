@@ -50,12 +50,12 @@ agent for three consecutive qualification cohorts.
 `cache-counter-holes` recorded "applied no edit" in all three report-only
 cohorts over corpus `0012ad8ca6d5`, scoring 13/19, 15/19 and 13/19 on raw
 first-draft pass against the floor of 14 that
-`packages/pi/src/expert_qualification.zig:16` sets for changing the product
+`packages/pi/src/expert_qualification.zig` sets for changing the product
 default. The page named the case and called it a property of the case rather
 than a sample (`docs/convergence.md:32-35`).
 
-The case is a `.mode = .holes` entry (`packages/pi/src/expert_codegen_record.zig:2016`,
-mode at `:2047`). Hole mode, per the `Mode` doc comment at `:829-831`, "seeds a
+The case is a `.mode = .holes` entry (`packages/pi/src/expert_codegen_record.zig`,
+mode at `packages/pi/src/expert_codegen_record.zig`). Hole mode, per the `Mode` doc comment at `packages/pi/src/expert_codegen_record.zig`, "seeds a
 skeleton whose response expressions are `hole()` and asks for them to be filled
 one at a time", against whole-file mode, which "hands the agent an empty
 workspace and asks for a handler". The skeleton carries the handler signature,
@@ -68,18 +68,18 @@ Twelve days earlier, `f87f97aa` (2026-09-08, "fix(zts): five store reads assert
 ignorance instead of a benign label", an origin/main commit that `afe1dc10`
 later merged into local main) changed what that capsule could mean. `cacheGet` now declares
 `.return_labels = .{ .internal = true, .unknown = true }`
-(`packages/modules/src/data/cache.zig:52`), because a store read hands back
+(`packages/modules/src/data/cache.zig`), because a store read hands back
 whatever a separate write put there and the read call holds no reference to that
 write. At the sink, `checkSinkLabels` does
 `if (labels.has(.unknown)) self.clearSinkProperties(sink);`
-(`packages/zts/src/flow_checker.zig:1994`), and the `.response` arm of
+(`packages/zts/src/flow_checker.zig`), and the `.response` arm of
 `clearSinkProperties` sets `no_secret_leakage`, `no_credential_leakage` and
-`deterministic` to false without condition (`flow_checker.zig:2202-2208`). Any
+`deterministic` to false without condition (`flow_checker.zig`). Any
 fill that carries `hits` into the response body therefore arrives at the sink
 carrying `.unknown`, the two leak properties are cleared, and the declared
-capsule cannot be discharged: `packages/zts/src/spec_discharge.zig:348-362`
+capsule cannot be discharged: `packages/zts/src/spec_discharge.zig`
 records each declared spec the property block does not hold as
-`not_discharged`, which `packages/tools/src/precompile_check.zig:637` renders as
+`not_discharged`, which `packages/tools/src/precompile_check.zig` renders as
 "declared Proof capsule was not discharged by handler proof", code ZTS500.
 
 The fence is correct. The fixture was correct when it was written. On 2026-09-08
@@ -111,7 +111,7 @@ recorded DeepSeek corpus replays in expert_codegen_record.zig fail with
 StaleCodegenCassette" and narrows the durable module example that "claimed four
 properties the compiler can no longer prove for it". Both of those are loud. A
 stale cassette is `error.StaleCodegenCassette` returned from
-`expert_codegen_record.zig:4773` after printing the re-record command; a module
+`expert_codegen_record.zig` after printing the re-record command; a module
 example sits under a gate. The holes seed is neither.
 
 ## Solution
@@ -132,9 +132,9 @@ Because seed bytes are inside `headlineInputIdentity`, the edit moved the corpus
 version from `0012ad8ca6d5` to `e6801afae099` and forced a paid whole-corpus
 re-record (`b66b3bca`, 2026-09-20, "test(pi): re-record the corpus against the
 two amended cases", local main). That is by design: `recordingRunCanActivate`
-(`:2669`) requires `selected == record_corpus.len`, and a filtered run ends in
+(`expert_codegen_record.zig`) requires `selected == record_corpus.len`, and a filtered run ends in
 `error.PartialRecordingQuarantined` with the staged artifact left where it is
-(`:3723-3727`).
+(`expert_codegen_record.zig`).
 
 ## Why This Works
 
@@ -143,8 +143,8 @@ the case measures hole filling instead of measuring an impossible request.
 
 The deeper reason the defect survived is that the recorder's identity hash
 cannot see it. `headlineInputIdentity()` hashes each case's name, prompt, seed
-files and mode (`expert_codegen_record.zig:961-984`), and `corpusVersion()` is
-that hash (`:1045-1047`). The seed's bytes did not change on 2026-09-08. What
+files and mode (`expert_codegen_record.zig`), and `corpusVersion()` is
+that hash (`expert_codegen_record.zig`). The seed's bytes did not change on 2026-09-08. What
 changed is whether a program exists that satisfies them, and no hash over bytes
 measures satisfiability. The identity detects an edit to the input. It does not
 detect a change in what the input means.
@@ -178,7 +178,7 @@ answer to an unsatisfiable request, and it was scored as a failure three times.
 One detail shows why hole mode cannot warn about this on its own. The frame the
 model quoted said `undischarged ["cost_bounded","optional_safe","result_safe"]`
 and did not name the leak specs. That was accurate for the file as it stood.
-`packages/zts/src/contract_builder.zig:940-972` builds a hole summary by
+`packages/zts/src/contract_builder.zig` builds a hole summary by
 projecting the `not_discharged` and `missing_capsule` diagnostics of the owning
 function, and with `hole()` in place nothing flowed into the response, so both
 leak properties were proven and no diagnostic named them. Hole mode reports what
@@ -197,7 +197,7 @@ when a fence moves the model absorbs it. The whole-file sibling `cache-counter`
 says so in its own comment: "Noticing that a store read costs the default
 profile and narrowing the Spec accordingly is the model behaviour being
 measured; saying it in the prompt would measure instruction-following instead"
-(`expert_codegen_record.zig:1767-1770`). In hole mode the capsule is in the seed
+(`expert_codegen_record.zig`). In hole mode the capsule is in the seed
 bytes, so the same fence turns the case into a request that no program
 satisfies.
 
@@ -241,10 +241,10 @@ Third, read a case that behaves identically in every cohort as a question about
 the case before reading it as a fact about the model.
 
 **The standing example to check first.** `egress-options-holes`
-(`expert_codegen_record.zig:2062`) declares the same two leak specs and carries
+(`expert_codegen_record.zig`) declares the same two leak specs and carries
 an upstream payload into the response body. It passes today only because `fetch`
 declares `.return_labels = .{ .external = true }`
-(`packages/modules/src/net/fetch.zig:69`) rather than `.unknown`, and because
+(`packages/modules/src/net/fetch.zig`) rather than `.unknown`, and because
 `f87f97aa` touched five store reads only: `cacheGet`, `queue.receive`, `sqlOne`,
 `sqlMany` and `durable.waitSignal`. It was measured passing in the
 `e6801afae099` recording. One future fence on an egress read breaks it in
@@ -254,7 +254,7 @@ run against.
 **Which side of the identity a fix lands on decides what it costs.** Seed bytes
 and prompts hash into `headlineInputIdentity`, so editing them forces a paid
 whole-corpus re-record. An intent spec hashes into `intentSuiteIdentity()`
-(`:986`) and not into the corpus version, so a spec edit leaves the committed
+(`packages/pi/src/expert_codegen_record.zig#intentSuiteIdentity`) and not into the corpus version, so a spec edit leaves the committed
 recordings replayable. `workflow-saga-compensation` is the precedent:
 `5fe52ae5` (2026-09-20, a local-main commit) changed the spec rather than the
 prompt and needed no re-record, and that case's

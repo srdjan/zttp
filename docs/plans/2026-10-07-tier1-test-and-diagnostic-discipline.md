@@ -35,11 +35,11 @@ those defects come first. The order is:
   corpus replay in `test-expert-app` compares model-request transcript
   digests through `simulator/model_client.zig`. It does not compare the
   apply-receipt digests that the 19 DeepSeek traces also hold: the
-  receipt-checking `Runner` (`simulator/runner.zig:368-380`) runs only at
+  receipt-checking `Runner` (`simulator/runner.zig`) runs only at
   promotion time and in unit tests with synthetic fixtures. U0.4 moved
   `diagnosticCatalogHash`, and `test-expert-app` still replayed 19 of 19.
   Replay breaks only when something the model sees changes: `policy_hash` and
-  `grammarHash()` in the `meta` output (`agent_protocol.zig:789-792,913-915`),
+  `grammarHash()` in the `meta` output (`agent_protocol.zig`),
   or the text, position, or count of a diagnostic that a recorded turn
   produced (C3). Rules:
   - Each unit records the four hashes (policy, diagnostic catalog, grammar,
@@ -49,18 +49,18 @@ those defects come first. The order is:
     such units.
 - **C2 (corpus identity).** Do not edit codegen prompts or the `seed_files`
   of codegen cases. Defect-seed edits do not move the codegen identity, but
-  they move the stand-in pin `content_hash` (`standin/range.zig:14`, hashed at
-  `:255-275`). A seed edit updates that pin and its generated document in the
+  they move the stand-in pin `content_hash` (`standin/range.zig`, hashed at
+  `standin/range.zig`). A seed edit updates that pin and its generated document in the
   same commit. This is offline work.
 - **C3 (replay of model-visible text).** The model sees each diagnostic's
   code, severity, message, line, column, suggestion, and repair intent, and the
-  number of diagnostics (`edit_simulate.zig:249-299`). `violationKey` hashes
-  code plus message (`edit_simulate.zig:525`). A unit that changes any of these
+  number of diagnostics (`edit_simulate.zig`). `violationKey` hashes
+  code plus message (`edit_simulate.zig`). A unit that changes any of these
   for existing diagnostics runs `zig build test-expert-app` and records the
   result.
 - **C4 (public JSON shape).** Do not add, remove, or rename fields in the
-  `zts check --json` output (`json_diagnostics.zig:215-244` for diagnostics,
-  `:261` onward for the envelope) in Tier 1.
+  `zts check --json` output (`json_diagnostics.zig` for diagnostics,
+  `json_diagnostics.zig` onward for the envelope) in Tier 1.
 - **C5 (evidence).** Take every verdict from an unfiltered run of the named
   step. Redirect build output to a file and read the exit status directly.
   A new gate asserts a floor on its own input, and states and tests what it
@@ -90,27 +90,27 @@ All four defects were observed on 2026-10-07 with `zig-out/bin/zttp serve`
 
 Causes, from the reviews:
 
-- **U0.1.** `emitPatternBindings` (`codegen.zig:2022-2045`) stores only the
+- **U0.1.** `emitPatternBindings` (`codegen.zig`) stores only the
   direct identifier fields of the top-level pattern. The parser declares
-  nested bindings (`parse.zig:1211-1215`). Fix: store bindings at every depth.
+  nested bindings (`parse.zig`). Fix: store bindings at every depth.
 - **U0.2.** `emitPatternValueTest` drops a nested empty array without a test
-  (`codegen.zig:2135-2141`). A nested `{}` has the same shape. Fix: a nested
+  (`codegen.zig`). A nested `{}` has the same shape. Fix: a nested
   `[]` tests "array of length 0", and a nested `{}` tests "is a record".
 - **U0.3.** `emitObjectPatternTest` reads fields with `get_field` and never
-  tests that the value is a record (`codegen.zig:2095-2098`). Fix: every
+  tests that the value is a record (`codegen.zig`). Fix: every
   record pattern, at every depth, first tests that the value is a record (not
   an array, `Bytes`, string, number, boolean, `null`, or `undefined`). This
   also makes a top-level `{}` match records only. The spec calls these
   "fixed record patterns" (`docs/zts-formal-spec-northstar-advanced.md:1064`).
 - **U0.4.** Codegen tests every non-default arm in order and jumps to
-  `default` last (`codegen.zig:1983-2008`). The parser accepts `default` at
-  any position (`parse.zig:949`). The spec grammar is `MatchArm+ [DefaultArm]`.
+  `default` last (`codegen.zig`). The parser accepts `default` at
+  any position (`parse.zig`). The spec grammar is `MatchArm+ [DefaultArm]`.
   Fix: the parser refuses a `default` that is not last, and a second `default`.
   This needs a parser diagnostic: either a new kind (a hash mover) or an
   existing ZTS0xx code with new text. The implementer uses an existing code
   if one fits the meaning, and records the choice.
 - **U0.5 (name trap).** `when { v: string }` is a binding named `string`, as
-  the spec defines (`parse.zig:1209-1216`), so the arm matches every value. A
+  the spec defines (`parse.zig`), so the arm matches every value. A
   programmer who writes it almost always meant a type test. See decision T4.
 
 **Check.** Runtime tests for each row in `zig build test-zruntime`, or the
@@ -121,7 +121,7 @@ U0.4 and U0.5 once R2 exists.
 
 **U2.1: corpus gate.** Add a host executable gate, for example
 `packages/tools/src/diagnostic_corpus_gate.zig`. Follow the vocab-envelope
-pattern (`build/proof_gates.zig:113-145`): a Run step with
+pattern (`build/proof_gates.zig`): a Run step with
 `has_side_effects = true`, its own tests on the same step, and a separate
 write step.
 
@@ -129,14 +129,14 @@ write step.
   a sibling `NAME.diag`.
 - Run each case in-process with
   `precompile.runCheckOnlyFromSourceWithOptions(..., .{ .json_mode = true })`
-  (`precompile.zig:1370`). Pass the path relative to `tests/corpus/` as
+  (`precompile.zig`). Pass the path relative to `tests/corpus/` as
   `handler_path`, so goldens hold no absolute paths. This call does not read
   `zttp.json` (confirm in the unit).
 - The golden records two things: the list of stages that ran, and the
   diagnostics array exactly as `json_diag.writeDiagnosticJson` emits it.
   Recording the stages stops a `good` case from passing because a stage was
   skipped (the type checker runs only when the type environment exists,
-  `precompile.zig:1652`).
+  `precompile.zig`).
 - A `good` case must produce zero diagnostics and must show every expected
   stage. Good cases use a narrow `Proof<>` capsule, or they get ZTS500.
 - A `bad` case without a `.diag` fails with the instruction to run the write
@@ -178,17 +178,17 @@ Then `zig build test` and `test-step-coverage`.
 **U1.1: matrix algorithm.** Rewrite `packages/zts/src/match_analysis.zig`
 (377 lines) around Maranget's usefulness algorithm. Keep `hasDefaultArm`,
 `narrowTypeForPattern`, and `isMatchExhaustive` for their callers, and update
-the private `StrictChecker.matchIsCovered` (`strict_checker.zig:1955`).
+the private `StrictChecker.matchIsCovered` (`strict_checker.zig`).
 
 The model must match the runtime after U0:
 
 - A record pattern requires a record. A record discriminant field with a
   literal type (`kind: "echo"`) is a constructor of the closed union.
 - A field `_` is a presence check and fails on `undefined`
-  (`codegen.zig:2088,2185`). A binding field matches any value, including
+  (`codegen.zig`). A binding field matches any value, including
   `undefined`. An optional field admits `undefined`.
 - `_` as an array element is a plain wildcard with no presence check
-  (`parse.zig:1013-1016`, `codegen.zig:2286`).
+  (`parse.zig`, `codegen.zig`).
 - An array pattern requires the exact length at every depth. A `T[]`
   scrutinee needs a `default` to be exhaustive.
 - A top-level type test (`boolean`, `number`, `string`, `array`, `Dict`,
@@ -196,7 +196,7 @@ The model must match the runtime after U0:
 - `boolean` has two constructors. `t_nullable` is the inner type plus
   `undefined`. `t_never` is covered by any pattern set.
 - String and number literals over an open type need a `default`. `lit_float`
-  patterns are values. Number literal types are `i16` (`type_pool.zig:727`).
+  patterns are values. Number literal types are `i16` (`type_pool.zig`).
 - Resolve `t_ref` through `TypeEnv` with a depth bound. Treat
   `t_unknown_type`, `t_generic_app`, `t_generic_param`, `t_intersection`,
   `t_template_literal`, and unresolved refs as open. `t_function` is covered
@@ -210,8 +210,8 @@ A `match` that is not proven exhaustive, including by budget exhaustion, has
 type `T | undefined`, where `T` is the union of the arm types. Today
 `inferMatchType` unions the arm types only. This makes the four call paths
 that run without the strict checker sound by construction
-(`handler_instance.zig:1186`, `in_process_dispatch.zig:70`,
-`build_command.zig:2138`, `contract_runtime.zig:2998`).
+(`handler_instance.zig`, `in_process_dispatch.zig`,
+`build_command.zig`, `contract_runtime.zig`).
 
 **U1.2: diagnostics.**
 
@@ -233,9 +233,9 @@ that run without the strict checker sound by construction
 **U1.3: seeds, tests, and docs.**
 
 - Rewrite defect-seed baselines that would gain a redundant-arm diagnostic:
-  the `clean_match_default` baseline (`defect_seeds.zig:415`, which matches
+  the `clean_match_default` baseline (`defect_seeds.zig`, which matches
   on a `const` with a literal type) and the `match-not-exhaustive` good draft
-  (`:1697`). Use a `number` parameter. Update the stand-in pin (C2). Run
+  (`defect_seeds.zig`). Use a `number` parameter. Update the stand-in pin (C2). Run
   `zig build test-standin`.
 - Update `type_checker.zig` test 4952 per decision T1.
 - Add corpus cases: split coverage across arms, nested discriminants, a
@@ -245,7 +245,7 @@ that run without the strict checker sound by construction
   against a union with a string member, and budget exhaustion.
 - Add runtime tests: each newly accepted split-coverage case runs every value
   of its type to an arm and never returns `undefined`.
-- Delete the dead `isMatchExhaustive` call path in `handler_verifier.zig:1313`.
+- Delete the dead `isMatchExhaustive` call path in `handler_verifier.zig`.
 - Fix `docs/typescript.md:728-745` (it says every `match` needs `default`) and
   the ZTS603 text in `docs/verification.md:123-128`.
 
@@ -256,9 +256,9 @@ that run without the strict checker sound by construction
 
 **U4.1: human renderer.** Add one renderer for human output: the ZTS code,
 `file:line:col`, the source line, and an underline from `offset` to
-`end_offset` (`token.zig:165`). Use it in each checker's `formatDiagnostics`
+`end_offset` (`token.zig`). Use it in each checker's `formatDiagnostics`
 and in the three parse-error paths that print no code and no caret
-(`precompile.zig:1529-1535`, `1981-1988`, `handler_instance.zig:1156-1165`).
+(`precompile.zig`, `handler_instance.zig`).
 Add text tests for those three paths. The JSON output does not change (C4).
 
 **U4.2: parser progress assertion.** In safe builds, assert that each loop
@@ -277,17 +277,17 @@ Update `docs/feature-detection.md:42`. Check C3.
 
 **U4.4: one message for one type mistake.** Add an error type to the type
 pool. Do not name it "poisoned", which already means a pool failure
-(`type_pool.zig:27,240-259`). A failed operator or call produces it, and
+(`type_pool.zig`). A failed operator or call produces it, and
 assignability and operator checks accept it silently. Containment rules:
 
 - The error type never leaves the type checker. `inferTypeWithoutDiagnostics`
-  (`type_checker.zig:244`), the match-narrowing APIs, and every other public
+  (`type_checker.zig`), the match-narrowing APIs, and every other public
   getter map it to `null_type_idx`, which the strict checker, verifier, flow
   checker, contract builder, and Boolean checker already treat as unknown.
 - A test asserts that "error type produced" implies `typeErrorCount() > 0`.
 - One probe per consumer shows that an error-typed receiver is still refused.
 - Stage gating is not the containment: `pipeline.resolve` still runs the
-  Boolean and strict checkers after type errors (`pipeline.zig:197`).
+  Boolean and strict checkers after type errors (`pipeline.zig`).
 
 Probe: `const m: number = n + "y";` gives ZTS105 and then ZTS200 today, and
 only ZTS105 after. Check C3. Add the probe as a corpus case.
@@ -301,18 +301,18 @@ Wider construct spans. The "what, where, why, hint" shape in JSON text.
 
 ### R3: fuzz, stress, and mutation tests
 
-House style is the deterministic harness in `http_parser.zig:1063-1290`: a
+House style is the deterministic harness in `http_parser.zig`: a
 stated contract, a fixed seed, a bounded iteration count, and
 `std.testing.allocator`.
 
 **U3.1: certificate decoder sweep.** In `packages/proof-checker`, sweep
-`certificate.decode` (`certificate.zig:652`) over `buildMinimal` (:1252):
+`certificate.decode` (`certificate.zig`) over `buildMinimal` (:1252):
 flip each bit of each byte, truncate at every length, and extend by one byte.
-Each mutation gets a fresh budget (`certificate.zig:671`). Contract: a typed
+Each mutation gets a fresh budget (`certificate.zig`). Contract: a typed
 error or a structurally valid value; no panic. The kernel gate forbids
 `std.Random`, `@embedFile`, allocator references, and column-0 `var`
 (`scripts/check-proof-checker.sh:81-104,113,180`), so the sweep uses
-deterministic loops only. Update the test floor (`:198,208`) if the count
+deterministic loops only. Update the test floor (`certificate.zig`) if the count
 rises past it.
 
 **U3.2: bytecode cache decoders.**
@@ -321,7 +321,7 @@ rises past it.
   (:1072). Delete it and its CRC format if no non-test code uses it.
   Otherwise add a cap and a minimum-size check.
 - `deserializeBytecodeWithAtomsAndShapes` (:2119) is live, with two callers:
-  `handler_instance.zig:1334` and `pre-rebase:packages/runtime/src/invariant_observer.zig:79`. It has no CRC
+  `handler_instance.zig` and `pre-rebase:packages/runtime/src/invariant_observer.zig`. It has no CRC
   (:1876). Add a depth bound to the `.nested_function` recursion (:338), caps
   on the lengths that size allocations (:360,378,468,1716,1849), and a
   checked conversion in place of `@intCast` at the atom remap (:1776).
@@ -334,7 +334,7 @@ rises past it.
 - Tokenizer: `std.testing.fuzz` with a seed corpus and a PRNG stress loop.
   Contract: terminates within `len + 1` tokens, ends at EOF, spans in bounds,
   offsets do not decrease. Include 256 or more nested `{` inside a template:
-  the brace depth is a `u8` (`tokenizer.zig:84`), a probable overflow panic in
+  the brace depth is a `u8` (`tokenizer.zig`), a probable overflow panic in
   safe builds.
 - Stripper, TSX lowerer, and parser: the same pattern. Contract: a result or
   a typed error; spans in bounds; no leak; no stack overflow near the 512 and
@@ -345,7 +345,7 @@ rises past it.
   `smith.slice()` reads a 4-byte length prefix, so seeds need a helper that
   prepends it; plain `zig build test` runs each seed and the empty input once.
   Fuzz tests must not be reachable from the `cli_main_tests` root
-  (`build/runtime_tests.zig:38`), whose runner has no `fuzz` function.
+  (`build/runtime_tests.zig`), whose runner has no `fuzz` function.
 - Gate iteration counts stay small. `ZTTP_FUZZ_ITERATIONS` raises them for
   manual runs. Record the time added to `zig build test`.
 
@@ -382,11 +382,11 @@ with hostile inputs: an empty file, a missing path, a directory, a file over
 the 10 MiB cap, invalid UTF-8, NUL bytes, deep nesting past the limit, and
 unknown flags. Assert: exited, not signalled; the exact exit code; completion
 within a deadline; with `--json`, any stdout is one complete JSON document.
-Unknown flags print stderr text without JSON today (`zts_main.zig:44`), so
+Unknown flags print stderr text without JSON today (`zts_main.zig`), so
 that case asserts empty stdout. Project discovery walks every ancestor of the
-input path (`project_config.zig:159-165`), so the test asserts that no
+input path (`project_config.zig`), so the test asserts that no
 `zttp.json` exists in the temporary directory's ancestors. Model the spawn on
-`pre-rebase:packages/runtime/src/reference_tools_check.zig:304-358`.
+`pre-rebase:packages/runtime/src/reference_tools_check.zig`.
 
 **Deferred.** Ratio scaling tests (cost(2n)/cost(n)) move to Tier 3 with the
 R10 measurement work. They need a program generator and give a manual step,
@@ -529,7 +529,7 @@ decision before it gets a plan.
     ZTS002 or ZTS003. Five pass or crash, and their rows start with `DEFECT:`:
     `1 = 2;` (ZTS016), a duplicate parameter (ZTS018), a duplicate `const`
     (ZTS019), and a duplicate `export function` (ZTS039). A fifth, 70000
-    distinct float constants panicking at `parser/ir.zig:710` (ZTS031), is
+    distinct float constants panicking at `parser/ir.zig` (ZTS031), is
     fixed in `22132e31`: the pool refuses the constant and the parser reports
     ZTS031. The same commit closes a wider hole: block recovery dropped any
     statement whose error recorded no diagnostic, and the parse succeeded.

@@ -43,8 +43,8 @@ const class_idx = self.ctx.getLiteralShape(shape_idx) orelse {
 const obj = try self.ctx.createObjectWithClass(class_idx, null);
 ```
 
-(`packages/zts/src/interpreter.zig:967`). `getLiteralShape` is a direct index
-into one array on the Context (`packages/zts/src/context.zig:377`), and that
+(`packages/zts/src/interpreter.zig`). `getLiteralShape` is a direct index
+into one array on the Context (`packages/zts/src/context.zig`), and that
 array is filled by `materializeShapes`, which **appends**:
 
 ```zig
@@ -61,13 +61,13 @@ pub fn materializeShapes(self: *Context, shapes: []const []const object.Atom) !v
 }
 ```
 
-(`packages/zts/src/context.zig:358`).
+(`packages/zts/src/context.zig`).
 
 Appending is deliberate. A handler is not always one compilation unit: the pool
 loads each dependency module's bytecode before the entry bytecode
-(`packages/runtime/src/runtime_pool.zig:910`), and the multi-module path
+(`packages/runtime/src/runtime_pool.zig`), and the multi-module path
 materializes each module's shapes in execution order
-(`packages/runtime/src/handler_instance.zig:797`). Those loads compose into one
+(`packages/runtime/src/handler_instance.zig`). Those loads compose into one
 program, and their shape indices are assigned across the whole composition, so
 each load must add to what is already there.
 
@@ -87,7 +87,7 @@ self.pc += 1;
 _ = prop_count;
 ```
 
-(`packages/zts/src/interpreter.zig:963`). The values are then written into the
+(`packages/zts/src/interpreter.zig`). The values are then written into the
 class's slots by position. A two-property literal that lands on a one-property
 class writes the first value into the one slot, drops the second, and reports the
 first program's name for it.
@@ -115,7 +115,7 @@ cache state in one handler and read it back in another: the read returned
 
 Nothing caught it, and the reason is worth stating: every test that reloads a
 handler on one instance reloads it to assert an **error**
-(`packages/runtime/src/zruntime_tests.zig:2657` and its neighbours load a second
+(`packages/runtime/src/zruntime_tests.zig` and its neighbours load a second
 handler and expect `error.NativeFunctionError`). A handler that fails never
 reaches an object literal, so the shape table never matters. The one pattern that
 would expose it, load a second working handler and read its response, did not
@@ -123,10 +123,10 @@ exist in the suite.
 
 Reading the reload path is also reassuring in the wrong direction. `reloadHandler`
 looks like the risky operation, and it is safe: it bumps a generation counter
-rather than reloading in place (`packages/runtime/src/runtime_pool.zig:250`), and
+rather than reloading in place (`packages/runtime/src/runtime_pool.zig`), and
 `ensureRuntime` tears the stale runtime down with `runtimeUserDeinit` and builds
 a fresh `HandlerInstance` before loading the new code
-(`packages/runtime/src/runtime_pool.zig:844`). The unsafe operation is the plain
+(`packages/runtime/src/runtime_pool.zig`). The unsafe operation is the plain
 one that no production path performs.
 
 ## Not Fixed
@@ -191,4 +191,4 @@ the success case was the broken one.
 ## Related Issues
 
 - [a-gate-that-counts-nothing-still-reports-a-pass](../conventions/a-gate-that-counts-nothing-still-reports-a-pass.md) - the same shape of blindness one level up: a check that runs, passes, and is looking at the wrong thing.
-- `packages/zts/src/interpreter.zig:967`, `packages/zts/src/context.zig:358`, and `packages/runtime/src/runtime_pool.zig:844` - the three sites any fix has to agree with: the lookup, the table, and the only production path that changes handler code.
+- `packages/zts/src/interpreter.zig`, `packages/zts/src/context.zig`, and `packages/runtime/src/runtime_pool.zig` - the three sites any fix has to agree with: the lookup, the table, and the only production path that changes handler code.

@@ -15,42 +15,41 @@ session scratch directory. They are not committed.
 
 T1a made the exchange deadline mandatory. [`FetchDeadline`](../../packages/runtime/src/fetch_deadline.zig)
 is a watchdog thread that calls `shutdown` on the socket when `timeout_ms`
-passes (`fetch_deadline.zig:37-58`). The caller can arm it only when it has a
+passes (`fetch_deadline.zig`). The caller can arm it only when it has a
 stream, and it gets the stream only when `connectTcpOptions` returns. At that
 point the TCP connect and the TLS handshake are complete. The three fetch sites
-show this order: connect at `runtime_http.zig:990`, `2022`, and `2354`, then
-arm at `1020`, `2062`, and `2384`.
+show this order: connect, then arm, in `packages/runtime/src/runtime_http.zig`.
 
 The std client cannot bound these two phases itself:
 
-- `ConnectTcpOptions.timeout` exists (`std/http/Client.zig:1442`), but
+- `ConnectTcpOptions.timeout` exists (`std/http/Client.zig`), but
   `connectTcpOptions` never reads it. It calls `host.connect(io, port,
-  .{ .mode = .stream })` without the timeout (`Client.zig:1460`). zttp sets the
-  field at `runtime_http.zig:997`, `2029`, and `2361`, and it has no effect.
+  .{ .mode = .stream })` without the timeout (`std/http/Client.zig`). zttp sets the
+  field in `packages/runtime/src/runtime_http.zig`, and it has no effect.
 - If std forwards that timeout in a later release, the Threaded backend panics:
   `netConnectIpPosix` panics with "TODO implement netConnectIpPosix with
-  timeout" when `options.timeout != .none` (`std/Io/Threaded.zig:12077`).
+  timeout" when `options.timeout != .none` (`std/Io/Threaded.zig`).
 - The TLS handshake runs inside `Connection.Tls.create`
-  (`Client.zig:304-373`), before `connectTcpOptions` returns. `Tls.create` and
-  `Plain.create` are not `pub` (`Client.zig:249`, `304`).
+  (`std/http/Client.zig`), before `connectTcpOptions` returns. `Tls.create` and
+  `Plain.create` are not `pub` (`std/http/Client.zig`).
 
 ## 2. What is and is not in scope: DNS
 
 The fetch sites resolve the name before the connect, in `resolvedScopeDecision`
-(`runtime_http.zig:548-604`). They then connect to the admitted address as a
-literal (`runtime_http.zig:992`) and give the original name as `proxied_host`
-for SNI (`runtime_http.zig:995`). T1b does not bound that lookup. On Linux the
+(`runtime_http.zig`). They then connect to the admitted address as a
+literal (`runtime_http.zig`) and give the original name as `proxied_host`
+for SNI (`runtime_http.zig`). T1b does not bound that lookup. On Linux the
 std resolver has its own bound from `resolv.conf` (`timeout_seconds` and
-`attempts`, `std/Io/Threaded.zig:14382-14385`). On macOS it calls blocking
-`getaddrinfo` (`Threaded.zig:13708-13730`), which zttp does not bound. On
+`attempts`, `std/Io/Threaded.zig`). On macOS it calls blocking
+`getaddrinfo` (`Threaded.zig`), which zttp does not bound. On
 macOS the literal passed to the connect also goes through `getaddrinfo`,
 because the literal fast path is Linux and Windows only
-(`Threaded.zig:13498-13523`). A numeric string should not cause a network
+(`Threaded.zig`). A numeric string should not cause a network
 query, but this needs verification. The contract text for T1b names only the
 connect and the handshake. DNS stays out of scope, and question 3 below asks
 the owner to confirm this.
 
-`pre-rebase:packages/runtime/src/invariant_cli.zig` connects by name (`pre-rebase:packages/runtime/src/invariant_cli.zig:220-227`), so its DNS
+`pre-rebase:packages/runtime/src/invariant_cli.zig` connects by name (`pre-rebase:packages/runtime/src/invariant_cli.zig`), so its DNS
 runs inside the connect. It is not an owned file of T1b.
 
 ## 3. Approaches
@@ -65,27 +64,27 @@ runs inside the connect. It is not an owned file of T1b.
 
 ### A. Own connect, own TLS, own HTTP
 
-The connect part is simple. `std.posix.poll` is public (`std/posix.zig:1003`),
+The connect part is simple. `std.posix.poll` is public (`std/posix.zig`),
 and `socket`, `fcntl`, `connect`, and `getsockopt` are available as libc
-externs (`std/c.zig:10725-10737`). zttp links libc (`link_libc = true` in `build/packages.zig` and the
+externs (`std/c.zig`). zttp links libc (`link_libc = true` in `build/packages.zig` and the
 other `link_libc = true` rows).
 
 The problem is the step after the connect. `RequestOptions.connection` takes
-a `*Connection` (`Client.zig:1657`), but a `Connection` made outside the
+a `*Connection` (`Client.zig`), but a `Connection` made outside the
 client is not usable. `writer`, `reader`, `flush`, `end`, and `destroy`
 recover the private `Tls` or `Plain` parent with `@fieldParentPtr`
-(`Client.zig:425-485`). `ConnectionPool.addUsed` is public (`Client.zig:153`),
+(`Client.zig`). `ConnectionPool.addUsed` is public (`Client.zig`),
 but it only links a node and does not help. No public path accepts an external
 stream. To use a stream zttp connected itself, zttp must write its own
 client: `std.crypto.tls.Client.init` over the stream
-(`std/crypto/tls/Client.zig:195`), with the same SNI and CA-bundle options
-that `Tls.create` passes (`Client.zig:347-367`), then a request writer and a
+(`std/crypto/tls/Client.zig`), with the same SNI and CA-bundle options
+that `Tls.create` passes (`Client.zig`), then a request writer and a
 response reader. std has parts for the reader: `std.http.Reader` with
-`receiveHead` and `bodyReaderDecompressing` (`std/http.zig:315`, `388`,
-`471`), `std.http.Decompress` (`std/http.zig:707`), and
-`Response.Head.parse` (`Client.zig:520`). Redirects are already unhandled at
-the sites (`runtime_http.zig:1003`), so zttp does not lose that. But
-`readResponseBody` (`runtime_http.zig:913-925`) and the three sites use the
+`receiveHead` and `bodyReaderDecompressing` (`std/http.zig`),
+`std.http.Decompress` (`std/http.zig`), and
+`Response.Head.parse` (`Client.zig`). Redirects are already unhandled at
+the sites (`runtime_http.zig`), so zttp does not lose that. But
+`readResponseBody` (`runtime_http.zig`) and the three sites use the
 std `Request` and `Response` types, so all of them change. The size is large
 compared with E. Fragility is low for the connect and medium for the reader,
 which uses std http internals that move between releases.
@@ -93,14 +92,14 @@ which uses std http internals that move between releases.
 ### B. Io cancellation
 
 `Io.Select` exists with `concurrent`, `await`, and `cancel`
-(`std/Io.zig:1367-1538`). Cancel in Threaded is signal-based: it sends SIGIO
-to the blocked worker with `pthread_kill` (`Threaded.zig:1276-1279`). The
+(`std/Io.zig`). Cancel in Threaded is signal-based: it sends SIGIO
+to the blocked worker with `pthread_kill` (`Threaded.zig`). The
 handler that makes SIGIO interrupt a syscall is installed in `Threaded.init`
-without `SA_RESTART` (`Threaded.zig:1653-1662`). `posixConnect` and
+without `SA_RESTART` (`Threaded.zig`). `posixConnect` and
 `netReadPosix` turn `EINTR` into `error.Canceled` through `checkCancel`
-(`Threaded.zig:11920-11922`, `12610-12612`). `connectTcpOptions` passes
-`Canceled` through (`Client.zig:1469`), and its `errdefer` closes the stream
-(`Client.zig:1461`).
+(`std/Io/Threaded.zig`). `connectTcpOptions` passes
+`Canceled` through (`Client.zig`), and its `errdefer` closes the stream
+(`Client.zig`).
 
 Probe B (a stalled-handshake peer on loopback, and a SYN to `10.255.255.1`,
 300 ms timer, one `Threaded` instance) measured this result: the timer won
@@ -108,12 +107,12 @@ at 303 ms, the connect task returned `Canceled`, and no fd leaked. The next
 free fd was the same before and after each case.
 
 The risk is the process-wide signal state. `Threaded.deinit` restores the
-SIGIO handler it saved at init (`Threaded.zig:1714-1717`). zttp creates
+SIGIO handler it saved at init (`Threaded.zig`). zttp creates
 several `Threaded` instances with overlapping lives: one for each handler
-instance (`handler_instance.zig:320`) and one for each parallel fetch
-(`runtime_http.zig:1970`). zttp's entry points use `std.process.Init.Minimal`
-(`main.zig:6`, `cli_main.zig:6`), so std does not install a process-lifetime
-handler first (`std/start.zig:699` against `724`). Probe B2 measured it. With
+instance (`handler_instance.zig`) and one for each parallel fetch
+(`runtime_http.zig`). zttp's entry points use `std.process.Init.Minimal`
+(`main.zig`, `cli_main.zig`), so std does not install a process-lifetime
+handler first (`std/start.zig`). Probe B2 measured it. With
 instance A created, then B, then A destroyed, the handler read back as 0
 (default). A cancel on B then did not interrupt the blocked connect, and the
 process ran until the outer 20 s limit stopped it. On macOS the default SIGIO
@@ -126,9 +125,9 @@ adds one concurrent task for each fetch, and its cost needs to be measured.
 ### C. Vendored client
 
 A patch cannot stay small. `Tls.create` is private, and `Request` uses the
-private connection types (`Client.zig:425-485`), so the whole 1867-line file
+private connection types (`Client.zig`), so the whole 1867-line file
 must be copied. A patched connect path must still avoid `.timeout` in
-`host.connect`, or it hits the panic at `Threaded.zig:12077`. So C needs the
+`host.connect`, or it hits the panic at `Threaded.zig`. So C needs the
 non-blocking connect of A or E anyway. The licence is MIT
 (`~/.zvm/0.16.0/LICENSE`), so copying is allowed with the notice. Each Zig
 upgrade then needs a manual merge of std fixes. Rejected: it has the cost of
@@ -137,21 +136,21 @@ E plus a fork.
 ### D. Watchdog without the fd
 
 `ConnectTcpOptions` has no field for a socket from the caller
-(`Client.zig:1435-1443`), so a socket created by zttp cannot be passed in. If
+(`Client.zig`), so a socket created by zttp cannot be passed in. If
 zttp abandons a thread that is blocked in `connectTcpOptions`, that thread
 still uses the `Client`, which is a stack local freed by `defer
-client.deinit()` (`runtime_http.zig:966-970`). This is a use-after-free, and
+client.deinit()` (`packages/runtime/src/runtime_http.zig`). This is a use-after-free, and
 the fd and thread leak. Rejected.
 
 ### E. Io wrapper that overrides the connect
 
-`Io` is a `userdata` pointer and a `*const VTable` (`std/Io.zig:25-26`), and
-`netConnectIp` is one vtable entry (`Io.zig:241`). `HostName.connect` reaches
-it through the `Io` that the caller gave it (`std/Io/net/HostName.zig:274-283`,
-`363-369`, and `std/Io/net.zig:340`). The wrapper is a struct whose first field
+`Io` is a `userdata` pointer and a `*const VTable` (`std/Io.zig`), and
+`netConnectIp` is one vtable entry (`Io.zig`). `HostName.connect` reaches
+it through the `Io` that the caller gave it (`std/Io/net/HostName.zig`,
+`std/Io/net.zig`). The wrapper is a struct whose first field
 is the `Threaded` value. The `Io` it hands out has `userdata = &threaded`, so
 every entry that is not overridden gets a valid `*Threaded`. Its vtable is a
-copy of `threaded.io().vtable.*` (`Threaded.zig:1806-1809`) with
+copy of `threaded.io().vtable.*` (`Threaded.zig`) with
 `netConnectIp` replaced. The override gets its context back with
 `@fieldParentPtr` on the `threaded` field.
 
@@ -159,11 +158,11 @@ The override opens the socket with `O_NONBLOCK`, calls `connect`, and uses
 `poll` for `POLLOUT` until the fetch deadline. Then it reads `SO_ERROR`,
 clears `O_NONBLOCK`, and arms the fetch's `FetchDeadline` on the new fd before
 it returns. The fd must be blocking again because Threaded treats `EAGAIN` on
-a socket as a bug (`Threaded.zig:12619`). std then runs the TLS handshake on a
+a socket as a bug (`Threaded.zig`). std then runs the TLS handshake on a
 socket that the watchdog already covers. When the watchdog shuts the socket
 down, the handshake read gets end of stream, and `connectTcpOptions` returns
-`TlsInitializationFailed` (`Client.zig:1470`). A poll timeout returns
-`error.Timeout`, which is already a `ConnectError` (`Threaded.zig:11932`).
+`TlsInitializationFailed` (`Client.zig`). A poll timeout returns
+`error.Timeout`, which is already a `ConnectError` (`Threaded.zig`).
 
 Probe E (300 ms bound, one wrapper) measured these results:
 
@@ -175,32 +174,32 @@ Probe E (300 ms bound, one wrapper) measured these results:
 | fds after all cases | no leak: only the two listeners and the held connection stayed open |
 
 SNI and certificate checks do not change, because std still runs `Tls.create`
-with `proxied_host` (`Client.zig:1466`, `347-367`). Pinning becomes stronger:
+with `proxied_host` (`std/http/Client.zig`). Pinning becomes stronger:
 the override can refuse any address other than the one that
 `resolvedScopeDecision` admitted.
 
 Risks and their controls:
 
 - Disarm-before-release. If the handshake fails, `connectTcpOptions` closes
-  the fd in its `errdefer` (`Client.zig:1461`) while the watchdog is still
+  the fd in its `errdefer` (`Client.zig`) while the watchdog is still
   armed. Another thread can then reuse that fd number before the caller
-  disarms. The wrapper must also override `netClose` (`Io.zig:250`) so that
+  disarms. The wrapper must also override `netClose` (`Io.zig`) so that
   it disarms and joins the watchdog before it closes an armed fd.
-- Budget. `FetchDeadline` starts its clock at `arm` (`fetch_deadline.zig:43`).
+- Budget. `FetchDeadline` starts its clock at `arm` (`fetch_deadline.zig`).
   If the connect uses its own timer, the total can be close to two timeouts.
   One absolute deadline for the whole fetch is correct, but that changes
   `fetch_deadline.zig` (question 2).
 - Context. `outbound_io_backend` is a `?std.Io.Threaded` value in
-  `HandlerInstance` (`handler_instance.zig:136`, `320`, `399`, `468`). The
+  `HandlerInstance` (`packages/runtime/src/handler_instance.zig`). The
   wrapper must hold the `Threaded` by value, so that field type changes
   (question 1). This design assumes that one handler instance runs one fetch
   at a time on that backend. This needs verification before the context
   pointer is made a plain field.
 - Upgrade fragility. The wrapper depends on the names and signatures of two
-  vtable entries, the `Socket` fields (`std/Io/net.zig:1052-1055`), and the
+  vtable entries, the `Socket` fields (`std/Io/net.zig`), and the
   libc externs. If any of them changes, the build fails at compile time, not
   at run time. The override must fill `Socket.address` from `getsockname`, as
-  Threaded does (`Threaded.zig:12086-12087`). IPv6 needs its own `sockaddr`
+  Threaded does (`Threaded.zig`). IPv6 needs its own `sockaddr`
   and was not probed.
 
 ## 4. Recommendation
@@ -222,8 +221,8 @@ process-wide SIGIO handler at startup.
 3. Change `outbound_io_backend` and `doFetchWorkerInner`'s backend to the
    wrapper. Review note: the parallel path does not share the handler's
    backend. Each `zttp:io` worker creates its own `Threaded`
-   (`runtime_http.zig:1970`), so one fetch runs on each worker backend, and
-   step 3 must cover both sites. `pre-rebase:packages/runtime/src/invariant_cli.zig:185` creates a third
+   (`runtime_http.zig`), so one fetch runs on each worker backend, and
+   step 3 must cover both sites. `pre-rebase:packages/runtime/src/invariant_cli.zig` creates a third
    backend. It moves to the wrapper too unless the owner keeps that name-based
    connect out of T1b (question 3).
 4. At the three sites in `runtime_http.zig`, create the `FetchDeadline` before

@@ -25,19 +25,24 @@ tags:
   - veto
   - proof-boundary
   - empty-baseline
+binds:
+  - packages/pi/src/standin/request.zig
+  - packages/pi/src/standin/playbook.zig
+  - packages/pi/src/loop.zig
+proves: zig build test-standin
 ---
 
 # An empty baseline made a file-destroying edit prove clean
 
 ## Problem
 
-The `zttp expert` agent has a deterministic offline author, the "stand-in": a small HTTP server that speaks the OpenAI Responses wire protocol and answers with fixed playbooks, so the expert loop can be exercised end to end without a hosted model. It has no memory of its own. It reconstructs the state of the turn by re-reading the transcript the loop sends it on every round trip, including the target file's bytes, which it recovers by parsing the `workspace_read_file` tool result back out of that transcript (`packages/pi/src/standin/request.zig:98`).
+The `zttp expert` agent has a deterministic offline author, the "stand-in": a small HTTP server that speaks the OpenAI Responses wire protocol and answers with fixed playbooks, so the expert loop can be exercised end to end without a hosted model. It has no memory of its own. It reconstructs the state of the turn by re-reading the transcript the loop sends it on every round trip, including the target file's bytes, which it recovers by parsing the `workspace_read_file` tool result back out of that transcript (`packages/pi/src/standin/request.zig`).
 
 Two facts about the loop make that recovery fallible.
 
-The first is a cap. A tool result entering the transcript is truncated at 32 KiB (`packages/pi/src/loop.zig:314`, `capToolResultForTranscript` at `packages/pi/src/loop.zig:319`), so a handler above that size arrives cut mid-string with a re-read pointer appended. The read tool's output is a JSON object, so a cut inside it is no longer JSON at all.
+The first is a cap. The original helper was `capToolResultForTranscript` in `packages/pi/src/loop.zig`. A tool result entering the transcript is truncated at 32 KiB, so a handler above that size arrives cut mid-string with a re-read pointer appended. The read tool's output is a JSON object, so a cut inside it is no longer JSON at all.
 
-The second is the shape of a failed tool call. `workspace_read_file` reads through a 256 KiB limit (`packages/pi/src/tools/common.zig:6`, used at `packages/pi/src/tools/workspace_read_file.zig:64`), and any error it raises is turned into plain text by the loop's recovery arm: `"{tool}: {errorName}"` (`packages/pi/src/loop.zig:826`). A missing file and a file above the read limit both arrive as `workspace_read_file: FileNotFound` and `workspace_read_file: FileTooBig`. Neither is JSON, and neither has a `content` field.
+The second is the shape of a failed tool call. `workspace_read_file` reads through a 256 KiB limit (`packages/pi/src/tools/common.zig`, used at `packages/pi/src/tools/workspace_read_file.zig`), and any error it raises is turned into plain text by the loop's recovery arm: `"{tool}: {errorName}"` (`packages/pi/src/loop.zig`). A missing file and a file above the read limit both arrive as `workspace_read_file: FileNotFound` and `workspace_read_file: FileTooBig`. Neither is JSON, and neither has a `content` field.
 
 In all three cases `readSource` recovered nothing. The old code stored that nothing as an empty string:
 
@@ -45,9 +50,9 @@ In all three cases `readSource` recovered nothing. The old code stored that noth
 var source: []const u8 = "";
 ```
 
-The playbook then treated `""` as the file's real contents. `synthesizeRoute` (`packages/pi/src/standin/playbook.zig:818`) searches the source for `zttp:router`, `const routes = {`, and a `Spec` import, finds none of them in an empty string, and emits its from-scratch branch: two imports, a `Guardrails` type alias, a one-entry `routes` object, a dispatching `function handler`, and the new route function. About twenty lines. That stub, and `""` as the `before` field, went into a single `apply_edit` call.
+The playbook then treated `""` as the file's real contents. `synthesizeRoute` (`packages/pi/src/standin/playbook.zig`) searches the source for `zttp:router`, `const routes = {`, and a `Spec` import, finds none of them in an empty string, and emits its from-scratch branch: two imports, a `Guardrails` type alias, a one-entry `routes` object, a dispatching `function handler`, and the new route function. About twenty lines. That stub, and `""` as the `before` field, went into a single `apply_edit` call.
 
-That is where the veto stopped being able to help. `before` is the baseline the compiler diffs against, not a compare-and-swap guard. `edit_simulate` analyzes `before`, builds a multiset of its violation keys, and marks a diagnostic in the new content `is_new` only when the baseline cannot account for it (`packages/tools/src/edit_simulate.zig:100-129`); `new_count` is the count of those, and the veto's verdict is exactly `ok = new_count == 0` (`packages/pi/src/veto.zig:7`, `packages/pi/src/veto.zig:240`). An empty `before` analyzes to zero violations, and the stub is clean code, so `new_count` was zero and the draft passed.
+That is where the veto stopped being able to help. `before` is the baseline the compiler diffs against, not a compare-and-swap guard. `edit_simulate` analyzes `before`, builds a multiset of its violation keys, and marks a diagnostic in the new content `is_new` only when the baseline cannot account for it (`packages/tools/src/edit_simulate.zig`); `new_count` is the count of those, and the veto's verdict is exactly `ok = new_count == 0` (`packages/pi/src/veto.zig`). An empty `before` analyzes to zero violations, and the stub is clean code, so `new_count` was zero and the draft passed.
 
 Worse, supplying `""` also suppressed the recovery that would have found the real baseline. `prepareEdit` reads the file from disk only when `before` is null:
 
@@ -61,7 +66,7 @@ const before = edit.before orelse blk: {
 };
 ```
 
-(`packages/pi/src/loop.zig:849`). An empty string is not null, so that fallback never ran. And the same degenerate baseline reached the human: the approval preview's `before` is that same field (`packages/pi/src/loop.zig:940`), so an interactive user was shown the deletion of a large handler as if it were the creation of a new twenty-line file. Under `zttp expert --yes` there is no prompt at all (`packages/pi/src/app.zig:579`).
+(`packages/pi/src/loop.zig`). An empty string is not null, so that fallback never ran. And the same degenerate baseline reached the human: the approval preview's `before` is that same field (`packages/pi/src/loop.zig`), so an interactive user was shown the deletion of a large handler as if it were the creation of a new twenty-line file. Under `zttp expert --yes` there is no prompt at all (`packages/pi/src/app.zig`).
 
 Then the apply path writes. It does not compare, re-read, or check anything about what is already on disk:
 
@@ -69,7 +74,7 @@ Then the apply path writes. It does not compare, re-read, or check anything abou
 try file_io.writeFile(allocator, prepared.resolved_path, content);
 ```
 
-(`packages/pi/src/loop.zig:883`). The user's file was gone, and every gate in the chain had said the edit was clean.
+(`packages/pi/src/loop.zig`). The user's file was gone, and every gate in the chain had said the edit was clean.
 
 ## Symptoms
 
@@ -112,7 +117,7 @@ pub const ParsedRequest = struct {
 };
 ```
 
-(`packages/pi/src/standin/request.zig:5-17`). The local that feeds it changed from `var source: []const u8 = "";` to `var source: ?[]const u8 = null;` (`packages/pi/src/standin/request.zig:36`), and `readSource` now returns `!?[]const u8`, answering null on a JSON parse failure, a non-object value, a missing `content` key, or a `content` that is not a string (`packages/pi/src/standin/request.zig:98-107`).
+(`packages/pi/src/standin/request.zig`). The local that feeds it changed from `var source: []const u8 = "";` to `var source: ?[]const u8 = null;` (`packages/pi/src/standin/request.zig`), and `readSource` now returns `!?[]const u8`, answering null on a JSON parse failure, a non-object value, a missing `content` key, or a `content` that is not a string (`packages/pi/src/standin/request.zig`).
 
 Every authoring step then unwraps, and refuses rather than writing. The add-route step went from
 
@@ -144,7 +149,7 @@ to
 },
 ```
 
-(`packages/pi/src/standin/playbook.zig:77-87`). The same `orelse` guard is on add-env (`:186`), write-test (`:240`), and fix (`:273`). The one place that keeps the old permissive behavior is the read-only review playbook, and it says why:
+(`packages/pi/src/standin/playbook.zig`). The same `orelse` guard is on add-env (`packages/pi/src/standin/playbook.zig`), write-test (`packages/pi/src/standin/playbook.zig`), and fix (`packages/pi/src/standin/playbook.zig`). The one place that keeps the old permissive behavior is the read-only review playbook, and it says why:
 
 ```zig
 else => if (is_review)
@@ -153,7 +158,7 @@ else => if (is_review)
     renderReviewText(allocator, parsed.source orelse "")
 ```
 
-(`packages/pi/src/standin/playbook.zig:135-137`).
+(`packages/pi/src/standin/playbook.zig`).
 
 The refusal itself carries the reason the user needs:
 
@@ -173,7 +178,7 @@ fn renderUnreadableSource(allocator: std.mem.Allocator, playbook_name: []const u
 }
 ```
 
-(`packages/pi/src/standin/playbook.zig:390-402`). It renders as a `[standin-miss]` text answer, the same shape the stand-in already used for asks outside its declared range.
+(`packages/pi/src/standin/playbook.zig`). It renders as a `[standin-miss]` text answer, the same shape the stand-in already used for asks outside its declared range.
 
 The regression test constructs the truncated transcript directly rather than mocking around it:
 
@@ -188,17 +193,17 @@ test "stand-in request parsing reports an unrecoverable read as null, not empty"
 }
 ```
 
-(`packages/pi/src/standin/request.zig:154-171`).
+(`packages/pi/src/standin/request.zig`).
 
 ### The four gates that reported a passing count while asserting nothing
 
 The same review found four test gates in this area that printed numbers nobody was checking. They are a different defect from the one above, but they share its shape closely enough to belong in the same record.
 
-**A frozen corpus outside the hash that guarded it.** `range.negative_corpus` holds the four prompts that must fall outside the stand-in's declared range, and it is the only thing asserting the range does not silently grow. It was not part of `contentHash()`, so emptying it changed no published number, and both false-fire gates that loop over it would have iterated zero times and reported 0/0, which reads exactly like a clean run. Fix: hash the corpus alongside the declared entries (`packages/pi/src/standin/range.zig:175-179`), and assert a floor before trusting any count taken over it (`try testing.expect(range.negative_corpus.len >= 4);` at `packages/pi/src/standin_range_tests.zig:133` and `:144`). The published `content_hash` moved to `970a6c41daae...` (`packages/pi/src/standin/range.zig:12`) because what it covers changed, not because the range did.
+**A frozen corpus outside the hash that guarded it.** `range.negative_corpus` holds the four prompts that must fall outside the stand-in's declared range, and it is the only thing asserting the range does not silently grow. It was not part of `contentHash()`, so emptying it changed no published number, and both false-fire gates that loop over it would have iterated zero times and reported 0/0, which reads exactly like a clean run. Fix: hash the corpus alongside the declared entries (`packages/pi/src/standin/range.zig`), and assert a floor before trusting any count taken over it (`try testing.expect(range.negative_corpus.len >= 4);` at `packages/pi/src/standin_range_tests.zig`). The published `content_hash` moved to `970a6c41daae...` (`packages/pi/src/standin/range.zig`) because what it covers changed, not because the range did.
 
-**A hand-written row list never compared to the table it covers.** The sequence gate is the only check on tool ordering and the at-most-one-edit rule, and it drives a literal array of six `SequenceCase` rows. A seventh range entry would simply have had no row and escaped the check while the gate still reported success. Fix: one line, `try testing.expectEqual(range.entries.len, cases.len);` (`packages/pi/src/standin_range_tests.zig:190`).
+**A hand-written row list never compared to the table it covers.** The sequence gate is the only check on tool ordering and the at-most-one-edit rule, and it drives a literal array of six `SequenceCase` rows. A seventh range entry would simply have had no row and escaped the check while the gate still reported success. Fix: one line, `try testing.expectEqual(range.entries.len, cases.len);` (`packages/pi/src/standin_range_tests.zig`).
 
-**A test binary whose filter excluded any test not named for it.** The stand-in test roots are compiled with `.filters = &.{"stand-in"}` (the `standin_only` row, applied in `build/host_tests.zig`), so a test whose name omits that token never runs and never reports. Nothing enforced the naming rule the filter depends on. Fix: a gate that `@embedFile`s both roots, fails on any `test "` declaration at column zero without `stand-in` in its name, and guards itself with a floor on how many declarations it saw (`packages/pi/src/standin_range_tests.zig:282-310`).
+**A test binary whose filter excluded any test not named for it.** The stand-in test roots are compiled with `.filters = &.{"stand-in"}` (the `standin_only` row, applied in `build/host_tests.zig`), so a test whose name omits that token never runs and never reports. Nothing enforced the naming rule the filter depends on. Fix: a gate that `@embedFile`s both roots, fails on any `test "` declaration at column zero without `stand-in` in its name, and guards itself with a floor on how many declarations it saw (`packages/pi/src/standin_range_tests.zig`).
 
 **An executable compiled by no gate.** `zttp-standin` is deliberately not installed, so nothing forced it to compile and a break would surface only when somebody ran the step by hand. Fix: `test_step.dependOn(&tools.standin_exe.step);` (the aggregate `test` step in `build.zig`), which compiles it without installing it.
 
@@ -240,6 +245,6 @@ Then ask the agent to add a route to each and check the file afterwards. Reasoni
 - [empty-label-set-claimed-a-value-was-clean](../security-issues/empty-label-set-claimed-a-value-was-clean.md) - the same conflation in the ZigTS flow checker, where the empty `LabelSet` meant both "carries nothing" and "never looked". Read its Prevention section with this one: the `?T` rule and the probe method are stated there and apply here unchanged.
 - [normalize-unions-without-dropping-members](normalize-unions-without-dropping-members.md) - the polarity rule underneath both: a bounded analysis may degrade quality but must never drop an obligation.
 - [a-proxy-signal-carried-a-proof-it-never-claimed](a-proxy-signal-carried-a-proof-it-never-claimed.md) - a signal used for a claim it did not make, the same substitution defect in a different form.
-- `packages/pi/src/veto.zig:7` and `packages/tools/src/edit_simulate.zig:100-129` - the contract this bug exploited: `ok = new_count == 0`, counted against `before`. Any change to the meaning of `before` has to be read against `packages/pi/src/loop.zig:849`, where a null (and only a null) triggers the disk-read fallback.
+- `packages/pi/src/veto.zig` and `packages/tools/src/edit_simulate.zig` - the contract this bug exploited: `ok = new_count == 0`, counted against `before`. Any change to the meaning of `before` has to be read against `packages/pi/src/loop.zig`, where a null (and only a null) triggers the disk-read fallback.
 - [a-gate-that-counts-nothing-still-reports-a-pass](../conventions/a-gate-that-counts-nothing-still-reports-a-pass.md) - the four gate weaknesses summarized here, stated as a repo-wide convention with the earlier recurrences and the two scripts that already implement the rule.
 - Commit `ab947d20` - the fix, with the twelve other findings from the same review pass.

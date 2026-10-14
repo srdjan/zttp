@@ -92,10 +92,10 @@ return parse(allocator, payload_data);
 ```
 
 Now `detect` resolves its own path and delegates to `detectPath`
-(`packages/runtime/src/self_extract.zig:136`, `:151`). After `readTrailer`
+(`packages/runtime/src/self_extract.zig`). After `readTrailer`
 accepts the frame, every failure is an error. A short read, a checksum
 mismatch, a `parse` error other than `OutOfMemory`, and a `parse` null are all
-`error.CorruptArtifact` (`self_extract.zig:148`, `:191-208`):
+`error.CorruptArtifact` (`self_extract.zig`):
 
 ```zig
 if (checksum_actual != checksum_expected) {
@@ -115,27 +115,27 @@ The `null` returns that remain in `detectPath` are all before the frame is
 accepted: the file cannot be opened, is smaller than a trailer, gives a short
 trailer read, or `readTrailer` reports `NoPayload`, which it does for a wrong
 magic and for offsets that do not add up to the file size exactly
-(`self_extract.zig:246-261`).
+(`self_extract.zig`).
 
 **An oversized framed payload is an error too.** `readTrailer` used to return
 `NoPayload` for a correctly framed payload over 100 MiB, so it also started the
 plain runtime, and a test named "an oversized payload is refused before it is
 allocated" asserted that `NoPayload`. It now returns `PayloadTooLarge` after
-the framing check (`self_extract.zig:262`), and `create` refuses to build a
-payload over `max_payload_bytes` (`self_extract.zig:232`, `:343`), so the
+the framing check (`self_extract.zig`), and `create` refuses to build a
+payload over `max_payload_bytes` (`self_extract.zig`), so the
 builder cannot write an artifact the runtime will not read.
 
 **`runtime_cli` refuses on every `detect` error.** Before the fix, every error
 except `UnsupportedArtifactFormat` became "no payload" through `else => null`.
 Now `PayloadTooLarge` and `CorruptArtifact` each exit 1 with their own line,
 and every other error exits 1 with "Could not inspect this binary for a handler
-payload: <error>. Refusing to start." (`packages/runtime/src/runtime_cli.zig:37-63`).
+payload: <error>. Refusing to start." (`packages/runtime/src/runtime_cli.zig`).
 Only `null` starts the plain runtime. One behavior change follows: a failure to
 resolve the binary's own path now refuses instead of starting plain. That case
 was not seen on macOS or Linux.
 
 **`zttp proofs` had the same fallback.** `payloadFromBinary`
-(`packages/runtime/src/proofs/bundle.zig:672`) mapped a checksum or parse
+(`packages/runtime/src/proofs/bundle.zig`) mapped a checksum or parse
 failure to `null`, and `zttp proofs bundle` then wrote the damaged artifact as
 a hash-only bundle. It now returns `CorruptArtifact`, and both `bundle` and
 `verify` print one diagnostic line and exit 1. `verify` had already failed on

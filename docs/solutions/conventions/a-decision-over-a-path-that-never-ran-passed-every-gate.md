@@ -50,14 +50,14 @@ belonged to the declaration. The same misread sat in
 or of any named helper) and in `contract_builder.zig` `subtreeContains`.
 
 Unit B0 of the next plan added `getFunctionOfDecl`
-(`packages/zts/src/parser/ir.zig:2058`), which reads the declaration's `init`,
+(`packages/zts/src/parser/ir.zig`), which reads the declaration's `init`,
 and made `getFunction` return null for a `function_decl`
-(`packages/zts/src/parser/ir.zig:2034`). With a correct read, the structural
+(`packages/zts/src/parser/ir.zig`). With a correct read, the structural
 walk ran for the first time, and the census moved: probe
 `x09_nested_decl_returns_secret_len` became a false ZTS400, because a nested
 body walked as a statement counts its `return` as a return of the enclosing
 function. B0 made the arm return instead
-(`packages/zts/src/flow_checker.zig:2956`), so a nested declaration is now
+(`packages/zts/src/flow_checker.zig`), so a nested declaration is now
 checked only through its calls. Probing that choice found a fail-open the no-op
 had hidden: `[secret].map(leak)`, with `leak` a named function that logs its
 argument, proved `no_secret_leakage`, because only a callback written as a

@@ -34,44 +34,44 @@ calling `cacheSet` total.
 ### 2.1 Who decides `fault_covered`
 
 Two production paths in `packages/tools/src/precompile.zig` decide the handler
-property: `analyzeHandlerPaths` (`:1408`, `:1458`, written at `:2038`) and
-`compileHandler` (`:2753`, `:2804-2807`). `zts check`, the agent protocol, the
-former wasm analyzer (`pre-rebase:packages/tools/src/wasm_analyzer.zig:107`,
-`skip_contract = false` at `:114`), and four `packages/pi` callers reach them. The durable workflow property
-(`contract_builder.zig:3837`) and the system property (`system_linker.zig:1241`)
-are separate calculations. Other generator callers (`precompile.zig:2131`,
-`:2475`, `severity_census.zig:538`, `property_diagnostics.zig:657`) do not call
+property: `analyzeHandlerPaths` (`packages/tools/src/precompile.zig`, written at `packages/tools/src/precompile.zig`) and
+`compileHandler` (`packages/tools/src/precompile.zig`). `zts check`, the agent protocol, the
+former wasm analyzer (`pre-rebase:packages/tools/src/wasm_analyzer.zig`,
+`skip_contract = false` at `pre-rebase:packages/tools/src/wasm_analyzer.zig`), and four `packages/pi` callers reach them. The durable workflow property
+(`contract_builder.zig`) and the system property (`system_linker.zig`)
+are separate calculations. Other generator callers (`precompile.zig`,
+`precompile.zig`, `severity_census.zig`, `property_diagnostics.zig`) do not call
 `faultAnalysisComplete()`.
 
 ### 2.2 The `&&` fall-through
 
 `walkBlock` gives the then-path of `if (a && b) return X` the constraints of
 `a` and `b`, and the fall-through the negation of each
-(`path_generator.zig:1150-1174`). Short-circuit evaluation reaches the
+(`path_generator.zig`). Short-circuit evaluation reaches the
 fall-through when `a` is false, or `a` is true and `b` is false. One path is
 emitted, and `pathsExhaustive()` stays true. When a conjunct is not
 recognized (a direct `req.method === "POST"`), the fall-through holds only
 `!a`. Probe `p_and.ts` proves `fault_covered`; `zts gen-tests` emits a GET that
 expects 401, which cannot pass. Probe `p_fetch_and.ts` hides an
 `upstreamFallbackSites` fact. Three `&&` conditions exist in examples
-(`handler-full.tsx:46,67`, `weather-forecasts.ts:20`), none in the DeepSeek
+(`handler-full.tsx:46,67`, `weather-forecasts.ts`), none in the DeepSeek
 corpus expected handlers. Whether `||` has the mirror defect in its then-path
 needs to be measured.
 
 ### 2.3 The unseen-call scan and imports
 
-- `scanUnseenFailableCalls` (`path_generator.zig:411`) reads one IR. It
+- `scanUnseenFailableCalls` (`path_generator.zig`) reads one IR. It
   detects calls to, and value uses of, failable builtin exports
-  (`:441-469`), with the `??` exemption (`:444`). `scanImports` fills
-  metadata only for `resolution == .builtin` (`:941-957`).
+  (`path_generator.zig`), with the `??` exemption (`path_generator.zig`). `scanImports` fills
+  metadata only for `resolution == .builtin` (`path_generator.zig`).
 - `ImportRecord.Resolution` is `builtin`, `partner`, or `unresolved`
-  (`module_facts.zig:72`). One record exists per imported binding, so two
+  (`module_facts.zig`). One record exists per imported binding, so two
   names from one file give two records. Whole-clause `import type` is erased
-  before parsing (`stripper.zig:1783`) and gives no record.
-- `collectImportedFnSummaries` (`precompile.zig:530`) reads `./` and `../`
+  before parsing (`stripper.zig`) and gives no record.
+- `collectImportedFnSummaries` (`precompile.zig`) reads `./` and `../`
   siblings for the flow checker. For the flow checker, a missing entry is
-  conservative. It returns an empty list on a freestanding build (`:545`) and
-  skips other specifiers and resolve failures with `continue` (`:551-554`).
+  conservative. It returns an empty list on a freestanding build (`precompile.zig`) and
+  skips other specifiers and resolve failures with `continue` (`precompile.zig`).
   **For fault coverage, an empty or partial list means "scanned clean", the
   opposite polarity.** The wasm analyzer would then get a wrong true.
 - Today a bare specifier (`"lodash"`) and a missing sibling both give no
@@ -87,17 +87,17 @@ needs to be measured.
 
 ### 2.4 The status comparison
 
-- `extractResultOkConstraint` (`path_generator.zig:1338`) forks only on `ok`.
-  Stubs carry `status` 503 and 200 (`:2196`).
+- `extractResultOkConstraint` (`path_generator.zig`) forks only on `ok`.
+  Stubs carry `status` 503 and 200 (`path_generator.zig`).
 - `fetch` does not follow redirects: both request paths that serve it
-  (`runtime_http.zig:1345` and the `parallel`/`race` worker at `:2511`) pass
+  (`runtime_http.zig` and the `parallel`/`race` worker at `runtime_http.zig`) pass
   `.redirect_behavior = .unhandled`. `ok` is `200 <= status < 300`
-  (`http.zig:199`). So a 3xx reaches the handler with `ok` false. By code
+  (`http.zig`). So a 3xx reaches the handler with `ok` false. By code
   reading (not measured), Zig's HTTP client also returns a 1xx head other than
   100-continue, and the fetch path has no 1xx handling.
-- Status comparisons after a call: `pre-rebase:examples/tools/tools.ts:76` (`fetch`), and
-  four after `serviceCall` (`system/gateway.ts:33`, `users.ts:27`,
-  `gateway-static.ts:17,23`). None in the DeepSeek corpus. The Claude corpus
+- Status comparisons after a call: `pre-rebase:examples/tools/tools.ts` (`fetch`), and
+  four after `serviceCall` (`system/gateway.ts`, `users.ts`,
+  `gateway-static.ts`). None in the DeepSeek corpus. The Claude corpus
   case `durable-order` has one; that corpus is frozen and off-headline.
 - A recognized comparison that does not fork gets the default success stub on
   both branches. Probe `p_status_before_ok.ts` (`=== 404`, then `!res.ok`)
@@ -105,45 +105,45 @@ needs to be measured.
 
 ### 2.5 Flow witnesses
 
-`FlowChecker.extractResultOkConstraint` (`flow_checker.zig:5723`) requires
+`FlowChecker.extractResultOkConstraint` (`flow_checker.zig`) requires
 `.result`. The solver then stubs `fetch` with `{"id":"1"}`
-(`counterexample.zig:315,362`), and replay defaults a missing status to 200.
-`StubInfo` has no `ok_record` field (`counterexample.zig:34-39`). Witnesses
-decide no verdict (`flow_checker.zig:5640`). The `verify` tool prints the
-trace counterexample (`agent_protocol.zig:1966`), so a witness change can move
+(`counterexample.zig`), and replay defaults a missing status to 200.
+`StubInfo` has no `ok_record` field (`counterexample.zig`). Witnesses
+decide no verdict (`flow_checker.zig`). The `verify` tool prints the
+trace counterexample (`agent_protocol.zig`), so a witness change can move
 recorded text. Persisted witnesses are keyed by property, origin, and sink,
 and a re-persist of a known key is a no-op, so old files keep the old stub.
 
 ### 2.6 The census and the open rows
 
 Five rows fail with plain `undefined` and no fork (`parseIso`, `rateCheck`,
-`cacheIncr`, `setCookie`, `base64Decode`; `severity_census.zig:200-230`).
+`cacheIncr`, `setCookie`, `base64Decode`; `severity_census.zig`).
 Seven rows fork without a severity (`verifyWebhookSignature`, `schemaCompile`,
-`cacheSet`, `signal`, `signalAt`, `callTool`, `race`; `:233-274`). Two census
+`cacheSet`, `signal`, `signalAt`, `callTool`, `race`; `severity_census.zig`). Two census
 reasons are wrong or incomplete: `schemaCompile` has no registry limit
-(`validate.zig:118`), and several failure lists are partial (Codex finding
+(`validate.zig`), and several failure lists are partial (Codex finding
 16).
 
-- A failed `cacheSet` can leave an earlier value in place (`cache.zig:220`,
-  `:227`). Bare `cacheSet(...)` statements: `examples/modules/modules_all.ts:45`
-  and `examples/system/users.ts:33`; none in the DeepSeek corpus.
+- A failed `cacheSet` can leave an earlier value in place (`cache.zig`,
+  `cache.zig`). Bare `cacheSet(...)` statements: `examples/modules/modules_all.ts`
+  and `examples/system/users.ts`; none in the DeepSeek corpus.
 - `race` declares `.optional_object` and already forks on `undefined`. It can
-  return any non-2xx Response that arrives first (`runtime_http.zig:2636`,
-  `io.zig:352`).
+  return any non-2xx Response that arrives first (`runtime_http.zig`,
+  `io.zig`).
 - `callTool` fails with `invalid_arguments`, `unknown_tool`,
   `budget_exhausted`, `deadline_exceeded`, or a closed latch
-  (`handler_instance.zig:2388-2425`).
+  (`handler_instance.zig`).
 - The census yields the `ok_record` shape only for an export with a severity
-  (`severity_census.zig:114`), so a `.none` export with the fetch record, and
+  (`severity_census.zig`), so a `.none` export with the fetch record, and
   an `.object` export with no signature, have no row in either direction.
 - R3 section 9: no boolean export declares a severity yet, so the census has
   never checked a boolean failure stub.
 
 ### 2.7 Identity
 
-A severity change moves `module_registry_hash` (`module_manifest.zig:404`).
-`path_analyzer_version` (2, `path_generator.zig:161`) is hashed into
-`policyHash()` (`rule_registry.zig:873,916`), which has ten pins. R3 measured
+A severity change moves `module_registry_hash` (`module_manifest.zig`).
+`path_analyzer_version` (2, `path_generator.zig`) is hashed into
+`policyHash()` (`rule_registry.zig`), which has ten pins. R3 measured
 16 of 19 cassettes moving on a registry change; R4's count needs to be
 measured.
 
@@ -219,7 +219,7 @@ constraint is recorded.
   D2; `=== 404` does not fork, and `p_status_before_ok.ts` gives a passing
   generated test; `const s = res.status` does not fork; a shadowed `res` keeps
   the outer fork. Generated tests pass end to end for every proven probe.
-- Measure: `tools.ts:76`.
+- Measure: `tools.ts`.
 
 **F4: flow witnesses fork on `res.ok` and on the F3 comparison.** Add
 `ok_record` to `StubInfo`, accept an `ok_record` export in
@@ -278,7 +278,7 @@ severity makes it an unseen call. F5 measured the cost: four contract goldens,
 `sql/sql-crud.ts` losing its declared `fault_covered`, `validate-external.ts`
 losing it, and three DeepSeek corpus cases with the idiom. A failed compile
 leaves the schema absent, so `validateJson`, `validateObject`, and
-`coerceJson` answer `schema not found` (`validate.zig:218`), and those are
+`coerceJson` answer `schema not found` (`validate.zig`), and those are
 critical. The owner chose to keep `.none`, with a census row under a new
 mechanism, `subsumed_by_critical`.
 
@@ -304,7 +304,7 @@ handler can write `!res.ok`. The 1xx runtime behavior goes to section 7.
 | `signal`, `signalAt` | `expected` | the target run may have finished |
 | `callTool` | `upstream` | an agent handler reports a tool failure inside a 2xx stream, which `upstreamFallbackSites` then shows; `critical` would make those handlers unprovable |
 | `workflow.call` | `upstream` | the same response record as `fetch`; the `ok` fork applies |
-| `serviceCall` | `upstream` and the `fetch` response signature | it calls `fetchSyncResult` (`runtime_http.zig:2168`); first confirm which export `httpRequestResultJsonAlloc` serves, since it derives `ok` differently |
+| `serviceCall` | `upstream` and the `fetch` response signature | it calls `fetchSyncResult` (`runtime_http.zig`); first confirm which export `httpRequestResultJsonAlloc` serves, since it derives `ok` differently |
 | `race`, `parallel`, `follow`, `saga`, `fanout` | defer, with census rows | each needs its own fork |
 
 Options: (a) the table; (b) the table without `serviceCall`; (c) defer F5.
@@ -352,7 +352,7 @@ Bare unresolved specifiers block under both options.
   only `handler-full.tsx` changed, from 9 to 23 enumerated paths, and replay
   stayed 19/19, so `path_analyzer_version` did not move. `req.method !== "X"`
   still yields no constraint, because a request constraint has no negation.
-- `proof_trace.zig:595` prints "0 of N failable I/O site(s) have no explicit
+- `proof_trace.zig` prints "0 of N failable I/O site(s) have no explicit
   failure path" for a handler that is not covered only because of a critical
   2xx warning. F1 makes this reachable for `&&` conditions.
 

@@ -210,16 +210,16 @@ flowchart TB
 
 ### Evidence and Risks
 
-`packages/tools/src/precompile.zig:4099` defines the tools graph contract producer.
-`packages/zts/src/pipeline.zig:780` defines the pipeline graph contract producer.
-`packages/zts/src/pipeline.zig:506` defines extraction options and custom callback behavior.
-`packages/zts/src/pipeline.zig:546` provides extraction from an explicit type session.
+`packages/tools/src/precompile.zig` defines the tools graph contract producer.
+`packages/zts/src/pipeline.zig` defines the pipeline graph contract producer.
+`packages/zts/src/pipeline.zig` defines extraction options and custom callback behavior.
+`packages/zts/src/pipeline.zig` provides extraction from an explicit type session.
 That helper currently rejects overridden callbacks and supplied resolution options.
 The new owner retains that public guard. Default extraction clears the supplied resolution option after selecting its completed checker.
 Custom extraction stays on the current compatibility branch.
 
-`packages/zts/src/pipeline.zig:236` shows resolution without a type environment.
-`packages/zts/src/pipeline.zig:601` shows the fallback environment populated with module types and handler ABI types.
+`packages/zts/src/pipeline.zig` shows resolution without a type environment.
+`packages/zts/src/pipeline.zig` shows the fallback environment populated with module types and handler ABI types.
 Replacing both environments with one unconditional environment would change the pass matrix.
 
 `packages/zts/src/modules/internal/compiler.zig` owns optimized parsers and generated constants.

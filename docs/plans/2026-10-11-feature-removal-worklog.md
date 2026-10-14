@@ -98,7 +98,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 - `RELEASE_CHECKLIST.md` and `docs/proofs-and-receipts.md` were not in the G2 edit list. They name the deleted step and the website playground, so invariant 8 required the edit.
 - `docs/internals/semantics-verification.md:56` said the injected solver keeps `std.process.Child` out of the wasm build. The sentence now says "out of the analyzer".
 - `packages/zts/src/repair_intent.zig` header said "Importable from `analyzer_only` builds". It now says "Pure enum, no I/O."
-- Left unchanged: `packages/modules/build.zig:12` (a comment on the freestanding `needs_libc` check, which is behavior), `precompile.zig`, `precompile_check.zig`, `parser/parse.zig` (comments and a wasm stack-size branch about freestanding builds), `policy.zig` `WasmPolicyChecker` (a separate fail-closed stub, not the deleted `wasm/` directory), the contract `wasm_policy_hash` field, and `CHANGELOG.md` history. The plan is silent on them.
+- Left unchanged: `packages/modules/build.zig` (a comment on the freestanding `needs_libc` check, which is behavior), `precompile.zig`, `precompile_check.zig`, `parser/parse.zig` (comments and a wasm stack-size branch about freestanding builds), `policy.zig` `WasmPolicyChecker` (a separate fail-closed stub, not the deleted `wasm/` directory), the contract `wasm_policy_hash` field, and `CHANGELOG.md` history. The plan is silent on them.
 
 ### Invariant 8 patterns
 
@@ -157,7 +157,7 @@ See the G2 report for the exit status of each command. Invariant 4 after G2: `po
 
 ### pi_app pass condition
 
-`git grep -n pi_app packages/runtime/src` lists `cli_args.zig`, `cli_doctor.zig`, `dev_cli.zig`, `dev_command.zig`, `handler_corpus.zig`, `witness_replay_lib.zig`, and one more file: `proof_cli.zig:308`, a doc comment that names the `pi_app.capsule_probe` seam. The plan's list omits it. The comment existed before G3 and is not an import.
+`git grep -n pi_app packages/runtime/src` lists `cli_args.zig`, `cli_doctor.zig`, `dev_cli.zig`, `dev_command.zig`, `handler_corpus.zig`, `witness_replay_lib.zig`, and one more file: `proof_cli.zig`, a doc comment that names the `pi_app.capsule_probe` seam. The plan's list omits it. The comment existed before G3 and is not an import.
 
 ### Invariant 8 patterns
 
@@ -202,9 +202,9 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 
 ### Judgments the plan did not settle
 
-- The plan cites `server.zig:1053,1116` for the lesson. Those lines are stale after G3. The chunked encoded-cap code is at `server.zig:850` and `899-928`, and the solution doc cites those lines.
+- The plan cites `server.zig` for the lesson. The cited locations became stale after G3. The chunked encoded-cap code remains in `server.zig`.
 - The solution doc cited `edge_server.zig` also in its Solution section (lines 34 and 36), not only at lines 45 and 47. Invariant 8 required the edit, so G4 rewrote those too.
-- The edge regression test (one-byte chunks with 1,100-byte extensions, `edge_server.zig:1031`) went with the file. `server.zig` has no equivalent test. The solution doc now says so. G4 did not add a test (out of scope). A later group or a follow-up commit can add one.
+- The edge regression test (one-byte chunks with 1,100-byte extensions, `edge_server.zig`) went with the file. `server.zig` has no equivalent test. The solution doc now says so. G4 did not add a test (out of scope). A later group or a follow-up commit can add one.
 - `packages/runtime/src/cli_shared.zig` `featureCompiledOut` has no caller now (only `edge` used it, since G3 removed Studio). It stays, and G15 owns it.
 - `docs/solutions/` frontmatter title and tags of the chunked-amplification note still say "edge". The file name stays by plan. `CHANGELOG.md` history lines about the edge server stay.
 - The `dev_cli.zig` import `feature_options` was already unused before G4. It is untouched.
@@ -220,7 +220,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 git grep -n -i -E "edge_server|edge_server_stub|-Dedge|enable_edge|zttp edge|zttp\.edge|edge\.md|edge runtime|edge-runtime|EdgeServer|edgeCommand|cmdEdge|printEdgeHelp|parseEdgeConfigPath|in-process edge|edge router|edge config|edge_enabled" -- docs README.md CLAUDE.md AGENTS.md STRATEGY.md CONCEPTS.md .agents .github scripts build build.zig packages tooling RELEASE_CHECKLIST.md advisor-plans CHANGELOG.md
 ```
 
-Remaining hits: `pre-rebase:` citations, the solution doc (history of the fix), `cli_shared.zig:128` (comment on the dead `featureCompiledOut`), `CHANGELOG.md` history, `advisor-plans/`, and plan text of this series.
+Remaining hits: `pre-rebase:` citations, the solution doc (history of the fix), `cli_shared.zig` (comment on the dead `featureCompiledOut`), `CHANGELOG.md` history, `advisor-plans/`, and plan text of this series.
 
 ### Checks
 
@@ -270,12 +270,12 @@ The generated `out.zig` differs in exactly one place: the five lines `pub const 
 
 - The plan names the `has_aot` field only. G5 also removed the generated and stub `aotHandler` function and `aot_metadata`. After the `has_aot` check went, nothing called `aotHandler`, and the stub always returned `error.AotBail`.
 - G5 removed the `CompiledHandler.aot` field, `AotAnalysis.handler_loc`, and the `handler_path` parameter of `writeZigFile`. Only the deleted generator read them.
-- G5 removed the unused `embedded_handler` import from `handler_instance.zig`. It left the build wiring that attaches the import to `runtime_instance` (`packages/runtime/build.zig:149`), because `dev_cli.zig` and `runtime_cli.zig` still need the import in other modules. Whether the `runtime_instance` attachment is dead needs a separate check (G15).
+- G5 removed the unused `embedded_handler` import from `handler_instance.zig`. It left the build wiring that attaches the import to `runtime_instance` (`packages/runtime/build.zig`), because `dev_cli.zig` and `runtime_cli.zig` still need the import in other modules. Whether the `runtime_instance` attachment is dead needs a separate check (G15).
 
 ### Dead code for G15
 
-- `packages/runtime/build.zig:149`: `embedded_handler` anonymous import on the `runtime_instance` module. `handler_instance.zig` no longer imports it. Confirm no other file in that module does, then drop it.
-- Stale comments that name the AOT path: `handler_analyzer.zig:62` ("intended for AOT precompile paths") and `:602` ("AOT-only dynamic pattern"), `runtime_config.zig:135,247`, `server.zig:2580`, `runtime_cli.zig:719`, `docs/consumer-contract.md:166`. `HandlerAnalyzer.enableJsonBodyParsePatterns` and the `request_json_parse` body source still feed the contract route table, so they are code to keep, not to delete.
+- `packages/runtime/build.zig`: `embedded_handler` anonymous import on the `runtime_instance` module. `handler_instance.zig` no longer imports it. Confirm no other file in that module does, then drop it.
+- Stale comments that name the AOT path: `handler_analyzer.zig` ("intended for AOT precompile paths") and `handler_analyzer.zig` ("AOT-only dynamic pattern"), `runtime_config.zig`, `server.zig`, `runtime_cli.zig`, `docs/consumer-contract.md:166`. `HandlerAnalyzer.enableJsonBodyParsePatterns` and the `request_json_parse` body source still feed the contract route table, so they are code to keep, not to delete.
 - Symbol support in `object.zig` and `value.zig` (`WellKnownSymbol`) lost its builtin creators, `createSymbol` and `createWellKnownSymbol`. G5 did not check whether the engine still reaches that support.
 
 ### Invariant 8 patterns
@@ -337,7 +337,7 @@ The method is the G5 method. `zts compile --verify --contract <handler> <dir>/ou
 
 - `contract_diff.writeProofJson`, `contract_diff.writeProofReport`, and their tests in `packages/zts/src/contract_diff.zig`: only `prove.zig` and `prove_upgrade.zig` called them.
 - `upgrade_verifier.writeUpgradeManifestJson` and `upgrade_verifier.writeUpgradeReport` (and their tests): same callers.
-- `zts.routePatternsMatch` and the `zts.pathsMatch` alias at `packages/zts/src/root.zig:727,731`: only `manifest_alignment.zig` used them outside their own test. They are curated public surface, so removal needs a decision.
+- `zts.routePatternsMatch` and the `zts.pathsMatch` alias at `packages/zts/src/root.zig`: only `manifest_alignment.zig` used them outside their own test. They are curated public surface, so removal needs a decision.
 - `packages/tools/src/report.zig` as a whole (`buildReport`, `writeReportJson`, the section types) and `test-report`: no production caller. The plan keeps it while a test uses it (`precompile.zig`, "an incomplete fault analysis writes isCovered false and report clean false").
 
 ### Invariant 8 patterns
@@ -385,7 +385,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 
 - The Requests pane. `proof_card_tui.zig` laid out three columns, and the third column held the audit ring. With the ring gone, G7 removed the pane content and its "Requests" header and kept the three-column geometry. The third column now holds only the status bar's Baseline cell and is blank in the other rows. The frame width stays 100 columns, the status bar and Why row are unchanged, and the `ColumnWidths.requests` field became `status`. A two-column reflow is a possible later change.
 - `dev --record-proof` is not refused by `dev`. The flag now passes through to `serve`, which handles it as it handles any unknown flag.
-- G7 left `packages/pi/src/app.zig:37-40` comments about the capsule probe seam unchanged (G10 deletes that seam).
+- G7 left `packages/pi/src/app.zig` comments about the capsule probe seam unchanged (G10 deletes that seam).
 
 ### Dead code for G15 and G10
 
@@ -433,7 +433,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 
 ### Dead code for G15
 
-- `witness_corpus.synthesizeStructural` with its two tests and the `UnsupportedSpec` path, and `spec_discharge.isCauseOnly` (its only caller): only `witnesses_cli.zig` called them. A comment at `spec_discharge.zig:94` names `synthesizeStructural`.
+- `witness_corpus.synthesizeStructural` with its two tests and the `UnsupportedSpec` path, and `spec_discharge.isCauseOnly` (its only caller): only `witnesses_cli.zig` called them. A comment at `spec_discharge.zig` names `synthesizeStructural`.
 - `witness_corpus.pin` and `witness_corpus.prune` with their tests: no production caller remains outside the file's own tests. `isPinned` has a live caller (`precompile_check.zig`), so keep it. `selectFewShot` also shows no caller outside its own tests in `packages/`; G15 should confirm and decide.
 - `witness_corpus.zig` itself and `pi_witnesses.zig` are Phase 3 per the plan.
 
@@ -476,7 +476,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 
 ### `review-patch` text in `packages/pi`: model-visible, left alone
 
-`expert_workflow.zig:162` is the `spec_goal` workflow route. `workflowNote` injects it into the session as a system note, so it reaches the model request. It names the registered tool `zts_expert_review_patch`, not the deleted CLI command. `expert_codegen_eval.zig:567` compares a tool name in code. Both stay and wait for Phase 3 with the tool.
+`expert_workflow.zig` is the `spec_goal` workflow route. `workflowNote` injects it into the session as a system note, so it reaches the model request. It names the registered tool `zts_expert_review_patch`, not the deleted CLI command. `expert_codegen_eval.zig` compares a tool name in code. Both stay and wait for Phase 3 with the tool.
 
 The doc comment at the top of `packages/pi/src/tools/zts_expert_review_patch.zig` still says "matching the CLI's `zts review-patch --diff-only` semantics". The file is a tool definition, so Phase 1 may not touch it. The comment is stale. It goes in Phase 3.
 
@@ -484,7 +484,7 @@ The doc comment at the top of `packages/pi/src/tools/zts_expert_review_patch.zig
 
 ### Dead code for G15
 
-- `module_audit.verifyManifestPath` (`packages/tools/src/module_audit.zig:257`) has no caller and no test. Only the two deleted commands called it. Its helper `appendManifestDiagnostic` still has a caller in the same file.
+- `module_audit.verifyManifestPath` (`packages/tools/src/module_audit.zig`) has no caller and no test. Only the two deleted commands called it. Its helper `appendManifestDiagnostic` still has a caller in the same file.
 - `module_manifest.parse` is still used by `contract_builder.zig`, `precompile_args.zig`, `manifest_registry.zig`, and others. No `module_manifest.zig` function lost its last caller.
 - `ModuleMetadata.Manifest` text and JSON writers are gone with `expert.zig`. Nothing else remained.
 
@@ -543,9 +543,9 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 
 ### Dead code for G15
 
-- `packages/runtime/src/handler_corpus.zig` (`runHandlerCorpus`, `runHandlerCorpusFromSource`, `HandlerCorpusStats`) and its import in `zruntime_tests.zig:642`: the perf probe was the only production caller. Only its own tests reach it now. I rewrote the header comment.
+- `packages/runtime/src/handler_corpus.zig` (`runHandlerCorpus`, `runHandlerCorpusFromSource`, `HandlerCorpusStats`) and its import in `zruntime_tests.zig`: the perf probe was the only production caller. Only its own tests reach it now. I rewrote the header comment.
 - `proof_ledger.AppendParams.perf` and `.equivalence`, and the serializer blocks for them in `appendEvent`: only tests write these kinds. Removing them means rewriting the two round-trip tests and the `.perf` use in three other ledger tests onto raw rows. `PerfPayload` and `EquivalencePayload` stay for the reader.
-- `cli_shared.nowUnixMs` (`packages/runtime/src/cli_shared.zig:81`): the gate was its last caller.
+- `cli_shared.nowUnixMs` (`packages/runtime/src/cli_shared.zig`): the gate was its last caller.
 - `instruction_counter.zig` stays, as the plan says.
 
 ### Invariant 8 patterns
@@ -599,7 +599,7 @@ Nothing removed is model-visible. `rpc_mode.zig` and the reach files only served
 
 - `session/events.zig`: `writeEntryEventLine` (line 957) has no caller left. Only `rpc_mode.zig` used it.
 - `registry/tool.zig` `Surface.rpc`, the `.rpc` branch in `allowedOn`, `registry/registry.zig` test "model and rpc surfaces reject workspace writers", and the `.rpc` assertions in `app.zig` (the registry effect test). Nothing production uses `.rpc` now.
-- Comments that still say RPC: `agent.zig:1029` ("--rpc"), `agent.zig:1454` (`compact` doc), `loop.zig:853`, `tools/pi_goal_candidate.zig:102,619`, `text_buffer.zig:4`, `registry/tool.zig:20,149,153`.
+- Comments that still say RPC: `agent.zig` ("--rpc"), `agent.zig` (`compact` doc), `loop.zig`, `tools/pi_goal_candidate.zig`, `text_buffer.zig`, `registry/tool.zig`.
 - `build/Context.zig` fields `pi_zts_cli_host_mod` and `project_config_mod` were passed to the reach executable. Check whether other steps still use them.
 
 ### Invariant 8 patterns
@@ -641,7 +641,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 
 ### Dead for Phase 3
 
-The `SpecCode` variants `smt_counterexample` (ZTS755), `smt_unencodable` (ZTS756), `excluded_law_holds` (ZTS757), `audit_solver_error` (ZTS758), `audit_inconclusive` (ZTS759), and `smt_unproven` (ZTS760) in `diagnostic_catalog.zig:109-114` have no producer now. The plan names ZTS757 and ZTS758; the other four are in the same state. They stay, with their rows at `scripts/corpus-uncovered.allow:107-112`, because deleting them moves `diagnosticHash`. The reason text on those rows ("produced by the semantics-conformance producer") is now inaccurate for ZTS755 to ZTS760. A Phase 3 commit that deletes the variants and rows must go with the re-record. `check-diagnostic-producers.sh` still passes ("17 variants"), so it does not cover these.
+The `SpecCode` variants `smt_counterexample` (ZTS755), `smt_unencodable` (ZTS756), `excluded_law_holds` (ZTS757), `audit_solver_error` (ZTS758), `audit_inconclusive` (ZTS759), and `smt_unproven` (ZTS760) in `diagnostic_catalog.zig` have no producer now. The plan names ZTS757 and ZTS758; the other four are in the same state. They stay, with their rows at `scripts/corpus-uncovered.allow:107-112`, because deleting them moves `diagnosticHash`. The reason text on those rows ("produced by the semantics-conformance producer") is now inaccurate for ZTS755 to ZTS760. A Phase 3 commit that deletes the variants and rows must go with the re-record. `check-diagnostic-producers.sh` still passes ("17 variants"), so it does not cover these.
 
 Also unconsumed after G12: `semantics.excluded_laws` and `Law.audit_timeout_ms` have readers only in `semantics_render.zig` and the hash. Keep them while `semanticsHash` and `docs/spec/` are published identities.
 
@@ -722,7 +722,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches, with outp
 - Invariant 2: the only `model_context_mismatch at turn 0/2` lines are the two negative tests. `response_order_mismatch` and `coverage.json is stale` do not appear. `docs/coverage.json` and `docs/convergence.json` are unchanged.
 - Invariant 3: `git diff --stat` over `tool_registry.zig`, `expert_persona.zig`, `skills/`, and `prompts/` is empty.
 - Invariant 4: `policy_hash` `b2038448...7ae3`, `module_registry_hash` `3bc86b0d...713d`, and `spec-hash` `83b822bd...77b8` equal the baselines. `git diff --stat -- policy-hash.txt docs/coverage.json docs/convergence.json docs/spec/` is empty.
-- Invariant 8: `git grep -n "openai-responses-sse\|v1/responses" -- docs README.md CLAUDE.md AGENTS.md .github scripts build build.zig packages` leaves only `agent.zig` URL tests, `providers/cassette_record.zig:440`, and `providers/openai/client.zig:30` (all G13c or G13d), plus the plan files.
+- Invariant 8: `git grep -n "openai-responses-sse\|v1/responses" -- docs README.md CLAUDE.md AGENTS.md .github scripts build build.zig packages` leaves only `agent.zig` URL tests, `providers/cassette_record.zig`, and `providers/openai/client.zig` (all G13c or G13d), plus the plan files.
 
 ## G13c Claude corpus, flat-cassette lane, and the record-tee test
 
@@ -745,7 +745,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches, with outp
 
 ### Left for G13d
 
-`providers/cassette_record.zig:440` (`/v1/responses` in a recorder-lane test that serves OpenAI SSE) stays: it exercises `providers/openai/` and goes with it. `ReplayRequestContext`, `recordingProvider`, and the `.anthropic` and `.openai` switch arms in `expert_codegen_record.zig` stay with the enum.
+`providers/cassette_record.zig` (`/v1/responses` in a recorder-lane test that serves OpenAI SSE) stays: it exercises `providers/openai/` and goes with it. `ReplayRequestContext`, `recordingProvider`, and the `.anthropic` and `.openai` switch arms in `expert_codegen_record.zig` stay with the enum.
 
 ### Checks
 
@@ -761,7 +761,7 @@ All commands ran with `DEEPSEEK_API_KEY` unset and private Zig caches. Each exit
 
 ### Stop condition: no enum member was kept
 
-No identity serializes the provider by integer ordinal. `providers/model_request.zig:328` and `expert_evidence_identity.zig:492` hash `@tagName(provider)`, simulator manifests and session meta store the public name, `session/protocol_identity.zig` hashes only the provider-neutral tool catalog, and a search of `providers/`, `session/`, `settings.zig`, `expert_evidence_identity.zig`, and `simulator/artifact*.zig` for `intFromEnum` and `enumFromInt` finds nothing provider-related. Removing `.anthropic` and `.openai` therefore did not shift `.local` or `.deepseek`. The DeepSeek and local replays stay green, `docs/coverage.json` and `docs/convergence.json` are unchanged, and the three identities equal their baselines. So both members are removed, not kept as unused tags.
+No identity serializes the provider by integer ordinal. `providers/model_request.zig` and `expert_evidence_identity.zig` hash `@tagName(provider)`, simulator manifests and session meta store the public name, `session/protocol_identity.zig` hashes only the provider-neutral tool catalog, and a search of `providers/`, `session/`, `settings.zig`, `expert_evidence_identity.zig`, and `simulator/artifact*.zig` for `intFromEnum` and `enumFromInt` finds nothing provider-related. Removing `.anthropic` and `.openai` therefore did not shift `.local` or `.deepseek`. The DeepSeek and local replays stay green, `docs/coverage.json` and `docs/convergence.json` are unchanged, and the three identities equal their baselines. So both members are removed, not kept as unused tags.
 
 ### Deleted
 
@@ -841,8 +841,8 @@ Each item below lost its last production caller in an earlier group. For each it
 | `Server.signer_fingerprint_hex` | Deleted | The field was write-only. Nothing read it, including the proof card. All four assignments went. |
 | `init_command.scaffoldProject` in-place `.` branch | Deleted | `validateProjectName` refuses `.`, and `initCommand` is the only production caller. The `preserved_path` parameter of `refuseExistingTargets` and `rollbackScaffoldFiles` went with it. The test "in-place scaffold preserves a pre-existing gitignore" went. |
 | `cli_shared.featureCompiledOut` | Deleted | No caller. |
-| `embedded_handler` import on `runtime_instance` (`packages/runtime/build.zig`) | Kept | `handler_instance.zig` imports `runtime_config.zig`, and `runtime_config.zig:7` imports `embedded_handler`. `runtime_pool.zig:14` also imports it. Without the import the benchmark module fails to compile. |
-| Stale AOT comments | Fixed | `handler_analyzer.zig` (two comments), `runtime_config.zig` (two), `server.zig` (one), `runtime_cli.zig` (one), `docs/consumer-contract.md:166`. `enableJsonBodyParsePatterns` and the `request_json_parse` source stay, because `precompile.zig:3575` calls them. |
+| `embedded_handler` import on `runtime_instance` (`packages/runtime/build.zig`) | Kept | `handler_instance.zig` imports `runtime_config.zig`, and `runtime_config.zig` imports `embedded_handler`. `runtime_pool.zig` also imports it. Without the import the benchmark module fails to compile. |
+| Stale AOT comments | Fixed | `handler_analyzer.zig` (two comments), `runtime_config.zig` (two), `server.zig` (one), `runtime_cli.zig` (one), `docs/consumer-contract.md:166`. `enableJsonBodyParsePatterns` and the `request_json_parse` source stay, because `precompile.zig` calls them. |
 | `JSValue` symbol helpers (`SymbolBox`, `WellKnownSymbol`, `isSymbol`, `getSymbolId`, `getSymbolDescription`, `isWellKnownSymbol`) in `value.zig` | Deleted | No caller in `packages/`. |
 | `MemTag.symbol`, the `gc.zig` symbol arm, and the `Symbol`, `iterator`, `toStringTag`, `symbol_object` ids in `object.zig` | Kept | These are heap tags and atom or class ids. Deleting them renumbers ids that the bytecode and the hashed registries use. They wait for Phase 3. |
 | `contract_diff.writeProofJson`, `writeProofReport`, `ProofCertificate` | Deleted | No caller. `ProofCertificate` was only the argument type of the two writers. Their two tests went. |
@@ -850,7 +850,7 @@ Each item below lost its last production caller in an earlier group. For each it
 | `report.zig` and the `test-report` step | Deleted | The only user was the test "an incomplete fault analysis writes isCovered false and report clean false". That test now asserts the same fact on `fault_coverage` directly (`!(isCovered() and warnings == 0)`) and is named "an incomplete fault analysis writes isCovered false". The row in `docs/internals/testing.md` went. |
 | `zts.routePatternsMatch`, `zts.pathsMatch` | Kept | Curated public surface, by the dispatch rule. |
 | `witness_corpus.synthesizeStructural` with `structuralKey` and `writeStructuralJsonl`, `spec_discharge.isCauseOnly` | Deleted | Only `witnesses_cli.zig` called them. The `spec_discharge` import in `witness_corpus.zig` went. |
-| `witness_corpus.pin`, `prune` | Deleted | No production caller. `isPinned` stays: `precompile_check.zig:219` calls it. The two `pin` tests became one test that makes a `<key>.pinned` marker by hand and checks `isPinned` and `loadEntries`. |
+| `witness_corpus.pin`, `prune` | Deleted | No production caller. `isPinned` stays: `precompile_check.zig` calls it. The two `pin` tests became one test that makes a `<key>.pinned` marker by hand and checks `isPinned` and `loadEntries`. |
 | `witness_corpus.selectFewShot`, `fewShotLineLen`, `fewShotLessThan`, `FEW_SHOT_KEY_PREFIX_LEN` | Deleted | No caller outside the file's own tests. `expert_persona.zig` does not use them. |
 | Other `witness_corpus` functions | Kept | `corpusDir`, `ensureCorpusDir`, `persist`, `loadEntries`, `freeEntries`, `countByProperty`, `freeCounts`, `writeProofEnvelopeBlock`, and `isPinned` are reached by `pi_witnesses`, `pi_goal_check`, `pi_repair_plan`, `precompile_check`, `zts_cli`, or `diagnostic_corpus_gate`. |
 | `module_audit.verifyManifestPath` | Deleted | No caller and no test. |
@@ -861,15 +861,15 @@ Each item below lost its last production caller in an earlier group. For each it
 | `session/events.zig` `writeEntryEventLine` | Deleted | No caller. |
 | `InvocationSurface.rpc` (the plan calls it `Surface.rpc`), its `allowedOn` branch, and the assertions on it | Deleted | Only `allowedOn(.model)` feeds the tool catalog. The test `test-expert-app` replay and the catalog digest check stay green (see below). The registry test "model and rpc surfaces reject workspace writers" is now "the model surface rejects workspace writers". |
 | Stale RPC comments | Fixed | `agent.zig` (two), `loop.zig`, `text_buffer.zig`, `registry/tool.zig` (two). |
-| RPC comments in `tools/pi_goal_candidate.zig:102,619` | Kept | Inside a tool definition file. They wait for Phase 3. |
-| `build/Context.zig` `pi_zts_cli_host_mod`, `project_config_mod` | Kept | `build/host_tests.zig:135-137,171-172` uses both. |
+| RPC comments in `tools/pi_goal_candidate.zig` | Kept | Inside a tool definition file. They wait for Phase 3. |
+| `build/Context.zig` `pi_zts_cli_host_mod`, `project_config_mod` | Kept | `build/host_tests.zig` uses both. |
 
 ### Judgments the plan did not settle
 
 - The status bar in the two-column card needs three cells in two columns. I put Verdict and Contract in the columns and Baseline in a full-width row. The alternative is one wide cell with all three. The chosen layout keeps the 24-character sha clip and never truncates at width 60.
 - Column split: 45 percent Properties and 55 percent Surface. The old split was 30, 40, and 30 percent. A new test checks the frame at widths 60, 100, and 200: every row has the requested width and every border row has exactly three corners.
 - The tool-definition rule covers `tools/*.zig` and `tool_registry.zig`. I treated `registry/tool.zig` as the registry type file, not a tool definition, so I edited it. If the root session reads the rule more widely, `git checkout` of the `registry/tool.zig` hunk and a re-add of the three `.rpc` lines restores the old state.
-- `packages/pi/src/memory_store.zig:20` still says "Mirrors the shape of slice C's few-shot selector". The selector is gone, but the file is a Phase 3 deletion, so I left it.
+- `packages/pi/src/memory_store.zig` still says "Mirrors the shape of slice C's few-shot selector". The selector is gone, but the file is a Phase 3 deletion, so I left it.
 - I did not rewrite the `.perf` use in `proof_ledger` tests that pass `kind = .perf` to `appendEvent` with no payload, except in "appendEvent appends in order across calls", where I changed the first kind to `.deploy`. The kind stays a valid enum member, and the `resolve` test builds `Event` values directly.
 - The `aot` field of the contract JSON and the `proof_trace.zig` text "The handler's AOT route table (routerMatch)" are contract output bytes. I left them.
 

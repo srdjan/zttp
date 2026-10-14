@@ -104,7 +104,7 @@ tested against, not that the admission rule was correct.
 
 The leaf check became syntactic. It matches the form of the test against the
 closed narrowing list, over the named parameter, and never asks whether a
-narrowing would result (`packages/zts/src/type_checker.zig:1895`):
+narrowing would result (`packages/zts/src/type_checker.zig`):
 
 ```zig
 fn predicateLeafTestsParam(self: *const TypeChecker, node: NodeIndex, param: ir.BindingRef) bool {
@@ -124,7 +124,7 @@ fn predicateLeafTestsParam(self: *const TypeChecker, node: NodeIndex, param: ir.
 }
 ```
 
-`operandNamesParam` (`packages/zts/src/type_checker.zig:1935`) recognizes the
+`operandNamesParam` (`packages/zts/src/type_checker.zig`) recognizes the
 three ways an admitted test names its subject - the bare identifier, `typeof` of
 it, and a property read off it - by walking to the underlying identifier and
 comparing its binding key to the parameter's. It never asks the narrowing

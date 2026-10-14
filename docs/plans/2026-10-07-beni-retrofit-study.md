@@ -36,10 +36,10 @@ measure any of them. I checked these ZTTP facts myself in code:
 - ZTTP has no `std.testing.fuzz` test (zero matches).
 - The module sources have 44 `throwError` or `TypeError` sites.
 - `packages/zts` has no analysis threads. The only thread use is a test in
-  `bytecode.zig:1418`.
-- `match_analysis.zig:169` (`patternFullyCoversType`) requires one arm to
+  `bytecode.zig`.
+- `match_analysis.zig` (`patternFullyCoversType`) requires one arm to
   cover each whole union member. It does not combine coverage across arms.
-- Handler sources are read by `packages/zts/src/file_io.zig:7`. It reads
+- Handler sources are read by `packages/zts/src/file_io.zig`. It reads
   chunks until end of file. See correction C1.
 
 ## 2. Beni feature inventory
@@ -345,7 +345,7 @@ hint-only file read for the `readFileAlloc` sites (see C1).
 
 **C1.** The frontend agent called the Zig 0.16 `readFileAlloc` crash (a file
 that grows during the read) a direct risk to ZTTP. That is wrong for handler
-sources: `file_io.zig:7` reads chunks until end of file. The risk is probable
+sources: `file_io.zig` reads chunks until end of file. The risk is probable
 for about 15 `readFileAlloc` sites in `packages/pi`, `tooling/`, `build/`,
 and `scripts/`. A test that appends to a file during the read confirms it.
 

@@ -569,7 +569,7 @@ asserted status 101.
 
 The runtime owns the upgrade, not the handler: it upgrades only when the request
 carries an RFC 6455 upgrade and the contract exports `onMessage`, and it writes
-the 101 itself (`packages/runtime/src/server.zig:634-635`, `:1173`). A
+the 101 itself (`packages/runtime/src/server.zig`). A
 header-less GET never upgrades, so it reaches the handler, and the only way a
 handler returns 101 for it is by hardcoding that status - claiming a protocol
 switch on every plain request. The check rewarded a bug rather than catching

@@ -36,13 +36,13 @@ The removed responsibility is fallback production inside contract construction. 
 
 ## Current state
 
-`runCheckOnPreparedSource` builds `ModuleFacts`, `ResolvedModule`, imported summaries, and `CheckedModule`. It installs imported summaries at `precompile.zig:2192-2199`.
+`runCheckOnPreparedSource` builds `ModuleFacts`, `ResolvedModule`, imported summaries, and `CheckedModule`. It installs imported summaries at `precompile.zig`.
 
-`compileHandler` resolves without injected `ModuleFacts` at `precompile.zig:2715-2727`. It runs `HandlerVerifier` only when `emit_verify` is true.
+`compileHandler` resolves without injected `ModuleFacts` at `precompile.zig`. It runs `HandlerVerifier` only when `emit_verify` is true.
 
-`buildContractWithPolicy` builds new `ModuleFacts` at `precompile.zig:3625-3628`. It accepts optional resolved and flow inputs.
+`buildContractWithPolicy` builds new `ModuleFacts` at `precompile.zig`. It accepts optional resolved and flow inputs.
 
-If flow is absent, `buildContractWithPolicy` creates it at `precompile.zig:3651-3677`. This fallback installs `contract.tools.items` before flow runs.
+If flow is absent, `buildContractWithPolicy` creates it at `precompile.zig`. This fallback installs `contract.tools.items` before flow runs.
 
 The check path supplies precomputed flow without that accepted tool catalog. This unit must retain both existing semantics.
 
@@ -50,17 +50,17 @@ Check uses strict mode, reports policy diagnostics, and can skip contracts. Comp
 
 Compile also passes `manifest_registry`. Check passes imported summaries and its optional declaration into flow.
 
-`pipeline.zig:103-112` requires caller-owned stable storage for `ModuleFacts`. `CheckedModule` also borrows `ResolvedModule`.
+`pipeline.zig` requires caller-owned stable storage for `ModuleFacts`. `CheckedModule` also borrows `ResolvedModule`.
 
 `buildContractForServiceContext` and `buildTestContractForSource` pass no resolved analysis. They can also pass no `TypeMap`.
 
-`extractContractFromParsed` then creates only a type session at `pipeline.zig:518-537`. It does not run boolean, strict, or verifier passes.
+`extractContractFromParsed` then creates only a type session at `pipeline.zig`. It does not run boolean, strict, or verifier passes.
 
-`pipeline.zig:18-31` rejects a new `LoweredModule`. The same section keeps file and process input outside `zts`.
+`pipeline.zig` rejects a new `LoweredModule`. The same section keeps file and process input outside `zts`.
 
-`precompile_check.zig:15-43` records check stage completion. Its diagnostic and presentation adapters remain path-specific.
+`precompile_check.zig` records check stage completion. Its diagnostic and presentation adapters remain path-specific.
 
-The multi-module branch refuses declarations at `precompile.zig:2674-2680`. This unit preserves that refusal.
+The multi-module branch refuses declarations at `precompile.zig`. This unit preserves that refusal.
 
 ## Scope
 
@@ -124,7 +124,7 @@ Add characterization tests beside existing tests in `precompile.zig`. Make each 
 
 Cover default check, `skip_contract`, compile with verification disabled, and compile with verification enabled. Assert exact stage presence and property values.
 
-Cover a missing handler. Preserve the `emit_aot` allocation-error return at `precompile.zig:3014-3050` through source review.
+Cover a missing handler. Preserve the `emit_aot` allocation-error return at `precompile.zig` through source review.
 Unsupported syntax does not enter that return. Characterize its normal runtime bail separately.
 No bounded public trigger identifies this allocation phase without a fragile allocation ordinal.
 
@@ -152,7 +152,7 @@ Refactor `CheckedModule` setup, verifier execution, and flow execution. Preserve
 
 Add tests for verifier-only, flow-only, both passes, repeated calls, missing handlers, and accepted tool catalogs.
 
-Extend the existing failure sweep near `pipeline.zig:1244`. Cover allocation failure during setup and both selected passes.
+Extend the existing failure sweep near `pipeline.zig`. Cover allocation failure during setup and both selected passes.
 
 Add one skipped-flow mutation probe. It must fail when a completed result is falsely claimed without a flow walk.
 

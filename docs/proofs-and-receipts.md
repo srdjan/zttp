@@ -92,7 +92,7 @@ Why: -deterministic at src/handler.ts:14: Date.now()
 ```
 
 It reads as: the `deterministic` property was lost (`-`), the construct that
-broke it is at `src/handler.ts:14`, and that construct is `Date.now()`. Remove
+broke it is at `src/handler.ts`, and that construct is `Date.now()`. Remove
 or relocate it and the property returns on the next save.
 
 ### Counterexamples

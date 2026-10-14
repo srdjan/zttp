@@ -42,7 +42,7 @@ the compatibility policy. The implementation now has three explicit boundaries:
 
 `parseFromJson` makes that lifetime boundary visible: it parses a temporary
 `ContractWire`, defers destruction of the parsed arena, and returns only the
-projected `HandlerContract` (`packages/zts/src/contract_json_parser.zig:428-435`).
+projected `HandlerContract` (`packages/zts/src/contract_json_parser.zig`).
 
 The decoder rederive was preceded by a characterization matrix and a measured
 branch baseline, so the implementation could be judged against observed behavior
@@ -57,29 +57,29 @@ Do not map compatibility-sensitive fields directly to ordinary decoded strings o
 integers. Give each exceptional rule a small wire type.
 
 - `json_wire.String` records the bytes between the JSON quotes without unescaping
-  them (`packages/zts/src/json_wire.zig:9-21`). This preserves the established
+  them (`packages/zts/src/json_wire.zig`). This preserves the established
   domain representation for strings and object keys.
 - `json_wire.RawValue` records the exact source span of an embedded JSON value
-  (`packages/zts/src/json_wire.zig:24-36`). The projection can then own those bytes
+  (`packages/zts/src/json_wire.zig`). The projection can then own those bytes
   without parse-and-reserialize drift.
 - `json_wire.Unsigned(T)` consumes a syntactically valid decimal integer and maps
   an out-of-range value to `null`, which lets the owning DTO apply its documented
-  default (`packages/zts/src/json_wire.zig:214-235`).
+  default (`packages/zts/src/json_wire.zig`).
 - `json_wire.OptionalNonNull(T)` distinguishes an omitted field from an explicit
-  JSON `null` (`packages/zts/src/json_wire.zig:238-253`). The sandbox proof DTO uses
+  JSON `null` (`packages/zts/src/json_wire.zig`). The sandbox proof DTO uses
   it for proof hashes, where silently accepting `null` would
-  erase a supplied proof claim (`packages/zts/src/contract_json_parser.zig:293-299`).
+  erase a supplied proof claim (`packages/zts/src/contract_json_parser.zig`).
 - `json_wire.AppendedNonNull(T)` gives sandbox capabilities the same null rejection
   while preserving repeated arrays inside one sandbox object
-  (`packages/zts/src/json_wire.zig:255-287`).
+  (`packages/zts/src/json_wire.zig`).
 - `json_wire.MergedOptional(T)` and `json_wire.AppendedOptional(T)` preserve the
   legacy rule that explicit null is a no-op for selected sections while repeated
-  objects merge and repeated arrays append (`packages/zts/src/json_wire.zig:289-366`).
+  objects merge and repeated arrays append (`packages/zts/src/json_wire.zig`).
 - `json_wire.FoldedOptional(T)` handles sections whose repeated-object policy is
-  more specific than field-wise merging (`packages/zts/src/json_wire.zig:368-409`).
+  more specific than field-wise merging (`packages/zts/src/json_wire.zig`).
   Sandbox capability hashes are folded with the capabilities from the same object,
   so a hash cannot cross an occurrence boundary
-  (`packages/zts/src/contract_json_parser.zig:293-309`).
+  (`packages/zts/src/contract_json_parser.zig`).
 
 These types keep the DTO declarative while preventing a generic decoder default
 from silently changing the wire contract.
@@ -88,19 +88,19 @@ from silently changing the wire contract.
 
 The recursive typed decoder reads structural keys through the raw string wrapper,
 matches them byte-for-byte against field names, and skips unknown values
-(`packages/zts/src/json_wire.zig:121-178`). This means an escaped spelling such as
+(`packages/zts/src/json_wire.zig`). This means an escaped spelling such as
 `"versi\u006fn"` remains an unknown field instead of becoming `"version"` after
 normalization.
 
 Duplicate handling is shape-dependent. With the configured `use_last` policy,
 ordinary scalar fields replace the earlier value, repeated slices append, and a
 repeated plain object continues filling the same DTO
-(`packages/zts/src/json_wire.zig:151-173`). Selected nullable sections add an
+(`packages/zts/src/json_wire.zig`). Selected nullable sections add an
 explicit merge or append policy so an intervening null does not erase earlier
-wire facts (`packages/zts/src/contract_json_parser.zig:418-422`). Raw extension
+wire facts (`packages/zts/src/contract_json_parser.zig`). Raw extension
 maps keep insertion order, retain escaped keys as distinct keys, and replace an
 exact duplicate through a temporary hash index
-(`packages/zts/src/json_wire.zig:39-79`).
+(`packages/zts/src/json_wire.zig`).
 
 Keep this policy in the shared wire layer. Reimplementing it independently in each
 DTO makes nested objects behave differently from the root and recreates the custom
@@ -111,45 +111,45 @@ parser as scattered code.
 The wire arena may borrow spans from the input, but nothing returned to a caller
 may depend on either lifetime. The projection therefore receives an allocator and
 a `*const ContractWire`, initializes a domain value, and registers domain cleanup
-before projecting child collections (`packages/zts/src/contract_json_parser.zig:438-450`).
+before projecting child collections (`packages/zts/src/contract_json_parser.zig`).
 
 For staged collection entries, initialize the owned value with an empty variant,
 install `errdefer` cleanup, then fill allocation-bearing fields before appending.
 The API response projection follows this sequence
-(`packages/zts/src/contract_json_parser.zig:880-899`). Legacy backfills use the
+(`packages/zts/src/contract_json_parser.zig`). Legacy backfills use the
 same pattern for synthesized request bodies and responses
-(`packages/zts/src/contract_json_parser.zig:915-955`). This keeps every allocation
+(`packages/zts/src/contract_json_parser.zig`). This keeps every allocation
 failure on the same cleanup path as a successful domain object.
 
 Projection is also where semantic boundaries stay separate. A decoded rate-limit
 namespace can alias an already-owned cache namespace, but a rate-limit-only
 namespace is owned separately rather than being appended to the cache
-authorization list (`packages/zts/src/contract_json_parser.zig:1325-1345`). The
+authorization list (`packages/zts/src/contract_json_parser.zig`). The
 domain object records and frees that separate ownership explicitly
-(`packages/zts/src/contract_types.zig:1760-1763`,
-`packages/zts/src/contract_types.zig:1884-1888`).
+(`packages/zts/src/contract_types.zig`,
+`packages/zts/src/contract_types.zig`).
 
 ### Verify behavior dimensions, not only representative documents
 
 A decoder migration needs a matrix of focused compatibility probes. The current
 tests pin scalar duplicate-last behavior, integer overflow defaults, and trailing
-bytes (`packages/zts/src/contract_json_parser.zig:1504-1516`). They separately pin
+bytes (`packages/zts/src/contract_json_parser.zig`). They separately pin
 raw structural keys, repeated collection appends, and repeated object merging
-(`packages/zts/src/contract_json_parser.zig:1519-1540`). Repeated nullable sections
+(`packages/zts/src/contract_json_parser.zig`). Repeated nullable sections
 are covered across sandbox authority data, durable workflow metadata, behavior
-arrays, and intervening nulls (`packages/zts/src/contract_json_parser.zig:1542-1567`).
+arrays, and intervening nulls (`packages/zts/src/contract_json_parser.zig`).
 Capability-hash scoping has a separate ordering matrix for cross-object and
-same-object cases (`packages/zts/src/contract_json_parser.zig:1569-1600`). Explicit
+same-object cases (`packages/zts/src/contract_json_parser.zig`). Explicit
 null rejection for proof fields has its own negative matrix
-(`packages/zts/src/contract_json_parser.zig:1602-1613`).
+(`packages/zts/src/contract_json_parser.zig`).
 
 Ownership deserves an end-to-end lifetime test. The contract decoder test destroys
 and overwrites its source buffer before asserting handler strings, raw schema JSON,
 extension keys, and extension content
-(`packages/zts/src/contract_json_parser.zig:1628-1646`).
+(`packages/zts/src/contract_json_parser.zig`).
 Allocator correctness is checked across every failing allocation point in a fixture
 that exercises extensions, legacy backfills, and rate-limit ownership
-(`packages/zts/src/contract_json_parser.zig:1661-1692`).
+(`packages/zts/src/contract_json_parser.zig`).
 
 Finally, keep the serializer's byte contract independent from decoder tests. The
 build defines byte-identical public contract goldens specifically so a

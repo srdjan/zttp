@@ -23,6 +23,11 @@ tags:
   - verification
   - probes
   - async-ordering
+binds:
+  - packages/pi/src/standin/defect_seeds.zig
+  - packages/pi/src/standin_range_tests.zig
+  - packages/pi/src/veto.zig
+proves: zig build test-standin
 ---
 
 # Difference is not the claim, and a probe that does not compile is not a probe
@@ -107,7 +112,7 @@ production code path, not from a second model of it hand-written in the test.
 
 **A topology floor must reject unknown members, not merely require known ones.**
 
-`required_packages` (`tooling/production_branch_metric.zig:43`) defines the
+`required_packages` (`tooling/production_branch_metric.zig`) defines the
 package set whose presence the production branch metric checks. The review
 found that the pre-fix path classifier used `.repo` as the fallback for both
 repository-level files and unknown directories below `packages/`. A new
@@ -116,10 +121,10 @@ per-package report.
 
 The fixed classifier keeps `.repo` only for paths outside `packages/` and returns
 `error.UnknownPackage` for malformed or unknown paths inside that namespace
-(`tooling/production_branch_metric.zig:95-104`, with `.repo` at `:97` and
-`error.UnknownPackage` at `:99` and `:104`). `collect` classifies each path
+(`tooling/production_branch_metric.zig`, with `.repo` at `tooling/production_branch_metric.zig` and
+`error.UnknownPackage` at `tooling/production_branch_metric.zig` and `tooling/production_branch_metric.zig`). `collect` classifies each path
 before file access, so parsing and I/O behavior cannot hide the topology error
-(`tooling/production_branch_metric.zig:265`).
+(`tooling/production_branch_metric.zig`).
 
 **A fixture must make the outcomes it separates observationally different.**
 
@@ -181,7 +186,7 @@ structural Wide = Box<string> & { f01: string } & ... & { f15: string } & { last
 ```
 
 `structural` is the model-1 spelling of the alias keyword. The stripper still
-accepts the legacy `type` (`packages/zts/src/stripper.zig:1510-1517`), so the
+accepts the legacy `type` (`packages/zts/src/stripper.zig`), so the
 older form parses but no longer matches the fixture.
 
 Measured against the same locally reintroduced `@min(live.len, 16)`:
@@ -200,9 +205,9 @@ quietly turn the first fixture into the second.
 
 The same ambiguity appears in concurrent tests even when the final state is
 exact. The runtime's signal path wakes a blocked `listener.accept()` by opening
-a loopback connection (`packages/runtime/src/server.zig:2439`). Once the
+a loopback connection (`packages/runtime/src/server.zig`). Once the
 accept returns, the loop observes the shutdown flag and exits
-(`packages/runtime/src/server.zig:2477`).
+(`packages/runtime/src/server.zig`).
 
 The first graceful-shutdown E2E ordering raised `SIGTERM`, then opened another
 client before waiting for the accept loop to exit (session history). That client
@@ -210,11 +215,11 @@ could release the same blocked accept call. A broken production wake and a
 working wake therefore reached the same observable end state.
 
 The corrected test waits for `shutdown_started` immediately after the signal
-(`packages/runtime/src/server.zig:3732` raises it, `:3776` waits, and the
-ordering comment at `:3774-3775` says why) and opens the rejection-probe client
-only after that checkpoint (`packages/runtime/src/server.zig:3780`). The accept
+(`packages/runtime/src/server.zig` raises it, `packages/runtime/src/server.zig` waits, and the
+ordering comment at `packages/runtime/src/server.zig` says why) and opens the rejection-probe client
+only after that checkpoint (`packages/runtime/src/server.zig`). The accept
 thread publishes the checkpoint only after `acceptLoop()` returns
-(`packages/runtime/src/server.zig:3728`). At that point, no test-owned
+(`packages/runtime/src/server.zig`). At that point, no test-owned
 connection can create the event being attributed to the production signal path.
 
 **A probe must compile, or it tests nothing. Read its result from the build's
@@ -352,7 +357,7 @@ zig build test -j1 --summary all
 `unit_tests` artifact rooted at `packages/runtime/src/main.zig`
 (`addUnit` in `build/runtime_tests.zig`), which reaches the file through the
 `_ = @import("server.zig");` in that root's test block
-(`packages/runtime/src/main.zig:30`), and `zig build test` runs that artifact
+(`packages/runtime/src/main.zig`), and `zig build test` runs that artifact
 (`build.zig`). The narrower `zig build test-invariant-drift` runs the same
 artifact (`addInvariantDriftEvidence` in `build/proof_gates.zig`).
 
@@ -364,18 +369,18 @@ also gives. Take the verdict from the unfiltered step.
 
 The corrected E2E exits nonzero at
 `Wait.forFlag(&shutdown_started, true, 2_000)` with `error.TestTimedOut`
-(`packages/runtime/src/server.zig:3542` for the test,
-`packages/runtime/src/server.zig:3551` for the timeout, and
-`packages/runtime/src/server.zig:3776` for the wait). Because no later test
+(`packages/runtime/src/server.zig` for the test,
+`packages/runtime/src/server.zig` for the timeout, and
+`packages/runtime/src/server.zig` for the wait). Because no later test
 client exists before that wait, the probe disables the only ordinary wake path
 and the exact claim turns red. Restore the configured port after the probe.
 
 The topology probe passes a nonexistent unknown-package path to `collect` and
-expects `error.UnknownPackage` (`tooling/production_branch_metric.zig:465`,
-beside the direct classifier check at `:454`).
+expects `error.UnknownPackage` (`tooling/production_branch_metric.zig`,
+beside the direct classifier check at `tooling/production_branch_metric.zig`).
 Using a nonexistent path is deliberate: that exact error proves classification
 ran before file access. A companion mapping test covers every known package and a
-real repository-level path (`tooling/production_branch_metric.zig:438-452`).
+real repository-level path (`tooling/production_branch_metric.zig`).
 
 Two questions to put to any gate, after the sibling document's "delete its input":
 

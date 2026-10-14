@@ -36,26 +36,26 @@ runs.
 The structured-I/O collector now belongs to `Context`. Its scope token records
 the exact state object, installed collector, and previous collector, then
 asserts that restoration follows the expected local stack. See
-`packages/zts/src/context.zig:217-219` and
-`packages/zts/src/parallel_collection.zig:30-58`.
+`packages/zts/src/context.zig` and
+`packages/zts/src/parallel_collection.zig`.
 
 `parallel()` and `race()` enter that Context-owned scope before invoking their
 thunks and restore it on every normal or error exit. The HTTP bridge reads the
 collector through the same runtime Context rather than through ambient thread
-state. See `packages/zts/src/modules/workflow/io.zig:172-187`,
-`packages/zts/src/modules/workflow/io.zig:306-318`, and
-`packages/runtime/src/runtime_http.zig:828-835`.
+state. See `packages/zts/src/modules/workflow/io.zig`,
+`packages/zts/src/modules/workflow/io.zig`, and
+`packages/runtime/src/runtime_http.zig`.
 
 The JSON shape cache now belongs to `HiddenClassPool`. Each entry stores a
 pool-local `HiddenClassIndex`, so the cache is initialized and destroyed with
 that pool. JSON parsing performs lookup and insertion through the current
-Context's pool. See `packages/zts/src/object.zig:932-948`,
-`packages/zts/src/object.zig:977-1022`, and
-`packages/zts/src/builtins/json.zig:260-273`.
+Context's pool. See `packages/zts/src/object.zig`,
+`packages/zts/src/object.zig`, and
+`packages/zts/src/builtins/json.zig`.
 
 Treat non-local recovery as a separate lifetime. Panic recovery can skip Zig
 defers, so a quarantined Context clears both transient scopes before invoking
-module-state destructors. See `packages/zts/src/context.zig:552-563`.
+module-state destructors. See `packages/zts/src/context.zig`.
 
 ## Why This Matters
 
@@ -109,10 +109,10 @@ const class_idx = pool.lookupJsonShape(atoms) orelse build: {
 ```
 
 The focused regressions are in
-`packages/zts/src/modules/workflow/io.zig:396-455`,
-`packages/zts/src/modules/workflow/io.zig:741-859`,
-`packages/zts/src/modules/workflow/io.zig:1001-1092`, and
-`packages/zts/src/builtins/json.zig:661-723`.
+`packages/zts/src/modules/workflow/io.zig`,
+`packages/zts/src/modules/workflow/io.zig`,
+`packages/zts/src/modules/workflow/io.zig`, and
+`packages/zts/src/builtins/json.zig`.
 
 ## Related
 

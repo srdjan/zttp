@@ -28,8 +28,8 @@ under owner decision 1. See "Results" at the end.
    suite and the ratchet corpus is identical before and after.
 5. **T5 and T6: accepted for Phase 4. T7: declined.** The owner left the choice to the
    implementer. T7 fails its own precondition: the stage does not follow from the code.
-   `obligation_missing` is emitted under `obligation_reconstruction` (`checker.zig:991`) and
-   under `evidence_check` (`:1194`), so deleting `Rejection.stage` would lose information.
+   `obligation_missing` is emitted under `obligation_reconstruction` (`checker.zig`) and
+   under `evidence_check` (`checker.zig`), so deleting `Rejection.stage` would lose information.
 6. **Section 7 behavior questions: pin the current behavior.** Phase 0 pins that a rewrite
    with no translation section is not checked, and that the residual-plan member loop keeps
    its current shape. Neither changes in this series.
@@ -46,13 +46,13 @@ mutation probe of 204 non-equivalent single-point mutants killed 80 (39%). In `c
 which produces the verdicts, the suite killed 21 of 88 (24%). Specific consequences, each
 reproduced by the supervisor on a fresh build cache:
 
-- Disabling the executable-root comparison (`checker.zig:1537`) leaves all 183 kernel tests
+- Disabling the executable-root comparison (`checker.zig`) leaves all 183 kernel tests
   green. No `.zig` file in the repository names `executable_root_mismatch`,
   `graph_member_extra`, or `zero_commitment`.
-- Deleting the empty-ledger-id refusal (`pre-rebase:packages/proof-checker/src/invariant.zig:424`) leaves all 183 tests green.
+- Deleting the empty-ledger-id refusal (`pre-rebase:packages/proof-checker/src/invariant.zig`) leaves all 183 tests green.
 - Mutant C16 (an unknown non-zero evidence rule decodes as "no rule") survives. Production
-  code refuses it today (`certificate.zig:513-516`), but no test holds that refusal, and
-  `validEvidenceShape` (`checker.zig:1420-1421`) accepts a null rule for `trusted`, `tested`,
+  code refuses it today (`certificate.zig`), but no test holds that refusal, and
+  `validEvidenceShape` (`checker.zig`) accepts a null rule for `trusted`, `tested`,
   and `not_established` edges. A regression on that one line is a silent fail-open.
 
 The code side has measured, low-risk reductions. Three independent drafts, each green on the
@@ -103,10 +103,10 @@ The mutant denominators exclude equivalent mutants. There were 18 of them, each 
 scout logs. `root.zig` and `test_root.zig` hold no logic. The suite runs in 30 ms
 (`zig build test-proof-checker`), so no test is slow.
 
-Highest-complexity functions: `checkInvariantCoverage` 59 (`checker.zig:511`),
-`checkEvidence` 46 (`:1184`), `decodeRecord` 33 (`certificate.zig:471`), `decodeSection` 28
-(`:738`), `bindExecutableGraph` 26 (`checker.zig:1463`), `normalizeEndpoint` 25
-(`residual.zig:341`). `reasonFor` (15) and `verdict.name` (13) are also high, but they are
+Highest-complexity functions: `checkInvariantCoverage` 59 (`checker.zig`),
+`checkEvidence` 46 (`checker.zig`), `decodeRecord` 33 (`certificate.zig`), `decodeSection` 28
+(`certificate.zig`), `bindExecutableGraph` 26 (`checker.zig`), `normalizeEndpoint` 25
+(`residual.zig`). `reasonFor` (15) and `verdict.name` (13) are also high, but they are
 exhaustive per-variant tables and are not targets.
 
 ## 3. Findings, ranked by leverage
@@ -134,12 +134,12 @@ fields before `Property.name` changes, and leave the `GuardKind` methods as swit
 `inline else` dispatch. Measured draft: certificate branches 210 to 147, CC>10 from 9 to 6,
 all tests pass. A differential test showed byte-identical `encode` output for both the
 minimal parts and the parts with all 11 sections. The draft also removes the two
-`.identity => unreachable` prongs (`:776`, `:795`), which the early return at `:745` makes
+`.identity => unreachable` prongs (`certificate.zig`), which the early return at `certificate.zig` makes
 unreachable only through control flow.
 
 **M3. One shared wire reader (`pre-rebase:packages/proof-checker/src/declaration.zig`, `pre-rebase:packages/proof-checker/src/tool_catalog.zig`, `capability_policy.zig`).**
-`Reader` is copied word for word (`pre-rebase:packages/proof-checker/src/declaration.zig:151-174`, `pre-rebase:packages/proof-checker/src/tool_catalog.zig:156-185`).
-`capability_policy.zig:159-183` has a third copy as `Cursor`. Six iterators, two test
+`Reader` is copied word for word (`pre-rebase:packages/proof-checker/src/declaration.zig`, `pre-rebase:packages/proof-checker/src/tool_catalog.zig`).
+`capability_policy.zig` has a third copy as `Cursor`. Six iterators, two test
 writers, two `digest()` bodies, two header checks, and six "previous must be strictly less"
 loops repeat the same shape. Rederive them as a sibling `wire.zig` that imports only `std`,
 with each decoder keeping its own error set through a comptime error argument. Measured
@@ -148,24 +148,24 @@ Together with M2 the decoders go from 352 to 267 branches. Risk: low. `wire.zig`
 added to `scripts/check-proof-swallow.sh`, or logic moved out of the gated
 `capability_policy.zig` leaves the gate.
 
-**M4. Tool-catalog and declaration stages are one function (`checker.zig:408-450`, `:460-502`).**
+**M4. Tool-catalog and declaration stages are one function (`checker.zig`).**
 They differ only in member kind, stage, three reason codes, and decoder. The same "exactly
 one member at ordinal 0 with digest D" loop appears again for the invariant spec and adapter
-(`:558-597`). Rederive: `bindMember(kind, digest)` returning
+(`checker.zig`). Rederive: `bindMember(kind, digest)` returning
 `union { missing, bound, mismatch: Member }`, plus one generic bound-bytes check.
 
-**M5. `checkInvariantCoverage` mixes two contracts (`checker.zig:511`, CC 59).** The
+**M5. `checkInvariantCoverage` mixes two contracts (`checker.zig`, CC 59).** The
 unconfigured path ("nothing invariant-shaped may appear") and the configured path
 (pairwise witness and observation matching) share one body. The body also builds the same
 `.{ .rejected = reject(.invariant_coverage, ...) }` shape 25 times. Split out
 `checkInvariantSite` returning `union { refused: ReasonCode, covered: bool }`. The
-`!result.ready()` check at `:717` cannot fail after the loops above it. It becomes an
+`!result.ready()` check at `checker.zig` cannot fail after the loops above it. It becomes an
 assertion only after Phase 0 pins the loops.
 
-**M6. `bindExecutableGraph` as a plain merge join (`checker.zig:1463`, CC 26).** The observed
-index always equals the loop index. The `while` at `:1497` always returns, so the
-`.lt => unreachable` at `:1509` exists only to satisfy it. The two lookups after the root
-check (`:1549-1581`) are one helper.
+**M6. `bindExecutableGraph` as a plain merge join (`checker.zig`, CC 26).** The observed
+index always equals the loop index. The `while` at `checker.zig` always returns, so the
+`.lt => unreachable` at `checker.zig` exists only to satisfy it. The two lookups after the root
+check (`checker.zig`) are one helper.
 
 Measured draft of M4 to M6 plus T2 (restructure only), T3, and T4: `checker.zig` goes from 335 to 309 branches, maxCC
 from 59 to 39, production lines from 2373 to 2238. All 183 tests pass on a fresh cache. One
@@ -173,29 +173,29 @@ behavioral side effect: the work spent on the invariant fixtures rises by 9 to 1
 because the spec and adapter are walked separately. A single two-kind walk restores the old
 figure. Decided: keep the old figure (owner decision 4).
 
-**M7. `normalizeEndpoint` (`residual.zig:341`, CC 25).** Split it into `parseScheme`,
+**M7. `normalizeEndpoint` (`residual.zig`, CC 25).** Split it into `parseScheme`,
 `authorityOf`, `splitHostPort`, and `canonicalHost`, and replace the hand-rolled
 `asciiEqlIgnoreCase` with `std.ascii.eqlIgnoreCase`. Measured draft: maxCC 25 to 8, -5
 branches, and a differential fuzz of 800,000 calls against the original matched every
-output and error. The byte-identical second implementation in `zts/src/endpoint.zig:60-100`
-is pinned by the differential test at `runtime/src/proof_activation.zig:345-349`, which must
+output and error. The byte-identical second implementation in `zts/src/endpoint.zig`
+is pinned by the differential test at `runtime/src/proof_activation.zig`, which must
 still pass.
 
-**M8. Small dead code.** `verdict.zig:371` (`if (artifact == .not_applicable)`) is redundant.
-`SemanticState.atLeast` (`verdict.zig:28`) has no caller except its own test. In
-`checker.zig`: `entryFunction` is re-derived twice with a dead `orelse` (`:946`, `:1302`),
-the `count == 0` check at `:868` is covered by the handler count, and the obligation "seen"
-loop (`:981-993`) is implied by the count, strict order, and reconstruction checks. Each was
+**M8. Small dead code.** `verdict.zig` (`if (artifact == .not_applicable)`) is redundant.
+`SemanticState.atLeast` (`verdict.zig`) has no caller except its own test. In
+`checker.zig`: `entryFunction` is re-derived twice with a dead `orelse` (`checker.zig`),
+the `count == 0` check at `checker.zig` is covered by the handler count, and the obligation "seen"
+loop (`checker.zig`) is implied by the count, strict order, and reconstruction checks. Each was
 confirmed by an equivalent mutant. Delete them only after Phase 0, so that an implied guard
 is proven by a test before the explicit one goes.
 
 ### Type-driven
 
-**T1. Before Phase 4, `Assessment` could hold contradictory states (`verdict.zig:457-506`).** It could represent
+**T1. Before Phase 4, `Assessment` could hold contradictory states (`verdict.zig`).** It could represent
 `policy_accepted` with a rejection (mutant V5 survives), `policy_accepted` with a null
 grade, a grade below `proof_checked`, and a stop below `policy_accepted` with no rejection.
 The kernel never produced these values, but the runtime paid to defend against them:
-`contract_runtime.zig:428` has `grade orelse return null`, and `server.zig:4674-4694` tests
+`contract_runtime.zig` has `grade orelse return null`, and `server.zig` tests
 both impossible shapes. The initial proposed shape was:
 
 ```zig
@@ -206,10 +206,10 @@ pub const Outcome = union(enum) {
 };
 ```
 
-`proof_checked` keeps an optional grade, because the policy rejections at `checker.zig:1337`
-and `:1349` stop there without one. Nine construction sites outside the package change.
+`proof_checked` keeps an optional grade, because the policy rejections at `checker.zig`
+and `checker.zig` stop there without one. Nine construction sites outside the package change.
 Risk: medium, because this is a public API used by runtime and tools. `Assessment.reject`
-also hard-codes `development_only = false` (`verdict.zig:501`), a claim nothing checked. The
+also hard-codes `development_only = false` (`verdict.zig`), a claim nothing checked. The
 new shape must carry that field honestly. The Phase 4 type uses an `Outcome`
 union. Its accepted member requires a grade and a declared development flag.
 Its rejected member requires a `Rejection`, a `Reached` value, and an optional
@@ -218,8 +218,8 @@ identity. A `proof_checked` rejection can have an optional grade. Provenance,
 work spent, property verdicts, disclosed edges, guard verdicts, and invariant
 verdicts stay on `Assessment` because both outcomes can report them.
 
-**T2. `rule_family_mismatch` has no reachable producer (`verdict.zig:206`).** The checks at
-`checker.zig:1237` and `:1250` re-test what `validEvidenceShape` (`:1412`) already refused.
+**T2. `rule_family_mismatch` has no reachable producer (`verdict.zig`).** The checks at
+`checker.zig` re-test what `validEvidenceShape` (`checker.zig`) already refused.
 Rederive the evidence stage as `classify(entry, property) ?Claim` with
 `Claim = union(enum) { proved: Rule, translation_validated: Rule, solver, trusted, tested,
 not_established }`, handled by one exhaustive switch. Measured: `checkEvidence` goes from
@@ -232,24 +232,24 @@ handler. Return `union { entry: u32, rejected: Outcome }` from it and pass the e
 explicitly. This deletes the two dead `orelse` branches in M8. It is included in the
 `checker.zig` draft numbers.
 
-**T4. `executable_graph.Error` is one set shared by four functions (`executable_graph.zig:152-158`).**
-`push` can only fail two ways, which forces a closed-set `else =>` at `checker.zig:1491`.
-`push` also reports count overflow as `NotOrdered` (`:192`), so the checker labels it
+**T4. `executable_graph.Error` is one set shared by four functions (`executable_graph.zig`).**
+`push` can only fail two ways, which forces a closed-set `else =>` at `checker.zig`.
+`push` also reports count overflow as `NotOrdered` (`checker.zig`), so the checker labels it
 `graph_member_out_of_order`. Give each function its own error set, and add
 `CountExceeded` to `push`.
 
-**T5. Before Phase 4, `invariant.Spec` carried states the decoder never produced (`pre-rebase:packages/proof-checker/src/invariant.zig:182-195`).**
-`schema: u16` admitted schema 7, which `recordAt` (`:237`) treated as v1. `Spec.kind` was always
+**T5. Before Phase 4, `invariant.Spec` carried states the decoder never produced (`pre-rebase:packages/proof-checker/src/invariant.zig`).**
+`schema: u16` admitted schema 7, which `recordAt` (`pre-rebase:packages/proof-checker/src/invariant.zig`) treated as v1. `Spec.kind` was always
 `.balance_conservation_v1` and had no production reader. Phase 4 uses
 `Schema = enum(u16) { v1 = 1, v2 = 2 }` with a `kinds: union(Schema)` field and removes
 `kind`. The external reader in `pre-rebase:packages/tools/src/invariant_config.zig` reads the tag.
 
-**T6. Before Phase 4, `PropertyVerdicts` did not tie the accepted bit to the grade (`verdict.zig:428-453`).**
+**T6. Before Phase 4, `PropertyVerdicts` did not tie the accepted bit to the grade (`verdict.zig`).**
 `accept()` could set a bit whose grade slot was null. Phase 4 uses
 `[count]union(enum) { none, graded: G, accepted: G }`. Both public read methods
 retain their behavior for valid entries.
 
-**T7. `Rejection.stage` is independent of `code`.** `checker.zig:276-281` reports
+**T7. `Rejection.stage` is independent of `code`.** `checker.zig` reports
 decode-block codes under `.limits`, and `else => .unknown_enum_member` swallows the rest of
 the session error set. Decide whether the stage follows from the code. If it does, derive
 it and delete the field.
@@ -269,7 +269,7 @@ Security-relevant, fail-open if the guarded line regresses:
   `dep_bytecode`, which is wire kind 2.
 - Evidence (`checker.zig`): `obligation_without_evidence` (EVD11), a property with both
   refused and graded evidence (EVD12), a non-trusted grade in the trusted inventory (EVD09),
-  `witness_missing` (EVD07), and the fabricated-property path. The test at `:2863` accepts
+  `witness_missing` (EVD07), and the fabricated-property path. The test at `checker.zig` accepts
   either `rule_premise_unmet` or `fabricated_property`, so it pins neither.
 - Invariant coverage (`checker.zig`): every guard on the unconfigured path (INV01-04). A
   `ledger_call` with no spec is accepted under the mutant. Also a witness `code_offset` that
@@ -286,7 +286,7 @@ Security-relevant, fail-open if the guarded line regresses:
   required section dropped in turn (C07; only `evidence` is dropped today).
 - Executable graph: a golden root literal. Mutants G4, G5, and G7 show that no test proves
   the root binds the ordinal, the count, or the kind.
-- Capability policy: a `max_policy_bytes + 1` input (P01; the test at `:453-461` asserts only
+- Capability policy: a `max_policy_bytes + 1` input (P01; the test at `checker.zig` asserts only
   the constant), and an SQL flag byte or enabled byte of 2 (P02, P03). P03 is read as
   "disabled" today.
 - Invariant spec: an empty ledger id (I11), and the ledger id, currency, scale, matcher, and
@@ -295,26 +295,26 @@ Security-relevant, fail-open if the guarded line regresses:
 
 Structural weaknesses in the suite:
 
-- The error censuses in `certificate.zig:1420`, `pre-rebase:packages/proof-checker/src/declaration.zig:638`, and
-  `pre-rebase:packages/proof-checker/src/tool_catalog.zig:753` need only one probe per error, so a second site that returns the
+- The error censuses in `certificate.zig`, `pre-rebase:packages/proof-checker/src/declaration.zig`, and
+  `pre-rebase:packages/proof-checker/src/tool_catalog.zig` need only one probe per error, so a second site that returns the
   same error goes unprobed. Seven reserved-byte sites share `ReservedFieldNonZero` and
   survive for that reason. Change the census to count sites, not errors.
 - About 18 reason codes have no test anywhere in the repository. Only the tool-catalog and
   declaration stages have a reason-code census. Add censuses for the binding, evidence,
   invariant, and guard codes.
 - The certificate round trip proves only self-consistency. The only producer
-  (`runtime/src/proof_certificate.zig:347`) calls the kernel's own `encode`, so a layout
+  (`runtime/src/proof_certificate.zig`) calls the kernel's own `encode`, so a layout
   error made in both directions passes every test in the repository. Add one pinned
   golden-bytes vector, or its SHA-256, for a certificate with all 11 sections.
-- These tests assert nothing: `checker.zig:2447-2450`, `residual.zig:507-513`, and
-  `proof_system.zig:335-340` discard a value with `_ =`. `verdict.zig:552-569` checks only
+- These tests assert nothing: `checker.zig`, `residual.zig`, and
+  `proof_system.zig` discard a value with `_ =`. `verdict.zig` checks only
   that each name is not empty.
-- These tests assert only the stage or `!accepted`: `checker.zig:2777`, `:2886`, `:2954`,
-  `:2969`, `:2979`, and `:3176`. The test at `:2473` is titled "omitted, extra, duplicated, or
+- These tests assert only the stage or `!accepted`: `checker.zig`,
+  `checker.zig`. The test at `checker.zig` is titled "omitted, extra, duplicated, or
   reordered guard" but covers only omitted and extra.
 - Every fixture has exactly one ledger call, one guard, and one handler, so no test crosses a
   multi-site boundary. Most surviving ordering mutants depend on this.
-- Tool-catalog bounds: the test "a catalog at the entry and export bounds decodes" (`:778`)
+- Tool-catalog bounds: the test "a catalog at the entry and export bounds decodes" (`checker.zig`)
   writes no exports (T10). Also missing: InvalidUtf8 cases for four string fields (T03-T06),
   GET and POST of one path in the same catalog (T01), and a declaration case that is ordered
   only by source kind (D12).
@@ -334,7 +334,7 @@ its boundary.
   a node that differs above 16 bits. The widened comparison has no test of its own: that
   needs more than 65,536 IR nodes, and the default limit forbids it.
 - **The kernel runs without runtime safety in release binaries.** Releases build
-  `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and the root build (then `build.zig:226-229`)
+  `-Doptimize=ReleaseFast` (`.github/workflows/release.yml:129`), and the root build (then `build.zig`)
   passes that mode into the kernel dependency. An out-of-range cast, a slice outside its
   bounds, or overflow reached from certificate bytes is a panic in the Debug tests and
   undefined behavior in production. Every such site checked in this review has an explicit
@@ -345,13 +345,13 @@ its boundary.
   isolate runtime safety from the root, so it had no effect. Replaced in ae26ba69 by
   `@setRuntimeSafety(true)` in every non-test kernel function, enforced by
   `zig build test-kernel-safety`.
-- **Enum bitmasks without a width guard.** `GuardKind` into `u8` (`checker.zig:794`),
-  `AddressScope` into `u8` (`residual.zig:220`), and `Property` into `u16`
-  (`verdict.zig:428-451`). A new member past the width is undefined behavior in
+- **Enum bitmasks without a width guard.** `GuardKind` into `u8` (`checker.zig`),
+  `AddressScope` into `u8` (`residual.zig`), and `Property` into `u16`
+  (`verdict.zig`). A new member past the width is undefined behavior in
   `ReleaseFast`. Use `std.EnumSet`, or add a `comptime` assert on the member count.
 
-- **Producer code lives in the kernel.** The certificate encoder (`certificate.zig:951-1188`)
-  is called in production by `runtime/src/proof_certificate.zig:326-368`. Four test encoders
+- **Producer code lives in the kernel.** The certificate encoder (`certificate.zig`)
+  is called in production by `runtime/src/proof_certificate.zig`. Four test encoders
   are `pub` in the kernel: `checker.test_support :1592`, `certificate.fixture :1189`,
   `declaration.test_support :321`, and `tool_catalog.test_support :381`. Runtime tests use
   the last two. `docs/threat-model.md:42-46` says the authority surface is one directory.
@@ -372,25 +372,25 @@ its boundary.
   and add the missing patterns.
 - **Wire formats defined twice.** Declaration, tool catalog, capability policy, residual
   catalog, and endpoint normalization each have a producer copy. Each has a drift check,
-  with one exception: the tool-catalog magic is duplicated (`pre-rebase:packages/tools/src/tool_catalog_encoding.zig:17`
-  and `pre-rebase:packages/proof-checker/src/tool_catalog.zig:56`) and not compared at compile time. The schema is compared.
-- **Panics a certificate might reach.** `checker.zig:105` (`std.debug.assert`, then undefined
-  behavior in ReleaseFast; since ae26ba69 a `safety.check` that always panics) and `checker.zig:1509` must be shown to be unreachable from input
+  with one exception: the tool-catalog magic is duplicated (`pre-rebase:packages/tools/src/tool_catalog_encoding.zig`
+  and `pre-rebase:packages/proof-checker/src/tool_catalog.zig`) and not compared at compile time. The schema is compared.
+- **Panics a certificate might reach.** `checker.zig` (`std.debug.assert`, then undefined
+  behavior in ReleaseFast; since ae26ba69 a `safety.check` that always panics) and `checker.zig` must be shown to be unreachable from input
   bytes. M6 deletes the second. The `certificate.zig` prongs were checked and are guarded by
-  `:745`.
+  `certificate.zig`.
 
 ## 6. Docs to update
 
-- `packages/proof-checker/build.zig:9` names `scripts/check-proof-checker-purity.sh`. The
+- `packages/proof-checker/build.zig` names `scripts/check-proof-checker-purity.sh`. The
   script is `scripts/check-proof-checker.sh`. This is stale today.
 - `AGENTS.md:37` says the fourteen files in `check-proof-swallow.sh` cover "the consumer-side
   acceptance kernel". Only `checker.zig` and `capability_policy.zig` are listed
   (`scripts/check-proof-swallow.sh:59-60`). Either add the other kernel files or correct the
   sentence. Add `wire.zig` if M3 lands.
-- `residual.zig:301-303` says the producer and the checker call one function. The producer
+- `residual.zig` says the producer and the checker call one function. The producer
   has its own copy in `zts/src/endpoint.zig`.
 - `pre-rebase:docs/consumer-contract.md:486-545` (ZTCAT1 and ZTDCL1 layouts, bounds, decoder paths),
-  `:580-600` (generated alphabet table with kernel paths), and `:619-623`. The generated
+  `zts/src/endpoint.zig` (generated alphabet table with kernel paths), and `zts/src/endpoint.zig`. The generated
   parts are regenerated, not hand-edited.
 - `pre-rebase:docs/consumer-contract-envelope.json` (generated) if T2 removes a reason code.
 - `docs/internals/testing.md:318-340`, if the purity gate changes.
@@ -415,12 +415,12 @@ its boundary.
   `rule_family_mismatch` and the 18 unpinned codes.
 - **Move `check-residual-guards.sh` off Python.** It regex-parses `residual.zig`, and
   AGENTS.md treats Python as legacy to remove when an area is touched. M1 and M7 touch it.
-- **Budget accounting for `Section.get`** (`capability_policy.zig:50-58`). Each lookup is
+- **Budget accounting for `Section.get`** (`capability_policy.zig`). Each lookup is
   O(index) and is not charged to the budget. Low priority.
-- **The residual-plan member loop** (`checker.zig:745`) spends no budget and does not require
+- **The residual-plan member loop** (`checker.zig`) spends no budget and does not require
   ordinal 0 or a single member, unlike every other member binding. This is a behavior
   question for the owner, not a mechanical fix.
-- **Rewrites are not checked when the translation section is empty** (`checker.zig:1078`
+- **Rewrites are not checked when the translation section is empty** (`checker.zig`
   returns before `checkRewrites`, mutant TRN10). Decide whether a rewrite with no
   translation is refused, and pin the answer.
 
@@ -452,12 +452,12 @@ The unreachable `rule_family_mismatch` branches are already gone.
 Verify: Phase 1 commands plus `zig build test-cli` (end-to-end acceptance in
 `build_command.zig`), `zig build test-proof-ratchet`, `zig build test-invariant-drift`.
 The invariant drift gate pins six exact `checker.zig` test names
-(`pre-rebase:packages/tools/src/invariant_drift_gate.zig:105-110`), so keep them.
+(`pre-rebase:packages/tools/src/invariant_drift_gate.zig`), so keep them.
 Expected: `checker.zig` 335 to 309 branches (measured), maxCC 59 to 39.
 
 **Phase 3: endpoint split (M7).**
 Verify: Phase 1 commands plus the runtime unit root that holds
-`proof_activation.zig:345-349` (run by `zig build test`).
+`proof_activation.zig` (run by `zig build test`).
 Expected: `residual.zig` maxCC 25 to 8, -5 branches (measured on its own).
 
 **Phase 4: type-driven public changes (T1, T5, T6).** T1 is accepted (owner decision 3).
@@ -465,8 +465,8 @@ T5 and T6 are accepted and T7 is declined (owner decision 5). T2 is done.
 Verify: `bash scripts/verify.sh` on a clean tree. This covers
 `test-vocab-envelope-drift` and the policy-hash pins.
 Expected: the branch count may rise. Success means the compiler refuses the contradictory
-`Assessment` shapes, `contract_runtime.zig:428` and the two defensive tests in
-`server.zig:4674-4694` are deleted.
+`Assessment` shapes, `contract_runtime.zig` and the two defensive tests in
+`server.zig` are deleted.
 
 ## 9. What not to touch
 
@@ -476,9 +476,9 @@ Expected: the branch count may rise. Success means the compiler refuses the cont
 - `reasonFor`, `SectionTag.required`, and the `EdgeKind` methods in `certificate.zig`. These
   are type-driven tables with no duplicate.
 - The declaration decoder (11/12 mutants killed) and the guard per-field comparisons in
-  `checker.zig` (all killed by the table test at `:2511`).
-- `limits.zig`, `policy.zig`, `Budget` stickiness, the comptime guards in `pre-rebase:packages/proof-checker/src/invariant.zig:139-164`
-  and `residual.zig:274-284`, and the pinned digest literals in `pre-rebase:packages/proof-checker/src/invariant.zig:867,884`.
+  `checker.zig` (all killed by the table test at `checker.zig`).
+- `limits.zig`, `policy.zig`, `Budget` stickiness, the comptime guards in `pre-rebase:packages/proof-checker/src/invariant.zig`
+  and `residual.zig`, and the pinned digest literals in `pre-rebase:packages/proof-checker/src/invariant.zig`.
 - `DuplicateSection` in `certificate.zig`. The strict-order check subsumes it, but removing
   it changes a public reason code for no behavioral gain.
 - All 18 `else =>` prongs in the non-checker files. Each one switches on a raw wire integer,
