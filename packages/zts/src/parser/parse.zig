@@ -105,11 +105,6 @@ pub const AsiCensus = struct {
         }
     }
 
-    /// The lines a `;` has to be written on, in parse order.
-    pub fn recordedLines(self: *const AsiCensus) []const u32 {
-        return self.lines[0..self.recorded];
-    }
-
     /// Statements that would stop parsing if the acceptance were removed.
     pub fn required(self: AsiCensus) u32 {
         return self.before_rbrace + self.at_eof + self.at_newline;

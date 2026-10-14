@@ -35,14 +35,6 @@ pub const UpgradeVerdict = enum {
     /// Structurally OK but property regressions or coverage gaps detected.
     needs_review,
 
-    pub fn exitCode(self: UpgradeVerdict) u8 {
-        return switch (self) {
-            .safe, .safe_with_additions => 0,
-            .needs_review => 2,
-            .breaking => 1,
-        };
-    }
-
     pub fn toString(self: UpgradeVerdict) []const u8 {
         return switch (self) {
             .safe => "SAFE",

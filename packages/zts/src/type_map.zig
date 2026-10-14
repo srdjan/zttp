@@ -84,12 +84,6 @@ pub const TypeMap = struct {
         self.entries.deinit(allocator);
     }
 
-    /// The offset, in the stripped source, of a position the parser reports.
-    pub fn strippedOffset(self: *const TypeMap, parser_offset: u32) u32 {
-        _ = self;
-        return parser_offset;
-    }
-
     /// Add a type annotation entry.
     pub fn addEntry(self: *TypeMap, allocator: std.mem.Allocator, entry: TypeMapEntry) !void {
         try self.entries.append(allocator, entry);

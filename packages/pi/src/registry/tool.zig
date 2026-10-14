@@ -222,19 +222,6 @@ pub fn decodeSingleStringField(
     return singleArg(allocator, value.string);
 }
 
-pub fn decodeOptionalSingleStringField(
-    allocator: std.mem.Allocator,
-    args_json: []const u8,
-    field: []const u8,
-) ![]const []const u8 {
-    const parsed = try parseObject(allocator, args_json);
-    if (parsed.get(field)) |value| {
-        if (value != .string) return error.InvalidToolArgsJson;
-        return singleArg(allocator, value.string);
-    }
-    return &.{};
-}
-
 pub fn decodeStringArrayField(
     allocator: std.mem.Allocator,
     args_json: []const u8,

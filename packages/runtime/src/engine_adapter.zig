@@ -8,26 +8,17 @@ const zq = @import("zts");
 const handler_instance = @import("handler_instance.zig");
 const http_types = @import("http_types.zig");
 
-pub const HandlerInstance = handler_instance.HandlerInstance;
-pub const AotOverrideFn = handler_instance.AotOverrideFn;
 pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 pub const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
-pub const HandlerProperties = zq.HandlerProperties;
 pub const RuntimePolicy = zq.RuntimePolicy;
 pub const endpoint = zq.endpoint;
 /// The configured capability policy file, parsed. It is the only source of
 /// entries for a contract category the compiler could not enumerate.
 pub const HandlerPolicy = zq.handler_policy.HandlerPolicy;
 pub const SourceIdentity = zq.SourceIdentity;
-pub const SqlQueryInfo = zq.handler_policy.SqlQueryInfo;
-pub const normalizedSqlQuery = zq.handler_policy.normalizedSqlQuery;
-pub const sqlQueryIsReadOnly = zq.handler_policy.sqlQueryIsReadOnly;
 pub const contractRequiresRuntimePolicyIndex = zq.handler_policy.contractRequiresRuntimePolicyIndex;
-pub const JSValue = zq.JSValue;
-pub const emptyContract = zq.handler_contract.emptyContract;
-pub const Instant = zq.compat.Instant;
 pub const Timer = zq.compat.Timer;
 pub const Mutex = zq.compat.Mutex;
 pub const RwLock = zq.compat.RwLock;
@@ -48,31 +39,8 @@ pub fn deinitSecurityEvents() void {
     zq.security_events.deinitGlobal();
 }
 
-pub fn setAotOverrideForTest(callback: ?AotOverrideFn) void {
-    handler_instance.setAotOverrideForTest(callback);
-}
-
 pub fn unixMillis() i64 {
     return zq.trace.unixMillis();
-}
-
-pub fn monotonicNowNs() !u64 {
-    return zq.monotonicNowNs();
-}
-
-pub fn jsInt(value: i32) JSValue {
-    return JSValue.fromInt(value);
-}
-
-pub fn defaultHandlerProperties() HandlerProperties {
-    return .{
-        .pure = false,
-        .read_only = false,
-        .stateless = false,
-        .retry_safe = false,
-        .deterministic = false,
-        .has_egress = false,
-    };
 }
 
 pub fn contractRuntimePolicy(
@@ -104,11 +72,6 @@ pub fn initHandlerPool(
     );
 }
 
-pub fn executeHandlerBorrowed(pool: *HandlerPool, request: http_types.HttpRequestView) !ResponseHandle {
-    return pool.executeHandlerBorrowed(request);
-}
-
-/// Resolved source location of a handler fault. Re-exported so `server.zig`
 /// can name it without importing the engine directly - it reaches the engine
 /// only through this adapter, and the purity script enforces that.
 pub const FaultLocation = zq.bytecode.LineEntry;
