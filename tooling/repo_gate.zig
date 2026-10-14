@@ -515,3 +515,150 @@ test "unknown operation remains a complete error envelope" {
     defer parsed.deinit();
     try validateEnvelope(parsed.value, "nope");
 }
+
+const valid_meta_envelope =
+    \\{"schema_version":2,"operation":"meta","profile_id":"zts-model-1","compiler_version":"1","policy_version":"1","policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","module_graph_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","success":true,"payload":{},"diagnostics":[]}
+;
+
+fn expectEnvelopeRefusal(from: []const u8, to: []const u8) !void {
+    const mutated = try std.mem.replaceOwned(u8, std.testing.allocator, valid_meta_envelope, from, to);
+    defer std.testing.allocator.free(mutated);
+    // The mutation must change the text, or the case would re-test the valid envelope.
+    try std.testing.expect(!std.mem.eql(u8, mutated, valid_meta_envelope));
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, mutated, .{});
+    defer parsed.deinit();
+    try std.testing.expectError(error.InvalidEnvelope, validateEnvelope(parsed.value, "meta"));
+}
+
+test "envelope validator refuses each broken identity field" {
+    const short_hash = "\"policy_hash\":\"aaaa\"";
+    const upper_hash = "\"policy_hash\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"";
+    const full_hash = "\"policy_hash\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"";
+    try expectEnvelopeRefusal("\"schema_version\":2", "\"schema_version\":3");
+    try expectEnvelopeRefusal("\"operation\":\"meta\"", "\"operation\":\"other\"");
+    try expectEnvelopeRefusal("\"profile_id\":\"zts-model-1\"", "\"profile_id\":\"\"");
+    try expectEnvelopeRefusal("\"compiler_version\":\"1\"", "\"compiler_version\":\"\"");
+    try expectEnvelopeRefusal("\"policy_version\":\"1\"", "\"policy_version\":\"\"");
+    try expectEnvelopeRefusal(full_hash, short_hash);
+    try expectEnvelopeRefusal(full_hash, upper_hash);
+    try expectEnvelopeRefusal("\"module_graph_hash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"", "\"module_graph_hash\":\"bb\"");
+    try expectEnvelopeRefusal("\"payload\":{}", "\"payload\":[]");
+    try expectEnvelopeRefusal("\"diagnostics\":[]", "\"diagnostics\":{}");
+    try expectEnvelopeRefusal("\"success\":true", "\"success\":false");
+    try expectEnvelopeRefusal("\"diagnostics\":[]", "\"diagnostics\":[],\"error\":{}");
+    try expectEnvelopeRefusal("\"diagnostics\":[]", "\"extra\":1");
+}
+
+test "meta drift names every moved pin" {
+    const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const value =
+        \\{"schema_version":2,"operation":"meta","profile_id":"zts-model-1","compiler_version":"1","policy_version":"1","policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","module_graph_hash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","success":true,"payload":{"profile_id":"zts-model-1","policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","grammar_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","idiom_table_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","restriction_matrix_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","builtin_registry_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source_frontends":[]},"diagnostics":[]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, value, .{});
+    defer parsed.deinit();
+    const base: MetaPins = .{
+        .profile = "zts-model-1",
+        .policy = hash,
+        .grammar = hash,
+        .idiom = hash,
+        .restriction = hash,
+        .builtin = hash,
+    };
+    var profile = base;
+    profile.profile = "other-profile";
+    var policy = base;
+    policy.policy = other;
+    var grammar = base;
+    grammar.grammar = other;
+    var idiom = base;
+    idiom.idiom = other;
+    var restriction = base;
+    restriction.restriction = other;
+    var builtin = base;
+    builtin.builtin = other;
+    const moved = [_]MetaPins{ profile, policy, grammar, idiom, restriction, builtin };
+    try std.testing.expectEqual(@as(usize, 6), moved.len);
+    for (moved) |pins| {
+        try std.testing.expectError(error.PinMoved, validateMetaValue(parsed.value, pins));
+    }
+}
+
+test "negotiation validator accepts one shape and refuses broken fields" {
+    const valid =
+        \\{"schema_version_unsupported":true,"supported_schema_versions":[2],"compiler_version":"1"}
+    ;
+    const broken = [_][]const u8{
+        \\{"schema_version_unsupported":false,"supported_schema_versions":[2],"compiler_version":"1"}
+        ,
+        \\{"schema_version_unsupported":true,"supported_schema_versions":[],"compiler_version":"1"}
+        ,
+        \\{"schema_version_unsupported":true,"supported_schema_versions":["2"],"compiler_version":"1"}
+        ,
+        \\{"schema_version_unsupported":true,"supported_schema_versions":[2],"compiler_version":""}
+        ,
+    };
+    {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, valid, .{});
+        defer parsed.deinit();
+        try validateNegotiation(parsed.value);
+    }
+    for (broken) |text| {
+        var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, text, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidEnvelope, validateNegotiation(parsed.value));
+    }
+    var extra = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"schema_version_unsupported":true,"supported_schema_versions":[2],"compiler_version":"1","extra":1}
+    , .{});
+    defer extra.deinit();
+    try std.testing.expectError(error.InvalidFields, validateNegotiation(extra.value));
+}
+
+const good_workflow_fixture =
+    \\jobs:
+    \\  test:
+    \\    strategy:
+    \\      matrix:
+    \\        os: [macos-latest, ubuntu-latest]
+    \\    steps:
+    \\      - name: Advisory benchmark
+    \\        if: ${{ matrix.os == 'macos-latest' }}
+    \\        continue-on-error: true
+    \\        run: zig build bench-check
+;
+
+test "release workflow accepts the advisory macos benchmark shape" {
+    try validateReleaseWorkflow(good_workflow_fixture);
+}
+
+test "release workflow refuses a missing job, a doubled matrix row, and a wrong step count" {
+    try expectReleaseFailure("jobs:\n  build:\n    steps: []\n", error.MissingTestJob);
+    const two_rows =
+        \\jobs:
+        \\  test:
+        \\    strategy:
+        \\      matrix:
+        \\        os: [macos-latest]
+        \\        os: [macos-latest]
+    ;
+    try expectReleaseFailure(two_rows, error.InvalidOsMatrix);
+    const no_step =
+        \\jobs:
+        \\  test:
+        \\    strategy:
+        \\      matrix:
+        \\        os: [macos-latest]
+        \\    steps:
+        \\      - run: true
+    ;
+    try expectReleaseFailure(no_step, error.InvalidBenchmarkStepCount);
+    const two_steps = good_workflow_fixture ++
+        \\
+        \\      - name: Second benchmark
+        \\        if: ${{ matrix.os == 'macos-latest' }}
+        \\        continue-on-error: true
+        \\        run: zig build bench-check
+    ;
+    try expectReleaseFailure(two_steps, error.InvalidBenchmarkStepCount);
+}
