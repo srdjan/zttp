@@ -433,14 +433,23 @@ pub const Analyzer = struct {
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
-                // Nested named functions are their own units; the call graph
-                // edge is recorded when this owner calls into them.
-                if (decl.init != null_node and !self.isFunctionNode(decl.init)) {
+                // A function value created in a body is charged to that body,
+                // initializer or not. `collectFunctionsIn` reads top-level
+                // statements only, so a closure declared here is no unit's
+                // row; skipping it here too left its effects in nobody's.
+                // Passed on as a value (`items.forEach(w)`) it then charged
+                // nothing, and the owner proved `read_only` for a write.
+                if (decl.init != null_node) {
                     try self.walkBaseExpr(decl.init, owner, row, seen_users);
                 }
             },
             .function_decl => {
-                // Skip nested declarations entirely - they're separate units.
+                // Same rule for a nested declaration: it is not a unit, so
+                // its body is walked into the owner where it is declared.
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.init != null_node) {
+                    try self.walkBaseExpr(decl.init, owner, row, seen_users);
+                }
             },
             else => try self.walkBaseExpr(node, owner, row, seen_users),
         }
@@ -2257,6 +2266,58 @@ test "the slot filter keeps module bindings reached from a nested closure and fr
     );
     try testing.expect(forward.writes);
     try testing.expect(!forward.lower_bound);
+}
+
+test "a closure declared in a body is charged to that body" {
+    // P4. `walkBaseStmt` skipped a function-valued `const` and a nested
+    // function declaration, and `collectFunctionsIn` reads top-level
+    // statements only, so no unit ever held the closure's write. The closure
+    // was then passed as a value, a path that charges nothing, and the handler
+    // proved `read_only`. A function value created in a body is charged to
+    // that body where it is created, as an inline callback already is.
+    const arrow = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(items) {
+        \\  const w = (k) => { cacheSet("ns", k, "v", 10); return 1; };
+        \\  items.forEach(w);
+        \\  return 1;
+        \\}
+    );
+    try testing.expect(arrow.writes);
+    try testing.expect(!arrow.readOnly());
+
+    const declared = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(items) {
+        \\  function w(k) { cacheSet("ns", k, "v", 10); return 1; }
+        \\  items.forEach(w);
+        \\  return 1;
+        \\}
+    );
+    try testing.expect(declared.writes);
+    try testing.expect(!declared.readOnly());
+
+    // A call to a body-local closure stays an unresolved callee, and its
+    // body's write is now in the row as well.
+    const called = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(k) {
+        \\  const w = (x) => { cacheSet("ns", x, "v", 10); return 1; };
+        \\  return w(k);
+        \\}
+    );
+    try testing.expect(called.lower_bound);
+    try testing.expect(called.writes);
+
+    // Control: a pure local closure charges nothing.
+    const pure = try analyzeHandlerRow(
+        \\function handler(items) {
+        \\  const w = (k) => k + 1;
+        \\  return items.map(w);
+        \\}
+    );
+    try testing.expect(pure.readOnly());
+    try testing.expect(pure.deterministic);
 }
 
 test "a local colliding with a pure import keeps a pure closure read only" {
