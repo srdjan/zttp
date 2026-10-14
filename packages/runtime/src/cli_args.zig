@@ -111,7 +111,7 @@ pub fn handlePreflightError(err: anyerror, command: []const u8) bool {
         return true;
     }
     if (err == error.FileNotFound) {
-        // zts check has already printed `Error reading handler file 'X': error.FileNotFound`.
+        // zts check has already printed `Error reading handler file 'X': no such file`.
         // Add a remediation hint and swallow the stack trace.
         std.debug.print(
             \\

@@ -800,6 +800,25 @@ pub fn runCheckOnly(
     });
 }
 
+/// Plain reason for the common handler-read failures. Any other error keeps
+/// its Zig error name, so no failure is hidden. Only the text output uses
+/// this: the `--json` message and the ZTS000 diagnostic keep `@errorName`.
+fn readFailureReason(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "no such file",
+        error.AccessDenied => "permission denied",
+        error.IsDir => "is a directory",
+        else => @errorName(err),
+    };
+}
+
+test "readFailureReason gives plain text for common read errors and keeps other names" {
+    try std.testing.expectEqualStrings("no such file", readFailureReason(error.FileNotFound));
+    try std.testing.expectEqualStrings("permission denied", readFailureReason(error.AccessDenied));
+    try std.testing.expectEqualStrings("is a directory", readFailureReason(error.IsDir));
+    try std.testing.expectEqualStrings("FileTooBig", readFailureReason(error.FileTooBig));
+}
+
 pub fn runCheckOnlyWithOptions(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
@@ -807,7 +826,7 @@ pub fn runCheckOnlyWithOptions(
 ) !CheckResult {
     const source = readFilePosix(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
         if (!opts.json_mode) {
-            debugPrint("Error reading handler file '{s}': {}\n", .{ handler_path, err });
+            debugPrint("Error reading handler file '{s}': {s}\n", .{ handler_path, readFailureReason(err) });
             return err;
         }
         // In JSON mode an unreadable handler must surface as a structured

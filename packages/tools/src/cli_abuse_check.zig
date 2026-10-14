@@ -70,12 +70,15 @@ const Case = struct {
     stderr_contains: ?[]const u8 = null,
     /// Zig stack-trace marker that standard error must not contain.
     stderr_excludes: ?[]const u8 = null,
+    /// A second text that standard error must not contain, such as a raw Zig
+    /// error name shown in place of a plain reason.
+    stderr_excludes_also: ?[]const u8 = null,
 };
 
 const cases = [_]Case{
     .{ .name = "empty file, text", .input = .empty_file, .mode = .text, .exit_code = 1 },
     .{ .name = "empty file, json", .input = .empty_file, .mode = .json, .exit_code = 1 },
-    .{ .name = "missing path, text", .input = .missing_path, .mode = .text, .exit_code = 1, .stderr_contains = "Next: check the handler path", .stderr_excludes = " in readFile" },
+    .{ .name = "missing path, text", .input = .missing_path, .mode = .text, .exit_code = 1, .stderr_contains = "does-not-exist.ts': no such file\nNext: check the handler path", .stderr_excludes = " in readFile", .stderr_excludes_also = "error.FileNotFound" },
     .{ .name = "missing path, json", .input = .missing_path, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "directory as file, text", .input = .directory, .mode = .text, .exit_code = 1 },
     .{ .name = "directory as file, json", .input = .directory, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
@@ -283,6 +286,13 @@ fn runCase(check: *Check, case: Case) void {
         }
     }
     if (case.stderr_excludes) |needle| {
+        if (std.mem.indexOf(u8, result.stderr, needle) != null) {
+            check.fail(case.name, "stderr contains \"{s}\"\nstderr:\n{s}", .{ needle, result.stderr });
+            return;
+        }
+    }
+
+    if (case.stderr_excludes_also) |needle| {
         if (std.mem.indexOf(u8, result.stderr, needle) != null) {
             check.fail(case.name, "stderr contains \"{s}\"\nstderr:\n{s}", .{ needle, result.stderr });
             return;
