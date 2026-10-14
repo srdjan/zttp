@@ -1,5 +1,12 @@
 # Agent spine worklog
 
+## Completion status
+
+The native installation is complete on local `main`.
+The approved full local gate passed against source commit `0474b019` on 2026-10-14.
+The final verification section records the check scope and measured runtime.
+No release evidence was republished, and no commits were pushed.
+
 ## Objective and authority
 
 Install a native Zig spine after the repository audit.
@@ -28,13 +35,13 @@ The canonical Deno anchor expression found 530 anchors across 46 documents.
 Broader native checking also covers ranges and Markdown links.
 The configured audit recommends installation.
 
-## Current work
+## Initial work
 
 The implementation plan is `2026-10-14-agent-spine-plan.md`.
 Native command, spine policy, and source-anchor migration can proceed in separate file sets.
 The main agent owns build integration, generated root blocks, review, and final checks.
 
-## Unresolved verification
+## Initial verification status
 
 The installed gate and its rejection probes have not run.
 The full canonical gate needs authorization because its recorded runtime exceeds two minutes.
@@ -92,7 +99,7 @@ The drill covered runtime acceptance, flow analysis, and stand-in baseline recov
 The drill found invalid decision fragments in the first brief output.
 The corrected output names the ledger file and decision id without inventing a Markdown fragment.
 
-## Verification still pending
+## Verification status before approval
 
 `zig build release-check` exited 1 because release evidence provenance does not match the changed source tree.
 Its Release gates row passed, so the build-wiring check found no missing release route.
@@ -125,3 +132,23 @@ The stream probe runs under `test-spine` and the aggregate suite.
 It introduces no new top-level task or standalone script.
 
 Next action owner: I will repeat the approved full gate after committing the stream correction.
+
+## Final full gate
+
+The main agent repeated `bash scripts/verify.sh` against committed source `0474b019`.
+The script exited 0 and reported that all CI test-job steps passed.
+The measured runtime was 453 seconds.
+The capture process also exited 0.
+The capture used a FIFO to preserve the complete output without changing the gate script.
+The full log and direct status record remain under `.context/agent-spine-audit/`.
+
+The sequential gate passed the aggregate suite, standalone runtime suite, release build, handler precompilation, and smoke checks.
+The gate also passed panic isolation, policy checks, generated module checks, expert checks, and formatting.
+The aggregate suite ran the installed spine check and the stream regression successfully.
+The stream regression confirms that stdout and stderr preserve earlier output through inherited file descriptors.
+
+This run covers the normal local gate, rather than release provenance or external publication.
+The source tree stayed clean throughout the run.
+The main agent records completion in this worklog and the plan index as a separate documentation commit.
+
+Next action owner: the user owns any push of the local commits.
