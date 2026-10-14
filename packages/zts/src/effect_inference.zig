@@ -109,6 +109,33 @@ const ImportedFunction = struct {
     name: []const u8,
 };
 
+/// The `owner` passed to the walk while a module-level initializer is being
+/// walked. It equals no function index, so no edge is mistaken for
+/// self-recursion and no parameter type is looked up.
+const module_scope_owner: usize = std.math.maxInt(usize);
+
+/// A module-level binding that may hold function values. Its `row` and
+/// `users` are what a reference to it charges: the row is the effects of the
+/// imports and closures in its initializer, and `users` is every user
+/// function that initializer calls or holds. `refs` names the other module
+/// bindings it mentions, resolved to a fixed point so an alias of an alias
+/// carries the whole set.
+const ModuleBinding = struct {
+    key: u32,
+    init_node: NodeIndex,
+    row: EffectRow = .{},
+    users: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
+    refs: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
+    /// True when the initializer, or a binding it mentions, holds a function
+    /// value. A plain data object stays false and charges nothing.
+    holds: bool = false,
+
+    fn deinit(self: *ModuleBinding, allocator: std.mem.Allocator) void {
+        self.users.deinit(allocator);
+        self.refs.deinit(allocator);
+    }
+};
+
 const fetch_module_specifier: []const u8 = "zttp:fetch";
 const fetch_sync_export: []const u8 = "fetchSync";
 
@@ -156,6 +183,23 @@ pub const Analyzer = struct {
     /// Functions already recorded as value references of the function being
     /// walked. Cleared per function.
     seen_values: std.AutoHashMapUnmanaged(usize, void),
+    /// Module-level bindings whose initializer is not itself a function: an
+    /// object or array of functions, an alias of an import, an alias of
+    /// another such binding. One row and one function set per binding, built
+    /// by `computeModuleBindings` before any function body is walked.
+    module_bindings: std.ArrayListUnmanaged(ModuleBinding),
+    /// `bool_checker.packBindingKey` of a declaration -> index in
+    /// `module_bindings`.
+    module_by_key: std.AutoHashMapUnmanaged(u32, usize),
+    /// Set while the module-scope pass walks one initializer. Edges and
+    /// module references found then belong to that binding, not to a
+    /// function's CSR rows.
+    module_acc: ?*ModuleBinding = null,
+    /// Counts function values the walk has met: an import, a user function,
+    /// a function-holding module binding, or a closure created in place. A
+    /// caller reads the difference across a subtree to learn whether that
+    /// subtree created or referenced one.
+    fn_value_count: u32 = 0,
     /// The call node whose result the enclosing statement throws away, or
     /// `null_node`. Set only for the outermost call of an `expr_stmt`, so a
     /// nested call inside that statement is not mistaken for a discarded one.
@@ -187,6 +231,8 @@ pub const Analyzer = struct {
             .value_starts = .empty,
             .value_storage = .empty,
             .seen_values = .empty,
+            .module_bindings = .empty,
+            .module_by_key = .empty,
             .inline_route_stack = .empty,
         };
     }
@@ -201,12 +247,16 @@ pub const Analyzer = struct {
         self.value_starts.deinit(self.allocator);
         self.value_storage.deinit(self.allocator);
         self.seen_values.deinit(self.allocator);
+        for (self.module_bindings.items) |*mb| mb.deinit(self.allocator);
+        self.module_bindings.deinit(self.allocator);
+        self.module_by_key.deinit(self.allocator);
         self.inline_route_stack.deinit(self.allocator);
     }
 
     pub fn analyze(self: *Analyzer, root: NodeIndex) !void {
         try self.scanImports();
         try self.collectFunctions(root);
+        try self.computeModuleBindings(root);
         try self.computeBaseEffects();
         try self.propagate();
         try self.detectRecursion();
@@ -369,6 +419,124 @@ pub const Analyzer = struct {
             .exported = exported,
         });
         try self.user_fn_by_slot.put(self.allocator, binding.slot, idx);
+    }
+
+    /// Build the row and function set of every module-level binding whose
+    /// initializer is not a function. A function body that mentions such a
+    /// binding is charged what it holds (`chargeModuleBinding`).
+    ///
+    /// Charging at the reference matters because a module-level object or
+    /// alias reaches a handler through names the handler never spells out as
+    /// the function: `ops.save()`, `helper(ops)`, `save()` for
+    /// `const save = cacheSet`. The initializer is walked as a function body
+    /// is, closures included, so a write that sits in callee position inside
+    /// a closure is charged too.
+    ///
+    /// Every binding is registered before any initializer is walked, so a
+    /// closure may mention a binding declared further down. The sets are then
+    /// closed over module-to-module references until nothing grows.
+    fn computeModuleBindings(self: *Analyzer, root: NodeIndex) !void {
+        try self.registerModuleBindings(root);
+        const count = self.module_bindings.items.len;
+        if (count == 0) return;
+
+        for (0..count) |i| {
+            const mb = &self.module_bindings.items[i];
+            var scratch: std.AutoHashMapUnmanaged(usize, void) = .empty;
+            defer scratch.deinit(self.allocator);
+            self.module_acc = mb;
+            defer self.module_acc = null;
+            const before = self.fn_value_count;
+            try self.walkBaseExpr(mb.init_node, module_scope_owner, &mb.row, &scratch);
+            mb.holds = self.fn_value_count != before;
+        }
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.module_bindings.items, 0..) |*mb, i| {
+                for (self.module_bindings.items, 0..) |*other, j| {
+                    if (i == j or !mb.refs.contains(j)) continue;
+                    var merged = mb.row.merge(other.row);
+                    // Whether a binding is recursive is no property of the
+                    // functions it holds.
+                    merged.recursive = mb.row.recursive;
+                    if (!merged.eql(mb.row)) {
+                        mb.row = merged;
+                        changed = true;
+                    }
+                    if (other.holds and !mb.holds) {
+                        mb.holds = true;
+                        changed = true;
+                    }
+                    for (other.users.keys()) |user| {
+                        const gop = try mb.users.getOrPut(self.allocator, user);
+                        if (!gop.found_existing) changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    fn registerModuleBindings(self: *Analyzer, node: NodeIndex) WalkError!void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    try self.registerModuleBindings(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                }
+            },
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                try self.registerModuleBindings(export_decl.declaration);
+            },
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                // A function-valued initializer is a unit with its own row;
+                // `userFnOf` already resolves a reference to it.
+                if (decl.init == null_node or self.isFunctionNode(decl.init)) return;
+                const key = bool_checker.packBindingKey(decl.binding.scope_id, decl.binding.slot);
+                const idx = self.module_bindings.items.len;
+                try self.module_bindings.append(self.allocator, .{ .key = key, .init_node = decl.init });
+                try self.module_by_key.put(self.allocator, key, idx);
+            },
+            // exhaustive: only a top-level `var_decl` binds a module value.
+            // Statements at module scope run at load, not per request.
+            else => {},
+        }
+    }
+
+    /// The module-level binding a reference names, or null.
+    fn moduleBindingOf(self: *const Analyzer, binding: ir.BindingRef) ?usize {
+        if (!slotIsAtom(binding)) return null;
+        return self.module_by_key.get(bool_checker.packBindingKey(binding.scope_id, binding.slot));
+    }
+
+    /// Charge a reference to a function-holding module binding: its row joins
+    /// the owner's and every user function it holds gets a value edge. While
+    /// the module pass itself is walking, the reference is only recorded for
+    /// the closure over module-to-module references.
+    fn chargeModuleBinding(
+        self: *Analyzer,
+        binding: ir.BindingRef,
+        owner: usize,
+        row: *EffectRow,
+        seen_users: *const std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!void {
+        const idx = self.moduleBindingOf(binding) orelse return;
+        if (self.module_acc) |acc| {
+            try acc.refs.put(self.allocator, idx, {});
+            return;
+        }
+        const mb = &self.module_bindings.items[idx];
+        if (!mb.holds) return;
+        self.fn_value_count += 1;
+        var merged = row.merge(mb.row);
+        merged.recursive = row.recursive;
+        row.* = merged;
+        for (mb.users.keys()) |user| try self.addValueEdge(user, owner, seen_users);
     }
 
     fn computeBaseEffects(self: *Analyzer) !void {
@@ -575,6 +743,7 @@ pub const Analyzer = struct {
             // Anonymous closures inherit their enclosing function's effect row
             // by-design: callbacks passed to map/filter run inside the caller.
             .function_expr, .arrow_function => {
+                self.fn_value_count += 1;
                 if (self.ir_view.getFunction(node)) |func| {
                     try self.walkBaseStmt(func.body, owner, row, seen_users);
                 }
@@ -676,10 +845,15 @@ pub const Analyzer = struct {
                 // during the dedicated detectRecursion pass.
                 row.recursive = true;
             }
-            const gop = try seen_users.getOrPut(self.allocator, callee_idx);
-            if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
+            try self.addCallEdge(callee_idx, seen_users);
             return;
         }
+
+        // A module-level binding that holds function values
+        // (`const save = cacheSet`) is charged what it holds, as a reference
+        // would be. The call still goes through a value, so it also falls
+        // through to the lower bound below.
+        try self.chargeModuleBinding(binding, owner, row, seen_users);
 
         // Neither an import nor a user function: the call goes through a value.
         // Returning here left the row untouched, which reads downstream as
@@ -731,8 +905,7 @@ pub const Analyzer = struct {
         for (targets) |fn_node| {
             if (self.functionIndex(fn_node)) |callee_idx| {
                 if (callee_idx == owner) row.recursive = true;
-                const gop = try seen_users.getOrPut(self.allocator, callee_idx);
-                if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
+                try self.addCallEdge(callee_idx, seen_users);
                 continue;
             }
 
@@ -856,12 +1029,16 @@ pub const Analyzer = struct {
     ) WalkError!void {
         const binding = self.ir_view.getBinding(node) orelse return;
         if (self.importOf(binding)) |imported| {
+            self.fn_value_count += 1;
             self.chargeImportValue(imported, row);
             return;
         }
         if (self.userFnOf(binding)) |callee_idx| {
+            self.fn_value_count += 1;
             try self.addValueEdge(callee_idx, owner, seen_users);
+            return;
         }
+        try self.chargeModuleBinding(binding, owner, row, seen_users);
     }
 
     /// Record a value edge from the function being walked to `callee_idx`. A
@@ -874,6 +1051,10 @@ pub const Analyzer = struct {
         seen_users: *const std.AutoHashMapUnmanaged(usize, void),
     ) WalkError!void {
         if (callee_idx == owner) return;
+        if (self.module_acc) |acc| {
+            try acc.users.put(self.allocator, callee_idx, {});
+            return;
+        }
         if (seen_users.contains(callee_idx)) return;
         const gop = try self.seen_values.getOrPut(self.allocator, callee_idx);
         if (!gop.found_existing) try self.value_storage.append(self.allocator, callee_idx);
@@ -915,6 +1096,21 @@ pub const Analyzer = struct {
         const binding = self.ir_view.getBinding(arg) orelse return;
         const callee_idx = self.userFnOf(binding) orelse return;
         if (callee_idx == owner) return;
+        try self.addCallEdge(callee_idx, seen_users);
+    }
+
+    /// Record a call edge from the function being walked. While the module
+    /// pass walks an initializer the edge belongs to that binding instead: it
+    /// becomes one of the functions a reference to the binding charges.
+    fn addCallEdge(
+        self: *Analyzer,
+        callee_idx: usize,
+        seen_users: *std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!void {
+        if (self.module_acc) |acc| {
+            try acc.users.put(self.allocator, callee_idx, {});
+            return;
+        }
         const gop = try seen_users.getOrPut(self.allocator, callee_idx);
         if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
     }
@@ -2557,6 +2753,126 @@ test "a value reference does not create recursion but a callback call still does
     }
     try testing.expectEqual(@as(usize, 0), vanalyzer.calleesOf(handler_idx).len);
     try testing.expectEqual(@as(usize, 1), vanalyzer.valueRefsOf(handler_idx).len);
+}
+
+test "a module-level object holding a writing function charges every reference to it" {
+    // The module-scope pass. `ops` holds `w`, and nothing in the handler names
+    // `w`: the handler reaches it through `ops` as a member receiver, as an
+    // argument, and through a second module alias. Each reference to a
+    // function-holding module binding charges the functions it holds.
+    const prelude =
+        \\import { cacheSet } from "zttp:cache";
+        \\function w(k) { cacheSet("ns", k, "v", 10); return 1; }
+        \\const ops = { save: w };
+        \\const ops2 = ops;
+        \\function helper(o) { return 1; }
+        \\
+    ;
+    const bodies = [_][]const u8{
+        "function handler(req) { return ops.save(\"k\"); }",
+        "function handler(req) { return helper(ops); }",
+        "function handler(req) { return ops2.save(\"k\"); }",
+    };
+    inline for (bodies) |body| {
+        const row = try analyzeHandlerRow(prelude ++ body);
+        try testing.expect(row.writes);
+        try testing.expect(!row.readOnly());
+    }
+}
+
+test "a closure inside a module-level initializer is charged for its own calls" {
+    // R2. The initializer's closure calls `cacheSet` in callee position, so a
+    // value-reference rule alone would miss it. The module-scope pass walks
+    // the initializer like a function body.
+    const row = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\const ops = { save: (k) => { cacheSet("ns", k, "v", 10); return 1; } };
+        \\function handler(req) { return ops.save("k"); }
+    );
+    try testing.expect(row.writes);
+    try testing.expect(!row.readOnly());
+
+    // An exported binding is a module binding too.
+    const exported = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\export const ops = { save: (k) => { cacheSet("ns", k, "v", 10); return 1; } };
+        \\function handler(req) { return ops.save("k"); }
+    );
+    try testing.expect(exported.writes);
+}
+
+test "a module-level alias of an import is charged when it is called or passed" {
+    const called = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\const save = cacheSet;
+        \\function handler(req) { return save("ns", "k", "v", 10); }
+    );
+    try testing.expect(called.writes);
+    // The call goes through a value, so the row is still a lower bound.
+    try testing.expect(called.lower_bound);
+
+    const passed = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\const save = cacheSet;
+        \\function handler(items) { items.forEach(save); return 1; }
+    );
+    try testing.expect(passed.writes);
+}
+
+test "a module binding declared after the function that references it still charges" {
+    // `later` is declared below `handler` and below the closure in `early`.
+    // The pass registers every binding before it walks any initializer, so
+    // neither order hides the write.
+    const row = try analyzeHandlerRow(
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) { return early.go("k"); }
+        \\const early = { go: (k) => later.save(k) };
+        \\const later = { save: (k) => { cacheSet("ns", k, "v", 10); return 1; } };
+    );
+    try testing.expect(row.writes);
+}
+
+test "module data and pure module-held functions keep the row read only" {
+    const row = try analyzeHandlerRow(
+        \\const cfg = { limit: 10, names: ["a", "b"] };
+        \\function fmt(x) { return x + 1; }
+        \\const table = { f: fmt, g: (x) => x };
+        \\function handler(req) {
+        \\  const n = cfg.limit;
+        \\  return table.f(n);
+        \\}
+    );
+    try testing.expect(row.readOnly());
+    try testing.expect(row.deterministic);
+}
+
+test "a route function that references the route table is not recursive" {
+    // R3. Both routes read `routes`, and `routes` holds both. That is a value
+    // reference, not a call: no recursion, so `total` is not refused for it.
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator,
+        \\function listUsers(req) { return Object.keys(routes); }
+        \\function getUser(req) { return Object.keys(routes); }
+        \\const routes = [{ path: "/u", run: listUsers }, { path: "/u/1", run: getUser }];
+    );
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    const list = analyzer.lookup("listUsers") orelse return error.FunctionNotFound;
+    const get = analyzer.lookup("getUser") orelse return error.FunctionNotFound;
+    try testing.expect(!list.recursive);
+    try testing.expect(!get.recursive);
+    var idx: usize = 0;
+    for (analyzer.all(), 0..) |fe, i| {
+        if (std.mem.eql(u8, fe.name, "listUsers")) idx = i;
+    }
+    try testing.expect(!(try analyzer.reachesRecursion(analyzer.all()[idx].body_node)));
 }
 
 test "a local colliding with a pure import keeps a pure closure read only" {
