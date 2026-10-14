@@ -480,6 +480,7 @@ pub const Analyzer = struct {
                     // argument. Without an edge here the helper's capabilities
                     // stay out of the caller's row entirely.
                     try self.recordFunctionValueArg(arg, owner, seen_users);
+                    self.recordImportValueArg(arg, row);
                     try self.walkBaseExpr(arg, owner, row, seen_users);
                 }
             },
@@ -776,6 +777,29 @@ pub const Analyzer = struct {
             if (pb.slot == binding.slot) return sig.param_types[i];
         }
         return null;
+    }
+
+    /// Charge the owner for an imported export handed to a callback slot
+    /// (`items.forEach(cacheSet)`). The call happens inside the callee, never
+    /// at a call node this walk sees, so without this the export's write,
+    /// egress, and capabilities stay out of the row and `read_only` is proven
+    /// for a handler that writes. Like `recordFunctionValueArg`, this
+    /// over-approximates: handing an export over is taken as calling it.
+    fn recordImportValueArg(self: *Analyzer, arg: NodeIndex, row: *EffectRow) void {
+        if (self.ir_view.getTag(arg) != .identifier) return;
+        const binding = self.ir_view.getBinding(arg) orelse return;
+        const imported = self.imports.get(binding.slot) orelse return;
+        const before = row.capabilities;
+        self.insertModuleCapabilities(imported.module, imported.name, row);
+        const added = row.capabilities.differenceWith(before);
+        if (added.contains(.clock) or added.contains(.random)) row.deterministic = false;
+        row.pure = false;
+        if (self.importEffect(imported.module, imported.name) == .write) row.writes = true;
+        if (std.mem.eql(u8, imported.module, fetch_module_specifier) and
+            std.mem.eql(u8, imported.name, fetch_sync_export))
+        {
+            row.has_egress = true;
+        }
     }
 
     /// Record a call-graph edge for a bare identifier passed as an argument
@@ -1256,6 +1280,32 @@ test "calling a write-classified import marks the function as writing" {
         \\import { cacheSet } from "zttp:cache";
         \\function store(k) { return cacheSet("ns", k, "v"); }
         \\function clean(s) { return s; }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const store = analyzer.lookup("store") orelse return error.FunctionNotFound;
+    const clean = analyzer.lookup("clean") orelse return error.FunctionNotFound;
+    try testing.expect(store.writes);
+    try testing.expect(!store.readOnly());
+    try testing.expect(!clean.writes);
+    try testing.expect(clean.readOnly());
+}
+
+test "a write-classified import handed to a callback slot marks the function as writing" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { cacheSet } from "zttp:cache";
+        \\function store(items) { return items.forEach(cacheSet); }
+        \\function clean(items) { return items.map(String); }
     ;
     var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
