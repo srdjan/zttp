@@ -881,3 +881,41 @@ test "comment stripping preserves a slash pair inside a string" {
         codeBeforeComment("const x = \"//\"; // @import(\"hidden.zig\")"),
     );
 }
+
+fn testRoots() [tier_count]BuildRoot {
+    var roots: [tier_count]BuildRoot = undefined;
+    for (tier_names, 0..) |name, index| {
+        roots[index] = .{ .module_name = name, .source_root = "root.zig" };
+    }
+    return roots;
+}
+
+test "module names map to their own tier index" {
+    const roots = testRoots();
+    for (tier_names, 0..) |name, index| {
+        try std.testing.expectEqual(@as(?u8, @intCast(index)), moduleTier(roots, name));
+    }
+    try std.testing.expectEqual(@as(?u8, null), moduleTier(roots, "std"));
+    try std.testing.expectEqual(@as(?u8, null), moduleTier(roots, "zts-"));
+}
+
+test "relative import targets resolve against the importing directory" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, spec: []const u8, want: []const u8 }{
+        .{ .source = "packages/zts/src/a/b.zig", .spec = "c.zig", .want = "packages/zts/src/a/c.zig" },
+        .{ .source = "packages/zts/src/a/b.zig", .spec = "../c.zig", .want = "packages/zts/src/c.zig" },
+        .{ .source = "packages/zts/src/a/b.zig", .spec = "d/e.zig", .want = "packages/zts/src/a/d/e.zig" },
+        .{ .source = "root.zig", .spec = "x.zig", .want = "x.zig" },
+    };
+    for (cases) |case| {
+        const got = try normalizedTarget(allocator, case.source, case.spec);
+        defer allocator.free(got);
+        try std.testing.expectEqualStrings(case.want, got);
+    }
+}
+
+test "import end skips an escaped quote and reports an unclosed import" {
+    const line = "@import(\"a\\\"b.zig\") x";
+    try std.testing.expectEqual(@as(?usize, 17), importEnd(line, 9));
+    try std.testing.expectEqual(@as(?usize, null), importEnd("@import(\"open", 9));
+}
