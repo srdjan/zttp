@@ -159,11 +159,14 @@ pub const ApiParamInfo = struct {
     }
 
     pub fn dupeOwned(self: ApiParamInfo, allocator: std.mem.Allocator) !ApiParamInfo {
+        const name = try allocator.dupe(u8, self.name);
+        errdefer allocator.free(name);
+        const schema_json = try allocator.dupe(u8, self.schema_json);
         return .{
-            .name = try allocator.dupe(u8, self.name),
+            .name = name,
             .location = self.location,
             .required = self.required,
-            .schema_json = try allocator.dupe(u8, self.schema_json),
+            .schema_json = schema_json,
         };
     }
 };
@@ -239,10 +242,10 @@ pub const ApiBodyInfo = struct {
     }
 
     pub fn dupeOwned(self: ApiBodyInfo, allocator: std.mem.Allocator) !ApiBodyInfo {
-        return .{
-            .content_type = try dupeOptionalString(allocator, self.content_type),
-            .schema = try self.schema.dupeOwned(allocator),
-        };
+        const content_type = try dupeOptionalString(allocator, self.content_type);
+        errdefer if (content_type) |c| allocator.free(c);
+        const schema = try self.schema.dupeOwned(allocator);
+        return .{ .content_type = content_type, .schema = schema };
     }
 };
 
@@ -257,11 +260,10 @@ pub const ApiResponseInfo = struct {
     }
 
     pub fn dupeOwned(self: ApiResponseInfo, allocator: std.mem.Allocator) !ApiResponseInfo {
-        return .{
-            .status = self.status,
-            .content_type = try dupeOptionalString(allocator, self.content_type),
-            .schema = try self.schema.dupeOwned(allocator),
-        };
+        const content_type = try dupeOptionalString(allocator, self.content_type);
+        errdefer if (content_type) |c| allocator.free(c);
+        const schema = try self.schema.dupeOwned(allocator);
+        return .{ .status = self.status, .content_type = content_type, .schema = schema };
     }
 };
 
@@ -885,12 +887,12 @@ pub const PathCondition = struct {
     }
 
     pub fn dupeOwned(self: PathCondition, allocator: std.mem.Allocator) !PathCondition {
-        return .{
-            .kind = self.kind,
-            .module = try dupeOptionalString(allocator, self.module),
-            .func = try dupeOptionalString(allocator, self.func),
-            .value = try dupeOptionalString(allocator, self.value),
-        };
+        const module = try dupeOptionalString(allocator, self.module);
+        errdefer if (module) |m| allocator.free(m);
+        const func = try dupeOptionalString(allocator, self.func);
+        errdefer if (func) |f| allocator.free(f);
+        const value = try dupeOptionalString(allocator, self.value);
+        return .{ .kind = self.kind, .module = module, .func = func, .value = value };
     }
 };
 
@@ -917,11 +919,12 @@ pub const PathIoCall = struct {
     }
 
     pub fn dupeOwned(self: PathIoCall, allocator: std.mem.Allocator) !PathIoCall {
-        return .{
-            .module = try allocator.dupe(u8, self.module),
-            .func = try allocator.dupe(u8, self.func),
-            .arg_signature = try dupeOptionalString(allocator, self.arg_signature),
-        };
+        const module = try allocator.dupe(u8, self.module);
+        errdefer allocator.free(module);
+        const func = try allocator.dupe(u8, self.func);
+        errdefer allocator.free(func);
+        const arg_signature = try dupeOptionalString(allocator, self.arg_signature);
+        return .{ .module = module, .func = func, .arg_signature = arg_signature };
     }
 };
 
@@ -970,9 +973,12 @@ pub const BehaviorPath = struct {
             io_sequence.appendAssumeCapacity(try io.dupeOwned(allocator));
         }
 
+        const route_method = try allocator.dupe(u8, self.route_method);
+        errdefer allocator.free(route_method);
+        const route_pattern = try allocator.dupe(u8, self.route_pattern);
         return .{
-            .route_method = try allocator.dupe(u8, self.route_method),
-            .route_pattern = try allocator.dupe(u8, self.route_pattern),
+            .route_method = route_method,
+            .route_pattern = route_pattern,
             .conditions = conditions,
             .io_sequence = io_sequence,
             .response_status = self.response_status,
@@ -1573,3 +1579,41 @@ pub const HandlerContract = struct {
         if (self.intent) |*i| i.deinit(allocator);
     }
 };
+
+fn deepCopyAndFree(allocator: std.mem.Allocator) !void {
+    const param = ApiParamInfo{ .name = "id", .schema_json = "{\"type\":\"string\"}" };
+    var param_copy = try param.dupeOwned(allocator);
+    param_copy.deinit(allocator);
+
+    const body = ApiBodyInfo{ .content_type = "application/json", .schema = .{ .ref = "Item" } };
+    var body_copy = try body.dupeOwned(allocator);
+    body_copy.deinit(allocator);
+
+    const response = ApiResponseInfo{ .status = 200, .content_type = "text/plain", .schema = .{ .inline_json = "{}" } };
+    var response_copy = try response.dupeOwned(allocator);
+    response_copy.deinit(allocator);
+
+    const condition = PathCondition{ .kind = .io_ok, .module = "zttp:cache", .func = "cacheGet", .value = "v" };
+    var condition_copy = try condition.dupeOwned(allocator);
+    condition_copy.deinit(allocator);
+
+    const io_call = PathIoCall{ .module = "zttp:cache", .func = "cacheGet", .arg_signature = "lit:k" };
+    var io_copy = try io_call.dupeOwned(allocator);
+    io_copy.deinit(allocator);
+
+    const path = BehaviorPath{
+        .route_method = "GET",
+        .route_pattern = "/items",
+        .conditions = .empty,
+        .io_sequence = .empty,
+        .response_status = 200,
+        .io_depth = 0,
+        .is_failure_path = false,
+    };
+    var path_copy = try path.dupeOwned(allocator);
+    path_copy.deinit(allocator);
+}
+
+test "dupeOwned copies release every allocation on each failing allocation path" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, deepCopyAndFree, .{});
+}
