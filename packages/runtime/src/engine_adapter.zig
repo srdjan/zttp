@@ -72,6 +72,7 @@ pub fn initHandlerPool(
     );
 }
 
+/// Resolved source location of a handler fault. Re-exported so `server.zig`
 /// can name it without importing the engine directly - it reaches the engine
 /// only through this adapter, and the purity script enforces that.
 pub const FaultLocation = zq.bytecode.LineEntry;
