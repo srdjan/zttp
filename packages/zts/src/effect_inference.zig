@@ -126,6 +126,10 @@ const ModuleBinding = struct {
     row: EffectRow = .{},
     users: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
     refs: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
+    /// Module bindings this initializer makes a member call through
+    /// (`other.f()`). Whether that is a lower bound depends on whether
+    /// `other` holds a function, which is only known after the closure.
+    rooted_calls: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
     /// True when the initializer, or a binding it mentions, holds a function
     /// value. A plain data object stays false and charges nothing.
     holds: bool = false,
@@ -133,6 +137,7 @@ const ModuleBinding = struct {
     fn deinit(self: *ModuleBinding, allocator: std.mem.Allocator) void {
         self.users.deinit(allocator);
         self.refs.deinit(allocator);
+        self.rooted_calls.deinit(allocator);
     }
 };
 
@@ -200,6 +205,13 @@ pub const Analyzer = struct {
     /// caller reads the difference across a subtree to learn whether that
     /// subtree created or referenced one.
     fn_value_count: u32 = 0,
+    /// Name atoms of body-local bindings whose initializer created or
+    /// referenced a function value (`const o = { f: w }`). A member call on
+    /// such a binding is a lower bound. Keyed by name, not slot, because a
+    /// closure sees the binding as an upvalue with a different slot; a name
+    /// reused for an unrelated local only makes the answer more conservative.
+    /// Cleared per function and per module initializer.
+    holding_names: std.AutoHashMapUnmanaged(u16, void),
     /// The call node whose result the enclosing statement throws away, or
     /// `null_node`. Set only for the outermost call of an `expr_stmt`, so a
     /// nested call inside that statement is not mistaken for a discarded one.
@@ -233,6 +245,7 @@ pub const Analyzer = struct {
             .seen_values = .empty,
             .module_bindings = .empty,
             .module_by_key = .empty,
+            .holding_names = .empty,
             .inline_route_stack = .empty,
         };
     }
@@ -250,6 +263,7 @@ pub const Analyzer = struct {
         for (self.module_bindings.items) |*mb| mb.deinit(self.allocator);
         self.module_bindings.deinit(self.allocator);
         self.module_by_key.deinit(self.allocator);
+        self.holding_names.deinit(self.allocator);
         self.inline_route_stack.deinit(self.allocator);
     }
 
@@ -446,6 +460,7 @@ pub const Analyzer = struct {
             defer scratch.deinit(self.allocator);
             self.module_acc = mb;
             defer self.module_acc = null;
+            self.holding_names.clearRetainingCapacity();
             const before = self.fn_value_count;
             try self.walkBaseExpr(mb.init_node, module_scope_owner, &mb.row, &scratch);
             mb.holds = self.fn_value_count != before;
@@ -456,7 +471,15 @@ pub const Analyzer = struct {
             changed = false;
             for (self.module_bindings.items, 0..) |*mb, i| {
                 for (self.module_bindings.items, 0..) |*other, j| {
-                    if (i == j or !mb.refs.contains(j)) continue;
+                    if (!mb.refs.contains(j)) continue;
+                    // R4 for a closure in this initializer: a member call
+                    // through a binding that holds a function is a lower
+                    // bound, including a binding reached through itself.
+                    if (mb.rooted_calls.contains(j) and other.holds and !mb.row.lower_bound) {
+                        mb.row.lower_bound = true;
+                        changed = true;
+                    }
+                    if (i == j) continue;
                     var merged = mb.row.merge(other.row);
                     // Whether a binding is recursive is no property of the
                     // functions it holds.
@@ -547,6 +570,7 @@ pub const Analyzer = struct {
             self.callee_starts.items[i] = @intCast(self.callee_storage.items.len);
             self.value_starts.items[i] = @intCast(self.value_storage.items.len);
             self.seen_values.clearRetainingCapacity();
+            self.holding_names.clearRetainingCapacity();
             var seen_users: std.AutoHashMapUnmanaged(usize, void) = .empty;
             defer seen_users.deinit(self.allocator);
             var row: EffectRow = .{};
@@ -639,7 +663,13 @@ pub const Analyzer = struct {
                 // Passed on as a value (`items.forEach(w)`) it then charged
                 // nothing, and the owner proved `read_only` for a write.
                 if (decl.init != null_node) {
+                    const before = self.fn_value_count;
                     try self.walkBaseExpr(decl.init, owner, row, seen_users);
+                    // The binding now holds a function value, so a member call
+                    // through it reaches code this walk cannot name.
+                    if (self.fn_value_count != before) {
+                        try self.holding_names.put(self.allocator, decl.binding.name_atom, {});
+                    }
                 }
             },
             .function_decl => {
@@ -783,6 +813,8 @@ pub const Analyzer = struct {
         // treat missing route effects as proof that they are absent.
         if (try self.contributeRouteDispatch(call.callee, owner, row, seen_users)) return;
 
+        try self.markCallThroughHolder(call.callee, row);
+
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
@@ -862,6 +894,44 @@ pub const Analyzer = struct {
         if (!self.calleeIsUnresolvable(binding)) return;
         if (try self.contributeDeclaredCallbackRow(binding, owner, row)) return;
         row.lower_bound = true;
+    }
+
+    /// A call whose callee is a member or computed access rooted at a binding
+    /// that holds function values (`ops.save()`, `o["f"]()`) runs a function
+    /// this walk did not resolve at the call. The functions it can reach are
+    /// charged at the reference, but no call edge exists, so the row is a
+    /// lower bound: recursion through `ops.a()` leaves no cycle for
+    /// `detectRecursion`, and `total` must not be proven for it. A receiver
+    /// that holds no function (`s.toUpperCase()`, `items.map(...)`) is
+    /// unchanged. Inside a module initializer the answer waits for the closure
+    /// over module bindings, so the call is recorded instead.
+    fn markCallThroughHolder(self: *Analyzer, callee: NodeIndex, row: *EffectRow) WalkError!void {
+        var node = callee;
+        var steps: usize = 0;
+        while (true) : (steps += 1) {
+            const tag = self.ir_view.getTag(node) orelse return;
+            switch (tag) {
+                .member_access, .optional_chain, .computed_access => {
+                    // Reaching the root of an access chain needs at least one
+                    // step: a bare identifier callee is `handleCall`'s own.
+                    node = (self.ir_view.getMember(node) orelse return).object;
+                },
+                .identifier => break,
+                else => return,
+            }
+        }
+        if (steps == 0) return;
+        const binding = self.ir_view.getBinding(node) orelse return;
+        if (slotIsAtom(binding)) {
+            const idx = self.moduleBindingOf(binding) orelse return;
+            if (self.module_acc) |acc| {
+                try acc.rooted_calls.put(self.allocator, idx, {});
+            } else if (self.module_bindings.items[idx].holds) {
+                row.lower_bound = true;
+            }
+            return;
+        }
+        if (self.holding_names.contains(binding.name_atom)) row.lower_bound = true;
     }
 
     fn contributeRouteDispatch(
@@ -2873,6 +2943,44 @@ test "a route function that references the route table is not recursive" {
         if (std.mem.eql(u8, fe.name, "listUsers")) idx = i;
     }
     try testing.expect(!(try analyzer.reachesRecursion(analyzer.all()[idx].body_node)));
+}
+
+test "a call through a member of a function-holding binding is a lower bound" {
+    // R4. Calls through a value-holding receiver reach functions the walk
+    // cannot name at the call, so the row cannot claim to have seen
+    // everything. Without this, recursion through `ops.a()` leaves no call
+    // edge and `total` would be proven for a function that recurses.
+    const sources = [_][]const u8{
+        // module-level receiver, dotted and computed
+        "function w(k) { return k; }\nconst ops = { a: w };\nfunction handler(k) { return ops.a(k); }",
+        "function w(k) { return k; }\nconst ops = { a: w };\nfunction handler(k) { return ops[\"a\"](k); }",
+        // body-local receiver, directly and from inside a closure
+        "function w(k) { return k; }\nfunction handler(k) { const o = { a: w }; return o.a(k); }",
+        "function w(k) { return k; }\nfunction handler(xs) { const o = { a: w }; return xs.map((x) => o.a(x)); }",
+        // a closure held at module scope that calls through its own binding
+        "const ops = { a: (k) => ops.b(k), b: (k) => k };\nfunction handler(k) { return ops.a(k); }",
+        // an alias of a holder
+        "function w(k) { return k; }\nconst ops = { a: w };\nconst ops2 = ops;\nfunction handler(k) { return ops2.a(k); }",
+    };
+    inline for (sources) |source| {
+        const row = try analyzeHandlerRow(source);
+        try testing.expect(row.lower_bound);
+    }
+}
+
+test "a member call on a receiver that holds no function stays resolved" {
+    const row = try analyzeHandlerRow(
+        \\const cfg = { names: ["a", "b"] };
+        \\function handler(items, s) {
+        \\  const d = { n: 1 };
+        \\  const a = s.toUpperCase();
+        \\  const b = items.map((x) => x + 1);
+        \\  const c = cfg.names.join(",");
+        \\  return a + d.n + Object.keys(cfg).length;
+        \\}
+    );
+    try testing.expect(!row.lower_bound);
+    try testing.expect(row.readOnly());
 }
 
 test "a local colliding with a pure import keeps a pure closure read only" {
