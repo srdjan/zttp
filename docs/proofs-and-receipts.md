@@ -57,10 +57,10 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped.
 
 | Chip | Proven when |
 |---|---|
-| `pure` | the handler calls no virtual modules: it is a pure function of the request |
-| `read_only` | every virtual-module call is read-classified: no state is mutated |
-| `deterministic` | no `Date.now()`, `Math.random()`, or `performance.now()` on any path: every run is identical |
-| `retry_safe` | every virtual-module call is read-classified |
+| `pure` | the handler calls no virtual modules and makes no call the compiler cannot resolve: it is a pure function of the request |
+| `read_only` | every virtual-module call is read-classified and every call resolves to a known function: no state is mutated |
+| `deterministic` | no value that can differ between runs, such as a clock read, a random draw, or stored data, reaches the response |
+| `retry_safe` | the same condition as `read_only` |
 | `idempotent` | deterministic and retry-safe: safe under at-least-once delivery |
 
 **Security** - data-flow guarantees:
@@ -81,6 +81,11 @@ A `[-]` pill is not an error. It means the compiler could not prove that
 property for this handler, often because the handler legitimately does the
 thing the property forbids. A handler that writes to a cache will not be
 `read_only`, and that is correct.
+
+A call through a value the compiler cannot resolve, such as
+`const f = cacheSet; f(...)`, also leaves `pure`, `read_only`, and
+`retry_safe` unproven. The compiler cannot see what
+that call reaches, so it does not claim that the call is safe.
 
 ### Reading A Failing Chip
 
