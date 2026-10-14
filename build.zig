@@ -99,6 +99,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(spine.check_step);
     test_step.dependOn(spine.test_step);
     const coverage_step = step_coverage.register(b);
-    agent_spine.attachTaskCensus(b, spine.check_run);
+    agent_spine.attachTaskCensus(b, spine);
     step_coverage.add(b, test_step, coverage_step);
 }

@@ -162,8 +162,9 @@ pub fn main(init: std.process.Init) !void {
 
     var stdout_buffer: [4096]u8 = undefined;
     var stderr_buffer: [4096]u8 = undefined;
-    var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-    var stderr = std.Io.File.stderr().writer(init.io, &stderr_buffer);
+    // Preserve the caller's offset when standard streams point to a file.
+    var stdout = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
+    var stderr = std.Io.File.stderr().writerStreaming(init.io, &stderr_buffer);
 
     const command = parseCommand(argv[1..]) catch {
         try stderr.interface.writeAll(

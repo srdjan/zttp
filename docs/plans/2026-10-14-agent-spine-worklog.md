@@ -105,3 +105,23 @@ Decision 2 is whether to run `bash scripts/verify.sh` now.
 That approval authorizes the full local gate and fixes required for this installation, without a push or release.
 
 Next action owner: the user selects Decision 2. I will run the full local gate after approval.
+
+## Full gate approval and stream correction
+
+The user approved Decision 2 with "yes, run".
+The main agent ran `bash scripts/verify.sh` against commit `e1f70dc3`.
+The script exited 0 and reported that all CI test-job steps passed.
+
+The redirected log exposed a defect in the new command's standard streams.
+A small executable probe wrote a prefix before invoking the command through the same regular file descriptor.
+The command overwrote that prefix because the default Zig file writer used a positional write at offset zero.
+The main agent confirmed the cause in the pinned standard library.
+
+The new build probe first failed with exit 1 and reported that stdout lost earlier output.
+The fix uses streaming writers for stdout and stderr.
+The same build probe then passed, preserving both prefixes and asserting usage exit 2.
+The main agent also ran the nine native tests, installed check, and task coverage successfully.
+The stream probe runs under `test-spine` and the aggregate suite.
+It introduces no new top-level task or standalone script.
+
+Next action owner: I will repeat the approved full gate after committing the stream correction.
