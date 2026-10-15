@@ -81,6 +81,27 @@ pub const ImportRecord = struct {
     resolution: Resolution,
 };
 
+/// The binding eligibility that one existing consumer applies.
+///
+/// `module_reference` admits only references that can name a module import.
+/// `legacy_slot` preserves consumers that historically matched raw slots.
+pub const ReferenceEligibility = enum {
+    module_reference,
+    legacy_slot,
+};
+
+pub const ImportResolutionFilter = enum {
+    any,
+    builtin,
+    partner,
+    unresolved,
+};
+
+pub const MatchOrder = enum {
+    first,
+    last,
+};
+
 /// The immutable import index. All strings in `modules` and `functions` are
 /// owned; both binding lists hold borrowed extraction rules.
 pub const ModuleFacts = struct {
@@ -295,6 +316,73 @@ pub const ModuleFacts = struct {
         return containsString(self.modules.items, specifier);
     }
 
+    pub fn importForReference(
+        self: *const ModuleFacts,
+        binding: ir.BindingRef,
+        eligibility: ReferenceEligibility,
+        resolution_filter: ImportResolutionFilter,
+        match_order: MatchOrder,
+    ) ?*const ImportRecord {
+        if (!referenceEligible(binding, eligibility)) return null;
+        if (match_order == .first) {
+            for (self.imports.items) |*record| {
+                if (record.slot != binding.slot or
+                    !resolutionMatches(record.resolution, resolution_filter)) continue;
+                return record;
+            }
+            return null;
+        }
+        var index = self.imports.items.len;
+        while (index > 0) {
+            index -= 1;
+            const record = &self.imports.items[index];
+            if (record.slot != binding.slot or
+                !resolutionMatches(record.resolution, resolution_filter)) continue;
+            return record;
+        }
+        return null;
+    }
+
+    pub fn genericBindingForReference(
+        self: *const ModuleFacts,
+        binding: ir.BindingRef,
+        eligibility: ReferenceEligibility,
+    ) ?*const GenericBinding {
+        if (!referenceEligible(binding, eligibility)) return null;
+        for (self.generic_bindings.items) |*record| {
+            if (record.slot == binding.slot) return record;
+        }
+        return null;
+    }
+
+    pub fn extensionBindingForReference(
+        self: *const ModuleFacts,
+        binding: ir.BindingRef,
+        eligibility: ReferenceEligibility,
+    ) ?*const ExtensionBinding {
+        if (!referenceEligible(binding, eligibility)) return null;
+        for (self.extension_bindings.items) |*record| {
+            if (record.slot == binding.slot) return record;
+        }
+        return null;
+    }
+
+    pub fn referenceHasCategory(
+        self: *const ModuleFacts,
+        binding: ir.BindingRef,
+        eligibility: ReferenceEligibility,
+        category: module_binding.ContractCategory,
+    ) bool {
+        if (!referenceEligible(binding, eligibility)) return false;
+        for (self.generic_bindings.items) |record| {
+            if (record.slot != binding.slot) continue;
+            for (record.extractions) |extraction| {
+                if (extraction.category == category) return true;
+            }
+        }
+        return false;
+    }
+
     /// Deep-copy `modules` for a `HandlerContract`, which owns its strings.
     /// The index keeps its own copy so later readers still see the imports.
     pub fn cloneModules(self: *const ModuleFacts, allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
@@ -345,6 +433,25 @@ pub const ModuleFacts = struct {
         return out;
     }
 };
+
+fn referenceEligible(binding: ir.BindingRef, eligibility: ReferenceEligibility) bool {
+    return switch (eligibility) {
+        .module_reference => binding.kind == .global or binding.kind == .undeclared_global,
+        .legacy_slot => true,
+    };
+}
+
+fn resolutionMatches(
+    resolution: ImportRecord.Resolution,
+    filter: ImportResolutionFilter,
+) bool {
+    return switch (filter) {
+        .any => true,
+        .builtin => resolution == .builtin,
+        .partner => resolution == .partner,
+        .unresolved => resolution == .unresolved,
+    };
+}
 
 fn resolveAtomName(ir_view: IrView, atoms: ?*context.AtomTable, atom_idx: u16) ?[]const u8 {
     if (atoms) |table| {
@@ -485,6 +592,109 @@ test "module facts deduplicate a name imported twice" {
     // testing allocator reports the leak here and nowhere else.
     try testing.expectEqual(@as(usize, 1), facts.functions.items.len);
     try testing.expectEqual(@as(usize, 1), facts.functions.items[0].names.items.len);
+}
+
+test "filtered legacy lookup skips an earlier unresolved import with the same slot" {
+    const allocator = testing.allocator;
+    const h = try Harness.init(allocator,
+        \\import { x as m } from "./x.ts";
+        \\import { routerMatch as m } from "zttp:router";
+        \\m({}, {});
+    );
+    defer h.deinit(allocator);
+
+    var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
+    defer facts.deinit();
+    try testing.expectEqual(@as(usize, 2), facts.imports.items.len);
+    try testing.expectEqual(facts.imports.items[0].slot, facts.imports.items[1].slot);
+
+    var callee_binding: ?ir.BindingRef = null;
+    for (0..h.view().nodeCount()) |index| {
+        const node: NodeIndex = @intCast(index);
+        if (h.view().getTag(node) != .call) continue;
+        const call = h.view().getCall(node) orelse continue;
+        if (h.view().getTag(call.callee) != .identifier) continue;
+        callee_binding = h.view().getBinding(call.callee);
+    }
+    const binding = callee_binding orelse return error.CallBindingMissing;
+    const record = facts.importForReference(
+        binding,
+        .legacy_slot,
+        .builtin,
+        .first,
+    ) orelse return error.BuiltinImportMissing;
+    try testing.expectEqual(ImportRecord.Resolution.builtin, record.resolution);
+    try testing.expectEqualStrings("zttp:router", record.module_specifier);
+    try testing.expectEqualStrings("routerMatch", record.imported_name);
+
+    const last = facts.importForReference(
+        binding,
+        .module_reference,
+        .any,
+        .last,
+    ) orelse return error.ImportExpected;
+    try testing.expectEqual(ImportRecord.Resolution.builtin, last.resolution);
+    try testing.expectEqualStrings("routerMatch", last.imported_name);
+}
+
+test "category lookup checks every legacy record with the same slot" {
+    const allocator = testing.allocator;
+    const h = try Harness.init(allocator,
+        \\import { cacheGet as m } from "zttp:cache";
+        \\import { validateJson as m } from "zttp:validate";
+        \\m("User", {});
+    );
+    defer h.deinit(allocator);
+
+    var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
+    defer facts.deinit();
+    var callee_binding: ?ir.BindingRef = null;
+    for (0..h.view().nodeCount()) |index| {
+        const node: NodeIndex = @intCast(index);
+        if (h.view().getTag(node) != .call) continue;
+        const call = h.view().getCall(node) orelse continue;
+        if (h.view().getTag(call.callee) != .identifier) continue;
+        callee_binding = h.view().getBinding(call.callee);
+    }
+    const binding = callee_binding orelse return error.CallBindingMissing;
+    try testing.expect(facts.referenceHasCategory(
+        binding,
+        .legacy_slot,
+        .request_schema,
+    ));
+}
+
+test "first builtin lookup lets an earlier non-router import block a later router" {
+    const allocator = testing.allocator;
+    const h = try Harness.init(allocator,
+        \\import { cacheGet as m } from "zttp:cache";
+        \\import { routerMatch as m } from "zttp:router";
+        \\m({}, {});
+    );
+    defer h.deinit(allocator);
+
+    var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
+    defer facts.deinit();
+    var callee_binding: ?ir.BindingRef = null;
+    for (0..h.view().nodeCount()) |index| {
+        const node: NodeIndex = @intCast(index);
+        if (h.view().getTag(node) != .call) continue;
+        const call = h.view().getCall(node) orelse continue;
+        if (h.view().getTag(call.callee) != .identifier) continue;
+        callee_binding = h.view().getBinding(call.callee);
+    }
+    const binding = callee_binding orelse return error.CallBindingMissing;
+    const first = facts.importForReference(
+        binding,
+        .legacy_slot,
+        .builtin,
+        .first,
+    ) orelse return error.BuiltinImportMissing;
+    try testing.expectEqualStrings("zttp:cache", first.module_specifier);
+    try testing.expectEqualStrings("cacheGet", first.imported_name);
+    const is_router = std.mem.eql(u8, first.module_specifier, "zttp:router") and
+        std.mem.eql(u8, first.imported_name, "routerMatch");
+    try testing.expect(!is_router);
 }
 
 test "module facts skip a module that is neither builtin nor registered" {

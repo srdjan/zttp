@@ -19,7 +19,7 @@ const contract_types = @import("zts-contracts").contract_types;
 const json_utils = @import("zts-base").json_utils;
 
 const IrView = ir.IrView;
-const EffectAnalyzer = effect_inference.Analyzer;
+const EffectFacts = effect_inference.EffectFacts;
 const TypeEnv = type_env_mod.TypeEnv;
 const SpecDiagnostic = contract_types.SpecDiagnostic;
 const CapsuleFacts = spec_discharge.CapsuleFacts;
@@ -102,19 +102,19 @@ pub const CapsuleTable = struct {
     }
 };
 
-/// Discharge every user-defined helper's `Proof<...>` capsule. `analyzer`
-/// must already have run `analyze`. `env` may be null (no type info): then
+/// Discharge every user-defined helper's `Proof<...>` capsule. `effects`
+/// must contain a completed analysis. `env` may be null (no type info): then
 /// every capsule is property-free and only the `proven` facts are recorded.
 pub fn discharge(
     allocator: std.mem.Allocator,
-    analyzer: *const EffectAnalyzer,
+    effects: *const EffectFacts,
     env: ?*const TypeEnv,
     ir_view: IrView,
 ) !CapsuleTable {
     var table: CapsuleTable = .{};
     errdefer table.deinit(allocator);
 
-    for (analyzer.all()) |fe| {
+    for (effects.all()) |fe| {
         if (std.mem.eql(u8, fe.name, handler_fn_name)) continue;
 
         const line: u32 = if (ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
@@ -235,11 +235,10 @@ test "discharge records proven facts and skips the handler" {
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var analyzer = EffectAnalyzer.init(allocator, view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
+    var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer effects.deinit(allocator);
 
-    var table = try discharge(allocator, &analyzer, null, view);
+    var table = try discharge(allocator, &effects, null, view);
     defer table.deinit(allocator);
 
     // The handler is discharged via Proof<...> elsewhere; capsule discharge
@@ -273,11 +272,10 @@ test "discharge records non-total facts for a helper that may not return" {
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var analyzer = EffectAnalyzer.init(allocator, view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.analyze(root);
+    var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer effects.deinit(allocator);
 
-    var table = try discharge(allocator, &analyzer, null, view);
+    var table = try discharge(allocator, &effects, null, view);
     defer table.deinit(allocator);
 
     const maybe = table.byName("maybe") orelse return error.MissingCapsule;

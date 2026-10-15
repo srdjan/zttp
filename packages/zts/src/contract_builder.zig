@@ -37,7 +37,6 @@ const module_binding = @import("zts-engine").module_binding;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
-const route_resolution = @import("route_resolution.zig");
 const module_manifest = @import("zts-engine").module_manifest;
 const bytecode = @import("zts-engine").bytecode;
 const handler_analyzer = @import("zts-engine").handler_analyzer;
@@ -126,22 +125,12 @@ pub const ContractBuilder = struct {
     /// Partner virtual-module manifests registered for this compile session.
     /// Borrowed; the registry must outlive the builder.
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
-    /// File-import effect rows prepared from already-loaded sibling modules.
-    /// Borrowed; the slice must outlive `build`.
-    imported_effects: []const effect_inference.ImportedEffect = &.{},
-    /// Request an owned export table from the analyzer used by `build`.
+    /// Request an owned clone of the completed export table.
     capture_export_effects: bool = false,
     exported_effects: ?effect_inference.ExportEffects = null,
-
-    /// The import and binding index this builder owns, used when no caller
-    /// injected one. Built at the start of `build` and not mutated after. The
-    /// contract gets copies, not the originals, so the index stays readable
-    /// after `build` returns.
-    owned_facts: module_facts_mod.ModuleFacts,
-    /// Injected index for this compile. When set, `build` reads it and never
-    /// builds `owned_facts`, so a compile that already has an index does not
-    /// pay for a second identical one. Borrowed; must outlive the builder.
-    injected_facts: ?*const module_facts_mod.ModuleFacts = null,
+    /// Completed immutable facts borrowed through `build`.
+    module_facts: ?*const module_facts_mod.ModuleFacts = null,
+    effect_facts: ?*const effect_inference.EffectFacts = null,
 
     // Collected data (all strings are duped/owned)
     env_literals: std.ArrayList([]const u8),
@@ -181,51 +170,11 @@ pub const ContractBuilder = struct {
     /// HUD's "Why" line. Borrowed snippet (static string).
     nondeterministic_cause: ?contract_types.PropertyCause = null,
 
-    const EffectSummary = struct {
-        has_any_call: bool = false,
-        io: module_binding.EffectClass = .none,
-        has_cache_read: bool = false,
-        has_egress: bool = false,
-        /// A reachable function-valued call could not be resolved. The
-        /// summary is then a lower bound and cannot prove absence properties.
-        unknown: bool = false,
-
-        fn includeCall(self: *EffectSummary, effect: module_binding.EffectClass) void {
-            switch (effect) {
-                .write => {
-                    self.io = .write;
-                },
-                .read => {
-                    if (self.io == .none) self.io = .read;
-                },
-                .none => {},
-            }
-        }
-
-        fn includeEgress(self: *EffectSummary) void {
-            // fetchSync is a conservative bare write because the HTTP method
-            // is not known during contract extraction.
-            self.has_egress = true;
-            self.has_any_call = true;
-            self.io = .write;
-        }
-    };
-
-    // The binding types moved to module_facts.zig with the walk that builds
-    // them. Aliased here so existing references keep resolving.
-    const GenericBinding = module_facts_mod.GenericBinding;
-    const ExtensionBinding = module_facts_mod.ExtensionBinding;
-
-    fn isFunctionNode(self: *const ContractBuilder, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        return tag == .function_decl or tag == .function_expr or tag == .arrow_function;
-    }
-
     fn subtreeContains(self: *ContractBuilder, root: NodeIndex, target: NodeIndex) bool {
         return self.ir_view.subtreeContains(root, target);
     }
 
-    pub fn init(
+    fn init(
         allocator: std.mem.Allocator,
         ir_view: IrView,
         atoms: ?*atom_table.AtomTable,
@@ -238,10 +187,6 @@ pub const ContractBuilder = struct {
             .atoms = atoms,
             .type_env = type_env,
             .type_checker = type_checker,
-            // An empty index. `build` replaces it with the real one unless a
-            // caller injected one; the property helpers that tests call
-            // directly read an empty index rather than requiring a parse.
-            .owned_facts = .{ .allocator = allocator },
             .env_literals = .empty,
             .env_dynamic = false,
             .egress_endpoints = .empty,
@@ -262,36 +207,29 @@ pub const ContractBuilder = struct {
         };
     }
 
-    /// Free all builder-owned resources. Safe to call whether or not build()
-    /// was called: if build() moved the lists into a HandlerContract, the
-    /// items slices are empty and these loops are no-ops.
-    /// The index to read: the injected one, else the owned one. Always valid,
-    /// because `owned_facts` starts empty rather than undefined.
+    pub fn initForBuild(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*atom_table.AtomTable,
+        type_env: ?*const TypeEnv,
+        type_checker: ?*TypeChecker,
+        module_facts: *const module_facts_mod.ModuleFacts,
+        effect_facts: *const effect_inference.EffectFacts,
+    ) ContractBuilder {
+        var self = init(allocator, ir_view, atoms, type_env, type_checker);
+        self.module_facts = module_facts;
+        self.effect_facts = effect_facts;
+        return self;
+    }
+
     fn factsRef(self: *const ContractBuilder) *const module_facts_mod.ModuleFacts {
-        return self.injected_facts orelse &self.owned_facts;
+        return self.module_facts orelse unreachable;
     }
 
-    /// Build the owned index over the current IR, or do nothing when a caller
-    /// injected one. Called once from `build`; the tests that used to call
-    /// `scanImports` directly call this instead, so both go through one path.
-    fn buildFacts(self: *ContractBuilder) !void {
-        if (self.injected_facts != null) return;
-        // Build into a temporary and swap, so a failure here leaves the
-        // existing (empty) index intact rather than dangling for deinit.
-        const built = try module_facts_mod.ModuleFacts.build(
-            self.allocator,
-            self.ir_view,
-            self.atoms,
-            self.manifest_registry,
-        );
-        self.owned_facts.deinit();
-        self.owned_facts = built;
-    }
-
+    /// Free builder-owned resources, including lists not transferred by build.
     pub fn deinit(self: *ContractBuilder) void {
         if (self.exported_effects) |*effects| effects.deinit(self.allocator);
         self.exported_effects = null;
-        self.owned_facts.deinit();
         var ext_it = self.extensions.iterator();
         while (ext_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -339,31 +277,12 @@ pub const ContractBuilder = struct {
         verification: ?VerificationInfo,
     ) !HandlerContract {
         if (self.type_checker) |tc| try tc.ensureHealthy();
-        // Phase 1: Build the import index. Modules, imported names, and the
-        // slot-keyed bindings the call-site scan resolves against. Built before
-        // the effect analyzer so that analyzer can share it instead of building
-        // an identical private one; the index depends only on the IR, the atom
-        // table, and the registry, so it does not care that effects has not run.
-        try self.buildFacts();
-
-        // Proof-carrying functions: infer per-function effect rows across the
-        // call graph. The handler's composed row tightens computeProperties;
-        // the full table drives capsule discharge after the contract is built.
-        var effects = effect_inference.Analyzer.initWithManifestRegistry(
-            self.allocator,
-            self.ir_view,
-            self.atoms,
-            self.manifest_registry,
-        );
-        // `self` is a stable address for the duration of `build`, so the borrow
-        // outlives the analyzer.
-        effects.facts = self.factsRef();
-        // Lets a call through a function-typed parameter contribute that type's
-        // declared ceiling instead of defeating the row (D2 section 4, I3).
-        effects.type_env = self.type_env;
-        effects.imported_effects = self.imported_effects;
-        defer effects.deinit();
-        try effects.analyze(root);
+        _ = root;
+        const effects = self.effect_facts orelse return error.CompletedEffectFactsRequired;
+        const contract_effects = try effects.requireContract();
+        if (contract_effects.selected_handler != handler_fn) {
+            return error.SelectedHandlerIdentityMismatch;
+        }
 
         // Phase 2: Scan all call sites for env/fetchSync/cache usage
         try self.scanCallSites();
@@ -375,8 +294,17 @@ pub const ContractBuilder = struct {
         const intent_value = try self.extractIntentAssertions();
 
         // Phase 3: Compute handler effect properties.
-        const handler_row = effects.lookup("handler");
-        const properties = try self.computeProperties(handler_row, handler_fn);
+        const handler_row = if (contract_effects.first_handler_index) |index|
+            effects.all()[index].row
+        else
+            null;
+        var effect_summary = contract_effects.summary;
+        if (handler_fn == null and
+            (self.egress_endpoints.items.len > 0 or self.egress_dynamic))
+        {
+            effect_summary.includeEgress();
+        }
+        const properties = self.computeProperties(effect_summary, handler_row, handler_fn);
 
         // Phase 3b: Detect rate limiting. The namespace is duped because
         // `rate_limit_keys` stays with the builder, unlike `cache_namespaces`,
@@ -456,9 +384,7 @@ pub const ContractBuilder = struct {
         errdefer if (handler_path_copy.len != 0) self.allocator.free(handler_path_copy);
 
         // Copies, not the index's own lists. Moving them would empty the
-        // index, and every reader after this point (detectRateLimiting,
-        // computeGlobalEffectSummary, and the six analyzers that adopt the
-        // index) would see a handler with no imports.
+        // index, and every later fact consumer would see no imports.
         var modules_copy = try self.factsRef().cloneModules(self.allocator);
         errdefer {
             for (modules_copy.items) |m| self.allocator.free(m);
@@ -565,21 +491,21 @@ pub const ContractBuilder = struct {
         // Phase 4b: Proof-carrying functions. Discharge each helper's
         // `Proof<...>` capsule, append helper ZTS500/ZTS502 and caller-demand
         // ZTS606 to spec_diagnostics, and project a CapsuleSummary per helper.
-        try self.dischargeFunctionCapsules(&contract, &effects);
+        try self.dischargeFunctionCapsules(&contract, effects, contract_effects);
 
         // Phase 4c: handler capability budget. Discharge the handler's
         // `Effects<...>` budget against its inferred capability row and
         // attribute every over-budget capability (ZTS506 / ZTS607).
-        try self.dischargeCapabilityBudget(&contract, &effects, handler_loc);
+        try self.dischargeCapabilityBudget(&contract, effects, contract_effects, handler_loc);
         // After the budget: the remaining-budget figure each hole reports is
         // the declared budget minus what the handler already spends.
-        try self.collectHoles(&contract, &effects);
+        try self.collectHoles(&contract, effects);
 
         // Phase 4d: refuse schemas that zttp:validate cannot compile (ZTS514).
         try self.checkSchemaCompilability(&contract);
 
         if (self.capture_export_effects) {
-            self.exported_effects = try effects.exportEffects();
+            self.exported_effects = try effects.export_effects.clone(self.allocator);
         }
 
         return contract;
@@ -683,11 +609,12 @@ pub const ContractBuilder = struct {
     fn dischargeFunctionCapsules(
         self: *ContractBuilder,
         contract: *HandlerContract,
-        analyzer: *const effect_inference.Analyzer,
+        effects: *const effect_inference.EffectFacts,
+        contract_effects: *const effect_inference.ContractEffectFacts,
     ) !void {
         var table = try function_specs.discharge(
             self.allocator,
-            analyzer,
+            effects,
             self.type_env,
             self.ir_view,
         );
@@ -700,11 +627,8 @@ pub const ContractBuilder = struct {
             if (spec_discharge.CapsuleProperty.fromName(name)) |p| handler_demands.insert(p);
         }
 
-        const reachable = try handlerReachability(self.allocator, analyzer);
-        defer if (reachable) |r| self.allocator.free(r);
-
         for (table.capsules.items) |*cap| {
-            const reachable_from_handler = helperReachable(analyzer, reachable, cap.name);
+            const reachable_from_handler = helperReachable(effects, contract_effects, cap.name);
             // The helper's own capsule discharge (ZTS500 / ZTS502),
             // attributed to the helper.
             for (cap.diagnostics.items) |d| {
@@ -796,7 +720,7 @@ pub const ContractBuilder = struct {
     fn collectHoles(
         self: *ContractBuilder,
         contract: *HandlerContract,
-        analyzer: *const effect_inference.Analyzer,
+        effects: *const effect_inference.EffectFacts,
     ) !void {
         // Remaining budget: what the declared budget still allows that the
         // handler's inferred row has not already spent. A property of the
@@ -805,7 +729,7 @@ pub const ContractBuilder = struct {
         const budget_declared = contract.capability_budget.len > 0;
         if (budget_declared) {
             for (contract.capability_budget.slice()) |c| remaining.insert(c);
-            const functions = analyzer.all();
+            const functions = effects.all();
             if (findFunctionIndex(functions, "handler")) |h| {
                 var spent = functions[h].row.capabilities.iterator();
                 while (spent.next()) |c| remaining.remove(c);
@@ -818,7 +742,7 @@ pub const ContractBuilder = struct {
             const call = self.ir_view.getCall(idx) orelse continue;
             if (!self.isHoleCallee(call.callee)) continue;
 
-            const owner = self.enclosingFunctionName(analyzer, idx);
+            const owner = self.enclosingFunctionName(effects, idx);
             // The call node is located at `(`. The fill tool replaces the full
             // `hole()` expression and therefore needs the callee's start.
             const loc = self.ir_view.getLoc(call.callee) orelse ir.SourceLocation{ .line = 0, .column = 0, .offset = 0 };
@@ -827,7 +751,7 @@ pub const ContractBuilder = struct {
             // A hole inside a nested function declaration stands for an
             // expression that returns from that declaration, so its expected
             // type is the declaration's, not the enclosing function's.
-            const expected = if (self.innermostNestedDecl(analyzer, idx)) |decl|
+            const expected = if (self.innermostNestedDecl(effects, idx)) |decl|
                 self.expectedTypeForDecl(decl, &type_buf)
             else
                 self.expectedTypeForHole(owner, &type_buf);
@@ -894,7 +818,7 @@ pub const ContractBuilder = struct {
                 }
             }
 
-            try self.collectHoleScope(&summary, analyzer, idx);
+            try self.collectHoleScope(&summary, effects, idx);
 
             try contract.holes.append(self.allocator, summary);
         }
@@ -911,10 +835,10 @@ pub const ContractBuilder = struct {
     /// rather than guessing when no body claims it.
     fn enclosingFunctionName(
         self: *ContractBuilder,
-        analyzer: *const effect_inference.Analyzer,
+        effects: *const effect_inference.EffectFacts,
         node: NodeIndex,
     ) []const u8 {
-        for (analyzer.all()) |fe| {
+        for (effects.all()) |fe| {
             if (self.subtreeContains(fe.body_node, node)) return fe.name;
         }
         return "<top-level>";
@@ -937,11 +861,11 @@ pub const ContractBuilder = struct {
     fn collectHoleScope(
         self: *ContractBuilder,
         summary: *contract_types.HoleSummary,
-        analyzer: *const effect_inference.Analyzer,
+        effects: *const effect_inference.EffectFacts,
         hole_node: NodeIndex,
     ) !void {
         const owner: *const effect_inference.FunctionEffect = blk: {
-            for (analyzer.all()) |*fe| {
+            for (effects.all()) |*fe| {
                 if (self.subtreeContains(fe.body_node, hole_node)) break :blk fe;
             }
             return;
@@ -1002,10 +926,10 @@ pub const ContractBuilder = struct {
     /// declaration that is not in its list is a nested one.
     fn innermostNestedDecl(
         self: *ContractBuilder,
-        analyzer: *const effect_inference.Analyzer,
+        effects: *const effect_inference.EffectFacts,
         hole_node: NodeIndex,
     ) ?NodeIndex {
-        const functions = analyzer.all();
+        const functions = effects.all();
         const owner: *const effect_inference.FunctionEffect = blk: {
             for (functions) |*fe| {
                 if (self.subtreeContains(fe.body_node, hole_node)) break :blk fe;
@@ -1061,44 +985,14 @@ pub const ContractBuilder = struct {
         return env.pool.formatType(env.stripProofMarkers(sig.return_type), buf);
     }
 
-    fn handlerReachability(
-        allocator: std.mem.Allocator,
-        analyzer: *const effect_inference.Analyzer,
-    ) !?[]bool {
-        const functions = analyzer.all();
-        const h = findFunctionIndex(functions, "handler") orelse return null;
-        var reachable = try allocator.alloc(bool, functions.len);
-        errdefer allocator.free(reachable);
-        @memset(reachable, false);
-
-        var stack: std.ArrayListUnmanaged(usize) = .empty;
-        defer stack.deinit(allocator);
-        reachable[h] = true;
-        try stack.append(allocator, h);
-        while (stack.pop()) |cur| {
-            // Follow function-value references as well as calls: a helper the
-            // handler holds can be called through that value, so counting it
-            // reachable is the conservative direction.
-            for ([_][]const usize{ analyzer.calleesOf(cur), analyzer.valueRefsOf(cur) }) |edges| {
-                for (edges) |callee| {
-                    if (callee < reachable.len and !reachable[callee]) {
-                        reachable[callee] = true;
-                        try stack.append(allocator, callee);
-                    }
-                }
-            }
-        }
-        return reachable;
-    }
-
     fn helperReachable(
-        analyzer: *const effect_inference.Analyzer,
-        reachable: ?[]const bool,
+        effects: *const effect_inference.EffectFacts,
+        contract_effects: *const effect_inference.ContractEffectFacts,
         name: []const u8,
     ) bool {
-        const r = reachable orelse return false;
-        if (findFunctionIndex(analyzer.all(), name)) |idx| {
-            return idx < r.len and r[idx];
+        if (findFunctionIndex(effects.all(), name)) |idx| {
+            return idx < contract_effects.handler_reachable.len and
+                contract_effects.handler_reachable[idx];
         }
         return false;
     }
@@ -1145,7 +1039,8 @@ pub const ContractBuilder = struct {
     fn dischargeCapabilityBudget(
         self: *ContractBuilder,
         contract: *HandlerContract,
-        analyzer: *const effect_inference.Analyzer,
+        effects: *const effect_inference.EffectFacts,
+        contract_effects: *const effect_inference.ContractEffectFacts,
         handler_loc: ?ir.SourceLocation,
     ) !void {
         const env = self.type_env orelse return;
@@ -1208,8 +1103,8 @@ pub const ContractBuilder = struct {
         // satisfied" to anything that only counts diagnostics by kind.
 
         // Locate the handler's FunctionEffect and index.
-        const functions = analyzer.all();
-        const h = findFunctionIndex(functions, "handler") orelse return;
+        const functions = effects.all();
+        const h = contract_effects.first_handler_index orelse return;
         const hfe = functions[h];
 
         // ZTS512: the handler's row is a lower bound, so testing it against
@@ -1233,27 +1128,6 @@ pub const ContractBuilder = struct {
             return;
         }
 
-        // Reachability: the budget bounds only helpers the handler can reach.
-        var reachable = try self.allocator.alloc(bool, functions.len);
-        defer self.allocator.free(reachable);
-        @memset(reachable, false);
-        var stack: std.ArrayListUnmanaged(usize) = .empty;
-        defer stack.deinit(self.allocator);
-        reachable[h] = true;
-        try stack.append(self.allocator, h);
-        while (stack.pop()) |cur| {
-            // Value references count as reachable for the same reason as in
-            // `handlerReachability`.
-            for ([_][]const usize{ analyzer.calleesOf(cur), analyzer.valueRefsOf(cur) }) |edges| {
-                for (edges) |callee| {
-                    if (callee < reachable.len and !reachable[callee]) {
-                        reachable[callee] = true;
-                        try stack.append(self.allocator, callee);
-                    }
-                }
-            }
-        }
-
         // Every capability in the handler's transitive row that the budget
         // omits is a violation, attributed to its direct source.
         var cap_it = hfe.row.capabilities.iterator();
@@ -1267,7 +1141,8 @@ pub const ContractBuilder = struct {
             }
             for (functions, 0..) |fe, i| {
                 if (i == h) continue;
-                if (!reachable[i]) continue;
+                if (i >= contract_effects.handler_reachable.len or
+                    !contract_effects.handler_reachable[i]) continue;
                 if (!fe.direct_caps.contains(cap)) continue;
                 try contract.spec_diagnostics.append(
                     self.allocator,
@@ -1370,10 +1245,8 @@ pub const ContractBuilder = struct {
                     }
                 }
 
-                // Check generic bindings from the module binding registry
-                for (self.factsRef().generic_bindings.items) |gb| {
-                    if (gb.slot != binding.slot) continue;
-
+                // Check generic bindings from the module binding registry.
+                if (self.factsRef().genericBindingForReference(binding, .legacy_slot)) |gb| {
                     // Apply contract flags
                     if (gb.flags.sets_bearer_auth) self.api_bearer_auth = true;
                     if (gb.flags.sets_jwt_auth) self.api_jwt_auth = true;
@@ -1399,19 +1272,16 @@ pub const ContractBuilder = struct {
                             },
                         }
                     }
-                    break;
                 }
 
                 // Partner extractions route literals into the per-specifier
                 // extensions map. `fetch_host` rules also mirror into the
                 // top-level egress.endpoints so runtime egress policy enforcement
                 // sees one uniform list.
-                for (self.factsRef().extension_bindings.items) |eb| {
-                    if (eb.slot != binding.slot) continue;
+                if (self.factsRef().extensionBindingForReference(binding, .legacy_slot)) |eb| {
                     for (eb.extractions) |rule| {
                         try self.applyExtensionExtraction(call, eb.module_specifier, rule);
                     }
-                    break;
                 }
             }
 
@@ -1607,14 +1477,12 @@ pub const ContractBuilder = struct {
     };
 
     /// Check if a binding slot is tracked for a specific contract category.
-    fn isBindingCategory(self: *const ContractBuilder, slot: u16, category: module_binding.ContractCategory) bool {
-        for (self.factsRef().generic_bindings.items) |gb| {
-            if (gb.slot != slot) continue;
-            for (gb.extractions) |ext| {
-                if (ext.category == category) return true;
-            }
-        }
-        return false;
+    fn isBindingCategory(
+        self: *const ContractBuilder,
+        binding: ir.BindingRef,
+        category: module_binding.ContractCategory,
+    ) bool {
+        return self.factsRef().referenceHasCategory(binding, .legacy_slot, category);
     }
 
     fn getCategoryTarget(self: *ContractBuilder, category: module_binding.ContractCategory) ?CategoryTarget {
@@ -2141,7 +2009,7 @@ pub const ContractBuilder = struct {
                 const callee_tag = self.ir_view.getTag(call.callee) orelse return;
                 if (callee_tag == .identifier) {
                     const binding = self.ir_view.getBinding(call.callee) orelse return;
-                    if (self.isBindingCategory(binding.slot, .request_schema)) {
+                    if (self.isBindingCategory(binding, .request_schema)) {
                         const fn_name = self.resolveAtomName(binding.name_atom);
                         const is_decode_query = fn_name != null and std.mem.eql(u8, fn_name.?, "decodeQuery");
 
@@ -2158,13 +2026,10 @@ pub const ContractBuilder = struct {
                             }
                         }
                     } else {
-                        // Check for auth flags via generic bindings
-                        for (self.factsRef().generic_bindings.items) |gb| {
-                            if (gb.slot == binding.slot) {
-                                if (gb.flags.sets_bearer_auth) route.requires_bearer = true;
-                                if (gb.flags.sets_jwt_auth) route.requires_jwt = true;
-                                break;
-                            }
+                        // Check for auth flags via generic bindings.
+                        if (self.factsRef().genericBindingForReference(binding, .legacy_slot)) |gb| {
+                            if (gb.flags.sets_bearer_auth) route.requires_bearer = true;
+                            if (gb.flags.sets_jwt_auth) route.requires_jwt = true;
                         }
                     }
                 }
@@ -2696,7 +2561,7 @@ pub const ContractBuilder = struct {
         if (callee_tag != .identifier) return null;
 
         const binding = self.ir_view.getBinding(call.callee) orelse return null;
-        if (!self.isBindingCategory(binding.slot, .request_schema)) return null;
+        if (!self.isBindingCategory(binding, .request_schema)) return null;
         if (call.args_count == 0) return null;
 
         const schema_idx = self.ir_view.getListIndex(call.args_start, 0);
@@ -2757,290 +2622,13 @@ pub const ContractBuilder = struct {
     // -----------------------------------------------------------------
 
     /// Summarize the effect facts that handler property derivation depends on.
-    fn computeEffectSummary(self: *const ContractBuilder, handler_fn: ?NodeIndex) !EffectSummary {
-        if (handler_fn) |hf| {
-            var summary = EffectSummary{};
-            var seen_functions: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
-            defer seen_functions.deinit(self.allocator);
-            try self.includeReachableFunctionEffects(hf, &summary, &seen_functions);
-
-            const route_resolver = route_resolution.Resolver.init(
-                self.ir_view,
-                self.atoms,
-                self.factsRef(),
-            );
-            var roots = try route_resolver.routeRoots(self.allocator);
-            defer roots.deinit(self.allocator);
-            if (roots.unresolved) summary.unknown = true;
-            for (roots.functions.items) |fn_node| {
-                try self.includeReachableFunctionEffects(fn_node, &summary, &seen_functions);
-            }
-            return summary;
-        }
-
-        return self.computeGlobalEffectSummary();
-    }
-
-    fn computeGlobalEffectSummary(self: *const ContractBuilder) EffectSummary {
-        var summary = EffectSummary{};
-
-        for (self.factsRef().functions.items) |entry| {
-            if (builtin_modules.fromSpecifier(entry.module)) |binding| {
-                const is_cache = std.mem.eql(u8, binding.specifier, "zttp:cache");
-
-                for (entry.names.items) |func_name| {
-                    summary.has_any_call = true;
-
-                    for (binding.exports) |exp| {
-                        if (std.mem.eql(u8, exp.name, func_name)) {
-                            summary.includeCall(exp.effect);
-                            break;
-                        }
-                    }
-
-                    if (is_cache and std.mem.eql(u8, func_name, "cacheGet")) {
-                        summary.has_cache_read = true;
-                    }
-                }
-            } else if (self.manifest_registry) |registry| {
-                // Partner-registered module: read effect class from the manifest.
-                // Treat extension-declared writes as writes.
-                const manifest = registry.fromSpecifier(entry.module) orelse continue;
-                for (entry.names.items) |func_name| {
-                    summary.has_any_call = true;
-                    for (manifest.exports.items) |exp| {
-                        if (std.mem.eql(u8, exp.name, func_name)) {
-                            summary.includeCall(exp.effect);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (self.egress_endpoints.items.len > 0 or self.egress_dynamic) summary.includeEgress();
-
-        return summary;
-    }
-
-    fn includeReachableFunctionEffects(
-        self: *const ContractBuilder,
-        node: NodeIndex,
-        summary: *EffectSummary,
-        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
-    ) std.mem.Allocator.Error!void {
-        const fn_node = self.resolveFunctionNode(node) orelse return;
-        const gop = try seen_functions.getOrPut(self.allocator, fn_node);
-        if (gop.found_existing) return;
-
-        const func = self.ir_view.getFunction(fn_node) orelse return;
-        try self.includeReachableNodeEffects(func.body, summary, seen_functions);
-    }
-
-    fn includeReachableNodeEffects(
-        self: *const ContractBuilder,
-        node: NodeIndex,
-        summary: *EffectSummary,
-        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
-    ) std.mem.Allocator.Error!void {
-        if (node == null_node) return;
-        const tag = self.ir_view.getTag(node) orelse return;
-        switch (tag) {
-            .program, .block => {
-                const block = self.ir_view.getBlock(node) orelse return;
-                for (0..block.stmts_count) |i| {
-                    try self.includeReachableNodeEffects(
-                        self.ir_view.getListIndex(block.stmts_start, @intCast(i)),
-                        summary,
-                        seen_functions,
-                    );
-                }
-            },
-            .if_stmt => {
-                const stmt = self.ir_view.getIfStmt(node) orelse return;
-                try self.includeReachableNodeEffects(stmt.condition, summary, seen_functions);
-                try self.includeReachableNodeEffects(stmt.then_branch, summary, seen_functions);
-                try self.includeReachableNodeEffects(stmt.else_branch, summary, seen_functions);
-            },
-            .for_of_stmt => {
-                const stmt = self.ir_view.getForIter(node) orelse return;
-                try self.includeReachableNodeEffects(stmt.iterable, summary, seen_functions);
-                try self.includeReachableNodeEffects(stmt.body, summary, seen_functions);
-            },
-            .return_stmt, .expr_stmt => {
-                if (self.ir_view.getOptValue(node)) |value| {
-                    try self.includeReachableNodeEffects(value, summary, seen_functions);
-                }
-            },
-            .var_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                if (decl.init != null_node and !self.isFunctionNode(decl.init)) {
-                    try self.includeReachableNodeEffects(decl.init, summary, seen_functions);
-                }
-            },
-            .function_decl => {},
-            .binary_op => {
-                const bin = self.ir_view.getBinary(node) orelse return;
-                try self.includeReachableNodeEffects(bin.left, summary, seen_functions);
-                try self.includeReachableNodeEffects(bin.right, summary, seen_functions);
-            },
-            .unary_op, .spread => {
-                const un = self.ir_view.getUnary(node) orelse return;
-                try self.includeReachableNodeEffects(un.operand, summary, seen_functions);
-            },
-            .ternary => {
-                const ternary = self.ir_view.getTernary(node) orelse return;
-                try self.includeReachableNodeEffects(ternary.condition, summary, seen_functions);
-                try self.includeReachableNodeEffects(ternary.then_branch, summary, seen_functions);
-                try self.includeReachableNodeEffects(ternary.else_branch, summary, seen_functions);
-            },
-            .call, .method_call => {
-                try self.includeReachableCallEffects(node, summary, seen_functions);
-                const call = self.ir_view.getCall(node) orelse return;
-                try self.includeReachableNodeEffects(call.callee, summary, seen_functions);
-                for (0..call.args_count) |i| {
-                    try self.includeReachableNodeEffects(
-                        self.ir_view.getListIndex(call.args_start, @intCast(i)),
-                        summary,
-                        seen_functions,
-                    );
-                }
-            },
-            .member_access, .optional_chain, .computed_access => {
-                const member = self.ir_view.getMember(node) orelse return;
-                try self.includeReachableNodeEffects(member.object, summary, seen_functions);
-                try self.includeReachableNodeEffects(member.computed, summary, seen_functions);
-            },
-            .assignment => {
-                const assign = self.ir_view.getAssignment(node) orelse return;
-                try self.includeReachableNodeEffects(assign.target, summary, seen_functions);
-                try self.includeReachableNodeEffects(assign.value, summary, seen_functions);
-            },
-            .array_literal => {
-                const arr = self.ir_view.getArray(node) orelse return;
-                for (0..arr.elements_count) |i| {
-                    try self.includeReachableNodeEffects(
-                        self.ir_view.getListIndex(arr.elements_start, @intCast(i)),
-                        summary,
-                        seen_functions,
-                    );
-                }
-            },
-            .object_literal => {
-                const obj = self.ir_view.getObject(node) orelse return;
-                for (0..obj.properties_count) |i| {
-                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
-                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-                    try self.includeReachableNodeEffects(prop.value, summary, seen_functions);
-                }
-            },
-            .match_expr => {
-                const match = self.ir_view.getMatchExpr(node) orelse return;
-                try self.includeReachableNodeEffects(match.discriminant, summary, seen_functions);
-                for (0..match.arms_count) |i| {
-                    const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
-                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-                    try self.includeReachableNodeEffects(arm.body, summary, seen_functions);
-                }
-            },
-            .function_expr, .arrow_function => {
-                const func = self.ir_view.getFunction(node) orelse return;
-                try self.includeReachableNodeEffects(func.body, summary, seen_functions);
-            },
-            // exhaustive: every node that can contain a call is walked above,
-            // including match_expr and both literal containers. What remains are
-            // leaves - identifiers and literals - which reach no effect.
-            else => {},
-        }
-    }
-
-    fn includeReachableCallEffects(
-        self: *const ContractBuilder,
-        node: NodeIndex,
-        summary: *EffectSummary,
-        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
-    ) std.mem.Allocator.Error!void {
-        const call = self.ir_view.getCall(node) orelse return;
-
-        const route_resolver = route_resolution.Resolver.init(
-            self.ir_view,
-            self.atoms,
-            self.factsRef(),
-        );
-        if (try route_resolver.resolveDispatch(self.allocator, call.callee)) |resolved| {
-            var targets = resolved;
-            defer targets.deinit(self.allocator);
-            if (targets.unresolved) summary.unknown = true;
-            for (targets.functions.items) |fn_node| {
-                try self.includeReachableFunctionEffects(fn_node, summary, seen_functions);
-            }
-            return;
-        }
-
-        if (self.ir_view.getTag(call.callee) != .identifier) return;
-        const binding = self.ir_view.getBinding(call.callee) orelse return;
-
-        if (binding.kind == .undeclared_global) {
-            const name = self.resolveAtomName(binding.name_atom) orelse return;
-            if (std.mem.eql(u8, name, "fetchSync")) {
-                summary.includeEgress();
-                return;
-            }
-        }
-
-        for (self.factsRef().generic_bindings.items) |gb| {
-            if (gb.slot != binding.slot) continue;
-            summary.has_any_call = true;
-            if (builtin_modules.fromSpecifier(gb.module_specifier)) |module| {
-                for (module.exports) |exp| {
-                    if (std.mem.eql(u8, exp.name, gb.binding_name)) {
-                        summary.includeCall(exp.effect);
-                        break;
-                    }
-                }
-            }
-            if (std.mem.eql(u8, gb.module_specifier, "zttp:cache") and
-                std.mem.eql(u8, gb.binding_name, "cacheGet"))
-            {
-                summary.has_cache_read = true;
-            }
-            return;
-        }
-
-        if (self.manifest_registry) |registry| {
-            for (self.factsRef().extension_bindings.items) |eb| {
-                if (eb.slot != binding.slot) continue;
-                summary.has_any_call = true;
-                const manifest = registry.fromSpecifier(eb.module_specifier) orelse return;
-                for (manifest.exports.items) |exp| {
-                    if (std.mem.eql(u8, exp.name, eb.binding_name)) {
-                        summary.includeCall(exp.effect);
-                        break;
-                    }
-                }
-                return;
-            }
-        }
-
-        if (self.findFunctionNodeByBinding(binding.slot)) |fn_node| {
-            try self.includeReachableFunctionEffects(fn_node, summary, seen_functions);
-        }
-    }
-
-    /// Derive handler-level properties from the aggregate effect summary.
-    /// `handler_row`, when present, is the handler's call-graph composed
-    /// effect row: intersecting with it makes a property the handler claims
-    /// also account for every helper it transitively calls. This is a
-    /// monotone tightening - it can only make a property falser, never
-    /// unsoundly true - so the proof composes across helper boundaries.
     fn computeProperties(
         self: *const ContractBuilder,
+        summary: effect_inference.ContractEffectSummary,
         handler_row: ?effect_inference.EffectRow,
         handler_fn: ?NodeIndex,
-    ) !HandlerProperties {
-        const s = try self.computeEffectSummary(handler_fn);
-
-        var read_only = !s.unknown and s.io != .write;
+    ) HandlerProperties {
+        var read_only = !summary.unknown and summary.io != .write;
         // Determinism is decided by the flow walk, which the caller ANDs in:
         // it answers whether a varying value reaches the response rather than
         // whether one was read at all, so a handler that logs a timestamp and
@@ -3055,9 +2643,9 @@ pub const ContractBuilder = struct {
         // nothing to prove, so the property stays unproven rather than
         // defaulting to held.
         const deterministic = handler_fn != null;
-        var pure = !s.unknown and !s.has_any_call and !s.has_egress;
-        var cache_reads = s.has_cache_read;
-        var has_egress = s.has_egress;
+        var pure = !summary.unknown and !summary.has_any_call and !summary.has_egress;
+        var cache_reads = summary.has_cache_read;
+        var has_egress = summary.has_egress;
 
         if (handler_row) |row| {
             // A lower-bound row calls through a value the walk could not
@@ -3221,25 +2809,6 @@ fn contentTypeFor(idx: u8) []const u8 {
         else => "text/html; charset=utf-8",
     };
 }
-fn appendTrackedFunction(
-    builder: *ContractBuilder,
-    module_name: []const u8,
-    func_name: []const u8,
-) !void {
-    var names: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (names.items) |name| builder.allocator.free(name);
-        names.deinit(builder.allocator);
-    }
-
-    try names.append(builder.allocator, try builder.allocator.dupe(u8, func_name));
-
-    try builder.owned_facts.functions.append(builder.allocator, .{
-        .module = try builder.allocator.dupe(u8, module_name),
-        .names = names,
-    });
-}
-
 fn expectBuiltinExportEffect(
     module_name: []const u8,
     func_name: []const u8,
@@ -3266,10 +2835,25 @@ fn buildTestContract(source: []const u8) !HandlerContract {
 
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var builder = ContractBuilder.init(allocator, view, &atoms, null, null);
+    const handler_fn = findTestFunctionNode(view, &atoms, "handler");
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer module_facts.deinit();
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{
+        .module_facts = &module_facts,
+        .contract_projection = .{ .complete = .{ .selected_handler = handler_fn } },
+    });
+    defer effect_facts.deinit(allocator);
+    var builder = ContractBuilder.initForBuild(
+        allocator,
+        view,
+        &atoms,
+        null,
+        null,
+        &module_facts,
+        &effect_facts,
+    );
     defer builder.deinit();
 
-    const handler_fn = findTestFunctionNode(view, &atoms, "handler");
     return try builder.build("handler.ts", null, handler_fn, root, null, false, null);
 }
 
@@ -3306,7 +2890,7 @@ test "computeProperties pure handler stays pure" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
 
-    const props = try builder.computeProperties(null, null);
+    const props = builder.computeProperties(.{}, null, null);
 
     try std.testing.expect(props.pure);
     try std.testing.expect(props.read_only);
@@ -3319,9 +2903,11 @@ test "computeProperties cache read is read-only but not stateless" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
 
-    try appendTrackedFunction(&builder, "zttp:cache", "cacheGet");
-
-    const props = try builder.computeProperties(null, null);
+    const props = builder.computeProperties(.{
+        .has_any_call = true,
+        .io = .read,
+        .has_cache_read = true,
+    }, null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(props.read_only);
@@ -3334,9 +2920,10 @@ test "computeProperties bare writes are not retry safe" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
 
-    try appendTrackedFunction(&builder, "zttp:cache", "cacheSet");
-
-    const props = try builder.computeProperties(null, null);
+    const props = builder.computeProperties(.{
+        .has_any_call = true,
+        .io = .write,
+    }, null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3349,9 +2936,10 @@ test "computeProperties registration functions are request-path writes" {
     var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
     defer builder.deinit();
 
-    try appendTrackedFunction(&builder, "zttp:validate", "schemaCompile");
-
-    const props = try builder.computeProperties(null, null);
+    const props = builder.computeProperties(.{
+        .has_any_call = true,
+        .io = .write,
+    }, null, null);
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.retry_safe);
 }
@@ -3491,13 +3079,20 @@ test "a write reached as a function value fails the handler properties closed" {
         \\  return Response.text("ok");
         \\}
     ;
-    const sources = [_][]const u8{ value_ref, slot_collision };
-    for (sources) |source| {
-        var contract = try buildTestContract(source);
+    const cases = [_]struct {
+        source: []const u8,
+        bearer_auth: bool,
+    }{
+        .{ .source = value_ref, .bearer_auth = false },
+        .{ .source = slot_collision, .bearer_auth = true },
+    };
+    for (cases) |case| {
+        var contract = try buildTestContract(case.source);
         defer contract.deinit(std.testing.allocator);
         const props = contract.properties orelse return error.MissingProperties;
         try std.testing.expect(!props.retry_safe);
         try std.testing.expect(!props.idempotent);
+        try std.testing.expectEqual(case.bearer_auth, contract.api.auth.bearer);
     }
 }
 
@@ -3632,7 +3227,9 @@ test "computeProperties egress is conservative write" {
 
     builder.egress_dynamic = true;
 
-    const props = try builder.computeProperties(null, null);
+    var summary: effect_inference.ContractEffectSummary = .{};
+    summary.includeEgress();
+    const props = builder.computeProperties(summary, null, null);
 
     try std.testing.expect(!props.pure);
     try std.testing.expect(!props.read_only);
@@ -3675,21 +3272,26 @@ test "registered partner manifest contributes effect class to handler properties
     parser.setAtomTable(&atoms);
     defer parser.deinit();
 
-    _ = try parser.parse();
+    const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, &registry);
+    defer module_facts.deinit();
+    try std.testing.expect(containsString(module_facts.modules.items, "zttp-ext:stripe"));
+    try std.testing.expectEqual(@as(usize, 1), module_facts.functions.items.len);
+    try std.testing.expectEqualStrings("zttp-ext:stripe", module_facts.functions.items[0].module);
+    try std.testing.expect(containsString(module_facts.functions.items[0].names.items, "chargeCard"));
+
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{
+        .manifest_registry = &registry,
+        .module_facts = &module_facts,
+        .contract_projection = .{ .complete = .{ .selected_handler = null } },
+    });
+    defer effect_facts.deinit(allocator);
+    const contract_effects = try effect_facts.requireContract();
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
-    builder.manifest_registry = &registry;
     defer builder.deinit();
-
-    try builder.buildFacts();
-
-    try std.testing.expect(containsString(builder.owned_facts.modules.items, "zttp-ext:stripe"));
-    try std.testing.expectEqual(@as(usize, 1), builder.owned_facts.functions.items.len);
-    try std.testing.expectEqualStrings("zttp-ext:stripe", builder.owned_facts.functions.items[0].module);
-    try std.testing.expect(containsString(builder.owned_facts.functions.items[0].names.items, "chargeCard"));
-
-    const props = try builder.computeProperties(null, null);
+    const props = builder.computeProperties(contract_effects.summary, null, null);
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.idempotent);
     try std.testing.expect(!props.pure);
@@ -3738,11 +3340,13 @@ test "partner manifest contractExtractions populate extensions section" {
     _ = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, &registry);
+    defer module_facts.deinit();
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
     builder.manifest_registry = &registry;
+    builder.module_facts = &module_facts;
     defer builder.deinit();
 
-    try builder.buildFacts();
     try builder.scanCallSites();
 
     // Top-level egress mirrors the partner-declared fetch_host (shared-section
@@ -3780,10 +3384,12 @@ test "a literal url the endpoint rule refuses proves no destination" {
     _ = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, null);
+    defer module_facts.deinit();
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    builder.module_facts = &module_facts;
     defer builder.deinit();
 
-    try builder.buildFacts();
     try builder.scanCallSites();
 
     try std.testing.expectEqual(@as(usize, 0), builder.egress_endpoints.items.len);
@@ -3811,10 +3417,12 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
     _ = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, null);
+    defer module_facts.deinit();
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
+    builder.module_facts = &module_facts;
     defer builder.deinit();
 
-    try builder.buildFacts();
     try builder.scanCallSites();
 
     // The contract records the destination, not the name: scheme and effective
@@ -3938,13 +3546,11 @@ test "missing manifest registry skips partner imports" {
     _ = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
-    defer builder.deinit();
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, null);
+    defer module_facts.deinit();
 
-    try builder.buildFacts();
-
-    try std.testing.expect(!containsString(builder.owned_facts.modules.items, "zttp-ext:unknown"));
-    try std.testing.expectEqual(@as(usize, 0), builder.owned_facts.functions.items.len);
+    try std.testing.expect(!containsString(module_facts.modules.items, "zttp-ext:unknown"));
+    try std.testing.expectEqual(@as(usize, 0), module_facts.functions.items.len);
 }
 
 test "a schema zttp:validate cannot compile is refused where a call would fail" {

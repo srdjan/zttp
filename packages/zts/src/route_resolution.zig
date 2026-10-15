@@ -384,12 +384,14 @@ pub const Resolver = struct {
     fn isRouterMatchCallee(self: *const Resolver, callee: NodeIndex) bool {
         if (self.ir_view.getTag(callee) != .identifier) return false;
         const binding = self.ir_view.getBinding(callee) orelse return false;
-        for (self.facts.imports.items) |record| {
-            if (record.slot != binding.slot or record.resolution != .builtin) continue;
-            return std.mem.eql(u8, record.module_specifier, "zttp:router") and
-                std.mem.eql(u8, record.imported_name, "routerMatch");
-        }
-        return false;
+        const record = self.facts.importForReference(
+            binding,
+            .legacy_slot,
+            .builtin,
+            .first,
+        ) orelse return false;
+        return std.mem.eql(u8, record.module_specifier, "zttp:router") and
+            std.mem.eql(u8, record.imported_name, "routerMatch");
     }
 
     fn hasRouterMatchImport(self: *const Resolver) bool {

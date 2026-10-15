@@ -785,11 +785,17 @@ The initial proposal to guard every consumer would change existing parsed-source
 Those consumers must retain explicit legacy slot matching within this reset.
 Captured module imports remain eligible where the current consumer admits them.
 Declaration identity remains distinct from import eligibility and includes scope where the existing lookup uses scope.
+Global import declarations can share a name atom and slot because declaration collection does not reject that duplication.
+Reference accessors must preserve resolution filtering before selecting a matching slot.
+For example, router lookup must skip an unresolved import before selecting a later builtin record with the same slot.
+The analyzer's import map instead retains the last matching record through overwrite.
+The shared accessor must express both selection policies explicitly.
+Schema-category lookup must search all eligible matching slots for its category, while authentication scanning retains its first-match behavior.
 Export copies must remain valid after session cleanup.
 
 An existing fixture imports `parseBearer as length` and calls a local function whose slot equals that import slot.
 Source review shows that the current contract sets bearer authentication metadata through that slot match.
-A baseline assertion must confirm this behavior before the accessor migration.
+An unfiltered baseline run confirmed this behavior before the accessor migration.
 The reset will centralize that policy instead of silently correcting it.
 
 The factory can retain a separate legacy summary facet when ordinary rows answer a different question.
@@ -803,7 +809,10 @@ The path profile marks the contract facet as unrequested.
 A completed no-handler facet remains different from an unrequested facet.
 The builder requires completed contract facts and combines the no-handler summary with its existing concrete-egress scan.
 Astra accepted this revised ownership design through source review.
-Baseline characterizations remain necessary before implementation.
+Baseline characterizations now cover the distinct handler identities, callback traversal, raw-slot precedence, unused imports, and exported helper facts.
+The duplicate-handler fixture uses a bare block because the analyzer's declaration collection does not descend conditional blocks.
+The typed budget fixture uses source preparation and a full session with its type map.
+The unfiltered analyzer root passed before the producer migration.
 
 ### U6 preparation findings
 
@@ -823,6 +832,13 @@ Only a string content override changes verify source; other content values remai
 Verify must still read disk first and preserve the current missing-file refusal.
 Graph identity and the stale guard must use the same effective source as analysis.
 
+A pre-U6 CLI baseline confirms the override identity mismatch.
+Disk verification and override verification return different `source_digest` values but the same `module_graph_hash`.
+Both transport commands exit 0 with no protocol error; their property verdicts establish no identity correctness.
+The retained responses are `disk-result.json` and `override-result.json` in `/tmp/zttp-reset-20261015/u6-root-baseline/`.
+The approved U6 scope corrects that mixed identity by hashing the effective root bytes.
+The wire schema, property interpretation, and separate imported observations remain compatible.
+
 Current graph construction reads the root before validating its extension.
 Missing or oversized JavaScript roots therefore produce `EntryUnreadable`, while readable JavaScript roots produce `UnsupportedSourceExtension`.
 Root read failures, including allocation failure during that read, map to `EntryUnreadable` before operation dispatch.
@@ -835,6 +851,178 @@ Separate dependency graph, summary, and fault observations remain unchanged.
 Normalize write refusal remains before stale checking and operation dispatch.
 A controlled changing-reader test must bind the digest, graph hash, diagnostics, and contract to captured bytes.
 The test must also confirm that later disk bytes differ from those captured bytes.
+
+### U7 preparation findings
+
+The parser seam is `packages/zts/src/parser/parse.zig`, in variable declaration parsing after binding creation.
+The grammar authority is `packages/zts/src/grammar_registry.zig`.
+Frozen preparation fixtures live in `packages/zts/src/source_frontend.zig`; CHECK stage fixtures live in `packages/tools/src/precompile.zig`.
+`packages/zts/src/type_env.zig` owns environment binding, while `packages/zts/src/type_checker.zig` owns declaration enforcement.
+
+The first direct parser slice can cover one annotated variable binding without changing production callers.
+The existing tokenizer supplies the required tokens and reversible lookahead.
+The annotation hook belongs after binding declaration and before initializer parsing.
+The typed initializer must use the same runtime parser and own a separate syntax store.
+
+The published primitive set is `unknown`, `never`, `undefined`, `null`, `boolean`, `number`, `string`, and `Bytes`.
+Parentheses can contain one primitive within the existing nesting limit.
+`any` and `void` retain admission refusals; boolean literals belong to the next syntax phase.
+Legacy preparation retains suffix text such as `string tolerated_suffix`, while semantic lowering resolves its primitive prefix.
+The syntax store must retain both the recognized semantic span and the complete raw annotation span.
+
+The syntax store belongs to the parser's engine tier and must not import the compiler's type pool.
+Compiler lowering must map syntax primitives directly to existing pool indices and bind the existing `BindingRef`.
+The direct path must use no TypeMap, name ordinal, location join, or type-text parse.
+`bindVarType` uses the binding's scope and name atom, rather than its slot alone.
+U7 establishes parser identity and direct environment lookup, not initializer enforcement by the existing checker.
+The current checker still obtains declaration annotations through name ordinals; U12 owns that consumer migration.
+The parser owns store arrays, borrows original bytes, and releases arrays on every exit.
+The store must add no runtime atoms, nodes, constants, strings, or scopes.
+
+Independent legacy and direct comparisons need fresh atom tables.
+The existing identity helper shares atoms and strips both inputs, so it cannot supply this comparison unchanged.
+Comparisons must include runtime nodes, payloads, locations, lists, constants, scopes, bindings, and atom identities.
+Type-store allocations remain separate from runtime allocation parity.
+Original spans remain half-open byte offsets into unmodified source.
+
+CHECK collects source-admission diagnostics before runtime parsing.
+Compilation stops at its first source-admission refusal before runtime parsing.
+A later admission refusal can therefore hide an earlier runtime syntax error.
+The private comparison path must preserve stage order rather than sort all diagnostics by position.
+Admission scanning can reuse token and syntax logic without building a second runtime tree.
+A failed direct parse must return its failure without a legacy retry.
+
+Type-token consumption must preserve the previous runtime token used by missing-semicolon diagnostics.
+Type nesting needs its own counter because legacy admission counts type delimiters separately from runtime nesting.
+Comment interiors need explicit legacy characterization before the private slice admits them.
+The legacy type parser does not skip comments as the runtime tokenizer does.
+Tolerated suffixes still require admission checks; suffix `any` or `void` must not bypass existing refusals.
+
+Astra's design review bounds U7's private comparison to simple `let` and `const` declarations with one annotated binding.
+Other declarations can remain untyped, and initializer tokens must belong to an explicit limited vocabulary.
+The preflight scan covers the complete source before declaring that source eligible.
+Functions, imports, exports, type declarations, compound annotations, assertions, templates, regexes, and uncharacterized comment interiors return a private `out_of_slice` outcome.
+An unsupported annotation position also returns that outcome.
+The outcome declines a private comparison and does not authorize a legacy retry or change public admission.
+
+Within that boundary, admission checks recognize type spellings only after a declaration's binding colon.
+Runtime identifiers and quoted strings receive no type-admission classification.
+Suffix `number void any` reports `any` before `void` in CHECK collection mode.
+The scan finds `any` first, then the removed-form pass finds `void`; compilation stops at `any`.
+The bounded mixed-error fixture places an untyped broken initializer before the annotated declaration.
+Its admission refusal must suppress the earlier runtime failure.
+
+Focused tests must cover primitives, grouping, tolerated suffixes, original error spans, nesting limits, allocation failure, and runtime identity.
+Mixed admission and runtime errors must preserve the frozen stage precedence.
+Production callers remain on `PreparedSource` until the later cutover phases.
+
+### U8 preparation findings
+
+`packages/zts/src/grammar_registry.zig` publishes compound grammar.
+`packages/zts/src/type_pool.zig` owns current semantic parsing and normalization.
+`packages/zts/src/stripper.zig` owns current admission and delimiter scanning.
+Existing semantic fixtures in TypePool and admission fixtures in the stripper supply separate compatibility evidence.
+
+The compound lowerer must distinguish published syntax, source admission, and legacy semantic prefix parsing.
+`TypePool.parseTypeExpr` does not require complete input consumption.
+TypePool behavior alone does not establish that source admission accepts an incomplete form.
+Each new fixture must therefore check admission before comparing semantic meaning.
+
+Record parsing accepts identifier fields, optional fields, readonly fields, and permissive separators.
+Quoted field names can stop semantic parsing and leave an empty record or an earlier field prefix.
+Missing colons, missing types, comments, and missing closers can also produce semantic prefixes.
+Those behaviors need source-admission characterization before the private path claims compatibility.
+
+Array suffixes depend on the parsed primary.
+Primitives and non-identifier primaries receive repeated suffixes; named references receive one suffix, and generic applications leave suffixes unconsumed.
+Readonly arrays retain their flag, while legacy lowering discards a tuple's readonly flag.
+Tuple syntax can retain that authored flag without changing its resolved legacy meaning.
+
+Intersection binds more tightly than union.
+Leading and trailing operators can produce a resolved prefix in the legacy semantic parser.
+Exactly two union members containing `undefined` use the nullable representation.
+Wider unions use the normal union constructor, with its existing flattening, deduplication, and subsumption.
+
+String literals retain raw escaped text rather than decoded text.
+Number literals resolve decimal integer prefixes; decimals and hexadecimal text can therefore produce shorter numeric meanings.
+Integers outside the existing literal range become base `number`.
+Template types retain literal segments and type slots; an empty template has no semantic type.
+Incomplete literals and templates need separate admission characterization.
+
+Function syntax and grouped syntax share a backtracking boundary after the first identifier.
+Legacy semantic parsing tolerates some missing separators, closers, arrows, and return types.
+Optional function parameters remain refused by source admission, while optional record fields remain admitted.
+The source frontend also refuses `void`, `Array<T>`, and `ReadonlyArray<T>` outside existing exceptions.
+Predicate semantics belong to the later annotation-owner phase.
+
+The engine-tier store can use separate arrays for syntax nodes, member lists, fields, parameters, template parts, and annotations.
+Nodes retain original spans; annotations retain complete admitted spans and recognized-prefix ends.
+Names, literal text, and template text remain borrowed source spans rather than runtime atoms or copied parser names.
+Compiler lowering calls TypePool constructors directly and copies names only when TypePool owns them.
+The lowerer must not reconstruct TypeMap or call `parseTypeExpr` on source text.
+Named references and generic applications remain outside U8 until their later phases.
+
+Admission scanning remains distinct from semantic prefix parsing.
+The legacy scanner tracks delimiter depths and skips comments and quoted text.
+Its removed-form scan reports only the first removed form within an annotation.
+Template scanning skips complete templates, including slots, so existing refusals do not automatically extend into those slots.
+Fixture comparisons must retain this admission scope and the existing CHECK and compilation diagnostic order.
+
+### U9 preparation findings
+
+`packages/zts/src/stripper.zig` owns declaration admission; `packages/zts/src/type_env.zig` owns alias population and recursive-alias checks.
+`packages/zts/src/type_pool.zig` owns nominal identity; `packages/zts/src/type_checker.zig` owns nominal construction and alias-use diagnostics.
+The published declaration grammar lives in `packages/zts/src/grammar_registry.zig`.
+
+The published nominal base grammar lists `number` and `string`, but frozen admission also accepts `boolean`.
+Nominal admission compares trimmed base text exactly; comments, suffixes, and other bases produce ZTS048.
+Structural declarations can omit an equals sign or body in the legacy scanner; empty bodies later supply no alias.
+Semicolons are optional, and multiline unions and intersections can continue across newlines.
+Exported type declarations emit no runtime export, and TypeMap does not retain their export status.
+
+Declaration recognition uses a simplified statement boundary.
+Outside that boundary, `structural` and `nominal` remain ordinary identifiers.
+Source review indicates that indentation can prevent recognition because the boundary check reads the last emitted byte.
+A characterization must confirm that behavior before the private parser claims parity.
+Legacy `type`, `distinct type`, and `interface` spellings retain their existing source refusals.
+Generic declarations remain deferred until U10 supplies their semantics.
+
+Alias population uses a module-wide namespace and processes declarations in source order, including recognized nested declarations.
+Aliases populate before variable and function annotations, while alias declarations themselves lower in source order.
+A later declaration replaces an earlier name without a duplicate diagnostic.
+Structural and nominal declarations share that namespace and can replace each other or previously registered ABI names.
+
+A bare alias root eagerly captures an existing named alias index.
+A missing name becomes a deferred reference, and references inside compound bodies remain deferred.
+Thus `A = string; B = A; A = number` retains string meaning for `B`.
+The forward form `B = A; A = string; A = number` resolves `B` through the final `A`.
+The direct lowerer must preserve that distinction rather than eagerly resolve every reference.
+
+Nominal identity uses the nominal name and base tag, without a unique declaration identity.
+Same-name nominal nodes over the same base remain the same type; different nominal names remain incompatible.
+Nominal values remain assignable to their base, while reverse assignment requires the existing annotated construction path.
+Production refuses callable nominal constructors, despite older specification prose describing them.
+The constructor check uses name-only alias lookup, so runtime-name collisions need a characterization before consumer cutover.
+Pool nodes truncate stored name lengths to eight bits, while environment keys retain full names.
+
+Recursive aliases form a finite reference graph without body expansion.
+Records, tuples, arrays, and `Dict` guard recursive paths; unions, intersections, nullable types, and function edges do not.
+The existing contractivity census marks current alias-map entries after population.
+ZTS212 appears when a variable annotation uses a marked alias; an unused invalid alias supplies no diagnostic through that path.
+The alias walk has 32 path slots, and ordinary reference resolution separately follows at most eight hops.
+Repeated declarations affect that census through their final map entries.
+
+The store needs named-reference nodes and declaration records with kind, component spans, full span, source order, and authored scope.
+An absent structural body must remain distinct from an absent declaration.
+Authored scope supports syntax ownership, while lowering retains the existing module-wide namespace.
+Type-only syntax adds no runtime statement, node, binding, atom, constant, or value export.
+Following runtime nodes retain original byte offsets.
+
+Compiler lowering must process declarations after ABI registration and preserve root-only eager alias lookup.
+It must retain existing nominal construction rules and the existing recursive-alias census.
+The syntax lowerer must check both environment and pool health before publishing completed results.
+Allocation probes must cover declaration arrays, namespace keys, nominal names, recursive-alias state, and partial initialization cleanup.
+Frozen fixtures in the stripper, TypePool, TypeEnv, and checker supply separate admission and semantic evidence.
 
 ## Definition of Done
 

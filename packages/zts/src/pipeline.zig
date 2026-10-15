@@ -668,6 +668,7 @@ pub const ModuleAnalysisSession = struct {
     standalone_flow_checker: ?FlowChecker = null,
     resolution_facts: ?ModuleFacts = null,
     contract_facts: ?ModuleFacts = null,
+    contract_effect_facts: ?EffectFacts = null,
     exported_effects: ?ExportEffects = null,
     path_effect_state: PathEffectState = .unattempted,
     resolution_state: PassState = .skipped,
@@ -764,6 +765,8 @@ pub const ModuleAnalysisSession = struct {
         self.type_env_storage.deinit(self.allocator);
         if (self.contract_facts) |*owned_contract| owned_contract.deinit();
         self.contract_facts = null;
+        if (self.contract_effect_facts) |*owned_effects| owned_effects.deinit(self.allocator);
+        self.contract_effect_facts = null;
         if (self.resolution_facts) |*owned_resolution| owned_resolution.deinit();
         self.resolution_facts = null;
         self.state = .uninitialized;
@@ -1065,6 +1068,30 @@ pub const ModuleAnalysisSession = struct {
         return if (self.standalone_checker) |*checker| checker else error.AnalysisPassIncomplete;
     }
 
+    fn prepareContractEffectFacts(
+        self: *ModuleAnalysisSession,
+        opts: ExtractContractOptions,
+        type_env: *const TypeEnv,
+        handler_fn: ?NodeIndex,
+    ) !*const EffectFacts {
+        if (self.contract_effect_facts != null) return error.ContractEffectFactsAlreadyPrepared;
+        const built = try effect_inference.buildEffectFacts(
+            self.allocator,
+            self.parsed.ir_view,
+            self.parsed.atoms,
+            self.parsed.root,
+            .{
+                .manifest_registry = opts.manifest_registry,
+                .module_facts = self.completedContractFacts(),
+                .type_env = type_env,
+                .imported_effects = opts.imported_effects,
+                .contract_projection = .{ .complete = .{ .selected_handler = handler_fn } },
+            },
+        );
+        self.contract_effect_facts = built;
+        return &self.contract_effect_facts.?;
+    }
+
     fn extractDefaultResult(
         self: *ModuleAnalysisSession,
         filename: []const u8,
@@ -1081,13 +1108,29 @@ pub const ModuleAnalysisSession = struct {
         opts.has_default_response = self.contract_context.has_default_response;
         opts.verification = self.contract_context.verification;
         opts.imported_effects = self.contract_context.imported_effects;
-        return extractContractResultFromTypeSession(
+        const checker = try self.completedTypeChecker();
+        try checker.ensureHealthy();
+        const handler_fn = handler_verifier_mod.findHandlerFunction(
+            self.parsed.ir_view,
+            self.parsed.root,
+        );
+        const handler_loc = if (handler_fn) |handler| self.parsed.ir_view.getLoc(handler) else null;
+        const effects = try self.prepareContractEffectFacts(opts, checker.env, handler_fn);
+        var extraction = try buildContractResultOn(
             self.allocator,
             self.parsed,
             filename,
             opts,
-            try self.completedTypeChecker(),
+            checker.env,
+            checker,
+            handler_fn,
+            handler_loc,
+            self.completedContractFacts(),
+            effects,
         );
+        errdefer extraction.deinit(self.allocator);
+        try checker.ensureHealthy();
+        return extraction;
     }
 
     fn extractCustomResult(
@@ -1104,6 +1147,7 @@ pub const ModuleAnalysisSession = struct {
         const checker = &self.extraction_checker.?;
         _ = try self.extraction_opts.type_check(checker, self.parsed.root);
         try self.prepareContractFacts(true);
+        try checker.ensureHealthy();
 
         var opts = self.extraction_opts;
         opts.resolved = null;
@@ -1112,6 +1156,12 @@ pub const ModuleAnalysisSession = struct {
         opts.has_default_response = self.contract_context.has_default_response;
         opts.verification = self.contract_context.verification;
         opts.imported_effects = self.contract_context.imported_effects;
+        const handler_fn = handler_verifier_mod.findHandlerFunction(
+            self.parsed.ir_view,
+            self.parsed.root,
+        );
+        const handler_loc = if (handler_fn) |handler| self.parsed.ir_view.getLoc(handler) else null;
+        const effects = try self.prepareContractEffectFacts(opts, checker.env, handler_fn);
         var extraction = try buildContractResultOn(
             self.allocator,
             self.parsed,
@@ -1119,11 +1169,10 @@ pub const ModuleAnalysisSession = struct {
             opts,
             checker.env,
             checker,
-            handler_verifier_mod.findHandlerFunction(self.parsed.ir_view, self.parsed.root),
-            if (handler_verifier_mod.findHandlerFunction(self.parsed.ir_view, self.parsed.root)) |handler|
-                self.parsed.ir_view.getLoc(handler)
-            else
-                null,
+            handler_fn,
+            handler_loc,
+            self.completedContractFacts(),
+            effects,
         );
         errdefer extraction.deinit(self.allocator);
         try checker.ensureHealthy();
@@ -1175,7 +1224,7 @@ pub fn extractContractResultFromTypeSession(
 
     const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
     const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
-    var extraction = try buildContractResultOn(
+    var extraction = try buildContractResultWithTemporaryFacts(
         allocator,
         parsed,
         filename,
@@ -1216,7 +1265,7 @@ pub fn extractContractResultFromParsed(
     if (opts.type_check == runContractTypeCheck) {
         if (opts.resolved) |resolved| {
             if (resolved.type_checker) |*tc| {
-                var extraction = try buildContractResultOn(
+                var extraction = try buildContractResultWithTemporaryFacts(
                     allocator,
                     parsed,
                     filename,
@@ -1253,7 +1302,8 @@ pub fn extractContractResultFromParsed(
     defer type_checker.deinit();
     _ = try opts.type_check(&type_checker, parsed.root);
 
-    var extraction = try buildContractResultOn(
+    try type_checker.ensureHealthy();
+    var extraction = try buildContractResultWithTemporaryFacts(
         allocator,
         parsed,
         filename,
@@ -1268,9 +1318,7 @@ pub fn extractContractResultFromParsed(
     return extraction;
 }
 
-/// The half of contract extraction that does not care where the type session
-/// came from: a freshly built one, or the one `resolve` already ran.
-fn buildContractResultOn(
+fn buildContractResultWithTemporaryFacts(
     allocator: std.mem.Allocator,
     parsed: ParsedModule,
     filename: []const u8,
@@ -1280,16 +1328,66 @@ fn buildContractResultOn(
     handler_fn: ?NodeIndex,
     handler_loc: ?ir_mod.SourceLocation,
 ) !ContractExtraction {
-    var builder = ContractBuilder.init(
+    try type_checker.ensureHealthy();
+    var owned_module_facts: ?ModuleFacts = if (opts.module_facts == null)
+        try buildModuleFacts(allocator, parsed, opts.manifest_registry)
+    else
+        null;
+    defer if (owned_module_facts) |*facts| facts.deinit();
+    const module_facts = opts.module_facts orelse &owned_module_facts.?;
+
+    var effect_facts = try effect_inference.buildEffectFacts(
+        allocator,
+        parsed.ir_view,
+        parsed.atoms,
+        parsed.root,
+        .{
+            .manifest_registry = opts.manifest_registry,
+            .module_facts = module_facts,
+            .type_env = type_env,
+            .imported_effects = opts.imported_effects,
+            .contract_projection = .{ .complete = .{ .selected_handler = handler_fn } },
+        },
+    );
+    defer effect_facts.deinit(allocator);
+
+    return buildContractResultOn(
+        allocator,
+        parsed,
+        filename,
+        opts,
+        type_env,
+        type_checker,
+        handler_fn,
+        handler_loc,
+        module_facts,
+        &effect_facts,
+    );
+}
+
+/// Build a contract from completed immutable module and effect facts.
+fn buildContractResultOn(
+    allocator: std.mem.Allocator,
+    parsed: ParsedModule,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+    type_env: *const TypeEnv,
+    type_checker: *TypeChecker,
+    handler_fn: ?NodeIndex,
+    handler_loc: ?ir_mod.SourceLocation,
+    module_facts: *const ModuleFacts,
+    effect_facts: *const EffectFacts,
+) !ContractExtraction {
+    var builder = ContractBuilder.initForBuild(
         allocator,
         parsed.ir_view,
         parsed.atoms,
         type_env,
         type_checker,
+        module_facts,
+        effect_facts,
     );
     builder.manifest_registry = opts.manifest_registry;
-    builder.injected_facts = opts.module_facts;
-    builder.imported_effects = opts.imported_effects;
     builder.capture_export_effects = opts.capture_export_effects;
     defer builder.deinit();
 
@@ -1577,6 +1675,47 @@ fn serializeContractForTest(allocator: std.mem.Allocator, contract: *const Handl
     errdefer output.deinit();
     try handler_contract_mod.writeContractJson(contract, &output.writer);
     return output.toOwnedSlice();
+}
+
+fn extractSessionContractForTest(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+) !ContractExtraction {
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(
+        allocator,
+        ParsedModule.fromExisting(view, root, &atoms),
+        .{ .extraction = opts },
+    );
+    defer analysis.deinit();
+    try analysis.complete();
+
+    var contract = try analysis.extractContract(filename);
+    errdefer contract.deinit(allocator);
+    return .{
+        .contract = contract,
+        .export_effects = analysis.takeExportEffects(),
+    };
+}
+
+fn hasSpecDiagnosticKind(
+    contract: *const HandlerContract,
+    kind: handler_contract_mod.SpecDiagnostic.Kind,
+) bool {
+    for (contract.spec_diagnostics.items) |diagnostic| {
+        if (diagnostic.kind == kind) return true;
+    }
+    return false;
 }
 
 fn expectStringSlices(expected: []const []const u8, actual: []const []const u8) !void {
@@ -1884,6 +2023,219 @@ test "ModuleAnalysisSession publishes owned exports for both extraction profiles
     }
 }
 
+test "contract summary keeps selected handler separate from first named effect row" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { cacheSet } from "zttp:cache";
+        \\{
+        \\  function handler(req) { return Response.text("local"); }
+        \\}
+        \\function handler(req): Effects<Response, "clock"> {
+        \\  cacheSet("state", "key", "value", 10);
+        \\  return Response.text("global");
+        \\}
+    ;
+    var prepared = try source_frontend_mod.PreparedSource.init(allocator, source, "duplicate-handler.ts", .{});
+    defer prepared.deinit();
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, prepared.parserInput());
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initFull(allocator, ParsedModule.fromExisting(view, root, &atoms), .{
+        .type_map = prepared.typeMap(),
+        .strict = false,
+    });
+    defer analysis.deinit();
+    try analysis.complete();
+    var result = try analysis.extractContract("duplicate-handler.ts");
+    defer result.deinit(allocator);
+
+    const contract = &result;
+    const props = contract.properties orelse return error.MissingProperties;
+    try testing.expect(!props.pure);
+    try testing.expect(!props.read_only);
+    try testing.expect(!props.stateless);
+    try testing.expect(!props.retry_safe);
+    try testing.expect(props.deterministic);
+    try testing.expect(!props.has_egress);
+    try testing.expect(!props.idempotent);
+
+    try testing.expect(contract.effect_analysis_complete);
+    try testing.expect(contract.capability_budget.has(.clock));
+    try testing.expect(!contract.capability_budget.has(.policy_check));
+    try testing.expect(!hasSpecDiagnosticKind(contract, .budget_exceeded));
+    try testing.expect(!hasSpecDiagnosticKind(contract, .helper_budget_exceeded));
+}
+
+test "ambient egress summary follows inline callbacks but not named callback values" {
+    const allocator = testing.allocator;
+    const named_source =
+        \\export function leaky() {
+        \\  return fetchSync("https://named.example/a");
+        \\}
+        \\function handler(req) {
+        \\  [1].map(leaky);
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const inline_source =
+        \\function handler(req) {
+        \\  [1].map(() => fetchSync("https://inline.example/a"));
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var named = try extractSessionContractForTest(
+        allocator,
+        named_source,
+        "named-callback.ts",
+        .{ .strict = false, .capture_export_effects = true },
+    );
+    defer named.deinit(allocator);
+    var inline_callback = try extractSessionContractForTest(
+        allocator,
+        inline_source,
+        "inline-callback.ts",
+        .{ .strict = false },
+    );
+    defer inline_callback.deinit(allocator);
+
+    const named_props = named.contract.properties orelse return error.MissingProperties;
+    const inline_props = inline_callback.contract.properties orelse return error.MissingProperties;
+    try testing.expect(!named_props.has_egress);
+    try testing.expect(inline_props.has_egress);
+
+    const exports = named.export_effects orelse return error.ExportEffectsMissing;
+    switch (exports.lookup("leaky")) {
+        .callable => |row| {
+            try testing.expect(row.pure);
+            try testing.expect(!row.has_egress);
+            try testing.expect(!row.writes);
+            try testing.expect(row.lower_bound);
+        },
+        .data, .blocked => return error.CallableExportExpected,
+    }
+
+    try testing.expectEqual(@as(usize, 1), named.contract.function_effect_capsules.items.len);
+    const capsule = named.contract.function_effect_capsules.items[0];
+    try testing.expectEqualStrings("leaky", capsule.function);
+    try testing.expectEqual(@as(usize, 0), capsule.declared.items.len);
+    try testing.expectEqual(@as(usize, 0), capsule.inferred.items.len);
+    try testing.expect(!capsule.discharged);
+    try testing.expect(capsule.exported);
+    try testing.expect(capsule.handler_reachable);
+}
+
+test "ambient egress summary keeps raw generic binding precedence" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { env as length } from "zttp:env";
+        \\function handler(req) {
+        \\  const a = 1;
+        \\  const b = 2;
+        \\  const c = 3;
+        \\  function leaky() { return fetchSync("https://legacy.example/a"); }
+        \\  leaky();
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var extraction = try extractSessionContractForTest(
+        allocator,
+        source,
+        "generic-precedence.ts",
+        .{ .strict = false },
+    );
+    defer extraction.deinit(allocator);
+
+    const props = extraction.contract.properties orelse return error.MissingProperties;
+    try testing.expect(!props.has_egress);
+}
+
+test "no-handler properties include every unused builtin import" {
+    const allocator = testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        read_only: bool,
+        stateless: bool,
+        retry_safe: bool,
+    }{
+        .{
+            .source = "import { cacheGet } from \"zttp:cache\";",
+            .read_only = true,
+            .stateless = false,
+            .retry_safe = true,
+        },
+        .{
+            .source = "import { cacheSet } from \"zttp:cache\";",
+            .read_only = false,
+            .stateless = false,
+            .retry_safe = false,
+        },
+    };
+
+    for (cases) |case| {
+        var extraction = try extractSessionContractForTest(
+            allocator,
+            case.source,
+            "no-handler-builtin.ts",
+            .{ .strict = false },
+        );
+        defer extraction.deinit(allocator);
+        const contract = &extraction.contract;
+        const props = contract.properties orelse return error.MissingProperties;
+        try testing.expect(!props.pure);
+        try testing.expectEqual(case.read_only, props.read_only);
+        try testing.expectEqual(case.stateless, props.stateless);
+        try testing.expectEqual(case.retry_safe, props.retry_safe);
+        try testing.expect(!props.deterministic);
+        try testing.expect(!props.has_egress);
+        try testing.expect(!props.idempotent);
+        try testing.expect(!contract.effect_analysis_complete);
+    }
+}
+
+test "no-handler properties include an unused registered partner import" {
+    const allocator = testing.allocator;
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:legacy-summary",
+        \\  "exports": [
+        \\    { "name": "lookup", "effect": "read", "returns": "result" }
+        \\  ]
+        \\}
+    ;
+    var manifest = try @import("zts-engine").module_manifest.parse(allocator, manifest_json);
+    var registry = manifest_registry_mod.Registry.init(allocator);
+    defer registry.deinit();
+    registry.register(manifest) catch |err| {
+        manifest.deinit(allocator);
+        return err;
+    };
+
+    var extraction = try extractSessionContractForTest(
+        allocator,
+        "import { lookup } from \"zttp-ext:legacy-summary\";",
+        "no-handler-partner.ts",
+        .{ .strict = false, .manifest_registry = &registry },
+    );
+    defer extraction.deinit(allocator);
+
+    const contract = &extraction.contract;
+    const props = contract.properties orelse return error.MissingProperties;
+    try testing.expect(!props.pure);
+    try testing.expect(props.read_only);
+    try testing.expect(props.stateless);
+    try testing.expect(props.retry_safe);
+    try testing.expect(!props.deterministic);
+    try testing.expect(!props.has_egress);
+    try testing.expect(!props.idempotent);
+    try testing.expect(!contract.effect_analysis_complete);
+}
+
 test "late export capture failure releases a transferred rate limit namespace" {
     const allocator = testing.allocator;
     const source =
@@ -1951,6 +2303,7 @@ test "ModuleAnalysisSession refuses extraction retry after allocation failure" {
     failing.fail_index = failing.alloc_index;
     try testing.expectError(error.OutOfMemory, analysis.extractContract("allocation.ts"));
     try testing.expect(failing.has_induced_failure);
+    try testing.expect(analysis.contract_effect_facts == null);
     try testing.expect(analysis.takeExportEffects() == null);
     try testing.expectError(
         error.ContractExtractionAlreadyAttempted,

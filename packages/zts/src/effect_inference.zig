@@ -125,6 +125,24 @@ pub const ExportEffects = struct {
         return .blocked;
     }
 
+    pub fn clone(self: *const ExportEffects, allocator: std.mem.Allocator) !ExportEffects {
+        if (self.entries.len == 0) return .{};
+        const entries = try allocator.alloc(ExportEffectEntry, self.entries.len);
+        var copied: usize = 0;
+        errdefer {
+            for (entries[0..copied]) |entry| allocator.free(entry.name);
+            allocator.free(entries);
+        }
+        for (self.entries, 0..) |entry, index| {
+            entries[index] = .{
+                .name = try allocator.dupe(u8, entry.name),
+                .effect = entry.effect,
+            };
+            copied += 1;
+        }
+        return .{ .entries = entries };
+    }
+
     pub fn deinit(self: *ExportEffects, allocator: std.mem.Allocator) void {
         for (self.entries) |entry| allocator.free(entry.name);
         if (self.entries.len > 0) allocator.free(self.entries);
@@ -154,10 +172,59 @@ pub const FunctionEffect = struct {
 /// Every pointer is borrowed only while `buildEffectFacts` runs. The returned
 /// facts own all data that their query methods expose.
 pub const EffectFactsOptions = struct {
+    pub const ContractProjection = union(enum) {
+        unrequested,
+        complete: struct {
+            selected_handler: ?NodeIndex,
+        },
+    };
+
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
     module_facts: ?*const module_facts_mod.ModuleFacts = null,
     type_env: ?*const type_env_mod.TypeEnv = null,
     imported_effects: []const ImportedEffect = &.{},
+    contract_projection: ContractProjection = .unrequested,
+};
+
+pub const ContractEffectSummary = struct {
+    has_any_call: bool = false,
+    io: module_binding.EffectClass = .none,
+    has_cache_read: bool = false,
+    has_egress: bool = false,
+    unknown: bool = false,
+
+    fn includeCall(self: *ContractEffectSummary, effect: module_binding.EffectClass) void {
+        switch (effect) {
+            .write => self.io = .write,
+            .read => if (self.io == .none) {
+                self.io = .read;
+            },
+            .none => {},
+        }
+    }
+
+    pub fn includeEgress(self: *ContractEffectSummary) void {
+        self.has_egress = true;
+        self.has_any_call = true;
+        self.io = .write;
+    }
+};
+
+pub const ContractEffectFacts = struct {
+    summary: ContractEffectSummary,
+    selected_handler: ?NodeIndex,
+    first_handler_index: ?usize,
+    handler_reachable: []const bool = &.{},
+
+    fn deinit(self: *ContractEffectFacts, allocator: std.mem.Allocator) void {
+        if (self.handler_reachable.len > 0) allocator.free(self.handler_reachable);
+        self.* = undefined;
+    }
+};
+
+pub const ContractEffectProjection = union(enum) {
+    unrequested,
+    complete: ContractEffectFacts,
 };
 
 /// One completed, immutable effect analysis.
@@ -173,6 +240,7 @@ pub const EffectFacts = struct {
     value_storage: []const usize = &.{},
     export_effects: ExportEffects = .{},
     reaches_recursion: []const bool = &.{},
+    contract: ContractEffectProjection = .unrequested,
 
     pub fn deinit(self: *EffectFacts, allocator: std.mem.Allocator) void {
         for (self.functions) |function| allocator.free(function.name);
@@ -183,6 +251,10 @@ pub const EffectFacts = struct {
         if (self.value_storage.len > 0) allocator.free(self.value_storage);
         self.export_effects.deinit(allocator);
         if (self.reaches_recursion.len > 0) allocator.free(self.reaches_recursion);
+        switch (self.contract) {
+            .unrequested => {},
+            .complete => |*contract| contract.deinit(allocator),
+        }
         self.* = .{};
     }
 
@@ -215,6 +287,13 @@ pub const EffectFacts = struct {
             if (function.body_node == body_node) return self.reaches_recursion[index];
         }
         return false;
+    }
+
+    pub fn requireContract(self: *const EffectFacts) !*const ContractEffectFacts {
+        return switch (self.contract) {
+            .unrequested => error.ContractProjectionUnrequested,
+            .complete => |*contract| contract,
+        };
     }
 };
 
@@ -288,8 +367,6 @@ pub const Analyzer = struct {
     atoms: ?*atom_table.AtomTable,
     manifest_registry: ?*const manifest_registry_mod.Registry,
     functions: std.ArrayListUnmanaged(FunctionEffect),
-    /// Imported callee metadata keyed by local binding slot.
-    imports: std.AutoHashMapUnmanaged(u16, ImportedFunction),
     /// Completed sibling results keyed by this module's local import slot.
     /// Borrowed; the caller must keep the slice alive through `analyze`.
     imported_effects: []const ImportedEffect = &.{},
@@ -371,7 +448,6 @@ pub const Analyzer = struct {
             .atoms = atoms,
             .manifest_registry = manifest_registry,
             .functions = .empty,
-            .imports = .empty,
             .user_fn_by_slot = .empty,
             .callee_starts = .empty,
             .callee_storage = .empty,
@@ -388,7 +464,6 @@ pub const Analyzer = struct {
     pub fn deinit(self: *Analyzer) void {
         if (self.owned_facts) |*owned| owned.deinit();
         self.functions.deinit(self.allocator);
-        self.imports.deinit(self.allocator);
         self.user_fn_by_slot.deinit(self.allocator);
         self.callee_starts.deinit(self.allocator);
         self.callee_storage.deinit(self.allocator);
@@ -403,7 +478,7 @@ pub const Analyzer = struct {
     }
 
     pub fn analyze(self: *Analyzer, root: NodeIndex) !void {
-        try self.scanImports();
+        _ = try self.resolveFacts();
         try self.collectFunctions(root);
         try self.computeModuleBindings(root);
         try self.computeBaseEffects();
@@ -569,21 +644,6 @@ pub const Analyzer = struct {
             );
         }
         return &self.owned_facts.?;
-    }
-
-    /// Record every import, with no filter: this analyzer tracks imports from
-    /// modules that are neither builtin nor partner-registered, which is a
-    /// deliberate difference from path_generator, flow_checker, bool_checker,
-    /// and handler_verifier.
-    fn scanImports(self: *Analyzer) !void {
-        const facts = try self.resolveFacts();
-        for (facts.imports.items) |rec| {
-            try self.imports.put(self.allocator, rec.slot, .{
-                .slot = rec.slot,
-                .module = rec.module_specifier,
-                .name = rec.imported_name,
-            });
-        }
     }
 
     fn collectFunctions(self: *Analyzer, root: NodeIndex) !void {
@@ -1584,8 +1644,8 @@ pub const Analyzer = struct {
 
     /// The import a reference names, or null.
     ///
-    /// `imports` is keyed by slot, and only a module-level binding carries an
-    /// atom as its slot. A function local or parameter restarts at slot 0, so
+    /// Module import records use slots, and only a module-level binding carries
+    /// an atom as its slot. A function local or parameter restarts at slot 0, so
     /// the fifth local of a handler shares slot 4 with whichever module
     /// binding happens to have atom 4 (`length`, for one). A slot-only lookup
     /// resolved that local to the import, charged it that import's row, and
@@ -1597,8 +1657,18 @@ pub const Analyzer = struct {
     /// `b`) resolves as `.undeclared_global`, whose slot is also the atom, so
     /// that kind passes too; dropping it stopped mutual recursion being found.
     fn importOf(self: *const Analyzer, binding: ir.BindingRef) ?ImportedFunction {
-        if (!slotIsAtom(binding)) return null;
-        return self.imports.get(binding.slot);
+        const facts = self.facts orelse if (self.owned_facts) |*owned| owned else return null;
+        const record = facts.importForReference(
+            binding,
+            .module_reference,
+            .any,
+            .last,
+        ) orelse return null;
+        return .{
+            .slot = record.slot,
+            .module = record.module_specifier,
+            .name = record.imported_name,
+        };
     }
 
     /// The collected user function a reference names, or null. Same slot
@@ -1830,6 +1900,371 @@ pub const Analyzer = struct {
     }
 };
 
+const ContractProjectionBuilder = struct {
+    allocator: std.mem.Allocator,
+    ir_view: IrView,
+    atoms: ?*atom_table.AtomTable,
+    facts: *const module_facts_mod.ModuleFacts,
+    registry: ?*const manifest_registry_mod.Registry,
+
+    fn build(
+        self: *const ContractProjectionBuilder,
+        analyzer: *const Analyzer,
+        selected_handler: ?NodeIndex,
+    ) !ContractEffectFacts {
+        const first_handler_index = findFunctionIndex(analyzer.all(), "handler");
+        var handler_reachable: []bool = &.{};
+        errdefer if (handler_reachable.len > 0) self.allocator.free(handler_reachable);
+        if (first_handler_index) |handler_index| {
+            handler_reachable = try self.buildHandlerReachability(analyzer, handler_index);
+        }
+
+        const summary = if (selected_handler) |handler| blk: {
+            const selected_function = self.ir_view.getFunction(handler) orelse
+                return error.SelectedHandlerBodyUnavailable;
+            var matched = false;
+            for (analyzer.all()) |function| {
+                if (function.body_node == selected_function.body) {
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return error.SelectedHandlerEffectMissing;
+            break :blk try self.computeSelectedSummary(handler);
+        } else self.computeNoHandlerSummary();
+
+        return .{
+            .summary = summary,
+            .selected_handler = selected_handler,
+            .first_handler_index = first_handler_index,
+            .handler_reachable = handler_reachable,
+        };
+    }
+
+    fn buildHandlerReachability(
+        self: *const ContractProjectionBuilder,
+        analyzer: *const Analyzer,
+        handler_index: usize,
+    ) ![]bool {
+        const functions = analyzer.all();
+        const reachable = try self.allocator.alloc(bool, functions.len);
+        errdefer self.allocator.free(reachable);
+        @memset(reachable, false);
+
+        var stack: std.ArrayListUnmanaged(usize) = .empty;
+        defer stack.deinit(self.allocator);
+        reachable[handler_index] = true;
+        try stack.append(self.allocator, handler_index);
+        while (stack.pop()) |current| {
+            for ([_][]const usize{ analyzer.calleesOf(current), analyzer.valueRefsOf(current) }) |edges| {
+                for (edges) |callee| {
+                    if (callee >= reachable.len or reachable[callee]) continue;
+                    reachable[callee] = true;
+                    try stack.append(self.allocator, callee);
+                }
+            }
+        }
+        return reachable;
+    }
+
+    fn computeSelectedSummary(
+        self: *const ContractProjectionBuilder,
+        handler: NodeIndex,
+    ) !ContractEffectSummary {
+        var summary: ContractEffectSummary = .{};
+        var seen_functions: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+        defer seen_functions.deinit(self.allocator);
+        try self.includeReachableFunctionEffects(handler, &summary, &seen_functions);
+
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, self.facts);
+        var roots = try resolver.routeRoots(self.allocator);
+        defer roots.deinit(self.allocator);
+        if (roots.unresolved) summary.unknown = true;
+        for (roots.functions.items) |function| {
+            try self.includeReachableFunctionEffects(function, &summary, &seen_functions);
+        }
+        return summary;
+    }
+
+    fn computeNoHandlerSummary(self: *const ContractProjectionBuilder) ContractEffectSummary {
+        var summary: ContractEffectSummary = .{};
+        for (self.facts.functions.items) |entry| {
+            if (builtin_modules.fromSpecifier(entry.module)) |binding| {
+                const is_cache = std.mem.eql(u8, binding.specifier, cache_module_specifier);
+                for (entry.names.items) |function_name| {
+                    summary.has_any_call = true;
+                    for (binding.exports) |exported| {
+                        if (!std.mem.eql(u8, exported.name, function_name)) continue;
+                        summary.includeCall(exported.effect);
+                        break;
+                    }
+                    if (is_cache and std.mem.eql(u8, function_name, cache_get_export)) {
+                        summary.has_cache_read = true;
+                    }
+                }
+                continue;
+            }
+            const registry = self.registry orelse continue;
+            const manifest = registry.fromSpecifier(entry.module) orelse continue;
+            for (entry.names.items) |function_name| {
+                summary.has_any_call = true;
+                for (manifest.exports.items) |exported| {
+                    if (!std.mem.eql(u8, exported.name, function_name)) continue;
+                    summary.includeCall(exported.effect);
+                    break;
+                }
+            }
+        }
+        return summary;
+    }
+
+    fn includeReachableFunctionEffects(
+        self: *const ContractProjectionBuilder,
+        node: NodeIndex,
+        summary: *ContractEffectSummary,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+    ) std.mem.Allocator.Error!void {
+        const function_node = self.resolveFunctionNode(node) orelse return;
+        const result = try seen_functions.getOrPut(self.allocator, function_node);
+        if (result.found_existing) return;
+        const function = self.ir_view.getFunction(function_node) orelse return;
+        try self.includeReachableNodeEffects(function.body, summary, seen_functions);
+    }
+
+    fn includeReachableNodeEffects(
+        self: *const ContractProjectionBuilder,
+        node: NodeIndex,
+        summary: *ContractEffectSummary,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+    ) std.mem.Allocator.Error!void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |index| {
+                    try self.includeReachableNodeEffects(
+                        self.ir_view.getListIndex(block.stmts_start, @intCast(index)),
+                        summary,
+                        seen_functions,
+                    );
+                }
+            },
+            .if_stmt => {
+                const statement = self.ir_view.getIfStmt(node) orelse return;
+                try self.includeReachableNodeEffects(statement.condition, summary, seen_functions);
+                try self.includeReachableNodeEffects(statement.then_branch, summary, seen_functions);
+                try self.includeReachableNodeEffects(statement.else_branch, summary, seen_functions);
+            },
+            .for_of_stmt => {
+                const statement = self.ir_view.getForIter(node) orelse return;
+                try self.includeReachableNodeEffects(statement.iterable, summary, seen_functions);
+                try self.includeReachableNodeEffects(statement.body, summary, seen_functions);
+            },
+            .return_stmt, .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| {
+                    try self.includeReachableNodeEffects(value, summary, seen_functions);
+                }
+            },
+            .var_decl => {
+                const declaration = self.ir_view.getVarDecl(node) orelse return;
+                if (declaration.init != null_node and !self.isFunctionNode(declaration.init)) {
+                    try self.includeReachableNodeEffects(declaration.init, summary, seen_functions);
+                }
+            },
+            .function_decl => {},
+            .binary_op => {
+                const binary = self.ir_view.getBinary(node) orelse return;
+                try self.includeReachableNodeEffects(binary.left, summary, seen_functions);
+                try self.includeReachableNodeEffects(binary.right, summary, seen_functions);
+            },
+            .unary_op, .spread => {
+                const unary = self.ir_view.getUnary(node) orelse return;
+                try self.includeReachableNodeEffects(unary.operand, summary, seen_functions);
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return;
+                try self.includeReachableNodeEffects(ternary.condition, summary, seen_functions);
+                try self.includeReachableNodeEffects(ternary.then_branch, summary, seen_functions);
+                try self.includeReachableNodeEffects(ternary.else_branch, summary, seen_functions);
+            },
+            .call, .method_call => {
+                try self.includeReachableCallEffects(node, summary, seen_functions);
+                const call = self.ir_view.getCall(node) orelse return;
+                try self.includeReachableNodeEffects(call.callee, summary, seen_functions);
+                for (0..call.args_count) |index| {
+                    try self.includeReachableNodeEffects(
+                        self.ir_view.getListIndex(call.args_start, @intCast(index)),
+                        summary,
+                        seen_functions,
+                    );
+                }
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                try self.includeReachableNodeEffects(member.object, summary, seen_functions);
+                try self.includeReachableNodeEffects(member.computed, summary, seen_functions);
+            },
+            .assignment => {
+                const assignment = self.ir_view.getAssignment(node) orelse return;
+                try self.includeReachableNodeEffects(assignment.target, summary, seen_functions);
+                try self.includeReachableNodeEffects(assignment.value, summary, seen_functions);
+            },
+            .array_literal => {
+                const array = self.ir_view.getArray(node) orelse return;
+                for (0..array.elements_count) |index| {
+                    try self.includeReachableNodeEffects(
+                        self.ir_view.getListIndex(array.elements_start, @intCast(index)),
+                        summary,
+                        seen_functions,
+                    );
+                }
+            },
+            .object_literal => {
+                const object_literal = self.ir_view.getObject(node) orelse return;
+                for (0..object_literal.properties_count) |index| {
+                    const property_node = self.ir_view.getListIndex(
+                        object_literal.properties_start,
+                        @intCast(index),
+                    );
+                    const property = self.ir_view.getProperty(property_node) orelse continue;
+                    try self.includeReachableNodeEffects(property.value, summary, seen_functions);
+                }
+            },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(node) orelse return;
+                try self.includeReachableNodeEffects(match.discriminant, summary, seen_functions);
+                for (0..match.arms_count) |index| {
+                    const arm_node = self.ir_view.getListIndex(match.arms_start, @intCast(index));
+                    const arm = self.ir_view.getMatchArm(arm_node) orelse continue;
+                    try self.includeReachableNodeEffects(arm.body, summary, seen_functions);
+                }
+            },
+            .function_expr, .arrow_function => {
+                const function = self.ir_view.getFunction(node) orelse return;
+                try self.includeReachableNodeEffects(function.body, summary, seen_functions);
+            },
+            // exhaustive: this legacy projection visits the container tags above.
+            // Other tags add no summary fact under its frozen policy.
+            // The independent composed rows still constrain contract properties.
+            else => {},
+        }
+    }
+
+    fn includeReachableCallEffects(
+        self: *const ContractProjectionBuilder,
+        node: NodeIndex,
+        summary: *ContractEffectSummary,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+    ) std.mem.Allocator.Error!void {
+        const call = self.ir_view.getCall(node) orelse return;
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, self.facts);
+        if (try resolver.resolveDispatch(self.allocator, call.callee)) |resolved| {
+            var targets = resolved;
+            defer targets.deinit(self.allocator);
+            if (targets.unresolved) summary.unknown = true;
+            for (targets.functions.items) |function| {
+                try self.includeReachableFunctionEffects(function, summary, seen_functions);
+            }
+            return;
+        }
+
+        if (self.ir_view.getTag(call.callee) != .identifier) return;
+        const binding = self.ir_view.getBinding(call.callee) orelse return;
+        if (binding.kind == .undeclared_global) {
+            const name = self.resolveAtomName(binding.name_atom) orelse return;
+            if (std.mem.eql(u8, name, fetch_sync_export)) {
+                summary.includeEgress();
+                return;
+            }
+        }
+
+        if (self.facts.genericBindingForReference(binding, .legacy_slot)) |generic| {
+            summary.has_any_call = true;
+            if (builtin_modules.fromSpecifier(generic.module_specifier)) |module| {
+                for (module.exports) |exported| {
+                    if (!std.mem.eql(u8, exported.name, generic.binding_name)) continue;
+                    summary.includeCall(exported.effect);
+                    break;
+                }
+            }
+            if (std.mem.eql(u8, generic.module_specifier, cache_module_specifier) and
+                std.mem.eql(u8, generic.binding_name, cache_get_export))
+            {
+                summary.has_cache_read = true;
+            }
+            return;
+        }
+
+        if (self.registry) |registry| {
+            if (self.facts.extensionBindingForReference(binding, .legacy_slot)) |extension| {
+                summary.has_any_call = true;
+                const manifest = registry.fromSpecifier(extension.module_specifier) orelse return;
+                for (manifest.exports.items) |exported| {
+                    if (!std.mem.eql(u8, exported.name, extension.binding_name)) continue;
+                    summary.includeCall(exported.effect);
+                    break;
+                }
+                return;
+            }
+        }
+
+        if (self.findFunctionNodeByBinding(binding.slot)) |function| {
+            try self.includeReachableFunctionEffects(function, summary, seen_functions);
+        }
+    }
+
+    fn findFunctionNodeByBinding(self: *const ContractProjectionBuilder, slot: u16) ?NodeIndex {
+        for (0..self.ir_view.nodeCount()) |index| {
+            const node: NodeIndex = @intCast(index);
+            const tag = self.ir_view.getTag(node) orelse continue;
+            if (tag != .function_decl and tag != .var_decl) continue;
+            const declaration = self.ir_view.getVarDecl(node) orelse continue;
+            if (declaration.binding.slot != slot or declaration.init == null_node) continue;
+            const init_tag = self.ir_view.getTag(declaration.init) orelse continue;
+            if (init_tag == .function_expr or init_tag == .arrow_function) return declaration.init;
+        }
+        return null;
+    }
+
+    fn resolveFunctionNode(self: *const ContractProjectionBuilder, node: NodeIndex) ?NodeIndex {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        return switch (tag) {
+            .function_decl => blk: {
+                const declaration = self.ir_view.getVarDecl(node) orelse break :blk null;
+                break :blk if (declaration.init != null_node) declaration.init else null;
+            },
+            .function_expr, .arrow_function => node,
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk null;
+                break :blk self.findFunctionNodeByBinding(binding.slot);
+            },
+            // exhaustive: legacy function targets are declarations, function
+            // expressions, arrows, or identifiers. Other forms resolve no target.
+            else => null,
+        };
+    }
+
+    fn isFunctionNode(self: *const ContractProjectionBuilder, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return tag == .function_decl or tag == .function_expr or tag == .arrow_function;
+    }
+
+    fn resolveAtomName(self: *const ContractProjectionBuilder, atom_value: u32) ?[]const u8 {
+        const atom: object.Atom = @enumFromInt(atom_value);
+        if (atom.isPredefined()) return atom.toPredefinedName();
+        if (self.atoms) |table| return table.getName(atom);
+        return null;
+    }
+};
+
+fn findFunctionIndex(functions: []const FunctionEffect, name: []const u8) ?usize {
+    for (functions, 0..) |function, index| {
+        if (std.mem.eql(u8, function.name, name)) return index;
+    }
+    return null;
+}
+
 /// Run one analyzer and project its completed immutable facts.
 pub fn buildEffectFacts(
     allocator: std.mem.Allocator,
@@ -1849,12 +2284,15 @@ pub fn buildEffectFacts(
     analyzer.type_env = options.type_env;
     analyzer.imported_effects = options.imported_effects;
     try analyzer.analyze(root);
-    return projectEffectFacts(allocator, &analyzer);
+    return projectEffectFacts(allocator, ir_view, atoms, &analyzer, options);
 }
 
 fn projectEffectFacts(
     allocator: std.mem.Allocator,
+    ir_view: IrView,
+    atoms: ?*atom_table.AtomTable,
     analyzer: *const Analyzer,
+    options: EffectFactsOptions,
 ) !EffectFacts {
     var result: EffectFacts = .{};
     errdefer result.deinit(allocator);
@@ -1866,6 +2304,23 @@ fn projectEffectFacts(
     result.value_storage = try allocator.dupe(usize, analyzer.value_storage.items);
     result.reaches_recursion = try analyzer.recursionReachability();
     result.export_effects = try analyzer.exportEffectsWithReachability(result.reaches_recursion);
+    switch (options.contract_projection) {
+        .unrequested => {},
+        .complete => |contract_options| {
+            const facts = options.module_facts orelse return error.ContractModuleFactsRequired;
+            const builder = ContractProjectionBuilder{
+                .allocator = allocator,
+                .ir_view = ir_view,
+                .atoms = atoms,
+                .facts = facts,
+                .registry = options.manifest_registry,
+            };
+            result.contract = .{ .complete = try builder.build(
+                analyzer,
+                contract_options.selected_handler,
+            ) };
+        },
+    }
     return result;
 }
 
@@ -2298,6 +2753,101 @@ test "effect facts own immutable call and recursion results" {
     }
 }
 
+test "effect facts refuse an unrequested contract projection" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, "function handler() { return 1; }");
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var effects = try buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer effects.deinit(allocator);
+
+    try testing.expectError(error.ContractProjectionUnrequested, effects.requireContract());
+}
+
+test "completed contract facts retain selected handler identity" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, "function handler() { return 1; }");
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const program = view.getBlock(root) orelse return error.ProgramExpected;
+    const declaration_node = view.getListIndex(program.stmts_start, 0);
+    const declaration = view.getVarDecl(declaration_node) orelse return error.HandlerExpected;
+    const handler = declaration.init;
+
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer module_facts.deinit();
+    var effects = try buildEffectFacts(allocator, view, &atoms, root, .{
+        .module_facts = &module_facts,
+        .contract_projection = .{ .complete = .{ .selected_handler = handler } },
+    });
+    defer effects.deinit(allocator);
+
+    const contract = try effects.requireContract();
+    try testing.expectEqual(handler, contract.selected_handler.?);
+    try testing.expect(contract.first_handler_index != null);
+    try testing.expectEqual(effects.all().len, contract.handler_reachable.len);
+    try testing.expect(contract.handler_reachable[contract.first_handler_index.?]);
+}
+
+test "completed no-handler facts remain distinct from an unrequested projection" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator,
+        \\import { cacheGet, cacheSet } from "zttp:cache";
+    );
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer module_facts.deinit();
+    var effects = try buildEffectFacts(allocator, view, &atoms, root, .{
+        .module_facts = &module_facts,
+        .contract_projection = .{ .complete = .{ .selected_handler = null } },
+    });
+    defer effects.deinit(allocator);
+
+    const contract = try effects.requireContract();
+    try testing.expect(contract.selected_handler == null);
+    try testing.expect(contract.first_handler_index == null);
+    try testing.expectEqual(@as(usize, 0), contract.handler_reachable.len);
+    try testing.expect(contract.summary.has_any_call);
+    try testing.expect(contract.summary.has_cache_read);
+    try testing.expectEqual(module_binding.EffectClass.write, contract.summary.io);
+}
+
+test "an export clone outlives its effect facts" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, "export function visible() { return 1; }");
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var cloned = blk: {
+        var effects = try buildEffectFacts(allocator, view, &atoms, root, .{});
+        defer effects.deinit(allocator);
+        break :blk try effects.export_effects.clone(allocator);
+    };
+    defer cloned.deinit(allocator);
+
+    switch (cloned.lookup("visible")) {
+        .callable => {},
+        .data, .blocked => return error.CallableExportExpected,
+    }
+    try testing.expectEqualStrings("visible", cloned.entries[0].name);
+}
+
 test "effect facts close every allocation failure" {
     const Projection = struct {
         fn run(allocator: std.mem.Allocator) !void {
@@ -2306,6 +2856,48 @@ test "effect facts close every allocation failure" {
             var parser = try JsParser.init(allocator,
                 \\export function first() { return second(); }
                 \\function second() { return second(); }
+                \\function handler() { return first(); }
+            );
+            parser.setAtomTable(&atoms);
+            defer parser.deinit();
+            const root = try parser.parse();
+            const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+            const program = view.getBlock(root) orelse return error.ProgramExpected;
+            const declaration_node = view.getListIndex(
+                program.stmts_start,
+                @intCast(program.stmts_count - 1),
+            );
+            const declaration = view.getVarDecl(declaration_node) orelse
+                return error.HandlerExpected;
+            var module_facts = try module_facts_mod.ModuleFacts.build(
+                allocator,
+                view,
+                &atoms,
+                null,
+            );
+            defer module_facts.deinit();
+            var effect_facts = try buildEffectFacts(allocator, view, &atoms, root, .{
+                .module_facts = &module_facts,
+                .contract_projection = .{ .complete = .{
+                    .selected_handler = declaration.init,
+                } },
+            });
+            defer effect_facts.deinit(allocator);
+            const contract = try effect_facts.requireContract();
+            if (contract.handler_reachable.len == 0) return error.HandlerReachabilityExpected;
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Projection.run, .{});
+}
+
+test "export clone closes every allocation failure" {
+    const Projection = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var atoms = atom_table.AtomTable.init(allocator);
+            defer atoms.deinit();
+            var parser = try JsParser.init(allocator,
+                \\export function first() { return second(); }
+                \\export function second() { return 2; }
             );
             parser.setAtomTable(&atoms);
             defer parser.deinit();
@@ -2313,6 +2905,8 @@ test "effect facts close every allocation failure" {
             const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
             var effect_facts = try buildEffectFacts(allocator, view, &atoms, root, .{});
             defer effect_facts.deinit(allocator);
+            var cloned = try effect_facts.export_effects.clone(allocator);
+            defer cloned.deinit(allocator);
         }
     };
     try testing.checkAllAllocationFailures(testing.allocator, Projection.run, .{});
@@ -3364,82 +3958,6 @@ test "empty program is a no-op" {
     defer analyzer.deinit();
     try analyzer.analyze(root);
     try testing.expectEqual(@as(usize, 0), analyzer.all().len);
-}
-
-const import_corpus = @import("tests/import_corpus.zig");
-
-test "the import scan records every specifier across the shared corpus" {
-    // Replaces the differential test that proved this scan matches the pre-C1
-    // implementation (commit e14b4e77). The expectations below were captured
-    // from that proven implementation, which is why they are trustworthy: the
-    // legacy scan they were compared against no longer exists.
-    const allocator = std.testing.allocator;
-
-    const expected = [_]struct { label: []const u8, count: u32 }{
-        .{ .label = "no imports at all", .count = 0 },
-        .{ .label = "one builtin import", .count = 1 },
-        .{ .label = "several names from one module", .count = 3 },
-        .{ .label = "the same module imported twice", .count = 2 },
-        // Two import declarations of one name collapse to one slot: the map is
-        // keyed by local binding slot, and the second import reuses it.
-        .{ .label = "the same name imported twice", .count = 1 },
-        .{ .label = "an aliased import", .count = 1 },
-        .{ .label = "a builtin function with no extractions and no flags", .count = 1 },
-        .{ .label = "a module that is neither builtin nor registered", .count = 1 },
-        .{ .label = "a builtin and an unresolved module together", .count = 2 },
-        .{ .label = "several modules in first-appearance order", .count = 3 },
-    };
-    try std.testing.expectEqual(import_corpus.cases.len, expected.len);
-
-    for (import_corpus.cases, expected) |case, want| {
-        try std.testing.expectEqualStrings(case.label, want.label);
-
-        var parser = try @import("zts-engine").parser.JsParser.init(allocator, case.source);
-        defer parser.deinit();
-        var atoms = atom_table.AtomTable.init(allocator);
-        defer atoms.deinit();
-        parser.setAtomTable(&atoms);
-        _ = try parser.parse();
-        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-        var analyzer = Analyzer.init(allocator, ir_view, &atoms);
-        defer analyzer.deinit();
-        try analyzer.scanImports();
-
-        std.testing.expectEqual(want.count, analyzer.imports.count()) catch |err| {
-            std.debug.print("\ncorpus case \"{s}\": expected {d} imports, found {d}\n", .{
-                case.label, want.count, analyzer.imports.count(),
-            });
-            return err;
-        };
-    }
-}
-
-test "this analyzer records imports from unresolved modules" {
-    // The filter difference that must SURVIVE the migration. strict_checker and
-    // effect_inference record every import; the other four record builtins
-    // only. A migration that unified the six filters would silently widen
-    // analysis, so it is asserted here rather than assumed.
-    const allocator = std.testing.allocator;
-    const source = "import { thing } from \"zttp-ext:unknown\";\n";
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
-    defer parser.deinit();
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    _ = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-    var analyzer = Analyzer.init(allocator, ir_view, &atoms);
-    defer analyzer.deinit();
-    try analyzer.scanImports();
-
-    try std.testing.expectEqual(@as(u32, 1), analyzer.imports.count());
-    var it = analyzer.imports.iterator();
-    const entry = it.next().?;
-    try std.testing.expectEqualStrings("zttp-ext:unknown", entry.value_ptr.module);
-    try std.testing.expectEqualStrings("thing", entry.value_ptr.name);
 }
 
 test "a local whose slot equals an import's atom slot is not that import" {

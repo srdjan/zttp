@@ -144,6 +144,12 @@ The session prepares immutable path effect facts only when path analysis request
 Path generators borrow completed facts and never own an effect analyzer.
 Path facts use no registry, type environment, injected module facts, or imported effect rows.
 An unavailable effect result makes path coverage report recursion conservatively.
+The session builds separate contract effect facts during contract extraction.
+These facts retain the selected handler and its legacy property summary.
+They also retain reachability from the first function named `handler`.
+The session builds these facts after late context and custom type checking are complete.
+The contract builder borrows completed module and effect facts.
+Contract analysis failures stop extraction and do not become unavailable path facts.
 
 The `full` profile runs resolution for CHECK and single-module compilation.
 The `contract_only` profile builds contracts without source annotations.
