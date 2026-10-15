@@ -11,6 +11,8 @@
 //! `CheckedModule` borrows `*const ResolvedModule` because `HandlerVerifier`
 //! holds a pointer back to the `TypeChecker` and the borrow keeps that target
 //! address stable in caller storage.
+//! `ModuleAnalysisSession` owns these wrappers for one complete module analysis.
+//! Its profiles preserve the different full, contract-only, and sound paths.
 //!
 //! Pass-ordering invariants ("type-check before flow-check", "resolve before
 //! check") are encoded in the function signatures. `CheckedModule.init` only
@@ -313,6 +315,9 @@ pub fn resolve(
     bool_checker.authoritative_type_checker = if (type_checker_opt) |*tc| tc else null;
     errdefer bool_checker.deinit();
     const bool_errors = try bool_checker.check(parsed.root);
+    // The pointer targets stack-local optional storage. Consumers use the
+    // stored diagnostics and node types after this check, not this pointer.
+    bool_checker.authoritative_type_checker = null;
 
     var strict_checker_opt: ?StrictChecker = null;
     var strict_errors: u32 = 0;
@@ -352,7 +357,7 @@ pub fn resolve(
 // Phase 3: Checked (handler verification + flow analysis)
 // ---------------------------------------------------------------------------
 
-const PassState = enum {
+const CheckedPassState = enum {
     ready,
     attempted,
     completed,
@@ -364,8 +369,8 @@ pub const CheckedModule = struct {
     flow_checker: FlowChecker,
     verifier_error_count: u32,
     flow_error_count: u32,
-    verifier_state: PassState,
-    flow_state: PassState,
+    verifier_state: CheckedPassState,
+    flow_state: CheckedPassState,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -493,11 +498,9 @@ pub fn check(
 }
 
 // ---------------------------------------------------------------------------
-// TypeEnvStorage — caller-owned bundle of TypePool + TypeEnv with a stable
-// address. `TypeEnv.init` captures `*TypePool`, so the pool must outlive the
-// env and live at a fixed address; bundling them into one struct guarantees
-// both. `init` requires a pointer-receiver because `populateFromTypeMap` and
-// the env's pool reference both need stable addresses.
+// TypeEnvStorage - bundle of TypePool + TypeEnv with a stable address.
+// `TypeEnv.init` captures `*TypePool`, so the pool must outlive the environment.
+// The bundle must stay in final owner storage after initialization.
 // ---------------------------------------------------------------------------
 
 pub const TypeEnvStorage = struct {
@@ -595,93 +598,283 @@ fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u3
     return type_checker.check(root);
 }
 
-/// Owns the analysis that one module needs for contract extraction.
-/// Initialize this value in final caller storage.
-/// Its checkers borrow the type environment and facts in this value.
-pub const ModuleContractAnalysis = struct {
+/// Owns the selected analysis passes for one parsed module.
+/// Initialize this value in final caller storage before calling complete.
+pub const ModuleAnalysisSession = struct {
     pub const Profile = enum {
+        full,
         contract_only,
         sound_extraction,
     };
 
-    const State = enum {
+    pub const PassState = enum {
+        skipped,
+        ready,
+        attempted,
+        completed,
+        refused,
+    };
+
+    const SessionState = enum {
         uninitialized,
         ready,
         analysis_attempted,
         completed,
-        extraction_attempted,
+    };
+
+    pub const FullOptions = struct {
+        /// Borrowed through session completion and extraction.
+        type_map: ?*const TypeMap = null,
+        strict: bool = true,
+        manifest_registry: ?*const manifest_registry_mod.Registry = null,
+        policy_sections: guard_catalog.SectionSet = .{},
+        select_verifier: bool = false,
+        select_flow: bool = false,
+    };
+
+    pub const ContractOnlyOptions = struct {
+        extraction: ExtractContractOptions = .{},
+        select_flow: bool = false,
+    };
+
+    pub const ContractContext = struct {
+        dispatch: ?*const PatternDispatchTable = null,
+        has_default_response: bool = false,
+        verification: ?VerificationInfo = null,
+        imported_effects: []const ImportedEffect = &.{},
     };
 
     allocator: std.mem.Allocator = undefined,
     parsed: ParsedModule = undefined,
     profile: Profile = undefined,
-    opts: ExtractContractOptions = .{},
-    state: State = .uninitialized,
+    full_opts: FullOptions = .{},
+    extraction_opts: ExtractContractOptions = .{},
+    contract_context: ContractContext = .{},
+    state: SessionState = .uninitialized,
     type_env_storage: TypeEnvStorage = .{},
+    extraction_type_env_storage: TypeEnvStorage = .{},
     resolved: ?ResolvedModule = null,
+    checked: ?CheckedModule = null,
     standalone_checker: ?TypeChecker = null,
+    extraction_checker: ?TypeChecker = null,
+    standalone_flow_checker: ?FlowChecker = null,
     resolution_facts: ?ModuleFacts = null,
     contract_facts: ?ModuleFacts = null,
     exported_effects: ?ExportEffects = null,
+    resolution_state: PassState = .skipped,
+    contract_type_state: PassState = .skipped,
+    verifier_state: PassState = .skipped,
+    flow_state: PassState = .skipped,
+    extraction_state: PassState = .skipped,
 
-    pub fn init(
-        self: *ModuleContractAnalysis,
+    pub fn initFull(
+        self: *ModuleAnalysisSession,
         allocator: std.mem.Allocator,
         parsed: ParsedModule,
-        profile: Profile,
+        opts: FullOptions,
+    ) !void {
+        if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
+        self.* = .{
+            .allocator = allocator,
+            .parsed = parsed,
+            .profile = .full,
+            .full_opts = opts,
+            .state = .ready,
+            .resolution_state = .ready,
+            .contract_type_state = .ready,
+            .verifier_state = if (opts.select_verifier) .ready else .skipped,
+            .flow_state = if (opts.select_flow) .ready else .skipped,
+            .extraction_state = .ready,
+        };
+    }
+
+    pub fn initContractOnly(
+        self: *ModuleAnalysisSession,
+        allocator: std.mem.Allocator,
+        parsed: ParsedModule,
+        opts: ContractOnlyOptions,
+    ) !void {
+        if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
+        self.* = .{
+            .allocator = allocator,
+            .parsed = parsed,
+            .profile = .contract_only,
+            .extraction_opts = opts.extraction,
+            .contract_context = contextFromExtractOptions(opts.extraction),
+            .state = .ready,
+            .contract_type_state = .ready,
+            .verifier_state = .skipped,
+            .flow_state = if (opts.select_flow) .ready else .skipped,
+            .extraction_state = .ready,
+        };
+    }
+
+    pub fn initSoundExtraction(
+        self: *ModuleAnalysisSession,
+        allocator: std.mem.Allocator,
+        parsed: ParsedModule,
         opts: ExtractContractOptions,
     ) !void {
         if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
         self.* = .{
             .allocator = allocator,
             .parsed = parsed,
-            .profile = profile,
-            .opts = opts,
+            .profile = .sound_extraction,
+            .extraction_opts = opts,
+            .contract_context = contextFromExtractOptions(opts),
             .state = .ready,
+            .resolution_state = .ready,
+            .contract_type_state = .ready,
+            .verifier_state = .skipped,
+            .flow_state = .skipped,
+            .extraction_state = .ready,
         };
     }
 
-    pub fn deinit(self: *ModuleContractAnalysis) void {
+    pub fn deinit(self: *ModuleAnalysisSession) void {
         if (self.state == .uninitialized) return;
 
         if (self.exported_effects) |*effects| effects.deinit(self.allocator);
         self.exported_effects = null;
+        if (self.checked) |*checked| checked.deinit();
+        self.checked = null;
+        if (self.standalone_flow_checker) |*flow| flow.deinit();
+        self.standalone_flow_checker = null;
+        if (self.extraction_checker) |*checker| checker.deinit();
+        self.extraction_checker = null;
         if (self.standalone_checker) |*checker| checker.deinit();
         self.standalone_checker = null;
         if (self.resolved) |*resolved| resolved.deinit();
         self.resolved = null;
+        self.extraction_type_env_storage.deinit(self.allocator);
         self.type_env_storage.deinit(self.allocator);
-        if (self.contract_facts) |*facts| facts.deinit();
+        if (self.contract_facts) |*owned_contract| owned_contract.deinit();
         self.contract_facts = null;
-        if (self.resolution_facts) |*facts| facts.deinit();
+        if (self.resolution_facts) |*owned_resolution| owned_resolution.deinit();
         self.resolution_facts = null;
         self.state = .uninitialized;
     }
 
-    pub fn complete(self: *ModuleContractAnalysis) !void {
+    pub fn complete(self: *ModuleAnalysisSession) !void {
         if (self.state != .ready) return error.AnalysisAlreadyAttempted;
         self.state = .analysis_attempted;
 
         switch (self.profile) {
+            .full => try self.completeFull(),
             .contract_only => try self.completeContractOnly(),
             .sound_extraction => try self.completeSoundExtraction(),
         }
         self.state = .completed;
     }
 
+    pub fn facts(self: *ModuleAnalysisSession) !*const ModuleFacts {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        return self.completedContractFacts();
+    }
+
+    pub fn resolvedForReport(self: *ModuleAnalysisSession) !*ResolvedModule {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        return if (self.resolved) |*resolved| resolved else error.AnalysisNotResolved;
+    }
+
+    pub fn refuseResolution(self: *ModuleAnalysisSession) void {
+        if (self.resolution_state != .completed) return;
+        self.resolution_state = .refused;
+        if (self.verifier_state == .ready) self.verifier_state = .refused;
+        if (self.flow_state == .ready) self.flow_state = .refused;
+        if (self.extraction_state == .ready) self.extraction_state = .refused;
+    }
+
+    pub fn prepareChecked(
+        self: *ModuleAnalysisSession,
+        handler_func: ?NodeIndex,
+        opts: CheckOptions,
+    ) !void {
+        if (self.profile != .full or self.resolution_state != .completed) {
+            return error.AnalysisNotResolved;
+        }
+        if (self.verifier_state == .skipped and self.flow_state == .skipped) return;
+        if (self.checked != null) return error.AnalysisPassAlreadyPrepared;
+        if (handler_func == null) return;
+        self.checked = try CheckedModule.init(
+            self.allocator,
+            try self.resolvedForReport(),
+            opts,
+        );
+    }
+
+    pub fn runVerifier(self: *ModuleAnalysisSession, handler_func: NodeIndex) !u32 {
+        if (self.verifier_state != .ready) return error.AnalysisPassUnavailable;
+        self.verifier_state = .attempted;
+        const checked = if (self.checked) |*value| value else return error.AnalysisPassUnavailable;
+        const count = try checked.runVerifier(handler_func);
+        if (!checked.verifierCompleted()) return error.AnalysisPassIncomplete;
+        self.verifier_state = .completed;
+        return count;
+    }
+
+    pub fn runFlow(self: *ModuleAnalysisSession, handler_func: NodeIndex) !u32 {
+        if (self.flow_state != .ready) return error.AnalysisPassUnavailable;
+        self.flow_state = .attempted;
+        const count = if (self.checked) |*checked|
+            try checked.runFlow(handler_func)
+        else if (self.standalone_flow_checker) |*flow|
+            try flow.check(handler_func)
+        else
+            return error.AnalysisPassUnavailable;
+        if (self.checked) |*checked| {
+            if (!checked.flowCompleted()) return error.AnalysisPassIncomplete;
+        }
+        self.flow_state = .completed;
+        return count;
+    }
+
+    pub fn checkedModule(self: *ModuleAnalysisSession) ?*CheckedModule {
+        return if (self.checked) |*checked| checked else null;
+    }
+
+    pub fn completedFlow(self: *ModuleAnalysisSession) !*const FlowChecker {
+        if (self.flow_state != .completed) return error.AnalysisPassIncomplete;
+        if (self.checked) |*checked| {
+            if (!checked.flowCompleted()) return error.AnalysisPassIncomplete;
+            return &checked.flow_checker;
+        }
+        return if (self.standalone_flow_checker) |*flow| flow else error.AnalysisPassIncomplete;
+    }
+
+    pub fn setContractContext(
+        self: *ModuleAnalysisSession,
+        context: ContractContext,
+    ) !void {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
+        self.contract_context = context;
+    }
+
+    pub fn setImportedEffects(
+        self: *ModuleAnalysisSession,
+        imported_effects: []const ImportedEffect,
+    ) !void {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
+        self.contract_context.imported_effects = imported_effects;
+    }
+
     pub fn extractContract(
-        self: *ModuleContractAnalysis,
+        self: *ModuleAnalysisSession,
         filename: []const u8,
     ) !HandlerContract {
-        switch (self.state) {
-            .completed => self.state = .extraction_attempted,
-            .extraction_attempted => return error.ContractExtractionAlreadyAttempted,
-            else => return error.AnalysisNotCompleted,
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        if (self.resolution_state == .refused) return error.AnalysisNotResolved;
+        if (self.verifier_state == .attempted or self.flow_state == .attempted) {
+            return error.AnalysisPassIncomplete;
         }
+        if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
+        self.extraction_state = .attempted;
 
         var extraction = switch (self.profile) {
-            .contract_only => try self.extractDefaultResult(filename),
-            .sound_extraction => if (self.opts.type_check == runContractTypeCheck)
+            .full, .contract_only => try self.extractDefaultResult(filename),
+            .sound_extraction => if (self.extraction_opts.type_check == runContractTypeCheck)
                 try self.extractDefaultResult(filename)
             else
                 try self.extractCustomResult(filename),
@@ -693,53 +886,68 @@ pub const ModuleContractAnalysis = struct {
         }
         self.exported_effects = extraction.export_effects;
         extraction.export_effects = null;
+        self.extraction_state = .completed;
         return extraction.contract;
     }
 
-    /// Borrow the completed facts used for graph import mapping.
-    pub fn contractFacts(self: *ModuleContractAnalysis) !*const ModuleFacts {
-        if (self.state != .completed) return error.AnalysisNotCompleted;
-        return self.completedContractFacts();
-    }
-
-    /// Install file-import rows after graph dependencies have completed.
-    pub fn setImportedEffects(
-        self: *ModuleContractAnalysis,
-        imported_effects: []const ImportedEffect,
-    ) !void {
-        if (self.state != .completed) return error.AnalysisNotCompleted;
-        self.opts.imported_effects = imported_effects;
-    }
-
     /// Transfer the export table after a successful extraction.
-    pub fn takeExportEffects(self: *ModuleContractAnalysis) ?ExportEffects {
-        if (self.state != .extraction_attempted) return null;
+    pub fn takeExportEffects(self: *ModuleAnalysisSession) ?ExportEffects {
+        if (self.extraction_state != .completed) return null;
         const result = self.exported_effects;
         self.exported_effects = null;
         return result;
     }
 
-    fn completeContractOnly(self: *ModuleContractAnalysis) !void {
-        if (self.opts.type_check != runContractTypeCheck) {
-            return error.IncompatibleAnalysisProfile;
-        }
-
-        try self.completeStandaloneTypeSession();
-        try self.prepareContractFacts();
-    }
-
-    fn completeSoundExtraction(self: *ModuleContractAnalysis) !void {
-        self.resolution_facts = try buildModuleFacts(self.allocator, self.parsed, null);
-        const resolution_facts = &self.resolution_facts.?;
-
-        if (self.opts.type_map) |type_map| {
+    fn completeFull(self: *ModuleAnalysisSession) !void {
+        self.contract_facts = try buildModuleFacts(
+            self.allocator,
+            self.parsed,
+            self.full_opts.manifest_registry,
+        );
+        if (self.full_opts.type_map) |type_map| {
             try self.type_env_storage.init(self.allocator, type_map);
         }
         self.resolved = try resolve(self.allocator, self.parsed, .{
             .type_env = self.type_env_storage.envPtr(),
-            .strict = self.opts.strict,
+            .strict = self.full_opts.strict,
+            .module_facts = &self.contract_facts.?,
+            .policy_sections = self.full_opts.policy_sections,
+        });
+        if (self.resolved.?.type_checker) |*checker| try checker.ensureHealthy();
+        self.resolution_state = .completed;
+        if (self.resolved.?.type_checker != null) self.contract_type_state = .completed;
+    }
+
+    fn completeContractOnly(self: *ModuleAnalysisSession) !void {
+        if (self.extraction_opts.type_check != runContractTypeCheck) {
+            return error.IncompatibleAnalysisProfile;
+        }
+
+        try self.completeStandaloneTypeSession(null);
+        try self.prepareContractFacts(false);
+        if (self.flow_state == .ready) {
+            self.standalone_flow_checker = FlowChecker.init(
+                self.allocator,
+                self.parsed.ir_view,
+                self.parsed.atoms,
+            );
+            self.standalone_flow_checker.?.facts = self.completedContractFacts();
+        }
+    }
+
+    fn completeSoundExtraction(self: *ModuleAnalysisSession) !void {
+        self.resolution_facts = try buildModuleFacts(self.allocator, self.parsed, null);
+        const resolution_facts = &self.resolution_facts.?;
+
+        if (self.extraction_opts.type_map) |type_map| {
+            try self.type_env_storage.init(self.allocator, type_map);
+        }
+        self.resolved = try resolve(self.allocator, self.parsed, .{
+            .type_env = self.type_env_storage.envPtr(),
+            .strict = self.extraction_opts.strict,
             .module_facts = resolution_facts,
         });
+        self.resolution_state = .completed;
         const resolved = &self.resolved.?;
         if (resolved.bool_error_count > 0 or
             resolved.typeErrorCount() > 0 or
@@ -748,17 +956,23 @@ pub const ModuleContractAnalysis = struct {
             return error.SoundModeViolation;
         }
 
-        if (self.opts.type_check != runContractTypeCheck) return;
+        if (self.extraction_opts.type_check != runContractTypeCheck) return;
         if (resolved.type_checker) |*checker| {
             try checker.ensureHealthy();
+            self.contract_type_state = .completed;
         } else {
-            try self.completeStandaloneTypeSession();
+            try self.completeStandaloneTypeSession(null);
         }
-        try self.prepareContractFacts();
+        try self.prepareContractFacts(false);
     }
 
-    fn completeStandaloneTypeSession(self: *ModuleContractAnalysis) !void {
-        try self.type_env_storage.init(self.allocator, null);
+    fn completeStandaloneTypeSession(
+        self: *ModuleAnalysisSession,
+        type_map: ?*const TypeMap,
+    ) !void {
+        if (self.contract_type_state != .ready) return error.AnalysisPassUnavailable;
+        self.contract_type_state = .attempted;
+        try self.type_env_storage.init(self.allocator, type_map);
         self.standalone_checker = TypeChecker.init(
             self.allocator,
             self.parsed.ir_view,
@@ -768,58 +982,117 @@ pub const ModuleContractAnalysis = struct {
         const checker = &self.standalone_checker.?;
         _ = try checker.check(self.parsed.root);
         try checker.ensureHealthy();
+        self.contract_type_state = .completed;
     }
 
-    fn prepareContractFacts(self: *ModuleContractAnalysis) !void {
-        if (self.opts.module_facts != null) return;
-        if (self.profile == .sound_extraction and self.opts.manifest_registry == null) {
+    fn prepareContractFacts(self: *ModuleAnalysisSession, force_distinct: bool) !void {
+        if (self.extraction_opts.module_facts != null) return;
+        if (!force_distinct and
+            self.profile == .sound_extraction and
+            self.extraction_opts.manifest_registry == null)
+        {
             return;
         }
         self.contract_facts = try buildModuleFacts(
             self.allocator,
             self.parsed,
-            self.opts.manifest_registry,
+            self.extraction_opts.manifest_registry,
         );
     }
 
-    fn completedContractFacts(self: *ModuleContractAnalysis) *const ModuleFacts {
-        if (self.opts.module_facts) |facts| return facts;
-        if (self.contract_facts) |*facts| return facts;
-        if (self.resolution_facts) |*facts| return facts;
+    fn completedContractFacts(self: *ModuleAnalysisSession) *const ModuleFacts {
+        if (self.profile != .full) {
+            if (self.extraction_opts.module_facts) |injected| return injected;
+        }
+        if (self.contract_facts) |*owned_contract| return owned_contract;
+        // Graph import mapping precedes custom extraction callbacks.
+        if (self.resolution_facts) |*owned_resolution| return owned_resolution;
         unreachable;
     }
 
-    fn completedTypeChecker(self: *ModuleContractAnalysis) *TypeChecker {
+    fn completedTypeChecker(self: *ModuleAnalysisSession) !*TypeChecker {
+        if (self.contract_type_state == .ready) {
+            try self.completeStandaloneTypeSession(null);
+        }
+        if (self.contract_type_state != .completed) return error.AnalysisPassIncomplete;
         if (self.resolved) |*resolved| {
             if (resolved.type_checker) |*checker| return checker;
         }
-        return &self.standalone_checker.?;
+        return if (self.standalone_checker) |*checker| checker else error.AnalysisPassIncomplete;
     }
 
     fn extractDefaultResult(
-        self: *ModuleContractAnalysis,
+        self: *ModuleAnalysisSession,
         filename: []const u8,
     ) !ContractExtraction {
-        var opts = self.opts;
+        var opts = if (self.profile == .full) ExtractContractOptions{
+            .strict = self.full_opts.strict,
+            .manifest_registry = self.full_opts.manifest_registry,
+            .type_map = self.full_opts.type_map,
+        } else self.extraction_opts;
         opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
         if (self.profile == .contract_only) opts.type_map = null;
+        opts.dispatch = self.contract_context.dispatch;
+        opts.has_default_response = self.contract_context.has_default_response;
+        opts.verification = self.contract_context.verification;
+        opts.imported_effects = self.contract_context.imported_effects;
         return extractContractResultFromTypeSession(
             self.allocator,
             self.parsed,
             filename,
             opts,
-            self.completedTypeChecker(),
+            try self.completedTypeChecker(),
         );
     }
 
     fn extractCustomResult(
-        self: *ModuleContractAnalysis,
+        self: *ModuleAnalysisSession,
         filename: []const u8,
     ) !ContractExtraction {
-        var opts = self.opts;
-        opts.resolved = &self.resolved.?;
-        return extractContractResultFromParsed(self.allocator, self.parsed, filename, opts);
+        try self.extraction_type_env_storage.init(self.allocator, self.extraction_opts.type_map);
+        self.extraction_checker = TypeChecker.init(
+            self.allocator,
+            self.parsed.ir_view,
+            self.parsed.atoms,
+            self.extraction_type_env_storage.envPtr().?,
+        );
+        const checker = &self.extraction_checker.?;
+        _ = try self.extraction_opts.type_check(checker, self.parsed.root);
+        try self.prepareContractFacts(true);
+
+        var opts = self.extraction_opts;
+        opts.resolved = null;
+        opts.module_facts = self.completedContractFacts();
+        opts.dispatch = self.contract_context.dispatch;
+        opts.has_default_response = self.contract_context.has_default_response;
+        opts.verification = self.contract_context.verification;
+        opts.imported_effects = self.contract_context.imported_effects;
+        var extraction = try buildContractResultOn(
+            self.allocator,
+            self.parsed,
+            filename,
+            opts,
+            checker.env,
+            checker,
+            handler_verifier_mod.findHandlerFunction(self.parsed.ir_view, self.parsed.root),
+            if (handler_verifier_mod.findHandlerFunction(self.parsed.ir_view, self.parsed.root)) |handler|
+                self.parsed.ir_view.getLoc(handler)
+            else
+                null,
+        );
+        errdefer extraction.deinit(self.allocator);
+        try checker.ensureHealthy();
+        return extraction;
+    }
+
+    fn contextFromExtractOptions(opts: ExtractContractOptions) ContractContext {
+        return .{
+            .dispatch = opts.dispatch,
+            .has_default_response = opts.has_default_response,
+            .verification = opts.verification,
+            .imported_effects = opts.imported_effects,
+        };
     }
 };
 
@@ -1034,8 +1307,8 @@ pub fn extractContract(
         );
     }
 
-    var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(allocator, parsed, .sound_extraction, contract_opts);
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, contract_opts);
     defer analysis.deinit();
     try analysis.complete();
     return analysis.extractContract(filename);
@@ -1105,8 +1378,8 @@ fn extractMultiModuleContract(
             module_opts.verification = null;
         }
 
-        var analysis: ModuleContractAnalysis = .{};
-        try analysis.init(allocator, parsed, .sound_extraction, module_opts);
+        var analysis: ModuleAnalysisSession = .{};
+        try analysis.initSoundExtraction(allocator, parsed, module_opts);
         defer analysis.deinit();
         try analysis.complete();
 
@@ -1114,7 +1387,7 @@ fn extractMultiModuleContract(
             allocator,
             &graph,
             graph_idx,
-            try analysis.contractFacts(),
+            try analysis.facts(),
             loaded_effects.items,
         );
         defer allocator.free(imported_effects);
@@ -1411,7 +1684,7 @@ test "explicit type session extraction uses the completed caller session" {
     );
 }
 
-test "ModuleContractAnalysis requires completion and permits one extraction" {
+test "ModuleAnalysisSession requires completion and permits one extraction" {
     const allocator = testing.allocator;
     const source = "function handler(req) { return Response.text('ok'); }\n";
     var parsed_state = try parseSourceForTest(allocator, source);
@@ -1419,16 +1692,16 @@ test "ModuleContractAnalysis requires completion and permits one extraction" {
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
 
-    var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(allocator, parsed, .contract_only, .{});
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(allocator, parsed, .{});
     defer analysis.deinit();
 
-    try testing.expectError(error.AnalysisNotCompleted, analysis.contractFacts());
+    try testing.expectError(error.AnalysisNotCompleted, analysis.facts());
     try testing.expectError(error.AnalysisNotCompleted, analysis.setImportedEffects(&.{}));
     try testing.expectError(error.AnalysisNotCompleted, analysis.extractContract("owner.ts"));
     try analysis.complete();
     try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
-    _ = try analysis.contractFacts();
+    _ = try analysis.facts();
     try analysis.setImportedEffects(&.{});
 
     var contract = try analysis.extractContract("owner.ts");
@@ -1440,7 +1713,7 @@ test "ModuleContractAnalysis requires completion and permits one extraction" {
     );
 }
 
-test "ModuleContractAnalysis does not retry a refused sound analysis" {
+test "ModuleAnalysisSession does not retry a refused sound analysis" {
     const allocator = testing.allocator;
     const source =
         \\if ({}) { const unreachable = true; }
@@ -1451,8 +1724,8 @@ test "ModuleContractAnalysis does not retry a refused sound analysis" {
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
 
-    var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(allocator, parsed, .sound_extraction, .{ .strict = false });
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, .{ .strict = false });
     defer analysis.deinit();
 
     try testing.expectError(error.SoundModeViolation, analysis.complete());
@@ -1460,7 +1733,7 @@ test "ModuleContractAnalysis does not retry a refused sound analysis" {
     try testing.expectError(error.AnalysisNotCompleted, analysis.extractContract("refused.ts"));
 }
 
-test "ModuleContractAnalysis cleans a partial completion failure" {
+test "ModuleAnalysisSession cleans a partial completion failure" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(
         allocator,
@@ -1471,10 +1744,10 @@ test "ModuleContractAnalysis cleans a partial completion failure" {
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(failing.allocator(), parsed, .contract_only, .{
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(failing.allocator(), parsed, .{ .extraction = .{
         .capture_export_effects = true,
-    });
+    } });
     defer analysis.deinit();
 
     try testing.expectError(error.OutOfMemory, analysis.complete());
@@ -1482,7 +1755,7 @@ test "ModuleContractAnalysis cleans a partial completion failure" {
     try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
 }
 
-test "ModuleContractAnalysis publishes owned exports for both profiles" {
+test "ModuleAnalysisSession publishes owned exports for both extraction profiles" {
     const allocator = testing.allocator;
     const source =
         \\export function sibling() { return Date.now(); }
@@ -1497,12 +1770,17 @@ test "ModuleContractAnalysis publishes owned exports for both profiles" {
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const parsed = ParsedModule.fromExisting(view, root, &atoms);
 
-    inline for (.{ ModuleContractAnalysis.Profile.contract_only, .sound_extraction }) |profile| {
-        var analysis: ModuleContractAnalysis = .{};
-        try analysis.init(allocator, parsed, profile, .{
+    inline for (.{ ModuleAnalysisSession.Profile.contract_only, .sound_extraction }) |profile| {
+        var analysis: ModuleAnalysisSession = .{};
+        const extraction_opts = ExtractContractOptions{
             .strict = false,
             .capture_export_effects = true,
-        });
+        };
+        if (profile == .contract_only) {
+            try analysis.initContractOnly(allocator, parsed, .{ .extraction = extraction_opts });
+        } else {
+            try analysis.initSoundExtraction(allocator, parsed, extraction_opts);
+        }
         try analysis.complete();
 
         var contract = try analysis.extractContract("exports.ts");
@@ -1540,10 +1818,10 @@ test "late export capture failure releases a transferred rate limit namespace" {
 
     const Run = struct {
         fn extract(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
-            var analysis: ModuleContractAnalysis = .{};
-            try analysis.init(run_allocator, module, .contract_only, .{
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initContractOnly(run_allocator, module, .{ .extraction = .{
                 .capture_export_effects = true,
-            });
+            } });
             defer analysis.deinit();
             try analysis.complete();
 
@@ -1568,7 +1846,7 @@ test "late export capture failure releases a transferred rate limit namespace" {
     try testing.expect(failing.has_induced_failure);
 }
 
-test "ModuleContractAnalysis refuses extraction retry after allocation failure" {
+test "ModuleAnalysisSession refuses extraction retry after allocation failure" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(
         allocator,
@@ -1579,10 +1857,10 @@ test "ModuleContractAnalysis refuses extraction retry after allocation failure" 
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
 
     var failing = std.testing.FailingAllocator.init(allocator, .{});
-    var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(failing.allocator(), parsed, .contract_only, .{
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(failing.allocator(), parsed, .{ .extraction = .{
         .capture_export_effects = true,
-    });
+    } });
     defer analysis.deinit();
     try analysis.complete();
 
@@ -1596,7 +1874,7 @@ test "ModuleContractAnalysis refuses extraction retry after allocation failure" 
     );
 }
 
-test "ModuleContractAnalysis profiles preserve type diagnostic acceptance" {
+test "ModuleAnalysisSession profiles preserve type diagnostic acceptance" {
     const allocator = testing.allocator;
     const source =
         \\const joined = 1 + "y";
@@ -1621,15 +1899,17 @@ test "ModuleContractAnalysis profiles preserve type diagnostic acceptance" {
     const parsed = ParsedModule.fromExisting(view, root, &atoms);
     const type_map = frontend.typeMap() orelse return error.TestExpectedTypeMap;
 
-    var contract_only: ModuleContractAnalysis = .{};
-    try contract_only.init(allocator, parsed, .contract_only, .{ .type_map = type_map });
+    var contract_only: ModuleAnalysisSession = .{};
+    try contract_only.initContractOnly(allocator, parsed, .{
+        .extraction = .{ .type_map = type_map },
+    });
     defer contract_only.deinit();
     try contract_only.complete();
     var contract = try contract_only.extractContract("profile.ts");
     defer contract.deinit(allocator);
 
-    var sound: ModuleContractAnalysis = .{};
-    try sound.init(allocator, parsed, .sound_extraction, .{
+    var sound: ModuleAnalysisSession = .{};
+    try sound.initSoundExtraction(allocator, parsed, .{
         .strict = false,
         .type_map = type_map,
     });
@@ -1637,7 +1917,48 @@ test "ModuleContractAnalysis profiles preserve type diagnostic acceptance" {
     try testing.expectError(error.SoundModeViolation, sound.complete());
 }
 
-test "ModuleContractAnalysis runs a custom callback only during extraction" {
+test "ModuleAnalysisSession full profile supports typed and untyped extraction" {
+    const allocator = testing.allocator;
+    const typed_source = "function handler(req: Request): Response { return Response.text('ok'); }\n";
+    var frontend = try source_frontend_mod.PreparedSource.init(allocator, typed_source, "typed.ts", .{});
+    defer frontend.deinit();
+    var typed_state = try parseSourceForTest(allocator, frontend.parserInput());
+    defer typed_state.js_parser.deinit();
+    const typed_view = IrView.fromIRStore(&typed_state.js_parser.nodes, &typed_state.js_parser.constants);
+    const typed_parsed = ParsedModule.fromExisting(typed_view, typed_state.root, null);
+
+    var typed: ModuleAnalysisSession = .{};
+    try typed.initFull(allocator, typed_parsed, .{
+        .type_map = frontend.typeMap(),
+        .strict = false,
+    });
+    defer typed.deinit();
+    try testing.expect(!typed.type_env_storage.initialized);
+    try testing.expect(typed.resolved == null);
+    try typed.complete();
+    try testing.expect((try typed.resolvedForReport()).type_checker != null);
+    var typed_contract = try typed.extractContract("typed.ts");
+    defer typed_contract.deinit(allocator);
+
+    var untyped_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer untyped_state.js_parser.deinit();
+    const untyped_view = IrView.fromIRStore(&untyped_state.js_parser.nodes, &untyped_state.js_parser.constants);
+    const untyped_parsed = ParsedModule.fromExisting(untyped_view, untyped_state.root, null);
+    var untyped: ModuleAnalysisSession = .{};
+    try untyped.initFull(allocator, untyped_parsed, .{ .strict = false });
+    defer untyped.deinit();
+    try untyped.complete();
+    try testing.expect((try untyped.resolvedForReport()).type_checker == null);
+    try testing.expectEqual(ModuleAnalysisSession.PassState.ready, untyped.contract_type_state);
+    var untyped_contract = try untyped.extractContract("untyped.ts");
+    defer untyped_contract.deinit(allocator);
+    try testing.expectEqual(ModuleAnalysisSession.PassState.completed, untyped.contract_type_state);
+}
+
+test "ModuleAnalysisSession keeps skipped passes distinct" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(
         allocator,
@@ -1646,10 +1967,166 @@ test "ModuleContractAnalysis runs a custom callback only during extraction" {
     defer parsed_state.js_parser.deinit();
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+        return error.HandlerNotFound;
 
-    var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(allocator, parsed, .sound_extraction, .{
+    var session: ModuleAnalysisSession = .{};
+    try session.initFull(allocator, parsed, .{ .strict = false });
+    defer session.deinit();
+    try session.complete();
+    try testing.expectEqual(ModuleAnalysisSession.PassState.skipped, session.verifier_state);
+    try testing.expectEqual(ModuleAnalysisSession.PassState.skipped, session.flow_state);
+    try testing.expectError(error.AnalysisPassUnavailable, session.runVerifier(handler));
+    try testing.expectError(error.AnalysisPassUnavailable, session.runFlow(handler));
+}
+
+test "ModuleAnalysisSession refuses publication after failed selected passes" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) { return Response.text('ok'); }
+    ;
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+        return error.HandlerNotFound;
+
+    inline for (.{ true, false }) |select_verifier| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = std.math.maxInt(usize),
+        });
+        var session: ModuleAnalysisSession = .{};
+        try session.initFull(failing.allocator(), parsed, .{
+            .strict = false,
+            .select_verifier = select_verifier,
+            .select_flow = !select_verifier,
+        });
+        defer session.deinit();
+        try session.complete();
+        try session.prepareChecked(handler, .{ .module_facts = try session.facts() });
+
+        failing.fail_index = failing.alloc_index;
+        if (select_verifier) {
+            try testing.expectError(error.OutOfMemory, session.runVerifier(handler));
+            try testing.expectError(error.AnalysisPassUnavailable, session.runVerifier(handler));
+        } else {
+            try testing.expectError(error.OutOfMemory, session.runFlow(handler));
+            try testing.expectError(error.AnalysisPassUnavailable, session.runFlow(handler));
+        }
+        try testing.expect(failing.has_induced_failure);
+        failing.fail_index = std.math.maxInt(usize);
+        try testing.expectError(error.AnalysisPassIncomplete, session.extractContract("failed-pass.ts"));
+        try testing.expect(session.takeExportEffects() == null);
+    }
+}
+
+test "ModuleAnalysisSession explicit refusal stops selected passes and extraction" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+        return error.HandlerNotFound;
+
+    var session: ModuleAnalysisSession = .{};
+    try session.initFull(allocator, parsed, .{
         .strict = false,
+        .select_verifier = true,
+        .select_flow = true,
+    });
+    defer session.deinit();
+    try session.complete();
+    session.refuseResolution();
+    _ = (try session.resolvedForReport()).boolDiagnostics();
+    try testing.expectError(error.AnalysisPassUnavailable, session.runVerifier(handler));
+    try testing.expectError(error.AnalysisPassUnavailable, session.runFlow(handler));
+    try testing.expectError(error.AnalysisNotResolved, session.extractContract("refused.ts"));
+}
+
+test "ModuleAnalysisSession contract-only flow can run after extraction" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+        return error.HandlerNotFound;
+
+    var session: ModuleAnalysisSession = .{};
+    try session.initContractOnly(allocator, parsed, .{ .select_flow = true });
+    defer session.deinit();
+    try session.complete();
+    var contract = try session.extractContract("flow-after.ts");
+    defer contract.deinit(allocator);
+    try testing.expectEqual(@as(u32, 0), try session.runFlow(handler));
+    _ = try session.completedFlow();
+}
+
+fn extractOwnedSessionResultsForTest(allocator: std.mem.Allocator) !ContractExtraction {
+    const source = "export function sibling() { return Date.now(); }\n" ++
+        "function handler(req: Request): Response { return Response.text('ok'); }\n";
+    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, "owned.ts", .{});
+    defer frontend.deinit();
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, frontend.parserInput());
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var session: ModuleAnalysisSession = .{};
+    try session.initContractOnly(
+        allocator,
+        ParsedModule.fromExisting(view, root, &atoms),
+        .{ .extraction = .{ .capture_export_effects = true } },
+    );
+    defer session.deinit();
+    try session.complete();
+    var contract = try session.extractContract("owned.ts");
+    errdefer contract.deinit(allocator);
+    return .{
+        .contract = contract,
+        .export_effects = session.takeExportEffects() orelse return error.ExportEffectsMissing,
+    };
+}
+
+test "ModuleAnalysisSession results survive every borrowed input" {
+    const allocator = testing.allocator;
+    var extraction = try extractOwnedSessionResultsForTest(allocator);
+    defer extraction.deinit(allocator);
+    try testing.expectEqualStrings("owned.ts", extraction.contract.handler.path);
+    switch (extraction.export_effects.?.lookup("sibling")) {
+        .callable => |row| try testing.expect(!row.deterministic),
+        .data, .blocked => return error.CallableExportExpected,
+    }
+}
+
+test "ModuleAnalysisSession runs a custom callback only during extraction" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var type_map = TypeMap.init("");
+    defer type_map.deinit(allocator);
+
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, .{
+        .strict = false,
+        .type_map = &type_map,
         .type_check = rejectingContractTypeCheck,
         .capture_export_effects = true,
     });
@@ -1657,6 +2134,10 @@ test "ModuleContractAnalysis runs a custom callback only during extraction" {
 
     try analysis.complete();
     try testing.expectError(error.TestTypeCheckRan, analysis.extractContract("custom.ts"));
+    try testing.expect(analysis.extraction_checker != null);
+    try testing.expect(analysis.resolved.?.type_checker != null);
+    try testing.expect(&analysis.extraction_checker.? != &analysis.resolved.?.type_checker.?);
+    try testing.expect(analysis.contract_facts == null);
     try testing.expect(analysis.takeExportEffects() == null);
     try testing.expectError(
         error.ContractExtractionAlreadyAttempted,
@@ -1664,7 +2145,7 @@ test "ModuleContractAnalysis runs a custom callback only during extraction" {
     );
 }
 
-test "ModuleContractAnalysis keeps resolution and contract facts distinct" {
+test "ModuleAnalysisSession keeps resolution and contract facts distinct" {
     const allocator = testing.allocator;
     const manifest_json =
         \\{
@@ -1694,8 +2175,8 @@ test "ModuleContractAnalysis keeps resolution and contract facts distinct" {
     const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, root, &atoms);
 
-    var registry_analysis: ModuleContractAnalysis = .{};
-    try registry_analysis.init(allocator, parsed, .sound_extraction, .{
+    var registry_analysis: ModuleAnalysisSession = .{};
+    try registry_analysis.initSoundExtraction(allocator, parsed, .{
         .strict = false,
         .manifest_registry = &registry,
     });
@@ -1708,17 +2189,18 @@ test "ModuleContractAnalysis keeps resolution and contract facts distinct" {
 
     var explicit_facts = try buildModuleFacts(allocator, parsed, null);
     defer explicit_facts.deinit();
-    var explicit_analysis: ModuleContractAnalysis = .{};
-    try explicit_analysis.init(allocator, parsed, .sound_extraction, .{
+    var explicit_analysis: ModuleAnalysisSession = .{};
+    try explicit_analysis.initSoundExtraction(allocator, parsed, .{
         .strict = false,
         .manifest_registry = &registry,
         .module_facts = &explicit_facts,
     });
-    defer explicit_analysis.deinit();
     try explicit_analysis.complete();
     var explicit_contract = try explicit_analysis.extractContract("explicit.ts");
-    defer explicit_contract.deinit(allocator);
     try testing.expectEqual(@as(usize, 0), explicit_contract.modules.items.len);
+    explicit_contract.deinit(allocator);
+    explicit_analysis.deinit();
+    try testing.expectEqual(@as(usize, 1), explicit_facts.imports.items.len);
 }
 
 test "pipeline.check does not emit a module after verifier allocation failure" {
@@ -2205,7 +2687,7 @@ test "loaded graph corrects entry effects before merge" {
         for (compiled.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
     }
 
-    const profiles = [_]ModuleContractAnalysis.Profile{ .contract_only, .sound_extraction };
+    const profiles = [_]ModuleAnalysisSession.Profile{ .contract_only, .sound_extraction };
     for (profiles) |profile| {
         var merged = try handler_contract_mod.initMergedContract(allocator, "/effects/entry.ts");
         defer merged.deinit(allocator);
@@ -2220,11 +2702,16 @@ test "loaded graph corrects entry effects before merge" {
             const graph_module = &graph.module_list.items[graph_index];
             const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
             const parsed = ParsedModule.fromExisting(view, module.root, &atoms);
-            var analysis: ModuleContractAnalysis = .{};
-            try analysis.init(allocator, parsed, profile, .{
+            var analysis: ModuleAnalysisSession = .{};
+            const extraction_opts = ExtractContractOptions{
                 .strict = false,
                 .capture_export_effects = true,
-            });
+            };
+            if (profile == .contract_only) {
+                try analysis.initContractOnly(allocator, parsed, .{ .extraction = extraction_opts });
+            } else {
+                try analysis.initSoundExtraction(allocator, parsed, extraction_opts);
+            }
             defer analysis.deinit();
             try analysis.complete();
 
@@ -2232,7 +2719,7 @@ test "loaded graph corrects entry effects before merge" {
                 allocator,
                 &graph,
                 graph_index,
-                try analysis.contractFacts(),
+                try analysis.facts(),
                 loaded.items,
             );
             defer allocator.free(imported);
@@ -2403,29 +2890,23 @@ fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8, typ
     const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, root, null);
 
-    var storage: TypeEnvStorage = .{};
-    defer storage.deinit(allocator);
-    try storage.init(allocator, type_map);
-
-    var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = false });
-    defer resolved.deinit();
-
     const handler_func = handler_verifier_mod.findHandlerFunction(view, root) orelse
         return error.HandlerNotFound;
 
-    var checked = try CheckedModule.init(allocator, &resolved, .{});
-    defer checked.deinit();
-    _ = try checked.runVerifier(handler_func);
-    _ = try checked.runFlow(handler_func);
+    var session: ModuleAnalysisSession = .{};
+    try session.initFull(allocator, parsed, .{
+        .type_map = type_map,
+        .strict = false,
+        .select_verifier = true,
+        .select_flow = true,
+    });
+    defer session.deinit();
+    try session.complete();
+    try session.prepareChecked(handler_func, .{ .module_facts = try session.facts() });
+    _ = try session.runVerifier(handler_func);
+    _ = try session.runFlow(handler_func);
 
-    const type_checker = if (resolved.type_checker) |*checker| checker else return error.TypeCheckerMissing;
-    var contract = try extractContractFromTypeSession(
-        allocator,
-        parsed,
-        "sweep.ts",
-        .{ .strict = false },
-        type_checker,
-    );
+    var contract = try session.extractContract("sweep.ts");
     contract.deinit(allocator);
 }
 

@@ -1175,214 +1175,6 @@ fn remapDiagnosticsToSource(
     }
 }
 
-const AnalysisState = enum {
-    skipped,
-    unresolved,
-    refused,
-    completed,
-};
-
-const FullAnalysisOptions = struct {
-    type_env: ?*zts.TypeEnv,
-    strict: bool,
-    manifest_registry: ?*const zts.ManifestRegistry,
-    policy_sections: @FieldType(zts.pipeline.ResolveOptions, "policy_sections"),
-    select_verifier: bool,
-    select_flow: bool,
-};
-
-/// Owns each analysis object for one parsed module. The parser, atoms, prepared
-/// source, and type environment remain in stable caller storage until deinit.
-const SingleModuleAnalysis = struct {
-    allocator: std.mem.Allocator,
-    parsed: zts.pipeline.ParsedModule,
-    module_facts: ?zts.pipeline.ModuleFacts = null,
-    resolved: ?zts.pipeline.ResolvedModule = null,
-    checked: ?zts.pipeline.CheckedModule = null,
-    standalone_type_checker: ?zts.TypeChecker = null,
-    standalone_flow_checker: ?zts.FlowChecker = null,
-    resolution_state: AnalysisState = .unresolved,
-    contract_type_state: AnalysisState = .unresolved,
-    verifier_state: AnalysisState = .unresolved,
-    flow_state: AnalysisState = .unresolved,
-
-    fn initFull(
-        self: *SingleModuleAnalysis,
-        allocator: std.mem.Allocator,
-        parsed: zts.pipeline.ParsedModule,
-        opts: FullAnalysisOptions,
-    ) !void {
-        try self.initFacts(allocator, parsed, opts.manifest_registry);
-        errdefer self.deinit();
-
-        self.verifier_state = if (opts.select_verifier) .unresolved else .skipped;
-        self.flow_state = if (opts.select_flow) .unresolved else .skipped;
-        self.resolved = try zts.pipeline.resolve(
-            allocator,
-            parsed,
-            .{
-                .type_env = opts.type_env,
-                .strict = opts.strict,
-                .module_facts = self.facts(),
-                .policy_sections = opts.policy_sections,
-            },
-        );
-        const resolved = if (self.resolved) |*value| value else unreachable;
-        if (resolved.type_checker) |*checker| try checker.ensureHealthy();
-        self.resolution_state = .completed;
-        self.contract_type_state = if (resolved.type_checker != null) .completed else .unresolved;
-    }
-
-    fn initContractOnly(
-        self: *SingleModuleAnalysis,
-        allocator: std.mem.Allocator,
-        parsed: zts.pipeline.ParsedModule,
-        type_env_storage: *zts.pipeline.TypeEnvStorage,
-        type_map: ?*const zts.TypeMap,
-        manifest_registry: ?*const zts.ManifestRegistry,
-    ) !void {
-        try self.initFacts(allocator, parsed, manifest_registry);
-        errdefer self.deinit();
-        self.resolution_state = .skipped;
-        self.verifier_state = .skipped;
-
-        try self.ensureContractTypeSession(type_env_storage, type_map);
-
-        self.standalone_flow_checker = zts.FlowChecker.init(allocator, parsed.ir_view, parsed.atoms);
-        const flow = if (self.standalone_flow_checker) |*value| value else unreachable;
-        flow.facts = self.facts();
-        self.flow_state = .unresolved;
-    }
-
-    fn initFacts(
-        self: *SingleModuleAnalysis,
-        allocator: std.mem.Allocator,
-        parsed: zts.pipeline.ParsedModule,
-        manifest_registry: ?*const zts.ManifestRegistry,
-    ) !void {
-        self.* = .{ .allocator = allocator, .parsed = parsed };
-        self.module_facts = try zts.pipeline.buildModuleFacts(allocator, parsed, manifest_registry);
-    }
-
-    fn deinit(self: *SingleModuleAnalysis) void {
-        if (self.checked) |*checked| checked.deinit();
-        if (self.resolved) |*resolved| resolved.deinit();
-        if (self.standalone_flow_checker) |*flow| flow.deinit();
-        if (self.standalone_type_checker) |*checker| checker.deinit();
-        if (self.module_facts) |*module_facts| module_facts.deinit();
-        self.checked = null;
-        self.resolved = null;
-        self.standalone_flow_checker = null;
-        self.standalone_type_checker = null;
-        self.module_facts = null;
-    }
-
-    fn facts(self: *SingleModuleAnalysis) *zts.pipeline.ModuleFacts {
-        return if (self.module_facts) |*module_facts| module_facts else unreachable;
-    }
-
-    fn resolvedForReport(self: *SingleModuleAnalysis) *zts.pipeline.ResolvedModule {
-        return if (self.resolved) |*resolved| resolved else unreachable;
-    }
-
-    fn refuseResolution(self: *SingleModuleAnalysis) void {
-        if (self.resolution_state == .completed) self.resolution_state = .refused;
-    }
-
-    fn prepareChecked(
-        self: *SingleModuleAnalysis,
-        handler_func: ?ir.NodeIndex,
-        opts: zts.pipeline.CheckOptions,
-    ) !void {
-        if (self.resolution_state != .completed) return error.AnalysisNotResolved;
-        if (self.verifier_state == .skipped and self.flow_state == .skipped) return;
-        if (self.checked != null) return error.AnalysisPassAlreadyPrepared;
-        if (handler_func == null) return;
-        self.checked = try zts.pipeline.CheckedModule.init(
-            self.allocator,
-            self.resolvedForReport(),
-            opts,
-        );
-    }
-
-    fn runVerifier(self: *SingleModuleAnalysis, handler_func: ir.NodeIndex) !u32 {
-        if (self.verifier_state != .unresolved) return error.AnalysisPassUnavailable;
-        const checked = if (self.checked) |*value| value else return error.AnalysisPassUnavailable;
-        const count = checked.runVerifier(handler_func) catch |err| {
-            self.verifier_state = .refused;
-            return err;
-        };
-        if (!checked.verifierCompleted()) return error.AnalysisPassIncomplete;
-        self.verifier_state = .completed;
-        return count;
-    }
-
-    fn runFlow(
-        self: *SingleModuleAnalysis,
-        handler_func: ir.NodeIndex,
-    ) !u32 {
-        if (self.flow_state != .unresolved) return error.AnalysisPassUnavailable;
-        self.flow_state = .refused;
-        const count = if (self.checked) |*checked|
-            try checked.runFlow(handler_func)
-        else if (self.standalone_flow_checker) |*flow| blk: {
-            const errors = try flow.check(handler_func);
-            break :blk errors;
-        } else return error.AnalysisPassUnavailable;
-        if (self.checked) |*checked| {
-            if (!checked.flowCompleted()) return error.AnalysisPassIncomplete;
-        }
-        self.flow_state = .completed;
-        return count;
-    }
-
-    fn ensureContractTypeSession(
-        self: *SingleModuleAnalysis,
-        type_env_storage: *zts.pipeline.TypeEnvStorage,
-        type_map: ?*const zts.TypeMap,
-    ) !void {
-        if (self.contract_type_state == .completed) return;
-        if (self.contract_type_state != .unresolved) return error.AnalysisPassUnavailable;
-        self.contract_type_state = .refused;
-        try type_env_storage.init(self.allocator, type_map);
-        const type_env = type_env_storage.envPtr() orelse return error.TypeEnvironmentUnavailable;
-        self.standalone_type_checker = zts.TypeChecker.init(
-            self.allocator,
-            self.parsed.ir_view,
-            self.parsed.atoms,
-            type_env,
-        );
-        const checker = if (self.standalone_type_checker) |*value| value else unreachable;
-        _ = try checker.check(self.parsed.root);
-        try checker.ensureHealthy();
-        self.contract_type_state = .completed;
-    }
-
-    fn completedTypeChecker(self: *SingleModuleAnalysis) !*zts.TypeChecker {
-        if (self.contract_type_state != .completed) return error.AnalysisPassIncomplete;
-        if (self.resolved != null and self.resolution_state != .completed) {
-            return error.AnalysisPassIncomplete;
-        }
-        if (self.resolved) |*resolved| {
-            if (resolved.type_checker) |*checker| return checker;
-        }
-        return if (self.standalone_type_checker) |*checker| checker else error.AnalysisPassIncomplete;
-    }
-
-    fn checkedModule(self: *SingleModuleAnalysis) ?*zts.pipeline.CheckedModule {
-        return if (self.checked) |*checked| checked else null;
-    }
-
-    fn completedFlow(self: *SingleModuleAnalysis) !*const zts.FlowChecker {
-        if (self.flow_state != .completed) return error.AnalysisPassIncomplete;
-        if (self.checked) |*checked| {
-            if (!checked.flowCompleted()) return error.AnalysisPassIncomplete;
-            return &checked.flow_checker;
-        }
-        return if (self.standalone_flow_checker) |*flow| flow else error.AnalysisPassIncomplete;
-    }
-};
-
 fn runCheckOnPreparedSource(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
@@ -1533,18 +1325,12 @@ fn runCheckOnPreparedSource(
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
 
-    var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
-    defer type_env_storage.deinit(allocator);
-    if (prepared.typeMap()) |type_map| {
-        try type_env_storage.init(allocator, type_map);
-    }
-
-    var analysis: SingleModuleAnalysis = undefined;
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
         allocator,
         parsed,
         .{
-            .type_env = type_env_storage.envPtr(),
+            .type_map = prepared.typeMap(),
             .strict = true,
             .manifest_registry = null,
             // Which sections the project's policy declares, so a computed
@@ -1559,7 +1345,8 @@ fn runCheckOnPreparedSource(
         },
     );
     defer analysis.deinit();
-    const resolved = analysis.resolvedForReport();
+    try analysis.complete();
+    const resolved = try analysis.resolvedForReport();
     // One message per node: a boolean or strict diagnostic under a node that
     // has a type error repeats it.
     resolved.dropRepeatsOfTypeErrors();
@@ -1595,7 +1382,7 @@ fn runCheckOnPreparedSource(
         }
     }
 
-    if (type_env_storage.envPtr() != null) {
+    if (prepared.typeMap() != null) {
         result.stages_run.insert(.types);
         const tc_diags = resolved.typeDiagnostics();
         result.type_errors = @intCast(resolved.typeErrorCount());
@@ -1688,14 +1475,14 @@ fn runCheckOnPreparedSource(
         }
         imported_analyses = try collectImportedFnSummaries(
             allocator,
-            analysis.facts(),
+            try analysis.facts(),
             handler_path,
             &import_stack,
             opts.import_reader,
         );
 
         try analysis.prepareChecked(hf, .{
-            .module_facts = analysis.facts(),
+            .module_facts = try analysis.facts(),
             .imported_fn_summaries = imported_analyses.flow.items,
         });
         _ = try analysis.runVerifier(hf);
@@ -1767,9 +1554,7 @@ fn runCheckOnPreparedSource(
 
     // Stage 8: Contract. Untyped full analysis creates a separate real type
     // session only now. The contract borrows the completed session.
-    try analysis.ensureContractTypeSession(&type_env_storage, prepared.typeMap());
     result.contract = try extractContractFromAnalysis(
-        allocator,
         &analysis,
         handler_path,
         .{
@@ -1831,7 +1616,7 @@ fn runCheckOnPreparedSource(
                 allocator,
                 ir_view,
                 &atoms,
-                analysis.facts(),
+                try analysis.facts(),
                 hf,
                 handler_path,
                 result.contract != null,
@@ -2181,18 +1966,12 @@ pub fn compileHandler(
     const ir_view_check = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view_check, root, &atoms);
 
-    var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
-    defer type_env_storage.deinit(allocator);
-    if (prepared.typeMap()) |type_map| {
-        try type_env_storage.init(allocator, type_map);
-    }
-
-    var analysis: SingleModuleAnalysis = undefined;
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
         allocator,
         parsed,
         .{
-            .type_env = type_env_storage.envPtr(),
+            .type_map = prepared.typeMap(),
             .strict = opts.strict,
             .manifest_registry = manifest_registry,
             // Which sections the author wrote, not what is in them: the
@@ -2204,7 +1983,8 @@ pub fn compileHandler(
         },
     );
     defer analysis.deinit();
-    const resolved = analysis.resolvedForReport();
+    try analysis.complete();
+    const resolved = try analysis.resolvedForReport();
 
     {
         const bool_diags = resolved.boolDiagnostics();
@@ -2231,7 +2011,7 @@ pub fn compileHandler(
         if (!builtin.is_test) debugPrint("Boolean check passed\n", .{});
     }
 
-    if (type_env_storage.envPtr() != null) {
+    if (prepared.typeMap() != null) {
         const tc_diags = resolved.typeDiagnostics();
         if (tc_diags.len > 0 and !builtin.is_test) {
             var tc_output: std.ArrayList(u8) = .empty;
@@ -2287,7 +2067,7 @@ pub fn compileHandler(
     var result_safe: bool = false;
     var optional_safe: bool = false;
     const handler_fn = zts.findHandlerFunction(ir_view_check, root);
-    try analysis.prepareChecked(handler_fn, .{ .module_facts = analysis.facts() });
+    try analysis.prepareChecked(handler_fn, .{ .module_facts = try analysis.facts() });
     if (emit_verify) {
         if (handler_fn) |hf| {
             const error_count = try analysis.runVerifier(hf);
@@ -2482,12 +2262,10 @@ pub fn compileHandler(
         var route_analysis = try analyzeAot(allocator, &js_parser, &atoms, root);
         defer if (route_analysis) |*t| t.deinit(allocator);
 
-        try analysis.ensureContractTypeSession(&type_env_storage, prepared.typeMap());
         contract = try extractContractFromAnalysis(
-            allocator,
             &analysis,
             filename,
-            .{ .aot = route_analysis, .verification = verify_info, .manifest_registry = manifest_registry },
+            .{ .aot = route_analysis, .verification = verify_info },
         );
         if (handler_fn) |hf| {
             const flow_errors = try analysis.runFlow(hf);
@@ -2987,33 +2765,21 @@ const findHandlerFunction = zts.findHandlerFunction;
 const ContractExtractionOptions = struct {
     aot: ?AotAnalysis = null,
     verification: ?VerificationInfo = null,
-    manifest_registry: ?*const zts.ManifestRegistry = null,
     imported_effects: []const zts.pipeline.ImportedEffect = &.{},
 };
 
 fn extractContractFromAnalysis(
-    allocator: std.mem.Allocator,
-    analysis: *SingleModuleAnalysis,
+    analysis: *zts.pipeline.ModuleAnalysisSession,
     filename: []const u8,
     opts: ContractExtractionOptions,
 ) !HandlerContract {
-    var contract = try zts.pipeline.extractContractFromTypeSession(
-        allocator,
-        analysis.parsed,
-        filename,
-        .{
-            .module_facts = analysis.facts(),
-            .dispatch = if (opts.aot) |aot_analysis| aot_analysis.dispatch else null,
-            .has_default_response = if (opts.aot) |aot_analysis| aot_analysis.default_response != null else false,
-            .verification = opts.verification,
-            .manifest_registry = opts.manifest_registry,
-            .imported_effects = opts.imported_effects,
-        },
-        try analysis.completedTypeChecker(),
-    );
-    errdefer contract.deinit(allocator);
-
-    return contract;
+    try analysis.setContractContext(.{
+        .dispatch = if (opts.aot) |aot_analysis| aot_analysis.dispatch else null,
+        .has_default_response = if (opts.aot) |aot_analysis| aot_analysis.default_response != null else false,
+        .verification = opts.verification,
+        .imported_effects = opts.imported_effects,
+    });
+    return analysis.extractContract(filename);
 }
 
 fn projectCompletedFlow(
@@ -3074,28 +2840,25 @@ fn buildContractOnlyFromParsed(
     allocator: std.mem.Allocator,
     parsed: zts.pipeline.ParsedModule,
     filename: []const u8,
-    type_map: ?*const zts.TypeMap,
     sql_schema_path: ?[]const u8,
     manifest_registry: ?*const zts.ManifestRegistry,
 ) !HandlerContract {
-    var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
-    defer type_env_storage.deinit(allocator);
-
-    var analysis: SingleModuleAnalysis = undefined;
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initContractOnly(
         allocator,
         parsed,
-        &type_env_storage,
-        type_map,
-        manifest_registry,
+        .{
+            .extraction = .{ .manifest_registry = manifest_registry },
+            .select_flow = true,
+        },
     );
     defer analysis.deinit();
+    try analysis.complete();
 
     var contract = try extractContractFromAnalysis(
-        allocator,
         &analysis,
         filename,
-        .{ .manifest_registry = manifest_registry },
+        .{},
     );
     errdefer contract.deinit(allocator);
 
@@ -3153,17 +2916,16 @@ fn buildMultiModuleContract(
 
         const module_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const parsed = zts.pipeline.ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
-        var module_analysis: zts.pipeline.ModuleContractAnalysis = .{};
-        try module_analysis.init(
+        var module_analysis: zts.pipeline.ModuleAnalysisSession = .{};
+        try module_analysis.initContractOnly(
             allocator,
             parsed,
-            .contract_only,
-            .{
+            .{ .extraction = .{
                 .dispatch = if (temp_aot) |analysis| analysis.dispatch else null,
                 .has_default_response = if (temp_aot) |analysis| analysis.default_response != null else false,
                 .manifest_registry = manifest_registry,
                 .capture_export_effects = true,
-            },
+            } },
         );
         defer module_analysis.deinit();
         try module_analysis.complete();
@@ -3172,7 +2934,7 @@ fn buildMultiModuleContract(
             allocator,
             graph,
             graph_idx,
-            try module_analysis.contractFacts(),
+            try module_analysis.facts(),
             loaded_effects.items,
         );
         defer allocator.free(imported_effects);
@@ -3942,7 +3704,6 @@ fn buildTestContractForSource(
         allocator,
         zts.pipeline.ParsedModule.fromExisting(view, root, &atoms),
         filename,
-        null,
         sql_schema_path,
         null,
     );

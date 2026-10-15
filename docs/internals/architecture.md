@@ -134,6 +134,28 @@ and thread analysis state through descent, so adding a new IR node type requires
 updating each relevant walker. A full single-pass visitor unification is
 intentionally not attempted: the traversals are not the same traversal.
 
+### Module analysis ownership
+
+`ModuleAnalysisSession` owns analysis storage for one parsed module.
+The caller initializes the session in its final address.
+The session borrows parser IR, atoms, type maps, registries, and injected module facts.
+The session owns type environments, checkers, internal facts, and pass results.
+
+The `full` profile runs resolution for CHECK and single-module compilation.
+The `contract_only` profile builds contracts without source annotations.
+It can run flow after contract extraction for the tools helper.
+The `sound_extraction` profile resolves soundness before contract extraction.
+
+Each selected pass has one attempt.
+Skipped passes remain different from failed or refused passes.
+An explicit resolution refusal blocks verifier, flow, and contract extraction.
+Completed contracts and transferred export tables own their data after session cleanup.
+
+Sound resolution always uses module facts without a manifest registry.
+Contract extraction can use separate facts with a manifest registry.
+Injected module facts remain borrowed and authoritative for contract extraction.
+A custom extraction callback gets a separate type environment and checker.
+
 ## Virtual Modules
 
 The native module registry is the source of truth:

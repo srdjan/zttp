@@ -687,6 +687,38 @@ Tests check entry properties through the shared import mapper before merging, un
 The tools graph test checks unchanged merged output, and source review checks the tools loop's mapper wiring.
 Merged properties remain null.
 
+### U3 implementation constraints
+
+One `ModuleAnalysisSession` will replace the tools owner and `ModuleContractAnalysis`.
+The session will initialize in final caller storage and own its analysis storage.
+The session will retain separate full, contract-only, and sound-extraction profiles.
+Each selected pass will have one attempt, and skipped passes will remain distinct.
+Flow can run after contract extraction where the current tools helper requires that order.
+
+Custom extraction callbacks require fresh checker storage and retain their extraction-time execution.
+Separate type storage remains necessary when resolution and a custom extraction callback both run.
+Externally supplied facts remain borrowed, and registry-specific facts remain distinct.
+Returned contracts and transferred export tables must survive all session cleanup.
+
+The private tools helper has one caller, which supplies no type map.
+U3 can remove that unused parameter instead of adding a profile option for an unobserved case.
+Contract-only analysis will continue to omit source annotations.
+Full and sound analysis will retain their existing type-map inputs.
+
+The boolean checker can retain a pointer into temporary checker storage within `resolve`.
+Current consumers read stored diagnostics and node types instead of rerunning boolean inference.
+U3 will clear the temporary pointer before the resolved result escapes.
+The direct `resolve` API will remain available to its current runtime caller.
+
+Graph import mapping precedes custom extraction callbacks.
+Before the callback runs, the session will expose resolution facts when no injected or contract facts exist.
+The callback will still run before construction of its registry-specific contract facts.
+The first Astra review identified and rejected an earlier accessor guard that broke this order.
+
+A failed selected verifier or flow attempt must prevent later contract extraction.
+An unattempted selected flow remains available because the contract-only tools path extracts before flow analysis.
+Independent allocation-failure probes will restore allocation before checking refusal after each selected pass fails.
+
 ## Definition of Done
 
 One stable pipeline owner manages each module analysis lifetime.

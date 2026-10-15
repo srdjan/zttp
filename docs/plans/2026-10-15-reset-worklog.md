@@ -26,18 +26,14 @@ No tracked source changes existed when execution started.
 
 ## Current work
 
-U1 (compatibility baseline) is complete.
-The Sol workers returned frontend and CHECK characterization tests without changing production behavior.
-The main agent reviewed every changed source line and corrected the fixture assumptions that Astra identified.
-The main agent also owns documentation links and authoritative verification.
-The full local gate passed. Git history records the phase commit.
-The Sol explorer completed U2 (sibling export effects) load-path review without editing code.
 U1 (compatibility baseline) is committed as `ad1aa961`.
-Three Sol workers returned effect analysis, contract integration, and CHECK integration for U2 (sibling export effects).
-The main agent completed the final corrections, documentation, and authoritative checks.
-Astra accepted the final source review. The additional suites, standalone runtime, and full local gate passed.
-U2 (sibling export effects) is complete. Git history records the phase commit.
-A Sol explorer completed the read-only U3 (analysis lifetime consolidation) review.
+U2 (sibling export effects) is committed as `2f1ca7c5`.
+Both phases passed their required checks and Astra source review.
+
+U3 (analysis lifetime consolidation) passed its required checks and Astra source review.
+The Sol worker `reset_u3_session` completed the coupled pipeline, tools, and architecture changes.
+The main agent now owns the changed files.
+The main agent owns review, authoritative checks, the plan authority, and this worklog.
 
 ## Verification and completion
 
@@ -45,6 +41,7 @@ The first unfiltered focused run exited 1: 3,473 tests passed, one skipped, and 
 The failure was an incorrect new fixture, not a production change.
 Named return annotations retain their function names and raw trailing spaces.
 The corrected unfiltered run exited 0: 3,474 tests passed and one skipped across 34 successful steps.
+
 The diagnostic corpus reported 182 cases and zero failures in the first run.
 The logs are `/tmp/zttp-reset-20261015/u1-focused.log` and `/tmp/zttp-reset-20261015/u1-focused-corrected.log`.
 
@@ -52,6 +49,7 @@ Astra reviewed the corrected U1 (compatibility baseline) diff and found no remai
 The review added a typed mismatch contrast and a compilation contrast to strengthen the baseline.
 The main agent also added an exact normalized-output fixture through the public normalize function.
 The review is source evidence; it does not replace authoritative test results.
+
 The separate spine and formatting checks both exited 0.
 The full local gate exited 0, with recording and evidence publication disabled in its environment.
 Its log is `/tmp/zttp-reset-20261015/u1-verify.log`.
@@ -59,12 +57,13 @@ Its log is `/tmp/zttp-reset-20261015/u1-verify.log`.
 The prior Claude logs cover the starting tracked tree, not the new characterization tests.
 The final documentation checks also exited 0.
 Their log is `/tmp/zttp-reset-20261015/u1-docs-final.log`.
-U2 (sibling export effects) is complete. U3 through U20 remain unstarted.
+U3 (analysis lifetime consolidation) is complete and awaits its local commit.
+U4 through U20 remain unstarted.
 
 ## Unresolved questions and next action
 
-No product decision blocks U3 (analysis lifetime consolidation).
-The main agent will specify and delegate one session owner after committing U2 (sibling export effects).
+No product decision blocks U4 (path effect facts).
+The main agent will commit U3, then release the prepared U4 worker.
 
 ## U2 preparation evidence
 
@@ -78,6 +77,7 @@ Export projection must distinguish functions, function holders, plain data, and 
 Holder effects require final user-function rows as well as the initializer row.
 Owned export tables must outlive loader cleanup without retaining borrowed names.
 The cache-read and egress bridges remain necessary before U5 (contract effect facts) removes the old summary producer.
+
 The accepted interface distinguishes callable exports, proven data exports, and blocked exports.
 Each import outcome uses the module's local binding slot.
 The export table owns its names and contains no borrowed parser state.
@@ -93,6 +93,7 @@ A handler calls a sibling that writes through `cacheSet` and declares `read_only
 The command exited 0 and reported both properties as true.
 The fixture is `/tmp/zttp-reset-20261015/sibling-writer/`.
 The result is `/tmp/zttp-reset-20261015/u2-baseline-writer.json`.
+
 The first attempted fixture used prohibited `void` syntax and therefore supplied no valid writer evidence.
 The corrected fixture uses `undefined` and produced no stderr diagnostic.
 
@@ -103,6 +104,7 @@ It reported 2,617 passing tests, one skipped test, three failed tests, and one c
 The log is `/tmp/zttp-reset-20261015/u2-integration-first.log`.
 One old test expected absent sibling summaries to establish clean effects.
 Two new fixtures used unavailable names or unsupported typing and required correction.
+
 The graph test also required correction because merged contracts expose no entry properties.
 
 The main agent rejected a proposed transfer of capsule diagnostics into merged output.
@@ -128,28 +130,33 @@ The log is `/tmp/zttp-reset-20261015/u2-focused-corrected.log`.
 The flow census matched all 734 expected verdicts.
 The diagnostic corpus passed all 182 cases.
 All 33 example suites passed.
+
 The proof-swallow gate requires an explanation for the new conservative default.
 Astra also identified name resolution incorrectly blocking holder registration without an atom table.
 The main agent added a focused regression before correcting that registration.
 The regression uses the standalone parser without an atom table.
 The fixture derives its padding from `Atom.FIRST_DYNAMIC` and asserts that the holder name exceeds the predefined range.
+
 The first unfiltered `test-zts` run exited 1 at an incorrect assertion in the new fixture.
 Native `Math.random()` clears determinism and purity, but does not add the `random` capability in this analyzer.
 The fixture now asserts the established determinism, purity, and holder behavior.
 The corrected unfiltered run exited 1 at the intended nondeterminism assertion.
 It reported 2,416 passing tests, one skipped test, and one failed test.
+
 Its log is `/tmp/zttp-reset-20261015/u2-null-atoms-red-corrected.log`.
 Holder registration now retains the original binding key when no name resolves.
 Only export publication requires a resolved name.
 The conservative default now explains why unproved shapes remain blocked.
 The final additional suite run exited 0.
 All 53 steps succeeded, with 4,026 passing tests and two skipped tests.
+
 Its log is `/tmp/zttp-reset-20261015/u2-focused-final.log`.
 Astra reviewed the final source diff and found no remaining blocking issue.
 That review includes the optional holder name, conservative imported rows, cleanup, and unchanged merged output.
 The formatting check and `git diff --check` both exited 0.
 The standalone runtime test root exited 0.
 Its log is `/tmp/zttp-reset-20261015/u2-zruntime.log`.
+
 The full local gate exited 0.
 Its log is `/tmp/zttp-reset-20261015/u2-verify.log`.
 The gate passed aggregate tests, standalone runtime tests, optimized builds, precompilation, smoke tests, shell gates, and offline replay.
@@ -157,20 +164,64 @@ The main agent added standing review dispositions to the plan authority.
 The final documentation and spine checks exited 0.
 Their log is `/tmp/zttp-reset-20261015/u2-docs-final.log`.
 
+## U3 preparation evidence
+
+The Sol explorer identified one shared session design for the two existing owners.
+The session must retain distinct extraction profiles, registry identities, callback timing, and selected pass states.
+The private tools helper has only one caller, which passes no type map.
+The session needs no new option for that unused private parameter.
+
+The boolean checker can retain a pointer to temporary checker storage after resolution.
+Current consumers need only stored diagnostics and node types.
+The worker will clear that pointer before the resolved value escapes.
+The unchanged public behavior from U1 and U2 supplies characterization evidence for this refactor.
+
 The main agent repeated the original public CLI probe against the rebuilt analyzer.
 CHECK now exits 1 and reports `read_only` and `retry_safe` as false for the sibling cache writer.
 The before and after fixtures use the same source files and command.
 The corrected result is `/tmp/zttp-reset-20261015/u2-final-writer.json`.
+
+## U3 review and verification
+
+The first two additional-suite runs exited 1 during compilation.
+The new nested state type conflicted with the existing private state type.
+Five local captures also conflicted with the new `facts` method.
+The main agent renamed the existing private type and the captures.
+Neither run established a behavior verdict for the affected roots.
+Their logs are `/tmp/zttp-reset-20261015/u3-focused-first.log` and `/tmp/zttp-reset-20261015/u3-focused-corrected.log`.
+
+Astra identified a custom callback regression in graph import mapping.
+The main agent restored resolution facts as the fallback before extraction.
+Callback-specific facts still build after the callback runs.
+Astra also identified extraction after a selected pass failed.
+The session now refuses that publication, with separate verifier and flow failure probes.
+
+Astra reviewed both corrections and found no remaining source blocker.
+The third additional-suite run exited 0.
+All 36 build steps succeeded, with 2,865 passing tests and one skipped test.
+Its log is `/tmp/zttp-reset-20261015/u3-focused-third.log`.
+The formatting, spine, and diff checks exited 0.
+The full local gate exited 0.
+Its log is `/tmp/zttp-reset-20261015/u3-verify.log`.
+The aggregate and standalone runtime steps passed in separate processes.
+The gate also passed optimized builds, precompilation, smoke tests, repository shell gates, and offline replay.
+The final documentation and spine checks exited 0.
+Their log is `/tmp/zttp-reset-20261015/u3-docs-final.log`.
+
+The next Sol worker is preparing U4 (path effect facts) without edits.
+That worker will receive source ownership only after U3 commits.
 
 ## Frontend measurement baseline
 
 The main agent ran the planned benchmark before the typed parser phases.
 Zig reports version `0.16.0`.
 The host reports `Darwin 25.6.0 arm64` and `Apple M4 Pro`.
+
 The one-iteration pilot exited 0. All eight fixtures reported success.
 The 50-iteration run also exited 0. All eight fixtures reported success.
 Only the iteration parameter changed between runs.
 The logs are `/tmp/zttp-reset-20261015/frontend-baseline-pilot.json` and `/tmp/zttp-reset-20261015/frontend-baseline.json`.
+
 The harness measures parsing and code generation for its built-in fixtures.
 The measurements establish no CHECK latency, imported-analysis cost, or performance improvement.
 
