@@ -3,48 +3,49 @@
 ## Objective and authority
 
 The [reset plan](2026-10-14-reset-implementation-plan.md) owns findings, design, phase order, and acceptance.
-This worklog records current work and execution evidence.
+This worklog records execution state and receipts.
 The user approved implementation with "reviewd, go ahead, use subagents when possible, verify with astra" on 2026-10-15.
-That approval supersedes the plan's earlier planning-only authorization paragraph.
+That approval supersedes the plan's earlier planning-only paragraph.
+The task continues through U20.
 
-## Constraints and starting state
+## Constraints
 
-Work stays on local main, with one local commit for each completed phase.
-No push, live model recording, corpus replacement, or public format change is authorized.
-Current public behavior remains compatible except for the planned sibling-effect correction.
-The approved root capture phase also binds graph identity to verify override bytes.
-CHECK retains its distinct imported traversals and exact reader observations.
-The main agent owns review, authoritative verification, integration, and commits.
-Each implementation phase uses a fresh Sol high worker. Astra xhigh supplies independent review.
+Work stays on local main, with a local commit after each completed phase.
+No push, branch, worktree, live model call, corpus replacement, or public format change is authorized.
+Public behavior remains compatible except for U2's sibling-effect correction and U6's approved binding of graph identity to override bytes.
+CHECK retains its separate imported traversals and reader observations.
+Main owns review, verification, documentation, integration, and Git writes.
+Each phase uses a fresh Sol high implementation worker; Astra xhigh supplies independent review.
+Workers run no builds or tests and make no Git writes.
+The pinned toolchain is Zig 0.16.0.
+No Python, filtered acceptance tests, or concurrent pool-heavy roots are permitted.
 
-The starting commit is `f917dc0b7320ecd0165e49a274311f77b3290796`.
-Its tracked tree is `d3b97c46e4ee5fbd0da9174d4343887fbbbc7e16`.
-No tracked source changes existed when execution started.
-The reset plan was an untracked document offered and approved by the user.
-The untracked `2026-10-14-sibling-module-effects-plan.md` belongs to Claude's earlier session and remains untouched and excluded.
+The starting commit was `f917dc0b7320ecd0165e49a274311f77b3290796`.
+Its tracked tree was `d3b97c46e4ee5fbd0da9174d4343887fbbbc7e16`.
+The Claude draft `2026-10-14-sibling-module-effects-plan.md` remains untracked, untouched, and excluded.
+No browser session was opened.
 
-## Current work and next action
+## Current work
 
-U1 through U6 are complete and committed locally.
-Every completed phase passed its required checks and Astra source review.
-U7 (primitive typed parser) passed every required check and is ready for its local commit.
-U8 through U20 remain unstarted.
+U1 through U7 are complete and committed locally.
+U8 (compound type syntax) passed its private comparison, tools baseline, frontend gate, and full repository gate.
+U9 has read-only preparation; U9 implementation and U10 through U20 remain unstarted.
+Production callers retain the legacy frontend during U8.
 
-The fresh Sol worker `reset_u7_primitive_parser` returned source ownership after its implementation handoff.
-The worker completed read-only preparation before main released Stage 2 after the U6 commit.
-The worker runs no builds or tests and makes no Git writes.
-Main owns all source corrections, actual verification, and independent Astra review.
-The main agent owns the plan authority, this worklog, checks, and Git writes.
+The Sol worker `reset_u8_compound_parser` completed its final correction handoff and paused edits.
+Main owns all U8 source, documentation, actual checks, and Git writes.
+Astra accepted the final correction, including the bounded rollback probes.
+Final documentation and spine checks passed with exit 0 across eight build steps.
+Whole-tree formatting and diff checks also passed.
+Main will commit the isolated U8 phase before releasing U9 implementation.
+No product decision blocks progress.
 
-No product decision blocks the next phase.
+## Completed phase receipts
 
-## Completed phases
-
-All log names below are relative to `/tmp/zttp-reset-20261015/`.
-The full gate disables `DEEPSEEK_API_KEY`, `ZTTP_CODEGEN_RECORD`, and `ZTTP_EVIDENCE_PUBLISH` in its environment.
-Each full gate runs aggregate and standalone runtime roots in separate processes.
-All named test runs are unfiltered, and their direct exit status supplies the verdict.
-Source review does not replace test execution or establish a performance improvement.
+Every log name below is relative to `/tmp/zttp-reset-20261015/`.
+Every accepted phase passed whole-tree formatting, diff checks, and Astra source review.
+The full gate passed aggregate tests, standalone runtime, optimized builds, verified precompilation, smoke tests, shell gates, and offline replay.
+Source review does not replace execution or establish a performance improvement.
 
 | Phase | Local commit | Final additional-suite result | Full gate | Final documentation and spine |
 |---|---|---|---|---|
@@ -54,329 +55,204 @@ Source review does not replace test execution or establish a performance improve
 | U4 (path effect facts) | `a13b1849` | `u4-focused-final.log`: exit 0, 30 steps, 2,854 pass, 1 skip | `u4-verify.log`: exit 0 | `u4-docs-final.log`: exit 0 |
 | U5 (contract effect facts) | `d79afafb` | `u5-focused-final.log`: exit 0, 39 steps, 3,090 pass, 1 skip | `u5-verify.log`: exit 0 | `u5-docs-final.log`: exit 0 |
 | U6 (root source capture) | `f8d4fce4` | `u6-focused.log`: exit 0, 25 steps, 1,765 pass, 1 skip; `u6-determinism.log`: exit 0 | `u6-verify.log`: exit 0 | `u6-docs-final.log`: exit 0 |
+| U7 (primitive typed parser) | `a56107e3` | `u7-focused-accepted.log`: exit 0, 45 steps, 3,383 pass, 1 skip | `u7-verify.log`: exit 0 | `u7-docs-final.log`: exit 0 |
 
-Formatting and diff checks passed for each completed phase.
-The full gates also passed optimized builds, precompilation, smoke tests, shell gates, and offline replay.
-U2 also passed its separate standalone runtime command in `u2-zruntime.log`.
-U2 and U4 matched all 734 flow probes.
-U1 and U2 passed all 182 diagnostic cases.
-U2 passed all 33 example suites; the full gates also run those suites.
+U2 also passed `u2-zruntime.log` separately.
+U2, U4, U5, and U7 matched all 734 flow probes.
+The final focused and full gates passed the 182-case diagnostic corpus where required.
+Detailed accepted findings remain in the authority.
+Earlier execution narratives remain in prior commits and `worklog-through-u8-slice.md` outside the repository.
 
-## Earlier failures and review receipts
+## Failed checks and corrections
 
-The plan authority records accepted design dispositions.
-This ledger retains failed execution evidence and its correction.
+These receipts retain failures without treating a later pass as evidence that the earlier run passed.
 
-| Run | Observed result | Correction or evidence limit |
+| Run | Result | Correction or limit |
 |---|---|---|
-| `u1-focused.log` | Exit 1: 3,473 pass, 1 skip, 1 fail | A new fixture lost a named return annotation's function name and trailing spaces. |
-| `u2-integration-first.log` | Exit 1: 2,617 pass, 1 skip, 3 fail, 1 crash | One stale expectation and two invalid fixtures required correction. |
-| `u2-focused-corrected.log` | Exit 1: 4,025 pass, 2 skip; 51 of 53 steps | The proof-swallow gate required an explanation for a conservative default. |
-| `u2-null-atoms-red-corrected.log` | Exit 1: 2,416 pass, 1 skip, 1 fail | The intended nondeterminism assertion exposed missing holder registration without an atom table. |
-| `u3-focused-first.log` | Exit 1 during compilation | A nested state type conflicted with the existing private state type. |
-| `u3-focused-corrected.log` | Exit 1 during compilation | Five local captures conflicted with the new `facts` method. |
-| `u4-zts-first.log` | Exit 1: 8 of 13 steps; 1,083 pass, 1 skip | A capture shadowed `complete`; one allocation-sweep helper call lacked the facts argument. |
-| `u4-zts-corrected.log` | Exit 0: 13 steps, 2,428 pass, 1 skip | The corrected analyzer roots passed before broader checks. |
-| `u4-focused.log` | Exit 0: 30 steps, 2,853 pass, 1 skip | A later failure probe increased the final passing count by one. |
-| `u4-proof-swallow-first.log` | Exit 0 | U4 required no allowlist change. |
+| `u1-focused.log` | Exit 1; one failure | Fixture lost a function name and trailing spaces. |
+| `u2-integration-first.log` | Exit 1; three failures and one crash | Corrected stale expectations and invalid fixtures. |
+| `u2-focused-corrected.log` | Exit 1; 51 of 53 steps | Added the missing conservative-default explanation. |
+| `u2-null-atoms-red-corrected.log` | Exit 1; intended failure | Exposed holder registration without resolved names. |
+| `u3-focused-first.log`, `u3-focused-corrected.log` | Compilation failures | Renamed conflicting state types and local captures. |
+| `u4-zts-first.log` | Compilation failure | Corrected a shadowed capture and missing facts argument. |
+| `u5-baseline-first.log`, `u5-baseline-corrected.log` | Exit 1; one failure each | Prepared typed source, corrected ownership cleanup, and used an actual declaration-bearing block. |
+| `u5-focused.log` | Exit 1; 37 of 39 steps | Restored two proof-scope explanations without widening the allowlist. |
+| `u6-changing-root-red.log` | Exit 1; intended failure | CHECK reread replacement bytes after capturing the root. |
+| `u6-agent-first.log` | Compilation failure | Unwrapped an optional JSON value in the new assertion. |
+| `u7-zts-first.log` | Compilation failure | Corrected atom narrowing and runtime iteration over a comptime enum. |
+| `u7-focused.log` | Exit 1; tier gate only | Added the two new tracked source files; the gate remained unchanged. |
+| `u7-focused-final.log` | Exit 1; one failure | Corrected the expected private exclusion reason while retaining exclusion. |
+| `u8-slice-first.log` | Exit 1; compilation failures | Renamed the shadowed checkpoint and added missing ASCII identifier helpers. |
+| `u8-slice-corrected.log` | Exit 1; compiler artifact failed | Added an explicit `TypeSyntax.Span` result type. Engine and precompile tests passed. |
+| `u8-final-bounded.log` | Exit 1; engine compilation failed | Main moved the computed second-annotation offset inside the allocation-sweep function. |
 
-The first attempted U2 CLI fixture used prohibited `void` syntax and supplied no writer evidence.
-The corrected baseline in `sibling-writer/` incorrectly held `read_only` and `retry_safe` for a sibling cache writer.
-The rebuilt analyzer later exited 1 and reported both properties as false for the same files and command.
-The result files are `u2-baseline-writer.json` and `u2-final-writer.json`.
-The first null-atoms probe also asserted an incorrect `random` capability expectation.
-Native `Math.random()` clears purity and determinism without adding that capability in this analyzer.
+The first U2 CLI candidate used prohibited `void` and supplied no writer evidence.
+The corrected writer baseline and final responses remain in `u2-baseline-writer.json` and `u2-final-writer.json`.
+A native `Math.random()` probe clears purity and determinism without adding the `random` capability.
+The authority retains the resulting imported-row, namespace, holder, summary, and identity decisions.
 
-Astra's U2 review required conservative imported rows, safe namespace ownership, and holder registration without resolved names.
-The main agent rejected new capsule arrays in merged output because they changed public behavior.
-Merged properties remain null; tests observe entry properties before merging.
+## U8 baseline receipts
 
-Astra's U3 review required resolution facts before custom callbacks and extraction refusal after selected-pass failure.
-The final code preserves later callback-specific facts and permits unattempted flow after extraction.
-The failure probes restore allocation before checking extraction refusal.
+Main measured 45 original CLI fixtures in `u8-cli-baseline/`.
+The full responses and direct statuses remain in that directory's index.
+Tools tests freeze diagnostic order, stages, text, locations, suggestions, and the propagated empty-template error.
+Compiler tests separately freeze exact type structure and admission.
+The exhaustive census contains eight compound families and 31 semantic quirks.
 
-Main and Astra reviews of U4 required immutable slices, a required-name census, and stable heap-backed fixture facts.
-Astra also identified allocation before an unmatched lower-level recursion query.
-The main agent restored the previous allocation-free false result and added a public failure probe.
-Astra accepted the corrected source before the final checks.
+| Run | Direct result |
+|---|---|
+| `u8-baseline-first.log` | Exit 0; 16 steps, 2,676 pass, 1 skip |
+| `u8-baseline-census.log` | Exit 0; 16 steps, 2,673 pass, 1 skip |
+| `u8-baseline-boundaries.log` | Exit 0; 16 steps, 2,675 pass, 1 skip |
+| `u8-baseline-whitespace.log` | Exit 0; 16 steps, 2,675 pass, 1 skip |
+| `u8-slice-third.log` | Exit 0; 16 steps, 2,676 pass, 1 skip |
+| `u8-full-corrected.log` | Exit 0; 16 steps, 2,685 pass, 1 skip |
+| `u8-final-slice.log` | Exit 0; 16 steps, 2,690 pass, 1 skip |
+| `u8-final-bounded-corrected.log` | Exit 0; 16 steps, 2,690 pass, 1 skip |
 
-## U5 preparation and accepted direction
+The census consolidated duplicate tests, which reduced the intermediate passing count.
+Astra required the record tag before accepting a zero-field result.
+Fifteen function parameters retain exact metadata; sixteen produce `TypePoolCapacityExceeded` after admission.
+Arrays with 63 and 64 suffixes retain every layer in healthy pools.
+Canonical encoding succeeds at 63 layers and refuses 64 layers.
+Whitespace before adjacent `[]` remains allowed; whitespace inside the brackets stops suffix recognition.
+Astra accepted the baseline and revised private specification before main released Stage 2B.
 
-The Sol explorer `reset_u4_path_facts` mapped contract consumers without edits or builds.
-The fresh worker then prepared the implementation design without edits or builds.
-Astra reviewed the design with xhigh reasoning.
+## U8 review and remaining work
 
-The first proposal overstated summary redundancy and universal import guards.
-First-name handler identity can differ from the selected top-level handler.
-Legacy callback traversal, nested targets, and raw-slot precedence also differ from ordinary effect rows.
-An existing parsed-source authentication fixture exposes a slot collision that universal guards would change.
-The baseline tests now confirm the exact fields under unchanged production code.
+Main reviewed the complete initial 1,230-line parser checkpoint and the typed hook.
+Main later reviewed the revised parser, direct lowerer, ordered oracle, and preflight changes.
+Astra independently reviewed the parser checkpoint and now reviews lowering and comparison.
 
-The accepted design keeps a completed `ContractEffectSummary` facet inside immutable `EffectFacts`.
-The facet retains the exact legacy scalar summary, selected-handler identity, and first-name handler reachability.
-The path profile distinguishes an unrequested facet from completed no-handler facts.
-The producer releases traversal scratch before publication.
-The builder borrows completed facts and clones returned exports.
+Returned findings cover missing `null` and `undefined`, absent-member stopping, exact nullable selection, closer handling, and all-six-array rollback.
+They also cover explicit admission ends, group and modifier nodes, full member spans, and private implementation budgets.
+The authority owns the detailed requirements and examples.
 
-Reference APIs retain each consumer's existing eligibility and resolution filter.
-Existing module-reference guards remain guards; existing raw-slot consumers retain explicit legacy slot matching.
-The reset does not silently correct those observable policies.
-Main review found that global imports can share a slot and that consumers select different matching records.
-The worker added explicit resolution filtering and first-or-last selection to preserve those policies.
-Further main review found a function-node versus body-node identity mismatch in the new projection guard.
-Main also found that schema-category lookup previously searched all matching slots, unlike the first-match authentication scan.
-The worker received both corrections before the first production build.
-The authority records the detailed source findings and accepted revisions.
+Main requested a compile-ready vertical slice before the full corpus.
+The worker paused edits; main corrected three compile issues and ran the unfiltered small roots.
+The accepted slice includes ordered record fields and nested arrays.
+Main then returned source ownership for full corpus completion.
 
-## U5 baseline execution
+The next handoff must remove unused nullable syntax and always-false array and tuple fields.
+Every private exclusion must restore the caller cursor.
+The quoted scanner must avoid a self-recursive helper call.
+Key allocation failure must propagate instead of becoming parity.
+Syntactically present groups with absent meaning must stop later constructors at the legacy position.
 
-The first unfiltered run exited 1: 2,433 tests passed, one skipped, and one failed.
-The annotated duplicate-handler fixture incorrectly passed raw typed syntax to the JavaScript parser.
-The main agent changed that fixture to use source preparation and a full session with its type map.
-The main agent also corrected manifest cleanup after registry ownership transfer in a new test.
-The log is `u5-baseline-first.log`.
+Main measured three such absence contrasts in `u8-absence-baseline/`.
+Each exits 1 with empty JSON and propagated `UnresolvedTypeBinding`, including the unused 16-parameter function.
+Main extended the tools baseline from one propagated-error case to four.
+Those additional assertions await the next unfiltered handoff run.
+Main also measured six admission contrasts in `u8-admission-extra-baseline/`.
+They confirm suffix `any` detection, Array refusals, nested-template text handling, and depth refusal before a later `any`.
+Main extended the tools baseline with those exact diagnostics and their order.
+Those assertions also await the next handoff run.
+Astra found no further successful-type blocker in lowering or ordered comparison.
+Its review requires independent direct capacity checks, because an earlier legacy failure otherwise prevents direct lowering from running.
+The worker received every finding and owns the corrections.
 
-The corrected run also exited 1 with the same test counts.
-Its conditional block did not enter the analyzer's declaration list and therefore tested the wrong handler selection.
-The main agent replaced the conditional with a bare block and retained the original assertions.
-The log is `u5-baseline-corrected.log`.
-All other new assertions passed under unchanged production code.
-The final baseline run exited 0: all 13 steps succeeded, with 2,434 passing tests and one skipped test.
-Its log is `u5-baseline-final.log`.
+## U8 full-corpus checks
 
-## U5 production checks
+The worker handed back all three files and paused edits.
+Main owns all source until another explicit handoff.
+The full first run compiled, then exited 1: 13 of 16 steps succeeded, with 2,682 pass, one skip, two failures, and one crash.
+Its log is `u8-full-first.log`.
+All 212 precompile tests passed, including 54 compound fixtures.
+Nested function arrows triggered unmatched-parenthesis handling before the intended rollback and absence assertions.
+Main corrected that raw scanning boundary.
 
-The first unfiltered production run exited 0: all 13 steps succeeded, with 2,440 passing tests and one skipped test.
-Its log is `u5-zts-first.log`.
-The first broader run exited 1: 37 of 39 steps succeeded, with 3,090 passing tests and one skipped test.
-The proof-swallow gate rejected two moved default arms that lacked their scope explanations.
-All 734 flow probes matched, and all 182 diagnostic cases passed in that run.
-Its log is `u5-focused.log`.
+A test also assumed that CHECK retains an earlier `any` before fatal depth failure.
+The actual CLI reports only ZTS044; the assertion accessed the wrong verdict field and crashed.
+Main corrected collect precedence and added a compile-mode first-refusal contrast.
+The seventh receipt in `u8-admission-extra-baseline/` records that measurement.
+Main replaced a named-error comparison with an exhaustive switch.
+The corrected unfiltered run is active in `u8-full-corrected.log`.
+Astra now reviews the complete source handoff.
+That run exited 0: all 16 steps succeeded, with 2,685 passing tests and one skipped test.
+Astra then identified missing forced budget probes and second-annotation allocation rollback coverage.
+It also found truncated empty-group spans and a private eligibility change that bypassed complete-source validation after depth refusal.
+Main returned the three files for a bounded correction handoff.
+The worker must restore complete-source eligibility and retain fatal-only diagnostic collection as a separate policy.
+It must preserve bare empty groups, force both private budgets, and cover every syntax array during second-annotation failures.
+Main retains tools and documentation ownership; no build currently runs.
+Main confirmed the allocating writer's `WriteFailed` projection in the pinned Zig source.
+The worker must add a successful-comparison allocation sweep and keep operational key failures distinct from semantic key limits.
+The architecture guide now describes compound syntax ownership and separate admission and semantic boundaries.
 
-Astra found no additional functional blocker in the source diff.
-Main restored explicit legacy-scope explanations without widening the proof-swallow allowlist.
-Main also removed unused reverse-selection branches from generic and extension reference APIs.
-Import lookup retains both first and last selection because current consumers require both.
-The corrected proof-swallow run exited 0 with no unreviewed cases.
-Its log is `u5-proof-swallow-corrected.log`.
-Astra accepted the final source cleanup and found no remaining source blocker.
-Main reviewed every changed source line and retained the separate legacy summary policies.
-The corrected broader run exited 0: all 39 steps succeeded, with 3,090 passing tests and one skipped test.
-All 734 flow probes matched, and all 182 diagnostic cases passed.
-Its log is `u5-focused-final.log`.
-The full gate exited 0 with every CI test-job step passing.
-Its log is `u5-verify.log`.
-It passed the aggregate, separate runtime root, optimized builds, verified precompilation, smoke tests, shell gates, and offline replay.
-Final documentation, link, and spine checks exited 0 in `u5-docs-final.log`.
-Formatting across all required paths and the diff check also passed.
+The final correction preserves empty-group spans and complete-source eligibility after fatal depth refusal.
+It excludes template-overflow origins until their distinct legacy treatment has a shared validation path.
+It adds all-six-array rollback, direct lowerer allocation failures, and successful-comparison allocation failures.
+Main replaced the manual failure loop with the standard measured allocation sweep.
+The same allocator now owns both annotations throughout that sweep.
+Main balanced the nested template source used to force the private capacity limit.
+Both engine and comparator budget sources now contain balanced nested templates.
+The corrected unfiltered small roots passed in `u8-final-bounded-corrected.log`.
+Astra accepted the final source after reviewing the corrected probes.
+Whole-tree formatting and diff checks passed.
+The broad frontend command passed in `u8-focused.log`: 45 steps, 3,424 passing tests, and one skipped test.
+All 182 diagnostic corpus cases passed.
+The full gate passed with exit 0 in `u8-verify.log`.
+Final documentation checks passed with exit 0 in `u8-docs-final.log`.
 
-## U6 preparation
+## Later phase preparation
 
-The Sol explorer `reset_u6_source_capture` mapped two production files without edits, builds, or tests.
-They are `agent_protocol.zig` and `canonicalize.zig`.
-Existing source APIs support the capture change; repair simulation needs a source-based helper.
-The authority records root refusal, imported graph behavior, verify overrides, stale guards, and read-before-extension ordering.
-The fresh implementation worker `reset_u6_capture_impl` completed read-only preparation and confirmed that bounded design.
-U5 is complete, and the worker now owns the first controlled-reader handoff.
-Main measured the pre-U6 CLI override mismatch in `u6-root-baseline/`.
-Disk and override requests exited 0 with no protocol error and different source digests, but their graph hashes were equal.
-These observations concern identity only; both property responses reported `success:false`.
-Stage 2A adds the capture owner, graph binding, and one controlled CHECK fixture.
-Operation helpers retain their rereads until main observes the fixture's failing verdict.
-Stage 2B will migrate the helpers and add the remaining operation and refusal cases.
+Read-only reviews ran no builds, tests, edits, or Git writes.
+Each fresh implementation worker must refresh findings against the completed preceding phase.
 
-Main measured candidate CHECK fixtures through the built U5 CLI before the controlled-reader test.
-The chained-ternary fixture produces ZTS621 but no contract, because its strict error stops extraction.
-The fully typed spec-less handler produces ZTS500 and retains an object contract with `contract_available:true`.
-Both transport commands exited 0; their CHECK responses reported `success:false`.
-The results are `u6-changing-root/a-result.json` and `u6-changing-root/typed-result.json`.
-The worker will use the measured typed fixture for the captured revision.
+| Phase | Preparation and receipts |
+|---|---|
+| U9 (declarations) | Authority records admission, aliases, nominal identity, and recursion. Sixteen CLI fixtures in `u9-declaration-baseline/` all exit 1 at measured distinct stages. |
+| U10 (generics) | Authority records admission, ignored defaults, compact limits, collisions, constraints, and substitution. |
+| U11 (annotation owners) | Authority maps all legacy kinds to exact owners. `u11-partial-parameter-baseline/partial.json` observes ZTS203 before ZTS601. |
+| U12 (type consumers) | Authority records compact parameter policy, repeated-name selection, strict raw spans, health, and profiles. Seven CLI fixtures remain in `u12-lookup-baseline/`. |
+| U13 (proof and printer) | Authority records opaque spans, callback projection, contracts, and certificate inputs. Both fixtures in `u13-signature-baseline/` exit 0 and report nested `pure` declarations. |
+| U14-U16 (cutovers) | Authority maps CHECK, compilation, normalization, virtual sources, Pi tools, graph observations, and benchmark boundaries. |
+| U17 (removal) | Authority records live helper relocation, diagnostic identity, exports, gates, and fixture retention. `u17-diagnostic-baseline/meta.json` exposes no catalog hash. |
+| U18 (recovered workspace) | Authority records five owner sites, lock/root binding, recovery progress, fault outcomes, and persistence-before-acknowledgement. |
+| U19 (retired state) | Authority records three deletion candidates, live ledger/rendering owners, exact directory timing, and hosted-state preservation. |
+| U20 (documentation and evidence) | Authority records preliminary guide references and the required final census. |
 
-Astra corrected the preparation's overbroad imported-failure description.
-Resolver failures retain rejection rows, while a later queued-import read failure silently omits that node.
-U6 preserves both behaviors without changing the graph walker.
+Main corrected an earlier profile claim after checking the production graph loop and its behavior fixture.
+The fresh Sol worker `reset_u9_named_declarations` now owns read-only Stage 1 preparation; U9 implementation waits for U8's commit.
+Two additional CLI contrasts show that an ignored alias suffix prevents eager root capture.
+Loaded multi-module contracts omit types for both entry and dependencies.
+Single-module full analysis remains different.
+Four further CLI contrasts in `u9-primitive-alias-baseline/` confirm whole-body lookup for primitive-name aliases and the nested compound exception.
+Astra found two additional named-type boundaries: implicit `Readonly<Named>` projection and the one-suffix limit for ungrouped named arrays.
+The proposed U9 design now requires exact whole-body lookup before lowering every source root.
+Contractivity finalization must retain legacy additive map behavior across repeated population calls.
+Astra accepted the revised U9 design after exact-root, readonly, suffix, and declaration-only comparison corrections.
+The first implementation slice still waits for U8's completed gates and commit.
 
-## U6 controlled-reader baseline
+## Verification commands
 
-The Stage 2A unfiltered root exited 1: 405 tests passed and one test failed.
-The controlled test compiled, accepted graph hash A, and failed at the payload digest comparison against A.
-Unchanged CHECK helpers read replacement bytes B after root capture, as intended for this incomplete handoff.
-Its log is `u6-changing-root-red.log`.
-The remaining 405 tests passed.
+All acceptance steps remain unfiltered, and direct process exit status supplies each verdict.
+The common full gate runs aggregate `zig build test -j1` on Darwin and standalone runtime in a separate process.
+Existing user approval covers the required long gates.
 
-## U6 design validation and current ownership
+```sh
+env -u DEEPSEEK_API_KEY -u ZTTP_CODEGEN_RECORD -u ZTTP_EVIDENCE_PUBLISH bash scripts/verify.sh
+```
 
-Astra accepted the proposed capture ownership and operation ordering through source review.
-The disk read cap must not become an override cap; empty string overrides retain their existing meaning.
-Simulation retains project-context discovery and proposed-before analysis order.
-Captured root bytes do not freeze policy, schema, or imported observations.
-Stage 2B returned source ownership before main ran the completed protocol root.
-The separate determinism script will run against the completed U6 binary after the full gate rebuilds that binary.
+The frontend phases also require:
 
-## U6 production checks
+```sh
+env -u DEEPSEEK_API_KEY -u ZTTP_CODEGEN_RECORD -u ZTTP_EVIDENCE_PUBLISH zig build test-zts test-precompile test-zts-cli test-canonicalize test-diagnostic-corpus test-contract-golden test-generic-intersection-cli-matrix test-cli-abuse test-module-boundary test-zts-layering -j1 --summary all
+zig build test-docs-drift test-doc-links check-spine -j1 --summary all
+zig fmt --check build.zig build/ packages/ tooling/
+git diff --check
+```
 
-The first completed-code root exited 1 during compilation because a new test compared an optional JSON value without unwrapping it.
-Main corrected that assertion; `u6-agent-first.log` retains the failed build.
-The corrected root exited 0 with all 419 tests passing in `u6-agent-corrected.log`.
-
-Main added a bounded graph-allocation failure probe after successful root capture.
-Main also enabled simulation in the changing-reader canonicalization case and asserted its exact summary.
-The summary matches the CLI measurement in `u6-changing-root/sim-result.json`.
-Astra accepted the completed source and these final test changes.
-The final protocol root exited 0 with all 420 tests passing in `u6-agent-final.log`.
-The required broader suites exited 0: all 25 steps succeeded, with 1,765 passing tests and one skipped test.
-Their log is `u6-focused.log`.
-The full gate exited 0 with every CI test-job step passing in `u6-verify.log`.
-It passed aggregate tests, the separate runtime root, optimized builds, verified precompilation, smoke tests, shell gates, and offline replay.
-The determinism script exited 0 against the newly rebuilt U6 analyzer in `u6-determinism.log`.
-Final documentation, link, and spine checks exited 0 in `u6-docs-final.log`.
-Formatting across the required paths and the diff check also passed.
-
-## U7 preparation
-
-The Sol explorer `reset_u4_path_facts` mapped the primitive parser slice without edits, builds, or tests.
-The first slice covers one variable binding, primitive annotations, parentheses, and retained raw suffix text.
-The authority records ownership, tier boundaries, original spans, and independent runtime comparisons.
-Admission diagnostics must retain CHECK collection and compile refusal order before runtime parsing.
-Astra identified that direct environment binding does not yet enable the existing checker's initializer enforcement.
-U7 proves parser identity and environment lookup; U12 retains checker migration.
-Astra accepted a bounded private comparison with complete preflight eligibility and an explicit `out_of_slice` outcome.
-The authority records its accepted token boundary, refusal ordering, and previous-token requirements.
-Main released U7 implementation after the U6 commit.
-
-The fresh Sol worker `reset_u7_primitive_parser` completed Stage 1 without edits, builds, or tests.
-Its proposal follows the accepted private comparison boundary and shared runtime parser.
-The tokenizer contains borrowed source and value state, so copying its cursor creates no allocation owner.
-The parser will transfer the separate type store with its existing result stores.
-Private admission diagnostics will map locally to existing codes without registry changes.
-Main released implementation after U6 committed as `f8d4fce4`.
-
-Astra accepted the proposal with one malformed-input correction.
-Unmatched type parentheses can reach legacy runtime semicolon refusal instead of source admission refusal.
-The comparator must preserve that result or explicitly decline the malformed shape.
-Main sent that correction and separate pool-health and environment-health requirements to the worker.
-Main measured `let n: (number;` through the rebuilt U6 CLI.
-The command exited 1 with ZTS047 at line 1, column 5, which identifies the binding token.
-The receipt is `u7-malformed-baseline/unmatched.json`.
-
-## U7 source review and execution
-
-The worker added the separate syntax store, typed parser hook, private comparator, direct primitive lowering, and test-root wiring.
-Production callers retain the legacy initializer and frontend.
-Main reviewed every initial source line and required complete diagnostic comparisons and complete preflight eligibility.
-Main also required diagnostic cleanup on later exclusions, root `any` and `void` refusals, and an exhaustive exclusion census.
-The worker applied those corrections and returned all source ownership.
-Astra accepted the parser core and required balanced depth fixtures with exact refusal offsets.
-
-The first unfiltered `test-zts` build exited 1 during compilation.
-One test omitted an explicit narrowing conversion for an atom, and another needed compile-time enum iteration.
-Its log is `u7-zts-first.log`.
-Main corrected both errors and added plain and grouped coverage for every primitive.
-The corrected unfiltered root exited 0: 13 steps succeeded, with 2,455 passing tests and one skipped test.
-Its log is `u7-zts-corrected.log`.
-The first broader run exited 1: 43 of 45 steps succeeded, with 3,381 passing tests and one skipped test.
-Its tier gate rejected two new files because main had not yet added the files to Git's tracked inventory.
-The log is `u7-focused.log`; all behavioral suites passed in that run.
-Main added both new files to the inventory without changing the gate or its policy.
-Astra also found generic call syntax crossing the bounded initializer vocabulary.
-Main excluded ambiguous angle tokens and added generic-call and relational exclusion fixtures.
-Main added a shared-allocator sweep for runtime failures after type-store publication.
-The corrected broader suites exited 0: all 45 steps succeeded, with 3,382 passing tests and one skipped test.
-Their log is `u7-focused-corrected.log`.
-Astra then required shared-grammar validation after depth refusal and full collection-mode diagnostic comparison.
-Main added both checks and privately excluded lone CR after measuring its legacy diagnostic column.
-The CR measurement exited 1 with ZTS041 at line 1, column 14 in `u7-cr-baseline/root-any.json`.
-The CRLF comparison remains covered.
-
-The next run exited 1: 3,382 tests passed, one skipped, and one new fixture failed.
-The grouped union correctly declined comparison, but its expected private reason differed from the primitive grammar's actual reason.
-Its log is `u7-focused-final.log`.
-Main corrected that expected reason while retaining the required exclusion assertion.
-The accepted-source broader run exited 0: all 45 steps succeeded, with 3,383 passing tests and one skipped test.
-Its log is `u7-focused-accepted.log`.
-All 182 diagnostic cases and all 18 CLI abuse cases passed.
-The full gate exited 0 with every CI test-job step passing in `u7-verify.log`.
-It passed aggregate tests, all 734 flow probes, the separate runtime root, release builds, verified precompilation, smoke tests, and offline replay.
-Astra accepted the final U7 source after the boundary corrections.
-The acceptance covers source review only; the required unfiltered checks remain main's responsibility.
-Final documentation, link, and spine checks exited 0 in `u7-docs-final.log`.
-Formatting across all required paths and the diff check also passed.
-
-## U8 preparation
-
-The Sol explorer `reset_u4_path_facts` mapped compound syntax without edits, builds, or tests.
-Legacy semantic parsing accepts prefixes and has different array behavior for primitive, named, and generic types.
-The authority records those distinctions and requires source-admission characterization before claiming incomplete forms remain accepted.
-U8 implementation remains unstarted.
-The fresh Sol worker `reset_u8_compound_parser` owns read-only Stage 1 preparation.
-Its design must use the actual U7 store, bounded iterative parsing, direct constructors, and complete private eligibility checks.
-Implementation remains blocked on the U7 commit and design review.
-The worker returned Stage 1 with a legacy-only baseline handoff before compound implementation.
-Main measured 27 isolated CLI fixtures in `u8-cli-baseline/`; `index.json` records responses and direct exit statuses.
-Eleven further fixtures confirm optional-parameter context, `any` member roles, numeric prefixes, boolean literals, and nested template absence.
-Seven further contrasts cover leading comments, grouped literals and unions, string literals, arrays, and tuples.
-The index now contains 45 measured fixtures.
-The authority records the distinct admission outcomes and the empty-template propagated error.
-Those measurements establish no exhaustive semantic equivalence.
-Astra accepted baseline-only Stage 2A after U7 commits.
-The authority records required exact representation checks, nested absence, lexical exceptions, raw boundaries, and distinct depth limits.
-Compound implementation remains subject to a revised design after baseline verification.
-
-## U9 preparation
-
-The Sol explorer `reset_u4_path_facts` mapped declaration semantics without edits, builds, or tests.
-The authority records module-wide alias order, nominal identity, root-only eager lookup, recursive-alias rules, and runtime parity requirements.
-Indentation and runtime-name collisions require characterization before the private parser claims compatibility.
-U9 implementation remains unstarted.
-
-## U10 preparation
-
-The Sol explorer `reset_u4_path_facts` mapped generic syntax without edits, builds, or tests.
-The authority records admission, ignored defaults, constraint policies, namespace collisions, repeated signatures, semantic truncation, and substitution limits.
-U10 implementation remains unstarted.
-
-## U11 preparation
-
-The Sol explorer `reset_u11_owner_review` mapped every legacy annotation kind without edits, builds, or tests.
-The authority records exact source owners, delayed attachments, module spans, and required identity and rollback fixtures.
-Legacy parameter assembly compacts annotated parameters and can shift their semantic slots.
-Astra confirmed that compact parameter mapping affects observable type diagnostics before strict refusal.
-U12 must retain that policy through an explicit projection, including both existing arity bounds.
-Main measured a partial signature through the U6 CLI and observed ZTS203 on the first argument before ZTS601.
-The command exited 1; the receipt is `u11-partial-parameter-baseline/partial.json`.
-U11 implementation remains unstarted and depends on the actual U10 store.
-
-## U12 preparation
-
-The Sol explorer `reset_u12_consumer_review` completed the consumer census without edits, builds, or tests.
-The authority records reconstruction inputs, repeated-name risks, strict raw spans, health gaps, and typing profiles.
-It must retain the measured compact-parameter projection without binding both the actual and projected parameters.
-U12 implementation remains unstarted and requires the actual U11 syntax owners.
-
-## U18 preparation
-
-The Sol explorer `reset_u18_recovery_review` mapped five production authority sites without edits, builds, or tests.
-The authority records lock-root separation, recovery progress, receipt ordering, and the refreshed census required after U17.
-The proposed owner must preserve existing caller lifetimes and the current proof and approval owners.
-Canonicalization order and failure-state reuse remain design questions for the U18 worker and Astra review.
-U18 implementation remains unstarted.
-
-## U19 preparation
-
-The Sol explorer `reset_u18_recovery_review` mapped retired state consumers without edits, builds, or tests.
-The authority records the three removal candidates, live rendering modules, exact directory timing, and hosted-state preservation fixture.
-The named proof-review gate remains necessary, and the stale package boundary row must disappear with its last consumer.
-U19 implementation remains unstarted and requires a refreshed census after U18.
+The authority names each phase's additional suites.
 
 ## Frontend measurement baseline
 
-The main agent measured the planned benchmark before the typed parser phases.
-Zig reports `0.16.0`; the host reports `Darwin 25.6.0 arm64` and `Apple M4 Pro`.
-The one-iteration pilot and 50-iteration run exited 0. All eight fixtures succeeded.
+The host reports Darwin 25.6.0 arm64 and Apple M4 Pro; Zig reports 0.16.0.
+The one-iteration pilot and 50-iteration measurement exited 0 across all eight fixtures.
 Only the iteration parameter changed.
-The logs are `frontend-baseline-pilot.json` and `frontend-baseline.json`.
-The harness measures source preparation, parsing, and code generation.
-These observations establish no CHECK latency, imported-analysis cost, or performance improvement.
+Receipts are `frontend-baseline-pilot.json` and `frontend-baseline.json`.
+The harness measures source preparation, parsing, and code generation, not CHECK or imported analysis.
+No performance improvement is claimed.
 
 | Fixture | Nanoseconds per iteration | Allocated bytes | IR nodes |
 |---|---:|---:|---:|

@@ -552,9 +552,22 @@ pub const Parser = struct {
 
     fn parseVariableType(self: *Parser, binding: BindingRef, binding_token: Token) !void {
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
-        const outcome = type_syntax.parsePrimitive(self.source, &cursor);
+        const outcome = try type_syntax.parseAndStore(
+            &self.type_store,
+            binding,
+            self.source,
+            self.current.start + self.current.len,
+            &cursor,
+        );
         switch (outcome) {
-            .parsed => |parsed| try self.type_store.add(binding, parsed),
+            .parsed => {},
+            .excluded => |exclusion| {
+                switch (exclusion.reason) {
+                    .implementation_budget => self.errorAtCurrent("type syntax exceeds the private parser budget"),
+                    .unsupported_syntax, .malformed_syntax => self.errorAtCurrent("type syntax is outside private parser comparison"),
+                }
+                return error.ParseError;
+            },
             .failure => |failure| {
                 const tok = switch (failure) {
                     .missing_type => |at| at,

@@ -8217,3 +8217,349 @@ test "ordinary calls and explicit HTML rendering remain accepted" {
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
     try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }
+
+const LegacyCompoundDiagnostic = struct {
+    code: []const u8,
+    message: []const u8,
+    line: u32,
+    column: u32,
+    suggestion: ?[]const u8 = null,
+};
+
+fn legacyCompoundSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
+        "function handler(req: Request): Response {{\n" ++
+            "  const value: {s} = undefined;\n" ++
+            "  return Response.text(\"ok\");\n" ++
+            "}}\n",
+        .{annotation},
+    );
+}
+
+fn expectLegacyCompoundDiagnostic(
+    actual: json_diag.JsonDiagnostic,
+    expected: LegacyCompoundDiagnostic,
+) !void {
+    try std.testing.expectEqualStrings(expected.code, actual.code);
+    try std.testing.expectEqualStrings("error", actual.severity);
+    try std.testing.expectEqualStrings(expected.message, actual.message);
+    try std.testing.expectEqualStrings("handler.ts", actual.file);
+    try std.testing.expectEqual(expected.line, actual.line);
+    try std.testing.expectEqual(expected.column, actual.column);
+    if (expected.suggestion) |suggestion| {
+        try std.testing.expectEqualStrings(suggestion, actual.suggestion.?);
+    } else {
+        try std.testing.expect(actual.suggestion == null);
+    }
+    try std.testing.expect(actual.repair_intent == null);
+}
+
+test "CHECK preserves legacy compound type diagnostics and semantic prefixes" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        annotation: []const u8,
+        message: []const u8,
+    }{
+        .{ .annotation = "{ \"x\": number }", .message = "type 'undefined' is not assignable to type '{  }'" },
+        .{ .annotation = "{ x number }", .message = "type 'undefined' is not assignable to type '{  }'" },
+        .{ .annotation = "{ x: }", .message = "type 'undefined' is not assignable to type '{ x: unknown }'" },
+        .{ .annotation = "{ /*c*/ x: number }", .message = "type 'undefined' is not assignable to type '{  }'" },
+        .{ .annotation = "{ x: number /*c*/ }", .message = "type 'undefined' is not assignable to type '{ x: number }'" },
+        .{ .annotation = "{ x: number y: string }", .message = "type 'undefined' is not assignable to type '{ x: number; y: string }'" },
+        .{ .annotation = "number |", .message = "type 'undefined' is not assignable to type 'number'" },
+        .{ .annotation = "{ x: number } &", .message = "type 'undefined' is not assignable to type '{ x: number }'" },
+        .{ .annotation = "(x: number y: string) => number", .message = "type 'undefined' is not assignable to type '(x: number, y: string) => number'" },
+        .{ .annotation = "(x: number) number", .message = "type 'undefined' is not assignable to type '(x: number) => void'" },
+        .{ .annotation = "(x: number) =>", .message = "type 'undefined' is not assignable to type '(x: number) => void'" },
+        .{ .annotation = "(number)", .message = "type 'undefined' is not assignable to type 'number'" },
+        .{ .annotation = "() => number", .message = "type 'undefined' is not assignable to type '() => number'" },
+        .{ .annotation = "number [ ]", .message = "type 'undefined' is not assignable to type 'number'" },
+        .{ .annotation = "number /*c*/ []", .message = "type 'undefined' is not assignable to type 'number'" },
+        .{ .annotation = "{ cb: (x?: number) => number }", .message = "type 'undefined' is not assignable to type '{ cb: (x: number) => number }'" },
+        .{ .annotation = "{ any: number }", .message = "type 'undefined' is not assignable to type '{ any: number }'" },
+        .{ .annotation = "string | 200", .message = "type 'undefined' is not assignable to type 'string | 200'" },
+        .{ .annotation = "string | 1.5", .message = "type 'undefined' is not assignable to type 'string | 1'" },
+        .{ .annotation = "string | 0x10", .message = "type 'undefined' is not assignable to type 'string | 0'" },
+        .{ .annotation = "string | 1_000", .message = "type 'undefined' is not assignable to type 'string | 1'" },
+        .{ .annotation = "true", .message = "type 'undefined' is not assignable to type 'true'" },
+        .{ .annotation = "`\\${string}`", .message = "type 'undefined' is not assignable to type '`\\${string}`'" },
+        .{ .annotation = "`x${}`", .message = "type 'undefined' is not assignable to type '`x${unknown}`'" },
+        .{ .annotation = "\"GET\"", .message = "type 'undefined' is not assignable to type '\"GET\"'" },
+        .{ .annotation = "(200)", .message = "type 'undefined' is not assignable to type '200'" },
+        .{ .annotation = "(| number | string)", .message = "type 'undefined' is not assignable to type 'number | string'" },
+        .{ .annotation = "readonly number[]", .message = "type 'undefined' is not assignable to type 'readonly number[]'" },
+        .{ .annotation = "[string, number]", .message = "type 'undefined' is not assignable to type '[string, number]'" },
+        .{ .annotation = "readonly [string, number]", .message = "type 'undefined' is not assignable to type '[string, number]'" },
+        .{ .annotation = "`outer${`any`}`", .message = "type 'undefined' is not assignable to type '`outer${`any`}`'" },
+    };
+    const expected_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    var observed: usize = 0;
+    for (cases) |case| {
+        const source = try legacyCompoundSource(allocator, case.annotation);
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+            .json_mode = true,
+            .skip_contract = true,
+        });
+        defer result.deinit(allocator);
+
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS200",
+            .message = case.message,
+            .line = 2,
+            .column = 3,
+        });
+        try std.testing.expect(result.contract == null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 31), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves legacy compound root admission parse diagnostics" {
+    const allocator = std.testing.allocator;
+    const annotations = [_][]const u8{
+        "| number | string",
+        "& { x: number }",
+        "1.5",
+        "0x10",
+        "1e3",
+        "1_000",
+        "32768",
+        "/*c*/ number",
+    };
+    const expected_stages = StageSet.initMany(&.{ .strip, .parse });
+    const expected = [_]LegacyCompoundDiagnostic{
+        .{
+            .code = "ZTS002",
+            .message = "const declarations must have an initializer",
+            .line = 2,
+            .column = 14,
+        },
+        .{
+            .code = "ZTS047",
+            .message = "statement is not terminated; this profile has no automatic semicolon insertion",
+            .line = 2,
+            .column = 9,
+        },
+    };
+    var observed: usize = 0;
+    for (annotations) |annotation| {
+        const source = try legacyCompoundSource(allocator, annotation);
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+            .json_mode = true,
+            .skip_contract = true,
+        });
+        defer result.deinit(allocator);
+
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, 2), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
+        try std.testing.expectEqual(expected.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, expected) |actual, diagnostic| {
+            try expectLegacyCompoundDiagnostic(actual, diagnostic);
+        }
+        try std.testing.expect(result.contract == null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 8), annotations.len);
+    try std.testing.expectEqual(annotations.len, observed);
+}
+
+test "CHECK preserves legacy compound unclosed syntax diagnostics" {
+    const allocator = std.testing.allocator;
+    const annotations = [_][]const u8{
+        "{ x: number",
+        "`a${number",
+        "(x: number => number",
+        "number [",
+    };
+    const expected_stages = StageSet.initMany(&.{ .strip, .parse });
+    const expected = [_]LegacyCompoundDiagnostic{
+        .{
+            .code = "ZTS002",
+            .message = "const declarations must have an initializer",
+            .line = 5,
+            .column = 1,
+        },
+        .{
+            .code = "ZTS047",
+            .message = "statement is not terminated; this profile has no automatic semicolon insertion",
+            .line = 2,
+            .column = 9,
+        },
+    };
+    var observed: usize = 0;
+    for (annotations) |annotation| {
+        const source = try legacyCompoundSource(allocator, annotation);
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+            .json_mode = true,
+            .skip_contract = true,
+        });
+        defer result.deinit(allocator);
+
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, 2), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
+        try std.testing.expectEqual(expected.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, expected) |actual, diagnostic| {
+            try expectLegacyCompoundDiagnostic(actual, diagnostic);
+        }
+        try std.testing.expect(result.contract == null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), annotations.len);
+    try std.testing.expectEqual(annotations.len, observed);
+}
+
+test "CHECK preserves legacy compound preparation diagnostics" {
+    const allocator = std.testing.allocator;
+    const any_suggestion = "use specific types (string, number, object) or union types instead";
+    const cases = [_]struct {
+        annotation: []const u8,
+        diagnostics: []const LegacyCompoundDiagnostic,
+    }{
+        .{
+            .annotation = "(x?: number) => number",
+            .diagnostics = &.{.{
+                .code = "ZTS055",
+                .message = "optional parameter shorthand is not part of this profile",
+                .line = 2,
+                .column = 18,
+                .suggestion = "replace `name?: T` with `name: T | undefined`",
+            }},
+        },
+        .{
+            .annotation = "{ value: any }",
+            .diagnostics = &.{.{
+                .code = "ZTS041",
+                .message = "'any' type is not supported",
+                .line = 2,
+                .column = 25,
+                .suggestion = any_suggestion,
+            }},
+        },
+        .{
+            .annotation = "number many",
+            .diagnostics = &.{.{
+                .code = "ZTS041",
+                .message = "'any' type is not supported",
+                .line = 2,
+                .column = 24,
+                .suggestion = any_suggestion,
+            }},
+        },
+        .{
+            .annotation = "number Array<string>",
+            .diagnostics = &.{.{
+                .code = "ZTS058",
+                .message = "`Array<T>` is not a type spelling in this profile",
+                .line = 2,
+                .column = 23,
+                .suggestion = "write `T[]`",
+            }},
+        },
+        .{
+            .annotation = "number ReadonlyArray<string>",
+            .diagnostics = &.{.{
+                .code = "ZTS059",
+                .message = "`ReadonlyArray<T>` is not a type spelling in this profile",
+                .line = 2,
+                .column = 23,
+                .suggestion = "write `readonly T[]`",
+            }},
+        },
+        .{
+            .annotation = "any Array<string>",
+            .diagnostics = &.{
+                .{
+                    .code = "ZTS041",
+                    .message = "'any' type is not supported",
+                    .line = 2,
+                    .column = 16,
+                    .suggestion = any_suggestion,
+                },
+                .{
+                    .code = "ZTS058",
+                    .message = "`Array<T>` is not a type spelling in this profile",
+                    .line = 2,
+                    .column = 20,
+                    .suggestion = "write `T[]`",
+                },
+            },
+        },
+        .{
+            .annotation = "(" ** 513 ++ "number" ++ ")" ** 513 ++ " any",
+            .diagnostics = &.{.{
+                .code = "ZTS044",
+                .message = "type syntax nests too deeply",
+                .line = 2,
+                .column = 528,
+                .suggestion = "simplify or split it (nesting limit is 512)",
+            }},
+        },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        const source = try legacyCompoundSource(allocator, case.annotation);
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+            .json_mode = true,
+            .skip_contract = true,
+        });
+        defer result.deinit(allocator);
+
+        try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+        const count: u32 = @intCast(case.diagnostics.len);
+        try std.testing.expect(count > 0);
+        try std.testing.expectEqual(count, result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(count, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, diagnostic| {
+            try expectLegacyCompoundDiagnostic(actual, diagnostic);
+        }
+        try std.testing.expect(result.contract == null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 7), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves legacy absent compound propagated errors" {
+    const allocator = std.testing.allocator;
+    const annotations = [_][]const u8{
+        "``",
+        "((())) | Unsupported",
+        "((()))[] | string",
+        "((())) | ((p0: number, p1: number, p2: number, p3: number, " ++
+            "p4: number, p5: number, p6: number, p7: number, " ++
+            "p8: number, p9: number, p10: number, p11: number, " ++
+            "p12: number, p13: number, p14: number, p15: number) => number)",
+    };
+    var observed: usize = 0;
+    for (annotations) |annotation| {
+        const source = try legacyCompoundSource(allocator, annotation);
+        defer allocator.free(source);
+        try std.testing.expectError(
+            error.UnresolvedTypeBinding,
+            runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+                .json_mode = true,
+                .skip_contract = true,
+            }),
+        );
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), annotations.len);
+    try std.testing.expectEqual(annotations.len, observed);
+}

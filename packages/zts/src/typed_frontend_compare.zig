@@ -1,10 +1,11 @@
-//! Private U7 comparison between legacy stripping and direct primitive parsing.
+//! Private comparison between legacy stripping and direct type syntax parsing.
 //!
 //! This module is test-only. It adds no public frontend choice or fallback.
 
 const std = @import("std");
 const engine = @import("zts-engine");
 const type_env_mod = @import("type_env.zig");
+const type_key = @import("type_key.zig");
 const type_pool_mod = @import("type_pool.zig");
 
 const AtomTable = engine.atom_table.AtomTable;
@@ -18,6 +19,57 @@ const PreparedSource = engine.source_frontend.PreparedSource;
 const TypeEnv = type_env_mod.TypeEnv;
 const TypeIndex = type_pool_mod.TypeIndex;
 const TypePool = type_pool_mod.TypePool;
+const TypeTag = type_pool_mod.TypeTag;
+const RecordField = type_pool_mod.RecordField;
+const FuncParam = type_pool_mod.FuncParam;
+const PoolTemplatePart = type_pool_mod.TemplatePart;
+const null_type_idx = type_pool_mod.null_type_idx;
+const parseTypeExpr = type_pool_mod.parseTypeExpr;
+
+const CompoundFamily = enum {
+    record,
+    array,
+    tuple,
+    union_type,
+    intersection,
+    literal,
+    template,
+    function,
+};
+
+const SemanticQuirk = enum {
+    quoted_record_prefix,
+    missing_record_colon_prefix,
+    missing_record_type_absent,
+    record_comment_prefix,
+    record_comment_after_field,
+    omitted_record_separator,
+    readonly_optional_fields,
+    mutable_repeated_arrays,
+    separated_array_brackets,
+    comment_before_array,
+    readonly_array_flag,
+    tuple_trailing_comma,
+    readonly_tuple_erasure,
+    grouped_leading_union,
+    trailing_union_prefix,
+    trailing_intersection_prefix,
+    intersection_precedence,
+    nullable_shorthand,
+    wider_undefined_union,
+    numeric_token_prefix,
+    nested_optional_parameter,
+    any_member_key,
+    missing_function_comma,
+    missing_function_arrow,
+    missing_function_return,
+    named_function_parameters,
+    escaped_template_slot,
+    empty_template_slot,
+    empty_template_root,
+    multi_part_template,
+    literal_values,
+};
 
 const AdmissionMode = enum {
     collect,
@@ -27,6 +79,9 @@ const AdmissionMode = enum {
 const AdmissionKind = enum {
     any_type,
     void_type,
+    array_type_alias,
+    readonly_array_type_alias,
+    optional_parameter,
     nesting_too_deep,
 };
 
@@ -124,56 +179,80 @@ fn preflight(
             if (annotation_count > 1) return .{ .out_of_slice = .annotation_count };
 
             const colon = current;
-            const initial_cursor = TypeSyntax.Cursor.afterCurrent(tokenizer);
-            var type_cursor = initial_cursor;
-            var scan_removed_forms = true;
-            switch (TypeSyntax.parsePrimitive(source, &type_cursor)) {
-                .parsed => {},
+            var type_cursor = TypeSyntax.Cursor.afterCurrent(tokenizer);
+            var syntax_store = TypeSyntax.Store.init(allocator, source);
+            defer syntax_store.deinit();
+            const parsed = try TypeSyntax.parseAndStore(
+                &syntax_store,
+                .global(0),
+                source,
+                colon.start + colon.len,
+                &type_cursor,
+            );
+            var nesting_refusal: ?AdmissionDiagnostic = null;
+            const raw_span: TypeSyntax.Span = switch (parsed) {
+                .parsed => |value| value.raw_span,
+                .excluded => |excluded| blk: {
+                    while (type_cursor.current.type != .eof and
+                        type_cursor.current.start < excluded.admission_end)
+                    {
+                        type_cursor.advance();
+                    }
+                    break :blk excluded.raw_span;
+                },
                 .failure => |failure| switch (failure) {
-                    .nesting_too_deep => |at| {
-                        var validation = initial_cursor;
+                    .nesting_too_deep => |at| blk: {
+                        var validation = type_cursor;
                         switch (TypeSyntax.validatePrimitiveAfterDepthRefusal(source, &validation)) {
                             .parsed => type_cursor = validation,
-                            .failure => |invalid| return .{ .out_of_slice = switch (invalid) {
-                                .unsupported_suffix => .compound_annotation,
-                                .missing_type, .unmatched_parenthesis, .nesting_too_deep => .malformed_annotation,
-                            } },
+                            .failure => return .{ .out_of_slice = .malformed_annotation },
                         }
-                        try result.diagnostics.append(allocator, .{
+                        nesting_refusal = .{
                             .kind = .nesting_too_deep,
                             .span = tokenSpan(at),
-                        });
-                        scan_removed_forms = false;
+                        };
+                        break :blk .{
+                            .start = colon.start + colon.len,
+                            .end = type_cursor.current.start,
+                        };
                     },
-                    .unsupported_suffix => return .{ .out_of_slice = .compound_annotation },
-                    .missing_type => |at| {
-                        if (!isRemovedRoot(at, source)) {
-                            return .{ .out_of_slice = .malformed_annotation };
-                        }
-                        while (!isAnnotationDelimiter(type_cursor.current.type)) {
-                            if (!isRemovedSuffix(type_cursor.current)) {
-                                return .{ .out_of_slice = .compound_annotation };
-                            }
-                            type_cursor.advance();
-                        }
-                    },
-                    .unmatched_parenthesis => return .{ .out_of_slice = .malformed_annotation },
+                    .missing_type, .unmatched_parenthesis, .unsupported_suffix => return .{ .out_of_slice = .malformed_annotation },
                 },
-            }
-
-            const annotation_end = type_cursor.current.start;
-            const annotation_start = colon.start + colon.len;
-            if (containsTypeComment(source, annotation_start, annotation_end)) {
-                return .{ .out_of_slice = .type_comment };
-            }
-            if (scan_removed_forms) {
-                try appendRemovedForms(
-                    allocator,
-                    &result.diagnostics,
-                    source,
-                    annotation_start,
-                    annotation_end,
-                );
+            };
+            if (nesting_refusal) |diagnostic| {
+                if (mode == .compile) {
+                    try appendAnyDiagnostics(
+                        allocator,
+                        &result.diagnostics,
+                        source,
+                        raw_span.start,
+                        diagnostic.span.start,
+                    );
+                } else {
+                    result.diagnostics.clearRetainingCapacity();
+                }
+                try result.diagnostics.append(allocator, diagnostic);
+                if (mode == .compile and result.diagnostics.items.len > 1) {
+                    result.diagnostics.items.len = 1;
+                }
+            } else try appendAdmissionDiagnostics(
+                allocator,
+                &result.diagnostics,
+                source,
+                raw_span,
+            );
+            switch (parsed) {
+                .parsed, .failure => {},
+                .excluded => |excluded| switch (excluded.reason) {
+                    .implementation_budget => return .{ .out_of_slice = .compound_annotation },
+                    .malformed_syntax => return .{ .out_of_slice = .malformed_annotation },
+                    .unsupported_syntax => if (result.diagnostics.items.len == 0) {
+                        if (startsWithTypeComment(source, colon.start + colon.len)) {
+                            return .{ .out_of_slice = .type_comment };
+                        }
+                        return .{ .out_of_slice = .compound_annotation };
+                    },
+                },
             }
 
             tokenizer = type_cursor.tokenizer;
@@ -286,46 +365,252 @@ fn scanInitializer(
     return null;
 }
 
-fn containsTypeComment(source: []const u8, start: u32, end: u32) bool {
-    if (start > end or @as(usize, end) > source.len) return true;
-    const text = source[@as(usize, start)..@as(usize, end)];
-    return std.mem.indexOf(u8, text, "//") != null or
-        std.mem.indexOf(u8, text, "/*") != null;
-}
-
-fn appendRemovedForms(
+fn appendAdmissionDiagnostics(
     allocator: std.mem.Allocator,
     diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
     source: []const u8,
-    start: u32,
-    end: u32,
+    raw_span: TypeSyntax.Span,
 ) !void {
-    var first_void: ?TypeSyntax.Span = null;
-    var cursor: usize = @intCast(start);
-    const end_index: usize = @intCast(end);
-    while (cursor < end_index) {
+    const start: usize = raw_span.start;
+    const end: usize = @min(@as(usize, raw_span.end), source.len);
+    try appendAnyDiagnostics(allocator, diagnostics, source, start, end);
+    if (findFirstRemovedForm(source, start, end)) |diagnostic| {
+        try diagnostics.append(allocator, diagnostic);
+    }
+}
+
+fn appendAnyDiagnostics(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+    source: []const u8,
+    start: usize,
+    end: usize,
+) !void {
+    var brace_depth: u16 = 0;
+    var cursor = start;
+    while (cursor < end) {
+        const byte = source[cursor];
+        if (byte == '"' or byte == '\'' or byte == '`') {
+            cursor = try skipAnyQuoted(allocator, source, cursor, end, byte);
+            continue;
+        }
+        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '/') {
+            cursor += 2;
+            while (cursor < end and source[cursor] != '\n') cursor += 1;
+            continue;
+        }
+        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '*') {
+            cursor += 2;
+            while (cursor + 1 < end and !(source[cursor] == '*' and source[cursor + 1] == '/')) cursor += 1;
+            cursor = @min(cursor + 2, end);
+            continue;
+        }
+        if (byte == '{') brace_depth +|= 1;
+        if (byte == '}') brace_depth -|= 1;
+        if (isIdentifierStart(byte) and cursor + 3 <= end and
+            std.mem.eql(u8, source[cursor .. cursor + 3], "any") and
+            (cursor + 3 == end or !isIdentifierContinue(source[cursor + 3])) and
+            !(brace_depth > 0 and isObjectTypeMemberKey(source, cursor, end)))
+        {
+            try diagnostics.append(allocator, .{
+                .kind = .any_type,
+                .span = .{ .start = @intCast(cursor), .end = @intCast(cursor + 3) },
+            });
+        }
+        cursor += 1;
+    }
+}
+
+fn findFirstRemovedForm(
+    source: []const u8,
+    start: usize,
+    end: usize,
+) ?AdmissionDiagnostic {
+    var first_removed: ?AdmissionDiagnostic = null;
+    var paren_depth: u16 = 0;
+    var brace_depth: u16 = 0;
+    var cursor = start;
+    while (cursor < end) {
+        const byte = source[cursor];
+        if (byte == '"' or byte == '\'' or byte == '`') {
+            cursor = skipAdmissionQuoted(source, cursor, end, byte);
+            continue;
+        }
+        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '/') {
+            cursor += 2;
+            while (cursor < end and source[cursor] != '\n') cursor += 1;
+            continue;
+        }
+        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '*') {
+            cursor += 2;
+            while (cursor + 1 < end and !(source[cursor] == '*' and source[cursor + 1] == '/')) cursor += 1;
+            cursor = @min(cursor + 2, end);
+            continue;
+        }
+        switch (byte) {
+            '(' => paren_depth +|= 1,
+            ')' => paren_depth -|= 1,
+            '{' => brace_depth +|= 1,
+            '}' => brace_depth -|= 1,
+            '?' => if (first_removed == null and paren_depth > 0 and brace_depth == 0 and
+                isOptionalParameterMarker(source, start, cursor, end))
+            {
+                first_removed = .{
+                    .kind = .optional_parameter,
+                    .span = .{ .start = @intCast(cursor), .end = @intCast(cursor + 1) },
+                };
+            },
+            else => {},
+        }
+        if (first_removed != null) return first_removed;
         if (!isIdentifierStart(source[cursor])) {
             cursor += 1;
             continue;
         }
         const ident_start = cursor;
         cursor += 1;
-        while (cursor < end_index and isIdentifierContinue(source[cursor])) cursor += 1;
+        while (cursor < end and isIdentifierContinue(source[cursor])) cursor += 1;
         const ident = source[ident_start..cursor];
         const span: TypeSyntax.Span = .{ .start = @intCast(ident_start), .end = @intCast(cursor) };
-        if (std.mem.eql(u8, ident, "any")) {
-            try diagnostics.append(allocator, .{ .kind = .any_type, .span = span });
-        } else if (first_void == null and std.mem.eql(u8, ident, "void")) {
-            first_void = span;
+        if (std.mem.eql(u8, ident, "void")) {
+            first_removed = .{ .kind = .void_type, .span = span };
+        } else if (std.mem.eql(u8, ident, "Array") or std.mem.eql(u8, ident, "ReadonlyArray")) {
+            const after = skipTypeTrivia(source, cursor, end);
+            if (after < end and source[after] == '<') {
+                first_removed = .{
+                    .kind = if (std.mem.eql(u8, ident, "Array"))
+                        .array_type_alias
+                    else
+                        .readonly_array_type_alias,
+                    .span = span,
+                };
+            }
         }
+        if (first_removed != null) return first_removed;
     }
-    if (first_void) |span| {
-        try diagnostics.append(allocator, .{ .kind = .void_type, .span = span });
+    return first_removed;
+}
+
+fn skipAnyQuoted(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    end: usize,
+    quote: u8,
+) !usize {
+    if (quote != '`') return skipAdmissionQuoted(source, start, end, quote);
+
+    var interpolation_depths: std.ArrayListUnmanaged(u32) = .empty;
+    defer interpolation_depths.deinit(allocator);
+    try interpolation_depths.append(allocator, 0);
+    var cursor = start + 1;
+    while (cursor < end) {
+        if (source[cursor] == '\\' and cursor + 1 < end) {
+            cursor += 2;
+            continue;
+        }
+        const level = interpolation_depths.items.len - 1;
+        if (interpolation_depths.items[level] == 0) {
+            if (source[cursor] == '`') {
+                _ = interpolation_depths.pop();
+                cursor += 1;
+                if (interpolation_depths.items.len == 0) return cursor;
+                continue;
+            }
+            if (source[cursor] == '$' and cursor + 1 < end and source[cursor + 1] == '{') {
+                interpolation_depths.items[level] = 1;
+                cursor += 2;
+                continue;
+            }
+            cursor += 1;
+            continue;
+        }
+        if (source[cursor] == '"' or source[cursor] == '\'') {
+            cursor = skipAdmissionQuoted(source, cursor, end, source[cursor]);
+            continue;
+        }
+        if (source[cursor] == '`') {
+            try interpolation_depths.append(allocator, 0);
+            cursor += 1;
+            continue;
+        }
+        if (source[cursor] == '{') interpolation_depths.items[level] += 1;
+        if (source[cursor] == '}') interpolation_depths.items[level] -= 1;
+        cursor += 1;
     }
+    return end;
+}
+
+fn skipTypeTrivia(source: []const u8, start: usize, end: usize) usize {
+    var cursor = start;
+    while (cursor < end) {
+        if (std.ascii.isWhitespace(source[cursor])) {
+            cursor += 1;
+            continue;
+        }
+        if (source[cursor] == '/' and cursor + 1 < end and source[cursor + 1] == '/') {
+            cursor += 2;
+            while (cursor < end and source[cursor] != '\n') cursor += 1;
+            continue;
+        }
+        if (source[cursor] == '/' and cursor + 1 < end and source[cursor + 1] == '*') {
+            cursor += 2;
+            while (cursor + 1 < end and !(source[cursor] == '*' and source[cursor + 1] == '/')) cursor += 1;
+            cursor = @min(cursor + 2, end);
+            continue;
+        }
+        break;
+    }
+    return cursor;
+}
+
+fn skipAdmissionQuoted(source: []const u8, start: usize, end: usize, quote: u8) usize {
+    var cursor = start + 1;
+    while (cursor < end) {
+        if (source[cursor] == '\\' and cursor + 1 < end) {
+            cursor += 2;
+            continue;
+        }
+        if (source[cursor] == quote) return cursor + 1;
+        cursor += 1;
+    }
+    return end;
+}
+
+fn isObjectTypeMemberKey(source: []const u8, start: usize, end: usize) bool {
+    var cursor = start;
+    while (cursor < end and isIdentifierContinue(source[cursor])) cursor += 1;
+    while (cursor < end and (source[cursor] == ' ' or source[cursor] == '\t')) cursor += 1;
+    if (cursor < end and source[cursor] == '?') {
+        cursor += 1;
+        while (cursor < end and (source[cursor] == ' ' or source[cursor] == '\t')) cursor += 1;
+    }
+    return cursor < end and (source[cursor] == ':' or source[cursor] == '(');
+}
+
+fn isOptionalParameterMarker(
+    source: []const u8,
+    start: usize,
+    marker: usize,
+    end: usize,
+) bool {
+    var before = marker;
+    while (before > start and std.ascii.isWhitespace(source[before - 1])) before -= 1;
+    if (before == start or !isIdentifierContinue(source[before - 1])) return false;
+    var after = marker + 1;
+    while (after < end and std.ascii.isWhitespace(source[after])) after += 1;
+    return after < end and source[after] == ':';
 }
 
 fn isIdentifierStart(byte: u8) bool {
     return std.ascii.isAlphabetic(byte) or byte == '_' or byte == '$';
+}
+
+fn startsWithTypeComment(source: []const u8, start: u32) bool {
+    var cursor: usize = @min(@as(usize, start), source.len);
+    while (cursor < source.len and std.ascii.isWhitespace(source[cursor])) cursor += 1;
+    return cursor + 1 < source.len and source[cursor] == '/' and
+        (source[cursor + 1] == '/' or source[cursor + 1] == '*');
 }
 
 fn isIdentifierContinue(byte: u8) bool {
@@ -431,7 +716,7 @@ fn compare(
         return .{ .differs = "the direct parser did not retain one annotation" };
     }
     if (!try compareLowering(allocator, &prepared, &direct.type_store)) {
-        return .{ .differs = "direct and legacy primitive lowering differ" };
+        return .{ .differs = "direct and legacy type lowering differ" };
     }
     if (type_alloc.alloc_calls == 0) {
         return .{ .differs = "the type store did not use its separate allocator" };
@@ -475,6 +760,9 @@ fn admissionMatchesStrip(
     const legacy_kind: AdmissionKind = switch (legacy.kind) {
         .any_type => .any_type,
         .void_type => .void_type,
+        .array_type_alias => .array_type_alias,
+        .readonly_array_type_alias => .readonly_array_type_alias,
+        .optional_parameter => .optional_parameter,
         .nesting_too_deep => .nesting_too_deep,
         else => return false,
     };
@@ -671,7 +959,7 @@ fn compareLowering(
     defer direct_env.deinit();
     try direct_pool.ensureHealthy();
     try direct_env.ensureHealthy();
-    try lowerPrimitiveStore(direct_store, &direct_pool, &direct_env);
+    try lowerSyntaxStore(allocator, direct_store, &direct_pool, &direct_env);
 
     const direct_annotation = direct_store.annotations.items[0];
     const direct_idx = direct_env.getVarTypeByBinding(
@@ -689,23 +977,206 @@ fn compareLowering(
         break;
     }
 
-    return direct_pool.getTag(direct_idx) == legacy_pool.getTag(legacy_idx orelse return false);
+    const legacy_root = legacy_idx orelse return false;
+    if (!try orderedTypeEqual(allocator, &legacy_pool, legacy_root, &direct_pool, direct_idx)) return false;
+
+    const legacy_key = comparisonTypeKey(&legacy_pool, allocator, legacy_root);
+    const direct_key = comparisonTypeKey(&direct_pool, allocator, direct_idx);
+    if (legacy_key) |left| {
+        const right = direct_key catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return false,
+        };
+        return std.mem.eql(u8, left, right);
+    } else |left_error| {
+        switch (left_error) {
+            error.OutOfMemory => return left_error,
+            else => {},
+        }
+        _ = direct_key catch |right_error| {
+            switch (right_error) {
+                error.OutOfMemory => return right_error,
+                else => {},
+            }
+            return left_error == right_error;
+        };
+        return false;
+    }
 }
 
-fn lowerPrimitiveStore(
+fn comparisonTypeKey(
+    pool: *TypePool,
+    allocator: std.mem.Allocator,
+    index: TypeIndex,
+) type_key.KeyError![]const u8 {
+    return type_key.typeKey(pool, allocator, index) catch |err| switch (err) {
+        // The allocating writer reports an allocation refusal as WriteFailed.
+        // This private comparator normalizes that operational failure.
+        error.WriteFailed => return error.OutOfMemory,
+        else => return err,
+    };
+}
+
+fn lowerSyntaxStore(
+    allocator: std.mem.Allocator,
     store: *const TypeSyntax.Store,
     pool: *TypePool,
     env: *TypeEnv,
 ) !void {
     try pool.ensureHealthy();
     try env.ensureHealthy();
+    try store.validate();
+
+    const lowered = try allocator.alloc(TypeIndex, store.nodes.items.len);
+    defer allocator.free(lowered);
+    @memset(lowered, null_type_idx);
+
+    for (store.nodes.items, 0..) |node, index| {
+        lowered[index] = switch (node.data) {
+            .primitive => |primitive| primitiveIndex(pool, primitive),
+            .group => |child| try loweredChild(lowered, child, index),
+            .readonly_modifier => |child| blk: {
+                const inner = try loweredChild(lowered, child, index);
+                if (pool.getTag(inner) == .t_array and !pool.isReadonlyArray(inner)) {
+                    break :blk pool.addReadonlyArray(allocator, pool.getArrayElement(inner));
+                }
+                break :blk inner;
+            },
+            .record => |range| blk: {
+                const fields = store.fieldSlice(range) orelse return error.InvalidTypeRange;
+                var result: std.ArrayListUnmanaged(RecordField) = .empty;
+                defer result.deinit(allocator);
+                try result.ensureTotalCapacity(allocator, fields.len);
+                for (fields) |field| {
+                    const name = pool.addName(allocator, field.name.text(store.source));
+                    result.appendAssumeCapacity(.{
+                        .name_start = name.start,
+                        .name_len = name.len,
+                        .type_idx = try loweredChild(lowered, field.type_child, index),
+                        .optional = field.optional,
+                        .readonly = field.readonly,
+                    });
+                }
+                break :blk pool.addRecord(allocator, result.items);
+            },
+            .array => |child| blk: {
+                const element = try loweredChild(lowered, child, index);
+                if (element == null_type_idx) break :blk null_type_idx;
+                break :blk pool.addArray(allocator, element);
+            },
+            .tuple => |range| blk: {
+                const elements = store.memberSlice(range) orelse return error.InvalidTypeRange;
+                var result: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                defer result.deinit(allocator);
+                try result.ensureTotalCapacity(allocator, elements.len);
+                for (elements) |element| {
+                    const child = try loweredChild(lowered, element, index);
+                    if (child == null_type_idx) break;
+                    result.appendAssumeCapacity(child);
+                }
+                break :blk pool.addTuple(allocator, result.items);
+            },
+            .function => |function| blk: {
+                const params = store.paramSlice(function.params) orelse return error.InvalidTypeRange;
+                var result: std.ArrayListUnmanaged(FuncParam) = .empty;
+                defer result.deinit(allocator);
+                try result.ensureTotalCapacity(allocator, params.len);
+                for (params) |parameter| {
+                    const name = pool.addName(allocator, parameter.name.text(store.source));
+                    result.appendAssumeCapacity(.{
+                        .name_start = name.start,
+                        .name_len = name.len,
+                        .type_idx = try loweredChild(lowered, parameter.type_child, index),
+                        .optional = parameter.optional,
+                    });
+                }
+                break :blk pool.addFunctionWithReturn(
+                    allocator,
+                    result.items,
+                    try loweredChild(lowered, function.ret, index),
+                );
+            },
+            .union_type => |range| try lowerJoin(allocator, store, pool, lowered, index, range, true),
+            .intersection => |range| try lowerJoin(allocator, store, pool, lowered, index, range, false),
+            .literal_string => |span| pool.addLiteralString(allocator, span.text(store.source)),
+            .literal_number => |value| pool.addLiteralNumber(allocator, value),
+            .literal_bool => |value| pool.addLiteralBool(allocator, value),
+            .template => |range| blk: {
+                const parts = store.templatePartSlice(range) orelse return error.InvalidTypeRange;
+                var result: std.ArrayListUnmanaged(PoolTemplatePart) = .empty;
+                defer result.deinit(allocator);
+                try result.ensureTotalCapacity(allocator, parts.len);
+                for (parts) |part| switch (part) {
+                    .literal => |span| {
+                        const name = pool.addName(allocator, span.text(store.source));
+                        result.appendAssumeCapacity(.{
+                            .kind = .literal,
+                            .name_start = name.start,
+                            .name_len = name.len,
+                        });
+                    },
+                    .type_slot => |child| result.appendAssumeCapacity(.{
+                        .kind = .type_slot,
+                        .type_idx = try loweredChild(lowered, child, index),
+                    }),
+                };
+                break :blk pool.addTemplateLiteral(allocator, result.items);
+            },
+        };
+        try pool.ensureHealthy();
+    }
+
     for (store.annotations.items) |annotation| {
-        const node = store.node(annotation.root) orelse return error.InvalidTypeNode;
-        const type_idx = primitiveIndex(pool, node.primitive);
+        const type_idx = try loweredChild(lowered, annotation.root, lowered.len);
         try env.bindVarType(annotation.binding.scope_id, annotation.binding.name_atom, type_idx);
     }
     try pool.ensureHealthy();
     try env.ensureHealthy();
+}
+
+fn loweredChild(lowered: []const TypeIndex, child: TypeSyntax.Child, parent: usize) !TypeIndex {
+    return switch (child) {
+        .absent => null_type_idx,
+        .present => |index| if (@as(usize, index) < parent and @as(usize, index) < lowered.len)
+            lowered[index]
+        else
+            error.InvalidTypeChild,
+    };
+}
+
+fn lowerJoin(
+    allocator: std.mem.Allocator,
+    store: *const TypeSyntax.Store,
+    pool: *TypePool,
+    lowered: []const TypeIndex,
+    parent: usize,
+    range: TypeSyntax.Range,
+    is_union: bool,
+) !TypeIndex {
+    const children = store.memberSlice(range) orelse return error.InvalidTypeRange;
+    var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
+    defer members.deinit(allocator);
+    try members.ensureTotalCapacity(allocator, children.len);
+    for (children, 0..) |child, member_index| {
+        const member = try loweredChild(lowered, child, parent);
+        if (member == null_type_idx) {
+            if (member_index == 0) return null_type_idx;
+            break;
+        }
+        members.appendAssumeCapacity(member);
+    }
+    if (is_union and members.items.len == 2) {
+        if (pool.getTag(members.items[1]) == .t_undefined) {
+            return pool.addNullable(allocator, members.items[0]);
+        }
+        if (pool.getTag(members.items[0]) == .t_undefined) {
+            return pool.addNullable(allocator, members.items[1]);
+        }
+    }
+    return if (is_union)
+        pool.addUnion(allocator, members.items)
+    else
+        pool.addIntersection(allocator, members.items);
 }
 
 fn primitiveIndex(pool: *const TypePool, primitive: TypeSyntax.Primitive) TypeIndex {
@@ -719,6 +1190,137 @@ fn primitiveIndex(pool: *const TypePool, primitive: TypeSyntax.Primitive) TypeIn
         .string => pool.idx_string,
         .bytes => pool.idx_bytes,
     };
+}
+
+const TypePair = struct {
+    left: TypeIndex,
+    right: TypeIndex,
+};
+
+fn orderedTypeEqual(
+    allocator: std.mem.Allocator,
+    left_pool: *const TypePool,
+    left_root: TypeIndex,
+    right_pool: *const TypePool,
+    right_root: TypeIndex,
+) !bool {
+    try left_pool.ensureHealthy();
+    try right_pool.ensureHealthy();
+    var pending: std.ArrayListUnmanaged(TypePair) = .empty;
+    defer pending.deinit(allocator);
+    try pending.append(allocator, .{ .left = left_root, .right = right_root });
+
+    while (pending.pop()) |pair| {
+        if (pair.left == null_type_idx or pair.right == null_type_idx) {
+            if (pair.left != pair.right) return false;
+            continue;
+        }
+        const left_tag = left_pool.getTag(pair.left) orelse return false;
+        const right_tag = right_pool.getTag(pair.right) orelse return false;
+        if (left_tag != right_tag) return false;
+        switch (left_tag) {
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_bytes,
+            .t_undefined,
+            .t_void,
+            .t_never,
+            .t_unknown_type,
+            .t_error,
+            => {},
+            .t_record => {
+                const left = left_pool.getRecordFields(pair.left);
+                const right = right_pool.getRecordFields(pair.right);
+                if (left.len != right.len) return false;
+                for (left, right) |a, b| {
+                    if (!std.mem.eql(
+                        u8,
+                        left_pool.getName(a.name_start, a.name_len),
+                        right_pool.getName(b.name_start, b.name_len),
+                    )) return false;
+                    if (a.optional != b.optional or a.readonly != b.readonly) return false;
+                    try pending.append(allocator, .{ .left = a.type_idx, .right = b.type_idx });
+                }
+            },
+            .t_array => {
+                if (left_pool.isReadonlyArray(pair.left) != right_pool.isReadonlyArray(pair.right)) return false;
+                try pending.append(allocator, .{
+                    .left = left_pool.getArrayElement(pair.left),
+                    .right = right_pool.getArrayElement(pair.right),
+                });
+            },
+            .t_tuple => {
+                const left = left_pool.getTupleElements(pair.left);
+                const right = right_pool.getTupleElements(pair.right);
+                if (left.len != right.len) return false;
+                for (left, right) |a, b| try pending.append(allocator, .{ .left = a, .right = b });
+            },
+            .t_function => {
+                const left = left_pool.getFunctionInfo(pair.left);
+                const right = right_pool.getFunctionInfo(pair.right);
+                if (left.params.len != right.params.len) return false;
+                for (left.params, right.params) |a, b| {
+                    if (!std.mem.eql(
+                        u8,
+                        left_pool.getName(a.name_start, a.name_len),
+                        right_pool.getName(b.name_start, b.name_len),
+                    )) return false;
+                    if (a.optional != b.optional) return false;
+                    try pending.append(allocator, .{ .left = a.type_idx, .right = b.type_idx });
+                }
+                try pending.append(allocator, .{ .left = left.ret, .right = right.ret });
+            },
+            .t_union => {
+                const left = left_pool.getUnionMembers(pair.left);
+                const right = right_pool.getUnionMembers(pair.right);
+                if (left.len != right.len) return false;
+                for (left, right) |a, b| try pending.append(allocator, .{ .left = a, .right = b });
+            },
+            .t_intersection => {
+                const left = left_pool.getIntersectionMembers(pair.left);
+                const right = right_pool.getIntersectionMembers(pair.right);
+                if (left.len != right.len) return false;
+                for (left, right) |a, b| try pending.append(allocator, .{ .left = a, .right = b });
+            },
+            .t_literal_string => {
+                const left = left_pool.getLiteralStringValue(pair.left) orelse return false;
+                const right = right_pool.getLiteralStringValue(pair.right) orelse return false;
+                if (!std.mem.eql(u8, left, right)) return false;
+            },
+            .t_literal_number, .t_literal_bool => {
+                const left = left_pool.getData(pair.left) orelse return false;
+                const right = right_pool.getData(pair.right) orelse return false;
+                if (!std.meta.eql(left, right)) return false;
+            },
+            .t_template_literal => {
+                const left = left_pool.getTemplateParts(pair.left);
+                const right = right_pool.getTemplateParts(pair.right);
+                if (left.len != right.len) return false;
+                for (left, right) |a, b| {
+                    if (a.kind != b.kind) return false;
+                    switch (a.kind) {
+                        .literal => if (!std.mem.eql(
+                            u8,
+                            left_pool.getName(a.name_start, a.name_len),
+                            right_pool.getName(b.name_start, b.name_len),
+                        )) return false,
+                        .type_slot => try pending.append(allocator, .{
+                            .left = a.type_idx,
+                            .right = b.type_idx,
+                        }),
+                    }
+                }
+            },
+            .t_nullable => try pending.append(allocator, .{
+                .left = left_pool.getNullableInner(pair.left),
+                .right = right_pool.getNullableInner(pair.right),
+            }),
+            .t_dict, .t_ref, .t_generic_param, .t_generic_app => return false,
+        }
+    }
+    return true;
 }
 
 const CountingAllocator = struct {
@@ -805,6 +1407,38 @@ fn expectEquivalent(source: []const u8) !void {
     }
 }
 
+fn expectDirectAbsentPrefix(annotation: []const u8, expected_prefix: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const source = try std.fmt.allocPrint(allocator, "{s} = value;", .{annotation});
+    defer allocator.free(source);
+    var store = TypeSyntax.Store.init(allocator, source);
+    defer store.deinit();
+    var cursor = TypeSyntax.Cursor.init(source);
+    const parsed = switch (try TypeSyntax.parseAndStore(
+        &store,
+        .global(300),
+        source,
+        0,
+        &cursor,
+    )) {
+        .parsed => |value| value,
+        .failure, .excluded => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(expected_prefix, parsed.semantic_span.text(source));
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try lowerSyntaxStore(allocator, &store, &pool, &env);
+    try std.testing.expectEqual(
+        null_type_idx,
+        env.getVarTypeByBinding(0, 300) orelse return error.TestUnexpectedResult,
+    );
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+}
+
 test "direct primitive slice matches every legacy primitive" {
     const primitives = [_][]const u8{
         "unknown",
@@ -828,6 +1462,375 @@ test "direct primitive slice matches every legacy primitive" {
             try expectEquivalent(source);
         }
     }
+}
+
+test "direct compound slice matches an ordered record with arrays" {
+    try expectEquivalent(
+        "const value: { readonly id?: number; tags: string[][] } = input;",
+    );
+}
+
+test "direct compound families and semantic quirks match ordered legacy types" {
+    const Fixture = struct {
+        annotation: []const u8,
+        family: ?CompoundFamily = null,
+        quirk: SemanticQuirk,
+    };
+    const fixtures = [_]Fixture{
+        .{ .annotation = "{ \"x\": number }", .quirk = .quoted_record_prefix },
+        .{ .annotation = "{ x number }", .quirk = .missing_record_colon_prefix },
+        .{ .annotation = "{ x: }", .quirk = .missing_record_type_absent },
+        .{ .annotation = "{ /*c*/ x: number }", .quirk = .record_comment_prefix },
+        .{ .annotation = "{ x: number /*c*/ }", .quirk = .record_comment_after_field },
+        .{ .annotation = "{ x: number y: string }", .quirk = .omitted_record_separator },
+        .{
+            .annotation = "{ readonly id?: number; name: string }",
+            .family = .record,
+            .quirk = .readonly_optional_fields,
+        },
+        .{ .annotation = "number[][]", .family = .array, .quirk = .mutable_repeated_arrays },
+        .{ .annotation = "number [ ]", .quirk = .separated_array_brackets },
+        .{ .annotation = "number /*c*/ []", .quirk = .comment_before_array },
+        .{ .annotation = "readonly number[]", .quirk = .readonly_array_flag },
+        .{ .annotation = "[string, number,]", .family = .tuple, .quirk = .tuple_trailing_comma },
+        .{ .annotation = "readonly [string, number]", .quirk = .readonly_tuple_erasure },
+        .{ .annotation = "(| number | string)", .family = .union_type, .quirk = .grouped_leading_union },
+        .{ .annotation = "number |", .quirk = .trailing_union_prefix },
+        .{ .annotation = "{ x: number } &", .quirk = .trailing_intersection_prefix },
+        .{
+            .annotation = "string | number & boolean",
+            .family = .intersection,
+            .quirk = .intersection_precedence,
+        },
+        .{ .annotation = "string | undefined", .quirk = .nullable_shorthand },
+        .{ .annotation = "string | number | undefined", .quirk = .wider_undefined_union },
+        .{ .annotation = "string | 1.5", .quirk = .numeric_token_prefix },
+        .{ .annotation = "{ cb: (x?: number) => number }", .quirk = .nested_optional_parameter },
+        .{ .annotation = "{ any: number }", .quirk = .any_member_key },
+        .{ .annotation = "(x: number y: string) => number", .quirk = .missing_function_comma },
+        .{ .annotation = "(x: number) number", .quirk = .missing_function_arrow },
+        .{ .annotation = "(x: number) =>", .quirk = .missing_function_return },
+        .{
+            .annotation = "(left: string, right: number) => boolean",
+            .family = .function,
+            .quirk = .named_function_parameters,
+        },
+        .{ .annotation = "`\\${string}`", .quirk = .escaped_template_slot },
+        .{ .annotation = "`x${}`", .quirk = .empty_template_slot },
+        .{ .annotation = "``", .quirk = .empty_template_root },
+        .{
+            .annotation = "`pre-${string}-mid-${number}-post`",
+            .family = .template,
+            .quirk = .multi_part_template,
+        },
+        .{ .annotation = "\"GET\"", .family = .literal, .quirk = .literal_values },
+    };
+    try std.testing.expectEqual(
+        @as(usize, @typeInfo(SemanticQuirk).@"enum".fields.len),
+        fixtures.len,
+    );
+
+    var families = std.EnumSet(CompoundFamily).initEmpty();
+    var quirks = std.EnumSet(SemanticQuirk).initEmpty();
+    for (fixtures) |fixture| {
+        const source = try legacyAnnotationSource(std.testing.allocator, fixture.annotation);
+        defer std.testing.allocator.free(source);
+        try expectEquivalent(source);
+        quirks.insert(fixture.quirk);
+        if (fixture.family) |family| families.insert(family);
+    }
+    inline for (@typeInfo(CompoundFamily).@"enum".fields) |field| {
+        try std.testing.expect(families.contains(@enumFromInt(field.value)));
+    }
+    inline for (@typeInfo(SemanticQuirk).@"enum".fields) |field| {
+        try std.testing.expect(quirks.contains(@enumFromInt(field.value)));
+    }
+
+    for ([_][]const u8{
+        "number [] []",
+        "string | 200",
+        "string | 0x10",
+        "string | 1_000",
+        "(200)",
+        "true",
+    }) |annotation| {
+        const source = try legacyAnnotationSource(std.testing.allocator, annotation);
+        defer std.testing.allocator.free(source);
+        try expectEquivalent(source);
+    }
+}
+
+test "direct compound boundaries preserve legacy structure before key comparison" {
+    const allocator = std.testing.allocator;
+    var function: std.ArrayListUnmanaged(u8) = .empty;
+    defer function.deinit(allocator);
+    try function.appendSlice(allocator, "const value: (");
+    for (0..15) |index| {
+        if (index > 0) try function.appendSlice(allocator, ", ");
+        var name: [32]u8 = undefined;
+        try function.appendSlice(allocator, try std.fmt.bufPrint(&name, "p{d}: number", .{index}));
+    }
+    try function.appendSlice(allocator, ") => string = undefined;");
+    try expectEquivalent(function.items);
+
+    inline for (.{ 63, 64 }) |layers| {
+        const source = "const value: number" ++ "[]" ** layers ++ " = undefined;";
+        try expectEquivalent(source);
+    }
+
+    for ([_][]const u8{
+        "const value: undefined | undefined = undefined;",
+        "const value: (undefined & undefined) | string = undefined;",
+        "const value: number | | string = undefined;",
+        "const value: number | | | string = undefined;",
+        "const value: number & & string = undefined;",
+        "const value: [()][] = undefined;",
+        "const value: { x }[] = undefined;",
+        "const value: [[()]][] = undefined;",
+        "const value: { outer: { x }[]; tail: number }[] = undefined;",
+    }) |source| try expectEquivalent(source);
+}
+
+test "nested semantic absence stops before later syntax" {
+    try expectDirectAbsentPrefix("((())) | Unsupported", "((()))");
+    try expectDirectAbsentPrefix("((()))[] | string", "((()))");
+
+    var annotation: std.ArrayListUnmanaged(u8) = .empty;
+    defer annotation.deinit(std.testing.allocator);
+    try annotation.appendSlice(std.testing.allocator, "((())) | ((");
+    for (0..16) |index| {
+        if (index > 0) try annotation.appendSlice(std.testing.allocator, ", ");
+        var name: [32]u8 = undefined;
+        try annotation.appendSlice(
+            std.testing.allocator,
+            try std.fmt.bufPrint(&name, "p{d}: number", .{index}),
+        );
+    }
+    try annotation.appendSlice(std.testing.allocator, ") => number)");
+    try expectDirectAbsentPrefix(annotation.items, "((()))");
+}
+
+test "direct function lowering propagates the packed parameter capacity error" {
+    const allocator = std.testing.allocator;
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "(");
+    for (0..16) |index| {
+        if (index > 0) try source.appendSlice(allocator, ", ");
+        var name: [32]u8 = undefined;
+        try source.appendSlice(allocator, try std.fmt.bufPrint(&name, "p{d}: number", .{index}));
+    }
+    try source.appendSlice(allocator, ") => string = value;");
+
+    var store = TypeSyntax.Store.init(allocator, source.items);
+    defer store.deinit();
+    var cursor = TypeSyntax.Cursor.init(source.items);
+    switch (try TypeSyntax.parseAndStore(&store, .global(300), source.items, 0, &cursor)) {
+        .parsed => {},
+        .failure, .excluded => return error.TestUnexpectedResult,
+    }
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try std.testing.expectError(
+        error.TypePoolCapacityExceeded,
+        lowerSyntaxStore(allocator, &store, &pool, &env),
+    );
+    try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
+}
+
+test "private compound budgets decline before legacy preparation" {
+    const Budget = enum { frames, templates };
+    inline for (std.meta.tags(Budget)) |budget| {
+        var source: std.ArrayListUnmanaged(u8) = .empty;
+        defer source.deinit(std.testing.allocator);
+        try source.appendSlice(std.testing.allocator, "const value: ");
+        switch (budget) {
+            .frames => {
+                for (0..TypeSyntax.max_parser_frames + 1) |_| {
+                    try source.appendSlice(std.testing.allocator, "readonly ");
+                }
+                try source.appendSlice(std.testing.allocator, "number = 1;");
+            },
+            .templates => {
+                try source.append(std.testing.allocator, '`');
+                for (0..TypeSyntax.max_template_levels) |_| {
+                    try source.appendSlice(std.testing.allocator, "${`");
+                }
+                try source.appendSlice(std.testing.allocator, "value");
+                for (0..TypeSyntax.max_template_levels) |_| {
+                    try source.appendSlice(std.testing.allocator, "`}");
+                }
+                try source.appendSlice(std.testing.allocator, "` = 1;");
+            },
+        }
+        const verdict = try compare(std.testing.allocator, source.items, .collect);
+        switch (verdict) {
+            .out_of_slice => |reason| try std.testing.expectEqual(
+                OutOfSliceReason.compound_annotation,
+                reason,
+            ),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "function backtracking removes every provisional syntax item" {
+    const source = "(number: string | boolean, number) = value;";
+    var store = TypeSyntax.Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = TypeSyntax.Cursor.init(source);
+    switch (try TypeSyntax.parseAndStore(&store, .global(300), source, 0, &cursor)) {
+        .parsed => {},
+        .failure, .excluded => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), store.params.items.len);
+    try std.testing.expectEqual(@as(usize, 0), store.members.items.len);
+    for (store.nodes.items) |node| switch (node.data) {
+        .primitive => |primitive| try std.testing.expectEqual(TypeSyntax.Primitive.number, primitive),
+        else => {},
+    };
+    try expectEquivalent("const value: (number: string | boolean, number) = undefined;");
+}
+
+test "compound syntax keeps complete field and parameter spans" {
+    const source = "{ readonly id?: number; cb: (arg: string) => boolean } = value;";
+    var store = TypeSyntax.Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = TypeSyntax.Cursor.init(source);
+    const parsed = switch (try TypeSyntax.parseAndStore(
+        &store,
+        .global(300),
+        source,
+        0,
+        &cursor,
+    )) {
+        .parsed => |value| value,
+        .failure, .excluded => return error.TestUnexpectedResult,
+    };
+    const root = switch (parsed.root) {
+        .present => |index| store.node(index) orelse return error.TestUnexpectedResult,
+        .absent => return error.TestUnexpectedResult,
+    };
+    const fields = switch (root.data) {
+        .record => |range| store.fieldSlice(range) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings("readonly id?: number", fields[0].span.text(source));
+    try std.testing.expectEqualStrings("cb: (arg: string) => boolean", fields[1].span.text(source));
+    const function = switch (fields[1].type_child) {
+        .present => |index| store.node(index) orelse return error.TestUnexpectedResult,
+        .absent => return error.TestUnexpectedResult,
+    };
+    const params = switch (function.data) {
+        .function => |value| store.paramSlice(value.params) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), params.len);
+    try std.testing.expectEqualStrings("arg: string", params[0].span.text(source));
+}
+
+test "bare groups keep consumed spans and lower as absent children" {
+    try expectEquivalent("const value: {value:();tail:number} = undefined;");
+    try expectEquivalent("const value: (value:())=>number = undefined;");
+
+    const record_source = "{value:();tail:number} = value;";
+    var record_store = TypeSyntax.Store.init(std.testing.allocator, record_source);
+    defer record_store.deinit();
+    var record_cursor = TypeSyntax.Cursor.init(record_source);
+    const record_parsed = switch (try TypeSyntax.parseAndStore(
+        &record_store,
+        .global(300),
+        record_source,
+        0,
+        &record_cursor,
+    )) {
+        .parsed => |value| value,
+        .failure, .excluded => return error.TestUnexpectedResult,
+    };
+    const record_node = switch (record_parsed.root) {
+        .present => |index| record_store.node(index) orelse return error.TestUnexpectedResult,
+        .absent => return error.TestUnexpectedResult,
+    };
+    const fields = switch (record_node.data) {
+        .record => |range| record_store.fieldSlice(range) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("value:()", fields[0].span.text(record_source));
+    const field_group = switch (fields[0].type_child) {
+        .present => |index| record_store.node(index) orelse return error.TestUnexpectedResult,
+        .absent => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(TypeSyntax.NodeTag.group, field_group.tag);
+    try std.testing.expectEqualStrings("()", field_group.semantic_span.text(record_source));
+    switch (field_group.data) {
+        .group => |child| switch (child) {
+            .absent => {},
+            .present => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var record_pool = TypePool.init(std.testing.allocator);
+    defer record_pool.deinit(std.testing.allocator);
+    var record_env = TypeEnv.init(std.testing.allocator, &record_pool);
+    defer record_env.deinit();
+    try lowerSyntaxStore(std.testing.allocator, &record_store, &record_pool, &record_env);
+    const lowered_record = record_env.getVarTypeByBinding(0, 300) orelse
+        return error.TestUnexpectedResult;
+    const lowered_fields = record_pool.getRecordFields(lowered_record);
+    try std.testing.expectEqual(@as(usize, 2), lowered_fields.len);
+    try std.testing.expectEqual(null_type_idx, lowered_fields[0].type_idx);
+
+    const function_source = "(value:())=>number = value;";
+    var function_store = TypeSyntax.Store.init(std.testing.allocator, function_source);
+    defer function_store.deinit();
+    var function_cursor = TypeSyntax.Cursor.init(function_source);
+    const function_parsed = switch (try TypeSyntax.parseAndStore(
+        &function_store,
+        .global(300),
+        function_source,
+        0,
+        &function_cursor,
+    )) {
+        .parsed => |value| value,
+        .failure, .excluded => return error.TestUnexpectedResult,
+    };
+    const function_node = switch (function_parsed.root) {
+        .present => |index| function_store.node(index) orelse return error.TestUnexpectedResult,
+        .absent => return error.TestUnexpectedResult,
+    };
+    const params = switch (function_node.data) {
+        .function => |value| function_store.paramSlice(value.params) orelse return error.TestUnexpectedResult,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("value:()", params[0].span.text(function_source));
+    const parameter_group = switch (params[0].type_child) {
+        .present => |index| function_store.node(index) orelse return error.TestUnexpectedResult,
+        .absent => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(TypeSyntax.NodeTag.group, parameter_group.tag);
+    try std.testing.expectEqualStrings("()", parameter_group.semantic_span.text(function_source));
+    switch (parameter_group.data) {
+        .group => |child| switch (child) {
+            .absent => {},
+            .present => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var function_pool = TypePool.init(std.testing.allocator);
+    defer function_pool.deinit(std.testing.allocator);
+    var function_env = TypeEnv.init(std.testing.allocator, &function_pool);
+    defer function_env.deinit();
+    try lowerSyntaxStore(std.testing.allocator, &function_store, &function_pool, &function_env);
+    const lowered_function = function_env.getVarTypeByBinding(0, 300) orelse
+        return error.TestUnexpectedResult;
+    const lowered_info = function_pool.getFunctionInfo(lowered_function);
+    try std.testing.expectEqual(@as(usize, 1), lowered_info.params.len);
+    try std.testing.expectEqual(null_type_idx, lowered_info.params[0].type_idx);
 }
 
 test "direct primitive slice binds a grouped and suffixed annotation" {
@@ -885,13 +1888,47 @@ test "direct type depth admits 512 and refuses opener 513" {
     try refused.appendNTimes(std.testing.allocator, '(', TypeSyntax.max_type_depth + 1);
     try refused.appendSlice(std.testing.allocator, "number");
     try refused.appendNTimes(std.testing.allocator, ')', TypeSyntax.max_type_depth + 1);
-    try refused.appendSlice(std.testing.allocator, " = 1;");
+    try refused.appendSlice(std.testing.allocator, " any = 1;");
     const verdict = try compare(std.testing.allocator, refused.items, .collect);
-    try std.testing.expectEqual(AdmissionKind.nesting_too_deep, verdict.admission_refused.first);
+    switch (verdict) {
+        .admission_refused => |refusal| {
+            try std.testing.expectEqual(AdmissionKind.nesting_too_deep, refusal.first);
+            try std.testing.expectEqual(@as(usize, 1), refusal.count);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    var earlier_any: std.ArrayListUnmanaged(u8) = .empty;
+    defer earlier_any.deinit(std.testing.allocator);
+    try earlier_any.appendSlice(std.testing.allocator, "const value: any | ");
+    try earlier_any.appendNTimes(std.testing.allocator, '(', TypeSyntax.max_type_depth + 1);
+    try earlier_any.appendSlice(std.testing.allocator, "number = 1;");
+    const ordered = try compare(std.testing.allocator, earlier_any.items, .collect);
+    switch (ordered) {
+        .out_of_slice => |reason| try std.testing.expectEqual(
+            OutOfSliceReason.malformed_annotation,
+            reason,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
+    const compile_ordered = try compare(std.testing.allocator, earlier_any.items, .compile);
+    switch (compile_ordered) {
+        .out_of_slice => |reason| try std.testing.expectEqual(
+            OutOfSliceReason.malformed_annotation,
+            reason,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
 
     try refused.appendSlice(std.testing.allocator, " function excluded() {}");
     const excluded = try compare(std.testing.allocator, refused.items, .collect);
-    try std.testing.expectEqual(OutOfSliceReason.function_declaration, excluded.out_of_slice);
+    switch (excluded) {
+        .out_of_slice => |reason| try std.testing.expectEqual(
+            OutOfSliceReason.function_declaration,
+            reason,
+        ),
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "direct parser keeps the binding token for a missing semicolon" {
@@ -910,15 +1947,13 @@ test "direct parser keeps the binding token for a missing semicolon" {
     try expectEquivalent(source);
 }
 
-test "depth refusals retain primitive comparison eligibility" {
+test "depth refusals keep only complete primitive annotations eligible" {
     const cases = [_]struct {
         body: []const u8,
         closed: bool,
-        reason: OutOfSliceReason,
     }{
-        // A grouped union fails the primitive grammar at the expected closing parenthesis.
-        .{ .body = "number | string", .closed = true, .reason = .malformed_annotation },
-        .{ .body = "number", .closed = false, .reason = .malformed_annotation },
+        .{ .body = "number | string", .closed = true },
+        .{ .body = "number", .closed = false },
     };
     for (cases) |case| {
         var source: std.ArrayListUnmanaged(u8) = .empty;
@@ -931,7 +1966,13 @@ test "depth refusals retain primitive comparison eligibility" {
         }
         try source.appendSlice(std.testing.allocator, " = 1;");
         const verdict = try compare(std.testing.allocator, source.items, .collect);
-        try std.testing.expectEqual(case.reason, verdict.out_of_slice);
+        switch (verdict) {
+            .out_of_slice => |reason| try std.testing.expectEqual(
+                OutOfSliceReason.malformed_annotation,
+                reason,
+            ),
+            else => return error.TestUnexpectedResult,
+        }
     }
 }
 
@@ -987,6 +2028,37 @@ test "annotation refusals preserve legacy order and stage precedence" {
 
     const crlf = try compare(std.testing.allocator, "const value:\r\n any = 1;", .collect);
     try std.testing.expectEqual(AdmissionKind.any_type, crlf.admission_refused.first);
+
+    const suffix_any = try compare(
+        std.testing.allocator,
+        "const value: number many = 1;",
+        .collect,
+    );
+    try std.testing.expectEqual(AdmissionKind.any_type, suffix_any.admission_refused.first);
+    try std.testing.expectEqual(@as(usize, 1), suffix_any.admission_refused.count);
+
+    const aliases = [_]struct {
+        source: []const u8,
+        kind: AdmissionKind,
+    }{
+        .{ .source = "const value: number Array<string> = 1;", .kind = .array_type_alias },
+        .{ .source = "const value: number ReadonlyArray<string> = 1;", .kind = .readonly_array_type_alias },
+    };
+    for (aliases) |case| {
+        const verdict = try compare(std.testing.allocator, case.source, .collect);
+        try std.testing.expectEqual(case.kind, verdict.admission_refused.first);
+        try std.testing.expectEqual(@as(usize, 1), verdict.admission_refused.count);
+    }
+
+    const any_array = try compare(
+        std.testing.allocator,
+        "const value: any Array<string> = 1;",
+        .collect,
+    );
+    try std.testing.expectEqual(AdmissionKind.any_type, any_array.admission_refused.first);
+    try std.testing.expectEqual(@as(usize, 2), any_array.admission_refused.count);
+
+    try expectEquivalent("const value: `outer${`any`}` = undefined;");
 }
 
 test "out of slice census covers every private reason" {
@@ -1000,13 +2072,13 @@ test "out of slice census covers every private reason" {
         .{ .reason = .type_declaration, .source = "structural X = number; const x: number = 1;" },
         .{ .reason = .multiple_bindings, .source = "const { x } = y; const z: number = 1;" },
         .{ .reason = .annotation_count, .source = "const x: number = 1; const y: number = 2;" },
-        .{ .reason = .compound_annotation, .source = "const x: number[] = y;" },
+        .{ .reason = .compound_annotation, .source = "const x: Named[] = y;" },
         .{ .reason = .malformed_annotation, .source = "const x: (number = 1;" },
         .{ .reason = .unsupported_annotation_position, .source = "const x = a: b; const y: number = 1;" },
         .{ .reason = .assertion_syntax, .source = "const x: number = y as number;" },
         .{ .reason = .template_literal, .source = "const x: string = `x`;" },
         .{ .reason = .regex_literal, .source = "const x: unknown = /x/;" },
-        .{ .reason = .type_comment, .source = "const x: number /* comment */ = 1;" },
+        .{ .reason = .type_comment, .source = "const x: /* comment */ number = 1;" },
         .{ .reason = .unsupported_initializer, .source = "const x: number = value.member;" },
         .{ .reason = .lone_carriage_return, .source = "const value:\r any = 1;" },
     };
@@ -1070,10 +2142,27 @@ test "admission comparison closes every allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
+test "successful compound comparison closes every allocation failure" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const source =
+                "const value: { pair: [number, string]; choice: number | string; " ++
+                "cb: (x: number) => `v${string}` } & { tags: string[] } = undefined;";
+            const verdict = try compare(allocator, source, .collect);
+            switch (verdict) {
+                .equivalent => {},
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
+}
+
 test "direct parser and lowering close every allocation failure" {
     const ParserContext = struct {
         fn run(type_allocator: std.mem.Allocator) !void {
-            const source = "const value: number = input;";
+            const source =
+                "const value: { readonly id?: number; tags: string[][]; cb: (x: number) => `v${string}` } = input;";
             var parser = try JsParser.initTyped(std.testing.allocator, type_allocator, source);
             defer parser.deinit();
             var atoms = AtomTable.init(std.testing.allocator);
@@ -1107,14 +2196,17 @@ test "direct parser and lowering close every allocation failure" {
             try pool.ensureHealthy();
             try env.ensureHealthy();
 
-            var store = TypeSyntax.Store.init(std.testing.allocator, "number");
+            const source =
+                "{ pair: [number, string]; choice: number | string; " ++
+                "cb: (x: number) => `v${string}` } & { tags: string[] } = value;";
+            var store = TypeSyntax.Store.init(allocator, source);
             defer store.deinit();
-            try store.add(.global(300), .{
-                .primitive = .number,
-                .semantic_span = .{ .start = 0, .end = 6 },
-                .raw_span = .{ .start = 0, .end = 6 },
-            });
-            try lowerPrimitiveStore(&store, &pool, &env);
+            var cursor = TypeSyntax.Cursor.init(source);
+            switch (try TypeSyntax.parseAndStore(&store, .global(300), source, 0, &cursor)) {
+                .parsed => {},
+                .failure, .excluded => return error.TestUnexpectedResult,
+            }
+            try lowerSyntaxStore(allocator, &store, &pool, &env);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, LowerContext.run, .{});
@@ -1124,4 +2216,495 @@ test "runtime comparison includes constants locations and complete empty upvalue
     try expectEquivalent(
         "const seed = \"x\"; const value: number = make(1.25 + 2 * 3); let copy = seed;",
     );
+}
+
+fn legacyAnnotationSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "const value: {s} = undefined;", .{annotation});
+}
+
+fn legacyValueTypeText(prepared: *PreparedSource) ?[]const u8 {
+    const type_map = prepared.typeMap() orelse return null;
+    for (type_map.entries.items) |entry| {
+        if (entry.kind != .var_annotation) continue;
+        const name = type_map.getNameText(entry) orelse continue;
+        if (std.mem.eql(u8, name, "value")) return type_map.getTypeText(entry);
+    }
+    return null;
+}
+
+fn expectLegacyTypeText(annotation: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const source = try legacyAnnotationSource(allocator, annotation);
+    defer allocator.free(source);
+
+    var prepared = try PreparedSource.init(allocator, source, "legacy-baseline.ts", .{});
+    defer prepared.deinit();
+    const type_map = prepared.typeMap().?;
+    try std.testing.expectEqual(@as(usize, 1), type_map.entries.items.len);
+    try std.testing.expectEqualStrings(annotation, legacyValueTypeText(&prepared).?);
+}
+
+fn expectLegacyColonRetained(annotation: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const source = try legacyAnnotationSource(allocator, annotation);
+    defer allocator.free(source);
+
+    var prepared = try PreparedSource.init(allocator, source, "legacy-baseline.ts", .{});
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.typeMap().?.entries.items.len);
+    try std.testing.expectEqualStrings(source, prepared.parserInput());
+}
+
+fn parseLegacyAnnotation(pool: *TypePool, annotation: []const u8) !TypeIndex {
+    try expectLegacyTypeText(annotation);
+    const idx = parseTypeExpr(pool, std.testing.allocator, annotation);
+    try pool.ensureHealthy();
+    return idx;
+}
+
+fn expectTag(pool: *const TypePool, idx: TypeIndex, tag: TypeTag) !void {
+    try std.testing.expectEqual(tag, pool.getTag(idx).?);
+}
+
+fn expectLiteralNumber(pool: *const TypePool, idx: TypeIndex, value: i16) !void {
+    try expectTag(pool, idx, .t_literal_number);
+    const data = pool.getData(idx).?;
+    try std.testing.expectEqual(value, @as(i16, @bitCast(data.a)));
+}
+
+test "legacy compound preparation preserves exact admitted type text" {
+    const annotations = [_][]const u8{
+        "{ \"x\": number }",
+        "{ x number }",
+        "{ x: }",
+        "{ /*c*/ x: number }",
+        "{ x: number /*c*/ }",
+        "{ x: number y: string }",
+        "number |",
+        "{ x: number } &",
+        "(x: number y: string) => number",
+        "(x: number) number",
+        "(x: number) =>",
+        "(number)",
+        "() => number",
+        "number [ ]",
+        "number /*c*/ []",
+        "{ cb: (x?: number) => number }",
+        "{ any: number }",
+        "string | 200",
+        "string | 1.5",
+        "string | 0x10",
+        "string | 1_000",
+        "true",
+        "`\\${string}`",
+        "`x${}`",
+        "\"GET\"",
+        "(200)",
+        "(| number | string)",
+        "readonly number[]",
+        "[string, number]",
+        "readonly [string, number]",
+        "``",
+    };
+    try std.testing.expectEqual(@as(usize, 31), annotations.len);
+    var observed: usize = 0;
+    for (annotations) |annotation| {
+        try expectLegacyTypeText(annotation);
+        observed += 1;
+    }
+    try std.testing.expectEqual(annotations.len, observed);
+}
+
+test "legacy preparation retains a colon when the root is not an annotation" {
+    const annotations = [_][]const u8{
+        "| number | string",
+        "& { x: number }",
+        "1.5",
+        "0x10",
+        "1e3",
+        "1_000",
+        "32768",
+        "/*c*/ number",
+    };
+    try std.testing.expectEqual(@as(usize, 8), annotations.len);
+    var observed: usize = 0;
+    for (annotations) |annotation| {
+        try expectLegacyColonRetained(annotation);
+        observed += 1;
+    }
+    try std.testing.expectEqual(annotations.len, observed);
+}
+
+test "legacy preparation keeps root refusal context separate from record context" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        annotation: []const u8,
+        expected: anyerror,
+    }{
+        .{ .annotation = "(x?: number) => number", .expected = error.OptionalParameter },
+        .{ .annotation = "{ value: any }", .expected = error.UnsupportedAnyType },
+    };
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+    var observed: usize = 0;
+    for (cases) |case| {
+        const source = try legacyAnnotationSource(allocator, case.annotation);
+        defer allocator.free(source);
+        var unexpected = PreparedSource.init(allocator, source, "legacy-baseline.ts", .{}) catch |err| {
+            try std.testing.expectEqual(case.expected, err);
+            observed += 1;
+            continue;
+        };
+        unexpected.deinit();
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "legacy compound family and semantic quirk census is exhaustive" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var families = std.EnumSet(CompoundFamily).initEmpty();
+    var quirks = std.EnumSet(SemanticQuirk).initEmpty();
+
+    const quoted = try parseLegacyAnnotation(&pool, "{ \"x\": number }");
+    try expectTag(&pool, quoted, .t_record);
+    try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(quoted).len);
+    try std.testing.expectEqualStrings("R0", try type_key.typeKey(&pool, allocator, quoted));
+    quirks.insert(.quoted_record_prefix);
+
+    const missing_colon = try parseLegacyAnnotation(&pool, "{ x number }");
+    try expectTag(&pool, missing_colon, .t_record);
+    try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(missing_colon).len);
+    quirks.insert(.missing_record_colon_prefix);
+
+    const missing_type = try parseLegacyAnnotation(&pool, "{ x: }");
+    const missing_fields = pool.getRecordFields(missing_type);
+    try std.testing.expectEqual(@as(usize, 1), missing_fields.len);
+    try std.testing.expectEqualStrings("x", pool.getName(missing_fields[0].name_start, missing_fields[0].name_len));
+    try std.testing.expectEqual(null_type_idx, missing_fields[0].type_idx);
+    try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_type));
+    quirks.insert(.missing_record_type_absent);
+
+    const comment_prefix = try parseLegacyAnnotation(&pool, "{ /*c*/ x: number }");
+    try expectTag(&pool, comment_prefix, .t_record);
+    try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(comment_prefix).len);
+    quirks.insert(.record_comment_prefix);
+
+    const comment_after = try parseLegacyAnnotation(&pool, "{ x: number /*c*/ }");
+    const comment_after_fields = pool.getRecordFields(comment_after);
+    try std.testing.expectEqual(@as(usize, 1), comment_after_fields.len);
+    try std.testing.expectEqualStrings("x", pool.getName(comment_after_fields[0].name_start, comment_after_fields[0].name_len));
+    try std.testing.expectEqual(pool.idx_number, comment_after_fields[0].type_idx);
+    quirks.insert(.record_comment_after_field);
+
+    const omitted_separator = try parseLegacyAnnotation(&pool, "{ x: number y: string }");
+    const omitted_fields = pool.getRecordFields(omitted_separator);
+    try std.testing.expectEqual(@as(usize, 2), omitted_fields.len);
+    try std.testing.expectEqualStrings("x", pool.getName(omitted_fields[0].name_start, omitted_fields[0].name_len));
+    try std.testing.expectEqual(pool.idx_number, omitted_fields[0].type_idx);
+    try std.testing.expectEqualStrings("y", pool.getName(omitted_fields[1].name_start, omitted_fields[1].name_len));
+    try std.testing.expectEqual(pool.idx_string, omitted_fields[1].type_idx);
+    try std.testing.expect((try type_key.typeKey(&pool, allocator, omitted_separator)).len > 0);
+    quirks.insert(.omitted_record_separator);
+
+    const readonly_optional = try parseLegacyAnnotation(&pool, "{ readonly id?: number; name: string }");
+    const readonly_fields = pool.getRecordFields(readonly_optional);
+    try std.testing.expectEqual(@as(usize, 2), readonly_fields.len);
+    try std.testing.expectEqualStrings("id", pool.getName(readonly_fields[0].name_start, readonly_fields[0].name_len));
+    try std.testing.expect(readonly_fields[0].readonly);
+    try std.testing.expect(readonly_fields[0].optional);
+    try std.testing.expectEqual(pool.idx_number, readonly_fields[0].type_idx);
+    try std.testing.expectEqualStrings("name", pool.getName(readonly_fields[1].name_start, readonly_fields[1].name_len));
+    try std.testing.expect(!readonly_fields[1].readonly);
+    try std.testing.expect(!readonly_fields[1].optional);
+    try std.testing.expectEqual(pool.idx_string, readonly_fields[1].type_idx);
+    families.insert(.record);
+    quirks.insert(.readonly_optional_fields);
+
+    for ([_][]const u8{ "number[][]", "number [] []" }) |annotation| {
+        const repeated_array = try parseLegacyAnnotation(&pool, annotation);
+        try expectTag(&pool, repeated_array, .t_array);
+        try std.testing.expect(!pool.isReadonlyArray(repeated_array));
+        const inner_array = pool.getArrayElement(repeated_array);
+        try expectTag(&pool, inner_array, .t_array);
+        try std.testing.expect(!pool.isReadonlyArray(inner_array));
+        try std.testing.expectEqual(pool.idx_number, pool.getArrayElement(inner_array));
+    }
+    families.insert(.array);
+    quirks.insert(.mutable_repeated_arrays);
+
+    try std.testing.expectEqual(pool.idx_number, try parseLegacyAnnotation(&pool, "number [ ]"));
+    quirks.insert(.separated_array_brackets);
+    try std.testing.expectEqual(pool.idx_number, try parseLegacyAnnotation(&pool, "number /*c*/ []"));
+    quirks.insert(.comment_before_array);
+
+    const readonly_array = try parseLegacyAnnotation(&pool, "readonly number[]");
+    try expectTag(&pool, readonly_array, .t_array);
+    try std.testing.expect(pool.isReadonlyArray(readonly_array));
+    try std.testing.expectEqual(pool.idx_number, pool.getArrayElement(readonly_array));
+    quirks.insert(.readonly_array_flag);
+
+    const trailing_tuple = try parseLegacyAnnotation(&pool, "[string, number,]");
+    try expectTag(&pool, trailing_tuple, .t_tuple);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        &.{ pool.idx_string, pool.idx_number },
+        pool.getTupleElements(trailing_tuple),
+    );
+    families.insert(.tuple);
+    quirks.insert(.tuple_trailing_comma);
+
+    const readonly_tuple = try parseLegacyAnnotation(&pool, "readonly [string, number]");
+    try expectTag(&pool, readonly_tuple, .t_tuple);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        &.{ pool.idx_string, pool.idx_number },
+        pool.getTupleElements(readonly_tuple),
+    );
+    quirks.insert(.readonly_tuple_erasure);
+
+    const grouped_union = try parseLegacyAnnotation(&pool, "(| number | string)");
+    try expectTag(&pool, grouped_union, .t_union);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        &.{ pool.idx_number, pool.idx_string },
+        pool.getUnionMembers(grouped_union),
+    );
+    quirks.insert(.grouped_leading_union);
+
+    try std.testing.expectEqual(pool.idx_number, try parseLegacyAnnotation(&pool, "number |"));
+    quirks.insert(.trailing_union_prefix);
+
+    const trailing_intersection = try parseLegacyAnnotation(&pool, "{ x: number } &");
+    const trailing_fields = pool.getRecordFields(trailing_intersection);
+    try std.testing.expectEqual(@as(usize, 1), trailing_fields.len);
+    try std.testing.expectEqualStrings("x", pool.getName(trailing_fields[0].name_start, trailing_fields[0].name_len));
+    try std.testing.expectEqual(pool.idx_number, trailing_fields[0].type_idx);
+    quirks.insert(.trailing_intersection_prefix);
+
+    const mixed = try parseLegacyAnnotation(&pool, "string | number & boolean");
+    try expectTag(&pool, mixed, .t_union);
+    const mixed_members = pool.getUnionMembers(mixed);
+    try std.testing.expectEqual(@as(usize, 2), mixed_members.len);
+    try std.testing.expectEqual(pool.idx_string, mixed_members[0]);
+    try expectTag(&pool, mixed_members[1], .t_intersection);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        &.{ pool.idx_number, pool.idx_boolean },
+        pool.getIntersectionMembers(mixed_members[1]),
+    );
+    families.insert(.union_type);
+    families.insert(.intersection);
+    quirks.insert(.intersection_precedence);
+
+    const nullable = try parseLegacyAnnotation(&pool, "string | undefined");
+    try expectTag(&pool, nullable, .t_nullable);
+    try std.testing.expectEqual(pool.idx_string, pool.getNullableInner(nullable));
+    try std.testing.expect((try type_key.typeKey(&pool, allocator, nullable)).len > 0);
+    quirks.insert(.nullable_shorthand);
+
+    const wide_undefined = try parseLegacyAnnotation(&pool, "string | number | undefined");
+    try expectTag(&pool, wide_undefined, .t_union);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        &.{ pool.idx_string, pool.idx_number, pool.idx_undefined },
+        pool.getUnionMembers(wide_undefined),
+    );
+    quirks.insert(.wider_undefined_union);
+
+    const numeric_cases = [_]struct { annotation: []const u8, value: i16 }{
+        .{ .annotation = "string | 200", .value = 200 },
+        .{ .annotation = "string | 1.5", .value = 1 },
+        .{ .annotation = "string | 0x10", .value = 0 },
+        .{ .annotation = "string | 1_000", .value = 1 },
+    };
+    var numeric_count: usize = 0;
+    for (numeric_cases) |case| {
+        const numeric = try parseLegacyAnnotation(&pool, case.annotation);
+        const numeric_members = pool.getUnionMembers(numeric);
+        try std.testing.expectEqual(@as(usize, 2), numeric_members.len);
+        try std.testing.expectEqual(pool.idx_string, numeric_members[0]);
+        try expectLiteralNumber(&pool, numeric_members[1], case.value);
+        numeric_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), numeric_count);
+    quirks.insert(.numeric_token_prefix);
+
+    const nested_optional = try parseLegacyAnnotation(&pool, "{ cb: (x?: number) => number }");
+    const nested_fields = pool.getRecordFields(nested_optional);
+    try std.testing.expectEqual(@as(usize, 1), nested_fields.len);
+    const nested_function = pool.getFunctionInfo(nested_fields[0].type_idx);
+    try std.testing.expectEqual(@as(usize, 1), nested_function.params.len);
+    try std.testing.expectEqualStrings("x", pool.getName(nested_function.params[0].name_start, nested_function.params[0].name_len));
+    try std.testing.expect(nested_function.params[0].optional);
+    try std.testing.expectEqual(pool.idx_number, nested_function.params[0].type_idx);
+    try std.testing.expectEqual(pool.idx_number, nested_function.ret);
+    quirks.insert(.nested_optional_parameter);
+
+    const any_key = try parseLegacyAnnotation(&pool, "{ any: number }");
+    const any_fields = pool.getRecordFields(any_key);
+    try std.testing.expectEqual(@as(usize, 1), any_fields.len);
+    try std.testing.expectEqualStrings("any", pool.getName(any_fields[0].name_start, any_fields[0].name_len));
+    try std.testing.expectEqual(pool.idx_number, any_fields[0].type_idx);
+    quirks.insert(.any_member_key);
+
+    const missing_comma = try parseLegacyAnnotation(&pool, "(x: number y: string) => number");
+    const comma_info = pool.getFunctionInfo(missing_comma);
+    try std.testing.expectEqual(@as(usize, 2), comma_info.params.len);
+    try std.testing.expectEqualStrings("x", pool.getName(comma_info.params[0].name_start, comma_info.params[0].name_len));
+    try std.testing.expectEqual(pool.idx_number, comma_info.params[0].type_idx);
+    try std.testing.expectEqualStrings("y", pool.getName(comma_info.params[1].name_start, comma_info.params[1].name_len));
+    try std.testing.expectEqual(pool.idx_string, comma_info.params[1].type_idx);
+    try std.testing.expectEqual(pool.idx_number, comma_info.ret);
+    quirks.insert(.missing_function_comma);
+
+    const missing_arrow = try parseLegacyAnnotation(&pool, "(x: number) number");
+    try expectTag(&pool, missing_arrow, .t_function);
+    try std.testing.expectEqual(null_type_idx, pool.getFunctionInfo(missing_arrow).ret);
+    try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_arrow));
+    quirks.insert(.missing_function_arrow);
+
+    const missing_return = try parseLegacyAnnotation(&pool, "(x: number) =>");
+    try expectTag(&pool, missing_return, .t_function);
+    try std.testing.expectEqual(null_type_idx, pool.getFunctionInfo(missing_return).ret);
+    try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_return));
+    quirks.insert(.missing_function_return);
+
+    const named_function = try parseLegacyAnnotation(&pool, "(left: string, right: number) => boolean");
+    const named_info = pool.getFunctionInfo(named_function);
+    try std.testing.expectEqual(@as(usize, 2), named_info.params.len);
+    try std.testing.expectEqualStrings("left", pool.getName(named_info.params[0].name_start, named_info.params[0].name_len));
+    try std.testing.expect(!named_info.params[0].optional);
+    try std.testing.expectEqual(pool.idx_string, named_info.params[0].type_idx);
+    try std.testing.expectEqualStrings("right", pool.getName(named_info.params[1].name_start, named_info.params[1].name_len));
+    try std.testing.expect(!named_info.params[1].optional);
+    try std.testing.expectEqual(pool.idx_number, named_info.params[1].type_idx);
+    try std.testing.expectEqual(pool.idx_boolean, named_info.ret);
+    try std.testing.expect((try type_key.typeKey(&pool, allocator, named_function)).len > 0);
+    families.insert(.function);
+    quirks.insert(.named_function_parameters);
+
+    const escaped_template = try parseLegacyAnnotation(&pool, "`\\${string}`");
+    const escaped_parts = pool.getTemplateParts(escaped_template);
+    try std.testing.expectEqual(@as(usize, 2), escaped_parts.len);
+    try std.testing.expectEqual(.literal, escaped_parts[0].kind);
+    try std.testing.expectEqualStrings("\\", pool.getName(escaped_parts[0].name_start, escaped_parts[0].name_len));
+    try std.testing.expectEqual(.type_slot, escaped_parts[1].kind);
+    try std.testing.expectEqual(pool.idx_string, escaped_parts[1].type_idx);
+    quirks.insert(.escaped_template_slot);
+
+    const empty_slot = try parseLegacyAnnotation(&pool, "`x${}`");
+    const empty_parts = pool.getTemplateParts(empty_slot);
+    try std.testing.expectEqual(@as(usize, 2), empty_parts.len);
+    try std.testing.expectEqual(.literal, empty_parts[0].kind);
+    try std.testing.expectEqualStrings("x", pool.getName(empty_parts[0].name_start, empty_parts[0].name_len));
+    try std.testing.expectEqual(.type_slot, empty_parts[1].kind);
+    try std.testing.expectEqual(null_type_idx, empty_parts[1].type_idx);
+    try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, empty_slot));
+    quirks.insert(.empty_template_slot);
+
+    try std.testing.expectEqual(null_type_idx, try parseLegacyAnnotation(&pool, "``"));
+    quirks.insert(.empty_template_root);
+
+    const multipart = try parseLegacyAnnotation(&pool, "`pre-${string}-mid-${number}-post`");
+    const multipart_parts = pool.getTemplateParts(multipart);
+    try std.testing.expectEqual(@as(usize, 5), multipart_parts.len);
+    try std.testing.expectEqual(.literal, multipart_parts[0].kind);
+    try std.testing.expectEqualStrings("pre-", pool.getName(multipart_parts[0].name_start, multipart_parts[0].name_len));
+    try std.testing.expectEqual(.type_slot, multipart_parts[1].kind);
+    try std.testing.expectEqual(pool.idx_string, multipart_parts[1].type_idx);
+    try std.testing.expectEqual(.literal, multipart_parts[2].kind);
+    try std.testing.expectEqualStrings("-mid-", pool.getName(multipart_parts[2].name_start, multipart_parts[2].name_len));
+    try std.testing.expectEqual(.type_slot, multipart_parts[3].kind);
+    try std.testing.expectEqual(pool.idx_number, multipart_parts[3].type_idx);
+    try std.testing.expectEqual(.literal, multipart_parts[4].kind);
+    try std.testing.expectEqualStrings("-post", pool.getName(multipart_parts[4].name_start, multipart_parts[4].name_len));
+    try std.testing.expect((try type_key.typeKey(&pool, allocator, multipart)).len > 0);
+    families.insert(.template);
+    quirks.insert(.multi_part_template);
+
+    const string_literal = try parseLegacyAnnotation(&pool, "\"GET\"");
+    try expectTag(&pool, string_literal, .t_literal_string);
+    try std.testing.expectEqualStrings("GET", pool.getLiteralStringValue(string_literal).?);
+    const boolean_literal = try parseLegacyAnnotation(&pool, "true");
+    try expectTag(&pool, boolean_literal, .t_literal_bool);
+    try std.testing.expectEqual(@as(u16, 1), pool.getData(boolean_literal).?.a);
+    families.insert(.literal);
+    quirks.insert(.literal_values);
+
+    try pool.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 8), @typeInfo(CompoundFamily).@"enum".fields.len);
+    try std.testing.expectEqual(@as(usize, 31), @typeInfo(SemanticQuirk).@"enum".fields.len);
+    inline for (@typeInfo(CompoundFamily).@"enum".fields) |field| {
+        const family: CompoundFamily = @enumFromInt(field.value);
+        try std.testing.expect(families.contains(family));
+    }
+    inline for (@typeInfo(SemanticQuirk).@"enum".fields) |field| {
+        const quirk: SemanticQuirk = @enumFromInt(field.value);
+        try std.testing.expect(quirks.contains(quirk));
+    }
+}
+
+test "legacy admitted function types preserve the packed parameter boundary" {
+    const allocator = std.testing.allocator;
+    inline for (.{ 15, 16 }) |count| {
+        var annotation: std.ArrayList(u8) = .empty;
+        defer annotation.deinit(allocator);
+        try annotation.append(allocator, '(');
+        for (0..count) |i| {
+            if (i > 0) try annotation.appendSlice(allocator, ", ");
+            var name_buffer: [32]u8 = undefined;
+            const parameter = try std.fmt.bufPrint(&name_buffer, "p{d}: number", .{i});
+            try annotation.appendSlice(allocator, parameter);
+        }
+        try annotation.appendSlice(allocator, ") => string");
+        try expectLegacyTypeText(annotation.items);
+
+        var pool = TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        const idx = parseTypeExpr(&pool, allocator, annotation.items);
+        if (count == 16) {
+            try std.testing.expectEqual(null_type_idx, idx);
+            try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
+        } else {
+            try pool.ensureHealthy();
+            try expectTag(&pool, idx, .t_function);
+            const info = pool.getFunctionInfo(idx);
+            try std.testing.expectEqual(@as(usize, count), info.params.len);
+            for (info.params, 0..) |parameter, i| {
+                var name_buffer: [8]u8 = undefined;
+                const name = try std.fmt.bufPrint(&name_buffer, "p{d}", .{i});
+                try std.testing.expectEqualStrings(name, pool.getName(parameter.name_start, parameter.name_len));
+                try std.testing.expectEqual(pool.idx_number, parameter.type_idx);
+                try std.testing.expect(!parameter.optional);
+            }
+            try std.testing.expectEqual(pool.idx_string, info.ret);
+            try std.testing.expect((try type_key.typeKey(&pool, allocator, idx)).len > 0);
+        }
+    }
+}
+
+test "legacy deep arrays separate admission and canonical key depth" {
+    const allocator = std.testing.allocator;
+    inline for (.{ 63, 64 }) |layers| {
+        const annotation = "number" ++ "[]" ** layers;
+        var pool = TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        const idx = try parseLegacyAnnotation(&pool, annotation);
+        var element = idx;
+        for (0..layers) |_| {
+            try expectTag(&pool, element, .t_array);
+            try std.testing.expect(!pool.isReadonlyArray(element));
+            element = pool.getArrayElement(element);
+        }
+        try std.testing.expectEqual(pool.idx_number, element);
+        try pool.ensureHealthy();
+        if (layers == 64) {
+            try std.testing.expectError(error.TypeKeyTooDeep, type_key.typeKey(&pool, allocator, idx));
+        } else {
+            const key = try type_key.typeKey(&pool, allocator, idx);
+            try std.testing.expectEqualStrings("Am" ** layers ++ "n", key);
+        }
+    }
 }

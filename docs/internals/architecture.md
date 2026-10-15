@@ -122,10 +122,20 @@ Production callers retain source preparation and the legacy parser initializer d
 The parser owns that syntax store, and `ParseResult` transfers the store with the other parser outputs.
 Type-only syntax creates no runtime node, atom, constant, or scope.
 
-The first comparison slice covers one variable annotation with a primitive type, parentheses, and retained suffix text.
-The syntax record keeps the declaration binding and separate semantic and raw spans.
-A compiler test module maps primitive syntax directly into `TypePool` and binds `TypeEnv` through the declaration identity.
-This slice establishes environment lookup; the existing checker retains its legacy annotation input.
+The comparison covers one variable annotation with primitives, records, arrays, tuples, unions, intersections, literals, templates, and function types.
+Six owned arrays hold nodes, members, fields, parameters, template parts, and annotations.
+Names and literal text borrow original source spans.
+Type nodes retain grouping and readonly modifiers, including modifiers that have no semantic effect.
+
+Annotations retain declaration bindings, raw spans, admission ends, and semantic-prefix ends.
+The admission end synchronizes the runtime cursor; the semantic prefix retains the existing type parser's recognized meaning.
+Explicit absent children differ from successful unknown types and invalid references.
+Present children precede their parents, and failed publication restores every syntax array and the caller cursor.
+
+A compiler test module lowers syntax directly through existing `TypePool` constructors and binds `TypeEnv` through declaration identities.
+The comparison checks exact ordered type structure before supplementary canonical keys.
+Canonical encoding has its own depth limit and does not establish parser admission.
+The existing checker retains its legacy annotation input until the consumer migration.
 
 The private preflight scans eligibility before runtime parsing and preserves admission diagnostic order.
 Unsupported comparison forms produce `out_of_slice`, which declines comparison without selecting another frontend.

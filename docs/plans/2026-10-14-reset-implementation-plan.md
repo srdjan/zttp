@@ -1053,6 +1053,7 @@ Readonly tuple syntax displays the same tuple type without a readonly modifier.
 
 Raw byte boundaries also carry semantic meaning.
 The legacy type parser skips whitespace but does not skip comments, and array wrapping requires adjacent `[]` bytes.
+Whitespace before each adjacent suffix remains allowed; whitespace between the brackets prevents that suffix from wrapping.
 Numeric semantic prefixes can stop inside a single runtime number token.
 Template semantic scanning treats escapes differently from the runtime tokenizer.
 The shared type parser must retain those distinctions rather than normalize tokens into broader acceptance.
@@ -1063,6 +1064,114 @@ An implementation frame budget is a separate limit because modifiers can add fra
 During private comparisons, implementation exhaustion must decline coverage unless the legacy admission scan itself reports excessive depth.
 CHECK baseline assertions belong in existing tools tests; the compiler comparison must not import the tools tier.
 Astra accepts legacy-only baseline work before final compound implementation approval.
+
+The baseline census contains eight compound families and 31 semantic quirks.
+Each census member needs an observed assertion; matching total counts alone do not establish coverage.
+An empty record assertion must check its record tag before checking its field count.
+TypePool accessors can otherwise turn an absent or unrelated type into an apparently empty result.
+
+Boundary fixtures must separate source admission from constructor capacity and canonical encoding.
+An admitted function type with 15 parameters must retain every parameter name, type, flag, and return type.
+The corresponding 16-parameter type must expose `TypePoolCapacityExceeded`, rather than normal semantic absence.
+Admitted arrays with 63 and 64 adjacent suffixes must retain every array layer in a healthy pool.
+Those fixtures must independently check the canonical encoder's depth boundary.
+
+Each annotation needs separate admission-end and semantic-prefix-end positions.
+Runtime cursor synchronization uses the admission end.
+Lowering uses stored semantic nodes and spans, without reparsing source text.
+Every child reference distinguishes present, absent, and invalid states.
+Each present child precedes its parent in node order.
+The parser publishes an annotation only after all six arrays succeed.
+An error or private exclusion restores all six array lengths.
+The comparison checks the ordered reachable representation before optional canonical keys.
+Matching key errors never establish equivalent representations.
+Nullable selection belongs after child lowering because legacy union parsing inspects TypePool tags, not authored syntax tags.
+Two `undefined` members retain the legacy nullable representation.
+An intersection that lowers to `undefined` can also trigger that same nullable rule.
+The syntax graph retains the authored union, grouping, and ignored modifiers until lowering.
+Fields and parameters retain full spans as well as borrowed names and child references.
+The explicit admission end remains separate from a trimmed raw span and the semantic-prefix end.
+Raw primitive recognition must retain `null` and `undefined` as types rather than unsupported references.
+An absent later union or intersection member stops the legacy semantic prefix immediately.
+The new parser must not resume that expression at another separator.
+Record and tuple early exits still attempt their own optional closer once.
+Normal exits must not consume that closer twice or remove an enclosing delimiter before an array suffix.
+Pre-publication validation rejects mismatched tags, invalid spans, invalid ranges, and forward or missing child indices.
+Rollback must preserve previously published annotations.
+An excluded parse also restores its caller cursor; diagnostic preflight can advance its own copy explicitly.
+Syntactic grouping can exist while its semantic child remains absent.
+That absence must still stop legacy expression and suffix parsing before later constructors run.
+Main measured three contrasts containing nested empty groups before an unsupported name, array suffix, or 16-parameter function type.
+All three CLI commands exit 1 with empty JSON and propagated `UnresolvedTypeBinding`.
+The wide function therefore remains unconstructed instead of producing a capacity error.
+Complete receipts remain under `/tmp/zttp-reset-20261015/u8-absence-baseline/`.
+
+The admission oracle must retain distinct legacy scans rather than combine their lexical rules.
+The `any` pass skips complete nested templates, while the removed-form pass uses its existing simpler quoted scan.
+Main measured nested template text containing a quoted `any`; it reaches ZTS200 without an `any` refusal.
+Array and readonly-array spellings remain refused even after a semantically complete primitive prefix.
+Measured prefix fixtures produce ZTS058 and ZTS059 with their existing suggestions.
+An `any` followed by `Array<string>` produces ZTS041 before ZTS058.
+Diagnostic collection stops at source-depth refusal rather than scanning the rest of a separately validated span.
+A measured 513-level group followed by `any` produces only ZTS044 at line 2, column 528.
+
+Legacy `any` detection also checks identifier suffixes without a preceding-boundary guard.
+The measured `number many` fixture produces ZTS041 at line 2, column 24.
+The private oracle must preserve that refusal or explicitly decline the lexical case.
+It must never correct that public behavior silently.
+A seventh CLI contrast places `any` before the overflowing group.
+CHECK still publishes only the fatal ZTS044; its failed preparation discards previously collected rows.
+Compile mode retains its separate first-refusal policy.
+The seven complete CLI receipts remain under `/tmp/zttp-reset-20261015/u8-admission-extra-baseline/`.
+Nested function-type arrows remain single arrow sequences during raw scanning.
+Their equals signs must not trigger unmatched-parenthesis handling or consume a generic closing delimiter.
+Fatal diagnostic collection and private comparison eligibility remain separate decisions.
+Depth refusal must not bypass complete-source preflight or accept a later unsupported function declaration.
+The private comparison can decline unclosed or compound depth cases until bounded shared validation covers them.
+Retained primitive validation must still check the complete annotation and remaining source after a depth refusal.
+
+Quoted interpolation overflow has a distinct legacy path.
+Annotation scanning catches errors from quoted scanning, while ordinary delimiter overflow propagates.
+The new frontend must preserve that origin or privately decline it until characterization establishes its recovery output.
+It must not apply ordinary fatal-depth projection to every quoted overflow.
+Bare empty groups retain consumed spans and group ownership even when their semantic result is absent.
+Field and parameter spans must therefore include the complete `()` syntax.
+
+Both private capacity branches need forced rejection probes.
+A readonly chain must exhaust frames without reaching the source delimiter limit.
+Nested templates must exhaust their temporary stack while each interpolation remains below the legacy brace limit.
+Both probes preserve the caller cursor and a nonempty checkpoint across all six arrays.
+Allocation sweeps must cover member lists, records, function parameters, templates, and direct lowering constructors.
+A second-annotation failure must preserve prior syntax before the owner is destroyed.
+The successful comparison path also needs an allocation-failure sweep.
+The pinned Zig allocating writer maps capacity allocation errors to `WriteFailed`.
+The private key comparison must propagate that operational failure rather than accept matching key errors.
+Any private conversion to `OutOfMemory` must state that the encoder uses allocating writers only.
+U8 must not change the public key encoder's error contract.
+
+Failure comparisons must execute both relevant sides independently.
+A legacy constructor failure must not prevent a test from exercising the direct constructor boundary.
+Fifteen-parameter success and direct sixteen-parameter rejection need their own observed assertions.
+Allocation failure propagates rather than counting as a matching semantic result.
+
+Template interpolation storage introduces no additional source-language limit.
+Legacy quoted scanning bounds braces within each interpolation, rather than sharing one nesting count across every nested template.
+An exhausted implementation buffer must produce private exclusion unless the actual legacy admission limit also fires.
+
+U8 now retains all eight compound families through the private syntax store and direct constructor lowerer.
+The comparison checks ordered semantic structure before supplementary canonical keys.
+The exact tools baseline contains 54 compound fixtures.
+Both private budget probes use balanced source and preserve nonempty checkpoints and caller cursors.
+The measured allocation sweep preserves earlier syntax and uses one allocator for construction and destruction.
+The key wrapper projects allocating-writer failures to `OutOfMemory` only within private comparison.
+Production callers still use the legacy frontend.
+
+Astra accepted the final U8 source after the recorded corrections.
+The corrected small suites passed 2,690 tests with one skip across 16 build steps.
+The frontend gate passed 3,424 tests with one skip across 45 build steps, including all 182 diagnostic cases.
+The full repository gate also exited 0.
+Receipts remain in `u8-final-bounded-corrected.log`, `u8-focused.log`, and `u8-verify.log` under `/tmp/zttp-reset-20261015/`.
+These checks establish private compatibility coverage; they do not establish a production cutover or performance improvement.
 
 ### U9 preparation findings
 
@@ -1080,6 +1189,16 @@ Declaration recognition uses a simplified statement boundary.
 Outside that boundary, `structural` and `nominal` remain ordinary identifiers.
 Source review indicates that indentation can prevent recognition because the boundary check reads the last emitted byte.
 A characterization must confirm that behavior before the private parser claims parity.
+Main measured 16 declaration fixtures through the legacy CLI.
+The sources, full responses, stderr, and direct exit statuses remain under `/tmp/zttp-reset-20261015/u9-declaration-baseline/`.
+Every command exits 1, with distinct failure stages.
+An unindented root declaration reaches ZTS200 for its deliberately incorrect string initializer.
+An unindented declaration inside a function reaches the same type mismatch.
+Leading spaces, indentation after a newline, a space after a semicolon, and indentation inside a function instead produce ZTS047.
+Those declarations remain runtime input rather than supplying alias meaning.
+A function sharing a nominal alias name still produces ZTS214 when called.
+The equivalent structural alias collision reaches contract checking with ZTS500 instead.
+The direct syntax path must preserve these measured declaration and nominal-call decisions.
 Legacy `type`, `distinct type`, and `interface` spellings retain their existing source refusals.
 Generic declarations remain deferred until U10 supplies their semantics.
 
@@ -1092,6 +1211,16 @@ A bare alias root eagerly captures an existing named alias index.
 A missing name becomes a deferred reference, and references inside compound bodies remain deferred.
 Thus `A = string; B = A; A = number` retains string meaning for `B`.
 The forward form `B = A; A = string; A = number` resolves `B` through the final `A`.
+CLI contrasts confirm these semantic outcomes.
+The eager form rejects a number with ZTS200 naming `string`.
+The forward form rejects a string with ZTS200 naming the retained reference `A`.
+The forward form accepts a numeric initializer through type checking and reaches contract checking with ZTS500.
+Semantic resolution must therefore remain separate from diagnostic display.
+Eager lookup also requires the exact trimmed body, rather than only a semantic reference root.
+The measured `B = A tolerated_suffix` form retains deferred `A` meaning after `A` changes from string to number.
+Its string initializer produces ZTS200 naming `A`; its numeric initializer reaches ZTS500.
+The ignored suffix therefore changes lookup timing without contributing a different type expression.
+An unindented nested declaration also supplies module-wide alias meaning to an outer variable.
 The direct lowerer must preserve that distinction rather than eagerly resolve every reference.
 
 Nominal identity uses the nominal name and base tag, without a unique declaration identity.
@@ -1105,6 +1234,7 @@ Recursive aliases form a finite reference graph without body expansion.
 Records, tuples, arrays, and `Dict` guard recursive paths; unions, intersections, nullable types, and function edges do not.
 The existing contractivity census marks current alias-map entries after population.
 ZTS212 appears when a variable annotation uses a marked alias; an unused invalid alias supplies no diagnostic through that path.
+The measured unused cycle reaches contract checking with ZTS500; its used contrast produces ZTS212 at the variable.
 The alias walk has 32 path slots, and ordinary reference resolution separately follows at most eight hops.
 Repeated declarations affect that census through their final map entries.
 
@@ -1119,6 +1249,80 @@ It must retain existing nominal construction rules and the existing recursive-al
 The syntax lowerer must check both environment and pool health before publishing completed results.
 Allocation probes must cover declaration arrays, namespace keys, nominal names, recursive-alias state, and partial initialization cleanup.
 Frozen fixtures in the stripper, TypePool, TypeEnv, and checker supply separate admission and semantic evidence.
+
+U9 has four implementation owners: `parser/type_syntax.zig`, `parser/parse.zig`, `typed_frontend_compare.zig`, and `type_env.zig`.
+Main retains tools baselines, documentation, verification, and Git operations.
+Production callers remain unchanged.
+
+Named-reference nodes borrow name spans.
+A seventh store array holds structural and nominal declarations.
+Each declaration retains component spans, an optional export span, a complete erased span, source order, and authored scope.
+An absent body differs from a present body whose semantic child is absent.
+Checkpoints, validation, rollback, and destruction cover all seven arrays.
+Declaration publication occurs last, and every failed or excluded parse preserves the caller cursor.
+
+Program and block loops consume type declarations without appending runtime statements.
+Other statement positions do not gain declaration recognition.
+The parser retains the last erased range to reproduce the legacy boundary byte.
+An erased newline remains a newline; another erased byte becomes a space.
+Original intervening whitespace still controls the following boundary.
+This rule avoids a padded source pass while preserving adjacency and indentation behavior.
+Generic declarations remain private exclusions until U10.
+
+Whole-body alias lookup precedes semantic parsing for every spelling, including primitive names.
+Source review shows that legacy declaration names can replace `string`, `number`, or another primitive spelling.
+The lowerer must query the exact trimmed body before lowering a declaration, nominal base, or annotation root.
+Nested compound children do not perform that whole-body lookup.
+Grouped and suffixed bodies only match when the complete trimmed body is an existing namespace key.
+Four public contrasts now confirm primitive-name collisions and their nested exception.
+Declaration and annotation roots reject a string initializer with ZTS200 naming `number` after `structural string = number`.
+The nominal contrast rejects its string initializer with ZTS200 naming `UserId`.
+The compound contrast still names `string | boolean`, so nested primitive syntax does not use whole-body alias lookup.
+Each command exits 1; complete responses remain under `/tmp/zttp-reset-20261015/u9-primitive-alias-baseline/`.
+
+The direct lowerer registers existing module and ABI types before source declarations.
+It then applies declarations in source order and lowers annotations after alias finalization.
+Named-reference children retain deferred references; exact whole-body matches retain the existing eager lookup.
+The proposed `finishTypeAliasPopulation` operation exposes the existing contractivity census.
+Legacy population retains its current call position and additive behavior across repeated population calls.
+The new operation does not clear either census map.
+The fresh direct environment invokes the operation once after its complete declaration batch.
+
+The first U9 slice contains one structural alias and one nominal alias, each with one annotated variable.
+That slice checks runtime neutrality, declaration ownership, and direct semantic parity.
+Main then runs unfiltered `zig build test-zts -j1 --summary all` before broader implementation.
+Main retains the 16 measured CLI contrasts as exact tools baselines.
+An explicit case census supplies the complete coverage count; an estimated count supplies no acceptance evidence.
+Second-declaration allocation probes preserve earlier syntax, and lowering probes cover names, maps, nominal storage, and annotation publication.
+
+Named array suffixes preserve a distinct legacy prefix rule.
+`Alias[][]` retains one array layer, while `(Alias)[][]` retains two layers.
+The syntax store must preserve their distinct semantic ends instead of applying the primitive suffix loop universally.
+A completed readonly modifier must not consume another suffix after its child has stopped.
+Readonly named operands also need their existing implicit `Readonly<Named>` application.
+Existing environment projection resolves that application through root unions, intersections, and nullable types.
+That projection does not traverse record fields or tuple elements.
+Direct lowering must preserve the same traversal boundary without reparsing text or introducing recursive traversal.
+An exposed existing postparse operation can retain that behavior while authored generic applications remain outside U9.
+An exact whole-body alias hit returns immediately and bypasses postparse projection, matching `resolveType`.
+Other roots invoke the existing projection once after their syntax lowers.
+Record, tuple, array, and function children retain unresolved implicit applications under that existing traversal boundary.
+
+Six public contrasts confirm these named-type boundaries.
+Their ZTS200 messages retain `Alias[]`, `Alias[][]`, `readonly string[]`, `{ field: Readonly<Items> }`, `[Readonly<Items>]`, and `readonly string[] | undefined`.
+Each command exits 1 at line 3, column 1.
+Complete responses remain under `/tmp/zttp-reset-20261015/u9-named-boundary-baseline/`.
+
+Declaration-only comparison must inspect final alias-map membership and values rather than assume an annotated variable exists.
+A missing key differs from a present key whose value is `null_type_idx`.
+An empty body supplies no alias, while nonempty syntax with absent meaning can publish a null alias.
+Ordered comparison checks nominal flags and names before accepting scalar tags.
+It also compares reference names and implicit application bases and ordered arguments.
+Separate assertions compare final contractivity flags without expanding recursive reference graphs.
+The revised semantic census has 56 named members; an exhaustive fixture table must observe every member.
+Its cases cover admission, aliases, nominal identity, readonly projection, suffixes, recursion, limits, comparison, and existing refusals.
+Separate invariant tests cover component spans, ownership, runtime neutrality, seven-array rollback, allocation failures, and health.
+The public tools baseline now contains 26 measured fixtures across the three recorded directories.
 
 ### U10 preparation findings
 
@@ -1253,11 +1457,265 @@ U12 needs failure characterization and explicit health checks before the new syn
 The new path must never retry through legacy reconstruction.
 
 Typing profiles also remain explicit.
-Loaded-graph contracts use entry type data while dependencies receive no type data.
+Loaded multi-module contracts omit type data for both entry and dependencies.
 Imported summaries can attempt dependency type checking and block nested summaries without rejecting graph compilation.
 The contract-only profile omits type metadata, while sound extraction uses entry metadata when present.
 An empty selected syntax store must remain different from intentionally omitted type data.
 The U12 worker must refresh this census after U11 defines the complete owner records.
+
+Main measured seven lookup fixtures through the legacy CLI.
+Every command exits 1; failure stages differ.
+The complete sources, responses, stderr, and index remain under `/tmp/zttp-reset-20261015/u12-lookup-baseline/`.
+
+Repeated nested forward helpers produce ZTS203 on the second helper's first argument.
+The same fixture also produces two ZTS629 diagnostics for unpublished `inner` references.
+Repeated predicates produce ZTS211 on the second predicate, then ZTS200 on the later narrowed assignment.
+Repeated forward return helpers produce ZTS200 on the first numeric assignment, followed by ZTS629 for an unpublished `make` reference.
+These observations freeze outputs; they do not establish valid forward-call semantics.
+The first forward-helper candidate used prohibited string addition and was discarded before measuring the retained fixture.
+Its response remains separately identified in the index.
+
+A mixed untyped shadow fixture reaches contract checking without a type diagnostic.
+Its negative contrast produces ZTS200 when the inner string annotation receives the number 2.
+A shadowed closure fixture also reaches contract checking without a type diagnostic.
+Its negative contrast produces ZTS204 when the inner closure declares a numeric return but captures a string.
+Those negative contrasts establish that the specific inner annotation and capture paths actually participate in checking.
+
+### U13 preparation findings
+
+The source review identifies printer spans and contract signatures as the direct migration areas.
+`proof_ir.zig` has no direct TypeMap dependency.
+The worker must refresh these findings after U11 and U12 supply complete syntax owners and consumer APIs.
+
+`printer.zig` prepares source again and converts TypeMap entries into opaque regions.
+Generic regions use delimiter arithmetic; declaration regions search for names and semicolons.
+Annotations use raw spans, while type-only imports remain ordinary tokens.
+The printer trims, sorts, merges, and copies opaque regions verbatim.
+Direct syntax inputs must replace reconstruction without changing those region operations or copied bytes.
+
+The syntax printer needs complete spans for annotations, generic declarations, call arguments, declarations, and type-only imports and exports.
+Each call must select one ownership source.
+The existing printer entry remains available until caller migration.
+Preparation refusal currently maps to `strip_failed`; allocation failure remains distinct.
+Carriage returns remain refused, and empty input remains empty output.
+The self-check compares significant tokens and exact comments, with only trailing commas allowed to differ.
+Canonicalization retains rewritten bytes when printing refuses.
+
+`ContractBuilder.build` already receives the selected handler node.
+Its signature query instead selects `handler` by name before trying a source offset.
+That selection supplies declared Proof specifications and capability budgets.
+Repeated names can therefore alter contract bytes even when runtime IR remains identical.
+The new owner API must preserve measured selection behavior through an explicit compatibility projection.
+U13 must not silently replace the name winner with the selected runtime handler.
+Main measured two nested-versus-outer handler fixtures through `zts check --json --contract`.
+Both commands exit 0 without diagnostics.
+The nested handler declares `pure`, and the outer handler declares `deterministic`.
+Both source orders report `pure` in `proof.declared_specs`.
+The wrapper capsule retains its actual source line in each order.
+Complete receipts remain under `/tmp/zttp-reset-20261015/u13-signature-baseline/`.
+This command exposes proof JSON; these receipts establish no complete contract or certificate byte comparison.
+
+Hole collection already uses exact effect declarations where available and binding identities for scope types.
+Other expected-type queries reconstruct signatures from declaration offsets or function names.
+Helper reachability also remains name-based.
+Fixtures must characterize repeated helpers, selected handlers, holes, locations, and serialized order before removing those joins.
+Missing Proof keeps the strict full profile; nonliteral Effects keeps ZTS511 and its current location.
+Unknown capabilities retain their current diagnostics and failure behavior.
+
+`effect_inference.zig` obtains an exact declaration, then converts that owner into a signature offset.
+Declared callback effects index the compact signature with the actual parameter position.
+U13 must retain U12's compact-parameter projection instead of binding both source and projected positions.
+Missing type knowledge leaves an effect lower bound.
+A function type without a marker supplies an empty pure row.
+Unknown capability data retains the lower bound, while marker allocation failure propagates.
+Existing tests cover an untyped callback but do not establish typed callback ceilings or annotation-gap behavior.
+
+Pipeline type inputs remain an ownership boundary.
+Current extraction prefers the prepared frontend's TypeMap and otherwise selects an option's TypeMap.
+The replacement needs explicit omitted, legacy, and direct syntax inputs.
+An empty selected store must differ from omitted data, and direct failure must never retry through legacy input.
+Full and sound extraction retain selected entry types; contract-only omits them for every loaded graph module.
+Session passes retain one-attempt behavior, unavailable path facts, and propagated contract failures.
+
+Contract JSON exposes source identity, budgets, properties, specifications, and diagnostics.
+Proof JSON also exposes holes, capsules, expected types, source locations, and scope lists.
+Proof IR depends on runtime node identity, child order, handler selection, and structural digests.
+Artifact construction hashes the serialized contract bytes.
+Certificates include proof evidence, discharged properties, artifact sections, contract digest, and runtime policy digest.
+Parity must therefore cover contract and certificate bytes independently of proof IR equality.
+
+The U13 fixture set needs every printer owner with comments and unusual type spacing.
+It also needs repeated handlers and helpers with different Proof and Effects annotations.
+Callback fixtures must contrast an annotated first parameter with an annotation after an untyped parameter.
+Hole fixtures must cover repeated names, nested declarations, and module-level arrows.
+Equivalent runtime programs with different type trivia must compare normalized output, runtime IR, bytecode, proof IR, contracts, identities, and certificate inputs.
+Error fixtures must distinguish missing Proof, explicit Proof, invalid Effects, unknown capabilities, omitted types, and an empty store.
+Allocation failures must prevent partial publication and legacy retry across syntax, printing, marker extraction, effect projection, and certificate construction.
+
+U13 retains production callers in precompile, runtime type resolution, runtime extraction, compiler preparation, and canonicalization.
+U14 through U16 own those cutovers.
+The frontend command and `test-proof-checker`, `test-proof-ratchet`, and `test-proof-swallow` remain required unfiltered gates.
+Contract goldens establish bytes; the proof ratchet checks producer and consumer reconstruction beyond the checker alone.
+
+### U14 through U16 preparation findings
+
+The source census separates six cutover groups and their public boundaries.
+Each implementing worker must refresh this census after U13 defines the final syntax APIs.
+
+| Phase | Caller group | Current boundary |
+|---|---|---|
+| U14 | CHECK root and imported files in `precompile.zig` | Owned source preparation, parsing, then existing analysis stages. |
+| U14 | CLI, machine check and verify, expert CHECK projections | Shared CHECK calls plus captured source and wire projections. |
+| U15 | Single-module compilation and runtime source compilation | Typed source preparation, ordered analysis, then bytecode. |
+| U15 | Loaded graph discovery, graph compilation, and graph contracts | Separate discovery parses and ordered compilation parses with shared atoms. |
+| U16 | Normalization, parse identity, inline evaluation, graph records, generated tests | Distinct refusal and source-profile policies. |
+| U16 | Direct Pi tools and compile benchmark | Tool-specific output contracts and the measured frontend boundary. |
+
+CHECK records the public `strip` stage before parsing.
+It collects source-admission diagnostics and stops parsing when any recovered admission diagnostic exists.
+Parsing precedes virtual import validation.
+Boolean, type, and strict analysis finish before their diagnostics publish in that order.
+Any error in those stages prevents verifier and flow work.
+Contract, policy, paths, trace, specifications, and canonical stages retain their current order.
+The direct frontend must retain `strip` as a public stage label.
+Compilation instead stops at its first admission refusal.
+
+Imported file loading collapses read, admission, parse, and facts failures into `Unreadable`.
+CHECK's summary and fault traversals can observe different dependency revisions.
+Existing reader fixtures expect three reads of the same imported path.
+A dependency type failure stops nested flow reads and leaves effects blocked without another nested read.
+Cutover must retain paths, counts, order, depth, cycles, revision selection, and those early stops.
+U6 captures only root bytes and gives no dependency snapshot guarantee.
+
+Machine CHECK must consume `CapturedFile.effective_source` without reopening the root.
+Its digest, diagnostic spans, contract location, counts, paths, and properties bind to those same bytes.
+Machine verify projects the existing proof trace rather than recomputing verdicts.
+The expert path tool uses the machine check envelope.
+Direct Pi tools have separate visible failure text, including legacy strip wording.
+Their cutover must retain JSON field order, success flags, diagnostics, and error text.
+
+Graph discovery and graph compilation remain separate parse events.
+Discovery does not use the shared atom table and stops import discovery when parsing fails.
+Compilation reparses in execution order with one shared atom table and string table.
+Single-module entry parsing can already allocate atoms before graph construction.
+U15 must preserve that ordering rather than reuse discovery IR or reset shared atoms.
+Loaded contracts consume graph sources and compilation parser state without rereading working-tree paths.
+
+Single-module compilation uses full analysis with source types and reports boolean, type, then strict failures.
+Loaded multi-module compilation uses `contract_only` for every module, including the entry.
+Neither entry nor dependencies receive a type environment in that profile.
+The existing graph fixture accepts its type, boolean, and strict diagnostics, with equal artifacts under strict and relaxed options.
+This source check corrects the earlier preparation claim that loaded entry contracts receive type data.
+Entry properties can exist before merging; the merged contract retains null properties.
+
+Compilation parity includes entry and dependency bytecodes, dependency order, verification state, contract bytes, generated tests, violations, summaries, and proof evidence.
+Artifact construction derives residual guards, policy identity, contract digest, certificate bytes, and executable graph identity from those outputs.
+Runtime contract validation, policy attestation, and semantic proof acceptance all precede pool initialization.
+An existing refusal test asserts that the server pool remains null.
+The frontend cutover must retain that acceptance order.
+
+Normalization runs CHECK and repairs to a fixed point, then prints once.
+Printer refusal retains rewritten bytes, while allocation failure propagates.
+Residual diagnostics inspect the emitted bytes.
+U16 must retain raw type interiors, comments, refusal reasons, printed and changed flags, rewrite traces, residual spans, and byte idempotence.
+The idempotence gate has nonempty floors for checked and printed files.
+
+File TypeScript, raw virtual JavaScript, and typed CLI inline source remain distinct profiles.
+Raw angle-bracket virtual names bypass stripping and contain no TypeMap.
+CLI `-e` first prepares source as `<eval>.ts`, then loads the result as `<eval>`.
+If that preparation fails, the helper copies original bytes and lets the runtime parser report its existing error.
+U16 must not make every virtual source typed.
+File `.js`, `.jsx`, `.tsx`, and `.mts` refusals remain unchanged.
+
+Machine graph recording treats ordinary admission or parse failure as a tolerant observation.
+Allocation failure and unsupported extensions propagate.
+Other preparation failures currently use raw parsing; failed parsing adds no imports but retains the module digest.
+Resolver failures produce ordered rejection rows, while later queued read failures silently omit a module.
+The replacement must preserve that policy without retrying through the legacy frontend.
+
+The four direct Pi callers are `zts_expert_narrow.zig`, `zts_expert_effects.zig`, `pi_goal_check.zig`, and `pi_repair_plan.zig`.
+Generated path tests and `ir_identity.zig` also require explicit direct inputs.
+The compile benchmark includes source preparation, parsing, IR creation, and code generation.
+It excludes boolean, type, strict, and optimization work.
+The direct parser must remain inside the same timing and allocation boundary.
+Its final pilot and measurement retain the baseline host, toolchain, fixtures, options, and iteration counts.
+
+U14 needs a mixed admission/parser error fixture and a captured-root refusal fixture.
+Both must pin stages, diagnostic spans, counts, publication absence, and read observations.
+A machine check/verify pair must compare payloads and proof traces over the same captured typed source.
+U15 needs typed fanout with a shared dependency to compare atom order, bytecodes, routes, resources, and complete contract bytes.
+A loaded-source mutation fixture must prove that bytecode and contracts use the loaded graph bytes.
+A guarded graph fixture must compare proof IR, residual guards, policy identity, certificate inputs, and runtime acceptance.
+Entry properties and merged null properties need paired assertions.
+U16 needs all three virtual profiles, tolerant graph failures, and printer refusal after a successful rewrite.
+It also needs exact outputs for the four direct Pi tools and parse identity with type comments and unusual spacing.
+
+Each cutover must census `PreparedSource`, `parserInput`, `typeMap`, `sourceView`, `strip`, source extraction, and legacy printer calls.
+Private oracle calls can remain through U16; production legacy calls must reach zero before U17.
+The phase table's frontend and additional named gates remain authoritative and unfiltered.
+
+### U17 preparation findings
+
+The deletion census identifies `stripper.zig`, `type_map.zig`, and the private differential oracle as removal candidates after production callers reach zero.
+The worker must refresh that census after U16.
+`source_frontend.zig`, source views, diagnostic causes, and semantic type helpers remain necessary.
+TypePool, `parseTypeExpr`, TypeEnv, and generic instantiation still serve generated contracts and binding types.
+Raw `JsParser.init` remains necessary for virtual JavaScript.
+The compatibility parser wrapper is separate from TypeMap reconstruction.
+
+Source classification retains TypeScript files, virtual JavaScript names, and unsupported file extensions.
+`.ts` and `.d.ts` remain TypeScript; angle-bracket names remain virtual JavaScript.
+Only TypeScript files satisfy `isSupportedFile`.
+Original bytes remain the source for identity, spans, and diagnostics.
+
+`Position`, `SourceView`, `HumanDiagnostic`, and UTF-8 rendering helpers currently live inside `stripper.zig`.
+Boolean, flow, verifier, type, strict, and diagnostic projection code still use those views.
+U17 must relocate those helpers before deleting the scanner.
+The source-view methods retain positioning, line extraction, and exact human diagnostic rendering.
+Identity mappings for stripped offsets can disappear after every parser consumes original bytes.
+
+The former stripper owns 17 admission kinds, with catalog and JSON mappings.
+Their codes, messages, suggestions, positions, row order, collection, and abort behavior remain public contracts.
+Shared ZTS008 and ZTS044 mappings also remain exact.
+CHECK retains its `strip` stage label after the scanner disappears.
+The diagnostic catalog hash includes ordered rows and producer tags.
+Renaming `type_stripper` to `parser` would change persisted session and receipt identities.
+The minimal migration retains that compatibility tag while moving diagnostic ownership.
+U17 must compare the actual catalog hash before and after removal, beyond its existing named gates.
+
+The root can remove scanner and TypeMap embedding aliases after the accepted internal API cut.
+Source views, positions, source kinds, classification, and direct admission diagnostics remain curated exports.
+`PreparedSource` and its error alias can retain their names if they become direct frontend owners.
+Obsolete parser-input, TypeMap, and strip-diagnostic accessors disappear only after their caller census reaches zero.
+The reset adds no public strip command or frontend selector.
+
+Root changes remove the base TypeMap import, engine stripper import, and compiler oracle import.
+The five analyzer test roots remain; the frontend fuzz root remains live.
+Tier rows for TypeMap, stripper, and the oracle disappear, while the source frontend row remains.
+The native graph gate also names the stripper as a root and needs a surviving frontend root instead.
+The worker must measure graph floors rather than invent replacement counts.
+Fourteen currently identified proof-swallow rows become stale when `populateFromTypeMap` disappears.
+Other TypeEnv rows need the actual gate result; TypeEnv remains in the gate's proof scope.
+
+Direct behavior fixtures must replace oracle machinery before its removal.
+They retain primitives, groups, suffixes, compound families, semantic quirks, error precedence, source locations, runtime identities, and allocation cleanup.
+They also retain delimiter depth, parameter packing, and deep-array contrasts.
+Only legacy comparison allocation accounting, private exclusions, preparation helpers, and TypeMap extraction disappear.
+The fuzz target must validate original spans and owned syntax while retaining its nonempty seed, allocation, accepted, refused, and located floors.
+The annotation census and published example evidence must move from TypeMap kinds to exhaustive syntax-owner kinds.
+Their negative floors remain required.
+
+Current architecture, TypeScript, feature-detection, and contributor guidance must stop directing readers to deleted files.
+Normalization comments, documentation drift checks, native evidence publication, and generated coverage also reference legacy owners.
+U17 must update those current references, while U20 reconciles the complete final documentation set.
+Historical plans can retain explicitly dated descriptions.
+
+Safe removal first relocates live helpers and migrates direct fixtures.
+Legacy adapters disappear before the final oracle, and the scanner and TypeMap files disappear after that oracle.
+The final census includes legacy symbols, reconstruction joins, source extraction, and printer inputs.
+It distinguishes intentional virtual JavaScript from legacy fallback.
+No failed direct typed parse invokes the retired scanner.
+The phase table's frontend, registry, native, spine, and normalization gates remain required and unfiltered.
 
 ### U18 preparation findings
 
@@ -1319,6 +1777,19 @@ A sentinel fixture should prove that appending an exact proof row leaves existin
 U19 must not open, migrate, truncate, or delete `.zttp/deploy-state.json`.
 Two live review comments that name hosted state should describe persisted proof facts without changing fields or decoding behavior.
 The implementing worker must refresh these findings after U18 before selecting the final removal diff.
+
+### U20 preparation findings
+
+The current documentation explicitly describes the legacy source pipeline in three guides.
+`docs/internals/architecture.md` lists stripping before parsing and describes the private primitive comparison separately.
+`docs/typescript.md` names the stripper in its introduction, implementation details, and build integration.
+`docs/feature-detection.md` assigns type-position refusals and first string diagnostics to the stripper.
+Its contributor instructions also direct new tests into that file.
+
+The final documentation must describe actual parser ownership and refusal stages after the production cutover.
+The rewrite must retain measured diagnostic order and lexical exceptions rather than promise broader validation.
+The current search is a preliminary census, not evidence that those three files contain every final update.
+U20 must refresh links, terminology, embedding entry points, test routes, and historical references against the completed source tree.
 
 ## Definition of Done
 
