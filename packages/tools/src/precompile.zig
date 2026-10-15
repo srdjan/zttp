@@ -8563,3 +8563,255 @@ test "CHECK preserves legacy absent compound propagated errors" {
     try std.testing.expectEqual(@as(usize, 4), annotations.len);
     try std.testing.expectEqual(annotations.len, observed);
 }
+test "CHECK preserves declaration admission and named type outcomes" {
+    const allocator = std.testing.allocator;
+    const FailureStage = enum { parse, types, contract };
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        stage: FailureStage,
+        diagnostic: LegacyCompoundDiagnostic,
+    }{
+        .{ .name = "root", .source = "structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .name = "leading_spaces", .source = "  structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 3, .suggestion = null } },
+        .{ .name = "after_newline", .source = "const seed = 1;\n  structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 3, .suggestion = null } },
+        .{ .name = "after_semicolon", .source = "const seed = 1; structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 17, .suggestion = null } },
+        .{ .name = "nested_left", .source = "function handler(req: Request): Response {\nstructural Alias = number;\nconst value: Alias = \"x\";\nreturn Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "nested_indented", .source = "function handler(req: Request): Response {\n  structural Alias = number;\n  const value: Alias = \"x\";\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 3, .suggestion = null } },
+        .{ .name = "nominal_runtime_collision", .source = "nominal UserId = string;\nfunction UserId(value: string): string {\n  return value;\n}\nfunction handler(req: Request): Response {\n  const value = UserId(\"x\");\n  return Response.text(value);\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS214", .message = "`UserId` is a nominal type, not a constructor", .line = 6, .column = 23, .suggestion = "brand at an annotated declaration: `const x: Name = value;`" } },
+        .{ .name = "structural_runtime_collision", .source = "structural UserId = string;\nfunction UserId(value: string): string {\n  return value;\n}\nfunction handler(req: Request): Response {\n  const value = UserId(\"x\");\n  return Response.text(value);\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .name = "eager_alias", .source = "structural A = string;\nstructural B = A;\nstructural A = number;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 4, .column = 1, .suggestion = null } },
+        .{ .name = "forward_alias", .source = "structural B = A;\nstructural A = string;\nstructural A = number;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'A'", .line = 4, .column = 1, .suggestion = null } },
+        .{ .name = "nested_alias_global", .source = "function define(): number {\nstructural A = string;\nreturn 1;\n}\nconst value: A = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string'", .line = 5, .column = 1, .suggestion = null } },
+        .{ .name = "unused_cycle", .source = "structural A = A | number;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .name = "used_cycle", .source = "structural A = A | number;\nconst value: A = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS212", .message = "recursive type alias 'A' has a cycle no data constructor guards", .line = 2, .column = 1, .suggestion = "route the recursion through a record, a tuple, or an array, the way `type JsonValue = ... | readonly JsonValue[]` does; a union or intersection edge does not guard it" } },
+        .{ .name = "forward_alias_number", .source = "structural B = A;\nstructural A = string;\nstructural A = number;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .name = "suffixed_alias_string", .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'A'", .line = 4, .column = 1, .suggestion = null } },
+        .{ .name = "suffixed_alias_number", .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .name = "primitive_declaration", .source = "structural string = number;\nstructural B = string;\nconst value: B = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "primitive_annotation", .source = "structural string = number;\nconst value: string = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .name = "primitive_nominal", .source = "structural string = number;\nnominal UserId = string;\nconst value: UserId = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'UserId'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "primitive_nested", .source = "structural string = number;\nstructural B = string | boolean;\nconst value: B = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'string | boolean'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "named_arrays", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: Alias[][] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Alias[]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "grouped_arrays", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: (Alias)[][] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Alias[][]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_root", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: readonly Items = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'readonly string[]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_record", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: { field: readonly Items } = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type '{ field: Readonly<Items> }'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_tuple", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: [readonly Items] = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type '[Readonly<Items>]'", .line = 3, .column = 1, .suggestion = null } },
+        .{ .name = "readonly_nullable", .source = "structural Alias = number;\nstructural Items = string[];\nconst value: readonly Items | undefined = 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'readonly string[] | undefined'", .line = 3, .column = 1, .suggestion = null } },
+    };
+    const types_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    const full_stages = StageSet.initMany(&.{
+        .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
+        .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
+    });
+    var observed: usize = 0;
+    for (cases) |case| {
+        errdefer std.debug.print("declaration baseline failed: {s}\n", .{case.name});
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        switch (case.stage) {
+            .parse => {
+                try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
+                try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+                try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+                try std.testing.expect(result.contract == null);
+            },
+            .types => {
+                try std.testing.expectEqual(types_stages, result.stages_run);
+                try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+                try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+                try std.testing.expect(result.contract == null);
+            },
+            .contract => {
+                try std.testing.expectEqual(full_stages, result.stages_run);
+                try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+                try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+                try std.testing.expect(result.contract != null);
+            },
+        }
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 26), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+test "CHECK preserves declaration suffix refusals and empty bodies" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        strip_refusal: bool,
+        diagnostic: LegacyCompoundDiagnostic,
+    }{
+        .{ .source = "structural Alias = number any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" } },
+        .{ .source = "structural Alias = number void;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `undefined`" } },
+        .{ .source = "structural Alias = number Array<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `T[]`" } },
+        .{ .source = "structural Alias = number ReadonlyArray<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS059", .message = "`ReadonlyArray<T>` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `readonly T[]`" } },
+        .{ .source = "structural Alias = ;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .source = "structural Alias = ();\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+    };
+    const full_stages = StageSet.initMany(&.{
+        .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
+        .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
+    });
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        if (case.strip_refusal) {
+            try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+            try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+            try std.testing.expect(result.contract == null);
+        } else {
+            try std.testing.expectEqual(full_stages, result.stages_run);
+            try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+            try std.testing.expect(result.contract != null);
+        }
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 6), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+test "CHECK preserves nominal refusals and keyword alias names" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        strip_refusal: bool,
+        diagnostic: LegacyCompoundDiagnostic,
+    }{
+        .{ .source = "nominal Bad = void;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+        .{ .source = "nominal Bad = Array<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+        .{ .source = "nominal Bad = ReadonlyArray<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+        .{ .source = "nominal Bad = (x?: number) => number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+        .{ .source = "nominal Bad = any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" } },
+        .{ .source = "nominal Bad = ;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+        .{ .source = "nominal Bad;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 12, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+        .{ .source = "nominal Bad   ;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+        .{ .source = "structural true = number;\nconst value: true = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "structural null = number;\nconst value: null = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "structural undefined = number;\nconst value: undefined = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "structural function = number;\nconst value: function = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expect(result.contract == null);
+        if (case.strip_refusal) {
+            try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+            try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+            try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        } else {
+            try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), result.stages_run);
+            try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+            try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        }
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 12), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK retains distinct nominal any and scalar refusal positions" {
+    const allocator = std.testing.allocator;
+    const source =
+        "nominal Bad = number any;\n" ++
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+    try std.testing.expectEqual(@as(u32, 2), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
+    try std.testing.expect(result.contract == null);
+    const expected = [_]LegacyCompoundDiagnostic{
+        .{
+            .code = "ZTS041",
+            .message = "'any' type is not supported",
+            .line = 1,
+            .column = 22,
+            .suggestion = "use specific types (string, number, object) or union types instead",
+        },
+        .{
+            .code = "ZTS048",
+            .message = "a nominal declaration carries scalar identity only",
+            .line = 1,
+            .column = 15,
+            .suggestion = "its base must be `string`, `number`, or `boolean`",
+        },
+    };
+    try std.testing.expectEqual(expected.len, result.json_diagnostics.items.len);
+    for (result.json_diagnostics.items, expected) |actual, diagnostic| {
+        try expectLegacyCompoundDiagnostic(actual, diagnostic);
+    }
+}
+test "CHECK admits declaration literals and blank-line continuations" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, message: []const u8, line: u32 }{
+        .{ .source = "structural N = 1;\nconst value: N = 2;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type '2' is not assignable to type '1'", .line = 2 },
+        .{ .source = "structural U = | number | string;\nconst value: U = true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type 'true' is not assignable to type 'number | string'", .line = 2 },
+        .{ .source = "structural A = number |\n\nstring;\nconst value: A = true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type 'true' is not assignable to type 'number | string'", .line = 4 },
+        .{ .source = "structural A = { id: number } &\n\n{ tag: string };\nconst value: A = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .message = "type '1' is not assignable to type '{ id: number } & { tag: string }'", .line = 4 },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), result.stages_run);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expect(result.contract == null);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS200",
+            .message = case.message,
+            .line = case.line,
+            .column = 1,
+        });
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves comment gaps around type declarations" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        diagnostic: LegacyCompoundDiagnostic,
+    }{
+        .{ .source = "structural /*c*/ A = number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 1, .suggestion = null } },
+        .{ .source = "structural A /*c*/ = number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 20, .suggestion = null } },
+        .{ .source = "structural A = number\n/*c*/;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS001", .message = "empty statements are not supported", .line = 2, .column = 6, .suggestion = "remove the standalone `;`" } },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
+        try std.testing.expect(result.contract == null);
+    }
+}

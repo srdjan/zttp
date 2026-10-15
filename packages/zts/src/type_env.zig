@@ -535,7 +535,7 @@ pub const TypeEnv = struct {
         // unresolved is unresolved rather than not-yet-defined, and a cycle is
         // a real cycle. Contractivity is decided once, before any annotation
         // is resolved against these names.
-        self.findNonContractiveAliases();
+        self.finishTypeAliasPopulation();
 
         // Type parameters declared by a signature, keyed by the offset of its
         // opening `(` - the same key its parameter and return
@@ -877,6 +877,12 @@ pub const TypeEnv = struct {
         return self.tryInstantiateGenericApp(parsed);
     }
 
+    /// Apply the existing post-parse projection to one complete syntax root.
+    /// Callers must perform exact whole-root alias lookup before this operation.
+    pub fn finishParsedTypeRoot(self: *TypeEnv, idx: TypeIndex) TypeIndex {
+        return self.tryInstantiateGenericApp(idx);
+    }
+
     /// Outcome of instantiating the members of a composite type. `unchanged`
     /// lets the caller keep the original index instead of interning an
     /// identical type; `changed` hands over an owned slice the caller frees.
@@ -1094,6 +1100,12 @@ pub const TypeEnv = struct {
                 self.non_contractive_indices.put(self.allocator, entry.value_ptr.*, {}) catch self.markAllocationFailure();
             }
         }
+    }
+
+    /// Add the current alias census to the retained contractivity maps.
+    /// Repeated legacy population is additive, so this operation clears nothing.
+    pub fn finishTypeAliasPopulation(self: *TypeEnv) void {
+        self.findNonContractiveAliases();
     }
 
     const MAX_ALIAS_PATH = 32;

@@ -145,6 +145,7 @@ pub const Parser = struct {
     errors: ErrorList,
     type_store: type_syntax.Store,
     parse_type_syntax: bool,
+    last_erased_type_span: ?type_syntax.Span,
 
     // Current state
     current: Token,
@@ -267,6 +268,7 @@ pub const Parser = struct {
             .errors = ErrorList.init(allocator, source),
             .type_store = type_syntax.Store.init(type_allocator, source),
             .parse_type_syntax = parse_type_syntax,
+            .last_erased_type_span = null,
             .current = undefined,
             .previous = undefined,
             .atoms = null,
@@ -299,6 +301,7 @@ pub const Parser = struct {
         var progress: ProgressGuard = .{};
         while (!self.check(.eof)) {
             progress.iteration(self);
+            if (try self.tryConsumeTypeDeclaration()) continue;
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
             } else |err| {
@@ -374,6 +377,65 @@ pub const Parser = struct {
 
     fn recursionLimit(self: *const Parser) u32 {
         return if (self.expression_profile != null) 64 else max_recursion_depth;
+    }
+
+    fn tryConsumeTypeDeclaration(self: *Parser) !bool {
+        if (!self.parse_type_syntax or !self.isTypeDeclarationBoundary()) return false;
+
+        const saved_previous = self.previous;
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var keyword = self.current;
+        var export_span: ?type_syntax.Span = null;
+        if (self.current.type == .kw_export) {
+            export_span = .{
+                .start = self.current.start,
+                .end = self.current.start + self.current.len,
+            };
+            keyword = cursor.current;
+            cursor.advance();
+        }
+        if (keyword.type != .identifier) return false;
+        const kind: type_syntax.DeclarationKind = if (std.mem.eql(u8, keyword.text(self.source), "structural"))
+            .structural
+        else if (std.mem.eql(u8, keyword.text(self.source), "nominal"))
+            .nominal
+        else
+            return false;
+
+        const outcome = try type_syntax.parseDeclarationAndStore(
+            &self.type_store,
+            self.source,
+            keyword,
+            export_span,
+            kind,
+            self.scopes.getCurrentScope().id,
+            &cursor,
+        );
+        const erased = switch (outcome) {
+            .not_declaration, .excluded => return false,
+            .parsed => |span| span,
+        };
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = saved_previous;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        self.last_erased_type_span = erased;
+        return true;
+    }
+
+    fn isTypeDeclarationBoundary(self: *const Parser) bool {
+        const start: usize = self.current.start;
+        if (start == 0) return true;
+        const previous_offset = start - 1;
+        const previous_byte = if (self.last_erased_type_span) |span|
+            if (previous_offset >= span.start and previous_offset < span.end)
+                if (self.source[previous_offset] == '\n') @as(u8, '\n') else @as(u8, ' ')
+            else
+                self.source[previous_offset]
+        else
+            self.source[previous_offset];
+        return previous_byte == ';' or previous_byte == '{' or previous_byte == '}' or
+            previous_byte == '\n';
     }
 
     // ============ Statement Parsing ============
@@ -1476,6 +1538,7 @@ pub const Parser = struct {
         var progress: ProgressGuard = .{};
         while (!self.check(.rbrace) and !self.check(.eof)) {
             progress.iteration(self);
+            if (try self.tryConsumeTypeDeclaration()) continue;
             if (self.parseStatement()) |stmt| {
                 try stmts.append(stmts_alloc, stmt);
             } else |err| {
@@ -3488,6 +3551,27 @@ pub const Parser = struct {
 };
 
 // ============ Tests ============
+
+test "typed block consumes a declaration without a runtime node" {
+    const source =
+        "{\n" ++
+        "structural Alias = number;\n" ++
+        "const value: Alias = 1;\n" ++
+        "}";
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    _ = try parser.parse();
+
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+    try std.testing.expectEqual(@as(u16, 1), parser.type_store.declarations.items[0].authored_scope);
+    var variable_count: usize = 0;
+    const declaration_offset: u32 = @intCast(std.mem.indexOf(u8, source, "structural").?);
+    for (parser.nodes.tags.items, 0..) |tag, index| {
+        if (tag == .var_decl) variable_count += 1;
+        try std.testing.expect(parser.nodes.getLoc(@intCast(index)).offset != declaration_offset);
+    }
+    try std.testing.expectEqual(@as(usize, 1), variable_count);
+}
 
 test "a newline after return no longer swallows the value" {
     // This test asserted the opposite until ASI was removed, and the fixture it

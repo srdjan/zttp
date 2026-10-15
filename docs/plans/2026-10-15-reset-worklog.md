@@ -11,7 +11,7 @@ The task continues through U20.
 ## Constraints
 
 Work stays on local main, with a local commit after each completed phase.
-No push, branch, worktree, live model call, corpus replacement, or public format change is authorized.
+No push, branch, worktree, project provider call, corpus replacement, or public format change is authorized.
 Public behavior remains compatible except for U2's sibling-effect correction and U6's approved binding of graph identity to override bytes.
 CHECK retains its separate imported traversals and reader observations.
 Main owns review, verification, documentation, integration, and Git writes.
@@ -27,18 +27,47 @@ No browser session was opened.
 
 ## Current work
 
-U1 through U7 are complete and committed locally.
-U8 (compound type syntax) passed its private comparison, tools baseline, frontend gate, and full repository gate.
-U9 has read-only preparation; U9 implementation and U10 through U20 remain unstarted.
-Production callers retain the legacy frontend during U8.
+U1 through U8 are complete and committed locally.
+U9 source review, focused execution, and the full local gate pass.
+U10 through U20 implementations remain unstarted.
+Production callers retain the legacy frontend.
+Main owns all files for final documentation checks and the local U9 commit; every worker has paused edits.
 
-The Sol worker `reset_u8_compound_parser` completed its final correction handoff and paused edits.
-Main owns all U8 source, documentation, actual checks, and Git writes.
-Astra accepted the final correction, including the bounded rollback probes.
-Final documentation and spine checks passed with exit 0 across eight build steps.
-Whole-tree formatting and diff checks also passed.
-Main will commit the isolated U8 phase before releasing U9 implementation.
+Main reviewed every changed U9 line and every correction.
+Astra accepts the final U9 source after all five earlier blockers and three boundary findings are resolved.
+Whole-tree formatting and `git diff --check` pass.
+`u9-focused.log` passes: 45 steps, 3,470 pass, and one skip.
+All 218 precompile tests pass, including the 52 public declaration sources.
+The authority retains the scanner, ownership, oracle, span, census, admission, and allocation findings.
+`u9-verify.log` exits 0 and reports that all CI test-job steps pass.
+
+Sol high worker `reset_u10_generic_design` completed read-only preparation and owns no files.
+Main measured 74 generic CLI contrasts across six directories; every command exits 1 at its recorded stage.
+Astra accepts the amended full design, subject to U9's commit and API refresh.
+Sol's final U9 API refresh found no required design change.
+The outside fragment `u10-tools-complete-74.zig` contains all 74 fixtures and passes formatting only.
+Main reviewed the fragment; integration and execution wait for U9's commit.
+
+U10 evidence separates eligible whole-source comparisons, direct fragment/API properties, and the public production baseline.
+Typed parameters, returns, predicates, and complete typed-source comparisons wait for U11.
+
+Fresh Sol high worker `reset_u11_annotation_owners` completed a read-only Stage 1 proposal.
+Astra conditionally accepts that design with the refinements recorded in the authority.
+Three measured predicate contrasts require unresolved targets and a separate facet for legacy return classification.
+The accepted compatibility root retains the whole raw return span and uses engine grammar during admission.
+U11 implementation waits for U10's commit, final API refresh, Astra acceptance, and explicit release.
+
 No product decision blocks progress.
+
+## U9 intermediate receipts
+
+| Run | Direct result |
+|---|---|
+| `u9-first-slice.log` | Exit 0; 13 steps, 2,483 pass, 1 skip |
+| `u9-public-baseline.log` | Exit 0; 213 precompile tests, including the initial 26 declaration sources |
+| `u9-full-first.log` | Exit 1; 14 of 16 steps, 2,699 pass, 1 skip, 1 census failure |
+| `u9-corrected-first.log` | Exit 0; 16 steps, 2,710 pass, 1 skip |
+| `u9-corrected-second.log` | Exit 0; 16 steps, 2,713 pass, 1 skip |
 
 ## Completed phase receipts
 
@@ -56,6 +85,7 @@ Source review does not replace execution or establish a performance improvement.
 | U5 (contract effect facts) | `d79afafb` | `u5-focused-final.log`: exit 0, 39 steps, 3,090 pass, 1 skip | `u5-verify.log`: exit 0 | `u5-docs-final.log`: exit 0 |
 | U6 (root source capture) | `f8d4fce4` | `u6-focused.log`: exit 0, 25 steps, 1,765 pass, 1 skip; `u6-determinism.log`: exit 0 | `u6-verify.log`: exit 0 | `u6-docs-final.log`: exit 0 |
 | U7 (primitive typed parser) | `a56107e3` | `u7-focused-accepted.log`: exit 0, 45 steps, 3,383 pass, 1 skip | `u7-verify.log`: exit 0 | `u7-docs-final.log`: exit 0 |
+| U8 (compound type syntax) | `df11fb48` | `u8-focused.log`: exit 0, 45 steps, 3,424 pass, 1 skip | `u8-verify.log`: exit 0 | `u8-docs-final.log`: exit 0, 8 steps |
 
 U2 also passed `u2-zruntime.log` separately.
 U2, U4, U5, and U7 matched all 734 flow probes.
@@ -85,6 +115,7 @@ These receipts retain failures without treating a later pass as evidence that th
 | `u8-slice-first.log` | Exit 1; compilation failures | Renamed the shadowed checkpoint and added missing ASCII identifier helpers. |
 | `u8-slice-corrected.log` | Exit 1; compiler artifact failed | Added an explicit `TypeSyntax.Span` result type. Engine and precompile tests passed. |
 | `u8-final-bounded.log` | Exit 1; engine compilation failed | Main moved the computed second-annotation offset inside the allocation-sweep function. |
+| `u9-full-first.log` | Exit 1; declaration census failed | Same-line declaration fixtures declined before their intended semantic checks. Source review also found unasserted census rows. |
 
 The first U2 CLI candidate used prohibited `void` and supplied no writer evidence.
 The corrected writer baseline and final responses remain in `u2-baseline-writer.json` and `u2-final-writer.json`.
@@ -222,7 +253,7 @@ Astra found two additional named-type boundaries: implicit `Readonly<Named>` pro
 The proposed U9 design now requires exact whole-body lookup before lowering every source root.
 Contractivity finalization must retain legacy additive map behavior across repeated population calls.
 Astra accepted the revised U9 design after exact-root, readonly, suffix, and declaration-only comparison corrections.
-The first implementation slice still waits for U8's completed gates and commit.
+U8's completed gates and commit now permit the first U9 implementation slice.
 
 ## Verification commands
 

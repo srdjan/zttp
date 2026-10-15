@@ -123,7 +123,8 @@ The parser owns that syntax store, and `ParseResult` transfers the store with th
 Type-only syntax creates no runtime node, atom, constant, or scope.
 
 The comparison covers one variable annotation with primitives, records, arrays, tuples, unions, intersections, literals, templates, and function types.
-Six owned arrays hold nodes, members, fields, parameters, template parts, and annotations.
+The comparison also covers named references and recognized structural and nominal declarations.
+Seven owned arrays hold nodes, members, fields, parameters, template parts, annotations, and declarations.
 Names and literal text borrow original source spans.
 Type nodes retain grouping and readonly modifiers, including modifiers that have no semantic effect.
 
@@ -131,8 +132,13 @@ Annotations retain declaration bindings, raw spans, admission ends, and semantic
 The admission end synchronizes the runtime cursor; the semantic prefix retains the existing type parser's recognized meaning.
 Explicit absent children differ from successful unknown types and invalid references.
 Present children precede their parents, and failed publication restores every syntax array and the caller cursor.
+Declarations retain component spans, complete erased spans, source order, and authored scope.
+Type-only declarations create no runtime statement, binding, atom, constant, or export.
+Declaration bodies and annotations own separate ranges of type nodes.
 
 A compiler test module lowers syntax directly through existing `TypePool` constructors and binds `TypeEnv` through declaration identities.
+Whole-body alias lookup precedes constructor calls, and source declarations retain their module-wide type namespace.
+The lowerer preserves nominal identity and the existing contractivity census.
 The comparison checks exact ordered type structure before supplementary canonical keys.
 Canonical encoding has its own depth limit and does not establish parser admission.
 The existing checker retains its legacy annotation input until the consumer migration.

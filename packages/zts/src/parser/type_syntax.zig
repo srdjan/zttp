@@ -47,6 +47,7 @@ pub const Range = struct {
 
 pub const NodeTag = enum {
     primitive,
+    named_reference,
     group,
     readonly_modifier,
     record,
@@ -68,6 +69,7 @@ pub const Node = struct {
 
     pub const Data = union(NodeTag) {
         primitive: Primitive,
+        named_reference: Span,
         group: Child,
         readonly_modifier: Child,
         record: Range,
@@ -106,9 +108,39 @@ pub const TemplatePart = union(enum) {
 pub const Annotation = struct {
     binding: BindingRef,
     root: Child,
+    node_range: Range,
     raw_span: Span,
     admission_end: u32,
     semantic_prefix_end: u32,
+};
+
+pub const DeclarationKind = enum {
+    structural,
+    nominal,
+};
+
+pub const DeclarationBody = union(enum) {
+    absent,
+    present: struct {
+        root: Child,
+        node_range: Range,
+        raw_span: Span,
+        admission_end: u32,
+        semantic_prefix_end: u32,
+    },
+};
+
+pub const Declaration = struct {
+    kind: DeclarationKind,
+    export_span: ?Span,
+    keyword_span: Span,
+    name_span: Span,
+    equals_span: ?Span,
+    terminator_span: ?Span,
+    body: DeclarationBody,
+    full_span: Span,
+    source_order: u32,
+    authored_scope: u16,
 };
 
 pub const Store = struct {
@@ -120,6 +152,7 @@ pub const Store = struct {
     params: std.ArrayListUnmanaged(Parameter) = .empty,
     template_parts: std.ArrayListUnmanaged(TemplatePart) = .empty,
     annotations: std.ArrayListUnmanaged(Annotation) = .empty,
+    declarations: std.ArrayListUnmanaged(Declaration) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Store {
         return .{
@@ -135,6 +168,7 @@ pub const Store = struct {
         self.params.deinit(self.allocator);
         self.template_parts.deinit(self.allocator);
         self.annotations.deinit(self.allocator);
+        self.declarations.deinit(self.allocator);
     }
 
     pub fn add(self: *Store, binding: BindingRef, parsed: ParsedPrimitive) !void {
@@ -149,6 +183,7 @@ pub const Store = struct {
         const annotation: Annotation = .{
             .binding = binding,
             .root = .{ .present = root },
+            .node_range = .{ .start = @intCast(previous.nodes), .count = 1 },
             .raw_span = parsed.raw_span,
             .admission_end = parsed.raw_span.end,
             .semantic_prefix_end = parsed.semantic_span.end,
@@ -165,6 +200,7 @@ pub const Store = struct {
         params: usize,
         template_parts: usize,
         annotations: usize,
+        declarations: usize,
     };
 
     pub fn checkpoint(self: *const Store) Checkpoint {
@@ -175,6 +211,7 @@ pub const Store = struct {
             .params = self.params.items.len,
             .template_parts = self.template_parts.items.len,
             .annotations = self.annotations.items.len,
+            .declarations = self.declarations.items.len,
         };
     }
 
@@ -185,6 +222,7 @@ pub const Store = struct {
         self.params.items.len = value.params;
         self.template_parts.items.len = value.template_parts;
         self.annotations.items.len = value.annotations;
+        self.declarations.items.len = value.declarations;
     }
 
     fn appendNode(self: *Store, value: Node) !NodeIndex {
@@ -243,6 +281,7 @@ pub const Store = struct {
             }
             switch (syntax_node.data) {
                 .primitive, .literal_number, .literal_bool => {},
+                .named_reference => |span| try self.validateSpan(span),
                 .group => |child| try validateChild(child, index),
                 .readonly_modifier => |child| try validateChild(child, index),
                 .record => |range| {
@@ -291,10 +330,19 @@ pub const Store = struct {
     pub fn validate(self: *const Store) !void {
         try self.validateParsed(.absent, .{ .start = 0, .end = 0 });
         for (self.annotations.items) |annotation| try self.validateAnnotation(annotation);
+        for (self.declarations.items, 0..) |declaration, index| {
+            try self.validateDeclaration(declaration);
+            if (declaration.source_order != @as(u32, @intCast(index))) return error.InvalidTypeSourceOrder;
+            if (index > 0 and self.declarations.items[index - 1].full_span.start > declaration.full_span.start) {
+                return error.InvalidTypeSourceOrder;
+            }
+        }
+        try self.validateOwnerRangesDoNotOverlap();
     }
 
     fn validateAnnotation(self: *const Store, annotation: Annotation) !void {
         try self.validateSpan(annotation.raw_span);
+        try self.validateNodeRange(annotation.node_range);
         if (annotation.admission_end < annotation.raw_span.end or
             @as(usize, annotation.admission_end) > self.source.len or
             annotation.semantic_prefix_end < annotation.raw_span.start or
@@ -303,6 +351,132 @@ pub const Store = struct {
             return error.InvalidTypeSpan;
         }
         try validateChild(annotation.root, self.nodes.items.len);
+        try validateOwnedChild(annotation.root, annotation.node_range);
+        try self.validateOwnedNodes(annotation.node_range);
+    }
+
+    fn validateDeclaration(self: *const Store, declaration: Declaration) !void {
+        if (declaration.export_span) |span| try self.validateSpan(span);
+        try self.validateSpan(declaration.keyword_span);
+        try self.validateSpan(declaration.name_span);
+        if (declaration.equals_span) |span| try self.validateSpan(span);
+        if (declaration.terminator_span) |span| try self.validateSpan(span);
+        try self.validateSpan(declaration.full_span);
+        if (declaration.full_span.start != if (declaration.export_span) |span| span.start else declaration.keyword_span.start) {
+            return error.InvalidTypeSpan;
+        }
+        if (!spanContains(declaration.full_span, declaration.keyword_span) or
+            !spanContains(declaration.full_span, declaration.name_span) or
+            declaration.keyword_span.end > declaration.name_span.start)
+        {
+            return error.InvalidTypeSpan;
+        }
+        if (declaration.export_span) |span| {
+            if (!spanContains(declaration.full_span, span) or span.end > declaration.keyword_span.start) {
+                return error.InvalidTypeSpan;
+            }
+        }
+        if (declaration.equals_span) |span| {
+            if (!spanContains(declaration.full_span, span) or declaration.name_span.end > span.start) {
+                return error.InvalidTypeSpan;
+            }
+        }
+        if (declaration.terminator_span) |span| {
+            if (!spanContains(declaration.full_span, span) or span.end != declaration.full_span.end) {
+                return error.InvalidTypeSpan;
+            }
+        }
+        switch (declaration.body) {
+            .absent => {},
+            .present => |body| {
+                try self.validateSpan(body.raw_span);
+                try self.validateNodeRange(body.node_range);
+                if (body.admission_end < body.raw_span.end or
+                    @as(usize, body.admission_end) > self.source.len or
+                    body.semantic_prefix_end < body.raw_span.start or
+                    body.semantic_prefix_end > body.raw_span.end)
+                {
+                    return error.InvalidTypeSpan;
+                }
+                if (!spanContains(declaration.full_span, body.raw_span) or
+                    body.admission_end > declaration.full_span.end or
+                    (declaration.equals_span == null or declaration.equals_span.?.end > body.raw_span.start))
+                {
+                    return error.InvalidTypeSpan;
+                }
+                try validateChild(body.root, self.nodes.items.len);
+                try validateOwnedChild(body.root, body.node_range);
+                try self.validateOwnedNodes(body.node_range);
+            },
+        }
+    }
+
+    fn validateOwnedNodes(self: *const Store, owner: Range) !void {
+        const start: usize = owner.start;
+        const end = std.math.add(usize, start, owner.count) catch return error.InvalidTypeRange;
+        if (end > self.nodes.items.len) return error.InvalidTypeRange;
+        for (self.nodes.items[start..end]) |syntax_node| switch (syntax_node.data) {
+            .primitive, .named_reference, .literal_string, .literal_number, .literal_bool => {},
+            .group => |child| try validateOwnedChild(child, owner),
+            .readonly_modifier => |child| try validateOwnedChild(child, owner),
+            .record => |range| {
+                const fields = self.fieldSlice(range) orelse return error.InvalidTypeRange;
+                for (fields) |field| try validateOwnedChild(field.type_child, owner);
+            },
+            .array => |child| try validateOwnedChild(child, owner),
+            .tuple => |range| {
+                const members = self.memberSlice(range) orelse return error.InvalidTypeRange;
+                for (members) |child| try validateOwnedChild(child, owner);
+            },
+            .function => |function| {
+                const params = self.paramSlice(function.params) orelse return error.InvalidTypeRange;
+                for (params) |parameter| try validateOwnedChild(parameter.type_child, owner);
+                try validateOwnedChild(function.ret, owner);
+            },
+            .union_type => |range| {
+                const members = self.memberSlice(range) orelse return error.InvalidTypeRange;
+                for (members) |child| try validateOwnedChild(child, owner);
+            },
+            .intersection => |range| {
+                const members = self.memberSlice(range) orelse return error.InvalidTypeRange;
+                for (members) |child| try validateOwnedChild(child, owner);
+            },
+            .template => |range| {
+                const parts = self.templatePartSlice(range) orelse return error.InvalidTypeRange;
+                for (parts) |part| switch (part) {
+                    .literal => {},
+                    .type_slot => |child| try validateOwnedChild(child, owner),
+                };
+            },
+        };
+    }
+
+    fn validateOwnerRangesDoNotOverlap(self: *const Store) !void {
+        for (self.annotations.items, 0..) |annotation, annotation_index| {
+            for (self.annotations.items[annotation_index + 1 ..]) |other| {
+                if (rangesOverlap(annotation.node_range, other.node_range)) {
+                    return error.OverlappingTypeNodeOwnership;
+                }
+            }
+            for (self.declarations.items) |declaration| switch (declaration.body) {
+                .absent => {},
+                .present => |body| if (rangesOverlap(annotation.node_range, body.node_range)) {
+                    return error.OverlappingTypeNodeOwnership;
+                },
+            };
+        }
+        for (self.declarations.items, 0..) |declaration, declaration_index| {
+            const range = switch (declaration.body) {
+                .absent => continue,
+                .present => |body| body.node_range,
+            };
+            for (self.declarations.items[declaration_index + 1 ..]) |other| switch (other.body) {
+                .absent => {},
+                .present => |body| if (rangesOverlap(range, body.node_range)) {
+                    return error.OverlappingTypeNodeOwnership;
+                },
+            };
+        }
     }
 
     fn validateSpan(self: *const Store, span: Span) !void {
@@ -310,12 +484,40 @@ pub const Store = struct {
             return error.InvalidTypeSpan;
         }
     }
+
+    fn validateNodeRange(self: *const Store, range: Range) !void {
+        const start: usize = range.start;
+        const end = std.math.add(usize, start, range.count) catch return error.InvalidTypeRange;
+        if (end > self.nodes.items.len) return error.InvalidTypeRange;
+    }
 };
+
+fn rangesOverlap(left: Range, right: Range) bool {
+    if (left.count == 0 or right.count == 0) return false;
+    const left_end = std.math.add(u32, left.start, left.count) catch return true;
+    const right_end = std.math.add(u32, right.start, right.count) catch return true;
+    return left.start < right_end and right.start < left_end;
+}
+
+fn spanContains(owner: Span, child: Span) bool {
+    return child.start >= owner.start and child.end <= owner.end;
+}
 
 fn validateChild(child: Child, parent: usize) !void {
     switch (child) {
         .absent => {},
         .present => |index| if (@as(usize, index) >= parent) return error.InvalidTypeChild,
+    }
+}
+
+fn validateOwnedChild(child: Child, range: Range) !void {
+    switch (child) {
+        .absent => {},
+        .present => |index| {
+            const end = std.math.add(u32, range.start, range.count) catch
+                return error.InvalidTypeRange;
+            if (index < range.start or index >= end) return error.InvalidTypeChild;
+        },
     }
 }
 
@@ -548,6 +750,10 @@ pub fn parseAndStore(
     const annotation: Annotation = .{
         .binding = binding,
         .root = parsed.child,
+        .node_range = .{
+            .start = @intCast(checkpoint.nodes),
+            .count = @intCast(store.nodes.items.len - checkpoint.nodes),
+        },
         .raw_span = .{ .start = raw_start, .end = raw_end },
         .admission_end = admission_end,
         .semantic_prefix_end = parsed.end,
@@ -560,6 +766,147 @@ pub fn parseAndStore(
         .semantic_span = .{ .start = raw_start, .end = parsed.end },
         .raw_span = .{ .start = raw_start, .end = raw_end },
     } };
+}
+
+pub const DeclarationParseOutcome = union(enum) {
+    parsed: Span,
+    excluded: struct {
+        reason: enum { unsupported_syntax, implementation_budget, nominal_base_not_scalar },
+        raw_span: Span,
+        admission_end: u32,
+    },
+    not_declaration,
+};
+
+/// Parse one declaration after its keyword. The caller supplies a copied
+/// cursor, so an excluded form preserves the runtime parser state.
+pub fn parseDeclarationAndStore(
+    store: *Store,
+    source: []const u8,
+    keyword: Token,
+    export_span: ?Span,
+    kind: DeclarationKind,
+    authored_scope: u16,
+    cursor: *Cursor,
+) !DeclarationParseOutcome {
+    const checkpoint = store.checkpoint();
+    var published = false;
+    defer if (!published) store.rollback(checkpoint);
+
+    var scanned = cursor.*;
+    if (!tokenIsDeclarationName(scanned.current, source)) return .not_declaration;
+    const name_span = tokenSpan(scanned.current);
+    if (export_span) |span| {
+        if (!containsOnlyTypeWhitespace(source, span.end, keyword.start)) return .not_declaration;
+    }
+    if (!containsOnlyTypeWhitespace(source, keyword.start + keyword.len, name_span.start)) {
+        return .not_declaration;
+    }
+    scanned.advance();
+
+    if (!containsOnlyTypeWhitespace(source, name_span.end, scanned.current.start)) {
+        return .not_declaration;
+    }
+
+    // U10 owns generic declarations. Leave this source for the runtime parser.
+    if (scanned.current.type == .lt) return .not_declaration;
+
+    var equals_span: ?Span = null;
+    var body: DeclarationBody = .absent;
+    var erased_end = scanned.current.start;
+    if (scanned.current.type == .assign) {
+        equals_span = tokenSpan(scanned.current);
+        const after_equals = scanned.current.start + scanned.current.len;
+        erased_end = after_equals;
+        scanned.advance();
+
+        const raw_start = skipTypeWhitespace(source, after_equals);
+        const admission_end = switch (scanDeclarationEnd(source, raw_start)) {
+            .end => |end| end,
+            else => return .not_declaration,
+        };
+        erased_end = skipTypeWhitespace(source, admission_end);
+        advanceCursorTo(&scanned, admission_end);
+        const raw_end = trimWhitespaceEnd(source, raw_start, admission_end);
+        if (raw_start == raw_end) {
+            if (kind == .nominal) return .{ .excluded = .{
+                .reason = .nominal_base_not_scalar,
+                .raw_span = .{ .start = raw_start, .end = raw_end },
+                .admission_end = admission_end,
+            } };
+        }
+        if (kind == .nominal and !isScalarNominalBase(source[raw_start..raw_end])) {
+            return .{ .excluded = .{
+                .reason = .nominal_base_not_scalar,
+                .raw_span = .{ .start = raw_start, .end = raw_end },
+                .admission_end = admission_end,
+            } };
+        }
+
+        if (raw_start != raw_end) {
+            var parser = SyntaxParser.init(store, source, raw_start, raw_end);
+            defer parser.deinit();
+            const parsed = parser.parse() catch |err| switch (err) {
+                error.TypeSyntaxFrameBudgetExceeded => return .{ .excluded = .{
+                    .reason = .implementation_budget,
+                    .raw_span = .{ .start = raw_start, .end = raw_end },
+                    .admission_end = admission_end,
+                } },
+                error.UnsupportedTypeSyntax => return .{ .excluded = .{
+                    .reason = .unsupported_syntax,
+                    .raw_span = .{ .start = raw_start, .end = raw_end },
+                    .admission_end = admission_end,
+                } },
+                else => return err,
+            };
+            try store.validateParsed(parsed.child, .{ .start = raw_start, .end = raw_end });
+            body = .{ .present = .{
+                .root = parsed.child,
+                .node_range = .{
+                    .start = @intCast(checkpoint.nodes),
+                    .count = @intCast(store.nodes.items.len - checkpoint.nodes),
+                },
+                .raw_span = .{ .start = raw_start, .end = raw_end },
+                .admission_end = admission_end,
+                .semantic_prefix_end = parsed.end,
+            } };
+        }
+    }
+    if (kind == .nominal and equals_span == null) return .{ .excluded = .{
+        .reason = .nominal_base_not_scalar,
+        .raw_span = .{ .start = erased_end, .end = erased_end },
+        .admission_end = erased_end,
+    } };
+
+    var terminator_span: ?Span = null;
+    if (scanned.current.type == .semicolon and scanned.current.start == erased_end) {
+        terminator_span = tokenSpan(scanned.current);
+        scanned.advance();
+    }
+    const full_start = if (export_span) |span| span.start else keyword.start;
+    const full_end = if (terminator_span) |span|
+        span.end
+    else
+        erased_end;
+    const source_order = std.math.cast(u32, store.declarations.items.len) orelse
+        return error.TooManyTypeItems;
+    const declaration: Declaration = .{
+        .kind = kind,
+        .export_span = export_span,
+        .keyword_span = tokenSpan(keyword),
+        .name_span = name_span,
+        .equals_span = equals_span,
+        .terminator_span = terminator_span,
+        .body = body,
+        .full_span = .{ .start = full_start, .end = full_end },
+        .source_order = source_order,
+        .authored_scope = authored_scope,
+    };
+    try store.validateDeclaration(declaration);
+    try store.declarations.append(store.allocator, declaration);
+    cursor.* = scanned;
+    published = true;
+    return .{ .parsed = declaration.full_span };
 }
 
 const AdmissionScan = union(enum) {
@@ -660,6 +1007,103 @@ fn scanAdmissionEnd(source: []const u8, raw_start: u32) AdmissionScan {
         } };
     }
     return .{ .end = @intCast(source.len) };
+}
+
+fn scanDeclarationEnd(source: []const u8, raw_start: u32) AdmissionScan {
+    var pos: usize = raw_start;
+    var paren_depth: u16 = 0;
+    var bracket_depth: u16 = 0;
+    var angle_depth: u16 = 0;
+    var brace_depth: u16 = 0;
+
+    while (pos < source.len) {
+        const byte = source[pos];
+        if (byte == '"' or byte == '\'' or byte == '`') {
+            switch (scanTypeQuoted(source, pos, byte)) {
+                .end => |end| pos = end,
+                .nesting_too_deep => |offset| return .{ .nesting_too_deep = offset },
+                .malformed => |span| return .{ .malformed = span },
+                .implementation_budget => |offset| return .{ .implementation_budget = offset },
+            }
+            continue;
+        }
+        if (byte == '/' and pos + 1 < source.len) {
+            if (source[pos + 1] == '/') {
+                pos += 2;
+                while (pos < source.len and source[pos] != '\n') pos += 1;
+                continue;
+            }
+            if (source[pos + 1] == '*') {
+                const comment_start = pos;
+                pos += 2;
+                while (pos + 1 < source.len and !(source[pos] == '*' and source[pos + 1] == '/')) pos += 1;
+                if (pos + 1 >= source.len) {
+                    return .{ .malformed = .{
+                        .start = @intCast(comment_start),
+                        .end = @intCast(source.len),
+                    } };
+                }
+                pos += 2;
+                continue;
+            }
+        }
+
+        const at_top = paren_depth == 0 and bracket_depth == 0 and angle_depth == 0 and brace_depth == 0;
+        if (at_top and byte == ';') return .{ .end = @intCast(pos) };
+        if (at_top and byte == '\n' and !multilineTypeContinues(source, pos)) {
+            return .{ .end = @intCast(pos) };
+        }
+
+        switch (byte) {
+            '(' => if (!increaseAdmissionDepth(&paren_depth, bracket_depth, angle_depth, brace_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            '[' => if (!increaseAdmissionDepth(&bracket_depth, paren_depth, angle_depth, brace_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            '<' => if (!increaseAdmissionDepth(&angle_depth, paren_depth, bracket_depth, brace_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            '{' => if (!increaseAdmissionDepth(&brace_depth, paren_depth, bracket_depth, angle_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            ')' => paren_depth -|= 1,
+            ']' => bracket_depth -|= 1,
+            '>' => angle_depth -|= 1,
+            '}' => brace_depth -|= 1,
+            else => {},
+        }
+        pos += 1;
+    }
+
+    if (paren_depth > 0) return .{ .unmatched_parenthesis = @intCast(source.len) };
+    if (bracket_depth > 0 or angle_depth > 0 or brace_depth > 0) {
+        return .{ .malformed = .{ .start = raw_start, .end = @intCast(source.len) } };
+    }
+    return .{ .end = @intCast(source.len) };
+}
+
+fn multilineTypeContinues(source: []const u8, newline: usize) bool {
+    var before = newline;
+    while (before > 0 and isTypeWhitespace(source[before - 1])) before -= 1;
+    if (before > 0) switch (source[before - 1]) {
+        '|', '&', '=', '<', ',', '(', '[', ':', '?', '.' => return true,
+        '>' => {
+            var operator_before = before - 1;
+            while (operator_before > 0 and isTypeWhitespace(source[operator_before - 1])) {
+                operator_before -= 1;
+            }
+            if (operator_before > 0 and source[operator_before - 1] == '=') return true;
+        },
+        else => {},
+    };
+    var after = newline + 1;
+    while (after < source.len and isTypeWhitespace(source[after])) after += 1;
+    if (after >= source.len) return false;
+    return switch (source[after]) {
+        '|', '&', '?', ':', '>', ')', ']', '[', '.', '=', '<', ',' => true,
+        else => false,
+    };
 }
 
 const QuotedScan = union(enum) {
@@ -776,6 +1220,14 @@ fn skipTypeWhitespace(source: []const u8, start: u32) u32 {
     return @intCast(pos);
 }
 
+fn containsOnlyTypeWhitespace(source: []const u8, start: u32, end: u32) bool {
+    const first = @min(@as(usize, start), source.len);
+    const last = @min(@as(usize, end), source.len);
+    if (first > last) return false;
+    for (source[first..last]) |byte| if (!isTypeWhitespace(byte)) return false;
+    return true;
+}
+
 fn looksLikeTypeStart(source: []const u8, start: u32) bool {
     if (@as(usize, start) >= source.len) return false;
     const byte = source[start];
@@ -838,6 +1290,17 @@ fn tokenAtOffset(source: []const u8, offset: u32) Token {
     return cursor.current;
 }
 
+fn tokenSpan(token: Token) Span {
+    return .{ .start = token.start, .end = token.start + token.len };
+}
+
+fn tokenIsDeclarationName(token: Token, source: []const u8) bool {
+    const text = token.text(source);
+    if (text.len == 0 or !isIdentifierStart(text[0])) return false;
+    for (text[1..]) |byte| if (!isIdentifierContinue(byte)) return false;
+    return true;
+}
+
 fn trimWhitespaceEnd(source: []const u8, start: u32, end: u32) u32 {
     var result = @min(@as(usize, end), source.len);
     const first = @min(@as(usize, start), result);
@@ -847,6 +1310,13 @@ fn trimWhitespaceEnd(source: []const u8, start: u32, end: u32) u32 {
 
 fn isTypeWhitespace(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
+}
+
+fn isScalarNominalBase(text: []const u8) bool {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    return std.mem.eql(u8, trimmed, "string") or
+        std.mem.eql(u8, trimmed, "number") or
+        std.mem.eql(u8, trimmed, "boolean");
 }
 
 const ParsedChild = struct {
@@ -868,6 +1338,9 @@ const PrimaryFrame = struct {
     start: u32,
     base: ParsedChild = .{ .child = .absent, .start = 0, .end = 0, .semantic_present = false },
     readonly_modifier_pending: bool = false,
+    ungrouped_named: bool = false,
+    consumed_array_suffix: bool = false,
+    complete_after_child: bool = false,
 };
 
 const RecordFrame = struct {
@@ -1141,8 +1614,15 @@ const SyntaxParser = struct {
                             .literal_bool = std.mem.eql(u8, ident.text(self.source), "true"),
                         });
                     } else {
-                        self.exclusion_span = ident;
-                        return error.UnsupportedTypeSyntax;
+                        self.skipWhitespace();
+                        if (self.pos < self.end and self.source[self.pos] == '<') {
+                            self.exclusion_span = ident;
+                            return error.UnsupportedTypeSyntax;
+                        }
+                        frame.base = try self.makeNode(frame.start, ident.end, .named_reference, .{
+                            .named_reference = ident,
+                        });
+                        frame.ungrouped_named = true;
                     }
                 }
                 frame.state = .suffix;
@@ -1158,11 +1638,17 @@ const SyntaxParser = struct {
                         .{ .readonly_modifier = frame.base.child },
                     );
                     frame.base.semantic_present = semantic_present;
+                    frame.complete_after_child = true;
                 }
                 frame.state = .suffix;
             },
             .suffix => {
                 if (!frame.base.semantic_present) return self.complete(frame.base);
+                if (frame.complete_after_child or
+                    (frame.ungrouped_named and frame.consumed_array_suffix))
+                {
+                    return self.complete(frame.base);
+                }
                 self.skipWhitespace();
                 if (self.pos + 1 < self.end and self.source[self.pos] == '[' and self.source[self.pos + 1] == ']') {
                     self.pos += 2;
@@ -1177,6 +1663,7 @@ const SyntaxParser = struct {
                         .end = self.pos,
                         .semantic_present = true,
                     };
+                    frame.consumed_array_suffix = true;
                     return;
                 }
                 return self.complete(frame.base);
@@ -1616,6 +2103,242 @@ test "primitive parser retains semantic and raw annotation spans" {
     try std.testing.expectEqual(token_mod.TokenType.assign, cursor.current.type);
 }
 
+test "simple declaration retains ownership and component spans" {
+    const source = "structural Alias = number;";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    const keyword = cursor.current;
+    cursor.advance();
+
+    const outcome = try parseDeclarationAndStore(
+        &store,
+        source,
+        keyword,
+        null,
+        .structural,
+        0,
+        &cursor,
+    );
+    const full_span = switch (outcome) {
+        .parsed => |span| span,
+        .not_declaration, .excluded => return error.TestUnexpectedResult,
+    };
+    try store.validate();
+    try std.testing.expectEqualStrings(source, full_span.text(source));
+    try std.testing.expectEqual(@as(usize, 1), store.declarations.items.len);
+    const declaration = store.declarations.items[0];
+    try std.testing.expectEqualStrings("structural", declaration.keyword_span.text(source));
+    try std.testing.expectEqualStrings("Alias", declaration.name_span.text(source));
+    try std.testing.expectEqualStrings("=", declaration.equals_span.?.text(source));
+    try std.testing.expectEqualStrings(";", declaration.terminator_span.?.text(source));
+    const body = switch (declaration.body) {
+        .absent => return error.TestUnexpectedResult,
+        .present => |present| present,
+    };
+    try std.testing.expectEqualStrings("number", body.raw_span.text(source));
+    try std.testing.expectEqual(@as(u32, 0), declaration.source_order);
+    try std.testing.expectEqual(@as(u16, 0), declaration.authored_scope);
+    try std.testing.expectEqual(token_mod.TokenType.eof, cursor.current.type);
+}
+
+test "declaration full spans retain consumed equals and trailing whitespace" {
+    const sources = [_][]const u8{
+        "structural Empty   ",
+        "structural Empty =   ",
+        "structural Alias = number\n  ",
+    };
+    for (sources) |source| {
+        var store = Store.init(std.testing.allocator, source);
+        defer store.deinit();
+        var cursor = Cursor.init(source);
+        const keyword = cursor.current;
+        cursor.advance();
+        const full_span = switch (try parseDeclarationAndStore(
+            &store,
+            source,
+            keyword,
+            null,
+            .structural,
+            0,
+            &cursor,
+        )) {
+            .parsed => |span| span,
+            .not_declaration, .excluded => return error.TestUnexpectedResult,
+        };
+        try store.validate();
+        try std.testing.expectEqualStrings(source, full_span.text(source));
+        try std.testing.expectEqualStrings(source, store.declarations.items[0].full_span.text(source));
+        if (std.mem.indexOfScalar(u8, source, '\n')) |newline| {
+            const body = switch (store.declarations.items[0].body) {
+                .absent => return error.TestUnexpectedResult,
+                .present => |present| present,
+            };
+            try std.testing.expectEqual(@as(u32, @intCast(newline)), body.admission_end);
+            try std.testing.expectEqual(@as(u32, @intCast(source.len)), full_span.end);
+        }
+    }
+}
+
+test "declaration headers require whitespace between raw components" {
+    const sources = [_][]const u8{
+        "structural /*c*/ A = number;",
+        "structural A /*c*/ = number;",
+    };
+    for (sources) |source| {
+        var store = Store.init(std.testing.allocator, source);
+        defer store.deinit();
+        var cursor = Cursor.init(source);
+        const keyword = cursor.current;
+        cursor.advance();
+        const before = cursor;
+        switch (try parseDeclarationAndStore(
+            &store,
+            source,
+            keyword,
+            null,
+            .structural,
+            0,
+            &cursor,
+        )) {
+            .not_declaration => {},
+            .parsed, .excluded => return error.TestUnexpectedResult,
+        }
+        try std.testing.expect(std.meta.eql(before, cursor));
+        try std.testing.expectEqual(@as(usize, 0), store.declarations.items.len);
+        try store.validate();
+    }
+}
+
+test "declaration terminators must start at the raw whitespace endpoint" {
+    const source = "structural A = number\n/*c*/;";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    const keyword = cursor.current;
+    cursor.advance();
+    const full_span = switch (try parseDeclarationAndStore(
+        &store,
+        source,
+        keyword,
+        null,
+        .structural,
+        0,
+        &cursor,
+    )) {
+        .parsed => |span| span,
+        .not_declaration, .excluded => return error.TestUnexpectedResult,
+    };
+    try store.validate();
+    const comment_start = std.mem.indexOf(u8, source, "/*c*/") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, @intCast(comment_start)), full_span.end);
+    try std.testing.expect(store.declarations.items[0].terminator_span == null);
+    try std.testing.expectEqual(token_mod.TokenType.semicolon, cursor.current.type);
+
+    const empty_source = "structural A =\n;";
+    var empty_store = Store.init(std.testing.allocator, empty_source);
+    defer empty_store.deinit();
+    var empty_cursor = Cursor.init(empty_source);
+    const empty_keyword = empty_cursor.current;
+    empty_cursor.advance();
+    switch (try parseDeclarationAndStore(
+        &empty_store,
+        empty_source,
+        empty_keyword,
+        null,
+        .structural,
+        0,
+        &empty_cursor,
+    )) {
+        .parsed => |span| try std.testing.expectEqualStrings(empty_source, span.text(empty_source)),
+        .not_declaration, .excluded => return error.TestUnexpectedResult,
+    }
+    try empty_store.validate();
+    try std.testing.expect(empty_store.declarations.items[0].terminator_span != null);
+    try std.testing.expectEqual(token_mod.TokenType.eof, empty_cursor.current.type);
+}
+
+test "declaration validation rejects source order and component escape" {
+    const source = "structural First = number;\nstructural Second = string;";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    inline for (0..2) |index| {
+        const keyword = cursor.current;
+        cursor.advance();
+        switch (try parseDeclarationAndStore(
+            &store,
+            source,
+            keyword,
+            null,
+            .structural,
+            0,
+            &cursor,
+        )) {
+            .parsed => {},
+            .not_declaration, .excluded => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(u32, index), store.declarations.items[index].source_order);
+    }
+    try store.validate();
+
+    const second = store.declarations.items[1];
+    store.declarations.items[1].source_order = 0;
+    try std.testing.expectError(error.InvalidTypeSourceOrder, store.validate());
+    store.declarations.items[1] = second;
+
+    const first = store.declarations.items[0];
+    store.declarations.items[0].full_span.end = store.declarations.items[0].name_span.end;
+    try std.testing.expectError(error.InvalidTypeSpan, store.validate());
+    store.declarations.items[0] = first;
+
+    store.declarations.items[0].name_span.end = @intCast(source.len);
+    try std.testing.expectError(error.InvalidTypeSpan, store.validate());
+    store.declarations.items[0] = first;
+    try store.validate();
+}
+
+test "excluded declaration preserves prior syntax and cursor" {
+    const source = "structural Prior = number;\nstructural Later = Named<string>;";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    const first_keyword = cursor.current;
+    cursor.advance();
+    switch (try parseDeclarationAndStore(
+        &store,
+        source,
+        first_keyword,
+        null,
+        .structural,
+        0,
+        &cursor,
+    )) {
+        .parsed => {},
+        .not_declaration, .excluded => return error.TestUnexpectedResult,
+    }
+
+    const prior = store.checkpoint();
+    const second_keyword = cursor.current;
+    cursor.advance();
+    const before = cursor;
+    switch (try parseDeclarationAndStore(
+        &store,
+        source,
+        second_keyword,
+        null,
+        .structural,
+        0,
+        &cursor,
+    )) {
+        .parsed => return error.TestUnexpectedResult,
+        .not_declaration, .excluded => {},
+    }
+    try std.testing.expect(std.meta.eql(before, cursor));
+    try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+    try std.testing.expectEqual(@as(usize, 1), store.declarations.items.len);
+}
+
 test "primitive parser admits 512 type parentheses and refuses the next" {
     var admitted_source: std.ArrayListUnmanaged(u8) = .empty;
     defer admitted_source.deinit(std.testing.allocator);
@@ -1689,7 +2412,7 @@ test "compound annotation keeps raw admission and semantic prefix ends separate"
 test "excluded compound annotation rolls back all arrays and keeps its cursor" {
     const source =
         "{ prior: number | string; cb: (x: number) => `v${string}` } = first; " ++
-        "{ a: number | string } | ((p: number) => `x${string}`) | Named = second;";
+        "{ a: number | string } | ((p: number) => `x${string}`) | Named<string> = second;";
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
 
@@ -1844,6 +2567,134 @@ test "second compound annotation rolls back every allocation failure" {
     var observed_failures: usize = 0;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{&observed_failures});
     try std.testing.expect(observed_failures > 0);
+}
+
+test "second declaration rolls back all seven arrays on allocation failure" {
+    const source =
+        "structural First = { field: number | string; cb: (pair: [number, string]) => `x${boolean}`; tags: string[] };\n" ++
+        "structural Second = { field: number | string; cb: (pair: [number, string]) => `y${boolean}`; tags: string[] };";
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator, observed_failures: *usize) !void {
+            var store = Store.init(allocator, source);
+            defer store.deinit();
+            var cursor = Cursor.init(source);
+            const first_keyword = cursor.current;
+            cursor.advance();
+            switch (try parseDeclarationAndStore(
+                &store,
+                source,
+                first_keyword,
+                null,
+                .structural,
+                0,
+                &cursor,
+            )) {
+                .parsed => {},
+                .not_declaration, .excluded => return error.TestUnexpectedResult,
+            }
+            const prior = store.checkpoint();
+            try std.testing.expect(prior.nodes > 0);
+            try std.testing.expect(prior.members > 0);
+            try std.testing.expect(prior.fields > 0);
+            try std.testing.expect(prior.params > 0);
+            try std.testing.expect(prior.template_parts > 0);
+            try std.testing.expectEqual(@as(usize, 0), prior.annotations);
+            try std.testing.expectEqual(@as(usize, 1), prior.declarations);
+
+            const second_keyword = cursor.current;
+            cursor.advance();
+            const before = cursor;
+            const outcome = parseDeclarationAndStore(
+                &store,
+                source,
+                second_keyword,
+                null,
+                .structural,
+                1,
+                &cursor,
+            );
+            const parsed = outcome catch |err| switch (err) {
+                error.OutOfMemory => {
+                    observed_failures.* += 1;
+                    try std.testing.expect(std.meta.eql(before, cursor));
+                    try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+                    try store.validate();
+                    return error.OutOfMemory;
+                },
+                else => return err,
+            };
+            switch (parsed) {
+                .parsed => {},
+                .not_declaration, .excluded => return error.TestUnexpectedResult,
+            }
+            const completed = store.checkpoint();
+            try std.testing.expect(completed.nodes > prior.nodes);
+            try std.testing.expect(completed.members > prior.members);
+            try std.testing.expect(completed.fields > prior.fields);
+            try std.testing.expect(completed.params > prior.params);
+            try std.testing.expect(completed.template_parts > prior.template_parts);
+            try std.testing.expectEqual(prior.annotations, completed.annotations);
+            try std.testing.expectEqual(prior.declarations + 1, completed.declarations);
+            try store.validate();
+        }
+    };
+    var observed_failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{&observed_failures});
+    try std.testing.expect(observed_failures > 0);
+}
+
+test "type owners reject direct indirect and overlapping cross-owner ranges" {
+    const Case = enum { direct_child, indirect_member_child, overlap };
+    inline for (std.meta.tags(Case)) |case| {
+        const source = switch (case) {
+            .direct_child => "(number) = first; (string) = second;",
+            .indirect_member_child => "[number] = first; [string] = second;",
+            .overlap => "number = first; string = second;",
+        };
+        var store = Store.init(std.testing.allocator, source);
+        defer store.deinit();
+        var first = Cursor.init(source);
+        switch (try parseAndStore(&store, .global(300), source, 0, &first)) {
+            .parsed => {},
+            .failure, .excluded => return error.TestUnexpectedResult,
+        }
+        const second_start: u32 = @intCast(std.mem.indexOf(u8, source, switch (case) {
+            .direct_child => "(string)",
+            .indirect_member_child => "[string]",
+            .overlap => "string",
+        }).?);
+        var second = Cursor.init(source);
+        while (second.current.type != .eof and second.current.start < second_start) second.advance();
+        switch (try parseAndStore(&store, .global(301), source, second_start, &second)) {
+            .parsed => {},
+            .failure, .excluded => return error.TestUnexpectedResult,
+        }
+        try store.validate();
+
+        switch (case) {
+            .direct_child => {
+                const root = switch (store.annotations.items[1].root) {
+                    .absent => return error.TestUnexpectedResult,
+                    .present => |index| index,
+                };
+                store.nodes.items[root].data.group = .{ .present = 0 };
+                try std.testing.expectError(error.InvalidTypeChild, store.validate());
+            },
+            .indirect_member_child => {
+                const root = switch (store.annotations.items[1].root) {
+                    .absent => return error.TestUnexpectedResult,
+                    .present => |index| index,
+                };
+                const range = store.nodes.items[root].data.tuple;
+                store.members.items[range.start] = .{ .present = 0 };
+                try std.testing.expectError(error.InvalidTypeChild, store.validate());
+            },
+            .overlap => {
+                store.annotations.items[1].node_range = .{ .start = 0, .count = 2 };
+                try std.testing.expectError(error.OverlappingTypeNodeOwnership, store.validate());
+            },
+        }
+    }
 }
 
 test "type store validation rejects invalid nodes without erasing prior syntax" {

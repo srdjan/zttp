@@ -7,6 +7,8 @@ const engine = @import("zts-engine");
 const type_env_mod = @import("type_env.zig");
 const type_key = @import("type_key.zig");
 const type_pool_mod = @import("type_pool.zig");
+const module_types = @import("module_types.zig");
+const abi_types = @import("abi_types.zig");
 
 const AtomTable = engine.atom_table.AtomTable;
 const JsParser = engine.parser.JsParser;
@@ -83,6 +85,7 @@ const AdmissionKind = enum {
     readonly_array_type_alias,
     optional_parameter,
     nesting_too_deep,
+    nominal_base_not_scalar,
 };
 
 const AdmissionDiagnostic = struct {
@@ -142,6 +145,9 @@ fn preflight(
             return .{ .out_of_slice = .lone_carriage_return };
         }
     }
+    if (hasUnterminatedSkippedBlockComment(source)) {
+        return .{ .out_of_slice = .unsupported_initializer };
+    }
     var result = Preflight{};
     var owns_result = true;
     defer if (owns_result) result.deinit(allocator);
@@ -149,20 +155,132 @@ fn preflight(
     var tokenizer = Tokenizer.init(source);
     var current = tokenizer.next();
     var annotation_count: usize = 0;
+    var declaration_count: usize = 0;
+    var last_erased_type_span: ?TypeSyntax.Span = null;
 
     while (current.type != .eof) {
         switch (current.type) {
             .kw_function => return .{ .out_of_slice = .function_declaration },
             .kw_import => return .{ .out_of_slice = .import_declaration },
-            .kw_export => return .{ .out_of_slice = .export_declaration },
             .template_literal, .template_head, .template_middle, .template_tail => return .{ .out_of_slice = .template_literal },
             .regex_literal => return .{ .out_of_slice = .regex_literal },
             .kw_let, .kw_const => {},
-            .identifier => {
-                if (isTypeDeclarationWord(current.text(source))) {
-                    return .{ .out_of_slice = .type_declaration };
+            .kw_export, .identifier => {
+                const declaration_start = current.start;
+                if (current.type == .identifier and !isTypeDeclarationWord(current.text(source))) {
+                    return .{ .out_of_slice = .unsupported_initializer };
                 }
-                return .{ .out_of_slice = .unsupported_initializer };
+                if (!isDeclarationBoundary(source, declaration_start, last_erased_type_span)) {
+                    return .{ .out_of_slice = if (current.type == .kw_export)
+                        .export_declaration
+                    else
+                        .type_declaration };
+                }
+                var export_span: ?TypeSyntax.Span = null;
+                var keyword = current;
+                var declaration_cursor = TypeSyntax.Cursor.afterCurrent(tokenizer);
+                if (current.type == .kw_export) {
+                    export_span = tokenSpan(current);
+                    keyword = declaration_cursor.current;
+                    declaration_cursor.advance();
+                }
+                if (keyword.type != .identifier or !isTypeDeclarationWord(keyword.text(source))) {
+                    return .{ .out_of_slice = if (current.type == .kw_export)
+                        .export_declaration
+                    else
+                        .unsupported_initializer };
+                }
+                const declaration_kind: TypeSyntax.DeclarationKind = if (std.mem.eql(
+                    u8,
+                    keyword.text(source),
+                    "structural",
+                ))
+                    .structural
+                else if (std.mem.eql(u8, keyword.text(source), "nominal"))
+                    .nominal
+                else
+                    return .{ .out_of_slice = .type_declaration };
+
+                var declaration_store = TypeSyntax.Store.init(allocator, source);
+                defer declaration_store.deinit();
+                const parsed = try TypeSyntax.parseDeclarationAndStore(
+                    &declaration_store,
+                    source,
+                    keyword,
+                    export_span,
+                    declaration_kind,
+                    0,
+                    &declaration_cursor,
+                );
+                const erased = switch (parsed) {
+                    .not_declaration => return .{ .out_of_slice = .type_declaration },
+                    .excluded => |excluded| blk: {
+                        switch (excluded.reason) {
+                            .implementation_budget, .unsupported_syntax => {
+                                return .{ .out_of_slice = .type_declaration };
+                            },
+                            .nominal_base_not_scalar => {},
+                        }
+                        var local: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+                        defer local.deinit(allocator);
+                        try appendAnyDiagnostics(
+                            allocator,
+                            &local,
+                            source,
+                            excluded.raw_span.start,
+                            excluded.raw_span.end,
+                        );
+                        for (local.items) |diagnostic| {
+                            try appendDiagnosticAtNewPosition(allocator, &result.diagnostics, diagnostic);
+                        }
+                        try appendDiagnosticAtNewPosition(allocator, &result.diagnostics, .{
+                            .kind = .nominal_base_not_scalar,
+                            .span = excluded.raw_span,
+                        });
+                        while (declaration_cursor.current.type != .eof and
+                            declaration_cursor.current.start < excluded.admission_end)
+                        {
+                            declaration_cursor.advance();
+                        }
+                        var end = excluded.admission_end;
+                        const whitespace_end = skipDeclarationWhitespace(source, excluded.admission_end);
+                        if (declaration_cursor.current.type == .semicolon and
+                            declaration_cursor.current.start == whitespace_end)
+                        {
+                            end = declaration_cursor.current.start + declaration_cursor.current.len;
+                            declaration_cursor.advance();
+                        }
+                        break :blk TypeSyntax.Span{ .start = declaration_start, .end = end };
+                    },
+                    .parsed => |span| blk: {
+                        const declaration = declaration_store.declarations.items[0];
+                        switch (declaration.body) {
+                            .absent => {},
+                            .present => |body| if (declaration.kind == .structural) {
+                                try appendAdmissionDiagnostics(
+                                    allocator,
+                                    &result.diagnostics,
+                                    source,
+                                    body.raw_span,
+                                );
+                            } else {
+                                try appendAnyDiagnostics(
+                                    allocator,
+                                    &result.diagnostics,
+                                    source,
+                                    body.raw_span.start,
+                                    body.raw_span.end,
+                                );
+                            },
+                        }
+                        break :blk span;
+                    },
+                };
+                declaration_count += 1;
+                last_erased_type_span = erased;
+                tokenizer = declaration_cursor.tokenizer;
+                current = declaration_cursor.current;
+                continue;
             },
             .colon => return .{ .out_of_slice = .unsupported_annotation_position },
             else => return .{ .out_of_slice = .unsupported_initializer },
@@ -272,12 +390,79 @@ fn preflight(
         }
     }
 
-    if (annotation_count != 1) return .{ .out_of_slice = .annotation_count };
+    if (annotation_count != 1 and declaration_count == 0) {
+        return .{ .out_of_slice = .annotation_count };
+    }
     if (mode == .compile and result.diagnostics.items.len > 1) {
         result.diagnostics.items.len = 1;
     }
     owns_result = false;
     return .{ .eligible = result };
+}
+
+fn isDeclarationBoundary(
+    source: []const u8,
+    start: u32,
+    last_erased_type_span: ?TypeSyntax.Span,
+) bool {
+    if (start == 0) return true;
+    const previous_offset = start - 1;
+    const previous = if (last_erased_type_span) |span|
+        if (previous_offset >= span.start and previous_offset < span.end)
+            if (source[previous_offset] == '\n') @as(u8, '\n') else @as(u8, ' ')
+        else
+            source[previous_offset]
+    else
+        source[previous_offset];
+    return previous == ';' or previous == '{' or previous == '}' or previous == '\n';
+}
+
+fn skipDeclarationWhitespace(source: []const u8, start: u32) u32 {
+    var offset: usize = @min(@as(usize, start), source.len);
+    while (offset < source.len) : (offset += 1) {
+        switch (source[offset]) {
+            ' ', '\t', '\r', '\n' => {},
+            else => break,
+        }
+    }
+    return @intCast(offset);
+}
+
+fn hasUnterminatedSkippedBlockComment(source: []const u8) bool {
+    var tokenizer = Tokenizer.init(source);
+    var previous_end: usize = 0;
+    while (tokenizer.pos < source.len) {
+        const previous_pos = tokenizer.pos;
+        const token = tokenizer.next();
+        const token_start = @min(@as(usize, token.start), source.len);
+        if (triviaGapHasUnterminatedBlockComment(source, previous_end, token_start)) return true;
+        if (token.type == .eof) return false;
+        if (tokenizer.pos <= previous_pos) return true;
+        previous_end = @min(token_start + token.len, source.len);
+    }
+    return false;
+}
+
+fn triviaGapHasUnterminatedBlockComment(source: []const u8, start: usize, end: usize) bool {
+    var offset = @min(start, end);
+    while (offset + 1 < end) {
+        if (source[offset] == '/' and source[offset + 1] == '/') {
+            offset += 2;
+            while (offset < end and source[offset] != '\n') offset += 1;
+            continue;
+        }
+        if (source[offset] != '/' or source[offset + 1] != '*') {
+            offset += 1;
+            continue;
+        }
+        offset += 2;
+        while (offset + 1 < end and !(source[offset] == '*' and source[offset + 1] == '/')) {
+            offset += 1;
+        }
+        if (offset + 1 >= end) return true;
+        offset += 2;
+    }
+    return false;
 }
 
 fn advance(tokenizer: *Tokenizer, current: *Token) void {
@@ -377,6 +562,17 @@ fn appendAdmissionDiagnostics(
     if (findFirstRemovedForm(source, start, end)) |diagnostic| {
         try diagnostics.append(allocator, diagnostic);
     }
+}
+
+fn appendDiagnosticAtNewPosition(
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+    diagnostic: AdmissionDiagnostic,
+) !void {
+    for (diagnostics.items) |existing| {
+        if (existing.span.start == diagnostic.span.start) return;
+    }
+    try diagnostics.append(allocator, diagnostic);
 }
 
 fn appendAnyDiagnostics(
@@ -712,8 +908,8 @@ fn compare(
     if (!legacy_alloc.sameRuntimeShape(direct_alloc)) {
         return .{ .differs = "runtime allocation shapes differ" };
     }
-    if (direct.type_store.annotations.items.len != 1) {
-        return .{ .differs = "the direct parser did not retain one annotation" };
+    if (direct.type_store.annotations.items.len == 0 and direct.type_store.declarations.items.len == 0) {
+        return .{ .differs = "the direct parser retained no type syntax" };
     }
     if (!try compareLowering(allocator, &prepared, &direct.type_store)) {
         return .{ .differs = "direct and legacy type lowering differ" };
@@ -764,6 +960,7 @@ fn admissionMatchesStrip(
         .readonly_array_type_alias => .readonly_array_type_alias,
         .optional_parameter => .optional_parameter,
         .nesting_too_deep => .nesting_too_deep,
+        .nominal_base_not_scalar => .nominal_base_not_scalar,
         else => return false,
     };
     if (legacy_kind != direct.kind) return false;
@@ -948,6 +1145,8 @@ fn compareLowering(
     defer legacy_env.deinit();
     try legacy_pool.ensureHealthy();
     try legacy_env.ensureHealthy();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, allocator);
     legacy_env.populateFromTypeMap(prepared.typeMap() orelse return false);
     try legacy_pool.ensureHealthy();
     try legacy_env.ensureHealthy();
@@ -959,29 +1158,94 @@ fn compareLowering(
     defer direct_env.deinit();
     try direct_pool.ensureHealthy();
     try direct_env.ensureHealthy();
+    module_types.populateModuleTypes(&direct_env, &direct_pool, allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, allocator);
     try lowerSyntaxStore(allocator, direct_store, &direct_pool, &direct_env);
-
-    const direct_annotation = direct_store.annotations.items[0];
-    const direct_idx = direct_env.getVarTypeByBinding(
-        direct_annotation.binding.scope_id,
-        direct_annotation.binding.name_atom,
-    ) orelse return false;
-
     const type_map = prepared.typeMap() orelse return false;
-    var legacy_idx: ?TypeIndex = null;
+
+    var declaration_index: usize = 0;
     for (type_map.entries.items) |entry| {
-        if (entry.kind != .var_annotation) continue;
-        const name = type_map.getNameText(entry) orelse continue;
-        const ordinal = entry.name_ordinal orelse continue;
-        legacy_idx = legacy_env.getVarTypeByNameOrdinal(name, ordinal) orelse return false;
-        break;
+        if (entry.kind != .type_alias and entry.kind != .distinct_type) continue;
+        if (declaration_index >= direct_store.declarations.items.len) return false;
+        const declaration = direct_store.declarations.items[declaration_index];
+        if (declaration.source_order != @as(u32, @intCast(declaration_index))) return false;
+        const expected_kind: TypeSyntax.DeclarationKind = if (entry.kind == .type_alias)
+            .structural
+        else
+            .nominal;
+        if (declaration.kind != expected_kind) return false;
+        const legacy_name = type_map.getNameText(entry) orelse return false;
+        if (!std.mem.eql(u8, legacy_name, declaration.name_span.text(direct_store.source))) return false;
+        const legacy_body = std.mem.trim(u8, type_map.getTypeText(entry), " \t\r\n");
+        switch (declaration.body) {
+            .absent => if (legacy_body.len != 0) return false,
+            .present => |body| if (!std.mem.eql(
+                u8,
+                legacy_body,
+                body.raw_span.text(direct_store.source),
+            )) return false,
+        }
+        declaration_index += 1;
+    }
+    if (declaration_index != direct_store.declarations.items.len) return false;
+
+    if (legacy_env.type_aliases.count() != direct_env.type_aliases.count()) return false;
+    var legacy_aliases = legacy_env.type_aliases.iterator();
+    while (legacy_aliases.next()) |entry| {
+        const direct_alias = direct_env.getTypeAlias(entry.key_ptr.*) orelse return false;
+        if (!try orderedTypeEqual(
+            allocator,
+            &legacy_pool,
+            entry.value_ptr.*,
+            &direct_pool,
+            direct_alias,
+        )) return false;
+        if (legacy_env.isNonContractiveType(entry.value_ptr.*) !=
+            direct_env.isNonContractiveType(direct_alias)) return false;
+        if (legacy_env.isNonContractiveAlias(entry.key_ptr.*) !=
+            direct_env.isNonContractiveAlias(entry.key_ptr.*)) return false;
+    }
+    var direct_aliases = direct_env.type_aliases.iterator();
+    while (direct_aliases.next()) |entry| {
+        if (legacy_env.getTypeAlias(entry.key_ptr.*) == null) return false;
     }
 
-    const legacy_root = legacy_idx orelse return false;
-    if (!try orderedTypeEqual(allocator, &legacy_pool, legacy_root, &direct_pool, direct_idx)) return false;
+    var annotation_index: usize = 0;
+    for (type_map.entries.items) |entry| {
+        if (entry.kind != .var_annotation) continue;
+        if (annotation_index >= direct_store.annotations.items.len) return false;
+        const name = type_map.getNameText(entry) orelse continue;
+        const ordinal = entry.name_ordinal orelse continue;
+        const legacy_idx = legacy_env.getVarTypeByNameOrdinal(name, ordinal) orelse return false;
+        const direct_annotation = direct_store.annotations.items[annotation_index];
+        const direct_idx = direct_env.getVarTypeByBinding(
+            direct_annotation.binding.scope_id,
+            direct_annotation.binding.name_atom,
+        ) orelse return false;
+        if (!try orderedTypeEqual(allocator, &legacy_pool, legacy_idx, &direct_pool, direct_idx)) {
+            return false;
+        }
+        if (!try supplementaryTypeKeyEqual(
+            allocator,
+            &legacy_pool,
+            legacy_idx,
+            &direct_pool,
+            direct_idx,
+        )) return false;
+        annotation_index += 1;
+    }
+    return annotation_index == direct_store.annotations.items.len;
+}
 
-    const legacy_key = comparisonTypeKey(&legacy_pool, allocator, legacy_root);
-    const direct_key = comparisonTypeKey(&direct_pool, allocator, direct_idx);
+fn supplementaryTypeKeyEqual(
+    allocator: std.mem.Allocator,
+    left_pool: *TypePool,
+    left_index: TypeIndex,
+    right_pool: *TypePool,
+    right_index: TypeIndex,
+) !bool {
+    const legacy_key = comparisonTypeKey(left_pool, allocator, left_index);
+    const direct_key = comparisonTypeKey(right_pool, allocator, right_index);
     if (legacy_key) |left| {
         const right = direct_key catch |err| switch (err) {
             error.OutOfMemory => return err,
@@ -1031,14 +1295,93 @@ fn lowerSyntaxStore(
     defer allocator.free(lowered);
     @memset(lowered, null_type_idx);
 
-    for (store.nodes.items, 0..) |node, index| {
+    for (store.declarations.items) |declaration| {
+        const present = switch (declaration.body) {
+            .absent => continue,
+            .present => |body| body,
+        };
+        const type_idx = try lowerOwnedRoot(
+            allocator,
+            store,
+            pool,
+            env,
+            lowered,
+            present.root,
+            present.node_range,
+            present.raw_span,
+        );
+        const name = declaration.name_span.text(store.source);
+        switch (declaration.kind) {
+            .structural => env.putTypeAlias(name, type_idx),
+            .nominal => {
+                if (type_idx != null_type_idx) {
+                    const nominal = pool.addNominalAlias(allocator, type_idx, name);
+                    if (nominal != null_type_idx) env.putTypeAlias(name, nominal);
+                }
+            },
+        }
+        try pool.ensureHealthy();
+        try env.ensureHealthy();
+    }
+    env.finishTypeAliasPopulation();
+    try env.ensureHealthy();
+
+    for (store.annotations.items) |annotation| {
+        const type_idx = try lowerOwnedRoot(
+            allocator,
+            store,
+            pool,
+            env,
+            lowered,
+            annotation.root,
+            annotation.node_range,
+            annotation.raw_span,
+        );
+        try env.bindVarType(annotation.binding.scope_id, annotation.binding.name_atom, type_idx);
+    }
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+}
+
+fn lowerOwnedRoot(
+    allocator: std.mem.Allocator,
+    store: *const TypeSyntax.Store,
+    pool: *TypePool,
+    env: *TypeEnv,
+    lowered: []TypeIndex,
+    root: TypeSyntax.Child,
+    node_range: TypeSyntax.Range,
+    raw_span: TypeSyntax.Span,
+) !TypeIndex {
+    const exact = std.mem.trim(u8, raw_span.text(store.source), " \t\r\n");
+    if (env.getTypeAlias(exact)) |type_idx| return type_idx;
+    try lowerOwnedRange(allocator, store, pool, lowered, node_range);
+    return env.finishParsedTypeRoot(try loweredChild(lowered, root, lowered.len));
+}
+
+fn lowerOwnedRange(
+    allocator: std.mem.Allocator,
+    store: *const TypeSyntax.Store,
+    pool: *TypePool,
+    lowered: []TypeIndex,
+    node_range: TypeSyntax.Range,
+) !void {
+    const start: usize = node_range.start;
+    const end = std.math.add(usize, start, node_range.count) catch return error.InvalidTypeRange;
+    if (end > store.nodes.items.len or end > lowered.len) return error.InvalidTypeRange;
+    for (store.nodes.items[start..end], start..) |node, index| {
         lowered[index] = switch (node.data) {
             .primitive => |primitive| primitiveIndex(pool, primitive),
+            .named_reference => |span| pool.addRef(allocator, span.text(store.source)),
             .group => |child| try loweredChild(lowered, child, index),
             .readonly_modifier => |child| blk: {
                 const inner = try loweredChild(lowered, child, index);
                 if (pool.getTag(inner) == .t_array and !pool.isReadonlyArray(inner)) {
                     break :blk pool.addReadonlyArray(allocator, pool.getArrayElement(inner));
+                }
+                if (pool.getTag(inner) == .t_ref or pool.getTag(inner) == .t_generic_app) {
+                    const base = pool.addRef(allocator, "Readonly");
+                    break :blk pool.addGenericApp(allocator, base, &.{inner});
                 }
                 break :blk inner;
             },
@@ -1125,13 +1468,6 @@ fn lowerSyntaxStore(
         };
         try pool.ensureHealthy();
     }
-
-    for (store.annotations.items) |annotation| {
-        const type_idx = try loweredChild(lowered, annotation.root, lowered.len);
-        try env.bindVarType(annotation.binding.scope_id, annotation.binding.name_atom, type_idx);
-    }
-    try pool.ensureHealthy();
-    try env.ensureHealthy();
 }
 
 fn loweredChild(lowered: []const TypeIndex, child: TypeSyntax.Child, parent: usize) !TypeIndex {
@@ -1215,6 +1551,14 @@ fn orderedTypeEqual(
             if (pair.left != pair.right) return false;
             continue;
         }
+        const left_nominal = left_pool.isNominal(pair.left);
+        const right_nominal = right_pool.isNominal(pair.right);
+        if (left_nominal != right_nominal) return false;
+        if (left_nominal and !std.mem.eql(
+            u8,
+            left_pool.nominalName(pair.left),
+            right_pool.nominalName(pair.right),
+        )) return false;
         const left_tag = left_pool.getTag(pair.left) orelse return false;
         const right_tag = right_pool.getTag(pair.right) orelse return false;
         if (left_tag != right_tag) return false;
@@ -1317,7 +1661,21 @@ fn orderedTypeEqual(
                 .left = left_pool.getNullableInner(pair.left),
                 .right = right_pool.getNullableInner(pair.right),
             }),
-            .t_dict, .t_ref, .t_generic_param, .t_generic_app => return false,
+            .t_ref => if (!std.mem.eql(
+                u8,
+                left_pool.getRefName(pair.left),
+                right_pool.getRefName(pair.right),
+            )) return false,
+            .t_generic_app => {
+                const left = left_pool.getGenericAppInfo(pair.left);
+                const right = right_pool.getGenericAppInfo(pair.right);
+                if (left.args.len != right.args.len) return false;
+                try pending.append(allocator, .{ .left = left.base, .right = right.base });
+                for (left.args, right.args) |left_arg, right_arg| {
+                    try pending.append(allocator, .{ .left = left_arg, .right = right_arg });
+                }
+            },
+            .t_dict, .t_generic_param => return false,
         }
     }
     return true;
@@ -1439,6 +1797,769 @@ fn expectDirectAbsentPrefix(annotation: []const u8, expected_prefix: []const u8)
     try env.ensureHealthy();
 }
 
+const DeclarationCase = enum {
+    structural_alias,
+    nominal_alias,
+    exported_structural_alias,
+    exported_nominal_alias,
+    root_boundary,
+    root_leading_space_refusal,
+    after_newline_refusal,
+    after_semicolon_refusal,
+    block_left_aligned,
+    block_indented_refusal,
+    runtime_structural_collision,
+    runtime_nominal_collision,
+    empty_body_no_alias,
+    present_absent_body_null_alias,
+    exact_eager_alias,
+    forward_deferred_ref,
+    nested_deferred_ref,
+    suffixed_deferred_ref,
+    last_write_alias,
+    builtin_before_source,
+    abi_before_source,
+    primitive_alias_declaration_root,
+    primitive_alias_annotation_root,
+    primitive_alias_nominal_base,
+    primitive_alias_nested_child,
+    readonly_named_root,
+    readonly_named_union,
+    readonly_named_intersection,
+    readonly_named_nullable,
+    readonly_named_record_terminal,
+    readonly_named_tuple_terminal,
+    named_array_one_suffix,
+    grouped_named_array_repeated_suffix,
+    nominal_same_name_same_base,
+    nominal_different_name_same_base,
+    nominal_to_base,
+    base_to_nominal,
+    nominal_long_name,
+    direct_cycle,
+    union_cycle,
+    intersection_cycle,
+    nullable_cycle,
+    function_cycle,
+    record_guard,
+    tuple_guard,
+    array_guard,
+    final_replacement_contractivity,
+    repeated_population_additive,
+    contractivity_path_limit,
+    resolution_hop_limit,
+    ref_structural_compare,
+    generic_app_structural_compare,
+    nominal_structural_compare,
+    generic_declaration_exclusion,
+    unsupported_legacy_spelling_refusal,
+    invalid_nominal_base_refusal,
+};
+
+const DeclarationProbe = union(enum) {
+    equivalent,
+    out_of_slice: OutOfSliceReason,
+    admission_refused: AdmissionKind,
+    retained_declarations: usize,
+    repeated_population_additive,
+    contractivity_path_limit,
+};
+
+const DeclarationFixture = struct {
+    case: DeclarationCase,
+    source: []const u8,
+    probe: DeclarationProbe,
+};
+
+const long_nominal_name = "N" ++
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const long_nominal_source = "nominal " ++ long_nominal_name ++ " = string;";
+
+const declaration_fixtures = [_]DeclarationFixture{
+    .{ .case = .structural_alias, .source = "structural Alias = number; const value: Alias = 1;", .probe = .equivalent },
+    .{ .case = .nominal_alias, .source = "nominal UserId = string; const value: UserId = \"x\";", .probe = .equivalent },
+    .{ .case = .exported_structural_alias, .source = "export structural Alias = number; const value: Alias = 1;", .probe = .equivalent },
+    .{ .case = .exported_nominal_alias, .source = "export nominal UserId = string; const value: UserId = \"x\";", .probe = .equivalent },
+    .{ .case = .root_boundary, .source = "structural Alias = number;", .probe = .equivalent },
+    .{ .case = .root_leading_space_refusal, .source = " structural Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
+    .{ .case = .after_newline_refusal, .source = "const first = 1;\n  structural Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
+    .{ .case = .after_semicolon_refusal, .source = "const first = 1; structural Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
+    .{ .case = .block_left_aligned, .source = "function outer() {\nstructural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 1 } },
+    .{ .case = .block_indented_refusal, .source = "function outer() {\n  structural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
+    .{ .case = .runtime_structural_collision, .source = "structural Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
+    .{ .case = .runtime_nominal_collision, .source = "nominal Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
+    .{ .case = .empty_body_no_alias, .source = "structural Empty =;", .probe = .equivalent },
+    .{ .case = .present_absent_body_null_alias, .source = "structural Empty = ();", .probe = .equivalent },
+    .{ .case = .exact_eager_alias, .source = "structural A = string;\nstructural B = A;\nstructural A = number;", .probe = .equivalent },
+    .{ .case = .forward_deferred_ref, .source = "structural B = A;\nstructural A = string;\nstructural A = number;", .probe = .equivalent },
+    .{ .case = .nested_deferred_ref, .source = "structural B = { value: A };\nstructural A = number;", .probe = .equivalent },
+    .{ .case = .suffixed_deferred_ref, .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;", .probe = .equivalent },
+    .{ .case = .last_write_alias, .source = "structural A = string;\nstructural A = number;", .probe = .equivalent },
+    .{ .case = .builtin_before_source, .source = "structural Copy = FetchOptions;", .probe = .equivalent },
+    .{ .case = .abi_before_source, .source = "structural Copy = Request;", .probe = .equivalent },
+    .{ .case = .primitive_alias_declaration_root, .source = "structural string = number;\nstructural Copy = string;", .probe = .equivalent },
+    .{ .case = .primitive_alias_annotation_root, .source = "structural string = number; const value: string = 1;", .probe = .equivalent },
+    .{ .case = .primitive_alias_nominal_base, .source = "structural string = number;\nnominal UserId = string;", .probe = .equivalent },
+    .{ .case = .primitive_alias_nested_child, .source = "structural string = number;\nstructural Choice = string | boolean;", .probe = .equivalent },
+    .{ .case = .readonly_named_root, .source = "structural Items = string[]; const value: readonly Items = \"x\";", .probe = .equivalent },
+    .{ .case = .readonly_named_union, .source = "structural Items = string[];\nstructural View = readonly Items | number;", .probe = .equivalent },
+    .{ .case = .readonly_named_intersection, .source = "structural Items = string[];\nstructural View = readonly Items & { tag: string };", .probe = .equivalent },
+    .{ .case = .readonly_named_nullable, .source = "structural Items = string[];\nstructural View = readonly Items | undefined;", .probe = .equivalent },
+    .{ .case = .readonly_named_record_terminal, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
+    .{ .case = .readonly_named_tuple_terminal, .source = "structural Items = string[];\nstructural View = [readonly Items];", .probe = .equivalent },
+    .{ .case = .named_array_one_suffix, .source = "structural Alias = string;\nstructural View = Alias[][];", .probe = .equivalent },
+    .{ .case = .grouped_named_array_repeated_suffix, .source = "structural Alias = string;\nstructural View = (Alias)[][];", .probe = .equivalent },
+    .{ .case = .nominal_same_name_same_base, .source = "nominal Id = string;\nnominal Id = string;", .probe = .equivalent },
+    .{ .case = .nominal_different_name_same_base, .source = "nominal Left = string;\nnominal Right = string;", .probe = .equivalent },
+    .{ .case = .nominal_to_base, .source = "nominal Id = string;\nstructural Base = string;", .probe = .equivalent },
+    .{ .case = .base_to_nominal, .source = "nominal Id = string;\nstructural Copy = Id;", .probe = .equivalent },
+    .{ .case = .nominal_long_name, .source = long_nominal_source, .probe = .equivalent },
+    .{ .case = .direct_cycle, .source = "structural A = A;", .probe = .equivalent },
+    .{ .case = .union_cycle, .source = "structural A = number | A;", .probe = .equivalent },
+    .{ .case = .intersection_cycle, .source = "structural A = number & A;", .probe = .equivalent },
+    .{ .case = .nullable_cycle, .source = "structural A = A | undefined;", .probe = .equivalent },
+    .{ .case = .function_cycle, .source = "structural A = () => A;", .probe = .equivalent },
+    .{ .case = .record_guard, .source = "structural A = { next: A };", .probe = .equivalent },
+    .{ .case = .tuple_guard, .source = "structural A = [A];", .probe = .equivalent },
+    .{ .case = .array_guard, .source = "structural A = A[];", .probe = .equivalent },
+    .{ .case = .final_replacement_contractivity, .source = "structural A = A;\nstructural A = number;", .probe = .equivalent },
+    .{ .case = .repeated_population_additive, .source = "structural A = A;", .probe = .repeated_population_additive },
+    .{ .case = .contractivity_path_limit, .source = "structural A = A;", .probe = .contractivity_path_limit },
+    .{ .case = .resolution_hop_limit, .source = "structural A0 = A1;\nstructural A1 = A2;\nstructural A2 = A3;\nstructural A3 = A4;\nstructural A4 = A5;\nstructural A5 = A6;\nstructural A6 = A7;\nstructural A7 = A8;\nstructural A8 = A9;\nstructural A9 = number;", .probe = .equivalent },
+    .{ .case = .ref_structural_compare, .source = "structural A = Missing;", .probe = .equivalent },
+    .{ .case = .generic_app_structural_compare, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
+    .{ .case = .nominal_structural_compare, .source = "nominal Id = string;", .probe = .equivalent },
+    .{ .case = .generic_declaration_exclusion, .source = "structural Box<T> = T;", .probe = .{ .out_of_slice = .type_declaration } },
+    .{ .case = .unsupported_legacy_spelling_refusal, .source = "type Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
+    .{ .case = .invalid_nominal_base_refusal, .source = "nominal Bad = { value: number };", .probe = .{ .admission_refused = .nominal_base_not_scalar } },
+};
+
+fn requireAlias(env: *const TypeEnv, name: []const u8) !TypeIndex {
+    return env.getTypeAlias(name) orelse error.TestUnexpectedResult;
+}
+
+fn expectRefName(pool: *const TypePool, index: TypeIndex, name: []const u8) !void {
+    try std.testing.expectEqual(TypeTag.t_ref, pool.getTag(index) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings(name, pool.getRefName(index));
+}
+
+fn expectImplicitReadonlyApp(pool: *const TypePool, index: TypeIndex) !void {
+    try std.testing.expectEqual(TypeTag.t_generic_app, pool.getTag(index) orelse return error.TestUnexpectedResult);
+    const app = pool.getGenericAppInfo(index);
+    try expectRefName(pool, app.base, "Readonly");
+    try std.testing.expectEqual(@as(usize, 1), app.args.len);
+    try expectRefName(pool, app.args[0], "Items");
+}
+
+fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) !void {
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    _ = try parser.parse();
+    try parser.type_store.validate();
+    try std.testing.expect(parser.type_store.declarations.items.len > 0);
+
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    module_types.populateModuleTypes(&env, &pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, std.testing.allocator);
+    try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env);
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+
+    switch (case) {
+        .structural_alias, .root_boundary => {
+            try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "Alias"));
+        },
+        .nominal_alias, .exported_nominal_alias => {
+            const alias = try requireAlias(&env, "UserId");
+            try std.testing.expect(pool.isNominal(alias));
+            try std.testing.expectEqualStrings("UserId", pool.nominalName(alias));
+            if (case == .exported_nominal_alias) {
+                try std.testing.expect(parser.type_store.declarations.items[0].export_span != null);
+            }
+        },
+        .exported_structural_alias => {
+            try std.testing.expect(parser.type_store.declarations.items[0].export_span != null);
+            try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "Alias"));
+        },
+        .empty_body_no_alias => try std.testing.expect(env.getTypeAlias("Empty") == null),
+        .present_absent_body_null_alias => {
+            const alias = env.getTypeAlias("Empty");
+            try std.testing.expect(alias != null);
+            try std.testing.expectEqual(null_type_idx, alias.?);
+        },
+        .exact_eager_alias => {
+            try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "A"));
+            try std.testing.expectEqual(pool.idx_string, try requireAlias(&env, "B"));
+        },
+        .forward_deferred_ref, .suffixed_deferred_ref => {
+            const alias = try requireAlias(&env, "B");
+            try expectRefName(&pool, alias, "A");
+            try std.testing.expectEqual(pool.idx_number, env.resolveRef(alias));
+        },
+        .nested_deferred_ref => {
+            const fields = pool.getRecordFields(try requireAlias(&env, "B"));
+            try std.testing.expectEqual(@as(usize, 1), fields.len);
+            try expectRefName(&pool, fields[0].type_idx, "A");
+        },
+        .last_write_alias => try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "A")),
+        .builtin_before_source => try std.testing.expectEqual(
+            try requireAlias(&env, "FetchOptions"),
+            try requireAlias(&env, "Copy"),
+        ),
+        .abi_before_source => try std.testing.expectEqual(
+            try requireAlias(&env, "Request"),
+            try requireAlias(&env, "Copy"),
+        ),
+        .primitive_alias_declaration_root => {
+            try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "string"));
+            try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "Copy"));
+        },
+        .primitive_alias_annotation_root => {
+            const annotation = parser.type_store.annotations.items[0];
+            try std.testing.expectEqual(
+                pool.idx_number,
+                env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
+                    return error.TestUnexpectedResult,
+            );
+        },
+        .primitive_alias_nominal_base => {
+            const alias = try requireAlias(&env, "UserId");
+            try std.testing.expect(pool.isNominal(alias));
+            try std.testing.expectEqual(TypeTag.t_number, pool.getTag(alias) orelse return error.TestUnexpectedResult);
+        },
+        .primitive_alias_nested_child => {
+            const members = pool.getUnionMembers(try requireAlias(&env, "Choice"));
+            try std.testing.expectEqualSlices(TypeIndex, &.{ pool.idx_string, pool.idx_boolean }, members);
+        },
+        .readonly_named_root => {
+            const annotation = parser.type_store.annotations.items[0];
+            const index = env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(TypeTag.t_array, pool.getTag(index) orelse return error.TestUnexpectedResult);
+            try std.testing.expect(pool.isReadonlyArray(index));
+        },
+        .readonly_named_union => {
+            const members = pool.getUnionMembers(try requireAlias(&env, "View"));
+            try std.testing.expectEqual(@as(usize, 2), members.len);
+            try std.testing.expect(pool.isReadonlyArray(members[0]));
+        },
+        .readonly_named_intersection => {
+            const members = pool.getIntersectionMembers(try requireAlias(&env, "View"));
+            try std.testing.expectEqual(@as(usize, 2), members.len);
+            try std.testing.expect(pool.isReadonlyArray(members[0]));
+        },
+        .readonly_named_nullable => {
+            const nullable = try requireAlias(&env, "View");
+            try std.testing.expectEqual(TypeTag.t_nullable, pool.getTag(nullable) orelse return error.TestUnexpectedResult);
+            try std.testing.expect(pool.isReadonlyArray(pool.getNullableInner(nullable)));
+        },
+        .readonly_named_record_terminal, .generic_app_structural_compare => {
+            const fields = pool.getRecordFields(try requireAlias(&env, "View"));
+            try std.testing.expectEqual(@as(usize, 1), fields.len);
+            try expectImplicitReadonlyApp(&pool, fields[0].type_idx);
+        },
+        .readonly_named_tuple_terminal => {
+            const elements = pool.getTupleElements(try requireAlias(&env, "View"));
+            try std.testing.expectEqual(@as(usize, 1), elements.len);
+            try expectImplicitReadonlyApp(&pool, elements[0]);
+        },
+        .named_array_one_suffix => {
+            const view = try requireAlias(&env, "View");
+            try std.testing.expectEqual(TypeTag.t_array, pool.getTag(view) orelse return error.TestUnexpectedResult);
+            try expectRefName(&pool, pool.getArrayElement(view), "Alias");
+            const body = parser.type_store.declarations.items[1].body.present;
+            try std.testing.expectEqualStrings("Alias[]", source[body.raw_span.start..body.semantic_prefix_end]);
+        },
+        .grouped_named_array_repeated_suffix => {
+            const outer = try requireAlias(&env, "View");
+            try std.testing.expectEqual(TypeTag.t_array, pool.getTag(outer) orelse return error.TestUnexpectedResult);
+            const inner = pool.getArrayElement(outer);
+            try std.testing.expectEqual(TypeTag.t_array, pool.getTag(inner) orelse return error.TestUnexpectedResult);
+            try expectRefName(&pool, pool.getArrayElement(inner), "Alias");
+            const body = parser.type_store.declarations.items[1].body.present;
+            try std.testing.expectEqual(body.raw_span.end, body.semantic_prefix_end);
+        },
+        .nominal_same_name_same_base => {
+            const first = pool.addNominalAlias(std.testing.allocator, pool.idx_string, "Id");
+            const second = pool.addNominalAlias(std.testing.allocator, pool.idx_string, "Id");
+            try pool.ensureHealthy();
+            try std.testing.expect(env.isAssignableTo(first, second));
+            try std.testing.expect(env.isAssignableTo(second, first));
+        },
+        .nominal_different_name_same_base => {
+            const left = try requireAlias(&env, "Left");
+            const right = try requireAlias(&env, "Right");
+            try std.testing.expect(!env.isAssignableTo(left, right));
+            try std.testing.expect(!env.isAssignableTo(right, left));
+        },
+        .nominal_to_base => try std.testing.expect(env.isAssignableTo(
+            try requireAlias(&env, "Id"),
+            pool.idx_string,
+        )),
+        .base_to_nominal => try std.testing.expect(!env.isAssignableTo(
+            pool.idx_string,
+            try requireAlias(&env, "Id"),
+        )),
+        .nominal_long_name => {
+            try std.testing.expect(long_nominal_name.len > std.math.maxInt(u8));
+            const alias = try requireAlias(&env, long_nominal_name);
+            try std.testing.expectEqual(@as(usize, std.math.maxInt(u8)), pool.nominalName(alias).len);
+        },
+        .direct_cycle, .union_cycle, .intersection_cycle, .nullable_cycle, .function_cycle => {
+            try std.testing.expect(env.isNonContractiveAlias("A"));
+        },
+        .record_guard, .tuple_guard, .array_guard => {
+            try std.testing.expect(!env.isNonContractiveAlias("A"));
+        },
+        .final_replacement_contractivity => {
+            try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "A"));
+            try std.testing.expect(!env.isNonContractiveAlias("A"));
+        },
+        .resolution_hop_limit => {
+            const a0 = try requireAlias(&env, "A0");
+            try expectRefName(&pool, env.resolveRef(a0), "A9");
+            try std.testing.expectEqual(pool.idx_number, env.resolveRef(try requireAlias(&env, "A1")));
+        },
+        .ref_structural_compare => try expectRefName(&pool, try requireAlias(&env, "A"), "Missing"),
+        .nominal_structural_compare => {
+            const alias = try requireAlias(&env, "Id");
+            try std.testing.expect(pool.isNominal(alias));
+            try std.testing.expectEqualStrings("Id", pool.nominalName(alias));
+        },
+        .repeated_population_additive, .contractivity_path_limit => {
+            try std.testing.expect(env.isNonContractiveAlias("A"));
+        },
+        .root_leading_space_refusal,
+        .after_newline_refusal,
+        .after_semicolon_refusal,
+        .block_left_aligned,
+        .block_indented_refusal,
+        .runtime_structural_collision,
+        .runtime_nominal_collision,
+        .generic_declaration_exclusion,
+        .unsupported_legacy_spelling_refusal,
+        .invalid_nominal_base_refusal,
+        => return error.TestUnexpectedResult,
+    }
+}
+
+fn assertRepeatedPopulationIsAdditive() !void {
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    env.putTypeAlias("A", pool.addRef(std.testing.allocator, "A"));
+    env.finishTypeAliasPopulation();
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expect(env.isNonContractiveAlias("A"));
+    env.putTypeAlias("A", pool.idx_number);
+    env.putTypeAlias("B", pool.addRef(std.testing.allocator, "B"));
+    env.finishTypeAliasPopulation();
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expect(env.isNonContractiveAlias("A"));
+    try std.testing.expect(env.isNonContractiveAlias("B"));
+}
+
+fn assertContractivityPathBoundary(alias_count: usize, expected: bool) !void {
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    var names: [32][4]u8 = undefined;
+    var lengths: [32]usize = undefined;
+    for (0..alias_count) |index| {
+        const name = try std.fmt.bufPrint(&names[index], "A{}", .{index});
+        lengths[index] = name.len;
+    }
+    for (0..alias_count) |index| {
+        const name = names[index][0..lengths[index]];
+        const next_index = (index + 1) % alias_count;
+        const next = names[next_index][0..lengths[next_index]];
+        env.putTypeAlias(name, pool.addRef(std.testing.allocator, next));
+    }
+    env.finishTypeAliasPopulation();
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(expected, env.isNonContractiveAlias("A0"));
+}
+
+fn assertRetainedRuntimeFunction(
+    parser: *const JsParser,
+    source: []const u8,
+    expected_kind: TypeSyntax.DeclarationKind,
+    expected_scope: u16,
+) !void {
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+    const declaration = parser.type_store.declarations.items[0];
+    try std.testing.expectEqual(expected_kind, declaration.kind);
+    try std.testing.expectEqual(expected_scope, declaration.authored_scope);
+    try std.testing.expectEqualStrings("Alias", declaration.name_span.text(source));
+
+    const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var function_index: ?NodeIndex = null;
+    var return_index: ?NodeIndex = null;
+    for (parser.nodes.tags.items, 0..) |tag, index| switch (tag) {
+        .function_decl => {
+            try std.testing.expect(function_index == null);
+            function_index = @intCast(index);
+        },
+        .return_stmt => {
+            try std.testing.expect(return_index == null);
+            return_index = @intCast(index);
+        },
+        else => {},
+    };
+    const function = function_index orelse return error.TestUnexpectedResult;
+    const return_statement = return_index orelse return error.TestUnexpectedResult;
+    const expected_function_offset = std.mem.indexOf(u8, source, "function") orelse
+        return error.TestUnexpectedResult;
+    const expected_return_offset = std.mem.indexOf(u8, source, "return") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, @intCast(expected_function_offset)), parser.nodes.getLoc(function).offset);
+    try std.testing.expectEqual(@as(u32, @intCast(expected_return_offset)), parser.nodes.getLoc(return_statement).offset);
+    const function_data = view.getFunctionOfDecl(function) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(engine.parser.NodeTag.block, view.getTag(function_data.body).?);
+    try std.testing.expect(view.subtreeContains(function_data.body, return_statement));
+}
+
+test "declaration semantic census observes every case" {
+    try std.testing.expectEqual(std.meta.fields(DeclarationCase).len, declaration_fixtures.len);
+    var seen = std.EnumSet(DeclarationCase).initEmpty();
+    for (declaration_fixtures) |fixture| {
+        try std.testing.expect(fixture.source.len > 0);
+        try std.testing.expect(!seen.contains(fixture.case));
+        switch (fixture.probe) {
+            .equivalent => {
+                try assertDeclarationSemanticProperty(fixture.case, fixture.source);
+                try expectEquivalent(fixture.source);
+            },
+            .out_of_slice => |expected| switch (try compare(std.testing.allocator, fixture.source, .collect)) {
+                .out_of_slice => |actual| try std.testing.expectEqual(expected, actual),
+                else => return error.TestUnexpectedResult,
+            },
+            .admission_refused => |expected| switch (try compare(std.testing.allocator, fixture.source, .collect)) {
+                .admission_refused => |actual| try std.testing.expectEqual(expected, actual.first),
+                else => return error.TestUnexpectedResult,
+            },
+            .retained_declarations => |expected| {
+                var parser = try JsParser.initTyped(
+                    std.testing.allocator,
+                    std.testing.allocator,
+                    fixture.source,
+                );
+                defer parser.deinit();
+                switch (fixture.case) {
+                    .block_left_aligned => {
+                        _ = try parser.parse();
+                        try assertRetainedRuntimeFunction(&parser, fixture.source, .structural, 2);
+                    },
+                    .runtime_structural_collision => {
+                        _ = try parser.parse();
+                        try assertRetainedRuntimeFunction(&parser, fixture.source, .structural, 0);
+                    },
+                    .runtime_nominal_collision => {
+                        _ = try parser.parse();
+                        try assertRetainedRuntimeFunction(&parser, fixture.source, .nominal, 0);
+                    },
+                    .block_indented_refusal => {
+                        try std.testing.expectError(error.ParseError, parser.parse());
+                        try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
+                        const errors = parser.errors.getErrors();
+                        try std.testing.expectEqual(@as(usize, 1), errors.len);
+                        try std.testing.expectEqual(engine.parser.ErrorKind.missing_semicolon, errors[0].kind);
+                        const structural = std.mem.indexOf(u8, fixture.source, "structural") orelse
+                            return error.TestUnexpectedResult;
+                        try std.testing.expectEqual(@as(u32, @intCast(structural)), errors[0].location.offset);
+                        try std.testing.expectEqual(
+                            @as(u32, @intCast(structural + "structural".len)),
+                            errors[0].location.end_offset,
+                        );
+                    },
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expectEqual(expected, parser.type_store.declarations.items.len);
+                try parser.type_store.validate();
+            },
+            .repeated_population_additive => {
+                try assertDeclarationSemanticProperty(fixture.case, fixture.source);
+                try expectEquivalent(fixture.source);
+                try assertRepeatedPopulationIsAdditive();
+            },
+            .contractivity_path_limit => {
+                try assertDeclarationSemanticProperty(fixture.case, fixture.source);
+                try expectEquivalent(fixture.source);
+                try assertContractivityPathBoundary(31, true);
+                try assertContractivityPathBoundary(32, false);
+            },
+        }
+        seen.insert(fixture.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(DeclarationCase).len, seen.count());
+}
+
+test "declaration bodies admit numeric leading and blank-line continuations" {
+    const sources = [_][]const u8{
+        "structural Numeric = 1;",
+        "structural LeadingUnion = | number;",
+        "structural LeadingIntersection = & number;",
+        "structural Union = number |\n\n string;",
+        "structural Intersection = number &\n\n { value: string };",
+    };
+    for (sources) |source| try expectEquivalent(source);
+}
+
+test "spaced function arrow continuation absorbs the next runtime line" {
+    const source = "structural A = number = >\nconst value = 1;";
+    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+        switch (try compare(std.testing.allocator, source, mode)) {
+            .equivalent => {},
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+    const body = switch (parser.type_store.declarations.items[0].body) {
+        .absent => return error.TestUnexpectedResult,
+        .present => |present| present,
+    };
+    try std.testing.expectEqualStrings("number = >\nconst value = 1", body.raw_span.text(source));
+    try std.testing.expectEqualStrings(source, parser.type_store.declarations.items[0].full_span.text(source));
+    var runtime_variables: usize = 0;
+    for (parser.nodes.tags.items) |tag| if (tag == .var_decl) {
+        runtime_variables += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 0), runtime_variables);
+}
+
+test "comment-separated declaration terminator remains a runtime semicolon" {
+    const source = "structural A = number\n/*c*/;";
+    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+        switch (try compare(std.testing.allocator, source, mode)) {
+            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+    try std.testing.expect(parser.type_store.declarations.items[0].terminator_span == null);
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    const semicolon = std.mem.indexOfScalar(u8, source, ';') orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, @intCast(semicolon)), errors[0].location.offset);
+    try std.testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 6), errors[0].location.column);
+}
+
+test "nominal refusal recovery preserves a comment-separated semicolon" {
+    const separated = "nominal Bad = void\n/*c*/;";
+    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+        switch (try preflight(std.testing.allocator, separated, mode)) {
+            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
+            .eligible => |eligible| {
+                var unexpected = eligible;
+                unexpected.deinit(std.testing.allocator);
+                return error.TestUnexpectedResult;
+            },
+        }
+    }
+
+    const empty = "nominal Bad =\n;";
+    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+        var checked = switch (try preflight(std.testing.allocator, empty, mode)) {
+            .eligible => |eligible| eligible,
+            .out_of_slice => return error.TestUnexpectedResult,
+        };
+        defer checked.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), checked.diagnostics.items.len);
+        try std.testing.expectEqual(AdmissionKind.nominal_base_not_scalar, checked.diagnostics.items[0].kind);
+    }
+}
+
+test "unterminated trailing declaration comment stays outside the private slice" {
+    const source = "structural A = number;/*";
+    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+        switch (try preflight(std.testing.allocator, source, mode)) {
+            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
+            .eligible => |eligible| {
+                var unexpected = eligible;
+                unexpected.deinit(std.testing.allocator);
+                return error.TestUnexpectedResult;
+            },
+        }
+        switch (try compare(std.testing.allocator, source, mode)) {
+            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "declaration names admit identifier-shaped keyword tokens" {
+    const names = [_][]const u8{ "true", "null", "undefined", "function" };
+    for (names) |name| {
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "structural {s} = number;\nconst value: {s} = 1;",
+            .{ name, name },
+        );
+        defer std.testing.allocator.free(source);
+        try expectEquivalent(source);
+    }
+}
+
+test "declaration exclusions ignore diagnostics from earlier syntax" {
+    const Fixture = struct { source: []const u8, reason: OutOfSliceReason };
+    const unsupported = [_]Fixture{
+        .{ .source = "const first: number any = 1;\nstructural Later = Named<string>;", .reason = .type_declaration },
+        .{ .source = "nominal Bad = number any;\nstructural Later = Named<string>;", .reason = .type_declaration },
+        .{ .source = "nominal Bad = number any;\nfunction later() { return 1; }", .reason = .function_declaration },
+        .{ .source = "structural Later = Named<any>;", .reason = .type_declaration },
+    };
+    for (unsupported) |fixture| {
+        inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+            switch (try compare(std.testing.allocator, fixture.source, mode)) {
+                .out_of_slice => |reason| try std.testing.expectEqual(fixture.reason, reason),
+                else => return error.TestUnexpectedResult,
+            }
+            switch (try preflight(std.testing.allocator, fixture.source, mode)) {
+                .out_of_slice => |reason| try std.testing.expectEqual(fixture.reason, reason),
+                .eligible => |eligible| {
+                    var unexpected = eligible;
+                    unexpected.deinit(std.testing.allocator);
+                    return error.TestUnexpectedResult;
+                },
+            }
+        }
+    }
+
+    var budget: std.ArrayListUnmanaged(u8) = .empty;
+    defer budget.deinit(std.testing.allocator);
+    try budget.appendSlice(std.testing.allocator, "const first: number any = 1;\nstructural Later = ");
+    for (0..TypeSyntax.max_parser_frames + 1) |_| {
+        try budget.appendSlice(std.testing.allocator, "readonly ");
+    }
+    try budget.appendSlice(std.testing.allocator, "number;");
+    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+        switch (try compare(std.testing.allocator, budget.items, mode)) {
+            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.type_declaration, reason),
+            else => return error.TestUnexpectedResult,
+        }
+    }
+}
+
+test "declaration header comments stay outside the private slice" {
+    const sources = [_][]const u8{
+        "structural /*c*/ A = number;",
+        "structural A /*c*/ = number;",
+    };
+    for (sources) |source| {
+        inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+            switch (try preflight(std.testing.allocator, source, mode)) {
+                .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.type_declaration, reason),
+                .eligible => |eligible| {
+                    var unexpected = eligible;
+                    unexpected.deinit(std.testing.allocator);
+                    return error.TestUnexpectedResult;
+                },
+            }
+        }
+    }
+}
+
+test "nominal declaration admission preserves diagnostic order and deduplication" {
+    const Fixture = struct {
+        source: []const u8,
+        expected: []const AdmissionKind,
+    };
+    const fixtures = [_]Fixture{
+        .{ .source = "nominal Bad = void;", .expected = &.{.nominal_base_not_scalar} },
+        .{ .source = "nominal Bad = Array<string>;", .expected = &.{.nominal_base_not_scalar} },
+        .{ .source = "nominal Bad = ReadonlyArray<string>;", .expected = &.{.nominal_base_not_scalar} },
+        .{ .source = "nominal Bad = (value?: string) => number;", .expected = &.{.nominal_base_not_scalar} },
+        .{ .source = "nominal Bad = any;", .expected = &.{.any_type} },
+        .{ .source = "nominal Bad = number any;", .expected = &.{ .any_type, .nominal_base_not_scalar } },
+        .{ .source = "nominal Bad =;", .expected = &.{.nominal_base_not_scalar} },
+        .{ .source = "nominal Bad;", .expected = &.{.nominal_base_not_scalar} },
+    };
+    for (fixtures) |fixture| {
+        var checked = switch (try preflight(std.testing.allocator, fixture.source, .collect)) {
+            .eligible => |eligible| eligible,
+            .out_of_slice => return error.TestUnexpectedResult,
+        };
+        defer checked.deinit(std.testing.allocator);
+        try std.testing.expectEqual(fixture.expected.len, checked.diagnostics.items.len);
+        for (fixture.expected, checked.diagnostics.items) |expected, actual| {
+            try std.testing.expectEqual(expected, actual.kind);
+        }
+    }
+
+    switch (try preflight(
+        std.testing.allocator,
+        "nominal Bad = number any;\nstructural Later = Named<string>;",
+        .compile,
+    )) {
+        .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.type_declaration, reason),
+        .eligible => |eligible| {
+            var unexpected = eligible;
+            unexpected.deinit(std.testing.allocator);
+            return error.TestUnexpectedResult;
+        },
+    }
+
+    var compile_checked = switch (try preflight(
+        std.testing.allocator,
+        "nominal Bad = number any;",
+        .compile,
+    )) {
+        .eligible => |eligible| eligible,
+        .out_of_slice => return error.TestUnexpectedResult,
+    };
+    defer compile_checked.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), compile_checked.diagnostics.items.len);
+    try std.testing.expectEqual(AdmissionKind.any_type, compile_checked.diagnostics.items[0].kind);
+
+    var spaced = switch (try preflight(std.testing.allocator, "nominal Bad   ;", .collect)) {
+        .eligible => |eligible| eligible,
+        .out_of_slice => return error.TestUnexpectedResult,
+    };
+    defer spaced.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), spaced.diagnostics.items.len);
+    try std.testing.expectEqual(AdmissionKind.nominal_base_not_scalar, spaced.diagnostics.items[0].kind);
+    const position = positionOf("nominal Bad   ;", spaced.diagnostics.items[0].span.start);
+    try std.testing.expectEqual(@as(u32, 1), position.line);
+    try std.testing.expectEqual(@as(u32, 15), position.column);
+}
+
+test "declaration comparison closes every allocation failure" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const source =
+                "structural Loop = Loop;\n" ++
+                "nominal Identifier = string;\n" ++
+                "const value: Identifier = \"x\";";
+            switch (try compare(allocator, source, .collect)) {
+                .equivalent => {},
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
+}
+
 test "direct primitive slice matches every legacy primitive" {
     const primitives = [_][]const u8{
         "unknown",
@@ -1462,6 +2583,15 @@ test "direct primitive slice matches every legacy primitive" {
             try expectEquivalent(source);
         }
     }
+}
+
+test "simple structural declaration is runtime neutral and lowers directly" {
+    try expectEquivalent("structural Alias = number; const value: Alias = 1;");
+    try expectEquivalent("structural Alias = number;");
+}
+
+test "simple nominal declaration is runtime neutral and lowers directly" {
+    try expectEquivalent("nominal UserId = string; const value: UserId = \"x\";");
 }
 
 test "direct compound slice matches an ordered record with arrays" {
@@ -2069,10 +3199,10 @@ test "out of slice census covers every private reason" {
         .{ .reason = .function_declaration, .source = "function f() {} const x: number = 1;" },
         .{ .reason = .import_declaration, .source = "import { x } from \"m\"; const y: number = 1;" },
         .{ .reason = .export_declaration, .source = "export const x: number = 1;" },
-        .{ .reason = .type_declaration, .source = "structural X = number; const x: number = 1;" },
+        .{ .reason = .type_declaration, .source = "structural X<T> = T; const x: number = 1;" },
         .{ .reason = .multiple_bindings, .source = "const { x } = y; const z: number = 1;" },
         .{ .reason = .annotation_count, .source = "const x: number = 1; const y: number = 2;" },
-        .{ .reason = .compound_annotation, .source = "const x: Named[] = y;" },
+        .{ .reason = .compound_annotation, .source = "const x: Named<number> = y;" },
         .{ .reason = .malformed_annotation, .source = "const x: (number = 1;" },
         .{ .reason = .unsupported_annotation_position, .source = "const x = a: b; const y: number = 1;" },
         .{ .reason = .assertion_syntax, .source = "const x: number = y as number;" },
