@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Reset implementation](2026-10-14-reset-implementation-plan.md) | Active 2026-10-15; phase evidence is in the [worklog](2026-10-15-reset-worklog.md) | Owner reviewed the plan and authorized implementation with subagents and Astra verification |
 | [Zig agent spine](2026-10-14-agent-spine-plan.md) | Complete 2026-10-14; full local gate passed, with evidence in the [worklog](2026-10-14-agent-spine-worklog.md) | Owner selected Option A and approved the full local gate |
 | [Plan 005 Phase 3: language and orchestration removal](2026-10-12-1444-refactor-feature-removal-phase-three-plan.md) | Active 2026-10-12; reviewed sequence and evidence in the [worklog](2026-10-12-feature-removal-phase-3-worklog.md) | Owner authorized Phase 3 and its complete DeepSeek recording with "go ahead with phase 3" |
 | [Plan 005 Phase 2: runtime and artifact removal](2026-10-12-1109-refactor-feature-removal-phase-two-plan.md) | Complete 2026-10-12; scope, decisions, and evidence in the [worklog](2026-10-12-feature-removal-phase-2-worklog.md) | Owner selected Decision 10, "Execute Phase 2" |

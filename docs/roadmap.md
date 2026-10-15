@@ -9,6 +9,10 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 
 ## Milestones
 
+The [reset implementation plan](plans/2026-10-14-reset-implementation-plan.md) owns the active reset design, phase order, and acceptance.
+The owner approved implementation on 2026-10-15.
+The [reset worklog](plans/2026-10-15-reset-worklog.md) records current work and verification evidence.
+
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
 

@@ -5382,6 +5382,69 @@ test "runCheckOnlyFromSource refuses raw JSX in TypeScript with ZTS002" {
     try std.testing.expect(result.contract == null);
 }
 
+test "CHECK reports collected strip refusals before an earlier parse failure" {
+    const source =
+        \\const broken = ;
+        \\const asserted = "asserted" as string;
+        \\const constrained = "constrained" satisfies string;
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "mixed-errors.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+    try std.testing.expectEqual(@as(u32, 2), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS042", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("ZTS043", result.json_diagnostics.items[1].code);
+    try std.testing.expect(result.contract == null);
+
+    try std.testing.expectError(error.UnsupportedAsAssertion, compileHandler(std.testing.allocator, source, "mixed-errors.ts", .{}));
+}
+
+test "CHECK keeps the current tolerated annotation text suffix" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const text: string tolerated_suffix = "ready";
+        \\  return Response.text(text);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "annotation-suffix.ts", .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    const expected = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    try std.testing.expectEqual(expected, result.stages_run);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    try std.testing.expect(result.contract == null);
+}
+
+test "CHECK retains the recognized type before a tolerated annotation suffix" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const text: string tolerated_suffix = 1;
+        \\  return Response.text(text);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "annotation-suffix.ts", .{
+        .json_mode = true,
+        .skip_contract = true,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    const expected = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    try std.testing.expectEqual(expected, result.stages_run);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS200", result.json_diagnostics.items[0].code);
+    try std.testing.expect(result.contract == null);
+}
+
 test "runCheckOnlyFromSource treats declared comptime as an ordinary function" {
     const source =
         \\function comptime(value: string): string { return value; }

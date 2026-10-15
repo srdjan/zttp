@@ -3536,6 +3536,27 @@ const normalize_cases = [_]NormalizeCase{
     },
 };
 
+test "normalize keeps exact typed source bytes at its public boundary" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\        const message: { text :  string } = {text:'ready'};
+        \\        return Response.json(message);
+        \\}
+    ;
+    const expected =
+        \\function handler(req: Request): Response {
+        \\  const message: { text :  string } = { text: "ready" };
+        \\  return Response.json(message);
+        \\}
+        \\
+    ;
+    var result = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(result.printed);
+    try std.testing.expectEqualStrings(expected, result.canonical_source);
+}
+
 test "normalize is byte-idempotent over every rewrite" {
     for (normalize_cases) |case| {
         var once = try normalizeSource(std.testing.allocator, case.source, "handler.ts");
