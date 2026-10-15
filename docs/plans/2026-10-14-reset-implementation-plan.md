@@ -719,6 +719,123 @@ A failed selected verifier or flow attempt must prevent later contract extractio
 An unattempted selected flow remains available because the contract-only tools path extracts before flow analysis.
 Independent allocation-failure probes will restore allocation before checking refusal after each selected pass fails.
 
+### U4 implementation constraints
+
+Path analysis currently uses no manifest registry, type environment, injected module facts, or imported effect rows.
+Its completed facts must retain that identity.
+Contract facts with different inputs cannot replace the path result.
+The session will prepare path facts lazily at the existing path phase.
+The existing imported fault scan will finish before effect production starts.
+
+The immutable result will own function names, function metadata, separate call and value edges, and export results.
+The result will precompute recursion reachability without retaining analyzer or parser pointers.
+The original `row.recursive` flag must remain separate from reachability.
+Reachability starts with existing recursive flags and propagates only through call edges.
+Function-value edges can carry effects without establishing recursion.
+
+`PathGenerator` will require an explicit complete or unavailable result.
+Analyzer or snapshot failure will publish unavailable and preserve conservative recursion handling.
+Path generation and reader failures will retain their existing handling.
+A complete result with no matching body will remain false.
+Inline route bodies will acquire no synthetic function rows.
+
+The session will attempt path analysis once and own any completed result through generator cleanup.
+Standalone callers will own explicit facts without adding full type or strict analysis.
+Returned fixtures must keep borrowed fact addresses stable.
+Each phase will retain the separate handler and route roots, costs, coverage, and reader observations.
+
+The implementation review required read-only slices for published rows, edges, export entries, and export names.
+The recursion fixture now checks every expected function name before checking projected results.
+The review also restored the lower-level analyzer's allocation-free false result for an unmatched body.
+A public failure probe checks that behavior with a nonempty analyzer.
+The review establishes no performance improvement for the propagation algorithm.
+
+### U5 preparation findings
+
+Contract extraction needs its own effect result when its inputs differ from the path profile.
+Its identity includes IR, atoms, module facts, registry, type environment, and imported effects.
+Imported effects arrive after session completion and before extraction.
+Custom extraction must build its result after the callback, with the callback's type environment and contract facts.
+Contract effect failure must fail extraction instead of publishing the path profile's unavailable outcome.
+
+`ContractBuilder` currently runs an analyzer, two handler reachability walks, a separate summary walk, and export projection.
+Handler reachability includes call edges and function-value edges.
+Recursion reachability includes only call edges.
+Capability attribution must retain direct handler violations, reachable helper violations, and lower-bound refusal.
+`scanCallSites` must remain because it extracts concrete resources, routes, schemas, flags, and diagnostic locations.
+
+The initial review overstated summary redundancy.
+The first function named `handler` supplies effect rows and helper reachability.
+The selected top-level global handler supplies the legacy summary.
+An earlier block-local handler can make those identities differ.
+The selected summary then supplies write, cache, call, and unknown facts that the first-name row does not contain.
+
+The old summary also records bare ambient `fetchSync` as egress, while effect inference records only a lower bound.
+Named callback arguments do not enter that summary, while inline callback bodies can enter it.
+Nested local function targets can lack ordinary effect rows.
+Raw generic slots and partner slots take precedence over raw user-function slots in that traversal.
+U5 must preserve these distinctions in completed facts before removing builder-owned summary production.
+Possible egress must demote properties without inventing a concrete outbound endpoint.
+The no-handler fallback must retain its current classification of imported functions, including unused imports.
+
+Reference lookups must accept `ir.BindingRef` and retain each consumer's existing eligibility and resolution filter.
+Effect inference already excludes local, argument, and upvalue references from import matching.
+Some contract, schema, authentication, and router consumers instead match raw slots.
+The initial proposal to guard every consumer would change existing parsed-source output and is rejected under R1 (public compatibility).
+Those consumers must retain explicit legacy slot matching within this reset.
+Captured module imports remain eligible where the current consumer admits them.
+Declaration identity remains distinct from import eligibility and includes scope where the existing lookup uses scope.
+Export copies must remain valid after session cleanup.
+
+An existing fixture imports `parseBearer as length` and calls a local function whose slot equals that import slot.
+Source review shows that the current contract sets bearer authentication metadata through that slot match.
+A baseline assertion must confirm this behavior before the accessor migration.
+The reset will centralize that policy instead of silently correcting it.
+
+The factory can retain a separate legacy summary facet when ordinary rows answer a different question.
+The builder must borrow completed results and stop producing its own analyzer, summary, export table, and repeated reachability walks.
+This requirement establishes one result owner, not one physical AST traversal.
+
+The accepted U5 design keeps a completed `ContractEffectSummary` facet inside `EffectFacts`.
+The facet retains the exact scalar summary, selected-handler identity, and first-name handler reachability.
+The producer releases traversal scratch before publishing the facet.
+The path profile marks the contract facet as unrequested.
+A completed no-handler facet remains different from an unrequested facet.
+The builder requires completed contract facts and combines the no-handler summary with its existing concrete-egress scan.
+Astra accepted this revised ownership design through source review.
+Baseline characterizations remain necessary before implementation.
+
+### U6 preparation findings
+
+`agent_protocol.zig` currently observes the root separately for graph identity, digest, and several operations.
+Existing source APIs cover CHECK, canonicalization, normalization, and edit simulation.
+`canonicalize.zig` needs a source-based repair simulation helper to remove its internal root reread.
+The public CLI helper can retain its file read and delegate to that source helper.
+
+CHECK can use `runCheckOnlyFromSourceWithOptions` with its current JSON mode, null SQL schema path, and other defaults.
+Canonicalization can use `collectFromSource`.
+Normalization can use `normalizeSource` with the current layout and schema defaults.
+Repair simulation must retain proposed content as `content` and captured bytes as `before`.
+
+A captured root owner can retain relative path, absolute path, disk bytes, effective source, digest, and graph.
+The effective source borrows disk bytes or a valid verify content override.
+Only a string content override changes verify source; other content values remain ignored.
+Verify must still read disk first and preserve the current missing-file refusal.
+Graph identity and the stale guard must use the same effective source as analysis.
+
+Current graph construction reads the root before validating its extension.
+Missing or oversized JavaScript roots therefore produce `EntryUnreadable`, while readable JavaScript roots produce `UnsupportedSourceExtension`.
+Root read failures, including allocation failure during that read, map to `EntryUnreadable` before operation dispatch.
+Later allocation failures retain their existing handling.
+The captured reader must retain `module_graph_record.max_source_bytes` and leave extension validation to `buildWithEntrySource`.
+
+Imported read failures remain graph rejections and do not become universal root refusals.
+The source capture reader must not become CHECK's import reader.
+Separate dependency graph, summary, and fault observations remain unchanged.
+Normalize write refusal remains before stale checking and operation dispatch.
+A controlled changing-reader test must bind the digest, graph hash, diagnostics, and contract to captured bytes.
+The test must also confirm that later disk bytes differ from those captured bytes.
+
 ## Definition of Done
 
 One stable pipeline owner manages each module analysis lifetime.

@@ -250,6 +250,9 @@ pub const PathGenerator = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
     atoms: ?*atom_table.AtomTable,
+    /// Borrowed through generator cleanup. Unavailable facts make recursion
+    /// conservative without starting a private analyzer.
+    effect_facts: effect_inference.EffectFactsRef,
 
     /// Binding tracking: local slot -> module function metadata.
     module_fn_bindings: std.AutoHashMapUnmanaged(u16, FnMeta),
@@ -473,11 +476,17 @@ pub const PathGenerator = struct {
         bound: contract_types.Bound,
     };
 
-    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*atom_table.AtomTable) PathGenerator {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*atom_table.AtomTable,
+        effect_facts: effect_inference.EffectFactsRef,
+    ) PathGenerator {
         return .{
             .allocator = allocator,
             .ir_view = ir_view,
             .atoms = atoms,
+            .effect_facts = effect_facts,
             .module_fn_bindings = .empty,
             .var_inits = .empty,
             .req_binding_key = null,
@@ -849,32 +858,24 @@ pub const PathGenerator = struct {
     /// claims below can refuse to over-claim over a call graph this generator
     /// never walks into.
     fn detectRecursionReach(self: *PathGenerator, handler_func: NodeIndex) !void {
-        // The analyzer collects functions by walking down from its argument, so
-        // it needs the program root: handed `handler_func` it would never see
-        // the sibling declarations the handler calls.
-        const root = self.findProgramRoot() orelse {
+        // The facts cover a complete program. Keep the structural guard that
+        // made a missing root conservative before the facts were projected.
+        _ = self.findProgramRoot() orelse {
             self.reaches_recursion = true;
             return;
         };
 
-        var analyzer = effect_inference.Analyzer.init(self.allocator, self.ir_view, self.atoms);
-        defer analyzer.deinit();
-        // Fail closed: an analysis that could not run is not evidence that the
-        // handler is recursion-free.
-        analyzer.analyze(root) catch {
-            self.reaches_recursion = true;
-            return;
-        };
         // `reachesRecursion` keys on the body: callers hold the
-        // `.function_expr` while the analyzer records the `.function_decl`, and
-        // the body is the node both agree on.
+        // `.function_expr` while the projection records the `.function_decl`.
+        // The body is the node both agree on.
         const handler_fn = self.ir_view.getFunction(handler_func) orelse {
             self.reaches_recursion = true;
             return;
         };
-        // Same reason as above: a walk that could not allocate found no cycle
-        // because it never looked.
-        const root_reaches_recursion = analyzer.reachesRecursion(handler_fn.body) catch true;
+        const root_reaches_recursion = switch (self.effect_facts) {
+            .complete => |facts| facts.reachesRecursion(handler_fn.body),
+            .unavailable => true,
+        };
         self.reaches_recursion = self.reaches_recursion or root_reaches_recursion;
     }
 
@@ -2930,10 +2931,12 @@ test "scanImports tracks virtual module functions with binding names" {
     parser.setAtomTable(&atoms);
     defer parser.deinit();
 
-    _ = try parser.parse();
+    const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    var generator = PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
+    var generator = PathGenerator.init(allocator, ir_view, &atoms, .{ .complete = &effect_facts });
     defer generator.deinit();
     try generator.scanImports();
 
@@ -2963,6 +2966,7 @@ const manifest_registry_mod = @import("manifest_registry.zig");
 const PathGeneratorFixture = struct {
     parser: parser_mod.JsParser,
     atoms: atom_table.AtomTable,
+    effect_facts: *effect_inference.EffectFacts,
     generator: PathGenerator,
     /// The scan answer given to the generator, owned here.
     scan_entries: []PathGenerator.ImportScanEntry = &.{},
@@ -2970,6 +2974,8 @@ const PathGeneratorFixture = struct {
     fn deinit(self: *PathGeneratorFixture) void {
         std.testing.allocator.free(self.scan_entries);
         self.generator.deinit();
+        self.effect_facts.deinit(std.testing.allocator);
+        std.testing.allocator.destroy(self.effect_facts);
         self.parser.deinit();
         self.atoms.deinit();
     }
@@ -3058,8 +3064,15 @@ fn expectGenerationFailsOnFirstAllocation(source: []const u8) !void {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
     var failing = FailNextAllocation.init(allocator);
-    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
+    var generator = PathGenerator.init(
+        failing.allocator(),
+        ir_view,
+        &atoms,
+        .{ .complete = &effect_facts },
+    );
     defer generator.deinit();
 
     try std.testing.expectError(error.OutOfMemory, generator.generate(handler_fn));
@@ -3096,10 +3109,17 @@ fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
     const function = ir_view.getFunction(handler_fn) orelse return error.HandlerNotFound;
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
 
     var failing = FailNextAllocation.init(allocator);
     failing.armed = false;
-    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
+    var generator = PathGenerator.init(
+        failing.allocator(),
+        ir_view,
+        &atoms,
+        .{ .complete = &effect_facts },
+    );
     defer generator.deinit();
     try generator.scanImports();
     try generator.findHandlerBindings(handler_fn);
@@ -3147,10 +3167,17 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
 
     var failing = FailNextAllocation.init(allocator);
     failing.armed = false;
-    var generator = PathGenerator.init(failing.allocator(), ir_view, &atoms);
+    var generator = PathGenerator.init(
+        failing.allocator(),
+        ir_view,
+        &atoms,
+        .{ .complete = &effect_facts },
+    );
     defer generator.deinit();
     try generator.scanImports();
     try generator.findHandlerBindings(handler_fn);
@@ -3176,8 +3203,9 @@ fn generateWithAllocator(
     ir_view: IrView,
     atoms: *atom_table.AtomTable,
     handler_fn: NodeIndex,
+    effect_facts: *const effect_inference.EffectFacts,
 ) !void {
-    var generator = PathGenerator.init(allocator, ir_view, atoms);
+    var generator = PathGenerator.init(allocator, ir_view, atoms, .{ .complete = effect_facts });
     defer generator.deinit();
     try generator.generate(handler_fn);
 }
@@ -3202,11 +3230,13 @@ test "generate cleans every fatal allocation failure" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
 
     try std.testing.checkAllAllocationFailures(
         allocator,
         generateWithAllocator,
-        .{ ir_view, &atoms, handler_fn },
+        .{ ir_view, &atoms, handler_fn, &effect_facts },
     );
 }
 
@@ -3341,7 +3371,11 @@ fn generateFixtureScanned(
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
 
-    var generator = PathGenerator.init(allocator, ir_view, &atoms);
+    const effect_facts = try allocator.create(effect_inference.EffectFacts);
+    errdefer allocator.destroy(effect_facts);
+    effect_facts.* = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    errdefer effect_facts.deinit(allocator);
+    var generator = PathGenerator.init(allocator, ir_view, &atoms, .{ .complete = effect_facts });
     errdefer generator.deinit();
     var entries: std.ArrayList(PathGenerator.ImportScanEntry) = .empty;
     errdefer entries.deinit(allocator);
@@ -3360,6 +3394,7 @@ fn generateFixtureScanned(
     return .{
         .parser = parser,
         .atoms = atoms,
+        .effect_facts = effect_facts,
         .generator = generator,
         .scan_entries = try entries.toOwnedSlice(allocator),
     };
@@ -3453,6 +3488,45 @@ test "non-recursive helper keeps its constant cost bound" {
 
     try std.testing.expect(envelope.total.class() != .unbounded);
     try std.testing.expect(envelope.exhaustive);
+}
+
+test "unavailable effect facts conservatively report recursion" {
+    const allocator = std.testing.allocator;
+    var parser = try parser_mod.JsParser.init(allocator,
+        \\export function handler(req) { return Response.json(true); }
+    );
+    defer parser.deinit();
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var generator = PathGenerator.init(allocator, ir_view, &atoms, .unavailable);
+    defer generator.deinit();
+    try generator.generate(handler_fn);
+
+    try std.testing.expectEqual(PathGenerator.Coverage.recursion, generator.coverage());
+    var envelope = try generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+    try std.testing.expectEqual(contract_types.BoundClass.unbounded, envelope.total.class());
+}
+
+test "a function holder lower bound does not imply recursion" {
+    const allocator = std.testing.allocator;
+    var fixture = try generateFixture(allocator,
+        \\function work(value) { return value; }
+        \\const operations = { run: work };
+        \\export function handler(req) { return Response.json(operations.run(req.id)); }
+    );
+    defer fixture.deinit();
+
+    const handler_row = fixture.effect_facts.lookup("handler") orelse
+        return error.FunctionNotFound;
+    try std.testing.expect(handler_row.lower_bound);
+    try std.testing.expectEqual(PathGenerator.Coverage.exhaustive, fixture.generator.coverage());
 }
 
 test "envelope is not exhaustive when a loop body is summarized" {
@@ -3879,10 +3953,24 @@ test "the import scan maps builtin slots to function metadata in both atom modes
         var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
         if (use_atoms) parser.setAtomTable(&atoms);
-        _ = try parser.parse();
+        const root = try parser.parse();
         const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-        var gen = PathGenerator.init(allocator, ir_view, if (use_atoms) &atoms else null);
+        const atom_source: ?*atom_table.AtomTable = if (use_atoms) &atoms else null;
+        var effect_facts = try effect_inference.buildEffectFacts(
+            allocator,
+            ir_view,
+            atom_source,
+            root,
+            .{},
+        );
+        defer effect_facts.deinit(allocator);
+        var gen = PathGenerator.init(
+            allocator,
+            ir_view,
+            atom_source,
+            .{ .complete = &effect_facts },
+        );
         defer gen.deinit();
         try gen.scanImports();
 
@@ -3908,10 +3996,12 @@ test "this generator skips imports from unresolved modules" {
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
-    _ = try parser.parse();
+    const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    var gen = PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
+    var gen = PathGenerator.init(allocator, ir_view, &atoms, .{ .complete = &effect_facts });
     defer gen.deinit();
     try gen.scanImports();
 
@@ -4172,7 +4262,9 @@ test "a partner import is unseen even when an answer calls it clean" {
     defer facts.deinit();
     try std.testing.expectEqual(module_facts_mod.ImportRecord.Resolution.partner, facts.imports.items[0].resolution);
 
-    var generator = PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
+    var generator = PathGenerator.init(allocator, ir_view, &atoms, .{ .complete = &effect_facts });
     defer generator.deinit();
     generator.facts = &facts;
     const clean = [_]PathGenerator.ImportScanEntry{.{ .slot = facts.imports.items[0].slot, .scan = .clean }};
@@ -4613,11 +4705,13 @@ test "generate cleans every fatal allocation failure through short-circuit cases
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
 
     try std.testing.checkAllAllocationFailures(
         allocator,
         generateWithAllocator,
-        .{ ir_view, &atoms, handler_fn },
+        .{ ir_view, &atoms, handler_fn, &effect_facts },
     );
 }
 

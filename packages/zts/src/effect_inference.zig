@@ -109,13 +109,13 @@ pub const ImportedEffect = struct {
 };
 
 const ExportEffectEntry = struct {
-    name: []u8,
+    name: []const u8,
     effect: ExportEffect,
 };
 
 /// An owned table of visible export results.
 pub const ExportEffects = struct {
-    entries: []ExportEffectEntry = &.{},
+    entries: []const ExportEffectEntry = &.{},
 
     /// Return the named result. An absent name is a blocked result.
     pub fn lookup(self: *const ExportEffects, name: []const u8) ExportEffect {
@@ -147,6 +147,82 @@ pub const FunctionEffect = struct {
     /// True when the function declaration sits under an `export`. The
     /// opt-in docs mode asks exported helpers to carry explicit capsules.
     exported: bool = false,
+};
+
+/// Configuration for one immutable effect-fact projection.
+///
+/// Every pointer is borrowed only while `buildEffectFacts` runs. The returned
+/// facts own all data that their query methods expose.
+pub const EffectFactsOptions = struct {
+    manifest_registry: ?*const manifest_registry_mod.Registry = null,
+    module_facts: ?*const module_facts_mod.ModuleFacts = null,
+    type_env: ?*const type_env_mod.TypeEnv = null,
+    imported_effects: []const ImportedEffect = &.{},
+};
+
+/// One completed, immutable effect analysis.
+///
+/// The projection owns function names, both edge stores, export results, and
+/// recursion reachability. It borrows no analyzer, parser, atom, or scratch
+/// storage. Query methods allocate nothing.
+pub const EffectFacts = struct {
+    functions: []const FunctionEffect = &.{},
+    callee_starts: []const u32 = &.{},
+    callee_storage: []const usize = &.{},
+    value_starts: []const u32 = &.{},
+    value_storage: []const usize = &.{},
+    export_effects: ExportEffects = .{},
+    reaches_recursion: []const bool = &.{},
+
+    pub fn deinit(self: *EffectFacts, allocator: std.mem.Allocator) void {
+        for (self.functions) |function| allocator.free(function.name);
+        if (self.functions.len > 0) allocator.free(self.functions);
+        if (self.callee_starts.len > 0) allocator.free(self.callee_starts);
+        if (self.callee_storage.len > 0) allocator.free(self.callee_storage);
+        if (self.value_starts.len > 0) allocator.free(self.value_starts);
+        if (self.value_storage.len > 0) allocator.free(self.value_storage);
+        self.export_effects.deinit(allocator);
+        if (self.reaches_recursion.len > 0) allocator.free(self.reaches_recursion);
+        self.* = .{};
+    }
+
+    pub fn lookup(self: *const EffectFacts, name: []const u8) ?EffectRow {
+        for (self.functions) |function| {
+            if (std.mem.eql(u8, function.name, name)) return function.row;
+        }
+        return null;
+    }
+
+    pub fn all(self: *const EffectFacts) []const FunctionEffect {
+        return self.functions;
+    }
+
+    pub fn calleesOf(self: *const EffectFacts, function_index: usize) []const usize {
+        const start = self.callee_starts[function_index];
+        const end = self.callee_starts[function_index + 1];
+        return self.callee_storage[start..end];
+    }
+
+    pub fn valueRefsOf(self: *const EffectFacts, function_index: usize) []const usize {
+        const start = self.value_starts[function_index];
+        const end = self.value_starts[function_index + 1];
+        return self.value_storage[start..end];
+    }
+
+    /// Return false when `body_node` does not name a projected function.
+    pub fn reachesRecursion(self: *const EffectFacts, body_node: NodeIndex) bool {
+        for (self.functions, 0..) |function, index| {
+            if (function.body_node == body_node) return self.reaches_recursion[index];
+        }
+        return false;
+    }
+};
+
+/// Path consumers receive either a complete immutable projection or an
+/// explicit conservative outcome.
+pub const EffectFactsRef = union(enum) {
+    complete: *const EffectFacts,
+    unavailable,
 };
 
 const ImportedFunction = struct {
@@ -349,6 +425,16 @@ pub const Analyzer = struct {
     /// Copy every visible export and its final transitive effect result into
     /// an owned table. Call this only after `analyze` completes.
     pub fn exportEffects(self: *const Analyzer) !ExportEffects {
+        const reaches_recursion = try self.recursionReachability();
+        defer self.allocator.free(reaches_recursion);
+        return self.exportEffectsWithReachability(reaches_recursion);
+    }
+
+    fn exportEffectsWithReachability(
+        self: *const Analyzer,
+        reaches_recursion: []const bool,
+    ) !ExportEffects {
+        std.debug.assert(reaches_recursion.len == self.functions.items.len);
         var count: usize = 0;
         for (self.functions.items) |fe| {
             if (fe.exported) count += 1;
@@ -365,10 +451,10 @@ pub const Analyzer = struct {
             self.allocator.free(entries);
         }
 
-        for (self.functions.items) |fe| {
+        for (self.functions.items, 0..) |fe, function_index| {
             if (!fe.exported) continue;
             var row = fe.row;
-            row.recursive = try self.reachesRecursion(fe.body_node);
+            row.recursive = reaches_recursion[function_index];
             entries[filled] = .{
                 .name = try self.allocator.dupe(u8, fe.name),
                 .effect = .{ .callable = row },
@@ -378,7 +464,7 @@ pub const Analyzer = struct {
         for (self.module_bindings.items) |mb| {
             if (!mb.exported) continue;
             const name = mb.name orelse continue;
-            const effect = try self.moduleExportEffect(&mb);
+            const effect = self.moduleExportEffect(&mb, reaches_recursion);
             entries[filled] = .{
                 .name = try self.allocator.dupe(u8, name),
                 .effect = effect,
@@ -389,19 +475,53 @@ pub const Analyzer = struct {
         return .{ .entries = entries };
     }
 
-    fn moduleExportEffect(self: *const Analyzer, mb: *const ModuleBinding) !ExportEffect {
+    fn moduleExportEffect(
+        self: *const Analyzer,
+        mb: *const ModuleBinding,
+        reaches_recursion: []const bool,
+    ) ExportEffect {
         if (mb.blocked_value) return .blocked;
         if (mb.holds) {
             var row = mb.row;
             for (mb.users.keys()) |user_idx| {
                 const user = self.functions.items[user_idx];
                 row = row.merge(user.row);
-                if (try self.reachesRecursion(user.body_node)) row.recursive = true;
+                if (reaches_recursion[user_idx]) row.recursive = true;
             }
             return .{ .callable = row };
         }
         if (mb.safe_data) return .{ .data = mb.row };
         return .blocked;
+    }
+
+    /// Compute recursion reachability for every function together.
+    ///
+    /// Each function starts with its own recursion flag. Reverse propagation
+    /// follows call edges only. Function-value references never create
+    /// recursion.
+    fn recursionReachability(self: *const Analyzer) ![]bool {
+        const function_count = self.functions.items.len;
+        const reaches_recursion = try self.allocator.alloc(bool, function_count);
+        errdefer self.allocator.free(reaches_recursion);
+        for (self.functions.items, 0..) |function, index| {
+            reaches_recursion[index] = function.row.recursive;
+        }
+
+        var remaining = function_count;
+        while (remaining > 0) : (remaining -= 1) {
+            var changed = false;
+            for (0..function_count) |caller_index| {
+                if (reaches_recursion[caller_index]) continue;
+                for (self.calleesOf(caller_index)) |callee_index| {
+                    if (!reaches_recursion[callee_index]) continue;
+                    reaches_recursion[caller_index] = true;
+                    changed = true;
+                    break;
+                }
+            }
+            if (!changed) break;
+        }
+        return reaches_recursion;
     }
 
     /// Whether the function whose body is `body_node` is recursive or can reach
@@ -425,39 +545,11 @@ pub const Analyzer = struct {
     /// reporting its silence as a clean result is the fail-open this doc
     /// comment used to claim it avoided.
     pub fn reachesRecursion(self: *const Analyzer, body_node: NodeIndex) !bool {
-        const fn_count = self.functions.items.len;
-        if (fn_count == 0) return false;
-
-        var start_idx: usize = 0;
-        while (start_idx < fn_count) : (start_idx += 1) {
-            if (self.functions.items[start_idx].body_node == body_node) break;
-        } else return false;
-
-        const visited = try self.allocator.alloc(bool, fn_count);
-        defer self.allocator.free(visited);
-        @memset(visited, false);
-
-        const stack = try self.allocator.alloc(usize, fn_count);
-        defer self.allocator.free(stack);
-
-        var depth: usize = 1;
-        stack[0] = start_idx;
-        visited[start_idx] = true;
-
-        while (depth > 0) {
-            depth -= 1;
-            const idx = stack[depth];
-            if (self.functions.items[idx].row.recursive) return true;
-
-            const start_off = self.callee_starts.items[idx];
-            const count = self.calleeCount(idx);
-            for (0..count) |k| {
-                const callee_idx = self.callee_storage.items[start_off + k];
-                if (visited[callee_idx]) continue;
-                visited[callee_idx] = true;
-                stack[depth] = callee_idx;
-                depth += 1;
-            }
+        for (self.functions.items, 0..) |function, index| {
+            if (function.body_node != body_node) continue;
+            const reaches_recursion = try self.recursionReachability();
+            defer self.allocator.free(reaches_recursion);
+            return reaches_recursion[index];
         }
         return false;
     }
@@ -1738,6 +1830,64 @@ pub const Analyzer = struct {
     }
 };
 
+/// Run one analyzer and project its completed immutable facts.
+pub fn buildEffectFacts(
+    allocator: std.mem.Allocator,
+    ir_view: IrView,
+    atoms: ?*atom_table.AtomTable,
+    root: NodeIndex,
+    options: EffectFactsOptions,
+) !EffectFacts {
+    var analyzer = Analyzer.initWithManifestRegistry(
+        allocator,
+        ir_view,
+        atoms,
+        options.manifest_registry,
+    );
+    defer analyzer.deinit();
+    analyzer.facts = options.module_facts;
+    analyzer.type_env = options.type_env;
+    analyzer.imported_effects = options.imported_effects;
+    try analyzer.analyze(root);
+    return projectEffectFacts(allocator, &analyzer);
+}
+
+fn projectEffectFacts(
+    allocator: std.mem.Allocator,
+    analyzer: *const Analyzer,
+) !EffectFacts {
+    var result: EffectFacts = .{};
+    errdefer result.deinit(allocator);
+
+    result.functions = try cloneFunctionEffects(allocator, analyzer.functions.items);
+    result.callee_starts = try allocator.dupe(u32, analyzer.callee_starts.items);
+    result.callee_storage = try allocator.dupe(usize, analyzer.callee_storage.items);
+    result.value_starts = try allocator.dupe(u32, analyzer.value_starts.items);
+    result.value_storage = try allocator.dupe(usize, analyzer.value_storage.items);
+    result.reaches_recursion = try analyzer.recursionReachability();
+    result.export_effects = try analyzer.exportEffectsWithReachability(result.reaches_recursion);
+    return result;
+}
+
+fn cloneFunctionEffects(
+    allocator: std.mem.Allocator,
+    source: []const FunctionEffect,
+) ![]FunctionEffect {
+    if (source.len == 0) return &.{};
+    const functions = try allocator.alloc(FunctionEffect, source.len);
+    var copied: usize = 0;
+    errdefer {
+        for (functions[0..copied]) |function| allocator.free(function.name);
+        allocator.free(functions);
+    }
+    for (source, 0..) |function, index| {
+        functions[index] = function;
+        functions[index].name = try allocator.dupe(u8, function.name);
+        copied += 1;
+    }
+    return functions;
+}
+
 /// Whether `binding.slot` is a name atom rather than a function-local index.
 /// Only a module-level binding (`.global`) or a reference to one that is not
 /// declared yet (`.undeclared_global`) keys on the atom; `.local`, `.argument`,
@@ -2088,6 +2238,86 @@ test "export projection closes every allocation failure" {
     try testing.checkAllAllocationFailures(testing.allocator, Projection.run, .{});
 }
 
+test "effect facts own immutable call and recursion results" {
+    const allocator = testing.allocator;
+    var effect_facts: EffectFacts = undefined;
+    {
+        var atoms = atom_table.AtomTable.init(allocator);
+        defer atoms.deinit();
+        var parser = try JsParser.init(allocator,
+            \\export function direct() { return direct(); }
+            \\function caller() { return direct(); }
+            \\function mutualA() { return mutualB(); }
+            \\function mutualB() { return mutualA(); }
+            \\function callbackA(xs) { return xs.map(callbackB); }
+            \\function callbackB(x) { return callbackA([x]); }
+            \\function valueA() { const refs = [valueB]; return refs; }
+            \\function valueB() { const refs = [valueA]; return refs; }
+            \\function unknown(run) { return run(); }
+        );
+        parser.setAtomTable(&atoms);
+        defer parser.deinit();
+        const root = try parser.parse();
+        const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        effect_facts = try buildEffectFacts(allocator, view, &atoms, root, .{});
+    }
+    defer effect_facts.deinit(allocator);
+
+    const expected_names = [_][]const u8{
+        "direct", "caller", "mutualA", "mutualB", "callbackA", "callbackB", "valueA", "valueB", "unknown",
+    };
+    try testing.expectEqual(expected_names.len, effect_facts.all().len);
+    for (expected_names) |name| try testing.expect(effect_facts.lookup(name) != null);
+
+    var caller_index: ?usize = null;
+    var value_index: ?usize = null;
+    for (effect_facts.all(), 0..) |function, index| {
+        const expected_reach = std.mem.eql(u8, function.name, "direct") or
+            std.mem.eql(u8, function.name, "caller") or
+            std.mem.eql(u8, function.name, "mutualA") or
+            std.mem.eql(u8, function.name, "mutualB") or
+            std.mem.eql(u8, function.name, "callbackA") or
+            std.mem.eql(u8, function.name, "callbackB");
+        try testing.expectEqual(expected_reach, effect_facts.reachesRecursion(function.body_node));
+        if (std.mem.eql(u8, function.name, "caller")) caller_index = index;
+        if (std.mem.eql(u8, function.name, "valueA")) value_index = index;
+    }
+
+    const caller = caller_index orelse return error.FunctionNotFound;
+    const value = value_index orelse return error.FunctionNotFound;
+    try testing.expectEqual(@as(usize, 1), effect_facts.calleesOf(caller).len);
+    try testing.expectEqual(@as(usize, 0), effect_facts.valueRefsOf(caller).len);
+    try testing.expectEqual(@as(usize, 0), effect_facts.calleesOf(value).len);
+    try testing.expectEqual(@as(usize, 1), effect_facts.valueRefsOf(value).len);
+    try testing.expect(!(effect_facts.lookup("caller") orelse return error.FunctionNotFound).recursive);
+    try testing.expect((effect_facts.lookup("unknown") orelse return error.FunctionNotFound).lower_bound);
+    try testing.expect(!effect_facts.reachesRecursion(null_node));
+    switch (effect_facts.export_effects.lookup("direct")) {
+        .callable => |row| try testing.expect(row.recursive),
+        .data, .blocked => return error.CallableExportExpected,
+    }
+}
+
+test "effect facts close every allocation failure" {
+    const Projection = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var atoms = atom_table.AtomTable.init(allocator);
+            defer atoms.deinit();
+            var parser = try JsParser.init(allocator,
+                \\export function first() { return second(); }
+                \\function second() { return second(); }
+            );
+            parser.setAtomTable(&atoms);
+            defer parser.deinit();
+            const root = try parser.parse();
+            const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+            var effect_facts = try buildEffectFacts(allocator, view, &atoms, root, .{});
+            defer effect_facts.deinit(allocator);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Projection.run, .{});
+}
+
 test "leaf pure function has empty effect row" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
@@ -2203,6 +2433,27 @@ test "a call chain too deep to converge marks every row a lower bound" {
     // carries the effect it reads directly.
     const f20 = analyzer.lookup("f20") orelse return error.FunctionNotFound;
     try testing.expect(!f20.deterministic);
+}
+
+test "an unmatched recursion query returns false without allocation" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, "function work() { return 1; }");
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var failing = testing.FailingAllocator.init(allocator, .{});
+    var analyzer = Analyzer.init(failing.allocator(), view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    try testing.expect(analyzer.lookup("work") != null);
+
+    failing.fail_index = failing.alloc_index;
+    try testing.expect(!(try analyzer.reachesRecursion(null_node)));
+    try testing.expect(!failing.has_induced_failure);
 }
 
 test "self-recursive function is flagged" {

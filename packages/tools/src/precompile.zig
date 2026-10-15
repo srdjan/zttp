@@ -961,20 +961,22 @@ fn analyzeHandlerPaths(
     ir_view: zts.IrView,
     atoms: *zts.AtomTable,
     module_facts: *const zts.pipeline.ModuleFacts,
+    analysis_session: *zts.pipeline.ModuleAnalysisSession,
     handler_fn: ir.NodeIndex,
     handler_path: []const u8,
     include_behaviors: bool,
     import_reader: ?ImportReader,
 ) !PathAnalysis {
-    var generator = zts.PathGenerator.init(state_allocator, ir_view, atoms);
-    defer generator.deinit();
-    // The CHECK analysis owner keeps these facts alive through path cleanup.
-    generator.facts = module_facts;
     // Fault coverage reads every file the handler imports, because a failable
     // call there is on no path of this handler. A null scan (no filesystem)
     // leaves each such import counted as unseen.
     var imported = try collectImportedFailableCalls(state_allocator, module_facts, handler_path, import_reader);
     defer if (imported) |*scan| scan.deinit(state_allocator);
+    const path_effects = try analysis_session.pathEffectFacts();
+    var generator = zts.PathGenerator.init(state_allocator, ir_view, atoms, path_effects);
+    defer generator.deinit();
+    // The CHECK analysis owner keeps these facts alive through path cleanup.
+    generator.facts = module_facts;
     generator.setImportedScan(if (imported) |scan| scan.entries.items else null);
     try generator.generate(handler_fn);
 
@@ -1617,6 +1619,7 @@ fn runCheckOnPreparedSource(
                 ir_view,
                 &atoms,
                 try analysis.facts(),
+                &analysis,
                 hf,
                 handler_path,
                 result.contract != null,
@@ -1734,7 +1737,19 @@ pub fn runGenTests(
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const handler_fn = findHandlerFunction(ir_view, root) orelse return 0;
 
-    var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts: ?zts.EffectFacts = zts.buildEffectFacts(
+        allocator,
+        ir_view,
+        &atoms,
+        root,
+        .{},
+    ) catch null;
+    defer if (effect_facts) |*owned_effects| owned_effects.deinit(allocator);
+    const path_effects: zts.EffectFactsRef = if (effect_facts) |*completed_effects|
+        .{ .complete = completed_effects }
+    else
+        .unavailable;
+    var gen = zts.PathGenerator.init(allocator, ir_view, &atoms, path_effects);
     defer gen.deinit();
     try gen.generate(handler_fn);
     try gen.writeJsonl(writer);
@@ -2098,7 +2113,8 @@ pub fn compileHandler(
             if (error_count > 0) {
                 // Run PathGenerator to fill counterexample refs for result_unsafe violations
                 // before returning the failure result.
-                var gen = zts.PathGenerator.init(allocator, ir_view_check, &atoms);
+                const path_effects = try analysis.pathEffectFacts();
+                var gen = zts.PathGenerator.init(allocator, ir_view_check, &atoms, path_effects);
                 defer gen.deinit();
                 gen.generate(hf) catch {};
                 const handler_tests = gen.getHandlerTests();
@@ -2301,11 +2317,20 @@ pub fn compileHandler(
     errdefer if (violations_summary) |bytes| allocator.free(bytes);
     if (generate_tests or (emit_contract and contract != null)) {
         if (handler_fn) |hf| {
-            var gen = zts.PathGenerator.init(allocator, ir_view_check, &atoms);
-            defer gen.deinit();
             // See analyzeHandlerPaths: the imported files decide `fault_covered`.
-            var imported_scan = try collectImportedFailableCalls(allocator, try gen.importFacts(), filename, null);
+            var path_module_facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
+            defer path_module_facts.deinit();
+            var imported_scan = try collectImportedFailableCalls(
+                allocator,
+                &path_module_facts,
+                filename,
+                null,
+            );
             defer if (imported_scan) |*scan| scan.deinit(allocator);
+            const path_effects = try analysis.pathEffectFacts();
+            var gen = zts.PathGenerator.init(allocator, ir_view_check, &atoms, path_effects);
+            defer gen.deinit();
+            gen.facts = &path_module_facts;
             gen.setImportedScan(if (imported_scan) |scan| scan.entries.items else null);
 
             try gen.generate(hf);

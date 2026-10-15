@@ -82,6 +82,8 @@ const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
 /// type would widen the internal surface the boundary gate pins.
 pub const ModuleFacts = module_facts_mod.ModuleFacts;
 pub const EffectRow = effect_inference.EffectRow;
+pub const EffectFacts = effect_inference.EffectFacts;
+pub const EffectFactsRef = effect_inference.EffectFactsRef;
 pub const ExportEffect = effect_inference.ExportEffect;
 pub const ImportedEffect = effect_inference.ImportedEffect;
 pub const ExportEffects = effect_inference.ExportEffects;
@@ -622,6 +624,12 @@ pub const ModuleAnalysisSession = struct {
         completed,
     };
 
+    const PathEffectState = union(enum) {
+        unattempted,
+        complete: EffectFacts,
+        unavailable,
+    };
+
     pub const FullOptions = struct {
         /// Borrowed through session completion and extraction.
         type_map: ?*const TypeMap = null,
@@ -661,6 +669,7 @@ pub const ModuleAnalysisSession = struct {
     resolution_facts: ?ModuleFacts = null,
     contract_facts: ?ModuleFacts = null,
     exported_effects: ?ExportEffects = null,
+    path_effect_state: PathEffectState = .unattempted,
     resolution_state: PassState = .skipped,
     contract_type_state: PassState = .skipped,
     verifier_state: PassState = .skipped,
@@ -734,6 +743,11 @@ pub const ModuleAnalysisSession = struct {
     pub fn deinit(self: *ModuleAnalysisSession) void {
         if (self.state == .uninitialized) return;
 
+        switch (self.path_effect_state) {
+            .complete => |*owned_effects| owned_effects.deinit(self.allocator),
+            .unattempted, .unavailable => {},
+        }
+        self.path_effect_state = .unattempted;
         if (self.exported_effects) |*effects| effects.deinit(self.allocator);
         self.exported_effects = null;
         if (self.checked) |*checked| checked.deinit();
@@ -770,6 +784,36 @@ pub const ModuleAnalysisSession = struct {
     pub fn facts(self: *ModuleAnalysisSession) !*const ModuleFacts {
         if (self.state != .completed) return error.AnalysisNotCompleted;
         return self.completedContractFacts();
+    }
+
+    /// Prepare path effect facts once and return the cached outcome.
+    ///
+    /// Effect analysis failure is conservative for path coverage. The path
+    /// generator receives `.unavailable` and reports recursion instead of
+    /// aborting path enumeration.
+    pub fn pathEffectFacts(self: *ModuleAnalysisSession) !EffectFactsRef {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        switch (self.path_effect_state) {
+            .complete => |*completed_effects| return .{ .complete = completed_effects },
+            .unavailable => return .unavailable,
+            .unattempted => {},
+        }
+
+        const owned_effects = effect_inference.buildEffectFacts(
+            self.allocator,
+            self.parsed.ir_view,
+            self.parsed.atoms,
+            self.parsed.root,
+            .{},
+        ) catch {
+            self.path_effect_state = .unavailable;
+            return .unavailable;
+        };
+        self.path_effect_state = .{ .complete = owned_effects };
+        return switch (self.path_effect_state) {
+            .complete => |*published_effects| .{ .complete = published_effects },
+            .unattempted, .unavailable => unreachable,
+        };
     }
 
     pub fn resolvedForReport(self: *ModuleAnalysisSession) !*ResolvedModule {
@@ -1697,11 +1741,21 @@ test "ModuleAnalysisSession requires completion and permits one extraction" {
     defer analysis.deinit();
 
     try testing.expectError(error.AnalysisNotCompleted, analysis.facts());
+    try testing.expectError(error.AnalysisNotCompleted, analysis.pathEffectFacts());
     try testing.expectError(error.AnalysisNotCompleted, analysis.setImportedEffects(&.{}));
     try testing.expectError(error.AnalysisNotCompleted, analysis.extractContract("owner.ts"));
     try analysis.complete();
     try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
     _ = try analysis.facts();
+    const first_path_effects = try analysis.pathEffectFacts();
+    const second_path_effects = try analysis.pathEffectFacts();
+    switch (first_path_effects) {
+        .complete => |first| switch (second_path_effects) {
+            .complete => |second| try testing.expect(first == second),
+            .unavailable => return error.EffectFactsExpected,
+        },
+        .unavailable => return error.EffectFactsExpected,
+    }
     try analysis.setImportedEffects(&.{});
 
     var contract = try analysis.extractContract("owner.ts");
@@ -1711,6 +1765,36 @@ test "ModuleAnalysisSession requires completion and permits one extraction" {
         error.ContractExtractionAlreadyAttempted,
         analysis.extractContract("owner.ts"),
     );
+}
+
+test "ModuleAnalysisSession caches unavailable path effects after one attempt" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(
+        allocator,
+        "function handler(req) { return Response.text('ok'); }\n",
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(failing.allocator(), parsed, .{});
+    defer analysis.deinit();
+    try analysis.complete();
+
+    failing.fail_index = failing.alloc_index;
+    switch (try analysis.pathEffectFacts()) {
+        .unavailable => {},
+        .complete => return error.UnavailableEffectFactsExpected,
+    }
+    try testing.expect(failing.has_induced_failure);
+
+    failing.fail_index = std.math.maxInt(usize);
+    switch (try analysis.pathEffectFacts()) {
+        .unavailable => {},
+        .complete => return error.UnavailableEffectFactsExpected,
+    }
 }
 
 test "ModuleAnalysisSession does not retry a refused sound analysis" {

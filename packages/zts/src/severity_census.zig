@@ -60,6 +60,7 @@ const builtin_modules = @import("zts-engine").builtin_modules;
 const atom_table = @import("zts-engine").atom_table;
 const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
+const effect_inference = @import("effect_inference.zig");
 const handler_verifier = @import("handler_verifier.zig");
 const fault_coverage = @import("fault_coverage.zig");
 
@@ -538,7 +539,24 @@ fn observe(
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return observed;
 
-    var generator = path_gen.PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts: ?effect_inference.EffectFacts = effect_inference.buildEffectFacts(
+        allocator,
+        ir_view,
+        &atoms,
+        root,
+        .{},
+    ) catch null;
+    defer if (effect_facts) |*owned_effects| owned_effects.deinit(allocator);
+    const path_effects: effect_inference.EffectFactsRef = if (effect_facts) |*completed_effects|
+        .{ .complete = completed_effects }
+    else
+        .unavailable;
+    var generator = path_gen.PathGenerator.init(
+        allocator,
+        ir_view,
+        &atoms,
+        path_effects,
+    );
     defer generator.deinit();
     generator.generate(handler_fn) catch return observed;
     observed.ran = true;

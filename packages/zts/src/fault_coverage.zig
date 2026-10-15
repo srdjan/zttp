@@ -19,6 +19,7 @@ const builtin_modules = @import("zts-engine").builtin_modules;
 const atom_table = @import("zts-engine").atom_table;
 const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
+const effect_inference = @import("effect_inference.zig");
 const handler_verifier = @import("handler_verifier.zig");
 
 const route_match = @import("zts-base").route_match;
@@ -552,7 +553,14 @@ fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) 
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
-    var generator = path_gen.PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
+    var generator = path_gen.PathGenerator.init(
+        allocator,
+        ir_view,
+        &atoms,
+        .{ .complete = &effect_facts },
+    );
     defer generator.deinit();
     try generator.generate(handler_fn);
 
@@ -1160,7 +1168,14 @@ test "route roots use the strictest external severity" {
     const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
-    var generator = path_gen.PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
+    var generator = path_gen.PathGenerator.init(
+        allocator,
+        ir_view,
+        &atoms,
+        .{ .complete = &effect_facts },
+    );
     defer generator.deinit();
     try generator.generate(handler_fn);
 

@@ -28,11 +28,12 @@ No tracked source changes existed when execution started.
 
 U1 (compatibility baseline) is committed as `ad1aa961`.
 U2 (sibling export effects) is committed as `2f1ca7c5`.
-Both phases passed their required checks and Astra source review.
+U3 (analysis lifetime consolidation) is committed as `f4967788`.
+All three phases passed their required checks and Astra source review.
 
-U3 (analysis lifetime consolidation) passed its required checks and Astra source review.
-The Sol worker `reset_u3_session` completed the coupled pipeline, tools, and architecture changes.
-The main agent now owns the changed files.
+U4 (path effect facts) passed its required checks and awaits its local commit.
+The fresh Sol worker `reset_u4_implementation` completed the specified source migration and architecture paragraph.
+The main agent now owns the U4 files.
 The main agent owns review, authoritative checks, the plan authority, and this worklog.
 
 ## Verification and completion
@@ -57,13 +58,13 @@ Its log is `/tmp/zttp-reset-20261015/u1-verify.log`.
 The prior Claude logs cover the starting tracked tree, not the new characterization tests.
 The final documentation checks also exited 0.
 Their log is `/tmp/zttp-reset-20261015/u1-docs-final.log`.
-U3 (analysis lifetime consolidation) is complete and awaits its local commit.
-U4 through U20 remain unstarted.
+U3 (analysis lifetime consolidation) is complete.
+U4 (path effect facts) is complete. U5 through U20 remain unstarted.
 
 ## Unresolved questions and next action
 
 No product decision blocks U4 (path effect facts).
-The main agent will commit U3, then release the prepared U4 worker.
+The main agent will commit U4, then release U5 baseline characterization work.
 
 ## U2 preparation evidence
 
@@ -208,8 +209,78 @@ The gate also passed optimized builds, precompilation, smoke tests, repository s
 The final documentation and spine checks exited 0.
 Their log is `/tmp/zttp-reset-20261015/u3-docs-final.log`.
 
-The next Sol worker is preparing U4 (path effect facts) without edits.
-That worker will receive source ownership only after U3 commits.
+The U4 worker completed read-only preparation before U3 committed.
+The main agent released source ownership after commit `f4967788`.
+
+## U4 preparation evidence
+
+The Sol explorer confirmed that each path root constructs an analyzer solely to query recursion reachability.
+Those analyzers use no registry, type environment, injected facts, or imported effect rows.
+The path result therefore cannot silently reuse contract facts with different inputs.
+
+Astra reviewed the proposed ownership and failure rules before implementation.
+The review required separate recursive and reachability flags, call-only propagation, unchanged unmatched bodies, and stable fixture addresses.
+The main agent accepted those constraints and recorded them in the plan authority.
+The CHECK imported fault scan must finish before lazy effect production.
+The compile path will preserve the same order with an explicit owner of its existing null-registry module facts.
+
+## U4 review and verification
+
+The main agent reviewed the source changes and requested read-only slices at publication.
+The result now owns read-only function rows, graph edges, export entries, and export names.
+The main agent also added a required-name census to the new recursion fixture.
+The census prevents omitted function classes from silently reducing the test's scope.
+
+The first unfiltered analyzer run exited 1 during compilation.
+A capture still shadowed the session's `complete` method.
+One allocation-sweep helper call also lacked the new facts argument.
+The main agent corrected both defects and started the corrected analyzer run.
+The first log is `/tmp/zttp-reset-20261015/u4-zts-first.log`.
+The corrected log is `/tmp/zttp-reset-20261015/u4-zts-corrected.log`.
+
+The separate proof-swallow gate exited 0 without an allowlist change.
+Its log is `/tmp/zttp-reset-20261015/u4-proof-swallow-first.log`.
+The corrected analyzer run exited 0: all 13 steps succeeded, with 2,428 passing tests and one skipped test.
+The first additional suite also exited 0: all 30 steps succeeded, with 2,853 passing tests and one skipped test.
+Its log is `/tmp/zttp-reset-20261015/u4-focused.log`.
+
+Astra identified an introduced lower-level allocation before unmatched-body refusal.
+The main agent restored lookup before allocation and added a public failure probe.
+Astra accepted the final source diff without a remaining blocker.
+The final additional suite exited 0 after that correction.
+All 30 steps succeeded, with 2,854 passing tests and one skipped test.
+All 734 flow probes matched their expected verdicts.
+Its log is `/tmp/zttp-reset-20261015/u4-focused-final.log`.
+Final formatting and spine checks exited 0.
+The review supplies no performance claim.
+The full local gate exited 0.
+Its log is `/tmp/zttp-reset-20261015/u4-verify.log`.
+The aggregate and standalone runtime roots passed in separate processes.
+The gate also passed optimized builds, precompilation, smoke tests, shell gates, and offline replay.
+The final documentation and spine checks exited 0.
+Their log is `/tmp/zttp-reset-20261015/u4-docs-final.log`.
+
+## Independent preparation for later phases
+
+The Sol explorer `reset_u4_path_facts` mapped U5 (contract effect facts) without edits or builds.
+Its narrow follow-up corrected an overstatement about complete summary redundancy.
+Bare ambient egress and the no-handler import fallback still need explicit preservation.
+The plan authority records those findings and the contract-specific ownership rules.
+
+The Sol explorer `reset_u6_source_capture` mapped U6 (root source capture) without edits or builds.
+Its follow-ups confirmed universal root refusal, separate imported graph rejections, and root-read-before-extension ordering.
+The plan authority records those conditions and the two production files.
+Neither preparation starts implementation of U5 or U6.
+The fresh Sol worker `reset_u5_contract_effects` is preparing the U5 design without edits.
+Source ownership will transfer only after U4 commits.
+Further source review rejected the initial assumption that one ordinary handler row replaces every legacy summary fact.
+First-name handler identity can differ from the selected top-level handler.
+Legacy callback traversal and raw-slot matching also have distinct observable behavior.
+Astra found an existing parsed-source authentication fixture affected by universal new guards.
+The main agent chose R1 (public compatibility) and recorded explicit legacy policies in the authority.
+U5 must characterize those outputs before migration.
+Astra accepted the revised contract-facet design through source review.
+The design keeps complete legacy summary facts where ordinary rows have different meanings.
 
 ## Frontend measurement baseline
 

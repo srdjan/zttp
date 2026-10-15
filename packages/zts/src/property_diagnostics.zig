@@ -18,6 +18,7 @@ const ir = @import("zts-engine").parser.ir;
 const atom_table = @import("zts-engine").atom_table;
 const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
+const effect_inference = @import("effect_inference.zig");
 const fault_cov = @import("fault_coverage.zig");
 const flow_checker_mod = @import("flow_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
@@ -654,7 +655,14 @@ test "routed Result violation cannot borrow a handler counterexample" {
     defer violations.deinit(allocator);
     collectVerifierViolations(allocator, &violations, verifier.getDiagnostics(), ir_view);
 
-    var generator = path_gen.PathGenerator.init(allocator, ir_view, &atoms);
+    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
+    defer effect_facts.deinit(allocator);
+    var generator = path_gen.PathGenerator.init(
+        allocator,
+        ir_view,
+        &atoms,
+        .{ .complete = &effect_facts },
+    );
     defer generator.deinit();
     try generator.generate(handler_fn);
     fillVerifierCounterexamples(violations.items, generator.getHandlerTests());

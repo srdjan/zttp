@@ -140,6 +140,10 @@ intentionally not attempted: the traversals are not the same traversal.
 The caller initializes the session in its final address.
 The session borrows parser IR, atoms, type maps, registries, and injected module facts.
 The session owns type environments, checkers, internal facts, and pass results.
+The session prepares immutable path effect facts only when path analysis requests them.
+Path generators borrow completed facts and never own an effect analyzer.
+Path facts use no registry, type environment, injected module facts, or imported effect rows.
+An unavailable effect result makes path coverage report recursion conservatively.
 
 The `full` profile runs resolution for CHECK and single-module compilation.
 The `contract_only` profile builds contracts without source annotations.
