@@ -1506,11 +1506,22 @@ pub fn simulateRepairs(
     const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
 
+    return simulateRepairsFromSource(allocator, source, file, result);
+}
+
+/// Simulate repairs against pre-read source while retaining its project path.
+/// The captured source supplies both repair input and the simulation baseline.
+pub fn simulateRepairsFromSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    virtual_path: []const u8,
+    result: *const Result,
+) !SimulationSummary {
     const proposed = try applyRepairs(allocator, source, result.repairs.items);
     defer allocator.free(proposed);
 
     var simulation = try edit_simulate.simulate(allocator, .{
-        .file = file,
+        .file = virtual_path,
         .content = proposed,
         .before = source,
     });

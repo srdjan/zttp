@@ -25,19 +25,18 @@ The untracked `2026-10-14-sibling-module-effects-plan.md` belongs to Claude's ea
 
 ## Current work and next action
 
-U1 through U4 are complete and committed locally.
+U1 through U5 are complete and committed locally.
 Every completed phase passed its required checks and Astra source review.
-U5 (contract effect facts) passed its required checks and Astra source review; its local commit is next.
-U6 through U20 remain unstarted.
+U6 (root source capture) passed all required checks and is ready for its local commit.
+U7 through U20 remain unstarted.
 
-The fresh Sol worker `reset_u5_contract_effects` returned the production migration and all assigned source ownership.
-The unfiltered baseline passed before that migration.
-The main agent completed source review and all required verification.
-Astra xhigh accepted the actual U5 diff and final cleanup.
+The fresh Sol worker `reset_u6_capture_impl` returned source ownership after Stage 2B.
+The first handoff added capture and a controlled CHECK fixture while operation helpers retained their rereads.
+Main observed the intended failing digest comparison through the unfiltered root.
+Main reviewed every source and test line, and Astra accepted the completed changes.
+The final protocol root, broader suites, full gate, and current-binary determinism check passed.
 The main agent owns the plan authority, this worklog, checks, and Git writes.
 
-The fresh U6 worker completed read-only preparation and awaits production ownership after the U5 commit.
-U6 will first expose the remaining CHECK rereads through a controlled reader before migrating operation helpers.
 No product decision blocks the next phase.
 
 ## Completed phases
@@ -54,7 +53,7 @@ Source review does not replace test execution or establish a performance improve
 | U2 (sibling export effects) | `2f1ca7c5` | `u2-focused-final.log`: exit 0, 53 steps, 4,026 pass, 2 skip | `u2-verify.log`: exit 0 | `u2-docs-final.log`: exit 0 |
 | U3 (analysis lifetime) | `f4967788` | `u3-focused-third.log`: exit 0, 36 steps, 2,865 pass, 1 skip | `u3-verify.log`: exit 0 | `u3-docs-final.log`: exit 0 |
 | U4 (path effect facts) | `a13b1849` | `u4-focused-final.log`: exit 0, 30 steps, 2,854 pass, 1 skip | `u4-verify.log`: exit 0 | `u4-docs-final.log`: exit 0 |
-| U5 (contract effect facts) | Pending this phase commit | `u5-focused-final.log`: exit 0, 39 steps, 3,090 pass, 1 skip | `u5-verify.log`: exit 0 | `u5-docs-final.log`: exit 0 |
+| U5 (contract effect facts) | `d79afafb` | `u5-focused-final.log`: exit 0, 39 steps, 3,090 pass, 1 skip | `u5-verify.log`: exit 0 | `u5-docs-final.log`: exit 0 |
 
 Formatting and diff checks passed for each completed phase.
 The full gates also passed optimized builds, precompilation, smoke tests, shell gates, and offline replay.
@@ -176,13 +175,62 @@ Formatting across all required paths and the diff check also passed.
 The Sol explorer `reset_u6_source_capture` mapped two production files without edits, builds, or tests.
 They are `agent_protocol.zig` and `canonicalize.zig`.
 Existing source APIs support the capture change; repair simulation needs a source-based helper.
-The authority records root refusal, imported graph rejection, verify overrides, stale guards, and read-before-extension ordering.
+The authority records root refusal, imported graph behavior, verify overrides, stale guards, and read-before-extension ordering.
 The fresh implementation worker `reset_u6_capture_impl` completed read-only preparation and confirmed that bounded design.
-Its source ownership remains withheld until U5 completes.
+U5 is complete, and the worker now owns the first controlled-reader handoff.
 Main measured the pre-U6 CLI override mismatch in `u6-root-baseline/`.
 Disk and override requests exited 0 with no protocol error and different source digests, but their graph hashes were equal.
 These observations concern identity only; both property responses reported `success:false`.
-U6 implementation remains unstarted.
+Stage 2A adds the capture owner, graph binding, and one controlled CHECK fixture.
+Operation helpers retain their rereads until main observes the fixture's failing verdict.
+Stage 2B will migrate the helpers and add the remaining operation and refusal cases.
+
+Main measured candidate CHECK fixtures through the built U5 CLI before the controlled-reader test.
+The chained-ternary fixture produces ZTS621 but no contract, because its strict error stops extraction.
+The fully typed spec-less handler produces ZTS500 and retains an object contract with `contract_available:true`.
+Both transport commands exited 0; their CHECK responses reported `success:false`.
+The results are `u6-changing-root/a-result.json` and `u6-changing-root/typed-result.json`.
+The worker will use the measured typed fixture for the captured revision.
+
+Astra corrected the preparation's overbroad imported-failure description.
+Resolver failures retain rejection rows, while a later queued-import read failure silently omits that node.
+U6 preserves both behaviors without changing the graph walker.
+
+## U6 controlled-reader baseline
+
+The Stage 2A unfiltered root exited 1: 405 tests passed and one test failed.
+The controlled test compiled, accepted graph hash A, and failed at the payload digest comparison against A.
+Unchanged CHECK helpers read replacement bytes B after root capture, as intended for this incomplete handoff.
+Its log is `u6-changing-root-red.log`.
+The remaining 405 tests passed.
+
+## U6 design validation and current ownership
+
+Astra accepted the proposed capture ownership and operation ordering through source review.
+The disk read cap must not become an override cap; empty string overrides retain their existing meaning.
+Simulation retains project-context discovery and proposed-before analysis order.
+Captured root bytes do not freeze policy, schema, or imported observations.
+Stage 2B returned source ownership before main ran the completed protocol root.
+The separate determinism script will run against the completed U6 binary after the full gate rebuilds that binary.
+
+## U6 production checks
+
+The first completed-code root exited 1 during compilation because a new test compared an optional JSON value without unwrapping it.
+Main corrected that assertion; `u6-agent-first.log` retains the failed build.
+The corrected root exited 0 with all 419 tests passing in `u6-agent-corrected.log`.
+
+Main added a bounded graph-allocation failure probe after successful root capture.
+Main also enabled simulation in the changing-reader canonicalization case and asserted its exact summary.
+The summary matches the CLI measurement in `u6-changing-root/sim-result.json`.
+Astra accepted the completed source and these final test changes.
+The final protocol root exited 0 with all 420 tests passing in `u6-agent-final.log`.
+The required broader suites exited 0: all 25 steps succeeded, with 1,765 passing tests and one skipped test.
+Their log is `u6-focused.log`.
+The full gate exited 0 with every CI test-job step passing in `u6-verify.log`.
+It passed aggregate tests, the separate runtime root, optimized builds, verified precompilation, smoke tests, shell gates, and offline replay.
+The determinism script exited 0 against the newly rebuilt U6 analyzer in `u6-determinism.log`.
+Final documentation, link, and spine checks exited 0 in `u6-docs-final.log`.
+Formatting across the required paths and the diff check also passed.
 
 ## U7 preparation
 
@@ -195,6 +243,18 @@ U7 proves parser identity and environment lookup; U12 retains checker migration.
 Astra accepted a bounded private comparison with complete preflight eligibility and an explicit `out_of_slice` outcome.
 The authority records its accepted token boundary, refusal ordering, and previous-token requirements.
 U7 implementation remains unstarted.
+
+The fresh Sol worker `reset_u7_primitive_parser` completed Stage 1 without edits, builds, or tests.
+Its proposal follows the accepted private comparison boundary and shared runtime parser.
+The tokenizer contains borrowed source and value state, so copying its cursor creates no allocation owner.
+The parser will transfer the separate type store with its existing result stores.
+Private admission diagnostics will map locally to existing codes without registry changes.
+Main will release implementation after the U6 commit.
+
+Astra accepted the proposal with one malformed-input correction.
+Unmatched type parentheses can reach legacy runtime semicolon refusal instead of source admission refusal.
+The comparator must preserve that result or explicitly decline the malformed shape.
+Main sent that correction and separate pool-health and environment-health requirements to the worker.
 
 ## U8 preparation
 
@@ -209,6 +269,12 @@ The Sol explorer `reset_u4_path_facts` mapped declaration semantics without edit
 The authority records module-wide alias order, nominal identity, root-only eager lookup, recursive-alias rules, and runtime parity requirements.
 Indentation and runtime-name collisions require characterization before the private parser claims compatibility.
 U9 implementation remains unstarted.
+
+## U10 preparation
+
+The Sol explorer `reset_u4_path_facts` mapped generic syntax without edits, builds, or tests.
+The authority records admission, ignored defaults, constraint policies, namespace collisions, repeated signatures, semantic truncation, and substitution limits.
+U10 implementation remains unstarted.
 
 ## Frontend measurement baseline
 

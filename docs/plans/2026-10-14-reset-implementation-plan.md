@@ -829,6 +829,7 @@ Repair simulation must retain proposed content as `content` and captured bytes a
 A captured root owner can retain relative path, absolute path, disk bytes, effective source, digest, and graph.
 The effective source borrows disk bytes or a valid verify content override.
 Only a string content override changes verify source; other content values remain ignored.
+Empty string overrides remain valid, and the disk read cap must not become an override length cap.
 Verify must still read disk first and preserve the current missing-file refusal.
 Graph identity and the stale guard must use the same effective source as analysis.
 
@@ -845,12 +846,24 @@ Root read failures, including allocation failure during that read, map to `Entry
 Later allocation failures retain their existing handling.
 The captured reader must retain `module_graph_record.max_source_bytes` and leave extension validation to `buildWithEntrySource`.
 
-Imported read failures remain graph rejections and do not become universal root refusals.
+Imported resolver and existence failures retain their existing graph rejection rows.
+A later read failure for an already queued import silently omits that node under the current walker.
+The earlier description of all imported read failures as graph rejections was too broad.
+U6 preserves both behaviors and must not turn imported failures into universal root refusals.
 The source capture reader must not become CHECK's import reader.
 Separate dependency graph, summary, and fault observations remain unchanged.
+Edit simulation retains its current project-context discovery and proposed-before analysis order.
+Captured root bytes do not freeze policy, schema, or imported observations.
 Normalize write refusal remains before stale checking and operation dispatch.
 A controlled changing-reader test must bind the digest, graph hash, diagnostics, and contract to captured bytes.
 The test must also confirm that later disk bytes differ from those captured bytes.
+The determinism script must use a `zts` binary built from the completed U6 source.
+The full gate's successful release build can supply that binary before the separate script runs.
+
+The captured fixture must reach contract extraction before producing its diagnostic.
+An early strict error, such as ZTS621 from a chained ternary, leaves no contract and cannot test contract retention.
+A CLI measurement confirms that a fully typed spec-less handler produces ZTS500 while retaining an object contract.
+The controlled-reader fixture will use that contract-stage diagnostic and a distinct later disk revision.
 
 ### U7 preparation findings
 
@@ -915,6 +928,13 @@ Its admission refusal must suppress the earlier runtime failure.
 Focused tests must cover primitives, grouping, tolerated suffixes, original error spans, nesting limits, allocation failure, and runtime identity.
 Mixed admission and runtime errors must preserve the frozen stage precedence.
 Production callers remain on `PreparedSource` until the later cutover phases.
+
+Astra's final proposal review identifies a malformed-input distinction.
+Legacy stripping can consume an unmatched opening parenthesis through EOF without an admission refusal.
+For `let n: (number;`, the runtime parser then reports its missing semicolon at the binding token.
+The private comparison must reproduce that outcome or explicitly decline that malformed shape.
+Direct parser failure tests alone do not establish legacy comparison parity.
+Lowering must check both pool health and environment health because environment health does not inspect pool poison.
 
 ### U8 preparation findings
 
@@ -1023,6 +1043,59 @@ It must retain existing nominal construction rules and the existing recursive-al
 The syntax lowerer must check both environment and pool health before publishing completed results.
 Allocation probes must cover declaration arrays, namespace keys, nominal names, recursive-alias state, and partial initialization cleanup.
 Frozen fixtures in the stripper, TypePool, TypeEnv, and checker supply separate admission and semantic evidence.
+
+### U10 preparation findings
+
+`packages/zts/src/stripper.zig` owns current generic admission and angle-bracket speculation.
+`packages/zts/src/type_env.zig` owns parameter lists, alias maps, and application projection.
+`packages/zts/src/type_pool.zig` owns application storage and substitution; `packages/zts/src/type_checker.zig` owns inference and constraint enforcement.
+The published grammar omits defaults, but the legacy source path admits balanced defaults in function, arrow, and structural parameter lists.
+
+Function declaration generics require `<` immediately after the name, while structural declarations permit intervening whitespace.
+Explicit call arguments require the final `>` to touch `(`.
+The call probe retains comparison and shift syntax instead of treating every angle pair as type arguments.
+Generic declaration scanning handles balanced angles, arrow tokens, and the existing depth limit.
+Removed-form scanning still precedes runtime parsing.
+Nested generic closers require type-local splitting of `>>` and `>>>`; runtime shift tokens must remain unchanged after failed speculation.
+
+TypeEnv retains at most eight function parameters, alias parameters, and explicit call type arguments.
+Its comma splitter silently leaves a ninth item outside that semantic projection.
+TypePool itself can retain wider applications, so its storage capacity must not expand TypeEnv admission or projection.
+Source-admitted defaults remain semantically ignored, while default syntax still needs authored spans for printing.
+Function constraints lower after all parameters enter scope; generic-alias constraints are parsed and discarded.
+An `extends` bound can retain an ignored default suffix through existing prefix parsing.
+
+Explicit call arguments skip inference and require the signature's existing argument count.
+Inference uses value arguments, not the expected return type, and constraints run after binding.
+Substitution enters the existing record, array, union, intersection, tuple, function, nullable, and nested application shapes.
+Substitution beyond depth eight returns the inner branch unchanged; unification at the same ceiling leaves parameters unbound.
+Pool and environment allocation failures retain their existing sticky health state.
+
+Legacy semantic application parsing can publish a prefix despite missing commas or a missing closing angle.
+Source admission must be checked separately before the private path claims those forms remain accepted.
+A generic application can leave an array suffix unconsumed.
+User aliases require exact arity, while builtin utility applications accept a minimum arity and ignore surplus arguments.
+`Dict` has its existing exact two-argument special case.
+Application projection enters outer applications, unions, intersections, and nullable wrappers, but omits some nested compound positions.
+
+Generic and non-generic aliases occupy separate maps and can coexist under one name.
+Each map retains its own last declaration; a non-generic declaration does not remove a generic declaration.
+Source aliases can replace ambient `Proof` and `Effects`, while builtin utilities resolve before user applications.
+A complete non-generic alias resolves before a generic parameter scope for bare names.
+Nested references can instead reach parameter substitution, making same-name collisions shape-dependent.
+Duplicate parameter names resolve to the first matching scope entry.
+
+Repeated function names retain distinct signatures through their opening-parenthesis identities.
+Hash-map iteration makes name-only signature maps unsuitable as the new owner identity.
+The syntax store needs parameter records with constraint, default, and full spans, plus generic owner and call-argument records.
+Named references and application nodes remain engine-tier syntax without compiler imports.
+Compiler lowering must use syntax records directly rather than reconstruct TypeMap, name ordinals, offset joins, or type text.
+U11 owns final attachment, and U12 owns checker migration; U10 does not establish initializer enforcement.
+
+Generic type syntax adds no runtime nodes, bindings, atoms, constants, strings, or scopes.
+Call locations remain at `(` after type-argument consumption.
+Comparisons must cover repeated signatures, ignored defaults, distinct constraint policies, namespace collisions, silent truncation, depth exhaustion, and allocation failure.
+Existing fixtures in `source_frontend.zig`, TypeEnv, TypePool, the checker, the stripper, and `frontend_fuzz.zig` supply separate evidence.
 
 ## Definition of Done
 

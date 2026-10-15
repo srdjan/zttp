@@ -238,6 +238,116 @@ const Identity = struct {
     module_graph_hash: [64]u8,
 };
 
+const RootSourceReader = struct {
+    context: ?*anyopaque,
+    readFn: *const fn (
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        path: []const u8,
+        max_bytes: usize,
+    ) anyerror![]u8,
+
+    fn read(
+        reader: RootSourceReader,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        path: []const u8,
+        max_bytes: usize,
+    ) anyerror![]u8 {
+        return reader.readFn(reader.context, allocator, io, path, max_bytes);
+    }
+};
+
+fn readRootSource(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    _: std.Io,
+    path: []const u8,
+    max_bytes: usize,
+) anyerror![]u8 {
+    return zts.file_io.readFile(allocator, path, max_bytes);
+}
+
+const CapturedFile = struct {
+    relative_path: []const u8,
+    absolute_path: []const u8,
+    disk_source: []const u8,
+    /// Borrows `disk_source` or the parsed request's string storage.
+    effective_source: []const u8,
+    source_digest: [64]u8,
+    graph: module_graph_record.GraphRecord,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        reader: RootSourceReader,
+        canonical_root: []const u8,
+        requested_path: []const u8,
+        operation: Operation,
+        input: std.json.Value,
+    ) module_graph_record.BuildError!CapturedFile {
+        const relative_path = try agent_identity.canonicalRelPath(
+            allocator,
+            io,
+            canonical_root,
+            requested_path,
+        );
+        errdefer allocator.free(relative_path);
+
+        const absolute_path = try std.fs.path.resolve(allocator, &.{ canonical_root, relative_path });
+        errdefer allocator.free(absolute_path);
+
+        const disk_source = reader.read(
+            allocator,
+            io,
+            absolute_path,
+            module_graph_record.max_source_bytes,
+        ) catch return error.EntryUnreadable;
+        errdefer allocator.free(disk_source);
+
+        const effective_source = verifyContentOverride(operation, input) orelse disk_source;
+        var graph = try module_graph_record.buildWithEntrySource(
+            allocator,
+            io,
+            canonical_root,
+            relative_path,
+            effective_source,
+        );
+        errdefer graph.deinit(allocator);
+
+        return .{
+            .relative_path = relative_path,
+            .absolute_path = absolute_path,
+            .disk_source = disk_source,
+            .effective_source = effective_source,
+            .source_digest = agent_identity.sourceDigest(effective_source),
+            .graph = graph,
+        };
+    }
+
+    fn deinit(file: *CapturedFile, allocator: std.mem.Allocator) void {
+        file.graph.deinit(allocator);
+        allocator.free(file.disk_source);
+        allocator.free(file.absolute_path);
+        allocator.free(file.relative_path);
+        file.* = undefined;
+    }
+};
+
+fn verifyContentOverride(operation: Operation, input: std.json.Value) ?[]const u8 {
+    if (operation != .verify) return null;
+    const object = switch (input) {
+        .object => |value| value,
+        else => return null,
+    };
+    const content = object.get("content") orelse return null;
+    return switch (content) {
+        .string => |value| value,
+        else => null,
+    };
+}
+
 const RepairBinding = struct {
     source_digest: [64]u8,
     profile_id: []const u8,
@@ -321,6 +431,19 @@ pub fn handleRequest(
     io: std.Io,
     request_json: []const u8,
     writer: *std.Io.Writer,
+) !void {
+    return handleRequestWithRootReader(allocator, io, request_json, writer, .{
+        .context = null,
+        .readFn = readRootSource,
+    });
+}
+
+fn handleRequestWithRootReader(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    request_json: []const u8,
+    writer: *std.Io.Writer,
+    root_source_reader: RootSourceReader,
 ) !void {
     var json: std.json.Stringify = .{ .writer = writer };
 
@@ -423,10 +546,8 @@ pub fn handleRequest(
     // read. Everything else binds the context-free digest - the built-in
     // registry with an empty module set - so `expected` has something to
     // compare for every operation and the envelope field is never empty.
-    var graph: ?module_graph_record.GraphRecord = null;
-    defer if (graph) |*g| g.deinit(allocator);
-    var file_rel: ?[]const u8 = null;
-    defer if (file_rel) |r| allocator.free(r);
+    var captured: ?CapturedFile = null;
+    defer if (captured) |*file| file.deinit(allocator);
 
     if (takesFile(spec)) {
         const file_value = switch (input) {
@@ -444,8 +565,15 @@ pub fn handleRequest(
                 .field = "input.file",
             });
         }
-        file_rel = agent_identity.canonicalRelPath(allocator, io, canonical_root, file_value.string) catch null;
-        graph = module_graph_record.build(allocator, io, canonical_root, file_value.string) catch |err| {
+        captured = CapturedFile.init(
+            allocator,
+            io,
+            root_source_reader,
+            canonical_root,
+            file_value.string,
+            op,
+            input,
+        ) catch |err| {
             return writeErrorEnvelope(&json, op_name, contextFreeIdentity(), switch (err) {
                 error.PathOutsideProjectRoot => .{
                     .code = .path_outside_project_root,
@@ -477,9 +605,14 @@ pub fn handleRequest(
         };
     }
 
+    const captured_file = if (captured) |*file| file else null;
+
     const identity = Identity{
         .policy_hash = zts.policyHash(),
-        .module_graph_hash = if (graph) |g| g.hash else module_graph_record.contextFreeHash(),
+        .module_graph_hash = if (captured_file) |file|
+            file.graph.hash
+        else
+            module_graph_record.contextFreeHash(),
     };
 
     // Source mutation belongs to Pi's aggregate propose/prove/apply lane.
@@ -523,19 +656,19 @@ pub fn handleRequest(
         .features => try writeFeaturesPayload(&payload_json),
         .restrictions => try writeRestrictionsPayload(&payload_json),
         .describe_rule => try writeDescribeRulePayload(&payload_json, input),
-        .modules => try writeModulesPayload(&payload_json, &graph.?),
-        .canonicalize => try runCanonicalize(allocator, &payload_json, canonical_root, file_rel.?, identity, input),
-        .normalize => try runNormalize(allocator, &payload_json, canonical_root, file_rel.?),
+        .modules => try writeModulesPayload(&payload_json, &captured_file.?.graph),
+        .canonicalize => try runCanonicalize(allocator, &payload_json, captured_file.?, identity, input),
+        .normalize => try runNormalize(allocator, &payload_json, captured_file.?),
         .check => try runCheck(
             allocator,
             io,
             &payload_json,
             &diagnostics,
             canonical_root,
-            file_rel.?,
+            captured_file.?,
         ),
-        .verify => try runVerify(allocator, &payload_json, canonical_root, file_rel.?, input),
-        .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, identity, input),
+        .verify => try runVerify(allocator, &payload_json, captured_file.?, input),
+        .simulate_edit => try runSimulateEdit(allocator, &payload_json, captured_file.?, identity, input),
     };
     // No `else` prong: spec 4.8's operation set is closed and every member is
     // served, so an unhandled one is a compile error rather than a runtime
@@ -1618,38 +1751,33 @@ fn parseRepairs(
 fn runSimulateEdit(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
-    canonical_root: []const u8,
-    file_rel: []const u8,
+    file: *const CapturedFile,
     identity: Identity,
     input: ?std.json.Value,
 ) !bool {
-    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
-    defer allocator.free(abs);
-
-    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
-    defer allocator.free(source);
-    const digest = agent_identity.sourceDigest(source);
+    const source = file.effective_source;
+    const digest = file.source_digest;
 
     var repairs: std.ArrayListUnmanaged(canonicalize.Repair) = .empty;
     defer repairs.deinit(allocator);
     // Canonicalize and simulate share one decoder, so a candidate cannot change
     // meaning between discovery and proof.
-    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, identity, input, source)) |refused| return refused;
+    if (try parseRepairs(allocator, json, &repairs, file.relative_path, digest, identity, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
-        return try writeSimulateRefusal(json, file_rel, digest, .no_repairs, "`repairs` must carry at least one repair; simulating nothing has no answer to give");
+        return try writeSimulateRefusal(json, file.relative_path, digest, .no_repairs, "`repairs` must carry at least one repair; simulating nothing has no answer to give");
     }
 
     const proposed = canonicalize.applyRepairs(allocator, source, repairs.items) catch |err| switch (err) {
-        error.StaleRepair => return try writeSimulateRefusal(json, file_rel, digest, .stale_repair, "a repair's `original` does not match the file as it stands; re-read the file and re-derive the repair"),
-        error.OverlappingRepairs => return try writeSimulateRefusal(json, file_rel, digest, .overlapping_repairs, "two repairs cover the same bytes, so which one applies is undefined"),
-        error.RepairOutOfBounds => return try writeSimulateRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
+        error.StaleRepair => return try writeSimulateRefusal(json, file.relative_path, digest, .stale_repair, "a repair's `original` does not match the file as it stands; re-read the file and re-derive the repair"),
+        error.OverlappingRepairs => return try writeSimulateRefusal(json, file.relative_path, digest, .overlapping_repairs, "two repairs cover the same bytes, so which one applies is undefined"),
+        error.RepairOutOfBounds => return try writeSimulateRefusal(json, file.relative_path, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
         else => return err,
     };
     defer allocator.free(proposed);
 
     var verdict = try edit_simulate.simulate(allocator, .{
-        .file = abs,
+        .file = file.absolute_path,
         .content = proposed,
         .before = source,
     });
@@ -1657,7 +1785,7 @@ fn runSimulateEdit(
 
     try json.beginObject();
     try json.objectField("file");
-    try json.write(file_rel);
+    try json.write(file.relative_path);
     try json.objectField("source_digest");
     try json.write(&digest);
     try json.objectField("ok");
@@ -1755,56 +1883,37 @@ fn writeSimulateRefusal(
 fn runVerify(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
-    canonical_root: []const u8,
-    file_rel: []const u8,
+    file: *const CapturedFile,
     input: ?std.json.Value,
 ) !bool {
-    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
-    defer allocator.free(abs);
-
-    // An optional `content` override is what closes the propose -> simulate ->
-    // verify cycle without a write. `simulate_edit` hands back
-    // `proposed_content`; without this a client could only verify the file it
-    // had not repaired yet, and would have to write the candidate to disk
-    // through a write operation just to ask about it.
-    //
-    // The digest covers whatever was analyzed, so a verdict about supplied
-    // bytes is never bound to the digest of bytes on disk that nobody checked.
-    const supplied: ?[]const u8 = blk: {
-        const obj = (input orelse break :blk null).object;
-        const value = obj.get("content") orelse break :blk null;
-        if (value != .string) break :blk null;
-        break :blk value.string;
-    };
-
-    const source = if (supplied) |c|
-        try allocator.dupe(u8, c)
-    else
-        try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
-    defer allocator.free(source);
-    const digest = agent_identity.sourceDigest(source);
-
-    var result = (if (supplied != null)
-        precompile.runCheckOnlyFromSourceWithOptions(allocator, source, abs, .{
-            .json_mode = true,
-        })
-    else
-        precompile.runCheckOnlyWithOptions(allocator, abs, .{
+    var result = precompile.runCheckOnlyFromSourceWithOptions(
+        allocator,
+        file.effective_source,
+        file.absolute_path,
+        .{
             .json_mode = true,
             .sql_schema_path = null,
-        })) catch |err| switch (err) {
+        },
+    ) catch |err| switch (err) {
         // Every property is undecided rather than false: the analysis never
         // ran, and reporting `analyzer_not_proved` would claim a verdict nothing
         // produced.
         error.MissingSqlSchema => {
-            try writeVerifyPayload(allocator, json, file_rel, digest, null, input);
+            try writeVerifyPayload(allocator, json, file.relative_path, file.source_digest, null, input);
             return false;
         },
         else => return err,
     };
     defer result.deinit(allocator);
 
-    try writeVerifyPayload(allocator, json, file_rel, digest, result.proof_trace_json, input);
+    try writeVerifyPayload(
+        allocator,
+        json,
+        file.relative_path,
+        file.source_digest,
+        result.proof_trace_json,
+        input,
+    );
     return result.totalErrors() == 0;
 }
 
@@ -1953,20 +2062,16 @@ fn runCheck(
     json: *std.json.Stringify,
     diagnostics: *std.Io.Writer.Allocating,
     canonical_root: []const u8,
-    file_rel: []const u8,
+    file: *const CapturedFile,
 ) !bool {
-    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
-    defer allocator.free(abs);
-
     // The same bytes the digest covers, so a byte offset published beside a
     // digest indexes into what that digest names.
-    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
-    defer allocator.free(source);
-    const digest = agent_identity.sourceDigest(source);
+    const source = file.effective_source;
+    const digest = file.source_digest;
 
     var diag_json: std.json.Stringify = .{ .writer = &diagnostics.writer };
 
-    var result = precompile.runCheckOnlyWithOptions(allocator, abs, .{
+    var result = precompile.runCheckOnlyFromSourceWithOptions(allocator, source, file.absolute_path, .{
         .json_mode = true,
         .sql_schema_path = null,
     }) catch |err| switch (err) {
@@ -1979,13 +2084,13 @@ fn runCheck(
                 .code = zts.DiagnosticCatalog.driverCode(.missing_sql_schema),
                 .severity = "error",
                 .message = "zttp:sql queries require a SQL schema, which this operation cannot supply",
-                .file = file_rel,
+                .file = file.relative_path,
                 .line = 1,
                 .column = 1,
                 .suggestion = "configure sqlite in zttp.json, or check this handler through `zts check --sql-schema`",
             }, digest, source);
             try diag_json.endArray();
-            try writeCheckPayload(json, null, file_rel, digest, 1, 0);
+            try writeCheckPayload(json, null, file.relative_path, digest, 1, 0);
             return false;
         },
         else => return err,
@@ -1998,7 +2103,14 @@ fn runCheck(
     }
     try diag_json.endArray();
 
-    try writeCheckPayload(json, &result, file_rel, digest, result.totalErrors(), result.totalWarnings());
+    try writeCheckPayload(
+        json,
+        &result,
+        file.relative_path,
+        digest,
+        result.totalErrors(),
+        result.totalWarnings(),
+    );
     return result.totalErrors() == 0;
 }
 
@@ -2230,24 +2342,19 @@ fn boolField(input: std.json.Value, name: []const u8) bool {
 fn runCanonicalize(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
-    canonical_root: []const u8,
-    file_rel: []const u8,
+    file: *const CapturedFile,
     identity: Identity,
     input: std.json.Value,
 ) !bool {
-    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
-    defer allocator.free(abs);
+    const source = file.effective_source;
+    const digest = file.source_digest;
 
-    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
-    defer allocator.free(source);
-    const digest = agent_identity.sourceDigest(source);
-
-    var result = try canonicalize.collect(allocator, abs);
+    var result = try canonicalize.collectFromSource(allocator, source, file.absolute_path);
     defer result.deinit(allocator);
 
     try json.beginObject();
     try json.objectField("file");
-    try json.write(file_rel);
+    try json.write(file.relative_path);
     try json.objectField("source_digest");
     try json.write(&digest);
 
@@ -2317,7 +2424,12 @@ fn runCanonicalize(
 
     try json.objectField("simulation");
     if (boolField(input, "simulate")) {
-        const summary = try canonicalize.simulateRepairs(allocator, abs, &result);
+        const summary = try canonicalize.simulateRepairsFromSource(
+            allocator,
+            source,
+            file.absolute_path,
+            &result,
+        );
         try json.beginObject();
         try json.objectField("ok");
         try json.write(summary.ok);
@@ -2344,22 +2456,25 @@ fn runCanonicalize(
 fn runNormalize(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
-    canonical_root: []const u8,
-    file_rel: []const u8,
+    file: *const CapturedFile,
 ) !bool {
-    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
-    defer allocator.free(abs);
+    const source = file.effective_source;
+    const digest = file.source_digest;
 
-    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
-    defer allocator.free(source);
-    const digest = agent_identity.sourceDigest(source);
-
-    var result = try canonicalize.normalize(allocator, abs);
+    var result = try canonicalize.normalizeSourceWithOptions(
+        allocator,
+        source,
+        file.absolute_path,
+        .{
+            .sql_schema_path = null,
+            .layout = true,
+        },
+    );
     defer result.deinit(allocator);
 
     try json.beginObject();
     try json.objectField("file");
-    try json.write(file_rel);
+    try json.write(file.relative_path);
     try json.objectField("source_digest");
     try json.write(&digest);
     try json.objectField("converged");
@@ -2502,6 +2617,75 @@ fn parse(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(std.j
     return std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
 }
 
+fn respondWithRootSourceReader(
+    allocator: std.mem.Allocator,
+    request: []const u8,
+    reader: RootSourceReader,
+) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    errdefer out.deinit();
+    try handleRequestWithRootReader(allocator, testing.io, request, &out.writer, reader);
+    return out.toOwnedSlice();
+}
+
+const ChangingRootReader = struct {
+    directory: std.Io.Dir,
+    path: []const u8,
+    replacement: []const u8,
+    read_count: u32 = 0,
+
+    fn read(
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        path: []const u8,
+        max_bytes: usize,
+    ) anyerror![]u8 {
+        const reader: *ChangingRootReader = @ptrCast(@alignCast(context orelse return error.MissingContext));
+        if (reader.read_count != 0) return error.UnexpectedRootRead;
+        if (max_bytes != module_graph_record.max_source_bytes) return error.UnexpectedSizeLimit;
+        reader.read_count += 1;
+
+        const source = try zts.file_io.readFile(allocator, path, max_bytes);
+        errdefer allocator.free(source);
+        try reader.directory.writeFile(io, .{
+            .sub_path = reader.path,
+            .data = reader.replacement,
+        });
+        return source;
+    }
+
+    fn rootSourceReader(reader: *ChangingRootReader) RootSourceReader {
+        return .{
+            .context = reader,
+            .readFn = read,
+        };
+    }
+};
+
+const ErrorRootReader = struct {
+    read_count: u32 = 0,
+
+    fn read(
+        context: ?*anyopaque,
+        _: std.mem.Allocator,
+        _: std.Io,
+        _: []const u8,
+        _: usize,
+    ) anyerror![]u8 {
+        const reader: *ErrorRootReader = @ptrCast(@alignCast(context orelse return error.MissingContext));
+        reader.read_count += 1;
+        return error.OutOfMemory;
+    }
+
+    fn rootSourceReader(reader: *ErrorRootReader) RootSourceReader {
+        return .{
+            .context = reader,
+            .readFn = read,
+        };
+    }
+};
+
 /// Keep hand-authored test requests readable while the production wire
 /// requires every repair to carry the identity a real canonicalize response
 /// publishes. Tests for missing or stale bindings call `respond` directly.
@@ -2592,6 +2776,60 @@ fn testRepairJson(
         if (stale_field == .module_graph_hash) stale else &binding.module_graph_hash,
         if (stale_field == .semantics_hash) stale else &binding.semantics_hash,
     });
+}
+
+test "simulate_edit applies repairs to one captured source" {
+    const allocator = testing.allocator;
+    const source_b = "export function handler(\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    const binding = try currentTestRepairBinding(allocator, root, "h.ts");
+    const repair = try testRepairJson(
+        allocator,
+        "replace_let_with_const",
+        6,
+        "    let name = \"world\";",
+        "    const name = \"world\";",
+        binding,
+        .none,
+    );
+    defer allocator.free(repair);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s}]}}}}
+    , .{ root, repair });
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = source_b,
+    };
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        changing_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const payload = response.value.object.get("payload").?.object;
+    const expected_digest = agent_identity.sourceDigest(let_handler);
+    try testing.expectEqualStrings(&expected_digest, payload.get("source_digest").?.string);
+    try testing.expect(payload.get("refusal").? == .null);
+    const proposed = payload.get("proposed_content").?.string;
+    try testing.expect(std.mem.indexOf(u8, proposed, "const name") != null);
+    try testing.expect(std.mem.indexOf(u8, proposed, "let name") == null);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(source_b, on_disk);
 }
 
 test "the operation table covers the closed operation set exactly once" {
@@ -3471,6 +3709,37 @@ test "modules reports a rejected import and stops claiming success" {
     try testing.expectEqualStrings("file_unreadable", rejected.items[0].object.get("reason").?.string);
 }
 
+test "check dispatches when graph discovery rejects an imported resolver target" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { gone } from "./gone.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ value: gone });
+        \\}
+    ;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    const raw = try respond(allocator, request);
+    defer allocator.free(raw);
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const envelope = response.value.object;
+    try testing.expect(envelope.get("error") == null);
+    try testing.expect(envelope.get("payload").? == .object);
+    try testing.expectEqualStrings(
+        "h.ts",
+        envelope.get("payload").?.object.get("file").?.string,
+    );
+}
+
 test "modules without input.file is malformed, not an empty graph" {
     const a = testing.allocator;
     const out = try respond(a,
@@ -3515,6 +3784,111 @@ test "modules on a missing entry file reports file_unreadable" {
     defer parsed.deinit();
     const err = parsed.value.object.get("error").?.object;
     try testing.expectEqualStrings("file_unreadable", err.get("code").?.string);
+}
+
+test "captured root releases owned bytes and paths after graph allocation failure" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = "export const value = 1;\n" });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    const FailAfterRead = struct {
+        fn read(
+            context: ?*anyopaque,
+            capture_allocator: std.mem.Allocator,
+            _: std.Io,
+            path: []const u8,
+            max_bytes: usize,
+        ) anyerror![]u8 {
+            const failing: *testing.FailingAllocator = @ptrCast(@alignCast(context.?));
+            const source = try zts.file_io.readFile(capture_allocator, path, max_bytes);
+            failing.fail_index = failing.alloc_index;
+            return source;
+        }
+    };
+    var failing = testing.FailingAllocator.init(allocator, .{});
+    try testing.expectError(error.OutOfMemory, CapturedFile.init(
+        failing.allocator(),
+        testing.io,
+        .{ .context = &failing, .readFn = FailAfterRead.read },
+        root,
+        "h.ts",
+        .modules,
+        .null,
+    ));
+    try testing.expect(failing.has_induced_failure);
+}
+
+test "a root read allocation failure reports file_unreadable" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = "export const value = 1;\n" });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    var error_reader = ErrorRootReader{};
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        error_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), error_reader.read_count);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const protocol_error = response.value.object.get("error").?.object;
+    try testing.expectEqualStrings("file_unreadable", protocol_error.get("code").?.string);
+    try testing.expectEqualStrings("input.file", protocol_error.get("field").?.string);
+}
+
+test "a missing JavaScript root is unreadable before extension validation" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"missing.js"}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    const raw = try respond(allocator, request);
+    defer allocator.free(raw);
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const protocol_error = response.value.object.get("error").?.object;
+    try testing.expectEqualStrings("file_unreadable", protocol_error.get("code").?.string);
+}
+
+test "an oversized JavaScript root is unreadable before extension validation" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const oversized = try allocator.alloc(u8, module_graph_record.max_source_bytes + 1);
+    defer allocator.free(oversized);
+    @memset(oversized, ' ');
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.js", .data = oversized });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"h.js"}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    const raw = try respond(allocator, request);
+    defer allocator.free(raw);
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const protocol_error = response.value.object.get("error").?.object;
+    try testing.expectEqualStrings("file_unreadable", protocol_error.get("code").?.string);
 }
 
 test "modules refuses a JavaScript entry extension" {
@@ -3605,6 +3979,270 @@ test "check on a clean handler succeeds with no diagnostics" {
     try testing.expect(contract_body == .object);
     const contract_version = contract_body.object.get("version") orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(i64, 2), contract_version.integer);
+}
+
+test "check binds graph digest diagnostics and contract to one captured root source" {
+    const allocator = testing.allocator;
+    const source_a =
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const source_b = "export function handler(\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "h.ts",
+        .data = source_a,
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = source_b,
+    };
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try handleRequestWithRootReader(
+        allocator,
+        testing.io,
+        request,
+        &output.writer,
+        changing_reader.rootSourceReader(),
+    );
+
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var expected_graph = try module_graph_record.buildWithEntrySource(
+        allocator,
+        testing.io,
+        root,
+        "h.ts",
+        source_a,
+    );
+    defer expected_graph.deinit(allocator);
+    const expected_digest = agent_identity.sourceDigest(source_a);
+
+    var response = try parse(allocator, output.writer.buffered());
+    defer response.deinit();
+    const envelope = response.value.object;
+    try testing.expectEqualStrings(&expected_graph.hash, envelope.get("module_graph_hash").?.string);
+
+    const payload = envelope.get("payload").?.object;
+    try testing.expectEqualStrings(&expected_digest, payload.get("source_digest").?.string);
+
+    const diagnostics = envelope.get("diagnostics").?.array;
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    const diagnostic = diagnostics.items[0].object;
+    try testing.expectEqualStrings("ZTS500", diagnostic.get("code").?.string);
+    try testing.expectEqualStrings(&expected_digest, diagnostic.get("source_digest").?.string);
+
+    try testing.expect(payload.get("contract_available").?.bool);
+    const contract = payload.get("contract_body").?.object;
+    try testing.expectEqual(@as(i64, 2), contract.get("version").?.integer);
+    const handler = contract.get("handler").?.object;
+    try testing.expectEqualStrings("h.ts", handler.get("path").?.string);
+    try testing.expectEqual(@as(i64, 1), handler.get("line").?.integer);
+    try testing.expectEqual(@as(i64, 17), handler.get("column").?.integer);
+    const spec_diagnostics = contract.get("spec_diagnostics").?.array;
+    try testing.expectEqual(@as(usize, 1), spec_diagnostics.items.len);
+    try testing.expectEqualStrings(
+        "ZTS500",
+        spec_diagnostics.items[0].object.get("code").?.string,
+    );
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(source_b, on_disk);
+}
+
+test "modules binds its root record to one captured source" {
+    const allocator = testing.allocator;
+    const source_a = "export const value = 1;\n";
+    const source_b = "export const value = 2;\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source_a });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = source_b,
+    };
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        changing_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const graph = response.value.object.get("payload").?.object.get("graph").?.array;
+    try testing.expectEqual(@as(usize, 1), graph.items.len);
+    try testing.expectEqualStrings("h.ts", graph.items[0].object.get("path").?.string);
+    const expected_digest = agent_identity.sourceDigest(source_a);
+    try testing.expectEqualStrings(
+        &expected_digest,
+        graph.items[0].object.get("source_digest").?.string,
+    );
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(source_b, on_disk);
+}
+
+test "canonicalize derives candidates from one captured source" {
+    const allocator = testing.allocator;
+    const source_b = "export function handler(\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts","simulate":true}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = source_b,
+    };
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        changing_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const payload = response.value.object.get("payload").?.object;
+    const expected_digest = agent_identity.sourceDigest(let_handler);
+    try testing.expectEqualStrings(&expected_digest, payload.get("source_digest").?.string);
+    const candidates = payload.get("candidates").?.array;
+    try testing.expectEqual(@as(usize, 1), candidates.items.len);
+    try testing.expectEqualStrings(
+        "ZTS604",
+        candidates.items[0].object.get("diagnostic_code").?.string,
+    );
+    const simulation = payload.get("simulation").?.object;
+    try testing.expect(simulation.get("ok").?.bool);
+    try testing.expectEqual(@as(i64, 0), simulation.get("total").?.integer);
+    try testing.expectEqual(@as(i64, 0), simulation.get("new_count").?.integer);
+    try testing.expectEqual(@as(i64, 0), simulation.get("preexisting_count").?.integer);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(source_b, on_disk);
+}
+
+test "normalize derives canonical source from one captured source" {
+    const allocator = testing.allocator;
+    const source_b = "export function handler(\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = source_b,
+    };
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        changing_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const payload = response.value.object.get("payload").?.object;
+    const expected_digest = agent_identity.sourceDigest(let_handler);
+    try testing.expectEqualStrings(&expected_digest, payload.get("source_digest").?.string);
+    const canonical_source = payload.get("canonical_source").?.string;
+    try testing.expect(std.mem.indexOf(u8, canonical_source, "const name") != null);
+    try testing.expect(std.mem.indexOf(u8, canonical_source, "let name") == null);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(source_b, on_disk);
+}
+
+test "verify derives its verdict from one captured source" {
+    const allocator = testing.allocator;
+    const source_a =
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const source_b = "export function handler(\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source_a });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"]}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = source_b,
+    };
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        changing_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const payload = response.value.object.get("payload").?.object;
+    const expected_digest = agent_identity.sourceDigest(source_a);
+    try testing.expectEqualStrings(&expected_digest, payload.get("source_digest").?.string);
+    const results = payload.get("results").?.array;
+    try testing.expectEqual(@as(usize, 1), results.items.len);
+    try testing.expectEqualStrings("canonical", results.items[0].object.get("property").?.string);
+    try testing.expectEqualStrings("analyzer_proved", results.items[0].object.get("grade").?.string);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(source_b, on_disk);
 }
 
 test "check payload reports guarded categories separately from properties" {
@@ -4198,6 +4836,154 @@ test "verify binds its digest to the bytes it analyzed" {
     try testing.expect(!std.mem.eql(u8, file_digest, content_digest));
 }
 
+test "verify override binds graph identity and stale guards to supplied content" {
+    const allocator = testing.allocator;
+    const disk_source = "export function handler(req: Request): Response { return Response.text(\"disk\"); }\n";
+    const override_source = "export function handler(req: Request): Response { return Response.text(\"override\"); }\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = disk_source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    var override_graph = try module_graph_record.buildWithEntrySource(
+        allocator,
+        testing.io,
+        root,
+        "h.ts",
+        override_source,
+    );
+    defer override_graph.deinit(allocator);
+    var disk_graph = try module_graph_record.buildWithEntrySource(
+        allocator,
+        testing.io,
+        root,
+        "h.ts",
+        disk_source,
+    );
+    defer disk_graph.deinit(allocator);
+    try testing.expect(!std.mem.eql(u8, &override_graph.hash, &disk_graph.hash));
+
+    const accepted_request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":{f}}},"expected":{{"module_graph_hash":"{s}"}}}}
+    , .{ root, std.json.fmt(override_source, .{}), override_graph.hash });
+    defer allocator.free(accepted_request);
+    const accepted_raw = try respond(allocator, accepted_request);
+    defer allocator.free(accepted_raw);
+    var accepted = try parse(allocator, accepted_raw);
+    defer accepted.deinit();
+    try testing.expect(accepted.value.object.get("error") == null);
+    try testing.expectEqualStrings(
+        &override_graph.hash,
+        accepted.value.object.get("module_graph_hash").?.string,
+    );
+    const override_digest = agent_identity.sourceDigest(override_source);
+    try testing.expectEqualStrings(
+        &override_digest,
+        accepted.value.object.get("payload").?.object.get("source_digest").?.string,
+    );
+
+    const stale_request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":{f}}},"expected":{{"module_graph_hash":"{s}"}}}}
+    , .{ root, std.json.fmt(override_source, .{}), disk_graph.hash });
+    defer allocator.free(stale_request);
+    const stale_raw = try respond(allocator, stale_request);
+    defer allocator.free(stale_raw);
+    var stale = try parse(allocator, stale_raw);
+    defer stale.deinit();
+    const stale_error = stale.value.object.get("error").?.object;
+    try testing.expectEqualStrings("identity_mismatch", stale_error.get("code").?.string);
+    try testing.expectEqualStrings("expected.module_graph_hash", stale_error.get("field").?.string);
+    try testing.expectEqualStrings(
+        &override_graph.hash,
+        stale.value.object.get("module_graph_hash").?.string,
+    );
+}
+
+test "verify ignores non-string content and accepts an empty string override" {
+    const allocator = testing.allocator;
+    const disk_source = "export function handler(req: Request): Response { return Response.text(\"disk\"); }\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = disk_source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    var disk_graph = try module_graph_record.buildWithEntrySource(
+        allocator,
+        testing.io,
+        root,
+        "h.ts",
+        disk_source,
+    );
+    defer disk_graph.deinit(allocator);
+    const non_string_request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":17}}}}
+    , .{root});
+    defer allocator.free(non_string_request);
+    const non_string_raw = try respond(allocator, non_string_request);
+    defer allocator.free(non_string_raw);
+    var non_string = try parse(allocator, non_string_raw);
+    defer non_string.deinit();
+    const disk_digest = agent_identity.sourceDigest(disk_source);
+    try testing.expectEqualStrings(
+        &disk_graph.hash,
+        non_string.value.object.get("module_graph_hash").?.string,
+    );
+    try testing.expectEqualStrings(
+        &disk_digest,
+        non_string.value.object.get("payload").?.object.get("source_digest").?.string,
+    );
+
+    var empty_graph = try module_graph_record.buildWithEntrySource(
+        allocator,
+        testing.io,
+        root,
+        "h.ts",
+        "",
+    );
+    defer empty_graph.deinit(allocator);
+    const empty_request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":""}}}}
+    , .{root});
+    defer allocator.free(empty_request);
+    const empty_raw = try respond(allocator, empty_request);
+    defer allocator.free(empty_raw);
+    var empty = try parse(allocator, empty_raw);
+    defer empty.deinit();
+    const empty_digest = agent_identity.sourceDigest("");
+    try testing.expectEqualStrings(
+        &empty_graph.hash,
+        empty.value.object.get("module_graph_hash").?.string,
+    );
+    try testing.expectEqualStrings(
+        &empty_digest,
+        empty.value.object.get("payload").?.object.get("source_digest").?.string,
+    );
+}
+
+test "verify reads disk before accepting a content override" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"missing.ts","properties":["canonical"],"content":""}}}}
+    , .{root});
+    defer allocator.free(request);
+
+    const raw = try respond(allocator, request);
+    defer allocator.free(raw);
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const protocol_error = response.value.object.get("error").?.object;
+    try testing.expectEqualStrings("file_unreadable", protocol_error.get("code").?.string);
+    try testing.expectEqualStrings("input.file", protocol_error.get("field").?.string);
+}
+
 test "verify answers only the properties it was asked about" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -4689,6 +5475,27 @@ test "normalize with write true is refused, not silently ignored" {
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
     defer a.free(on_disk);
     try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "normalize write refusal precedes the stale identity guard" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts","write":true}},"expected":{{"module_graph_hash":"{s}"}}}}
+    , .{ root, module_graph_record.contextFreeHash() });
+    defer allocator.free(request);
+
+    const raw = try respond(allocator, request);
+    defer allocator.free(raw);
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const protocol_error = response.value.object.get("error").?.object;
+    try testing.expectEqualStrings("operation_not_implemented", protocol_error.get("code").?.string);
+    try testing.expectEqualStrings("input.write", protocol_error.get("field").?.string);
 }
 
 fn metaPayload(a: std.mem.Allocator, out: *[]u8) !std.json.Parsed(std.json.Value) {

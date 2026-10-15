@@ -140,10 +140,12 @@ intentionally not attempted: the traversals are not the same traversal.
 The caller initializes the session in its final address.
 The session borrows parser IR, atoms, type maps, registries, and injected module facts.
 The session owns type environments, checkers, internal facts, and pass results.
+
 The session prepares immutable path effect facts only when path analysis requests them.
 Path generators borrow completed facts and never own an effect analyzer.
 Path facts use no registry, type environment, injected module facts, or imported effect rows.
 An unavailable effect result makes path coverage report recursion conservatively.
+
 The session builds separate contract effect facts during contract extraction.
 These facts retain the selected handler and its legacy property summary.
 They also retain reachability from the first function named `handler`.
@@ -165,6 +167,19 @@ Sound resolution always uses module facts without a manifest registry.
 Contract extraction can use separate facts with a manifest registry.
 Injected module facts remain borrowed and authoritative for contract extraction.
 A custom extraction callback gets a separate type environment and checker.
+
+### Root source ownership for machine requests
+
+Each file operation owns one `CapturedFile` through response completion.
+This owner retains canonical paths, disk bytes, and graph records.
+A verify content override borrows its bytes from request storage.
+The graph hash, source digest, diagnostic spans, and analysis use the same effective root bytes.
+Operation helpers consume those captured bytes, including repair simulation and normalization.
+
+The owner reads disk before selecting a string override or validating the source extension.
+The disk size limit applies only to that read; empty string overrides retain their existing meaning.
+Imported files retain separate graph, summary, and fault observations.
+Root capture leaves simulation context discovery and dependency observations in their existing owners.
 
 ## Virtual Modules
 
