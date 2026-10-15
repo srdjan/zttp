@@ -630,6 +630,9 @@ fn buildTrace(
             }
         },
     }
+    if (!contract.effect_analysis_complete and holds and eql(name, "has_egress")) {
+        trace.summary = "Effect analysis is incomplete. Conservative egress does not claim an observed outbound call.";
+    }
     return trace;
 }
 
@@ -922,6 +925,34 @@ test "an incomplete fault analysis is named even when the enumerated paths are e
     const text = summary orelse return error.TestUnexpectedResult;
     try testing.expect(std.mem.indexOf(u8, text, "fault analysis is not complete") != null);
     try testing.expect(std.mem.indexOf(u8, text, "route dispatch did not resolve") != null);
+}
+
+test "incomplete effect analysis does not claim observed or absent calls" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.effect_analysis_complete = false;
+    contract.properties = .{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = true,
+    };
+
+    const traces = try collect(arena.allocator(), &contract, &.{}, &.{}, undefined, 0, false);
+    var egress_summary: ?[]const u8 = null;
+    for (traces) |trace| {
+        if (std.mem.eql(u8, trace.property, "has_egress")) egress_summary = trace.summary;
+    }
+    const summary = egress_summary orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, summary, "incomplete") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "observed outbound call") != null);
+    try testing.expect(std.mem.indexOf(u8, summary, "makes outbound") == null);
+    try testing.expect(std.mem.indexOf(u8, summary, "no outbound") == null);
 }
 
 test "unbounded cost trace carries loop counterexample and lever" {

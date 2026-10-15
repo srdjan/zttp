@@ -1430,6 +1430,9 @@ pub const HandlerContract = struct {
     /// Transient and not serialized.
     owned_fault_cause_snippet: ?[]const u8 = null,
     properties: ?HandlerProperties = null,
+    /// True when effect inference resolved every callable that contributed to
+    /// `properties`. Transient analysis state; contract JSON does not emit it.
+    effect_analysis_complete: bool = true,
     /// Author-declared intent assertions. Null when the handler module
     /// has no `export const intent` literal. See `IntentInfo` for shape.
     intent: ?IntentInfo = null,

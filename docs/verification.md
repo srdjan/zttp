@@ -262,6 +262,19 @@ also accounts for every helper it transitively calls. `zts check
 --json` adds a `proofCapsules` array; see
 [zts-expert-contract.md](internals/zts-expert-contract.md).
 
+For relative imports, effect analysis uses the sibling's exported value and its transitive effects.
+Writes can block `read_only` and `retry_safe`. Cache reads can block `stateless`.
+Egress includes outbound calls that a sibling makes.
+Missing files, missing exports, parse failures, cycles, and depth limits leave effects incomplete.
+Incomplete effects cannot establish an absence of writes or egress.
+With incomplete effects, `has_egress` reports possible egress. The proof trace identifies the incomplete analysis.
+
+CHECK computes these effects during its existing imported-flow reads.
+CHECK retains a separate fault traversal, with its existing read order and stopping rules.
+Graph extraction uses the loaded compilation parsers and makes no additional reads for effect summaries.
+The entry contract receives these facts before merging. The merged contract retains null aggregate properties.
+Legacy capability and purity charging remains conservative for relative imports.
+
 Counterexample-rich specs additionally feed a persistent on-disk
 corpus. Each falsifying input the analyzer materialises is written
 under `.zttp/witnesses/<short_hash>/` so the same logical leak does

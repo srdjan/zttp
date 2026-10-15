@@ -643,6 +643,50 @@ The final criterion is one typed parser implementation with no annotation recons
 The review required smaller grammar units.
 U8, U9, and U10 now separate compound types, named declarations, and generics.
 
+### U2 implementation review dispositions
+
+The effect correction retains legacy capability, purity, and determinism charges for relative imports.
+A completed pure sibling must not grant a new capability or purity proof.
+Known data retains those charges but does not count as a function value.
+An initializer that calls a factory does not establish a data export.
+The export projection tests include a local factory that returns a writer.
+
+An incomplete callable row can still contain false `writes` and `has_egress` fields.
+Those fields describe only observed effects and cannot establish their absence.
+Import charging therefore adds possible writes and egress when a supplied row is incomplete.
+The merge retains positive cache-read and recursion facts.
+A public CHECK test covers an imported function that calls an unresolved callback.
+
+Conservative egress must not claim an observed outbound call.
+The contract retains an internal completeness flag for its immediate proof trace.
+The flag does not enter contract JSON or change a format version.
+The trace replaces only the incomplete positive egress explanation.
+Flow analysis continues to determine the handler's determinism.
+
+Effects must not borrow a poisoned type environment.
+A failed type initialization prevents checker construction and nested reads.
+Every imported flow attempt checks type health, including attempts that produce no summary.
+An unhealthy checker loses its flow summary, and effect analysis receives no type environment.
+The existing early stop and separate fault traversal remain unchanged.
+
+Late export capture introduces an allocation failure after contract construction.
+The review found that `rate_limit_namespace` still had two owners at that point.
+The builder now clears its local namespace after the contract takes ownership.
+A measured final-allocation failure exercises namespace cleanup during export capture.
+Export projection also has a complete allocation-failure sweep.
+
+A module holder must not require a resolved name for registration.
+Without an atom table, that requirement dropped the holder's initializer and could falsely establish determinism and purity.
+Registration retains the original binding key, and only export publication requires a name.
+The regression uses the standalone parser and derives its padding from `Atom.FIRST_DYNAMIC`.
+An unfiltered run confirmed the incorrect determinism result before the registration correction.
+
+Merged contracts must not acquire new capsule diagnostics or declaration arrays for test observation.
+The review rejected that change because it altered public output beyond the approved correction.
+Tests check entry properties through the shared import mapper before merging, under both extraction profiles.
+The tools graph test checks unchanged merged output, and source review checks the tools loop's mapper wiring.
+Merged properties remain null.
+
 ## Definition of Done
 
 One stable pipeline owner manages each module analysis lifetime.

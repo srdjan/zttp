@@ -58,6 +58,7 @@ const stripper_mod = @import("zts-engine").stripper;
 const source_frontend_mod = @import("zts-engine").source_frontend;
 const compat_mod = @import("zts-base").compat;
 const string_mod = @import("zts-engine").string;
+const effect_inference = @import("effect_inference.zig");
 
 const NodeIndex = ir_mod.NodeIndex;
 const IrView = ir_mod.IrView;
@@ -78,6 +79,61 @@ const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
 /// package need to name it. Reaching `zts.module_facts` directly for the same
 /// type would widen the internal surface the boundary gate pins.
 pub const ModuleFacts = module_facts_mod.ModuleFacts;
+pub const EffectRow = effect_inference.EffectRow;
+pub const ExportEffect = effect_inference.ExportEffect;
+pub const ImportedEffect = effect_inference.ImportedEffect;
+pub const ExportEffects = effect_inference.ExportEffects;
+
+/// One completed module effect table, keyed by its stable graph identity.
+pub const LoadedModuleEffects = struct {
+    graph_index: modules_mod.module_graph.ModuleIndex,
+    effects: ExportEffects,
+
+    pub fn deinit(self: *LoadedModuleEffects, allocator: std.mem.Allocator) void {
+        self.effects.deinit(allocator);
+    }
+};
+
+/// Resolve file-import slots against completed modules from the same loaded graph.
+/// The returned slice owns no names. The caller frees only the slice itself.
+pub fn importedEffectsForLoadedModule(
+    allocator: std.mem.Allocator,
+    graph: *const modules_mod.ModuleGraph,
+    module_index: modules_mod.module_graph.ModuleIndex,
+    facts: *const ModuleFacts,
+    available: []const LoadedModuleEffects,
+) ![]ImportedEffect {
+    var imported: std.ArrayList(ImportedEffect) = .empty;
+    errdefer imported.deinit(allocator);
+
+    const importing_path = graph.module_list.items[module_index].path;
+    const importing_dir = modules_mod.file_resolver.dirName(importing_path);
+    for (facts.imports.items) |record| {
+        const resolved = modules_mod.resolver.resolve(record.module_specifier);
+        const specifier = switch (resolved) {
+            .file => |file| file,
+            .virtual, .unknown => continue,
+        };
+        const path = try modules_mod.file_resolver.resolve(
+            allocator,
+            specifier,
+            importing_dir,
+            null,
+        );
+        const dependency_index = graph.modules.get(path);
+        allocator.free(path);
+        var effect: ExportEffect = .blocked;
+        if (dependency_index) |wanted| {
+            for (available) |*loaded| {
+                if (loaded.graph_index != wanted) continue;
+                effect = loaded.effects.lookup(record.imported_name);
+                break;
+            }
+        }
+        try imported.append(allocator, .{ .slot = record.slot, .effect = effect });
+    }
+    return imported.toOwnedSlice(allocator);
+}
 
 // ---------------------------------------------------------------------------
 // Phase 1: Parsed
@@ -516,6 +572,23 @@ pub const ExtractContractOptions = struct {
     /// `type_check` is overridden, because a caller that replaced the check
     /// wants it to run.
     resolved: ?*ResolvedModule = null,
+    /// File-import effects prepared from earlier modules in one loaded graph.
+    /// Borrowed through extraction only.
+    imported_effects: []const ImportedEffect = &.{},
+    /// Return an owned export table beside the contract.
+    capture_export_effects: bool = false,
+};
+
+/// Owned outputs from one transactional contract extraction.
+pub const ContractExtraction = struct {
+    contract: HandlerContract,
+    export_effects: ?ExportEffects = null,
+
+    pub fn deinit(self: *ContractExtraction, allocator: std.mem.Allocator) void {
+        self.contract.deinit(allocator);
+        if (self.export_effects) |*effects| effects.deinit(allocator);
+        self.export_effects = null;
+    }
 };
 
 fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
@@ -549,6 +622,7 @@ pub const ModuleContractAnalysis = struct {
     standalone_checker: ?TypeChecker = null,
     resolution_facts: ?ModuleFacts = null,
     contract_facts: ?ModuleFacts = null,
+    exported_effects: ?ExportEffects = null,
 
     pub fn init(
         self: *ModuleContractAnalysis,
@@ -570,6 +644,8 @@ pub const ModuleContractAnalysis = struct {
     pub fn deinit(self: *ModuleContractAnalysis) void {
         if (self.state == .uninitialized) return;
 
+        if (self.exported_effects) |*effects| effects.deinit(self.allocator);
+        self.exported_effects = null;
         if (self.standalone_checker) |*checker| checker.deinit();
         self.standalone_checker = null;
         if (self.resolved) |*resolved| resolved.deinit();
@@ -603,19 +679,44 @@ pub const ModuleContractAnalysis = struct {
             else => return error.AnalysisNotCompleted,
         }
 
-        var contract = switch (self.profile) {
-            .contract_only => try self.extractDefault(filename),
+        var extraction = switch (self.profile) {
+            .contract_only => try self.extractDefaultResult(filename),
             .sound_extraction => if (self.opts.type_check == runContractTypeCheck)
-                try self.extractDefault(filename)
+                try self.extractDefaultResult(filename)
             else
-                try self.extractCustom(filename),
+                try self.extractCustomResult(filename),
         };
-        errdefer contract.deinit(self.allocator);
+        errdefer extraction.deinit(self.allocator);
 
         if (self.resolved) |*resolved| {
             if (resolved.typeErrorCount() > 0) return error.SoundModeViolation;
         }
-        return contract;
+        self.exported_effects = extraction.export_effects;
+        extraction.export_effects = null;
+        return extraction.contract;
+    }
+
+    /// Borrow the completed facts used for graph import mapping.
+    pub fn contractFacts(self: *ModuleContractAnalysis) !*const ModuleFacts {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        return self.completedContractFacts();
+    }
+
+    /// Install file-import rows after graph dependencies have completed.
+    pub fn setImportedEffects(
+        self: *ModuleContractAnalysis,
+        imported_effects: []const ImportedEffect,
+    ) !void {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        self.opts.imported_effects = imported_effects;
+    }
+
+    /// Transfer the export table after a successful extraction.
+    pub fn takeExportEffects(self: *ModuleContractAnalysis) ?ExportEffects {
+        if (self.state != .extraction_attempted) return null;
+        const result = self.exported_effects;
+        self.exported_effects = null;
+        return result;
     }
 
     fn completeContractOnly(self: *ModuleContractAnalysis) !void {
@@ -695,15 +796,15 @@ pub const ModuleContractAnalysis = struct {
         return &self.standalone_checker.?;
     }
 
-    fn extractDefault(
+    fn extractDefaultResult(
         self: *ModuleContractAnalysis,
         filename: []const u8,
-    ) !HandlerContract {
+    ) !ContractExtraction {
         var opts = self.opts;
         opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
         if (self.profile == .contract_only) opts.type_map = null;
-        return extractContractFromTypeSession(
+        return extractContractResultFromTypeSession(
             self.allocator,
             self.parsed,
             filename,
@@ -712,13 +813,13 @@ pub const ModuleContractAnalysis = struct {
         );
     }
 
-    fn extractCustom(
+    fn extractCustomResult(
         self: *ModuleContractAnalysis,
         filename: []const u8,
-    ) !HandlerContract {
+    ) !ContractExtraction {
         var opts = self.opts;
         opts.resolved = &self.resolved.?;
-        return extractContractFromParsed(self.allocator, self.parsed, filename, opts);
+        return extractContractResultFromParsed(self.allocator, self.parsed, filename, opts);
     }
 };
 
@@ -730,6 +831,26 @@ pub fn extractContractFromTypeSession(
     opts: ExtractContractOptions,
     type_checker: *TypeChecker,
 ) !HandlerContract {
+    var extraction = try extractContractResultFromTypeSession(
+        allocator,
+        parsed,
+        filename,
+        opts,
+        type_checker,
+    );
+    if (extraction.export_effects) |*effects| effects.deinit(allocator);
+    extraction.export_effects = null;
+    return extraction.contract;
+}
+
+/// Build a contract and optional export table from a completed type session.
+pub fn extractContractResultFromTypeSession(
+    allocator: std.mem.Allocator,
+    parsed: ParsedModule,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+    type_checker: *TypeChecker,
+) !ContractExtraction {
     if (opts.type_check != runContractTypeCheck or opts.resolved != null) {
         return error.IncompatibleTypeSessionOptions;
     }
@@ -737,7 +858,7 @@ pub fn extractContractFromTypeSession(
 
     const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
     const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
-    var contract = try buildContractOn(
+    var extraction = try buildContractResultOn(
         allocator,
         parsed,
         filename,
@@ -747,9 +868,9 @@ pub fn extractContractFromTypeSession(
         handler_fn,
         handler_loc,
     );
-    errdefer contract.deinit(allocator);
+    errdefer extraction.deinit(allocator);
     try type_checker.ensureHealthy();
-    return contract;
+    return extraction;
 }
 
 /// Build an owned handler contract from an already-parsed module.
@@ -759,13 +880,26 @@ pub fn extractContractFromParsed(
     filename: []const u8,
     opts: ExtractContractOptions,
 ) !HandlerContract {
+    var extraction = try extractContractResultFromParsed(allocator, parsed, filename, opts);
+    if (extraction.export_effects) |*effects| effects.deinit(allocator);
+    extraction.export_effects = null;
+    return extraction.contract;
+}
+
+/// Build a contract and optional export table from an already-parsed module.
+pub fn extractContractResultFromParsed(
+    allocator: std.mem.Allocator,
+    parsed: ParsedModule,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+) !ContractExtraction {
     const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
     const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
 
     if (opts.type_check == runContractTypeCheck) {
         if (opts.resolved) |resolved| {
             if (resolved.type_checker) |*tc| {
-                var contract = try buildContractOn(
+                var extraction = try buildContractResultOn(
                     allocator,
                     parsed,
                     filename,
@@ -775,9 +909,9 @@ pub fn extractContractFromParsed(
                     handler_fn,
                     handler_loc,
                 );
-                errdefer contract.deinit(allocator);
+                errdefer extraction.deinit(allocator);
                 try tc.ensureHealthy();
-                return contract;
+                return extraction;
             }
         }
     }
@@ -802,7 +936,7 @@ pub fn extractContractFromParsed(
     defer type_checker.deinit();
     _ = try opts.type_check(&type_checker, parsed.root);
 
-    var contract = try buildContractOn(
+    var extraction = try buildContractResultOn(
         allocator,
         parsed,
         filename,
@@ -812,14 +946,14 @@ pub fn extractContractFromParsed(
         handler_fn,
         handler_loc,
     );
-    errdefer contract.deinit(allocator);
+    errdefer extraction.deinit(allocator);
     try type_checker.ensureHealthy();
-    return contract;
+    return extraction;
 }
 
 /// The half of contract extraction that does not care where the type session
 /// came from: a freshly built one, or the one `resolve` already ran.
-fn buildContractOn(
+fn buildContractResultOn(
     allocator: std.mem.Allocator,
     parsed: ParsedModule,
     filename: []const u8,
@@ -828,7 +962,7 @@ fn buildContractOn(
     type_checker: *TypeChecker,
     handler_fn: ?NodeIndex,
     handler_loc: ?ir_mod.SourceLocation,
-) !HandlerContract {
+) !ContractExtraction {
     var builder = ContractBuilder.init(
         allocator,
         parsed.ir_view,
@@ -838,9 +972,11 @@ fn buildContractOn(
     );
     builder.manifest_registry = opts.manifest_registry;
     builder.injected_facts = opts.module_facts;
+    builder.imported_effects = opts.imported_effects;
+    builder.capture_export_effects = opts.capture_export_effects;
     defer builder.deinit();
 
-    return builder.build(
+    var contract = try builder.build(
         filename,
         handler_loc,
         handler_fn,
@@ -849,6 +985,11 @@ fn buildContractOn(
         opts.has_default_response,
         opts.verification,
     );
+    errdefer contract.deinit(allocator);
+    return .{
+        .contract = contract,
+        .export_effects = builder.takeExportEffects(),
+    };
 }
 
 /// Strip TypeScript when needed, parse and resolve the source, then return
@@ -940,6 +1081,12 @@ fn extractMultiModuleContract(
     var merged = try handler_contract_mod.initMergedContract(allocator, entry_filename);
     errdefer merged.deinit(allocator);
 
+    var loaded_effects: std.ArrayList(LoadedModuleEffects) = .empty;
+    defer {
+        for (loaded_effects.items) |*loaded| loaded.deinit(allocator);
+        loaded_effects.deinit(allocator);
+    }
+
     const entry_index = compile_result.modules.len - 1;
     for (compile_result.modules, compile_result.parsers, 0..) |compiled_module, *js_parser, idx| {
         const graph_idx = graph.execution_order[idx];
@@ -951,6 +1098,7 @@ fn extractMultiModuleContract(
         var module_opts = opts;
         module_opts.type_map = if (is_entry) opts.type_map else null;
         module_opts.read_file = null;
+        module_opts.capture_export_effects = true;
         if (!is_entry) {
             module_opts.dispatch = null;
             module_opts.has_default_response = false;
@@ -962,9 +1110,29 @@ fn extractMultiModuleContract(
         defer analysis.deinit();
         try analysis.complete();
 
+        const imported_effects = try importedEffectsForLoadedModule(
+            allocator,
+            &graph,
+            graph_idx,
+            try analysis.contractFacts(),
+            loaded_effects.items,
+        );
+        defer allocator.free(imported_effects);
+        try analysis.setImportedEffects(imported_effects);
+
         var module_contract = try analysis.extractContract(module.path);
         defer module_contract.deinit(allocator);
         try handler_contract_mod.mergeModuleContract(allocator, &merged, &module_contract, is_entry);
+
+        var export_effects = analysis.takeExportEffects() orelse
+            return error.ExportEffectsNotCaptured;
+        loaded_effects.append(allocator, .{
+            .graph_index = graph_idx,
+            .effects = export_effects,
+        }) catch |err| {
+            export_effects.deinit(allocator);
+            return err;
+        };
     }
 
     return merged;
@@ -1037,6 +1205,14 @@ fn readGraphBaselineFile(allocator: std.mem.Allocator, path: []const u8) modules
         return error.FileNotFound;
 
     return allocator.dupe(u8, source);
+}
+
+fn readSiblingEffectFile(allocator: std.mem.Allocator, path: []const u8) modules_mod.module_graph.ReadFileError![]const u8 {
+    if (!std.mem.endsWith(u8, path, "dep.ts")) return error.FileNotFound;
+    return allocator.dupe(u8,
+        \\import { cacheSet } from "zttp:cache";
+        \\export function mutate() { cacheSet("state", "key", "value"); }
+    );
 }
 
 const GraphCallbackModule = enum {
@@ -1247,9 +1423,13 @@ test "ModuleContractAnalysis requires completion and permits one extraction" {
     try analysis.init(allocator, parsed, .contract_only, .{});
     defer analysis.deinit();
 
+    try testing.expectError(error.AnalysisNotCompleted, analysis.contractFacts());
+    try testing.expectError(error.AnalysisNotCompleted, analysis.setImportedEffects(&.{}));
     try testing.expectError(error.AnalysisNotCompleted, analysis.extractContract("owner.ts"));
     try analysis.complete();
     try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
+    _ = try analysis.contractFacts();
+    try analysis.setImportedEffects(&.{});
 
     var contract = try analysis.extractContract("owner.ts");
     defer contract.deinit(allocator);
@@ -1292,12 +1472,100 @@ test "ModuleContractAnalysis cleans a partial completion failure" {
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(failing.allocator(), parsed, .contract_only, .{});
+    try analysis.init(failing.allocator(), parsed, .contract_only, .{
+        .capture_export_effects = true,
+    });
     defer analysis.deinit();
 
     try testing.expectError(error.OutOfMemory, analysis.complete());
     try testing.expect(failing.has_induced_failure);
     try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
+}
+
+test "ModuleContractAnalysis publishes owned exports for both profiles" {
+    const allocator = testing.allocator;
+    const source =
+        \\export function sibling() { return Date.now(); }
+        \\function handler(req) { return Response.text("ok"); }
+    ;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+
+    inline for (.{ ModuleContractAnalysis.Profile.contract_only, .sound_extraction }) |profile| {
+        var analysis: ModuleContractAnalysis = .{};
+        try analysis.init(allocator, parsed, profile, .{
+            .strict = false,
+            .capture_export_effects = true,
+        });
+        try analysis.complete();
+
+        var contract = try analysis.extractContract("exports.ts");
+        const contract_json = try serializeContractForTest(allocator, &contract);
+        defer allocator.free(contract_json);
+        try testing.expect(std.mem.indexOf(u8, contract_json, "effectAnalysisComplete") == null);
+        try testing.expect(std.mem.indexOf(u8, contract_json, "effect_analysis_complete") == null);
+        contract.deinit(allocator);
+        var effects = analysis.takeExportEffects() orelse return error.ExportEffectsMissing;
+        analysis.deinit();
+        defer effects.deinit(allocator);
+
+        switch (effects.lookup("sibling")) {
+            .callable => |row| try testing.expect(!row.deterministic),
+            .data, .blocked => return error.CallableExportExpected,
+        }
+    }
+}
+
+test "late export capture failure releases a transferred rate limit namespace" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\export function allowed() { return rateCheck("login-attempts", 5, 60); }
+        \\function handler(req) { return Response.text(String(allowed())); }
+    ;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+
+    const Run = struct {
+        fn extract(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
+            var analysis: ModuleContractAnalysis = .{};
+            try analysis.init(run_allocator, module, .contract_only, .{
+                .capture_export_effects = true,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+
+            var contract = try analysis.extractContract("rate-limit.ts");
+            defer contract.deinit(run_allocator);
+            try testing.expect(contract.rate_limiting != null);
+            var effects = analysis.takeExportEffects() orelse return error.ExportEffectsMissing;
+            defer effects.deinit(run_allocator);
+        }
+    };
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = std.math.maxInt(usize),
+    });
+    try Run.extract(counting.allocator(), parsed);
+    try testing.expect(counting.alloc_index > 0);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = counting.alloc_index - 1,
+    });
+    try testing.expectError(error.OutOfMemory, Run.extract(failing.allocator(), parsed));
+    try testing.expect(failing.has_induced_failure);
 }
 
 test "ModuleContractAnalysis refuses extraction retry after allocation failure" {
@@ -1312,13 +1580,16 @@ test "ModuleContractAnalysis refuses extraction retry after allocation failure" 
 
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     var analysis: ModuleContractAnalysis = .{};
-    try analysis.init(failing.allocator(), parsed, .contract_only, .{});
+    try analysis.init(failing.allocator(), parsed, .contract_only, .{
+        .capture_export_effects = true,
+    });
     defer analysis.deinit();
     try analysis.complete();
 
     failing.fail_index = failing.alloc_index;
     try testing.expectError(error.OutOfMemory, analysis.extractContract("allocation.ts"));
     try testing.expect(failing.has_induced_failure);
+    try testing.expect(analysis.takeExportEffects() == null);
     try testing.expectError(
         error.ContractExtractionAlreadyAttempted,
         analysis.extractContract("allocation.ts"),
@@ -1380,11 +1651,13 @@ test "ModuleContractAnalysis runs a custom callback only during extraction" {
     try analysis.init(allocator, parsed, .sound_extraction, .{
         .strict = false,
         .type_check = rejectingContractTypeCheck,
+        .capture_export_effects = true,
     });
     defer analysis.deinit();
 
     try analysis.complete();
     try testing.expectError(error.TestTypeCheckRan, analysis.extractContract("custom.ts"));
+    try testing.expect(analysis.takeExportEffects() == null);
     try testing.expectError(
         error.ContractExtractionAlreadyAttempted,
         analysis.extractContract("custom.ts"),
@@ -1909,6 +2182,83 @@ test "extractContract preserves graph callback order and merged contract bytes" 
         &.{ .shared, .left },
         refusal_probe.modules[0..refusal_probe.count],
     );
+}
+
+test "loaded graph corrects entry effects before merge" {
+    const allocator = testing.allocator;
+    const entry_source =
+        \\import { mutate } from "./dep.ts";
+        \\function handler(req) { mutate(); return Response.text("ok"); }
+    ;
+    var graph = modules_mod.ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build("/effects/entry.ts", entry_source, readSiblingEffectFile);
+
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+    var compiler = modules_mod.ModuleCompiler.init(allocator, &atoms, &strings);
+    var compiled = try compiler.compileAll(&graph);
+    defer compiled.deinit();
+    defer {
+        for (compiled.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
+    }
+
+    const profiles = [_]ModuleContractAnalysis.Profile{ .contract_only, .sound_extraction };
+    for (profiles) |profile| {
+        var merged = try handler_contract_mod.initMergedContract(allocator, "/effects/entry.ts");
+        defer merged.deinit(allocator);
+        var loaded: std.ArrayList(LoadedModuleEffects) = .empty;
+        defer {
+            for (loaded.items) |*item| item.deinit(allocator);
+            loaded.deinit(allocator);
+        }
+
+        for (compiled.modules, compiled.parsers, 0..) |module, *parser, index| {
+            const graph_index = graph.execution_order[index];
+            const graph_module = &graph.module_list.items[graph_index];
+            const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+            const parsed = ParsedModule.fromExisting(view, module.root, &atoms);
+            var analysis: ModuleContractAnalysis = .{};
+            try analysis.init(allocator, parsed, profile, .{
+                .strict = false,
+                .capture_export_effects = true,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+
+            const imported = try importedEffectsForLoadedModule(
+                allocator,
+                &graph,
+                graph_index,
+                try analysis.contractFacts(),
+                loaded.items,
+            );
+            defer allocator.free(imported);
+            try analysis.setImportedEffects(imported);
+
+            var contract = try analysis.extractContract(graph_module.path);
+            defer contract.deinit(allocator);
+            const is_entry = index == compiled.modules.len - 1;
+            if (is_entry) {
+                const properties = contract.properties orelse return error.PropertiesMissing;
+                try testing.expect(!properties.read_only);
+                try testing.expect(!properties.stateless);
+            }
+            try handler_contract_mod.mergeModuleContract(allocator, &merged, &contract, is_entry);
+
+            var effects = analysis.takeExportEffects() orelse return error.ExportEffectsMissing;
+            loaded.append(allocator, .{
+                .graph_index = graph_index,
+                .effects = effects,
+            }) catch |err| {
+                effects.deinit(allocator);
+                return err;
+            };
+        }
+        try testing.expect(merged.properties == null);
+    }
 }
 
 test "extractContract merges capabilities from relative imports" {

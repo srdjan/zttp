@@ -43,6 +43,8 @@ pub const EffectRow = struct {
     pure: bool = true,
     recursive: bool = false,
     has_egress: bool = false,
+    /// True when a direct or transitive call reads mutable cache state.
+    cache_reads: bool = false,
     /// True when a direct or transitive call reaches an imported module export
     /// classified `.write`. Drives the per-function `read_only` capsule
     /// property: `read_only == !writes and !has_egress`.
@@ -64,6 +66,7 @@ pub const EffectRow = struct {
             .pure = a.pure and b.pure,
             .recursive = a.recursive or b.recursive,
             .has_egress = a.has_egress or b.has_egress,
+            .cache_reads = a.cache_reads or b.cache_reads,
             .writes = a.writes or b.writes,
             .lower_bound = a.lower_bound or b.lower_bound,
         };
@@ -75,6 +78,7 @@ pub const EffectRow = struct {
             a.pure == b.pure and
             a.recursive == b.recursive and
             a.has_egress == b.has_egress and
+            a.cache_reads == b.cache_reads and
             a.writes == b.writes and
             a.lower_bound == b.lower_bound;
     }
@@ -84,6 +88,47 @@ pub const EffectRow = struct {
     /// other fields.
     pub fn readOnly(self: EffectRow) bool {
         return !self.writes and !self.has_egress;
+    }
+};
+
+/// A visible export's completed effect result.
+///
+/// `callable` covers named functions, arrows, aliases, and function holders.
+/// `data` covers only values whose initializer proves that they cannot hold a
+/// function. `blocked` covers missing exports and unresolved value shapes.
+pub const ExportEffect = union(enum) {
+    callable: EffectRow,
+    data: EffectRow,
+    blocked,
+};
+
+/// An imported result keyed by the local import slot in the consuming module.
+pub const ImportedEffect = struct {
+    slot: u16,
+    effect: ExportEffect,
+};
+
+const ExportEffectEntry = struct {
+    name: []u8,
+    effect: ExportEffect,
+};
+
+/// An owned table of visible export results.
+pub const ExportEffects = struct {
+    entries: []ExportEffectEntry = &.{},
+
+    /// Return the named result. An absent name is a blocked result.
+    pub fn lookup(self: *const ExportEffects, name: []const u8) ExportEffect {
+        for (self.entries) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry.effect;
+        }
+        return .blocked;
+    }
+
+    pub fn deinit(self: *ExportEffects, allocator: std.mem.Allocator) void {
+        for (self.entries) |entry| allocator.free(entry.name);
+        if (self.entries.len > 0) allocator.free(self.entries);
+        self.* = .{};
     }
 };
 
@@ -105,6 +150,7 @@ pub const FunctionEffect = struct {
 };
 
 const ImportedFunction = struct {
+    slot: u16,
     module: []const u8,
     name: []const u8,
 };
@@ -122,7 +168,9 @@ const module_scope_owner: usize = std.math.maxInt(usize);
 /// carries the whole set.
 const ModuleBinding = struct {
     key: u32,
+    name: ?[]const u8,
     init_node: NodeIndex,
+    exported: bool = false,
     row: EffectRow = .{},
     users: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
     refs: std.AutoArrayHashMapUnmanaged(usize, void) = .empty,
@@ -133,6 +181,12 @@ const ModuleBinding = struct {
     /// True when the initializer, or a binding it mentions, holds a function
     /// value. A plain data object stays false and charges nothing.
     holds: bool = false,
+    /// The initializer has a value-only shape. Alias dependencies must also
+    /// prove data before `safe_data` becomes true.
+    data_candidate: bool = false,
+    safe_data: bool = false,
+    /// The initializer contains an imported value whose result was blocked.
+    blocked_value: bool = false,
 
     fn deinit(self: *ModuleBinding, allocator: std.mem.Allocator) void {
         self.users.deinit(allocator);
@@ -143,6 +197,8 @@ const ModuleBinding = struct {
 
 const fetch_module_specifier: []const u8 = "zttp:fetch";
 const fetch_sync_export: []const u8 = "fetchSync";
+const cache_module_specifier: []const u8 = "zttp:cache";
+const cache_get_export: []const u8 = "cacheGet";
 
 /// Maximum fixed-point iterations. A single iteration propagates each user
 /// call's current row into its caller. Convergence is bounded by the
@@ -158,6 +214,9 @@ pub const Analyzer = struct {
     functions: std.ArrayListUnmanaged(FunctionEffect),
     /// Imported callee metadata keyed by local binding slot.
     imports: std.AutoHashMapUnmanaged(u16, ImportedFunction),
+    /// Completed sibling results keyed by this module's local import slot.
+    /// Borrowed; the caller must keep the slice alive through `analyze`.
+    imported_effects: []const ImportedEffect = &.{},
     /// Shared import index, injected by the orchestrator when one exists for
     /// this compile. Borrowed; it must outlive the analyzer. When null the
     /// analyzer builds `owned_facts` for itself, which is what the in-file
@@ -287,6 +346,64 @@ pub const Analyzer = struct {
         return self.functions.items;
     }
 
+    /// Copy every visible export and its final transitive effect result into
+    /// an owned table. Call this only after `analyze` completes.
+    pub fn exportEffects(self: *const Analyzer) !ExportEffects {
+        var count: usize = 0;
+        for (self.functions.items) |fe| {
+            if (fe.exported) count += 1;
+        }
+        for (self.module_bindings.items) |mb| {
+            if (mb.exported and mb.name != null) count += 1;
+        }
+        if (count == 0) return .{};
+
+        const entries = try self.allocator.alloc(ExportEffectEntry, count);
+        var filled: usize = 0;
+        errdefer {
+            for (entries[0..filled]) |entry| self.allocator.free(entry.name);
+            self.allocator.free(entries);
+        }
+
+        for (self.functions.items) |fe| {
+            if (!fe.exported) continue;
+            var row = fe.row;
+            row.recursive = try self.reachesRecursion(fe.body_node);
+            entries[filled] = .{
+                .name = try self.allocator.dupe(u8, fe.name),
+                .effect = .{ .callable = row },
+            };
+            filled += 1;
+        }
+        for (self.module_bindings.items) |mb| {
+            if (!mb.exported) continue;
+            const name = mb.name orelse continue;
+            const effect = try self.moduleExportEffect(&mb);
+            entries[filled] = .{
+                .name = try self.allocator.dupe(u8, name),
+                .effect = effect,
+            };
+            filled += 1;
+        }
+        std.debug.assert(filled == entries.len);
+        return .{ .entries = entries };
+    }
+
+    fn moduleExportEffect(self: *const Analyzer, mb: *const ModuleBinding) !ExportEffect {
+        if (mb.blocked_value) return .blocked;
+        if (mb.holds) {
+            var row = mb.row;
+            for (mb.users.keys()) |user_idx| {
+                const user = self.functions.items[user_idx];
+                row = row.merge(user.row);
+                if (try self.reachesRecursion(user.body_node)) row.recursive = true;
+            }
+            return .{ .callable = row };
+        }
+        if (mb.safe_data) return .{ .data = mb.row };
+        return .blocked;
+    }
+
     /// Whether the function whose body is `body_node` is recursive or can reach
     /// a recursive function through the call graph.
     ///
@@ -370,6 +487,7 @@ pub const Analyzer = struct {
         const facts = try self.resolveFacts();
         for (facts.imports.items) |rec| {
             try self.imports.put(self.allocator, rec.slot, .{
+                .slot = rec.slot,
                 .module = rec.module_specifier,
                 .name = rec.imported_name,
             });
@@ -450,7 +568,7 @@ pub const Analyzer = struct {
     /// closure may mention a binding declared further down. The sets are then
     /// closed over module-to-module references until nothing grows.
     fn computeModuleBindings(self: *Analyzer, root: NodeIndex) !void {
-        try self.registerModuleBindings(root);
+        try self.registerModuleBindings(root, false);
         const count = self.module_bindings.items.len;
         if (count == 0) return;
 
@@ -464,6 +582,8 @@ pub const Analyzer = struct {
             const before = self.fn_value_count;
             try self.walkBaseExpr(mb.init_node, module_scope_owner, &mb.row, &scratch);
             mb.holds = self.fn_value_count != before;
+            mb.data_candidate = self.isSafeDataShape(mb.init_node);
+            mb.safe_data = mb.data_candidate and mb.refs.count() == 0;
         }
 
         var changed = true;
@@ -492,28 +612,45 @@ pub const Analyzer = struct {
                         mb.holds = true;
                         changed = true;
                     }
+                    if (other.blocked_value and !mb.blocked_value) {
+                        mb.blocked_value = true;
+                        changed = true;
+                    }
                     for (other.users.keys()) |user| {
                         const gop = try mb.users.getOrPut(self.allocator, user);
                         if (!gop.found_existing) changed = true;
+                    }
+                }
+                if (mb.data_candidate and !mb.safe_data) {
+                    var all_data = true;
+                    for (mb.refs.keys()) |ref_idx| {
+                        if (!self.module_bindings.items[ref_idx].safe_data) {
+                            all_data = false;
+                            break;
+                        }
+                    }
+                    if (all_data) {
+                        mb.safe_data = true;
+                        changed = true;
                     }
                 }
             }
         }
     }
 
-    fn registerModuleBindings(self: *Analyzer, node: NodeIndex) WalkError!void {
+    fn registerModuleBindings(self: *Analyzer, node: NodeIndex, exported: bool) WalkError!void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
         switch (tag) {
             .program => {
                 const block = self.ir_view.getBlock(node) orelse return;
                 for (0..block.stmts_count) |i| {
-                    try self.registerModuleBindings(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
+                    try self.registerModuleBindings(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), exported);
                 }
             },
             .export_decl => {
                 const export_decl = self.ir_view.getExportDecl(node) orelse return;
-                try self.registerModuleBindings(export_decl.declaration);
+                try self.registerModuleBindings(export_decl.declaration, true);
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
@@ -522,13 +659,79 @@ pub const Analyzer = struct {
                 if (decl.init == null_node or self.isFunctionNode(decl.init)) return;
                 const key = bool_checker.packBindingKey(decl.binding.scope_id, decl.binding.slot);
                 const idx = self.module_bindings.items.len;
-                try self.module_bindings.append(self.allocator, .{ .key = key, .init_node = decl.init });
+                try self.module_bindings.append(self.allocator, .{
+                    .key = key,
+                    .name = self.resolveAtomName(decl.binding.name_atom),
+                    .init_node = decl.init,
+                    .exported = exported,
+                });
                 try self.module_by_key.put(self.allocator, key, idx);
             },
             // exhaustive: only a top-level `var_decl` binds a module value.
             // Statements at module scope run at load, not per request.
             else => {},
         }
+    }
+
+    /// Return true only for an initializer whose syntax proves a non-callable
+    /// value. Module aliases become data after their dependencies also prove
+    /// data. Calls and member reads remain blocked because they can return a
+    /// function even when the initializer walk observes no function value.
+    fn isSafeDataShape(self: *const Analyzer, node: NodeIndex) bool {
+        if (node == null_node) return false;
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return switch (tag) {
+            .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null, .lit_undefined => true,
+            .identifier => blk: {
+                const binding = self.ir_view.getBinding(node) orelse break :blk false;
+                if (self.moduleBindingOf(binding) != null) break :blk true;
+                const imported = self.importOf(binding) orelse break :blk false;
+                if (!isRelativeModule(imported.module)) break :blk false;
+                const supplied = self.importedEffect(imported.slot) orelse break :blk false;
+                break :blk switch (supplied) {
+                    .data => true,
+                    .callable, .blocked => false,
+                };
+            },
+            .unary_op => blk: {
+                const unary = self.ir_view.getUnary(node) orelse break :blk false;
+                break :blk self.isSafeDataShape(unary.operand);
+            },
+            .binary_op => blk: {
+                const binary = self.ir_view.getBinary(node) orelse break :blk false;
+                break :blk self.isSafeDataShape(binary.left) and self.isSafeDataShape(binary.right);
+            },
+            .ternary => blk: {
+                const ternary = self.ir_view.getTernary(node) orelse break :blk false;
+                break :blk self.isSafeDataShape(ternary.condition) and
+                    self.isSafeDataShape(ternary.then_branch) and
+                    self.isSafeDataShape(ternary.else_branch);
+            },
+            .spread => blk: {
+                const spread = self.ir_view.getUnary(node) orelse break :blk false;
+                break :blk self.isSafeDataShape(spread.operand);
+            },
+            .array_literal => blk: {
+                const array = self.ir_view.getArray(node) orelse break :blk false;
+                for (0..array.elements_count) |i| {
+                    const item = self.ir_view.getListIndex(array.elements_start, @intCast(i));
+                    if (!self.isSafeDataShape(item)) break :blk false;
+                }
+                break :blk true;
+            },
+            .object_literal => blk: {
+                const object_value = self.ir_view.getObject(node) orelse break :blk false;
+                for (0..object_value.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(object_value.properties_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse break :blk false;
+                    if (!self.isSafeDataShape(prop.value)) break :blk false;
+                }
+                break :blk true;
+            },
+            // exhaustive: calls, member reads, functions, and other unproved
+            // shapes cannot establish data. Their exports remain blocked.
+            else => false,
+        };
     }
 
     /// The module-level binding a reference names, or null.
@@ -868,12 +1071,21 @@ pub const Analyzer = struct {
             {
                 row.has_egress = true;
             }
+            if (std.mem.eql(u8, imported.module, cache_module_specifier) and
+                std.mem.eql(u8, imported.name, cache_get_export))
+            {
+                row.cache_reads = true;
+            }
             // Same fail-closed answer as `chargeImportValue`: an export of a
             // module no registry knows has no effect class, and `.none` would
             // leave `read_only` proven for a call that may write.
             if (!self.moduleIsKnown(imported.module)) {
                 row.writes = true;
                 row.has_egress = true;
+            }
+            if (isRelativeModule(imported.module)) {
+                const supplied = self.importedEffect(imported.slot) orelse .blocked;
+                self.mergeImportedEffect(supplied, true, row);
             }
             return;
         }
@@ -1111,7 +1323,19 @@ pub const Analyzer = struct {
     ) WalkError!void {
         const binding = self.ir_view.getBinding(node) orelse return;
         if (self.importOf(binding)) |imported| {
-            self.fn_value_count += 1;
+            if (isRelativeModule(imported.module)) {
+                const supplied = self.importedEffect(binding.slot) orelse .blocked;
+                switch (supplied) {
+                    .data => {},
+                    .callable => self.fn_value_count += 1,
+                    .blocked => {
+                        self.fn_value_count += 1;
+                        if (self.module_acc) |acc| acc.blocked_value = true;
+                    },
+                }
+            } else {
+                self.fn_value_count += 1;
+            }
             self.chargeImportValue(imported, row);
             return;
         }
@@ -1158,6 +1382,11 @@ pub const Analyzer = struct {
         {
             row.has_egress = true;
         }
+        if (std.mem.eql(u8, imported.module, cache_module_specifier) and
+            std.mem.eql(u8, imported.name, cache_get_export))
+        {
+            row.cache_reads = true;
+        }
         // A module neither registry resolves has no effect class to read, and
         // `importEffect` answers `.none` for it, which would leave `read_only`
         // standing. `insertModuleCapabilities` already grants it every
@@ -1167,6 +1396,49 @@ pub const Analyzer = struct {
         if (!self.moduleIsKnown(imported.module)) {
             row.writes = true;
             row.has_egress = true;
+        }
+        if (isRelativeModule(imported.module)) {
+            const supplied = self.importedEffect(imported.slot) orelse .blocked;
+            self.mergeImportedEffect(supplied, false, row);
+        }
+    }
+
+    fn importedEffect(self: *const Analyzer, slot: u16) ?ExportEffect {
+        for (self.imported_effects) |entry| {
+            if (entry.slot == slot) return entry.effect;
+        }
+        return null;
+    }
+
+    /// Merge a supplied sibling result after the legacy relative-import
+    /// charge. The legacy charge stays intact, so a clean sibling does not
+    /// establish new purity, capability, or determinism claims.
+    fn mergeImportedEffect(
+        self: *const Analyzer,
+        effect: ExportEffect,
+        called: bool,
+        row: *EffectRow,
+    ) void {
+        _ = self;
+        const incomplete = EffectRow{
+            .capabilities = CapabilitySet.initFull(),
+            .pure = false,
+            .deterministic = false,
+            .writes = true,
+            .has_egress = true,
+            .lower_bound = true,
+        };
+        const imported_row = switch (effect) {
+            .callable, .data => |supplied| supplied,
+            .blocked => incomplete,
+        };
+        row.* = row.merge(imported_row);
+        if (imported_row.lower_bound) row.* = row.merge(incomplete);
+        if (called) {
+            switch (effect) {
+                .data => row.lower_bound = true,
+                .callable, .blocked => {},
+            }
         }
     }
 
@@ -1474,6 +1746,10 @@ fn slotIsAtom(binding: ir.BindingRef) bool {
     return binding.kind == .global or binding.kind == .undeclared_global;
 }
 
+fn isRelativeModule(module: []const u8) bool {
+    return std.mem.startsWith(u8, module, "./") or std.mem.startsWith(u8, module, "../");
+}
+
 /// Shares `known_globals.varying_reads` with `flow_checker.isVaryingGlobalRead`
 /// rather than keeping a second copy. The two lists drifted apart once already:
 /// neither carried `performance.now`, so a handler reading that clock proved
@@ -1507,6 +1783,309 @@ fn analyzeNamedRow(source: []const u8, name: []const u8) !EffectRow {
 
 fn analyzeHandlerRow(source: []const u8) !EffectRow {
     return analyzeNamedRow(source, "handler");
+}
+
+test "effect rows merge cache reads" {
+    const left = EffectRow{ .cache_reads = true };
+    const right = EffectRow{ .writes = true };
+    const merged = left.merge(right);
+
+    try testing.expect(merged.cache_reads);
+    try testing.expect(merged.writes);
+    try testing.expect(merged.eql(.{ .cache_reads = true, .writes = true }));
+}
+
+test "module holders retain their effects without an atom table" {
+    const allocator = testing.allocator;
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try output.writer.writeAll("const padding = [");
+    for (0..object.Atom.FIRST_DYNAMIC + 1) |index| {
+        if (index != 0) try output.writer.writeAll(",");
+        try output.writer.print("\"s{d}\"", .{index});
+    }
+    try output.writer.writeAll(
+        \\];
+        \\const ops = { run: () => Math.random() };
+        \\function handler() { return ops.run(); }
+    );
+    const source = try output.toOwnedSlice();
+    defer allocator.free(source);
+    var parser = try JsParser.init(allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const program = view.getBlock(root) orelse return error.ProgramMissing;
+    try testing.expectEqual(@as(u32, 3), program.stmts_count);
+    const holder = view.getVarDecl(view.getListIndex(program.stmts_start, 1)) orelse
+        return error.HolderMissing;
+    try testing.expect(holder.binding.name_atom >= object.Atom.FIRST_DYNAMIC);
+
+    var analyzer = Analyzer.init(allocator, view, null);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    const row = analyzer.lookup("handler") orelse return error.FunctionNotFound;
+    try testing.expect(!row.deterministic);
+    try testing.expect(!row.pure);
+    try testing.expect(row.lower_bound);
+}
+
+test "supplied sibling outcomes preserve legacy charges and add completed effects" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { store, config, absent, pure } from "./helper.ts";
+        \\function direct() { return store("k"); }
+        \\function callback(items) { return items.forEach(store); }
+        \\function value() { return config; }
+        \\function callData() { return config(); }
+        \\function missing() { return absent(); }
+        \\function pureSibling() { return pure(); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer facts.deinit();
+
+    var supplied: [3]ImportedEffect = undefined;
+    var supplied_count: usize = 0;
+    for (facts.imports.items) |rec| {
+        if (std.mem.eql(u8, rec.imported_name, "store")) {
+            supplied[supplied_count] = .{
+                .slot = rec.slot,
+                .effect = .{ .callable = .{
+                    .writes = true,
+                    .cache_reads = true,
+                    .has_egress = true,
+                } },
+            };
+            supplied_count += 1;
+        } else if (std.mem.eql(u8, rec.imported_name, "config")) {
+            supplied[supplied_count] = .{ .slot = rec.slot, .effect = .{ .data = .{} } };
+            supplied_count += 1;
+        } else if (std.mem.eql(u8, rec.imported_name, "pure")) {
+            supplied[supplied_count] = .{ .slot = rec.slot, .effect = .{ .callable = .{} } };
+            supplied_count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), supplied_count);
+
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    analyzer.facts = &facts;
+    analyzer.imported_effects = supplied[0..supplied_count];
+    try analyzer.analyze(root);
+
+    const direct = analyzer.lookup("direct") orelse return error.FunctionNotFound;
+    try testing.expect(direct.writes);
+    try testing.expect(direct.cache_reads);
+    try testing.expect(direct.has_egress);
+    try testing.expect(!direct.lower_bound);
+    try testing.expectEqual(CapabilitySet.initFull().count(), direct.capabilities.count());
+    try testing.expect(!direct.pure);
+    try testing.expect(!direct.deterministic);
+
+    const callback = analyzer.lookup("callback") orelse return error.FunctionNotFound;
+    try testing.expect(callback.writes);
+    try testing.expect(callback.cache_reads);
+    try testing.expect(callback.has_egress);
+
+    const value = analyzer.lookup("value") orelse return error.FunctionNotFound;
+    try testing.expect(!value.writes);
+    try testing.expect(!value.has_egress);
+    try testing.expect(!value.lower_bound);
+    try testing.expect(!value.pure);
+    try testing.expect(!value.deterministic);
+
+    const called_data = analyzer.lookup("callData") orelse return error.FunctionNotFound;
+    try testing.expect(called_data.lower_bound);
+    try testing.expect(!called_data.writes);
+
+    const missing = analyzer.lookup("missing") orelse return error.FunctionNotFound;
+    try testing.expect(missing.writes);
+    try testing.expect(missing.has_egress);
+    try testing.expect(missing.lower_bound);
+    try testing.expectEqual(CapabilitySet.initFull().count(), missing.capabilities.count());
+
+    const pure = analyzer.lookup("pureSibling") orelse return error.FunctionNotFound;
+    try testing.expect(pure.readOnly());
+    try testing.expect(!pure.lower_bound);
+    try testing.expect(!pure.pure);
+    try testing.expect(!pure.deterministic);
+    try testing.expectEqual(CapabilitySet.initFull().count(), pure.capabilities.count());
+}
+
+test "incomplete sibling rows include possible writes and egress" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator,
+        \\import { run } from "./helper.ts";
+        \\function handler() { return run(); }
+    );
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer facts.deinit();
+    try testing.expectEqual(@as(usize, 1), facts.imports.items.len);
+    const incomplete = EffectRow{ .lower_bound = true, .cache_reads = true, .recursive = true };
+    const outcomes = [_]ExportEffect{
+        .{ .callable = incomplete },
+        .{ .data = incomplete },
+    };
+    for (outcomes) |outcome| {
+        const imported = [_]ImportedEffect{.{ .slot = facts.imports.items[0].slot, .effect = outcome }};
+        var analyzer = Analyzer.init(allocator, view, &atoms);
+        defer analyzer.deinit();
+        analyzer.facts = &facts;
+        analyzer.imported_effects = &imported;
+        try analyzer.analyze(root);
+        const row = analyzer.lookup("handler") orelse return error.FunctionNotFound;
+        try testing.expect(row.lower_bound);
+        try testing.expect(row.writes);
+        try testing.expect(row.has_egress);
+        try testing.expect(row.cache_reads);
+        try testing.expect(row.recursive);
+        try testing.expect(!row.pure);
+        try testing.expect(!row.deterministic);
+        try testing.expectEqual(CapabilitySet.initFull().count(), row.capabilities.count());
+    }
+}
+
+test "export projection owns names and classifies callables data and blocked values" {
+    const allocator = testing.allocator;
+    var effects: ExportEffects = undefined;
+    {
+        var atoms = atom_table.AtomTable.init(allocator);
+        defer atoms.deinit();
+        const source =
+            \\import { cacheGet, cacheSet } from "zttp:cache";
+            \\import { fetchSync } from "zttp:fetch";
+            \\export function write(k) { cacheSet("ns", k, "v", 10); return 1; }
+            \\export function read(k) { return cacheGet("ns", k); }
+            \\export const send = (url) => fetchSync(url);
+            \\export const alias = write;
+            \\export const holder = { run: alias };
+            \\function loop() { return loop(); }
+            \\export function reachesLoop() { return loop(); }
+            \\export const recursiveHolder = { run: loop };
+            \\export const scalar = 7;
+            \\export const objectData = { limit: scalar, names: ["a", "b"] };
+            \\export const unknown = makeFactory();
+            \\function factory() { return write; }
+            \\export const factoryResult = factory();
+            \\function hidden() { cacheSet("hidden", "k", "v", 10); }
+        ;
+        var parser = try JsParser.init(allocator, source);
+        parser.setAtomTable(&atoms);
+        defer parser.deinit();
+        const root = try parser.parse();
+        const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        var analyzer = Analyzer.init(allocator, view, &atoms);
+        defer analyzer.deinit();
+        try analyzer.analyze(root);
+        effects = try analyzer.exportEffects();
+    }
+    defer effects.deinit(allocator);
+
+    switch (effects.lookup("write")) {
+        .callable => |row| try testing.expect(row.writes),
+        else => return error.ExpectedCallableExport,
+    }
+    switch (effects.lookup("read")) {
+        .callable => |row| try testing.expect(row.cache_reads),
+        else => return error.ExpectedCallableExport,
+    }
+    switch (effects.lookup("send")) {
+        .callable => |row| try testing.expect(row.has_egress),
+        else => return error.ExpectedCallableExport,
+    }
+    for ([_][]const u8{ "alias", "holder" }) |name| {
+        switch (effects.lookup(name)) {
+            .callable => |row| try testing.expect(row.writes),
+            else => return error.ExpectedCallableExport,
+        }
+    }
+    for ([_][]const u8{ "reachesLoop", "recursiveHolder" }) |name| {
+        switch (effects.lookup(name)) {
+            .callable => |row| try testing.expect(row.recursive),
+            else => return error.ExpectedCallableExport,
+        }
+    }
+    for ([_][]const u8{ "scalar", "objectData" }) |name| {
+        switch (effects.lookup(name)) {
+            .data => {},
+            else => return error.ExpectedDataExport,
+        }
+    }
+    for ([_][]const u8{ "unknown", "factoryResult", "hidden", "missing" }) |name| {
+        switch (effects.lookup(name)) {
+            .blocked => {},
+            else => return error.ExpectedBlockedExport,
+        }
+    }
+}
+
+test "export projection keeps supplied data aliases as data" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { config } from "./config.ts";
+        \\export const localConfig = config;
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer facts.deinit();
+    const imported = [_]ImportedEffect{.{
+        .slot = facts.imports.items[0].slot,
+        .effect = .{ .data = .{} },
+    }};
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    analyzer.facts = &facts;
+    analyzer.imported_effects = &imported;
+    try analyzer.analyze(root);
+    var effects = try analyzer.exportEffects();
+    defer effects.deinit(allocator);
+
+    switch (effects.lookup("localConfig")) {
+        .data => {},
+        else => return error.ExpectedDataExport,
+    }
+}
+
+test "export projection closes every allocation failure" {
+    const Projection = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var atoms = atom_table.AtomTable.init(allocator);
+            defer atoms.deinit();
+            var parser = try JsParser.init(allocator,
+                \\export function first() { return second(); }
+                \\export function second() { return 2; }
+            );
+            parser.setAtomTable(&atoms);
+            defer parser.deinit();
+            const root = try parser.parse();
+            const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+            var analyzer = Analyzer.init(allocator, view, &atoms);
+            defer analyzer.deinit();
+            try analyzer.analyze(root);
+            var effects = try analyzer.exportEffects();
+            defer effects.deinit(allocator);
+        }
+    };
+    try testing.checkAllAllocationFailures(testing.allocator, Projection.run, .{});
 }
 
 test "leaf pure function has empty effect row" {
@@ -3039,15 +3618,15 @@ test "an unknown module's export referenced as a value fails closed" {
     try testing.expect(called.has_egress);
     try testing.expect(!called.readOnly());
 
-    // Control: a sibling user module is no registry entry, but it is not
-    // unknown either. Charging it as a writer cost every handler that calls a
-    // pure sibling helper `read_only` and `idempotent`.
+    // Without a supplied result, a sibling's effects remain unknown.
+    // A missing summary cannot establish an absence of writes or egress.
     const sibling = try analyzeHandlerRow(
         \\import { normalizeLabel } from "./label.ts";
         \\function handler(items) { const r = normalizeLabel("a"); return items.map(normalizeLabel); }
     );
-    try testing.expect(!sibling.writes);
-    try testing.expect(!sibling.has_egress);
+    try testing.expect(sibling.writes);
+    try testing.expect(sibling.has_egress);
+    try testing.expect(sibling.lower_bound);
 
     // Control: a known pure export referenced as a value stays read only.
     const known = try analyzeHandlerRow(

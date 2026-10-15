@@ -126,6 +126,12 @@ pub const ContractBuilder = struct {
     /// Partner virtual-module manifests registered for this compile session.
     /// Borrowed; the registry must outlive the builder.
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
+    /// File-import effect rows prepared from already-loaded sibling modules.
+    /// Borrowed; the slice must outlive `build`.
+    imported_effects: []const effect_inference.ImportedEffect = &.{},
+    /// Request an owned export table from the analyzer used by `build`.
+    capture_export_effects: bool = false,
+    exported_effects: ?effect_inference.ExportEffects = null,
 
     /// The import and binding index this builder owns, used when no caller
     /// injected one. Built at the start of `build` and not mutated after. The
@@ -283,6 +289,8 @@ pub const ContractBuilder = struct {
     }
 
     pub fn deinit(self: *ContractBuilder) void {
+        if (self.exported_effects) |*effects| effects.deinit(self.allocator);
+        self.exported_effects = null;
         self.owned_facts.deinit();
         var ext_it = self.extensions.iterator();
         while (ext_it.next()) |entry| {
@@ -353,6 +361,7 @@ pub const ContractBuilder = struct {
         // Lets a call through a function-typed parameter contribute that type's
         // declared ceiling instead of defeating the row (D2 section 4, I3).
         effects.type_env = self.type_env;
+        effects.imported_effects = self.imported_effects;
         defer effects.deinit();
         try effects.analyze(root);
 
@@ -366,12 +375,13 @@ pub const ContractBuilder = struct {
         const intent_value = try self.extractIntentAssertions();
 
         // Phase 3: Compute handler effect properties.
-        const properties = try self.computeProperties(effects.lookup("handler"), handler_fn);
+        const handler_row = effects.lookup("handler");
+        const properties = try self.computeProperties(handler_row, handler_fn);
 
         // Phase 3b: Detect rate limiting. The namespace is duped because
         // `rate_limit_keys` stays with the builder, unlike `cache_namespaces`,
         // which the contract takes ownership of below.
-        const rate_limit_namespace: ?[]const u8 = if (self.rate_limit_keys.items.len > 0)
+        var rate_limit_namespace: ?[]const u8 = if (self.rate_limit_keys.items.len > 0)
             try self.allocator.dupe(u8, self.rate_limit_keys.items[0])
         else
             null;
@@ -512,6 +522,7 @@ pub const ContractBuilder = struct {
             .rate_limiting = rate_limiting,
             .owned_rate_limit_namespace = rate_limit_namespace,
             .properties = properties,
+            .effect_analysis_complete = if (handler_row) |row| !row.lower_bound else false,
             .intent = intent_value,
             .property_provenance = .{
                 .deterministic = self.nondeterministic_cause,
@@ -537,6 +548,7 @@ pub const ContractBuilder = struct {
         self.api_request_schema_refs = .empty;
         self.api_routes = .empty;
         self.extensions = .empty;
+        rate_limit_namespace = null;
         // Every phase below can fail, and each one adds to the contract. Before
         // this the partially built contract was simply dropped.
         errdefer contract.deinit(self.allocator);
@@ -566,7 +578,18 @@ pub const ContractBuilder = struct {
         // Phase 4d: refuse schemas that zttp:validate cannot compile (ZTS514).
         try self.checkSchemaCompilability(&contract);
 
+        if (self.capture_export_effects) {
+            self.exported_effects = try effects.exportEffects();
+        }
+
         return contract;
+    }
+
+    /// Transfer the captured export table to the caller.
+    pub fn takeExportEffects(self: *ContractBuilder) ?effect_inference.ExportEffects {
+        const result = self.exported_effects;
+        self.exported_effects = null;
+        return result;
     }
 
     // -----------------------------------------------------------------
@@ -3033,6 +3056,8 @@ pub const ContractBuilder = struct {
         // defaulting to held.
         const deterministic = handler_fn != null;
         var pure = !s.unknown and !s.has_any_call and !s.has_egress;
+        var cache_reads = s.has_cache_read;
+        var has_egress = s.has_egress;
 
         if (handler_row) |row| {
             // A lower-bound row calls through a value the walk could not
@@ -3041,6 +3066,8 @@ pub const ContractBuilder = struct {
             // for a handler whose hidden callee writes.
             read_only = read_only and row.readOnly() and !row.lower_bound;
             pure = pure and row.pure and !row.lower_bound;
+            cache_reads = cache_reads or row.cache_reads;
+            has_egress = has_egress or row.has_egress;
         }
 
         const retry_safe = read_only;
@@ -3067,10 +3094,10 @@ pub const ContractBuilder = struct {
         return .{
             .pure = pure,
             .read_only = read_only,
-            .stateless = read_only and !s.has_cache_read,
+            .stateless = read_only and !cache_reads,
             .retry_safe = retry_safe,
             .deterministic = deterministic,
-            .has_egress = s.has_egress,
+            .has_egress = has_egress,
             .idempotent = deterministic and retry_safe,
             .post_only = post_only,
             // The contract builder runs only after strict checking passed

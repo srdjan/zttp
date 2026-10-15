@@ -265,11 +265,30 @@ const ImportedFile = struct {
 /// its own, and the modules it imports in turn are summarized first, so a sink
 /// two files deep reaches the handler's call.
 ///
-/// Every failure here - a specifier that is not relative, a file that will not
-/// read, strip, or parse, an export that is not a function, an import cycle, a
-/// chain past `max_import_depth` - drops the entry rather than the build. A
-/// missing entry means the flow checker treats the call as unresolved, which
-/// clears every property a sink decides: the conservative direction.
+/// A failed flow summary stays absent, so the flow checker treats the call as
+/// unresolved. Its effect entry stays present as blocked, so effects also fail
+/// closed without a second file read.
+const ImportedFunctionAnalysis = struct {
+    summary: ?zts.pipeline.ImportedSummary = null,
+    effect: zts.pipeline.ExportEffect = .blocked,
+
+    fn deinit(self: *ImportedFunctionAnalysis, allocator: std.mem.Allocator) void {
+        if (self.summary) |*summary| summary.deinit(allocator);
+        self.summary = null;
+    }
+};
+
+const ImportedFunctionAnalyses = struct {
+    flow: std.ArrayList(zts.pipeline.ImportedFnSummary) = .empty,
+    effects: std.ArrayList(zts.pipeline.ImportedEffect) = .empty,
+
+    fn deinit(self: *ImportedFunctionAnalyses, allocator: std.mem.Allocator) void {
+        for (self.flow.items) |*entry| entry.summary.deinit(allocator);
+        self.flow.deinit(allocator);
+        self.effects.deinit(allocator);
+    }
+};
+
 fn collectImportedFnSummaries(
     allocator: std.mem.Allocator,
     facts: *const zts.pipeline.ModuleFacts,
@@ -277,8 +296,9 @@ fn collectImportedFnSummaries(
     stack: *ImportStack,
     /// Where each imported file's bytes come from; null is the working tree.
     reader: ?ImportReader,
-) std.ArrayList(zts.pipeline.ImportedFnSummary) {
-    var out: std.ArrayList(zts.pipeline.ImportedFnSummary) = .empty;
+) error{OutOfMemory}!ImportedFunctionAnalyses {
+    var out: ImportedFunctionAnalyses = .{};
+    errdefer out.deinit(allocator);
     // Browser analysis receives one source buffer and has no filesystem. Keep
     // the conservative empty answer while compiling the POSIX reader entirely
     // out of the freestanding build.
@@ -291,21 +311,23 @@ fn collectImportedFnSummaries(
         if (!std.mem.startsWith(u8, rec.module_specifier, "./") and
             !std.mem.startsWith(u8, rec.module_specifier, "../")) continue;
 
-        const path = std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier }) catch continue;
+        const path = try std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier });
         defer allocator.free(path);
 
-        var summary = importedFunctionSummary(
+        var imported = try importedFunctionSummary(
             allocator,
             path,
             rec.module_specifier,
             rec.imported_name,
             stack,
             reader,
-        ) orelse continue;
-        out.append(allocator, .{ .slot = rec.slot, .summary = summary }) catch {
-            summary.deinit(allocator);
-            return out;
-        };
+        );
+        defer imported.deinit(allocator);
+        if (imported.summary) |summary| {
+            try out.flow.append(allocator, .{ .slot = rec.slot, .summary = summary });
+            imported.summary = null;
+        }
+        try out.effects.append(allocator, .{ .slot = rec.slot, .effect = imported.effect });
     }
     return out;
 }
@@ -498,14 +520,8 @@ fn scanImportedFileTree(
     return .clean;
 }
 
-fn deinitImportedSummaries(allocator: std.mem.Allocator, list: *std.ArrayList(zts.pipeline.ImportedFnSummary)) void {
-    for (list.items) |*entry| entry.summary.deinit(allocator);
-    list.deinit(allocator);
-}
-
-/// Walk one imported file and answer the sink summary of `name`, or null when
-/// the file cannot be read, stripped, parsed, or carries no such function.
-/// `specifier` is how the importer wrote the path, for the report's help text.
+/// Walk one imported file and answer its independent flow and effect results.
+/// `specifier` is the importer's path spelling for flow diagnostics.
 fn importedFunctionSummary(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -513,48 +529,89 @@ fn importedFunctionSummary(
     name: []const u8,
     stack: *ImportStack,
     reader: ?ImportReader,
-) ?zts.pipeline.ImportedSummary {
-    if (stack.len >= max_import_depth or stack.contains(path)) return null;
+) error{OutOfMemory}!ImportedFunctionAnalysis {
+    var result: ImportedFunctionAnalysis = .{};
+    errdefer result.deinit(allocator);
+    if (stack.len >= max_import_depth or stack.contains(path)) return result;
     stack.paths[stack.len] = path;
     stack.len += 1;
     defer stack.len -= 1;
 
     var file: ImportedFile = undefined;
-    file.load(allocator, reader, path) catch return null;
+    file.load(allocator, reader, path) catch return result;
     defer file.deinit();
     const view = file.view;
     const module_facts = &file.module_facts;
 
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
+    var type_check_clean = true;
     if (file.prepared.typeMap()) |type_map| {
-        type_env_storage.init(allocator, type_map) catch return null;
+        type_env_storage.init(allocator, type_map) catch {
+            type_check_clean = false;
+        };
     }
     var type_checker: ?zts.TypeChecker = null;
     defer if (type_checker) |*checker| checker.deinit();
-    if (type_env_storage.envPtr()) |type_env| {
-        type_checker = zts.TypeChecker.init(allocator, view, &file.atoms, type_env);
-        const type_errors = type_checker.?.check(file.root) catch return null;
-        if (type_errors != 0) return null;
+    if (type_check_clean) {
+        if (type_env_storage.envPtr()) |type_env| {
+            type_checker = zts.TypeChecker.init(allocator, view, &file.atoms, type_env);
+            const type_errors = type_checker.?.check(file.root) catch blk: {
+                type_check_clean = false;
+                break :blk 0;
+            };
+            if (type_errors != 0) type_check_clean = false;
+            if (type_check_clean) {
+                type_checker.?.ensureHealthy() catch {
+                    type_check_clean = false;
+                };
+            }
+        }
     }
 
-    var flow = zts.FlowChecker.init(allocator, view, &file.atoms);
-    defer flow.deinit();
-    flow.facts = module_facts;
-    if (type_checker) |*checker| flow.setTypeChecker(checker);
-
     // The helpers of this helper come first, so a call into one of them applies
-    // that file's sinks to this file's parameters.
-    var nested = collectImportedFnSummaries(allocator, module_facts, path, stack, reader);
-    defer deinitImportedSummaries(allocator, &nested);
-    for (nested.items) |*entry| flow.setFileFunctionSummary(entry.slot, &entry.summary);
+    // that file's sinks and effects to this file. A failed type check retains
+    // the old early stop. Effects still inspect the loaded IR with every
+    // nested file import blocked, without reading another file.
+    var nested: ImportedFunctionAnalyses = if (type_check_clean)
+        try collectImportedFnSummaries(allocator, module_facts, path, stack, reader)
+    else
+        .{};
+    defer nested.deinit(allocator);
+    if (!type_check_clean) {
+        for (module_facts.imports.items) |rec| {
+            if (rec.resolution != .unresolved or !isRelativeSpecifier(rec.module_specifier)) continue;
+            try nested.effects.append(allocator, .{ .slot = rec.slot, .effect = .blocked });
+        }
+    }
 
-    var summary = (flow.exportedSummary(specifier, name) catch return null) orelse return null;
-    if (type_checker) |*checker| checker.ensureHealthy() catch {
-        summary.deinit(allocator);
-        return null;
-    };
-    return summary;
+    if (type_check_clean) {
+        var flow = zts.FlowChecker.init(allocator, view, &file.atoms);
+        defer flow.deinit();
+        flow.facts = module_facts;
+        if (type_checker) |*checker| flow.setTypeChecker(checker);
+        for (nested.flow.items) |*entry| flow.setFileFunctionSummary(entry.slot, &entry.summary);
+
+        result.summary = flow.exportedSummary(specifier, name) catch null;
+        if (type_checker) |*checker| {
+            checker.ensureHealthy() catch {
+                if (result.summary) |*owned| owned.deinit(allocator);
+                result.summary = null;
+                type_check_clean = false;
+            };
+        }
+    }
+
+    var effects = zts.EffectAnalyzer.init(allocator, view, &file.atoms);
+    defer effects.deinit();
+    effects.facts = module_facts;
+    effects.type_env = if (type_check_clean) type_env_storage.envPtr() else null;
+    effects.imported_effects = nested.effects.items;
+    effects.analyze(file.root) catch return result;
+    var exported = effects.exportEffects() catch return result;
+    defer exported.deinit(allocator);
+    result.effect = exported.lookup(name);
+    return result;
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -1613,6 +1670,8 @@ fn runCheckOnPreparedSource(
 
     if (skip_contract) return result;
 
+    var imported_analyses: ImportedFunctionAnalyses = .{};
+    defer imported_analyses.deinit(allocator);
     var verify_info: ?VerificationInfo = null;
     if (zts.findHandlerFunction(ir_view, root)) |hf| {
         // Sink summaries for helpers imported from sibling files. Without them
@@ -1627,12 +1686,17 @@ fn runCheckOnPreparedSource(
             import_stack.paths[0] = p;
             import_stack.len = 1;
         }
-        var imported_summaries = collectImportedFnSummaries(allocator, analysis.facts(), handler_path, &import_stack, opts.import_reader);
-        defer deinitImportedSummaries(allocator, &imported_summaries);
+        imported_analyses = try collectImportedFnSummaries(
+            allocator,
+            analysis.facts(),
+            handler_path,
+            &import_stack,
+            opts.import_reader,
+        );
 
         try analysis.prepareChecked(hf, .{
             .module_facts = analysis.facts(),
-            .imported_fn_summaries = imported_summaries.items,
+            .imported_fn_summaries = imported_analyses.flow.items,
         });
         _ = try analysis.runVerifier(hf);
         _ = try analysis.runFlow(hf);
@@ -1708,7 +1772,10 @@ fn runCheckOnPreparedSource(
         allocator,
         &analysis,
         handler_path,
-        .{ .verification = verify_info },
+        .{
+            .verification = verify_info,
+            .imported_effects = imported_analyses.effects.items,
+        },
     );
     if (zts.findHandlerFunction(ir_view, root) != null) {
         try projectCompletedFlow(
@@ -2921,6 +2988,7 @@ const ContractExtractionOptions = struct {
     aot: ?AotAnalysis = null,
     verification: ?VerificationInfo = null,
     manifest_registry: ?*const zts.ManifestRegistry = null,
+    imported_effects: []const zts.pipeline.ImportedEffect = &.{},
 };
 
 fn extractContractFromAnalysis(
@@ -2939,6 +3007,7 @@ fn extractContractFromAnalysis(
             .has_default_response = if (opts.aot) |aot_analysis| aot_analysis.default_response != null else false,
             .verification = opts.verification,
             .manifest_registry = opts.manifest_registry,
+            .imported_effects = opts.imported_effects,
         },
         try analysis.completedTypeChecker(),
     );
@@ -3065,6 +3134,11 @@ fn buildMultiModuleContract(
 
     const entry_index = compile_result.modules.len - 1;
     var policy_checked = false;
+    var loaded_effects: std.ArrayList(zts.pipeline.LoadedModuleEffects) = .empty;
+    defer {
+        for (loaded_effects.items) |*loaded| loaded.deinit(allocator);
+        loaded_effects.deinit(allocator);
+    }
 
     for (compile_result.modules, compile_result.parsers, 0..) |compiled_module, *js_parser, idx| {
         const graph_idx = graph.execution_order[idx];
@@ -3088,13 +3162,31 @@ fn buildMultiModuleContract(
                 .dispatch = if (temp_aot) |analysis| analysis.dispatch else null,
                 .has_default_response = if (temp_aot) |analysis| analysis.default_response != null else false,
                 .manifest_registry = manifest_registry,
+                .capture_export_effects = true,
             },
         );
         defer module_analysis.deinit();
         try module_analysis.complete();
 
+        const imported_effects = try zts.pipeline.importedEffectsForLoadedModule(
+            allocator,
+            graph,
+            graph_idx,
+            try module_analysis.contractFacts(),
+            loaded_effects.items,
+        );
+        defer allocator.free(imported_effects);
+        try module_analysis.setImportedEffects(imported_effects);
+
         var module_contract = try module_analysis.extractContract(module.path);
         defer module_contract.deinit(allocator);
+        var pending_export_effects = module_analysis.takeExportEffects();
+        errdefer if (pending_export_effects) |*effects| effects.deinit(allocator);
+        try loaded_effects.append(allocator, .{
+            .graph_index = graph_idx,
+            .effects = pending_export_effects orelse return error.AnalysisPassIncomplete,
+        });
+        pending_export_effects = null;
 
         try validateSqlContract(allocator, &module_contract, sql_schema_path);
         try enforcePolicyForContract(allocator, module.path, &module_contract, policy);
@@ -3664,6 +3756,31 @@ test "compileHandler aggregates contract across file imports" {
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), contract.env.literal.items.len);
     try std.testing.expectEqualStrings("JWT_SECRET", contract.env.literal.items[0]);
+}
+
+test "compileHandler keeps merged properties null after loaded graph effects" {
+    const entry_source =
+        \\import { saveAlias } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  saveAlias();
+        \\  return Response.text("ok");
+        \\}
+        \\
+    ;
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { cacheSet } from "zttp:cache";
+        \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
+        \\export const saveAlias = save;
+        \\
+    );
+
+    var compiled = try fixture.compile(.{ .emit_contract = true });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+    const merged = compiled.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expect(merged.properties == null);
 }
 
 test "compileHandler rejects disallowed policy from imported module" {
@@ -6785,6 +6902,314 @@ fn diagnosticWithCode(result: *const CheckResult, code: []const u8) ?json_diag.J
     return null;
 }
 
+const sibling_cache_writer =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function save(): undefined {
+    \\  cacheSet("items", "key", "value");
+    \\  return undefined;
+    \\}
+    \\
+;
+
+test "CHECK applies a sibling writer effect to handler properties" {
+    var fixture = try SiblingFixture.init(
+        \\import { save } from "./dep.ts";
+        \\function handler(req: Request): Proof<Response, "read_only" | "retry_safe"> {
+        \\  save();
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", sibling_cache_writer);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
+    try std.testing.expect(!properties.idempotent);
+    var refused_read_only = false;
+    var refused_retry_safe = false;
+    for (result.contract.?.spec_diagnostics.items) |diagnostic| {
+        if (diagnostic.kind != .not_discharged) continue;
+        if (std.mem.eql(u8, diagnostic.spec_name, "read_only")) refused_read_only = true;
+        if (std.mem.eql(u8, diagnostic.spec_name, "retry_safe")) refused_retry_safe = true;
+    }
+    try std.testing.expect(refused_read_only);
+    try std.testing.expect(refused_retry_safe);
+}
+
+test "CHECK applies sibling effects through an alias and a holder" {
+    const cases = [_]struct {
+        imported_name: []const u8,
+        call: []const u8,
+        dependency: []const u8,
+    }{
+        .{
+            .imported_name = "saveAlias",
+            .call = "saveAlias()",
+            .dependency =
+            \\import { cacheSet } from "zttp:cache";
+            \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
+            \\export const saveAlias = save;
+            \\
+            ,
+        },
+        .{
+            .imported_name = "holder",
+            .call = "holder.save()",
+            .dependency =
+            \\import { cacheSet } from "zttp:cache";
+            \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
+            \\export const holder = { save };
+            \\
+            ,
+        },
+    };
+
+    for (cases) |case| {
+        const handler = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "import {{ {s} }} from \"./dep.ts\";\nfunction handler(req: Request): Response {{ {s}; return Response.text(\"ok\"); }}\n",
+            .{ case.imported_name, case.call },
+        );
+        defer std.testing.allocator.free(handler);
+        var fixture = try SiblingFixture.init(handler);
+        defer fixture.deinit();
+        try fixture.add("dep.ts", case.dependency);
+
+        var result = try fixture.check();
+        defer result.deinit(std.testing.allocator);
+        const properties = result.contract.?.properties.?;
+        try std.testing.expect(!properties.read_only);
+        try std.testing.expect(!properties.retry_safe);
+    }
+}
+
+test "CHECK applies a sibling writer effect through two imports" {
+    var fixture = try SiblingFixture.init(
+        \\import { relay } from "./a.ts";
+        \\function handler(req: Request): Response { relay(); return Response.text("ok"); }
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("a.ts",
+        \\import { save } from "./dep.ts";
+        \\export function relay(): undefined { return save(); }
+        \\
+    );
+    try fixture.add("dep.ts", sibling_cache_writer);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
+}
+
+test "CHECK reports incomplete effects for an imported callback invocation" {
+    var fixture = try SiblingFixture.init(
+        \\import { run } from "./dep.ts";
+        \\function clean(): undefined { return undefined; }
+        \\function handler(req: Request): Response { run(clean); return Response.text("ok"); }
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function run(callback) { callback(); return undefined; }
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
+    try std.testing.expect(properties.has_egress);
+    try std.testing.expect(!contract.effect_analysis_complete);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        result.proof_trace_json orelse return error.TestUnexpectedResult,
+        "Effect analysis is incomplete",
+    ) != null);
+}
+
+test "CHECK preserves sibling cache reads and egress facts" {
+    const cases = [_]struct {
+        name: []const u8,
+        dependency: []const u8,
+        stateless: bool,
+        has_egress: bool,
+    }{
+        .{
+            .name = "readIt",
+            .dependency =
+            \\import { cacheGet } from "zttp:cache";
+            \\export function readIt(): string | undefined { return cacheGet("items", "key"); }
+            \\
+            ,
+            .stateless = false,
+            .has_egress = false,
+        },
+        .{
+            .name = "readIt",
+            .dependency =
+            \\import { fetchSync } from "zttp:fetch";
+            \\export function readIt(): string { return fetchSync("https://example.com"); }
+            \\
+            ,
+            .stateless = false,
+            .has_egress = true,
+        },
+    };
+
+    for (cases) |case| {
+        const handler = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "import {{ {s} }} from \"./dep.ts\";\nfunction handler(req: Request): Response {{ return Response.text({s}() ?? \"\"); }}\n",
+            .{ case.name, case.name },
+        );
+        defer std.testing.allocator.free(handler);
+        var fixture = try SiblingFixture.init(handler);
+        defer fixture.deinit();
+        try fixture.add("dep.ts", case.dependency);
+
+        var result = try fixture.check();
+        defer result.deinit(std.testing.allocator);
+        const properties = result.contract.?.properties.?;
+        try std.testing.expectEqual(case.stateless, properties.stateless);
+        try std.testing.expectEqual(case.has_egress, properties.has_egress);
+    }
+}
+
+test "CHECK keeps pure and data sibling controls clean" {
+    var fixture = try SiblingFixture.init(
+        \\import { pure, label } from "./dep.ts";
+        \\function handler(req: Request): Response { return Response.text(pure(label)); }
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function pure(value: string): string { return value.toUpperCase(); }
+        \\export const label = "clean";
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(properties.read_only);
+    try std.testing.expect(properties.retry_safe);
+    try std.testing.expect(properties.stateless);
+    try std.testing.expect(!properties.has_egress);
+}
+
+test "CHECK does not classify a factory-produced callable as data" {
+    var fixture = try SiblingFixture.init(
+        \\import { save } from "./dep.ts";
+        \\function handler(req: Request): Response { save(); return Response.text("ok"); }
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { cacheSet } from "zttp:cache";
+        \\function writer() { cacheSet("items", "key", "value"); return undefined; }
+        \\function factory() { return writer; }
+        \\export const save = factory();
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
+}
+
+test "CHECK blocks effects for missing unreadable and malformed sibling exports" {
+    const cases = [_]?[]const u8{
+        null,
+        "export function other(): string { return \"ok\"; }\n",
+        "export function work( {{{\n",
+    };
+    for (cases) |dependency| {
+        var fixture = try SiblingFixture.init(
+            \\import { work } from "./dep.ts";
+            \\function handler(req: Request): Response { work(); return Response.text("ok"); }
+            \\
+        );
+        defer fixture.deinit();
+        if (dependency) |source| try fixture.add("dep.ts", source);
+
+        var result = try fixture.check();
+        defer result.deinit(std.testing.allocator);
+        const properties = result.contract.?.properties.?;
+        try std.testing.expect(!properties.read_only);
+        try std.testing.expect(!properties.retry_safe);
+    }
+}
+
+test "CHECK blocks effects at an import cycle" {
+    var fixture = try SiblingFixture.init(
+        \\import { first } from "./a.ts";
+        \\function handler(req: Request): Response { first(); return Response.text("ok"); }
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("a.ts",
+        \\import { second } from "./b.ts";
+        \\export function first(): undefined { return second(); }
+        \\
+    );
+    try fixture.add("b.ts",
+        \\import { first } from "./a.ts";
+        \\export function second(): undefined { return first(); }
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
+}
+
+test "CHECK blocks effects past the sibling import depth limit" {
+    var fixture = try SiblingFixture.init(
+        \\import { f0 } from "./f0.ts";
+        \\function handler(req: Request): Response { f0(); return Response.text("ok"); }
+        \\
+    );
+    defer fixture.deinit();
+    for (0..max_import_depth) |index| {
+        const name = try std.fmt.allocPrint(std.testing.allocator, "f{d}.ts", .{index});
+        defer std.testing.allocator.free(name);
+        const source = if (index + 1 < max_import_depth)
+            try std.fmt.allocPrint(
+                std.testing.allocator,
+                "import {{ f{d} }} from \"./f{d}.ts\";\nexport function f{d}(): undefined {{ return f{d}(); }}\n",
+                .{ index + 1, index + 1, index, index + 1 },
+            )
+        else
+            try std.fmt.allocPrint(
+                std.testing.allocator,
+                "export function f{d}(): undefined {{ return undefined; }}\n",
+                .{index},
+            );
+        defer std.testing.allocator.free(source);
+        try fixture.add(name, source);
+    }
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
+}
+
 const logs_param_helper =
     \\import { logInfo } from "zttp:log";
     \\export function logIt(x: string): number {
@@ -7752,9 +8177,12 @@ test "CHECK keeps the reader trace for two names imported from one file" {
         \\
     ;
     // Only the final revision is fault-clean. Earlier fault reads must fail
-    // the public unseen-call assertion, even when their flow summaries match.
+    // the public unseen-call assertion. The first flow/effect revision writes,
+    // so the exact reads also prove that effects use the flow load.
     const reader_sources = [_][]const u8{
-        "export function first(): string { return \"first\"; }\n" ++ fault_unchecked_helper,
+        "import { cacheSet } from \"zttp:cache\";\n" ++
+            "export function first(): string { cacheSet(\"n\", \"k\", \"v\"); return \"first\"; }\n" ++
+            fault_unchecked_helper,
         "export function second(): string { return \"second\"; }\n" ++ fault_unchecked_helper,
         "export function first(): string { return \"first\"; }\n" ++
             "export function second(): string { return \"second\"; }\n",
@@ -7786,6 +8214,11 @@ test "CHECK keeps the reader trace for two names imported from one file" {
     const contract = result.contract orelse return error.TestUnexpectedResult;
     const properties = contract.properties orelse return error.TestUnexpectedResult;
     try std.testing.expect(properties.no_secret_leakage);
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
+    try std.testing.expect(!properties.idempotent);
+    try std.testing.expect(!properties.stateless);
+    try std.testing.expect(!properties.has_egress);
     try std.testing.expectEqual(false, properties.fault_covered);
     try std.testing.expectEqual(@as(usize, 1), contract.behaviors.items.len);
     try std.testing.expect(contract.behaviors_exhaustive);
@@ -7797,6 +8230,50 @@ test "CHECK keeps the reader trace for two names imported from one file" {
         .upstream_fallback_sites = 0,
         .analysis_complete = true,
     }, contract.fault_coverage orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK stops nested effect reads after an imported type failure" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { outer } from "./a.ts";
+        \\function handler(req: Request): Response { return Response.text(outer()); }
+        \\
+    ;
+    const failed_outer =
+        \\import { inner } from "./b.ts";
+        \\export function outer(): string {
+        \\  const value: number = "wrong";
+        \\  return inner();
+        \\}
+        \\
+    ;
+    const reader_sources = [_][]const u8{
+        failed_outer,
+        failed_outer,
+        "export function inner(): string { return \"ok\"; }\n",
+    };
+    var tracing_reader: TracingImportReader = .{ .sources = &reader_sources };
+    defer tracing_reader.deinit(allocator);
+
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, handler_source, "/virtual/handler.ts", .{
+        .json_mode = true,
+        .import_reader = tracing_reader.reader(),
+    });
+    defer result.deinit(allocator);
+
+    const expected_paths = [_][]const u8{
+        "/virtual/a.ts",
+        "/virtual/a.ts",
+        "/virtual/b.ts",
+    };
+    try std.testing.expectEqual(expected_paths.len, tracing_reader.paths.items.len);
+    for (expected_paths, tracing_reader.paths.items) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+
+    const properties = result.contract.?.properties.?;
+    try std.testing.expect(!properties.read_only);
+    try std.testing.expect(!properties.retry_safe);
 }
 
 // ---------------------------------------------------------------------------
