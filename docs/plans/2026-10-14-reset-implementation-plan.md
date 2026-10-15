@@ -935,6 +935,18 @@ For `let n: (number;`, the runtime parser then reports its missing semicolon at 
 The private comparison must reproduce that outcome or explicitly decline that malformed shape.
 Direct parser failure tests alone do not establish legacy comparison parity.
 Lowering must check both pool health and environment health because environment health does not inspect pool poison.
+Astra's source review also identifies angle-token ambiguity in initializers.
+For U7, private comparisons decline `<` and `>` tokens, including generic calls, before runtime parsing.
+The existing `<=` and `>=` operators remain within the bounded vocabulary.
+U10 owns generic call syntax; this private restriction changes no production admission rule.
+Depth refusal alone does not establish eligibility for the primitive comparison.
+The preflight validates the entire annotation through the same grammar with a source-length bound.
+Only successful validation retains the original depth diagnostic before the remaining source scan.
+Grouped compounds and unclosed groups still decline comparison.
+
+A CLI measurement confirms that lone CR before root `any` reports a legacy cursor column unlike byte-based positioning.
+U7 privately declines source containing lone CR while retaining CRLF coverage.
+Later production migration must preserve the observed diagnostic policy or obtain explicit approval for a change.
 
 ### U8 preparation findings
 
@@ -971,7 +983,8 @@ Incomplete literals and templates need separate admission characterization.
 
 Function syntax and grouped syntax share a backtracking boundary after the first identifier.
 Legacy semantic parsing tolerates some missing separators, closers, arrows, and return types.
-Optional function parameters remain refused by source admission, while optional record fields remain admitted.
+Source admission refuses optional function parameters only when its parenthesis depth is positive and its brace depth is zero.
+Nested record context can therefore change that refusal; optional record fields remain admitted.
 The source frontend also refuses `void`, `Array<T>`, and `ReadonlyArray<T>` outside existing exceptions.
 Predicate semantics belong to the later annotation-owner phase.
 
@@ -987,6 +1000,69 @@ The legacy scanner tracks delimiter depths and skips comments and quoted text.
 Its removed-form scan reports only the first removed form within an annotation.
 Template scanning skips complete templates, including slots, so existing refusals do not automatically extend into those slots.
 Fixture comparisons must retain this admission scope and the existing CHECK and compilation diagnostic order.
+
+Main measured 45 isolated annotation fixtures through the current CLI during U7 verification.
+Each fixture assigns `undefined` to expose admitted types through the existing mismatch diagnostic.
+All commands exit 1, but their failure stages differ.
+Sources, complete responses, stderr, and an index remain under `/tmp/zttp-reset-20261015/u8-cli-baseline/`.
+The table groups 27 fixtures; the directory index contains the full set.
+
+| Measured form | Observed public result |
+|---|---|
+| Quoted record key | ZTS200 describes an empty record prefix. |
+| Missing record colon or type | ZTS200 follows admission. |
+| Record comments or omitted separators | ZTS200 follows admission; exact meanings still require baseline assertions. |
+| Missing record, function, or array closer | ZTS002 precedes ZTS047. |
+| Leading union or intersection operator | ZTS002 precedes ZTS047; semantic-parser tolerance does not establish source admission. |
+| Root decimal, hexadecimal, exponent, separator, or large integer annotation | ZTS002 precedes ZTS047. |
+| Trailing union or intersection operator | ZTS200 follows admission. |
+| Missing function comma, arrow, or return | ZTS200 follows admission. |
+| Grouped primitive, function type, or spaced array suffix | ZTS200 follows admission. |
+| Comment before array suffix | ZTS200 follows admission. |
+| Incomplete template | ZTS002 precedes ZTS047. |
+| Empty template | `UnresolvedTypeBinding` propagates through stderr, and the JSON response remains empty. |
+
+The empty-template outcome must remain an error rather than becoming a successful unknown type during consumer migration.
+Numeric literals need position-specific fixtures because a root annotation differs from nested or declaration contexts.
+U8 starts with legacy-only baseline tests before compound parser changes.
+Those tests separate source admission, exact retained text, semantic constructor structure, and visible CLI behavior.
+The proposed direct lowerer must compare canonical type encodings rather than only type tags.
+Canonical encodings alone do not establish exact representation parity.
+The key encoder sorts fields and union members, omits function parameter names, and can equate nullable and union representations.
+Baseline tests must also assert exact tags and ordered metadata that later display or analysis can observe.
+
+Nested semantic absence needs its own representation.
+Missing record field types, missing function returns, and empty template slots can retain `null_type_idx` children.
+An optional annotation root alone cannot represent those cases.
+The syntax store and lowerer must distinguish an absent child from an invalid index and from a successful unknown type.
+
+Admission facts need the legacy lexical conditions.
+An `any` record member key does not count as an `any` type.
+A semantic node scan must not replace those lexical eligibility rules with broader universal refusals.
+Additional CLI measurements confirm these lexical and semantic distinctions.
+The root optional function type produces ZTS055, while the record-nested form displays a function with a required numeric parameter.
+The `any` member key reaches type checking, while an `any` member type produces ZTS041.
+Numeric union fixtures display literal 200, decimal prefix 1, hexadecimal prefix 0, and separator prefix 1.
+Root `true` also reaches type checking.
+An empty template slot displays unknown inside the template; it differs from the entirely empty template's propagated error.
+Seven further contrasts confirm that source admission depends on the first raw type byte.
+A leading comment leaves the colon intact and produces ZTS002 followed by ZTS047.
+A grouped numeric literal and grouped leading union reach type checking, unlike their ungrouped counterparts.
+String literals, tuples, and readonly arrays also reach type checking.
+Readonly tuple syntax displays the same tuple type without a readonly modifier.
+
+Raw byte boundaries also carry semantic meaning.
+The legacy type parser skips whitespace but does not skip comments, and array wrapping requires adjacent `[]` bytes.
+Numeric semantic prefixes can stop inside a single runtime number token.
+Template semantic scanning treats escapes differently from the runtime tokenizer.
+The shared type parser must retain those distinctions rather than normalize tokens into broader acceptance.
+
+The canonical key depth limit is 64; the source admission limit is 512 delimiter levels.
+Matching `AbsentType` or `TypeKeyTooDeep` errors do not prove semantic equality.
+An implementation frame budget is a separate limit because modifiers can add frames without adding delimiters.
+During private comparisons, implementation exhaustion must decline coverage unless the legacy admission scan itself reports excessive depth.
+CHECK baseline assertions belong in existing tools tests; the compiler comparison must not import the tools tier.
+Astra accepts legacy-only baseline work before final compound implementation approval.
 
 ### U9 preparation findings
 
@@ -1096,6 +1172,153 @@ Generic type syntax adds no runtime nodes, bindings, atoms, constants, strings, 
 Call locations remain at `(` after type-argument consumption.
 Comparisons must cover repeated signatures, ignored defaults, distinct constraint policies, namespace collisions, silent truncation, depth exhaustion, and allocation failure.
 Existing fixtures in `source_frontend.zig`, TypeEnv, TypePool, the checker, the stripper, and `frontend_fuzz.zig` supply separate evidence.
+
+### U11 preparation findings
+
+The current TypeMap has eight kinds, and the existing census in `source_frontend.zig` covers every kind.
+Structural and nominal annotations belong to type declarations without runtime nodes or atoms.
+Variable annotations belong to declaration `BindingRef` values.
+Parameter annotations need both the parameter node and its declaration binding.
+Return types, predicates, and function generic parameters belong to function expression or arrow nodes.
+Explicit call arguments belong to the final call node, which exists only after its value arguments parse.
+Type-only imports and exports need ordered module records with complete raw spans and no runtime owner.
+
+The function declaration wrapper is not the function node.
+Its `VarDecl.init` points to that node, while arrows already have their own node identity.
+Nested functions can receive node indices before their enclosing function.
+Authored order therefore requires retained spans or an explicit sequence, rather than sorting by node index.
+Pending function and call attachments must not publish ownerless records after parse failure.
+
+Existing signatures use the opening parenthesis offset to distinguish repeated names and same-line functions.
+Direct function ownership removes that reconstruction join.
+Existing variable ordinals count each spelling globally, rather than identifying lexical declarations.
+Captured accesses use upvalue identities, while annotations belong to the original declarations.
+The store must retain the complete binding; consumers can select their existing identity projection.
+
+Legacy parameter assembly compacts annotated parameters into encounter order.
+Unannotated parameters create no hole in that signature array.
+Predicate name lookup also uses only annotated parameter names.
+These policies need characterization before U12 can claim public compatibility.
+Correct source ownership in U11 does not authorize a silent change in consumer diagnostics.
+Astra confirms that the checker applies the compacted array to actual parameter positions and call arguments.
+Strict checking rejects incomplete signatures, but earlier type diagnostics remain observable in CHECK output.
+U12 therefore needs an explicit compatibility projection while retaining exact source owners.
+That projection must preserve the annotation-count lower arity bound and the actual-node upper arity bound.
+Accurate source owners must remain syntax data until that projection selects semantic bindings.
+Binding both the actual annotated parameter and its compacted legacy position would change diagnostics.
+The same projection must control predicate indices rather than joining two incompatible binding policies.
+
+A CLI measurement confirms the diagnostic difference that a silent correction would introduce.
+For `pick(a, b: string)` called with `(1, "ok")`, CHECK reports ZTS203 against the first call argument.
+The same response then reports ZTS601 for the incomplete signature.
+The command exits 1; its receipt is `/tmp/zttp-reset-20261015/u11-partial-parameter-baseline/partial.json`.
+This observed compatibility requirement does not approve a new signature policy.
+
+The existing census does not prove direct attachment, module raw spans, exported type flags, or attachment rollback.
+New fixtures need repeated predicates, a predicate after an unannotated parameter, same-line generic calls, shadowed captures, and failed constructs.
+The direct census must enumerate every annotation kind and separately enumerate type-only module records.
+It must assert nonzero totals, expected counts, valid owner tags, exact binding identities, and in-range spans.
+U11 changes syntax ownership only; U12 retains consumer migration.
+
+### U12 preparation findings
+
+The consumer census covers TypeEnv, TypeChecker, StrictChecker, and function specifications.
+Current reconstruction uses type text, variable name ordinals, signature parenthesis offsets, alias name spans, and call parenthesis offsets.
+The variable location map has no current reader; name ordinals supply variable semantics before binding to the actual declaration.
+Untyped simple declarations also advance each spelling's ordinal.
+Mixed annotated and untyped shadows need characterization before direct binding replaces that selection policy.
+
+Function signatures have exact offset maps and additional name maps.
+The name maps overwrite during hash-map iteration, so their winner has no documented source-order rule.
+Type predicates and some inference fallbacks still select signatures by name.
+Direct owner maps must not silently change those observable selections.
+Forward calls, repeated predicates, repeated helpers, and inference fallbacks need measured expectations.
+
+The parameter compatibility projection retains compacted argument types, the annotation-count lower bound, and the actual-node upper bound.
+Strict completeness also uses that compacted count.
+An anonymous arrow with all parameters annotated does not require an explicit return annotation under the current rule.
+Exported boundary diagnostics inspect original annotation spelling; semantic equality cannot replace the raw span.
+Partial signatures skip parameter boundary checks because compacted entries do not map directly to actual parameters.
+
+Function specifications already receive exact effect declaration nodes but convert those nodes into signature offsets.
+The syntax path can replace that conversion with an owner query.
+Capsule output enters public contracts, so repeated-name selection and raw annotation behavior require explicit fixtures.
+The new path retains explicit legacy entry points until caller migration finishes.
+
+Health and absence remain separate.
+The current TypeChecker health check does not inspect environment health.
+Function specification collection checks environment health only after finding a return type.
+Allocation-dropped metadata can therefore resemble an absent declaration in that collection path.
+U12 needs failure characterization and explicit health checks before the new syntax path publishes results.
+The new path must never retry through legacy reconstruction.
+
+Typing profiles also remain explicit.
+Loaded-graph contracts use entry type data while dependencies receive no type data.
+Imported summaries can attempt dependency type checking and block nested summaries without rejecting graph compilation.
+The contract-only profile omits type metadata, while sound extraction uses entry metadata when present.
+An empty selected syntax store must remain different from intentionally omitted type data.
+The U12 worker must refresh this census after U11 defines the complete owner records.
+
+### U18 preparation findings
+
+`change_transaction.zig` owns locking, recovery, source commits, pending receipts, and acknowledgement.
+Five production sites repeat lock acquisition and recovery.
+They are the expert loop, autoloop, ledger replay, agent startup recovery, and agent receipt reconciliation.
+Startup recovery and later reconciliation need separate acquisitions because another writer can commit between those lifetimes.
+
+The current locked methods accept both a lock and a separate workspace root.
+Several methods discard the lock value, so the method signature does not bind the root to the lock.
+A recovered owner can retain the root and remove that separate method argument.
+The owner must reject a prepared change set for another workspace before transaction writes.
+Root canonicalization and path refusal order need characterization before selecting the owner's exact acquisition sequence.
+
+Commit rechecks the proof read set before durable preparation and source renames.
+The durable receipt precedes source renames, and the applying marker precedes candidate writes.
+Recovery plans every target before writing any source candidate.
+A third target state prevents writes to all other targets during that recovery attempt.
+The loop and autoloop retain aggregate proof, approval, and session persistence in their existing owners.
+Session persistence must still precede workspace receipt acknowledgement.
+
+Recovery can make durable progress before returning an error.
+Examples include an aborted marker, removed transaction directory, visible candidate bytes, committed receipt, or completed acknowledgement.
+The existing transaction tests cover those outcomes, truncated writes, marker combinations, target combinations, and read-set mutation.
+U18 must preserve those outcomes rather than promising rollback after every failure.
+
+Current production callers unwind after a failed commit.
+A proposed owner state can require closing and reopening after that failure before later transaction methods run.
+This proposal needs review against all existing fault outcomes before implementation.
+Raw locked helpers can remain private for core tests while production callers use only the recovered owner.
+The public owner tests must cover recovery-before-return, lock release on failure, contention, root mismatch, and failed-commit reuse.
+Receipt reconciliation also needs a failed-persistence retry fixture that proves acknowledgement never precedes durable session evidence.
+The implementing worker must refresh the caller census after U17 because this review precedes the frontend migration.
+
+### U19 preparation findings
+
+The current source census finds no production caller for hosted state entries, loading, saving, or provider types.
+The only live state call is `state.ensureStateDir` from `packages/runtime/src/proof_ledger.zig`.
+That helper creates `.zttp` before timestamp selection, JSON allocation, serialization, or ledger opening.
+It uses threaded I/O with the system allocator and an empty environment.
+The helper propagates directory errors and closes its I/O backend on every return.
+Moving the helper must preserve that order, relative path, and error behavior.
+
+Ledger reads remain different: they create no directory and return an empty slice for a missing ledger.
+Ledger writes retain `.zttp/proofs.jsonl`, exact JSONL bytes, ordered appends, and legacy `perf` and `equivalence` rows.
+Local deploy writes the artifact before appending the ledger row.
+A ledger failure therefore retains the artifact and prevents the success summary.
+Live reload, historical proof commands, proof cards, and review rendering remain live consumers.
+
+The bounded removal candidates are `state.zig`, `types.zig`, and `io_util.zig` under `packages/proof-review/src/`.
+Their package exports, package test imports, and the CLI state test import can disappear after the fresh census.
+`json_util.zig`, `printer.zig`, `review.zig`, and `spec_diagnostic.zig` remain live.
+The proof-review package and its named test step remain necessary.
+The `proof-review file_io` allowlist row becomes stale after removal; the runtime row remains necessary.
+Separate unused build imports need a fresh consumer census and compile evidence before removal.
+
+Existing ledger and deploy tests cover creation, missing files, ordered rows, legacy decoding, cards, and artifact ordering.
+A sentinel fixture should prove that appending an exact proof row leaves existing hosted state bytes unchanged.
+U19 must not open, migrate, truncate, or delete `.zttp/deploy-state.json`.
+Two live review comments that name hosted state should describe persisted proof facts without changing fields or decoding behavior.
+The implementing worker must refresh these findings after U18 before selecting the final removal diff.
 
 ## Definition of Done
 

@@ -47,6 +47,7 @@ pub const Tokenizer = @import("tokenizer.zig").Tokenizer;
 pub const trivia = @import("trivia.zig");
 pub const Trivia = @import("trivia.zig").Trivia;
 pub const TriviaKind = @import("trivia.zig").Kind;
+pub const type_syntax = @import("type_syntax.zig");
 
 pub const Node = @import("ir.zig").Node;
 pub const NodeTag = @import("ir.zig").NodeTag;
@@ -91,6 +92,7 @@ pub const ParseResult = struct {
     constants: ConstantPool,
     scopes: ScopeAnalyzer,
     errors: ErrorList,
+    type_store: type_syntax.Store,
     root: NodeIndex,
 
     pub fn deinit(self: *ParseResult) void {
@@ -98,6 +100,7 @@ pub const ParseResult = struct {
         self.constants.deinit();
         self.scopes.deinit();
         self.errors.deinit();
+        self.type_store.deinit();
     }
 
     pub fn hasErrors(self: *const ParseResult) bool {
@@ -123,6 +126,7 @@ pub fn parse(
             .constants = p.constants,
             .scopes = p.scopes,
             .errors = p.errors,
+            .type_store = p.type_store,
             .root = @import("ir.zig").null_node,
         };
     };
@@ -132,6 +136,7 @@ pub fn parse(
         .constants = p.constants,
         .scopes = p.scopes,
         .errors = p.errors,
+        .type_store = p.type_store,
         .root = root,
     };
 }

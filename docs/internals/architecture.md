@@ -115,6 +115,23 @@ atom resolver. It returns complete owned JSON bytes or no literal, and releases
 partial output on refusal or failure. Each caller still recognizes
 `JSON.stringify`, handles raw schema strings, and interprets schema types.
 
+### Private typed parser comparison
+
+Production callers retain source preparation and the legacy parser initializer during the reset's comparison phases.
+`JsParser.initTyped` parses original source with the same runtime parser and a separate allocator for type syntax.
+The parser owns that syntax store, and `ParseResult` transfers the store with the other parser outputs.
+Type-only syntax creates no runtime node, atom, constant, or scope.
+
+The first comparison slice covers one variable annotation with a primitive type, parentheses, and retained suffix text.
+The syntax record keeps the declaration binding and separate semantic and raw spans.
+A compiler test module maps primitive syntax directly into `TypePool` and binds `TypeEnv` through the declaration identity.
+This slice establishes environment lookup; the existing checker retains its legacy annotation input.
+
+The private preflight scans eligibility before runtime parsing and preserves admission diagnostic order.
+Unsupported comparison forms produce `out_of_slice`, which declines comparison without selecting another frontend.
+Independent atom tables support comparisons of runtime stores, source locations, binding identities, and allocation counts.
+Later reset phases extend the syntax store before any production caller switches.
+
 ### Analysis passes
 
 Step 4 is implemented as four independent IR walkers, each traversing the same

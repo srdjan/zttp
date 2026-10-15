@@ -11,6 +11,7 @@ const ir = @import("ir.zig");
 const scope_mod = @import("scope.zig");
 const error_mod = @import("error.zig");
 const token_mod = @import("token.zig");
+const type_syntax = @import("type_syntax.zig");
 const object = @import("../object.zig");
 const atom_table = @import("../atom_table.zig");
 
@@ -142,6 +143,8 @@ pub const Parser = struct {
     constants: ConstantPool,
     scopes: ScopeAnalyzer,
     errors: ErrorList,
+    type_store: type_syntax.Store,
+    parse_type_syntax: bool,
 
     // Current state
     current: Token,
@@ -228,14 +231,29 @@ pub const Parser = struct {
     const temp_list_stack_bytes: usize = if (@import("builtin").target.cpu.arch.isWasm()) 32 else 256;
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
-        return initWithProfile(allocator, source, null);
+        return initWithProfile(allocator, allocator, source, null, false);
+    }
+
+    /// Private migration initializer. Production callers remain on `init`.
+    pub fn initTyped(
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+    ) !Parser {
+        return initWithProfile(allocator, type_allocator, source, null, true);
     }
 
     pub fn initExpression(allocator: std.mem.Allocator, source: []const u8, profile: ExpressionProfile) !Parser {
-        return initWithProfile(allocator, source, profile);
+        return initWithProfile(allocator, allocator, source, profile, false);
     }
 
-    fn initWithProfile(allocator: std.mem.Allocator, source: []const u8, profile: ?ExpressionProfile) !Parser {
+    fn initWithProfile(
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+        profile: ?ExpressionProfile,
+        parse_type_syntax: bool,
+    ) !Parser {
         var nodes = IRStore.initCapacity(allocator, source.len);
         errdefer nodes.deinit();
 
@@ -247,6 +265,8 @@ pub const Parser = struct {
             .constants = ConstantPool.init(allocator),
             .scopes = try ScopeAnalyzer.init(allocator),
             .errors = ErrorList.init(allocator, source),
+            .type_store = type_syntax.Store.init(type_allocator, source),
+            .parse_type_syntax = parse_type_syntax,
             .current = undefined,
             .previous = undefined,
             .atoms = null,
@@ -264,6 +284,7 @@ pub const Parser = struct {
         self.constants.deinit();
         self.scopes.deinit();
         self.errors.deinit();
+        self.type_store.deinit();
     }
 
     pub fn setAtomTable(self: *Parser, atoms: *atom_table.AtomTable) void {
@@ -504,6 +525,10 @@ pub const Parser = struct {
             return error.TooManyLocals;
         };
 
+        if (self.parse_type_syntax and self.check(.colon)) {
+            try self.parseVariableType(binding, name);
+        }
+
         // Parse initializer
         var init_node: NodeIndex = null_node;
         if (self.match(.assign)) {
@@ -523,6 +548,39 @@ pub const Parser = struct {
                 .kind = kind,
             } },
         });
+    }
+
+    fn parseVariableType(self: *Parser, binding: BindingRef, binding_token: Token) !void {
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        const outcome = type_syntax.parsePrimitive(self.source, &cursor);
+        switch (outcome) {
+            .parsed => |parsed| try self.type_store.add(binding, parsed),
+            .failure => |failure| {
+                const tok = switch (failure) {
+                    .missing_type => |at| at,
+                    .unmatched_parenthesis => |at| at,
+                    .nesting_too_deep => |at| at,
+                    .unsupported_suffix => |at| at,
+                };
+                switch (failure) {
+                    .nesting_too_deep => self.errors.addErrorAt(
+                        .nesting_too_deep,
+                        tok,
+                        "type syntax nests too deeply; simplify or split it (nesting limit is 512)",
+                    ),
+                    .unmatched_parenthesis => self.errors.addExpectedError(tok, "')' to close type annotation"),
+                    .missing_type => self.errors.addExpectedError(tok, "primitive type annotation"),
+                    .unsupported_suffix => self.errors.addExpectedError(tok, "end of primitive type annotation"),
+                }
+                if (self.errors.outOfMemory()) return error.OutOfMemory;
+                return error.ParseError;
+            },
+        }
+
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = binding_token;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
     }
 
     fn parseFunctionDeclaration(self: *Parser) anyerror!NodeIndex {

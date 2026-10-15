@@ -101,6 +101,7 @@ zts parser/scope.zig
 zts parser/token.zig
 zts parser/tokenizer.zig
 zts parser/trivia.zig
+zts parser/type_syntax.zig
 zts policy.zig
 zts printer.zig
 zts pool.zig
@@ -170,6 +171,7 @@ zts-compiler type_checker.zig
 zts-compiler type_env.zig
 zts-compiler type_key.zig
 zts-compiler type_pool.zig
+zts-compiler typed_frontend_compare.zig
 
 # root.zig is the module every consumer imports. It re-exports the four tiers
 zts-umbrella root.zig

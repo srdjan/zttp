@@ -25,16 +25,15 @@ The untracked `2026-10-14-sibling-module-effects-plan.md` belongs to Claude's ea
 
 ## Current work and next action
 
-U1 through U5 are complete and committed locally.
+U1 through U6 are complete and committed locally.
 Every completed phase passed its required checks and Astra source review.
-U6 (root source capture) passed all required checks and is ready for its local commit.
-U7 through U20 remain unstarted.
+U7 (primitive typed parser) passed every required check and is ready for its local commit.
+U8 through U20 remain unstarted.
 
-The fresh Sol worker `reset_u6_capture_impl` returned source ownership after Stage 2B.
-The first handoff added capture and a controlled CHECK fixture while operation helpers retained their rereads.
-Main observed the intended failing digest comparison through the unfiltered root.
-Main reviewed every source and test line, and Astra accepted the completed changes.
-The final protocol root, broader suites, full gate, and current-binary determinism check passed.
+The fresh Sol worker `reset_u7_primitive_parser` returned source ownership after its implementation handoff.
+The worker completed read-only preparation before main released Stage 2 after the U6 commit.
+The worker runs no builds or tests and makes no Git writes.
+Main owns all source corrections, actual verification, and independent Astra review.
 The main agent owns the plan authority, this worklog, checks, and Git writes.
 
 No product decision blocks the next phase.
@@ -54,6 +53,7 @@ Source review does not replace test execution or establish a performance improve
 | U3 (analysis lifetime) | `f4967788` | `u3-focused-third.log`: exit 0, 36 steps, 2,865 pass, 1 skip | `u3-verify.log`: exit 0 | `u3-docs-final.log`: exit 0 |
 | U4 (path effect facts) | `a13b1849` | `u4-focused-final.log`: exit 0, 30 steps, 2,854 pass, 1 skip | `u4-verify.log`: exit 0 | `u4-docs-final.log`: exit 0 |
 | U5 (contract effect facts) | `d79afafb` | `u5-focused-final.log`: exit 0, 39 steps, 3,090 pass, 1 skip | `u5-verify.log`: exit 0 | `u5-docs-final.log`: exit 0 |
+| U6 (root source capture) | `f8d4fce4` | `u6-focused.log`: exit 0, 25 steps, 1,765 pass, 1 skip; `u6-determinism.log`: exit 0 | `u6-verify.log`: exit 0 | `u6-docs-final.log`: exit 0 |
 
 Formatting and diff checks passed for each completed phase.
 The full gates also passed optimized builds, precompilation, smoke tests, shell gates, and offline replay.
@@ -242,19 +242,65 @@ Astra identified that direct environment binding does not yet enable the existin
 U7 proves parser identity and environment lookup; U12 retains checker migration.
 Astra accepted a bounded private comparison with complete preflight eligibility and an explicit `out_of_slice` outcome.
 The authority records its accepted token boundary, refusal ordering, and previous-token requirements.
-U7 implementation remains unstarted.
+Main released U7 implementation after the U6 commit.
 
 The fresh Sol worker `reset_u7_primitive_parser` completed Stage 1 without edits, builds, or tests.
 Its proposal follows the accepted private comparison boundary and shared runtime parser.
 The tokenizer contains borrowed source and value state, so copying its cursor creates no allocation owner.
 The parser will transfer the separate type store with its existing result stores.
 Private admission diagnostics will map locally to existing codes without registry changes.
-Main will release implementation after the U6 commit.
+Main released implementation after U6 committed as `f8d4fce4`.
 
 Astra accepted the proposal with one malformed-input correction.
 Unmatched type parentheses can reach legacy runtime semicolon refusal instead of source admission refusal.
 The comparator must preserve that result or explicitly decline the malformed shape.
 Main sent that correction and separate pool-health and environment-health requirements to the worker.
+Main measured `let n: (number;` through the rebuilt U6 CLI.
+The command exited 1 with ZTS047 at line 1, column 5, which identifies the binding token.
+The receipt is `u7-malformed-baseline/unmatched.json`.
+
+## U7 source review and execution
+
+The worker added the separate syntax store, typed parser hook, private comparator, direct primitive lowering, and test-root wiring.
+Production callers retain the legacy initializer and frontend.
+Main reviewed every initial source line and required complete diagnostic comparisons and complete preflight eligibility.
+Main also required diagnostic cleanup on later exclusions, root `any` and `void` refusals, and an exhaustive exclusion census.
+The worker applied those corrections and returned all source ownership.
+Astra accepted the parser core and required balanced depth fixtures with exact refusal offsets.
+
+The first unfiltered `test-zts` build exited 1 during compilation.
+One test omitted an explicit narrowing conversion for an atom, and another needed compile-time enum iteration.
+Its log is `u7-zts-first.log`.
+Main corrected both errors and added plain and grouped coverage for every primitive.
+The corrected unfiltered root exited 0: 13 steps succeeded, with 2,455 passing tests and one skipped test.
+Its log is `u7-zts-corrected.log`.
+The first broader run exited 1: 43 of 45 steps succeeded, with 3,381 passing tests and one skipped test.
+Its tier gate rejected two new files because main had not yet added the files to Git's tracked inventory.
+The log is `u7-focused.log`; all behavioral suites passed in that run.
+Main added both new files to the inventory without changing the gate or its policy.
+Astra also found generic call syntax crossing the bounded initializer vocabulary.
+Main excluded ambiguous angle tokens and added generic-call and relational exclusion fixtures.
+Main added a shared-allocator sweep for runtime failures after type-store publication.
+The corrected broader suites exited 0: all 45 steps succeeded, with 3,382 passing tests and one skipped test.
+Their log is `u7-focused-corrected.log`.
+Astra then required shared-grammar validation after depth refusal and full collection-mode diagnostic comparison.
+Main added both checks and privately excluded lone CR after measuring its legacy diagnostic column.
+The CR measurement exited 1 with ZTS041 at line 1, column 14 in `u7-cr-baseline/root-any.json`.
+The CRLF comparison remains covered.
+
+The next run exited 1: 3,382 tests passed, one skipped, and one new fixture failed.
+The grouped union correctly declined comparison, but its expected private reason differed from the primitive grammar's actual reason.
+Its log is `u7-focused-final.log`.
+Main corrected that expected reason while retaining the required exclusion assertion.
+The accepted-source broader run exited 0: all 45 steps succeeded, with 3,383 passing tests and one skipped test.
+Its log is `u7-focused-accepted.log`.
+All 182 diagnostic cases and all 18 CLI abuse cases passed.
+The full gate exited 0 with every CI test-job step passing in `u7-verify.log`.
+It passed aggregate tests, all 734 flow probes, the separate runtime root, release builds, verified precompilation, smoke tests, and offline replay.
+Astra accepted the final U7 source after the boundary corrections.
+The acceptance covers source review only; the required unfiltered checks remain main's responsibility.
+Final documentation, link, and spine checks exited 0 in `u7-docs-final.log`.
+Formatting across all required paths and the diff check also passed.
 
 ## U8 preparation
 
@@ -262,6 +308,19 @@ The Sol explorer `reset_u4_path_facts` mapped compound syntax without edits, bui
 Legacy semantic parsing accepts prefixes and has different array behavior for primitive, named, and generic types.
 The authority records those distinctions and requires source-admission characterization before claiming incomplete forms remain accepted.
 U8 implementation remains unstarted.
+The fresh Sol worker `reset_u8_compound_parser` owns read-only Stage 1 preparation.
+Its design must use the actual U7 store, bounded iterative parsing, direct constructors, and complete private eligibility checks.
+Implementation remains blocked on the U7 commit and design review.
+The worker returned Stage 1 with a legacy-only baseline handoff before compound implementation.
+Main measured 27 isolated CLI fixtures in `u8-cli-baseline/`; `index.json` records responses and direct exit statuses.
+Eleven further fixtures confirm optional-parameter context, `any` member roles, numeric prefixes, boolean literals, and nested template absence.
+Seven further contrasts cover leading comments, grouped literals and unions, string literals, arrays, and tuples.
+The index now contains 45 measured fixtures.
+The authority records the distinct admission outcomes and the empty-template propagated error.
+Those measurements establish no exhaustive semantic equivalence.
+Astra accepted baseline-only Stage 2A after U7 commits.
+The authority records required exact representation checks, nested absence, lexical exceptions, raw boundaries, and distinct depth limits.
+Compound implementation remains subject to a revised design after baseline verification.
 
 ## U9 preparation
 
@@ -275,6 +334,39 @@ U9 implementation remains unstarted.
 The Sol explorer `reset_u4_path_facts` mapped generic syntax without edits, builds, or tests.
 The authority records admission, ignored defaults, constraint policies, namespace collisions, repeated signatures, semantic truncation, and substitution limits.
 U10 implementation remains unstarted.
+
+## U11 preparation
+
+The Sol explorer `reset_u11_owner_review` mapped every legacy annotation kind without edits, builds, or tests.
+The authority records exact source owners, delayed attachments, module spans, and required identity and rollback fixtures.
+Legacy parameter assembly compacts annotated parameters and can shift their semantic slots.
+Astra confirmed that compact parameter mapping affects observable type diagnostics before strict refusal.
+U12 must retain that policy through an explicit projection, including both existing arity bounds.
+Main measured a partial signature through the U6 CLI and observed ZTS203 on the first argument before ZTS601.
+The command exited 1; the receipt is `u11-partial-parameter-baseline/partial.json`.
+U11 implementation remains unstarted and depends on the actual U10 store.
+
+## U12 preparation
+
+The Sol explorer `reset_u12_consumer_review` completed the consumer census without edits, builds, or tests.
+The authority records reconstruction inputs, repeated-name risks, strict raw spans, health gaps, and typing profiles.
+It must retain the measured compact-parameter projection without binding both the actual and projected parameters.
+U12 implementation remains unstarted and requires the actual U11 syntax owners.
+
+## U18 preparation
+
+The Sol explorer `reset_u18_recovery_review` mapped five production authority sites without edits, builds, or tests.
+The authority records lock-root separation, recovery progress, receipt ordering, and the refreshed census required after U17.
+The proposed owner must preserve existing caller lifetimes and the current proof and approval owners.
+Canonicalization order and failure-state reuse remain design questions for the U18 worker and Astra review.
+U18 implementation remains unstarted.
+
+## U19 preparation
+
+The Sol explorer `reset_u18_recovery_review` mapped retired state consumers without edits, builds, or tests.
+The authority records the three removal candidates, live rendering modules, exact directory timing, and hosted-state preservation fixture.
+The named proof-review gate remains necessary, and the stale package boundary row must disappear with its last consumer.
+U19 implementation remains unstarted and requires a refreshed census after U18.
 
 ## Frontend measurement baseline
 

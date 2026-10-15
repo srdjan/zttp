@@ -73,4 +73,5 @@ pub const api_schema = @import("api_schema.zig");
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("typed_frontend_compare.zig");
 }
