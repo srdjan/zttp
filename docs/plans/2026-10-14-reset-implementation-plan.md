@@ -21,10 +21,11 @@ The reset will give future work fewer analysis owners and direct access to typed
 It will preserve current public behavior and permit internal Zig API changes.
 The owner selected the full staged reset instead of retaining type stripping as the final design.
 
-This planning task authorizes only this document.
-It does not authorize implementation, other documentation edits, commits, or pushes.
-The implementing agent will own later code, documentation, review, and verification.
-The user will own authorization to start implementation and any publication.
+The original planning request authorized only this document.
+On 2026-10-15, the user approved implementation: "reviewd, go ahead, use subagents when possible, verify with astra".
+That approval authorizes U1 through U20, required documentation, local commits, and independent Astra review.
+The implementing agent owns code, documentation, review, and verification.
+The user retains publication ownership; this reset authorizes no push or release.
 
 ## Product Contract
 
@@ -1550,7 +1551,8 @@ Astra accepted that limited first slice after U9's commit and API refresh.
 The full U10 design still requires the following compatibility boundaries.
 
 Application nodes retain a base child and an ordered range of arguments.
-Three additional arrays retain generic parameters, generic owners, and explicit call arguments.
+Owned arrays retain generic parameters, generic owners, and explicit call arguments.
+The final store layout must separate authored parameter spans from their projected semantic fragments.
 Parameter records retain names, full spans, constraints, defaults, and distinct legacy semantic-bound spans.
 Structural owners identify declarations; provisional function and call owners capture their opening-parenthesis offsets directly.
 U11 replaces those captured offsets with final runtime-node ownership.
@@ -1586,6 +1588,41 @@ Exact-one-argument `Readonly` with an inline record transforms that record even 
 Other applications retain the existing generic application constructor and root projection boundary.
 Exact whole-body alias hits still bypass projection.
 No production caller switches during U10.
+
+Source inspection identifies an application rule for semantic absence.
+`TypePool.parseGenericApp` stops before appending an argument whose meaning is absent.
+It still publishes the application with the preceding arguments.
+Private tests must distinguish that result from an absent application or a list that consumes later arguments.
+The tests must assert both the retained argument count and the semantic-prefix end.
+The legacy parser still attempts one adjacent closing angle after an absent argument stops the list.
+Main corrected the first slice to retain that step and added two cases with an adjacent closing angle.
+
+The first application slice remains unaccepted after its initial small-root run.
+Two rollback fixtures still expected applications to be excluded, and the proof census used a stale marker spelling.
+Main retargeted the exclusions and used the published proof marker constant without weakening the expected property.
+All 219 precompile tests pass; the small roots report three failures.
+
+Astra found an additional capacity defect in direct application lowering.
+The first slice allocated a semantic reference for every base before lowering its arguments.
+Legacy allocates no base reference for direct dictionary and inline readonly constructors.
+Ordinary applications allocate their base reference after their arguments.
+The extra node and name bytes can move a valid input across the pool's capacity boundary.
+
+Direct lowering must defer base materialization until constructor dispatch.
+Validation must require exclusive named-reference bases before a deferred-base mask can select those syntax nodes.
+No ordinary child, owner root, or second application can reuse such a base.
+Validation must use bounded iteration and explicit scratch ownership without quadratic scans of source-sized node sets.
+Capacity tests must compare successful constructors at the exact required capacity and the named failure with one fewer slot.
+Node and name deltas must show that direct constructors allocate no unused semantic base.
+The bounded correction keeps structural `Store.validate()` allocation free.
+`Store.planApplicationBases(allocator)` owns one mask and checks base roles with linear passes over roots and child edges.
+`lowerSyntaxStore` owns and releases that plan before it performs semantic construction.
+Later syntax additions must extend the plan's root and edge census.
+Astra accepts the corrected application-only source after reviewing allocation order, cleanup, base ownership, and capacity probes.
+That verdict covers source inspection only; the unfiltered small roots still determine execution acceptance.
+The corrected unfiltered small roots now pass 2,725 tests with one skip across 16 steps.
+That run executes all thirteen application census rows and the capacity probes.
+The full U10 phase still requires generic owners, semantic parameter projection, explicit calls, and its final gates.
 
 An exhaustive semantic census must cover admission, constraints, defaults, arity, scopes, collisions, substitution, inference, limits, rollback, and allocation failures.
 Each enum member needs its own observed fixture row.
@@ -1655,7 +1692,337 @@ The ordered comparator must support dictionary and generic-parameter types befor
 Each census row must execute its named property before recording coverage.
 This acceptance covers design and source inspection; implementation and execution remain outstanding.
 
+#### U10 final record and API refresh
+
+The next slices separate authored syntax from the legacy semantic projection.
+The store gains six arrays: `generic_parameters`, `projected_generic_parameters`, `semantic_fragments`, `generic_owners`, `authored_call_arguments`, and `explicit_call_arguments`.
+Every checkpoint, rollback, destructor, and ownership check covers all six arrays.
+
+An authored parameter retains its raw span, trimmed span, and optional recognized metadata.
+Recognized metadata retains the name, `extends`, constraint, equals sign, and default spans.
+Recognition failure does not reject a balanced list or change cursor movement.
+The authored splitter respects quoted strings and comments.
+The independent legacy projection retains raw comma behavior, empty names, and the eight-item limit.
+The splitter omits whitespace-only pieces before applying that limit.
+A nonempty piece such as `=string` retains its empty parsed name.
+Authored empty pieces and projected empty names require separate tests.
+
+A projected parameter retains its raw span, name span, optional legacy bound span, and optional semantic fragment index.
+Alias constraints and defaults remain opaque.
+A function bound retains its default suffix and owns a semantic fragment.
+A semantic fragment retains its raw span, root, node range, and semantic prefix end.
+Fragment ranges remain disjoint from declaration bodies, variable annotations, and other fragments.
+The application-base plan includes every fragment root and child edge.
+
+A generic owner retains its list span and the authored and projected parameter ranges.
+A structural owner identifies its exact declaration index.
+Provisional function owners identify the captured opening parenthesis and distinguish declarations from arrows.
+A declaration retains its optional generic owner index.
+An explicit call retains its touching parenthesis offset, list span, authored argument range, and projected fragment range.
+U11 replaces provisional offsets with final runtime node ownership.
+
+`beginParsedGenerics` returns an owning scope with prior depth, token, compact parameters, count, and active state.
+The API confirms a successful push and unwinds that push after a later allocation failure.
+`endParsedGenerics` checks depth, token, and active state before removing the scope.
+The owning value also identifies its exact TypeEnv instance.
+Cleanup removes a valid owned scope even after pool or environment poisoning.
+Health checks must not return before that cleanup.
+`installParsedConstraints` preserves original projection indexes against the compact parameter count.
+`resolveParsedGenericParam` calls the existing `GenericScope.resolve`; complete published names cannot bypass its 32-byte storage.
+`putParsedGenericAlias` accepts lowered bodies and explicit names.
+`putParsedCallTypeArgs` copies at most eight lowered indices.
+Every API propagates unhealthy pool or environment state.
+
+Bound lookup tests exact `DictKey` before ordinary aliases.
+Other root lookup tests a complete ordinary alias before the owned generic scope.
+Stored syntax lowering and existing application projection follow those lookups.
+Nested references retain the existing substitution timing.
+Semantic fragments parse their exact bounded spans without ordinary annotation admission.
+Numeric prefixes, leading operators, `any`, and raw-split partial strings retain legacy prefix behavior.
+The whole-list removed-form check remains separate.
+
+Alias publication distinguishes raw absence from semantic absence.
+`DeclarationBody.absent` publishes no alias.
+A present body such as `()` still publishes a generic alias with a healthy `null_type_idx` body.
+The direct publication API must not suppress that entry.
+Main measured the applied `()` contrast returning `UnresolvedTypeBinding`, with exit 1 and no JSON response.
+The raw-absent contrast returns two ZTS200 diagnostics and exits 1.
+The receipts remain in `/tmp/zttp-reset-20261015/u10-generic-null-body-baseline/`.
+Direct tests must assert map membership as well as the source result.
+
+Slice A adds structural generic declarations and direct environment APIs in `type_syntax.zig`, `typed_frontend_compare.zig`, and `type_env.zig`.
+Its first fixture uses `Box<T extends string = boolean>` with a record body and an `undefined` initializer.
+The test asserts numeric field substitution without requiring object initializers outside current private eligibility.
+The ordered oracle adds generic-parameter support before those comparisons execute.
+
+Slice A review found that a uniform bracket counter can tighten generic-list admission.
+Legacy skips each matching bracket group without interpreting its angle bytes.
+Ignored defaults and constraints therefore admit angle operators inside those groups.
+Main measured `<T = (left > right)>` and `<T extends { value: Missing > }>` with a numeric alias body.
+Both admit the declaration and report only the later numeric assignment mismatch.
+The authored scanner must preserve those source boundaries without changing the independent raw projection.
+
+Authored metadata also needs quote-aware equals recognition and arrow-aware nested delimiters.
+Main measured `<T extends "a=b" = boolean>` and `<T = Wrap<(x: string) => number, string>>`.
+The nested arrow remains one authored parameter, while legacy raw projection produces two semantic parameters.
+All four commands exit 1 with ZTS200 at line 2, column 1.
+The receipts remain in `/tmp/zttp-reset-20261015/u10-generic-scanner-baseline/`.
+The direct API must limit projected items before compacting empty names.
+Its tests must distinguish an empty first name followed by eight nonempty names from an eight-item input.
+Raw projection retains legacy `u32` counters and their arithmetic policy.
+Saturating `u16` counters change the final depth after long quoted delimiter sequences.
+The projection census must compare each eligible source against legacy after asserting its named syntax property.
+Allocation sweeps must include nonempty semantic fragments, their ownership mask, and lowering cleanup.
+The second-declaration sweep alone does not cover those allocations.
+Generic openers can share a tokenizer token with another operator byte.
+Generic closers can also share `>=` with the following assignment.
+The cursor must retain the unconsumed suffix and the full tokenizer state.
+Main measured `structural Box<T>=T` and `const value: Box<number>="x"` in separate sources.
+Both reach ZTS200 at line 2, column 1, with no earlier diagnostic.
+The same scanner baseline directory retains those exit-1 responses.
+Legacy bracket scanning can catch an error after recording its admission diagnostic.
+An unterminated quoted line inside an ignored generic group is one such case.
+Main measured ZTS008 at line 1, column 23; the command exits 1.
+The exact receipt is `u10-generic-scanner-baseline/unterminated_quoted_group.json` outside the repository.
+Slice A must explicitly decline malformed forms whose recorded diagnostics it does not represent.
+The comparison must reject an unexpected nonempty legacy diagnostic list before reporting equivalence.
+The later production cutover must preserve the existing diagnostic instead of retaining that private exclusion.
+Authored metadata must also isolate angle counters from bracket groups.
+Ignored `<` operators inside groups can keep the raw semantic counter open without removing the authored parameter.
+The same rule applies inside an outer generic application.
+Three measured less-than contrasts project no legacy semantic parameter.
+The direct syntax must retain one authored parameter for each contrast.
+Their `Box<>` assignments produce only ZTS200 at line 2, column 1.
+The scanner baseline directory retains those exit-1 responses.
+
+A regex-shaped ignored default can make runtime tokenization cross the raw generic boundary.
+Main measured `structural Box<T = /x> = number; /* tail */` with a later typed assignment.
+Legacy reports only the later numeric mismatch and exits 1.
+Slice A may explicitly decline that bounded form until the direct cursor supports its raw boundary.
+The production cutover must preserve its admission and exact diagnostic behavior.
+These private exclusions must not become silent production refusals.
+The exclusion guard includes a slash immediately before the final `>`.
+Any malformed or over-budget quoted scan must decline comparison before authored splitting can absorb later parameters.
+The balanced nested-template probe retains a later `U` parameter beyond the private quoted-scan budget.
+Allocation sweeps report invalid scope cleanup as `InvalidParsedGenericOwner`, even when the original failure is allocation exhaustion.
+
+The eight-parameter census initially used the alias `Many`.
+Legacy annotation scanning detects the suffix `any` in that name and refuses the annotation.
+Main measured ZTS041 at line 2, column 15; the command exits 1.
+The receipt is `u10-generic-scanner-baseline/eight_many_name.json` outside the repository.
+This result confirms the retained U8 suffix rule, not a generic lowering defect.
+The eligible capacity comparison uses `Wide`; a separate regression preserves the `Many` refusal.
+
+Slice B adds `parse.zig` hooks for untyped generic functions, arrows, and explicit calls.
+Function capture requires raw adjacency between the name and `<`; tokenizer whitespace skipping cannot authorize a spaced list.
+Call speculation retains the separate operator filter and combined depth policy from `looksLikeCallTypeArguments`.
+The caller first retains the raw operand classification from `looksLikeComparison`.
+Tokenizer operand classes cannot silently replace that source rule.
+The call hook runs before Pratt precedence selection and preserves ordinary call precedence and chain-depth accounting.
+An admitted explicit call can start inside a combined `<<` token.
+The scanner, Pratt hook, and preflight must test the raw opener consistently.
+An earlier review incorrectly inferred semantic absence for `id<<string>>(seed)`.
+Legacy `splitTopLevelCommas` removes one optional outer angle pair before projecting call arguments.
+That source retains authored `<string>` but projects a `string` fragment with primitive string semantics.
+The direct projection must preserve that single removal before raw comma splitting.
+The same rule applies to function and arrow parameters through each owner's recorded window.
+`identity<<T>>(value)` and a dedicated `<<T>>(value) => value` arrow project the name `T`.
+Their `<<>>` controls project no parameter and perform no generic scope work.
+A structural alias records its outer angles, so `Box<<T>>` still projects the name `<T>`.
+One shared span helper removes exactly one optional pair from the applicable recorded span.
+The five direct contrasts assert names, exact pool growth, scope cleanup, and no function signature before semantic comparison.
+An actual shift remains a non-call and retains ordinary operator parsing.
+Variable and export transactions remain open through semicolons and final wrapper nodes.
+Outer publication failure removes nested generic owners and explicit calls.
+Pending owners reserve records before bodies or value arguments introduce nested owners.
+Finalization updates those records after runtime node creation, preserving contiguous range order in the store.
+Pending values retain their checkpoint, reserved slot, final record, and active state.
+The store exposes explicit reserve, finish, and cancel operations for generic owners and calls.
+Options name the balanced list span and projected span separately.
+The first Slice B fixture uses one numeric seed and an untyped `identity<T>` declaration.
+It asserts capture, ordering, exact parenthesis identity, runtime equivalence, and absence of a function signature.
+A recovered-body contrast retains the seed while removing the failed declaration's generic records.
+The initial preflight skipped function bodies by brace count and could miss nested annotations or unsupported owners.
+Complete-source eligibility must inspect every body before the comparator invokes legacy preparation.
+The first fixture uses a narrow bare-parameter and identifier-return policy until later Slice B work expands that policy explicitly.
+Direct recovery tests can exercise refused bodies without claiming complete-source equivalence.
+Function bound lowering stops before an original projected index reaches the compact parameter count.
+The syntax store retains skipped raw bounds without requiring semantic fragments for those bounds.
+Otherwise an ignored literal can consume pool capacity, or ignored unsupported syntax can introduce a new refusal.
+Pending publication also checks diagnostic allocation health because an unrecorded error leaves the diagnostic count unchanged.
+The diagnostic failure probe must observe that condition and confirm owner removal without changing runtime recovery.
+Legacy `parenOffsetAfter` skips only spaces, tabs, carriage returns, and line feeds.
+A comment between a function's generic list and `(` leaves its legacy signature offset absent.
+TypeEnv therefore omits that entry's generic declaration work.
+Token-only capture incorrectly attaches the list and constructs generic parameters.
+This bounded private slice declines comment gaps in both preflight and the parser hook.
+Whitespace positive probes and block-comment and line-comment negative probes establish that boundary.
+The production migration must preserve the omitted generic work for admitted comment gaps.
+The `function`-to-name gap needs the same raw whitespace restriction in this bounded slice.
+A comment there stops legacy named-function handling before the name.
+The later generic pass records call arguments at the function parenthesis instead of declaring function parameters.
+The production design must retain that projection without creating a runtime call node.
+The list-end gap check also rejects an extra closing angle hidden inside a combined tokenizer token.
+`function identity<T>>(value){return value;}` must not consume the residual `>` as type syntax.
+The negative probes include both header gaps and that residual closer.
+Function preflight and capture must share the declaration path's private generic-list eligibility guard.
+That guard excludes regex-shaped contents and malformed or over-budget quoted scans before authored splitting.
+Function-form probes must retain a later parameter beyond a balanced quoted-scan budget boundary.
+The raw-gap parser probes expect `UnexpectedToken`; the diagnostic-allocation probe expects `ParseError`.
+The diagnostic probe checks `has_induced_failure` because a failed first allocation does not advance `alloc_index`.
+Projected spans retain each legacy recording window rather than a normalized angle-list interior.
+Aliases record both angles; function lists and dedicated assignment arrows record the interior.
+The general arrow path records through one byte before its whitespace-adjusted cursor.
+Arrow classification uses raw source context, including intervening comments, before selecting that recording window.
+Main measured `const id = /* gap */ <T> (value: T): T => value` retaining the general window.
+The command exits 1 with ZTS208 for `T>` before ZTS200 for the later numeric assignment.
+The receipt is `u10-arrow-comment-baseline/assignment_comment.json` outside the repository.
+Legacy scanning processes each `=` byte outside skipped strings and comments, including the last byte of compound operators.
+The dedicated arrow window therefore also applies after `===`, `+=`, and similar operators ending with `=`.
+An equals sign inside a skipped line comment does not select that window.
+The parser must distinguish the preceding runtime token from comment contents.
+At the first runtime token, the parser must use a defined initial token rather than reading undefined previous-token fields.
+Direct first-token and leading-comment arrow probes must establish that boundary without a seeded declaration.
+
+The general angle probe uses the last copied non-whitespace byte, including copied comment text.
+Three measured line-comment contrasts establish that separate rule.
+Each CLI command exits 1; receipts remain in `/tmp/zttp-reset-20261015/u10-arrow-line-comment-baseline/`.
+With `// note` and adjacent `<T>(...)`, legacy records call arguments and reports ZTS203 before ZTS200 on line 3.
+With `// note` and spaced `<T> (...)`, legacy leaves the angle bytes and reports ZTS002 at line 2, column 1.
+With `// note=` and spaced `<T> (...)`, legacy records general parameters and reports ZTS208 for `T>` before ZTS200.
+U10's bounded private path can decline prefix arrows whose general angle probe selects call arguments.
+That restriction also covers keyword prefixes such as `return`, whose final raw byte satisfies the legacy operand classification.
+The private guard must use the shared raw classification after checking the dedicated assignment window.
+The production migration must preserve that projection through the final arrow owner.
+Thus `(<T> (value: T): T => value)` retains the semantic parameter name `T>`.
+The adjacent arrow and dedicated assignment contrast retain `T`.
+Main measured ZTS208 and ZTS200 for the spaced parenthesized arrow, versus one ZTS200 for each control.
+All three commands exit 1 with JSON; receipts remain in `/tmp/zttp-reset-20261015/u10-arrow-window-baseline/`.
+The public generic table now contains 77 sources, plus the separate propagated-error regression.
+Failed speculation restores the full cursor and store checkpoint.
+Accepted syntax uses pending records through runtime node and wrapper creation.
+Runtime failure removes pending records while preserving parser recovery progress.
+A nongeneric enclosing call can fail after a nested generic call publishes its record.
+Expression and statement transactions must remove those nested records while retaining syntax from earlier statements.
+The same boundaries must cover a failed right operand and a failed final statement node.
+Transactions must also detect recovered errors and diagnostic allocation failure.
+A recovered `parseBlock` error prevents publication even when the block returns a node.
+Variable and export wrappers apply that diagnostic-count check and diagnostic allocation health before retaining nested records.
+Generic ownership alone creates no function signature.
+An empty function or arrow projection performs no generic scope allocation, matching the legacy early return.
+A nonempty projection with no retained names still performs its existing scope work.
+Structural generic aliases retain their separate publication policy, including an empty parameter list.
+The population order remains aliases, contractivity, independent function scopes, and calls outside every function scope.
+The full Slice B census inspects every original body and initializer before complete-source comparison.
+The first expanded preflight used recursive calls for nested functions without a scanner budget.
+The accepted implementation must use bounded iteration, as the Zig skill requires.
+A forced budget probe must decline comparison, while a nonempty nested positive must still compare.
+Empty dedicated and spaced general arrow lists need separate projection assertions.
+Nested arrows and calls must assert reservation order, final parenthesis locations, and disjoint semantic fragment ownership.
+Separate positive probes must nest a call inside a call and an arrow inside an arrow.
+Those probes must also assert contiguous authored ranges and balanced independent generic scopes.
+Allocation sweeps cover successful comparisons, second-owner rollback, nonempty bounds and call fragments, and preserved outer generic scopes.
+Explicit call validation rejects more than eight projected fragments before the lowerer fills its fixed argument array.
+The malformed-record probe supplies nine otherwise valid fragments to establish that rejection.
+The explicit-call scanner must distinguish a non-call from a private exclusion.
+Combined-depth exhaustion must decline comparison before legacy preparation instead of becoming a comparison operator.
+Only a non-call outcome can retain the ordinary comparison fallback.
+Both slices retain separate complete-source, direct API, and public production evidence.
+Astra accepts the final Slice A source after the authored-span, private-exclusion, cursor, projection, and cleanup corrections.
+The preceding unfiltered run passed 2,743 tests with one skip across 16 steps.
+The final guard run also passed 2,743 tests with one skip across 16 steps.
+Its log is `u10-slice-a-final-bounded.log`; all 223 precompile tests pass.
+The separate comment-window tools run passes all 224 precompile tests in `u10-arrow-comment-public.log`.
+
+The following receipts cover intermediate U10 slices, not completion of U10.
+Each log path is relative to `/tmp/zttp-reset-20261015/`.
+
+| Log | Direct result and scope |
+|---|---|
+| `u10-first-slice-corrected.log` | Exit 0; 16 steps, 2,725 pass, one skip; application slice. |
+| `u10-slice-a-first.log` | Exit 1; invalid assignment syntax in three closer branches. |
+| `u10-slice-a-syntax-corrected.log` | Exit 1; two span-width errors; 94 tests pass. |
+| `u10-slice-a-width-corrected.log` | Exit 1; 14 steps succeed, 2,729 pass, one skip, five failures; all 220 precompile tests pass. |
+| `u10-slice-a-corrected-first.log` | Exit 1; 14 steps succeed, 2,738 pass, one skip, one failure; all 221 precompile tests pass. |
+| `u10-slice-a-corrected-second.log` | Exit 0; 16 steps, 2,743 pass, one skip; all 223 precompile tests pass. |
+| `u10-slice-a-final-bounded.log` | Exit 0; 16 steps, 2,743 pass, one skip; final Slice A guards. |
+| `u10-arrow-comment-public.log` | Exit 0; four steps, 224 precompile tests pass; exact comment-window regression. |
+| `u10-b-first.log` | Exit 0; 16 steps, 2,746 pass, one skip; first function fixture; source review still requires corrections. |
+| `u10-b-first-corrected.log` | Exit 1; offset-width compilation error; six steps succeed and 94 tests pass. |
+| `u10-b-first-width-corrected.log` | Exit 1; 14 steps succeed, 2,748 pass, one skip, one stale raw-gap expectation; all 224 precompile tests pass. |
+| `u10-b-first-final.log` | Exit 0; 16 steps, 2,750 pass, one skip; all 224 precompile tests pass; Astra accepts the bounded first function slice. |
+| `u10-b-full-first.log` | Exit 1; six of sixteen steps, 94 tests pass; new switch assignments and callback-local offsets fail compilation. |
+| `u10-b-full-syntax-corrected.log` | Exit 1; fourteen of sixteen steps, 2,763 pass, one skip, four failures, one crash; all 225 precompile tests pass. |
+| `u10-b-full-corrected.log` | Exit 1; fourteen of sixteen steps, 2,774 pass, one skip, three failures; all 225 precompile tests pass. |
+| `u10-b-full-projection-corrected.log` | Exit 0; sixteen steps, 2,777 pass, one skip; all 225 precompile tests pass. |
+| `u10-b-full-owner-window-corrected.log` | Exit 0; sixteen steps, 2,778 pass, one skip; all 225 precompile tests pass; Astra accepts the final source. |
+
+The corrected run exposed three stale exclusions after private eligibility expanded.
+It also exposed an empty group's retained syntax node, a declaration fixture outside its required boundary, and an incorrect runtime error expectation.
+An older test accessed an inactive verdict field after comparison operators became eligible.
+Main corrected those expectations and replaced that unsafe field access with an exhaustive verdict switch.
+Astra also required enclosing rollback transactions, explicit scanner exclusions, and the empty-scope allocation policy described above.
+`u10-b-full-corrected.log` passes the new wrapper, diagnostic-allocation, and nested reservation probes.
+Its remaining failures expose the optional angle-pair projection and two incorrect fixture expectations.
+The empty-scope probe must initialize built-in aliases before it installs the failing allocator.
+It must remove unused scope capacity before it tests a required new allocation.
+Generic call arguments admit `any`; the ordinary annotation scanner's refusal does not apply to that capture path.
+That call contrast must preserve semantic comparison instead of expecting an admission refusal.
+Astra accepts the final shared projection helper and its five direct contrasts.
+That source acceptance remains separate from the next run's execution result.
+
+The broad frontend run passes 45 steps, with 3,551 passing tests and one skip in `u10-focused.log`.
+All 182 diagnostic corpus cases pass, and whole-repository formatting passes.
+A daemon restart interrupted `u10-verify.log`; that partial run supplies no full-gate verdict.
+The recovered full gate exits 1 in `u10-verify-recovered.exit`.
+Its aggregate completes 189 of 191 steps, with 8,275 passing tests and six skips.
+The proof-swallow shell gate rejects anonymous catch blocks in `putParsedGenericAlias` and `putParsedCallTypeArgs`.
+Main replaces those blocks with native `try` propagation and scoped `errdefer` to retain the allocation-failure flag.
+The direct proof-swallow gate then passes without an allowlist change.
+Astra accepts the correction after checking the pinned map error set and both error paths.
+The other three source files match the accepted snapshot.
+The corrected small run exits 0 in `u10-propagation-small.log`: sixteen steps, 2,778 passing tests, and one skip.
+All 225 precompile tests pass again.
+The corrected full gate exits 0 in `u10-verify-propagation.exit`.
+Its log is `u10-verify-propagation.log`.
+Aggregate tests, standalone runtime, optimized builds, verified precompilation, smoke tests, offline replay, and specification checks pass.
+All 734 flow probes match their expected verdicts; all 182 diagnostic corpus cases pass.
+Final documentation, link, and spine checks pass all eight steps in `u10-docs-final.log` with exit 0.
+Whole-repository formatting and the diff check also pass after the propagation correction.
+U10 is ready for its local commit.
+
 ### U11 preparation findings
+
+Main measured typed parameter contrasts for both function header comment gaps.
+Each command exits 1 with ZTS003 before type analysis.
+The comment before the name reports line 1, column 37; the comment after the list reports column 36.
+Both diagnostics retain the suggestion `')'`.
+The normal header reaches ZTS200 at line 2, column 1 for the later numeric assignment.
+Receipts remain in `/tmp/zttp-reset-20261015/u11-function-header-baseline/`.
+The accepted untyped header cases do not authorize typed parameter admission through those gaps.
+
+The accepted U11 design adds a bounded compatibility projection to the final function's generic owner.
+`GenericOwnerCompatibility` distinguishes declaration parameters, ignored declaration parameters, and legacy call arguments.
+The call variant retains authored argument and semantic fragment ranges.
+The ignored variant performs no generic semantic work.
+Neither variant alone creates a fake call node or a function signature.
+Ordinary parameter and return annotations still establish their existing signatures.
+
+The compatibility projection retains no second owner identity or stored `legacy_lparen_offset`.
+An interim offset facade can read the parameter opener directly from the final function node.
+U12 uses one map keyed entirely by node indices for real calls and unmatched function-owned compatibility entries.
+Real calls query only actual call nodes.
+Node indices must never enter the existing map of source offsets because those numeric domains can collide.
+
+Compatibility arguments populate in source order with real call arguments during the existing call-argument phase.
+Ordinary alias resolution, pool construction, map insertion, and health checks remain unchanged.
+Validation requires actual function owners and disjoint fragment ranges.
+Wrapper failure and diagnostic allocation failure remove every pending compatibility range.
+Astra accepts this bounded design for the two specified header gaps and three measured arrow contrasts.
+Implementation still requires U10's commit and final API refresh.
+The adjacent line-comment arrow uses the call-argument variant on its final arrow node.
+The spaced line-comment refusal publishes no owner; the equals-ending comment retains the general declaration projection.
+The call-argument variant performs no generic declaration work and retains ordinary typed signatures.
 
 The current TypeMap has eight kinds, and the existing census in `source_frontend.zig` covers every kind.
 Structural and nominal annotations belong to type declarations without runtime nodes or atoms.
@@ -1760,8 +2127,97 @@ Export transactions must include exported constants and their final export wrapp
 Wrapper allocation failure must remove the variable annotation and nested arrow or call syntax from its initializer.
 
 Astra conditionally accepts U11 Stage 1 with those refinements.
+The refreshed review finds no remaining design blocker.
+Every new `TypeValue` participates in range validation, rollback, and application-base planning.
+That census includes predicate narrowing and `legacy_ordinary_prefix`.
 The first slice establishes runtime identity, exact owners, individual type lowering, and rollback after recovered body errors.
 Implementation release still requires U10's commit, final API refresh, and review of that refreshed specification.
+
+U11 adds `parameter_annotations`, `function_signatures`, `type_only_modules`, and `erased_type_prefixes` to the thirteen arrays from U10.
+Every checkpoint, rollback, and destructor covers all seventeen arrays.
+Reserve operations use named options and the store's source, rather than accepting another source slice.
+An explicit parse-time policy distinguishes opaque structural parameters from callable bound projection before the final owner exists.
+Type-only module refusal has a separate `zttp_types` state; it does not extend annotation-grammar failures.
+
+The function body transfers pending signature cleanup to its declaration wrapper exactly once.
+Finalizers receive the completed owner and an IR view where runtime ownership applies.
+Each finalizer validates its own record while other reserved slots can remain undefined.
+Global source validation, runtime-owner validation, and application masks run only after enclosing publication finishes.
+Astra conditionally accepts this preliminary API, subject to the required refresh after U10's commit.
+
+The first U11 slice parses variable, parameter, and ordinary return types without expanding the general comparison preflight.
+A dedicated comparator checks runtime IR before exact ownership and ordered individual type lowering.
+The signature's `source_span` covers its runtime parameter opener through the header, stopping at the body start.
+The signature uses its final runtime node as identity; that source interval supplies no reconstruction join.
+
+The declaration body transfers pending cleanup once, and the declaration wrapper retains cleanup through its final allocation.
+A nested positive probe must publish the outer signature before the inner signature in authored order.
+A recovered outer body must remove completed inner syntax while retaining the earlier variable annotation and runtime recovery progress.
+The owner validator must reject incorrect node tags before it reads tagged runtime data.
+The first slice retains provisional generic and explicit-call offsets until U11's later owner conversion.
+
+The final syntax inventory must also retain nominal declarations with generic lists before production cutover.
+U10 explicitly excludes those lists from its private comparison scope.
+Main measured `nominal Id<T> = string` with an integer assignment to `Id`.
+CHECK admits the list and reports ZTS200 at line 2, column 1.
+The contrast `nominal Id<T> = T` reports ZTS048 at line 1, column 17.
+Both commands exit 1; receipts remain under `u11-nominal-generic-baseline/` outside the repository.
+The U11 API refresh must locate this syntax owner while preserving ignored nominal parameters and scalar-base admission.
+
+The producer inventory covers each legacy annotation-recording callsite, not only the eight recorded kinds.
+Admitted object-property arrows require final arrow ownership; refused object methods require transaction rollback.
+Function expressions, async forms, default exports, and destructuring retain their existing refusals.
+Exported named functions and constants retain their outer wrapper transactions.
+The concrete fixture specification remains in `/tmp/zttp-reset-20261015/u11-owner-fixture-spec.md` until final API refresh.
+
+The general `<T> extends ...` producer has no established successful runtime owner.
+Main measured assignment, grouped, and statement probes of that prefix.
+All commands exit 1 with ZTS002, `expected expression`, at `extends`.
+The columns are 19, 20, and 5 respectively, all on line 1.
+The receipts remain in `/tmp/zttp-reset-20261015/u11-orphan-generic-baseline/`.
+Cutover must preserve those diagnostic positions without publishing an ownerless semantic record.
+These three probes establish those refusals; they do not prove every possible context is refused.
+
+The same general producer also admits prefixes before braces and parentheses without a function or call owner.
+Main measured `<T>{ id: 1 }`, its grouped form, `<T>(1)`, and `<T>{ const value = 1; }`.
+All four reach the ordinary handler's ZTS500 refusal without earlier parser or type diagnostics.
+All commands exit 1; the receipts remain in `/tmp/zttp-reset-20261015/u11-expression-prefix-baseline/`.
+All four normalization commands exit 0 and retain the generic prefix in `canonicalSource`.
+The exact normalized bytes remain in the same directory's `*.normalize.json` files.
+
+These prefixes require syntax retention without an invented function or call owner.
+Parenthesis prefixes still trigger legacy generic declaration work through a recorded signature offset.
+That work creates parameter nodes and resolves bounds even when no function signature follows.
+Brace prefixes have no such offset and skip that semantic work.
+The direct path must preserve this distinction, including pool-capacity and failure behavior.
+U10 can decline these bounded forms until U11 adds the accepted representation.
+Astra accepts a separate `ErasedTypePrefix` record class for these prefixes.
+Each record retains the actual erased span, exact legacy recorded span, and final expression or block owner.
+Its compatibility tag distinguishes ignored parameters from legacy parameter projection.
+Parenthesis prefixes reuse U10's projected parameter and fragment ranges for U12's transient declaration work.
+Brace prefixes retain no such semantic construction.
+Bounded prefix projections need direct API probes without adding sources to the seven measured forms eligible for complete-source comparison.
+An actual arrow receives its normal generic owner instead.
+The prefix creates no runtime node, atom, binding, function signature, or semantic generic owner.
+
+Prefix publication waits for operand or block completion and every enclosing declaration or export wrapper.
+Recovered block errors cancel pending prefix records while retaining runtime progress.
+Validation checks exact owner tags, spans, record ranges, rollback, and application-base roots.
+A separate census distinguishes erased prefixes from semantic generic owners.
+Tests cover both capture paths, empty lists, whitespace, exact owners, transient parameter construction, and failure rollback.
+
+The printer needs the exact legacy recorded span for every generic capture path.
+Its region builder skips an empty span, otherwise expands that span by one byte and trims whitespace.
+The actual angle span cannot replace that input.
+U11 retains these facts; U13 retains printer migration.
+
+Three further empty-list probes reach only the handler's ZTS500 refusal and exit 1.
+Their normalization commands exit 0.
+The empty object prefix normalizes to `const value = < > { id: 1 };`.
+The empty assignment prefix normalizes to `const value = < > (1);`.
+The empty general spaced prefix normalizes to `const value = (<>(1));`.
+These outputs retain angle tokens even when an empty recorded span creates no opaque printer region.
+Exact responses remain in the same baseline directory.
 
 ### U12 preparation findings
 
@@ -1794,6 +2250,19 @@ Function specification collection checks environment health only after finding a
 Allocation-dropped metadata can therefore resemble an absent declaration in that collection path.
 U12 needs failure characterization and explicit health checks before the new syntax path publishes results.
 The new path must never retry through legacy reconstruction.
+
+Population order is a compatibility input, separate from final owner identity.
+Legacy population completes aliases and contractivity, then constructs all generic declarations, then resolves all explicit call arguments.
+It next resolves variable, parameter, ordinary return, and guard annotations together in authored source order.
+Finally, its temporary signature map supplies the hash iteration order for name fallbacks.
+The direct path must retain that construction order without reconstructing annotation owners.
+
+Generic declarations construct parameter indices once, including generic-only owners and applicable erased prefixes.
+Later parameter and return resolution uses short scopes that reuse those indices.
+Variable annotations inherit no function generic scope.
+Real and compatibility call arguments merge in source order during the earlier call phase.
+A per-function loop that resolves its annotations before the call phase does not preserve this sequence.
+The preliminary U12 proposal requires that correction before design acceptance.
 
 Typing profiles also remain explicit.
 Loaded multi-module contracts omit type data for both entry and dependencies.
@@ -2152,5 +2621,6 @@ All required checks pass, and their evidence states its scope.
 Documentation describes the final design.
 No live model call, corpus replacement, push, or release claim forms part of this reset.
 
-The planning task ends when this complete document is saved and reviewed.
-The user owns authorization to start U1.
+The original planning task ended when this document was saved and reviewed.
+The user subsequently authorized implementation through U20.
+The implementing agent owns phase completion; the user owns later publication.

@@ -27,37 +27,92 @@ No browser session was opened.
 
 ## Current work
 
-U1 through U8 are complete and committed locally.
-U9 source review, focused execution, and the full local gate pass.
-U10 through U20 implementations remain unstarted.
-Production callers retain the legacy frontend.
-Main owns all files for final documentation checks and the local U9 commit; every worker has paused edits.
-
-Main reviewed every changed U9 line and every correction.
-Astra accepts the final U9 source after all five earlier blockers and three boundary findings are resolved.
-Whole-tree formatting and `git diff --check` pass.
-`u9-focused.log` passes: 45 steps, 3,470 pass, and one skip.
-All 218 precompile tests pass, including the 52 public declaration sources.
-The authority retains the scanner, ownership, oracle, span, census, admission, and allocation findings.
-`u9-verify.log` exits 0 and reports that all CI test-job steps pass.
-
-Sol high worker `reset_u10_generic_design` completed read-only preparation and owns no files.
-Main measured 74 generic CLI contrasts across six directories; every command exits 1 at its recorded stage.
-Astra accepts the amended full design, subject to U9's commit and API refresh.
-Sol's final U9 API refresh found no required design change.
-The outside fragment `u10-tools-complete-74.zig` contains all 74 fixtures and passes formatting only.
-Main reviewed the fragment; integration and execution wait for U9's commit.
-
-U10 evidence separates eligible whole-source comparisons, direct fragment/API properties, and the public production baseline.
-Typed parameters, returns, predicates, and complete typed-source comparisons wait for U11.
-
-Fresh Sol high worker `reset_u11_annotation_owners` completed a read-only Stage 1 proposal.
-Astra conditionally accepts that design with the refinements recorded in the authority.
-Three measured predicate contrasts require unresolved targets and a separate facet for legacy return classification.
-The accepted compatibility root retains the whole raw return span and uses engine grammar during admission.
-U11 implementation waits for U10's commit, final API refresh, Astra acceptance, and explicit release.
-
+U1 through U9 are complete and committed locally.
+U10 remains private; production callers retain the legacy frontend.
+U11 through U20 implementations remain unstarted.
 No product decision blocks progress.
+
+U10's application, structural, function, arrow, and explicit-call slices pass their small roots and Astra source reviews.
+`u10-b-full-owner-window-corrected.log` exits 0: sixteen steps, 2,778 pass, and one skip.
+All 225 precompile tests pass, including the measured line-comment contrasts.
+The authority retains intermediate failures, exact compatibility boundaries, corrections, and receipts.
+The public generic table contains 77 measured sources plus separate boundary regressions.
+
+Sol worker `reset_u10_generic_design` stopped all edits after handoff.
+Main owns source, tools regressions, documentation, verification, integration, and Git.
+The four U10 implementation files remain `parse.zig`, `type_syntax.zig`, `typed_frontend_compare.zig`, and `type_env.zig` under `packages/zts/src/`.
+Main reviewed every accepted source line and correction.
+The source snapshot before the propagation correction is `u10-b-owner-window-final-source/` under `/tmp/zttp-reset-20261015/`.
+`u10-focused.log` exits 0: 45 steps, 3,551 pass, and one skip; the 182-case diagnostic corpus passes.
+Whole-repository formatting and the diff check pass.
+The daemon restart lost the tool handle for `u10-verify.log` during the aggregate suite.
+Main terminated only that orphaned process group; its partial log remains available.
+That interrupted aggregate matched all 734 flow probes; it supplies no full-gate exit receipt.
+`u10-verify-recovered.exit` records exit 1: 189 of 191 aggregate steps succeeded, with 8,275 passing tests and six skips.
+The proof-swallow shell gate rejects two anonymous catch blocks in the new TypeEnv publication methods.
+Those blocks already return allocation failure, but the gate requires explicit propagation or a reviewed exception.
+Main replaced both blocks with scoped `errdefer` and `try`, preserving the allocation-failure flag and native error propagation.
+The direct proof-swallow gate now passes without allowlist changes.
+Astra accepts the correction after checking the pinned map error set and the exact source delta.
+Whole-repository formatting and the diff check pass again.
+`u10-propagation-small.log` exits 0: sixteen steps succeed, with 2,778 passing tests and one skip.
+All 225 precompile tests pass again.
+The corrected full gate exits 0 in `u10-verify-propagation.exit`; its log is `u10-verify-propagation.log`.
+All 734 flow probes and all 182 diagnostic corpus cases pass.
+The full script also passes standalone runtime, optimized builds, verified precompilation, smoke tests, offline replay, and specification checks.
+No source edits occurred during that gate.
+Final documentation gates pass all eight steps in `u10-docs-final.log` with exit 0.
+U10's source, checks, and documentation are ready for its local commit.
+
+Thirteen arrays retain authored syntax and separate legacy semantic projections.
+Scope APIs bind ownership to one environment and preserve compact indexing before constraint construction.
+Generic-only owners create no function signature.
+Aliases populate before independent function scopes; calls and body variables inherit no enclosing generic scope.
+Pending owners reserve source order before nested bodies or value arguments.
+Final publication waits for runtime nodes, enclosing wrappers, diagnostic counts, and diagnostic allocation health.
+
+Enclosing expression and statement transactions remove failed nested records without rewinding runtime progress.
+The call scanner distinguishes a non-call from a private exclusion and propagates allocator failure.
+The parser initializes a defined previous token and probes combined openers without changing actual shifts.
+Empty function and arrow projections skip semantic work; nonempty projections with no retained names retain their scope work.
+One helper removes one optional angle pair from each owner's legacy recorded window.
+Calibrated node failures, diagnostic failures, nested reservations, and allocation sweeps pass their direct assertions.
+
+Complete eligibility inspects function bodies with a bounded iterative depth counter.
+Declarations and function capture share the same private generic-list eligibility guard.
+Malformed quotes, quoted-scan budgets, regex-shaped lists, and raw header comment gaps remain explicit private exclusions.
+The production migration must resolve those exclusions while preserving actual legacy behavior.
+Original CLI responses remain in the baseline directories named by the authority.
+
+U11's external fixture specification is `u11-owner-fixture-spec.md` in the same temporary directory.
+Astra conditionally accepts the specification, subject to U10's commit and final API refresh.
+The accepted design retains exact erased and recorded spans, predicate compatibility roots, erased prefixes, and final runtime owners.
+Function header comments need bounded compatibility tags with no stored legacy offset.
+The same accepted tags cover the three measured line-comment arrow contrasts without adding an identity or tag.
+The U11 worker completed those external fixtures; ordinary typed signatures remain separate from generic compatibility.
+U12 must use one map keyed entirely by final node indices and preserve source-order projection with real calls.
+Main measured three typed header contrasts in `u11-function-header-baseline/`; every CLI command exits 1.
+Both comment gaps produce ZTS003 at the parameter colon; the normal header reaches the later ZTS200 mismatch.
+Those receipts do not broaden admission of the specified untyped header cases.
+Prepared U11 tools fragments remain outside the repository and have formatting evidence only.
+Main also prepared `u11-function-header-tools.zig` with all three exact header contrasts; execution waits for U11 integration.
+The seven expression-prefix fixtures also retain exact CHECK and normalization receipts.
+U11 implementation requires U10's commit, final API refresh, Astra acceptance, and explicit release.
+Sol worker `u11_owner_slice_worker` prepares the first bounded slice without source edits while U10 checks run.
+Sol found no design blocker and returned the bounded proposal without edits or command execution.
+Main requires nested publication and recovered-outer rollback probes, plus tag checks before runtime data access.
+The authority records these refinements; final post-commit refresh and Astra review remain required.
+Sol worker `u12_consumer_api_prep` returned a preliminary consumer proposal without edits or execution.
+Main found a population-order mismatch and returned that proposal for correction against the legacy source.
+The authority records the required phase order and reuse of declared generic indices.
+U12 remains blocked on U11 completion and its final API refresh.
+Sol completed a read-only API census in `u11-api-precommit-check.md` outside the repository.
+Main corrected the pending publication contract and kept bound-prefix probes outside complete-source eligibility.
+Astra conditionally accepts that preliminary API with no remaining design blocker.
+That preliminary census does not replace the required refresh after U10's commit.
+
+Main will finish the required U10 gates, update documentation, and commit U10.
+The task then continues through U20.
 
 ## U9 intermediate receipts
 
@@ -86,6 +141,8 @@ Source review does not replace execution or establish a performance improvement.
 | U6 (root source capture) | `f8d4fce4` | `u6-focused.log`: exit 0, 25 steps, 1,765 pass, 1 skip; `u6-determinism.log`: exit 0 | `u6-verify.log`: exit 0 | `u6-docs-final.log`: exit 0 |
 | U7 (primitive typed parser) | `a56107e3` | `u7-focused-accepted.log`: exit 0, 45 steps, 3,383 pass, 1 skip | `u7-verify.log`: exit 0 | `u7-docs-final.log`: exit 0 |
 | U8 (compound type syntax) | `df11fb48` | `u8-focused.log`: exit 0, 45 steps, 3,424 pass, 1 skip | `u8-verify.log`: exit 0 | `u8-docs-final.log`: exit 0, 8 steps |
+| U9 (named and recursive declarations) | `23ef9e84` | `u9-focused.log`: exit 0, 45 steps, 3,470 pass, 1 skip | `u9-verify.log`: exit 0 | `u9-docs-final.log`: exit 0, 8 steps |
+| U10 (generic syntax) | This commit | `u10-focused.log`: exit 0, 45 steps, 3,551 pass, 1 skip; corrected source: `u10-propagation-small.log`, exit 0, 16 steps, 2,778 pass, 1 skip | `u10-verify-propagation.log`: exit 0 | `u10-docs-final.log`: exit 0, 8 steps |
 
 U2 also passed `u2-zruntime.log` separately.
 U2, U4, U5, and U7 matched all 734 flow probes.

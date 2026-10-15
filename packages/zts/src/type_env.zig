@@ -82,6 +82,7 @@ pub const GenericScope = struct {
         constraint: TypeIndex,
     } = undefined,
     count: u8 = 0,
+    owner_token: u64 = 0,
 
     pub fn addParam(self: *GenericScope, name: []const u8, idx: TypeIndex) void {
         self.addConstrainedParam(name, idx, null_type_idx);
@@ -136,6 +137,20 @@ pub const GenericParam = struct {
     idx: TypeIndex = null_type_idx,
     /// The `extends` bound, or `null_type_idx` when unconstrained.
     constraint: TypeIndex = null_type_idx,
+};
+
+pub const ParsedGenericInput = struct {
+    name: []const u8,
+    constraint: ?TypeIndex = null,
+};
+
+pub const ParsedGenericScope = struct {
+    owner_env: *TypeEnv,
+    prior_depth: usize,
+    owner_token: u64,
+    params: [MAX_TYPE_PARAMS]GenericParam = @splat(.{}),
+    count: u8 = 0,
+    active: bool = true,
 };
 
 /// Explicit type arguments written at a call site (`first<string>(xs)`),
@@ -399,6 +414,7 @@ pub const TypeEnv = struct {
     /// author declared nothing". `TypeChecker` and `TypePool` already carry
     /// the same flag for the same reason.
     allocation_failed: bool = false,
+    next_generic_owner_token: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator, pool: *TypePool) TypeEnv {
         var env: TypeEnv = .{
@@ -443,7 +459,7 @@ pub const TypeEnv = struct {
 
     /// Register a two-param capsule alias `Name<T, S>` whose body is
     /// `T & { <marker>: S }` - the shape shared by `Proof<T, S>` (marker
-    /// `__zttp_spec__`) and `Effects<T, S>` (marker `__zttp_effect__`).
+    /// `__zttp_proof__`) and `Effects<T, S>` (marker `__zttp_effect__`).
     /// After instantiation the underlying return type `T` survives for type
     /// checking while the phantom marker record carries `S`. Distinct marker
     /// fields let a return type carry both capsules and have each extraction
@@ -1587,6 +1603,185 @@ pub const TypeEnv = struct {
     // Generic scope management
     // -------------------------------------------------------------------
 
+    pub fn beginParsedGenerics(
+        self: *TypeEnv,
+        projected: []const ParsedGenericInput,
+    ) !ParsedGenericScope {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        const prior_depth = self.generic_scopes.items.len;
+        self.pushGenericScope();
+        if (self.generic_scopes.items.len != prior_depth + 1) {
+            try self.ensureHealthy();
+            return error.OutOfMemory;
+        }
+        var owns_push = true;
+        errdefer if (owns_push and self.generic_scopes.items.len == prior_depth + 1) {
+            self.popGenericScope();
+        };
+
+        const token = self.next_generic_owner_token;
+        self.next_generic_owner_token +%= 1;
+        if (self.next_generic_owner_token == 0) self.next_generic_owner_token = 1;
+        self.generic_scopes.items[prior_depth].owner_token = token;
+        var owner: ParsedGenericScope = .{
+            .owner_env = self,
+            .prior_depth = prior_depth,
+            .owner_token = token,
+        };
+        for (projected[0..@min(projected.len, MAX_TYPE_PARAMS)]) |input| {
+            if (input.name.len == 0) continue;
+            const owned_name = self.internName(input.name);
+            try self.ensureHealthy();
+            const index = self.addGenericParam(input.name);
+            try self.pool.ensureHealthy();
+            owner.params[owner.count] = .{
+                .name = owned_name,
+                .idx = index,
+            };
+            owner.count += 1;
+        }
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        owns_push = false;
+        return owner;
+    }
+
+    pub fn installParsedConstraints(
+        self: *TypeEnv,
+        owner: *ParsedGenericScope,
+        projected: []const ParsedGenericInput,
+    ) !void {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        _ = try self.validateParsedGenericScope(owner);
+        for (projected, 0..) |input, index| {
+            if (index >= owner.count) break;
+            const constraint = input.constraint orelse continue;
+            owner.params[index].constraint = constraint;
+            self.generic_scopes.items[owner.prior_depth].setConstraint(input.name, constraint);
+        }
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+    }
+
+    pub fn resolveParsedGenericParam(
+        self: *const TypeEnv,
+        owner: *const ParsedGenericScope,
+        name: []const u8,
+    ) !?TypeIndex {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        const scope = try self.validateParsedGenericScope(owner);
+        return scope.resolve(name);
+    }
+
+    pub fn finishParsedGenericRoot(
+        self: *TypeEnv,
+        owner: *const ParsedGenericScope,
+        exact_text: []const u8,
+        lowered: TypeIndex,
+    ) !TypeIndex {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        const scope = try self.validateParsedGenericScope(owner);
+        const exact = std.mem.trim(u8, exact_text, " \t\n\r");
+        if (self.type_aliases.get(exact)) |index| return index;
+        if (scope.resolve(exact)) |index| return index;
+        const result = self.finishParsedTypeRoot(lowered);
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        return result;
+    }
+
+    pub fn finishParsedBoundRoot(
+        self: *TypeEnv,
+        owner: *const ParsedGenericScope,
+        exact_text: []const u8,
+        lowered: TypeIndex,
+    ) !TypeIndex {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        const scope = try self.validateParsedGenericScope(owner);
+        const exact = std.mem.trim(u8, exact_text, " \t\n\r");
+        if (std.mem.eql(u8, exact, "DictKey")) {
+            const result = self.pool.addUnion(self.allocator, &.{ self.pool.idx_string, self.pool.idx_number });
+            try self.pool.ensureHealthy();
+            return result;
+        }
+        if (self.type_aliases.get(exact)) |index| return index;
+        if (scope.resolve(exact)) |index| return index;
+        const result = self.finishParsedTypeRoot(lowered);
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        return result;
+    }
+
+    pub fn putParsedGenericAlias(
+        self: *TypeEnv,
+        name: []const u8,
+        owner: *const ParsedGenericScope,
+        body: TypeIndex,
+    ) !void {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        _ = try self.validateParsedGenericScope(owner);
+        var alias: GenericAlias = .{ .body = body };
+        for (owner.params[0..owner.count], 0..) |parameter, index| {
+            alias.param_names[index] = parameter.name;
+        }
+        alias.param_count = owner.count;
+        const owned_name = self.internName(name);
+        try self.ensureHealthy();
+        {
+            errdefer self.markAllocationFailure();
+            try self.generic_aliases.put(self.allocator, owned_name, alias);
+        }
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+    }
+
+    pub fn putParsedCallTypeArgs(
+        self: *TypeEnv,
+        lparen_offset: u32,
+        indices: []const TypeIndex,
+    ) !void {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        var arguments: CallTypeArgs = .{};
+        const count = @min(indices.len, MAX_TYPE_PARAMS);
+        if (count == 0) return;
+        @memcpy(arguments.args[0..count], indices[0..count]);
+        arguments.count = @intCast(count);
+        {
+            errdefer self.markAllocationFailure();
+            try self.call_type_args.put(self.allocator, lparen_offset, arguments);
+        }
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+    }
+
+    pub fn endParsedGenerics(self: *TypeEnv, owner: *ParsedGenericScope) !void {
+        _ = try self.validateParsedGenericScope(owner);
+        self.popGenericScope();
+        owner.active = false;
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+    }
+
+    fn validateParsedGenericScope(
+        self: *const TypeEnv,
+        owner: *const ParsedGenericScope,
+    ) !*const GenericScope {
+        if (owner.owner_env != self or !owner.active) return error.InvalidParsedGenericOwner;
+        if (self.generic_scopes.items.len != owner.prior_depth + 1) {
+            return error.InvalidParsedGenericOwner;
+        }
+        const scope = &self.generic_scopes.items[owner.prior_depth];
+        if (scope.owner_token != owner.owner_token) return error.InvalidParsedGenericOwner;
+        return scope;
+    }
+
     pub fn pushGenericScope(self: *TypeEnv) void {
         self.generic_scopes.append(self.allocator, .{}) catch self.markAllocationFailure();
     }
@@ -1630,6 +1825,242 @@ pub const TypeEnv = struct {
 fn packLocationKey(line: u32, col: u32) u32 {
     // Pack line (20 bits) + col (12 bits) into u32
     return (line << 12) | (col & 0xFFF);
+}
+
+const ParsedGenericApiCase = enum {
+    exact_dict_key_bound,
+    scope_name_storage,
+    original_constraint_index,
+    forward_constraint,
+    duplicate_constraint_selection,
+    compact_capacity,
+    empty_name_consumes_capacity,
+    null_body_publication,
+    call_argument_capacity,
+    cross_environment_owner,
+    poisoned_pool_cleanup,
+    poisoned_environment_cleanup,
+    interned_publication_names,
+    repeated_exit_rejected,
+};
+
+test "parsed generic API census observes every case" {
+    var seen = std.EnumSet(ParsedGenericApiCase).initEmpty();
+    inline for (std.meta.tags(ParsedGenericApiCase)) |case| {
+        try std.testing.expect(!seen.contains(case));
+        switch (case) {
+            .cross_environment_owner => {
+                var left_pool = TypePool.init(std.testing.allocator);
+                defer left_pool.deinit(std.testing.allocator);
+                var right_pool = TypePool.init(std.testing.allocator);
+                defer right_pool.deinit(std.testing.allocator);
+                var left = TypeEnv.init(std.testing.allocator, &left_pool);
+                defer left.deinit();
+                var right = TypeEnv.init(std.testing.allocator, &right_pool);
+                defer right.deinit();
+                var left_owner = try left.beginParsedGenerics(&.{.{ .name = "T" }});
+                var right_owner = try right.beginParsedGenerics(&.{.{ .name = "T" }});
+                try std.testing.expectEqual(left_owner.prior_depth, right_owner.prior_depth);
+                try std.testing.expectEqual(left_owner.owner_token, right_owner.owner_token);
+                try std.testing.expectError(
+                    error.InvalidParsedGenericOwner,
+                    right.resolveParsedGenericParam(&left_owner, "T"),
+                );
+                try left.endParsedGenerics(&left_owner);
+                try right.endParsedGenerics(&right_owner);
+            },
+            else => {
+                var pool = TypePool.init(std.testing.allocator);
+                defer pool.deinit(std.testing.allocator);
+                var env = TypeEnv.init(std.testing.allocator, &pool);
+                defer env.deinit();
+                switch (case) {
+                    .exact_dict_key_bound => {
+                        env.putTypeAlias("DictKey", pool.idx_boolean);
+                        var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
+                        const ordinary = try env.finishParsedGenericRoot(&owner, "DictKey", pool.idx_number);
+                        try std.testing.expectEqual(pool.idx_boolean, ordinary);
+                        const bound = try env.finishParsedBoundRoot(&owner, "DictKey", pool.idx_boolean);
+                        try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, pool.getTag(bound).?);
+                        try std.testing.expectEqualSlices(
+                            TypeIndex,
+                            &.{ pool.idx_string, pool.idx_number },
+                            pool.getUnionMembers(bound),
+                        );
+                        const partial_dict_key = pool.addRef(std.testing.allocator, "DictKey");
+                        try pool.ensureHealthy();
+                        const suffixed = try env.finishParsedBoundRoot(
+                            &owner,
+                            "DictKey = string",
+                            partial_dict_key,
+                        );
+                        try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(suffixed).?);
+                        try std.testing.expectEqualStrings("DictKey", pool.getRefName(suffixed));
+                        try env.endParsedGenerics(&owner);
+                    },
+                    .scope_name_storage => {
+                        const name32 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+                        const name33 = name32 ++ "b";
+                        var owner32 = try env.beginParsedGenerics(&.{.{ .name = name32 }});
+                        try std.testing.expect((try env.resolveParsedGenericParam(&owner32, name32)) != null);
+                        try env.endParsedGenerics(&owner32);
+                        var owner33 = try env.beginParsedGenerics(&.{.{ .name = name33 }});
+                        try std.testing.expectEqual(@as(usize, 33), owner33.params[0].name.len);
+                        try std.testing.expect((try env.resolveParsedGenericParam(&owner33, name33)) == null);
+                        try env.endParsedGenerics(&owner33);
+                    },
+                    .original_constraint_index => {
+                        var owner = try env.beginParsedGenerics(&.{
+                            .{ .name = "" },
+                            .{ .name = "T" },
+                        });
+                        try env.installParsedConstraints(&owner, &.{
+                            .{ .name = "" },
+                            .{ .name = "T", .constraint = pool.idx_number },
+                        });
+                        try std.testing.expectEqual(@as(u8, 1), owner.count);
+                        try std.testing.expectEqual(null_type_idx, owner.params[0].constraint);
+                        try env.endParsedGenerics(&owner);
+                    },
+                    .forward_constraint => {
+                        var owner = try env.beginParsedGenerics(&.{
+                            .{ .name = "T" },
+                            .{ .name = "U" },
+                        });
+                        try env.installParsedConstraints(&owner, &.{
+                            .{ .name = "T", .constraint = owner.params[1].idx },
+                            .{ .name = "U" },
+                        });
+                        try std.testing.expectEqual(owner.params[1].idx, owner.params[0].constraint);
+                        try env.endParsedGenerics(&owner);
+                    },
+                    .duplicate_constraint_selection => {
+                        var owner = try env.beginParsedGenerics(&.{
+                            .{ .name = "T" },
+                            .{ .name = "T" },
+                        });
+                        try env.installParsedConstraints(&owner, &.{
+                            .{ .name = "T", .constraint = pool.idx_string },
+                            .{ .name = "T", .constraint = pool.idx_number },
+                        });
+                        const scope = env.generic_scopes.items[owner.prior_depth];
+                        try std.testing.expectEqual(pool.idx_number, owner.params[1].constraint);
+                        try std.testing.expectEqual(pool.idx_number, scope.params[0].constraint);
+                        try std.testing.expectEqual(null_type_idx, scope.params[1].constraint);
+                        try env.endParsedGenerics(&owner);
+                    },
+                    .compact_capacity => {
+                        var owner = try env.beginParsedGenerics(&.{
+                            .{ .name = "A" }, .{ .name = "B" }, .{ .name = "C" },
+                            .{ .name = "D" }, .{ .name = "E" }, .{ .name = "F" },
+                            .{ .name = "G" }, .{ .name = "H" }, .{ .name = "I" },
+                        });
+                        try std.testing.expectEqual(@as(u8, @intCast(MAX_TYPE_PARAMS)), owner.count);
+                        try std.testing.expectEqualStrings("H", owner.params[7].name);
+                        try env.endParsedGenerics(&owner);
+                    },
+                    .empty_name_consumes_capacity => {
+                        var owner = try env.beginParsedGenerics(&.{
+                            .{ .name = "" },  .{ .name = "A" }, .{ .name = "B" },
+                            .{ .name = "C" }, .{ .name = "D" }, .{ .name = "E" },
+                            .{ .name = "F" }, .{ .name = "G" }, .{ .name = "H" },
+                        });
+                        try std.testing.expectEqual(@as(u8, 7), owner.count);
+                        try std.testing.expectEqualStrings("G", owner.params[6].name);
+                        try std.testing.expect((try env.resolveParsedGenericParam(&owner, "H")) == null);
+                        try env.endParsedGenerics(&owner);
+                    },
+                    .null_body_publication => {
+                        var owner = try env.beginParsedGenerics(&.{});
+                        try env.putParsedGenericAlias("Empty", &owner, null_type_idx);
+                        const alias = env.generic_aliases.get("Empty") orelse return error.TestUnexpectedResult;
+                        try std.testing.expectEqual(@as(u8, 0), alias.param_count);
+                        try std.testing.expectEqual(null_type_idx, alias.body);
+                        try env.endParsedGenerics(&owner);
+                    },
+                    .call_argument_capacity => {
+                        try env.putParsedCallTypeArgs(42, &.{
+                            pool.idx_string, pool.idx_number,    pool.idx_boolean, pool.idx_null,
+                            pool.idx_bytes,  pool.idx_undefined, pool.idx_never,   pool.idx_unknown,
+                            pool.idx_string,
+                        });
+                        const arguments = env.getCallTypeArgs(42) orelse return error.TestUnexpectedResult;
+                        try std.testing.expectEqual(@as(u8, @intCast(MAX_TYPE_PARAMS)), arguments.count);
+                        try std.testing.expectEqual(pool.idx_unknown, arguments.args[7]);
+                    },
+                    .poisoned_pool_cleanup => {
+                        const prior = env.generic_scopes.items.len;
+                        var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
+                        pool.failure = error.TypePoolCapacityExceeded;
+                        try std.testing.expectError(error.TypePoolCapacityExceeded, env.endParsedGenerics(&owner));
+                        try std.testing.expectEqual(prior, env.generic_scopes.items.len);
+                        try std.testing.expect(!owner.active);
+                    },
+                    .poisoned_environment_cleanup => {
+                        const prior = env.generic_scopes.items.len;
+                        var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
+                        env.allocation_failed = true;
+                        try std.testing.expectError(error.OutOfMemory, env.endParsedGenerics(&owner));
+                        try std.testing.expectEqual(prior, env.generic_scopes.items.len);
+                        try std.testing.expect(!owner.active);
+                    },
+                    .interned_publication_names => {
+                        const param_source = try std.testing.allocator.dupe(u8, "OwnedParameter");
+                        const alias_source = try std.testing.allocator.dupe(u8, "OwnedAlias");
+                        var owner = try env.beginParsedGenerics(&.{.{ .name = param_source }});
+                        try env.putParsedGenericAlias(alias_source, &owner, owner.params[0].idx);
+                        try env.endParsedGenerics(&owner);
+                        std.testing.allocator.free(param_source);
+                        std.testing.allocator.free(alias_source);
+                        const alias = env.generic_aliases.get("OwnedAlias") orelse return error.TestUnexpectedResult;
+                        try std.testing.expectEqualStrings("OwnedParameter", alias.param_names[0]);
+                    },
+                    .repeated_exit_rejected => {
+                        var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
+                        try env.endParsedGenerics(&owner);
+                        try std.testing.expectError(
+                            error.InvalidParsedGenericOwner,
+                            env.endParsedGenerics(&owner),
+                        );
+                    },
+                    .cross_environment_owner => unreachable,
+                }
+            },
+        }
+        seen.insert(case);
+    }
+    try std.testing.expectEqual(std.meta.fields(ParsedGenericApiCase).len, seen.count());
+}
+
+test "parsed generic scope entry preserves an outer scope across allocation failures" {
+    const Context = struct {
+        fn run(injected: std.mem.Allocator) !void {
+            var pool = TypePool.init(injected);
+            defer pool.deinit(injected);
+            var env = TypeEnv.init(injected, &pool);
+            defer env.deinit();
+            try pool.ensureHealthy();
+            try env.ensureHealthy();
+
+            env.generic_scopes.deinit(injected);
+            env.generic_scopes = .empty;
+            try env.generic_scopes.ensureTotalCapacityPrecise(injected, 1);
+            env.generic_scopes.appendAssumeCapacity(.{});
+            const prior_depth = env.generic_scopes.items.len;
+            var owner = env.beginParsedGenerics(&.{
+                .{ .name = "First" },
+                .{ .name = "Second" },
+            }) catch |err| {
+                try std.testing.expectEqual(prior_depth, env.generic_scopes.items.len);
+                return err;
+            };
+            try std.testing.expectEqual(prior_depth + 1, env.generic_scopes.items.len);
+            try std.testing.expectEqual(@as(u8, 2), owner.count);
+            try env.endParsedGenerics(&owner);
+            try std.testing.expectEqual(prior_depth, env.generic_scopes.items.len);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
 const return_annotation_slot = std.math.maxInt(u8);

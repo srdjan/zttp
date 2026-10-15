@@ -124,7 +124,8 @@ Type-only syntax creates no runtime node, atom, constant, or scope.
 
 The comparison covers one variable annotation with primitives, records, arrays, tuples, unions, intersections, literals, templates, and function types.
 The comparison also covers named references and recognized structural and nominal declarations.
-Seven owned arrays hold nodes, members, fields, parameters, template parts, annotations, and declarations.
+It also covers generic applications, structural generic declarations, untyped generic functions, untyped generic arrows, and explicit call arguments.
+Thirteen owned arrays hold syntax nodes, child lists, annotation owners, declaration owners, generic parameters, semantic fragments, and call arguments.
 Names and literal text borrow original source spans.
 Type nodes retain grouping and readonly modifiers, including modifiers that have no semantic effect.
 
@@ -135,15 +136,32 @@ Present children precede their parents, and failed publication restores every sy
 Declarations retain component spans, complete erased spans, source order, and authored scope.
 Type-only declarations create no runtime statement, binding, atom, constant, or export.
 Declaration bodies and annotations own separate ranges of type nodes.
+Authored generic parameters retain quoted and comment boundaries independently from the existing raw semantic projection.
+Semantic projection removes one optional angle pair from the recorded window, which differs by owner kind.
+Semantic fragments own disjoint node ranges and retain their recognized prefix ends.
+Generic defaults and structural constraints remain opaque where legacy semantics ignore those bytes.
+Function and arrow owners retain provisional parameter openers until the annotation phase attaches final runtime owners.
+Call arguments retain their touching call opener and separate authored and semantic ranges.
+Pending records reserve source order before nested bodies or arguments add records.
+Publication waits for runtime nodes and enclosing declaration wrappers.
+Recovered errors and diagnostic allocation failures cancel pending records while preserving runtime recovery progress.
 
 A compiler test module lowers syntax directly through existing `TypePool` constructors and binds `TypeEnv` through declaration identities.
 Whole-body alias lookup precedes constructor calls, and source declarations retain their module-wide type namespace.
 The lowerer preserves nominal identity and the existing contractivity census.
+Direct generic APIs bind scope ownership to one environment and remove valid owned scopes after allocation failure.
+The lowerer retains eight-item semantic projections and separate generic and ordinary alias maps.
+Function and arrow scopes remain independent; call arguments and variable annotations inherit no enclosing generic scope.
+Generic ownership alone creates no function signature.
+Empty function and arrow projections perform no scope allocation.
+Application lowering preserves constructor allocation order and defers unused base references.
 The comparison checks exact ordered type structure before supplementary canonical keys.
 Canonical encoding has its own depth limit and does not establish parser admission.
 The existing checker retains its legacy annotation input until the consumer migration.
 
 The private preflight scans eligibility before runtime parsing and preserves admission diagnostic order.
+The preflight inspects function bodies with a bounded iterative depth counter.
+Private exclusions retain malformed lists, unsupported raw capture windows, and typed signatures until later reset phases.
 Unsupported comparison forms produce `out_of_slice`, which declines comparison without selecting another frontend.
 Independent atom tables support comparisons of runtime stores, source locations, binding identities, and allocation counts.
 Later reset phases extend the syntax store before any production caller switches.
