@@ -129,7 +129,7 @@ since covered. Neither list can drift from the registry without failing a build.
 `ZTS001`, `ZTS056`, `ZTS202`, `ZTS203`
 
 These are real diagnostics the corpus trips that no `rule_registry` entry
-carries - the parser, stripper, bool-checker, and type-checker families. The
+carries - the parser, type-position admission, bool-checker, and type-checker families. The
 policy hash covers the registry, so it cannot see them: a change to any of these
 leaves the hash identical while the corpus behaves differently. A coverage count
 taken over the registry alone would both understate the corpus and hide that.

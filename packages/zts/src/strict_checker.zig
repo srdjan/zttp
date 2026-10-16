@@ -5,7 +5,7 @@
 //! normal type/sound passes, and before handler verification/contract work.
 
 const std = @import("std");
-const stripper = @import("zts-engine").stripper;
+const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
@@ -317,7 +317,7 @@ pub const StrictChecker = struct {
         self.type_checker = null;
     }
 
-    pub fn formatDiagnostics(self: *const StrictChecker, source: stripper.SourceView, writer: anytype) !void {
+    pub fn formatDiagnostics(self: *const StrictChecker, source: SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
             const span = loc.span();
@@ -2404,22 +2404,26 @@ test "canonical profile counts reused arrow helper after typed arrow" {
         \\  return Response.json({ a: a, b: b });
         \\}
     ;
-    var stripped = try @import("zts-engine").stripper.strip(testing.allocator, source, .{});
-    defer stripped.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, stripped.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(testing.allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(testing.allocator, testing.allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var pool = type_pool_mod.TypePool.init(testing.allocator);
     defer pool.deinit(testing.allocator);
     var env = TypeEnv.init(testing.allocator, &pool);
     defer env.deinit();
-    try env.populateFromTypeMap(&stripped.type_map);
-    var tc = TypeChecker.init(testing.allocator, view, null, &env);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    var tc = TypeChecker.init(testing.allocator, view, &atoms, &env);
     defer tc.deinit();
     _ = try tc.check(root);
-    var checker = StrictChecker.init(testing.allocator, view, null, &env, &tc);
+    var checker = StrictChecker.init(testing.allocator, view, &atoms, &env, &tc);
     defer checker.deinit();
     _ = try checker.check(root);
     var saw = false;
@@ -2542,52 +2546,60 @@ test "canonical_redundant_bool_compare fires on `!== false` for a boolean" {
     try expectKind(&h.checker, .canonical_redundant_bool_compare);
 }
 
-/// Strip, parse, and strict-check `source`, so the type env is populated from
-/// the stripper's TypeMap the way the real pipeline populates it. The typed
-/// harness above parses raw source and never strips, so it has no TypeMap and
-/// cannot exercise annotation lookup at all.
-const StrippedHarness = struct {
-    stripped: @import("zts-engine").stripper.StripResult,
+/// Parse typed source and run both checkers against its syntax owners.
+const DirectHarness = struct {
+    atoms: @import("zts-engine").atom_table.AtomTable,
     parser: @import("zts-engine").parser.JsParser,
     pool: type_pool_mod.TypePool,
     env: TypeEnv,
     tc: TypeChecker,
     checker: StrictChecker,
 
-    fn deinit(self: *StrippedHarness) void {
+    fn deinit(self: *DirectHarness) void {
         self.checker.deinit();
         self.tc.deinit();
         self.env.deinit();
         self.pool.deinit(testing.allocator);
         self.parser.deinit();
-        self.stripped.deinit();
+        self.atoms.deinit();
         testing.allocator.destroy(self);
     }
 };
 
-fn checkStrippedWithSections(
+fn checkDirectWithSections(
     source: []const u8,
     policy_sections: guard_catalog.SectionSet,
-) !*StrippedHarness {
-    const h = try testing.allocator.create(StrippedHarness);
+) !*DirectHarness {
+    const h = try testing.allocator.create(DirectHarness);
     errdefer testing.allocator.destroy(h);
-    h.stripped = try @import("zts-engine").stripper.strip(testing.allocator, source, .{});
-    h.parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, h.stripped.code);
+    h.atoms = @import("zts-engine").atom_table.AtomTable.init(testing.allocator);
+    errdefer h.atoms.deinit();
+    h.parser = try @import("zts-engine").parser.JsParser.initTyped(testing.allocator, testing.allocator, source);
+    errdefer h.parser.deinit();
+    h.parser.setAtomTable(&h.atoms);
     const root = try h.parser.parse();
     const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
+    errdefer h.pool.deinit(testing.allocator);
     h.env = TypeEnv.init(testing.allocator, &h.pool);
-    try h.env.populateFromTypeMap(&h.stripped.type_map);
-    h.tc = TypeChecker.init(testing.allocator, view, null, &h.env);
+    errdefer h.env.deinit();
+    try h.env.populateSourceTypes(.{ .direct = .{
+        .store = &h.parser.type_store,
+        .ir_view = view,
+        .atoms = &h.atoms,
+    } });
+    h.tc = TypeChecker.init(testing.allocator, view, &h.atoms, &h.env);
+    errdefer h.tc.deinit();
     _ = try h.tc.check(root);
-    h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);
+    h.checker = StrictChecker.init(testing.allocator, view, &h.atoms, &h.env, &h.tc);
+    errdefer h.checker.deinit();
     h.checker.policy_sections = policy_sections;
     _ = try h.checker.check(root);
     return h;
 }
 
-fn checkStripped(source: []const u8) !*StrippedHarness {
-    return checkStrippedWithSections(source, .{});
+fn checkDirect(source: []const u8) !*DirectHarness {
+    return checkDirectWithSections(source, .{});
 }
 
 test "covered computed env egress and cache resources are guarded rather than rejected" {
@@ -2610,7 +2622,7 @@ test "covered computed env egress and cache resources are guarded rather than re
     };
 
     for (cases) |case| {
-        var h = try checkStrippedWithSections(
+        var h = try checkDirectWithSections(
             case.source,
             (guard_catalog.SectionSet{}).with(case.section),
         );
@@ -2625,7 +2637,7 @@ test "a multi-line signature is fully annotated" {
     // parameters and the return type landed in buckets keyed by their own
     // lines, neither held a complete signature, and a fully annotated function
     // was reported as missing its annotations.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(\n    req: Request,\n): Response {\n  return Response.json({});\n}\n",
     );
     defer h.deinit();
@@ -2636,7 +2648,7 @@ test "a signature whose brace sits on the next line is fully annotated" {
     // The narrowest form of the same bug: the whole signature is on one line
     // and only the brace moved, which is enough to shift the function node's
     // line away from the annotations'.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response\n{\n  return Response.json({});\n}\n",
     );
     defer h.deinit();
@@ -2646,7 +2658,7 @@ test "a signature whose brace sits on the next line is fully annotated" {
 test "a multi-line signature missing a parameter type still fails" {
     // The fix must not loosen the check: assembling the signature correctly is
     // the point, not accepting more.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(\n    req,\n): Response {\n  return Response.json({});\n}\n",
     );
     defer h.deinit();
@@ -2654,7 +2666,7 @@ test "a multi-line signature missing a parameter type still fails" {
 }
 
 test "a multi-line signature missing the return type still fails" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(\n    req: Request,\n) {\n  return Response.json({});\n}\n",
     );
     defer h.deinit();
@@ -2665,7 +2677,7 @@ test "a function and an arrow on one line are annotation-checked separately" {
     // Both annotations used to land in the one bucket the line named. The
     // arrow's annotations then stood in for a function that had none, so
     // `plain` was reported fully annotated.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response { return Response.json({}); }\n" ++
             "function plain(x) { return [1].map((y: number): number => y); }\n",
     );
@@ -2674,7 +2686,7 @@ test "a function and an arrow on one line are annotation-checked separately" {
 }
 
 test "an annotated function sharing a line with an arrow is fully annotated" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function bump(xs: number[]): number[] { return xs.map((x: number): number => x + 1); }\n" ++
             "function handler(req: Request): Response { return Response.json({}); }\n",
     );
@@ -2683,7 +2695,7 @@ test "an annotated function sharing a line with an arrow is fully annotated" {
 }
 
 test "an anonymous arrow with some parameters annotated is refused" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response { return Response.json({}); }\n" ++
             "const first = (a: number, b): number => a;\n",
     );
@@ -2692,7 +2704,7 @@ test "an anonymous arrow with some parameters annotated is refused" {
 }
 
 test "an anonymous arrow annotating only its return type is refused" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response { return Response.json({}); }\n" ++
             "const first = (a): number => 1;\n",
     );
@@ -2701,7 +2713,7 @@ test "an anonymous arrow annotating only its return type is refused" {
 }
 
 test "an anonymous arrow with every parameter annotated needs no return type" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response { return Response.json({ ys: [1].map((x: number) => x) }); }\n",
     );
     defer h.deinit();
@@ -2709,7 +2721,7 @@ test "an anonymous arrow with every parameter annotated needs no return type" {
 }
 
 test "an anonymous arrow with no annotation at all is still a plain callback" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response { return Response.json({ ys: [1].map((x) => x) }); }\n",
     );
     defer h.deinit();
@@ -2727,7 +2739,7 @@ test "raw exported boundary types are refused in every specified shape" {
         "export function expose(value: readonly number[]): readonly number[] { return value; }",
     };
     for (sources) |source| {
-        var h = try checkStripped(source);
+        var h = try checkDirect(source);
         defer h.deinit();
         try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
     }
@@ -2739,14 +2751,14 @@ test "raw union members cannot hide behind a closed or ABI member" {
         "export function expose(value: Request | string): Request | string { return value; }",
     };
     for (sources) |source| {
-        var h = try checkStripped(source);
+        var h = try checkDirect(source);
         defer h.deinit();
         try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
     }
 }
 
 test "exported function-valued constants stay outside ZTS061 scope" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "export const widen = (value: string): string => value;",
     );
     defer h.deinit();
@@ -2755,7 +2767,7 @@ test "exported function-valued constants stay outside ZTS061 scope" {
 }
 
 test "raw exported boundary types are refused in a multi-line signature" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         \\export function expose(
         \\    value: string[],
         \\): number {
@@ -2767,7 +2779,7 @@ test "raw exported boundary types are refused in a multi-line signature" {
 }
 
 test "raw exported boundaries survive a next-line function brace" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         \\export function expose(value: string): string
         \\{
         \\    return value;
@@ -2789,13 +2801,13 @@ test "a structural alias over a raw scalar does not satisfy the boundary" {
         // Through an array, and through a chain of aliases: transparency is not
         // interrupted by either.
         "structural Text = string; export function expose(value: Text[]): Text[] { return value; }",
-        // Separate lines: the stripper scans one type declaration per line, so
+        // Separate lines keep this fixture focused on alias transparency;
         // two on one line is a parse failure unrelated to this rule.
         "structural A = string;\nstructural B = A;\nexport function expose(value: B): B { return value; }",
         "structural Text = string; export function expose(value: readonly Text[]): readonly Text[] { return value; }",
     };
     for (sources) |source| {
-        var h = try checkStripped(source);
+        var h = try checkDirect(source);
         defer h.deinit();
         try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
     }
@@ -2811,7 +2823,7 @@ test "a structural alias carrying real structure still satisfies the boundary" {
         "structural Pair = [string, number]; export function expose(value: Pair): Pair { return value; }",
     };
     for (sources) |source| {
-        var h = try checkStripped(source);
+        var h = try checkDirect(source);
         defer h.deinit();
         try expectNoKind(&h.checker, .raw_exported_boundary_type);
     }
@@ -2830,14 +2842,14 @@ test "declared ABI and literal-union boundary types are admitted" {
         "export function expose(value: Request | \"fallback\"): Request | \"fallback\" { return value; }",
     };
     for (sources) |source| {
-        var h = try checkStripped(source);
+        var h = try checkDirect(source);
         defer h.deinit();
         try expectNoKind(&h.checker, .raw_exported_boundary_type);
     }
 }
 
 test "raw internal function boundary types remain admitted" {
-    var h = try checkStripped("function expose(value: string): string { return value; }");
+    var h = try checkDirect("function expose(value: string): string { return value; }");
     defer h.deinit();
     try expectNoKind(&h.checker, .raw_exported_boundary_type);
 }
@@ -2933,7 +2945,7 @@ test "a ternary over zero-capability module calls is admitted" {
     // this is the shape it exists to prefer. Both arms call a module that
     // declares no effect and reaches no capability; the rule used to refuse it
     // because every call answered impure.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "import { ok, err } from \"zttp:result\";\n" ++
             "function handler(req: Request): Response {\n  const n = 2;\n  const r = n > 0 ? ok(n) : err(\"negative\");\n  return Response.json({ ok: r.ok });\n}\n",
     );
@@ -2946,7 +2958,7 @@ test "a ternary over a capability-reaching call still fires" {
     // in one branch only is the conditional the rule wants spelled out, and it
     // is why the capability set decides rather than the `pure` law - which
     // `env` declares while reading the host.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "import { sha256 } from \"zttp:crypto\";\n" ++
             "function handler(req: Request): Response {\n  const n = 1;\n  const x = n > 0 ? sha256(\"a\") : \"\";\n  return Response.json({ x: x });\n}\n",
     );
@@ -2958,14 +2970,14 @@ test "a pure callback keeps its call pure, an effectful one does not" {
     // `dictMapValues` declares `.none` and runs whatever it is handed, so the
     // export's own effect says nothing about the call. Answering `true` for
     // every function node - which the walk used to do - would admit both.
-    var pure_cb = try checkStripped(
+    var pure_cb = try checkDirect(
         "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
             "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => v * 2) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
     );
     defer pure_cb.deinit();
     try expectNoKind(&pure_cb.checker, .canonical_ternary_impure);
 
-    var effectful_cb = try checkStripped(
+    var effectful_cb = try checkDirect(
         "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
             "import { cacheGet } from \"zttp:cache\";\n" ++
             "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => cacheGet(\"ns\", \"k\")) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
@@ -2980,7 +2992,7 @@ test "an imported function in a callback slot is refused like a local one" {
     // declares `.none` and runs whatever it is handed - here a `zttp:log`
     // export that reaches `.clock` and `.stderr` - so the rule that exists to
     // forbid a conditional effect reported nothing on one.
-    var imported_cb = try checkStripped(
+    var imported_cb = try checkDirect(
         "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
             "import { logInfo } from \"zttp:log\";\n" ++
             "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, logInfo) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
@@ -2991,7 +3003,7 @@ test "an imported function in a callback slot is refused like a local one" {
     // The control that keeps the refusal from being "refuse every call": the
     // two-way pure selection spec 4.2.1 prefers still passes, and its
     // arguments are locals rather than named functions.
-    var pure_selection = try checkStripped(
+    var pure_selection = try checkDirect(
         "import { ok, err } from \"zttp:result\";\n" ++
             "function handler(req: Request): Response {\n  const n = 1;\n  const r = n > 0 ? ok(1) : err(\"no\");\n  return Response.json({ ok: r.ok });\n}\n",
     );
@@ -3001,7 +3013,7 @@ test "an imported function in a callback slot is refused like a local one" {
 
 test "a block-bodied callback is read statement by statement" {
     // The `const` and the `return` are both decidable, so the body is pure.
-    var pure_block = try checkStripped(
+    var pure_block = try checkDirect(
         "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
             "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => { const doubled = v * 2; return doubled; }) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
     );
@@ -3011,7 +3023,7 @@ test "a block-bodied callback is read statement by statement" {
     // An `if` is a statement kind the purity walk does not model, and an
     // unmodelled statement is refused rather than assumed pure - here it hides
     // a call that reaches storage.
-    var control_flow = try checkStripped(
+    var control_flow = try checkDirect(
         "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
             "import { cacheGet } from \"zttp:cache\";\n" ++
             "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => { if (v > 0) { cacheGet(\"ns\", \"k\"); } return v; }) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
@@ -3024,7 +3036,7 @@ test "a named helper in a callback slot is refused rather than assumed pure" {
     // The body is not readable from here, and an identifier is a leaf the walk
     // would otherwise answer `pure` for - the absence of information reported
     // as a fact.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
             "function double(v: number): number { return v * 2; }\n" ++
             "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, double) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
@@ -3201,7 +3213,7 @@ test "this checker records imports from unresolved modules" {
 // ---------------------------------------------------------------------------
 
 test "`??` over a type that admits null is refused" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response {\n  const name: string | null = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
@@ -3212,7 +3224,7 @@ test "`??` over an optional type stays idiomatic" {
     // The control for the test above. On a concrete type without `null` the
     // operator keeps exactly one meaning and is the idiomatic spelling of it,
     // so a rule that fired here would refuse the corpus rather than a defect.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response {\n  const name: string | undefined = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
@@ -3220,7 +3232,7 @@ test "`??` over an optional type stays idiomatic" {
 }
 
 test "`?.` over a type that admits null is refused" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response {\n  const row: { name: string } | null = undefined;\n  const shown = row?.name;\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
@@ -3228,7 +3240,7 @@ test "`?.` over a type that admits null is refused" {
 }
 
 test "`?.` over a concrete record stays idiomatic" {
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response {\n  const row: { name: string } | undefined = undefined;\n  const shown = row?.name;\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
@@ -3238,7 +3250,7 @@ test "`?.` over a concrete record stays idiomatic" {
 test "`??` over unknown is refused ahead of the instantiation" {
     // Spec 5.3 refuses `unknown` and a generic parameter for the same reason:
     // a later instantiation can admit `null` under source already accepted.
-    var h = try checkStripped(
+    var h = try checkDirect(
         "function handler(req: Request): Response {\n  const raw: unknown = req.url;\n  const shown = raw ?? \"anonymous\";\n  return Response.json({ ok: true });\n}\n",
     );
     defer h.deinit();
@@ -3261,7 +3273,7 @@ fn expectMessageContains(checker: *const StrictChecker, kind: DiagnosticKind, ne
 }
 
 test "a value-only entry round trip is advised to dictMapValues" {
-    var h = try checkStripped(dict_imports ++
+    var h = try checkDirect(dict_imports ++
         "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [p[0], p[1] * 2]);\n  const rebuilt = dictFromEntries(pairs);\n  return Response.json({ ok: rebuilt.ok });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .canonical_dict_entry_round_trip);
@@ -3272,14 +3284,14 @@ test "the nested spelling of the same round trip reads the same" {
     // The two-statement form above is the common one, and the nested form is
     // the same program. Seeing only one of them would make the row's coverage
     // a property of where the author put a `const`.
-    var h = try checkStripped(dict_imports ++
+    var h = try checkDirect(dict_imports ++
         "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const rebuilt = dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2]));\n  return Response.json({ ok: rebuilt.ok });\n}\n");
     defer h.deinit();
     try expectMessageContains(&h.checker, .canonical_dict_entry_round_trip, "dictMapValues");
 }
 
 test "a drop-only entry round trip is advised to dictFilter" {
-    var h = try checkStripped(dict_imports ++
+    var h = try checkDirect(dict_imports ++
         "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const kept = dictEntries(d).filter((p) => p[1] > 1);\n  const rebuilt = dictFromEntries(kept);\n  return Response.json({ ok: rebuilt.ok });\n}\n");
     defer h.deinit();
     try expectMessageContains(&h.checker, .canonical_dict_entry_round_trip, "dictFilter");
@@ -3290,14 +3302,14 @@ test "a round trip that changes the key set is advised nothing" {
     // This one computes a new key, so the precondition does not hold and the
     // rewrite would change the program - a duplicate key it can now produce is
     // exactly why `dictFromEntries` returns a `Result` at all.
-    var h = try checkStripped(dict_imports ++
+    var h = try checkDirect(dict_imports ++
         "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [\"fixed\", p[1]]);\n  const rebuilt = dictFromEntries(pairs);\n  return Response.json({ ok: rebuilt.ok });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_dict_entry_round_trip);
 }
 
 test "a reduce over dictEntries is advised to dictFold" {
-    var h = try checkStripped(dict_imports ++
+    var h = try checkDirect(dict_imports ++
         "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total: total });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .canonical_dict_entries_reduce);
@@ -3306,7 +3318,7 @@ test "a reduce over dictEntries is advised to dictFold" {
 test "the bulk operations themselves are advised nothing" {
     // The control for all three rows at once. A rule that fired here would
     // advise the idiomatic spelling to rewrite itself.
-    var h = try checkStripped(dict_imports ++
+    var h = try checkDirect(dict_imports ++
         "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const doubled = dictMapValues(d, (v, k) => v * 2);\n  const kept = dictFilter(d, (v, k) => v > 0);\n  const total = dictFold(d, (acc, v, k) => acc + v, 0);\n  return Response.json({ total: total, a: dictEntries(doubled).length, b: dictEntries(kept).length });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_dict_entry_round_trip);
@@ -3317,7 +3329,7 @@ test "a reduce over a filtered entry list is not the fold row" {
     // `dictFold` folds the whole dictionary. Folding a filtered list is a
     // different program, so the row does not cover it and advising the rewrite
     // would be advising a behavior change.
-    var h = try checkStripped(dict_imports ++
+    var h = try checkDirect(dict_imports ++
         "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).filter((p) => p[1] > 0).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total: total });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_dict_entries_reduce);
@@ -3331,14 +3343,14 @@ const command_union_source =
     "structural Command =\n  | { kind: \"echo\"; text: string }\n  | { kind: \"ping\" };\n";
 
 test "a pattern field renamed to its own name is advised to the shorthand" {
-    var h = try checkStripped(command_union_source ++
+    var h = try checkDirect(command_union_source ++
         "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text: text }: text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_pattern_rename);
 }
 
 test "the shorthand itself is advised nothing" {
-    var h = try checkStripped(command_union_source ++
+    var h = try checkDirect(command_union_source ++
         "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text }: text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_redundant_pattern_rename);
@@ -3346,14 +3358,14 @@ test "the shorthand itself is advised nothing" {
 }
 
 test "an arm reading the field off the scrutinee is advised to bind it" {
-    var h = try checkStripped(command_union_source ++
+    var h = try checkDirect(command_union_source ++
         "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\" }: command.text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .canonical_unbound_field_read);
 }
 
 test "a rename under a different name is not the redundant form" {
-    var h = try checkStripped(command_union_source ++
+    var h = try checkDirect(command_union_source ++
         "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text: message }: message\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_redundant_pattern_rename);
@@ -3365,7 +3377,7 @@ test "a const initialized from a two-way effectful match passes the profile" {
     // from a two-way effectful choice. The canonical profile refuses an impure
     // ternary (ZTS612) and points here, so a rule refusing this shape would
     // leave the author with nowhere to go.
-    var h = try checkStripped("import { logInfo } from \"zttp:log\";\nfunction handler(req: Request): Response {\n  const chosen = match (req.method) {\n    when \"GET\": logInfo(\"read\")\n    default: logInfo(\"write\")\n  };\n  return Response.json({ ok: true });\n}\n");
+    var h = try checkDirect("import { logInfo } from \"zttp:log\";\nfunction handler(req: Request): Response {\n  const chosen = match (req.method) {\n    when \"GET\": logInfo(\"read\")\n    default: logInfo(\"write\")\n  };\n  return Response.json({ ok: true });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_ternary_impure);
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
@@ -3374,19 +3386,19 @@ test "a const initialized from a two-way effectful match passes the profile" {
 test "dropping one arm leaves the JsonValue match non-exhaustive" {
     // The floor under the phase 3 exit gate: a coverage check that answered
     // "exhaustive" for everything would pass the gate without measuring it.
-    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
 
 test "the five arms cover JsonValue without a default" {
-    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n    when array: 2\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n    when array: 2\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
 
 test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
-    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3394,7 +3406,7 @@ test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
 test "a union carrying Bytes is exhaustive with its Bytes arm" {
     // Spec 5.5's type tests are six now, and `when Bytes:` is the sixth. A
     // union covered member by member needs no `default`.
-    var h = try checkStripped("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when Bytes: \"bytes\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when Bytes: \"bytes\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3402,7 +3414,7 @@ test "a union carrying Bytes is exhaustive with its Bytes arm" {
 test "dropping the Bytes arm leaves that union non-exhaustive" {
     // The half that makes the test above mean something: without it, a checker
     // that ignored the arm entirely would pass the covered case too.
-    var h = try checkStripped("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3410,7 +3422,7 @@ test "dropping the Bytes arm leaves that union non-exhaustive" {
 test "the strict match error names the first missing case" {
     // The message stays fixed because `edit_simulate` keys a violation on code
     // plus message; the witness rides in the help.
-    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     var found = false;
     for (h.checker.getDiagnostics()) |diag| {
@@ -3426,7 +3438,7 @@ test "the strict match error names the first missing case" {
 }
 
 test "the six arms cover it" {
-    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }

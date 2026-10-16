@@ -79,7 +79,7 @@ Request body readers (globals): `requestBody(req)` returns `Bytes` and is total,
 - **Verification** (`-Dverify`): Response returns, Result checking, state isolation. [docs/verification.md](docs/verification.md).
 - **Contracts** (`-Dcontract`): imports, env vars, routes, egress hosts, handler properties, author-declared intent assertions. `packages/zts/src/handler_contract.zig`, `packages/zts/src/intent_extractor.zig`.
 - **Sound mode**: type-directed analysis across operators. [docs/typescript.md](docs/typescript.md#sound-mode).
-- **Type checking**: `packages/zts/src/type_checker.zig`, `packages/zts/src/type_map.zig`.
+- **Type checking**: `packages/zts/src/type_checker.zig`, `packages/zts/src/type_env.zig`.
 - **Flow analysis**: data label tracking (secret, credential, user_input). `packages/zts/src/flow_checker.zig`.
 - **Fault coverage**: path enumeration, failure severity. `packages/zts/src/fault_coverage.zig`.
 - **Replay**: `packages/zts/src/trace.zig`.

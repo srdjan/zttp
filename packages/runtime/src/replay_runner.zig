@@ -514,12 +514,13 @@ fn replayFlowWitnessBody(allocator: std.mem.Allocator, handler_code: []const u8)
     const rt = try HandlerInstance.init(allocator, .{ .replay_file_path = "witness-flow-test" });
     defer rt.deinit();
 
-    // Parse the way `loadCode` does, so the flow check reads the same IR.
-    var prepared = try zq.PreparedSource.init(allocator, handler_code, witness_flow_path, .{});
-    defer prepared.deinit();
-    var p = try zq.Parser.init(allocator, prepared.parserInput(), rt.strings, &rt.ctx.atoms);
+    // Parse the authored source so the flow check reads the same IR as `loadCode`.
+    var p = try zq.Parser.initTyped(allocator, allocator, handler_code, rt.strings, &rt.ctx.atoms);
     defer p.deinit();
-    _ = try p.parse();
+    switch (try p.parseTypedIr()) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
     const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
     const handler_fn = zq.findHandlerFunction(ir_view, p.root_node) orelse return error.HandlerNotFound;
 

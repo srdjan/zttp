@@ -46,7 +46,6 @@ const module_facts_mod = @import("module_facts.zig");
 const context_mod = @import("zts-engine").context;
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
-const type_map_mod = @import("zts-base").type_map;
 const guard_catalog = @import("zts-base").guard_catalog;
 const modules_mod = @import("zts-engine").modules;
 const module_types_mod = @import("module_types.zig");
@@ -56,7 +55,7 @@ const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_builder_mod = @import("contract_builder.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const bytecode_mod = @import("zts-engine").bytecode;
-const stripper_mod = @import("zts-engine").stripper;
+const source_diagnostics = @import("zts-base").source_diagnostics;
 const source_frontend_mod = @import("zts-engine").source_frontend;
 const compat_mod = @import("zts-base").compat;
 const string_mod = @import("zts-engine").string;
@@ -72,7 +71,6 @@ const FlowChecker = flow_checker_mod.FlowChecker;
 const AtomTable = context_mod.AtomTable;
 const TypeEnv = type_env_mod.TypeEnv;
 const TypePool = type_pool_mod.TypePool;
-const TypeMap = type_map_mod.TypeMap;
 const TypeSyntax = parser_mod.type_syntax;
 const HandlerContract = handler_contract_mod.HandlerContract;
 const VerificationInfo = handler_contract_mod.VerificationInfo;
@@ -283,7 +281,7 @@ pub const ResolvedModule = struct {
 
     pub fn formatBoolDiagnostics(
         self: *const ResolvedModule,
-        source: stripper_mod.SourceView,
+        source: source_diagnostics.SourceView,
         writer: anytype,
     ) !void {
         try self.bool_checker.formatDiagnostics(source, writer);
@@ -291,7 +289,7 @@ pub const ResolvedModule = struct {
 
     pub fn formatTypeDiagnostics(
         self: *const ResolvedModule,
-        source: stripper_mod.SourceView,
+        source: source_diagnostics.SourceView,
         writer: anytype,
     ) !void {
         if (self.type_checker) |*tc| try tc.formatDiagnostics(source, writer);
@@ -299,7 +297,7 @@ pub const ResolvedModule = struct {
 
     pub fn formatStrictDiagnostics(
         self: *const ResolvedModule,
-        source: stripper_mod.SourceView,
+        source: source_diagnostics.SourceView,
         writer: anytype,
     ) !void {
         if (self.strict_checker) |*sc| try sc.formatDiagnostics(source, writer);
@@ -526,17 +524,6 @@ pub const TypeEnvStorage = struct {
     env: TypeEnv = undefined,
     initialized: bool = false,
 
-    pub fn init(
-        self: *TypeEnvStorage,
-        allocator: std.mem.Allocator,
-        type_map: ?*const TypeMap,
-    ) !void {
-        return self.initWithSource(
-            allocator,
-            if (type_map) |map| .{ .legacy = map } else .omitted,
-        );
-    }
-
     pub fn initWithSource(
         self: *TypeEnvStorage,
         allocator: std.mem.Allocator,
@@ -584,7 +571,6 @@ pub const ExtractContractOptions = struct {
     dispatch: ?*const PatternDispatchTable = null,
     has_default_response: bool = false,
     verification: ?VerificationInfo = null,
-    type_map: ?*const TypeMap = null,
     source_types: ?ModuleSourceTypeInput = null,
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
     type_check: ContractTypeCheckFn = runContractTypeCheck,
@@ -608,16 +594,11 @@ pub const ExtractContractOptions = struct {
 
 pub const ModuleSourceTypeInput = union(type_env_mod.SourceTypeMode) {
     omitted,
-    legacy: *const TypeMap,
     direct,
 };
 
-fn normalizeModuleSourceTypes(
-    explicit: ?ModuleSourceTypeInput,
-    legacy: ?*const TypeMap,
-) !ModuleSourceTypeInput {
-    if (explicit != null and legacy != null) return error.AmbiguousTypeSource;
-    return explicit orelse if (legacy) |type_map| .{ .legacy = type_map } else .omitted;
+fn normalizeModuleSourceTypes(explicit: ?ModuleSourceTypeInput) ModuleSourceTypeInput {
+    return explicit orelse .omitted;
 }
 
 fn sourceTypeInput(
@@ -626,7 +607,6 @@ fn sourceTypeInput(
 ) !type_env_mod.SourceTypeInput {
     return switch (source) {
         .omitted => .omitted,
-        .legacy => |type_map| .{ .legacy = type_map },
         .direct => .{ .direct = .{
             .store = parsed.type_store orelse return error.DirectTypeSyntaxUnavailable,
             .ir_view = parsed.ir_view,
@@ -641,7 +621,6 @@ fn consumerTypeSource(
 ) type_env_mod.ConsumerTypeSource {
     return switch (source) {
         .omitted => .omitted,
-        .legacy => .{ .legacy = env },
         .direct => .{ .direct = env },
     };
 }
@@ -652,22 +631,21 @@ fn consumerTypeSourceForExistingChecker(
     env: *const TypeEnv,
 ) !type_env_mod.ConsumerTypeSource {
     if (options.source_types) |source| {
-        if (options.type_map != null) return error.AmbiguousTypeSource;
         switch (source) {
             .direct => _ = try sourceTypeInput(parsed, .direct),
-            .omitted, .legacy => {},
+            .omitted => {},
         }
         const selected = consumerTypeSource(source, env);
         _ = try selected.validate();
         return selected;
     }
-    return type_env_mod.ConsumerTypeSource.normalizeLegacy(env);
+    return type_env_mod.ConsumerTypeSource.fromEnvironment(env);
 }
 
 fn hasAuthoredSource(source: ModuleSourceTypeInput) bool {
     return switch (source) {
         .omitted => false,
-        .legacy, .direct => true,
+        .direct => true,
     };
 }
 
@@ -719,7 +697,6 @@ pub const ModuleAnalysisSession = struct {
 
     pub const FullOptions = struct {
         /// Borrowed through session completion and extraction.
-        type_map: ?*const TypeMap = null,
         source_types: ?ModuleSourceTypeInput = null,
         strict: bool = true,
         manifest_registry: ?*const manifest_registry_mod.Registry = null,
@@ -779,7 +756,7 @@ pub const ModuleAnalysisSession = struct {
         opts: FullOptions,
     ) !void {
         if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
-        const source_types = try normalizeModuleSourceTypes(opts.source_types, opts.type_map);
+        const source_types = normalizeModuleSourceTypes(opts.source_types);
         self.* = .{
             .allocator = allocator,
             .parsed = parsed,
@@ -806,9 +783,6 @@ pub const ModuleAnalysisSession = struct {
         opts: ContractOnlyOptions,
     ) !void {
         if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
-        if (opts.extraction.source_types != null and opts.extraction.type_map != null) {
-            return error.AmbiguousTypeSource;
-        }
         self.* = .{
             .allocator = allocator,
             .parsed = parsed,
@@ -831,7 +805,7 @@ pub const ModuleAnalysisSession = struct {
         opts: ExtractContractOptions,
     ) !void {
         if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
-        const source_types = try normalizeModuleSourceTypes(opts.source_types, opts.type_map);
+        const source_types = normalizeModuleSourceTypes(opts.source_types);
         self.* = .{
             .allocator = allocator,
             .parsed = parsed,
@@ -1213,7 +1187,6 @@ pub const ModuleAnalysisSession = struct {
             .strict = self.full_opts.strict,
             .manifest_registry = self.full_opts.manifest_registry,
         } else self.extraction_opts;
-        opts.type_map = null;
         opts.source_types = self.source_types;
         opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
@@ -1268,7 +1241,6 @@ pub const ModuleAnalysisSession = struct {
         try checker.ensureHealthy();
 
         var opts = self.extraction_opts;
-        opts.type_map = null;
         opts.source_types = self.source_types;
         opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
@@ -1407,7 +1379,7 @@ pub fn extractContractResultFromParsed(
         }
     }
 
-    const selected = try normalizeModuleSourceTypes(opts.source_types, opts.type_map);
+    const selected = normalizeModuleSourceTypes(opts.source_types);
 
     var storage: TypeEnvStorage = .{};
     try storage.initWithSource(allocator, try sourceTypeInput(parsed, selected));
@@ -1541,9 +1513,6 @@ pub fn extractContract(
     filename: []const u8,
     opts: ExtractContractOptions,
 ) !HandlerContract {
-    if (opts.source_types != null and opts.type_map != null) {
-        return error.AmbiguousTypeSource;
-    }
     if (source_frontend_mod.classifyPath(filename) == .virtual_javascript) {
         return extractVirtualContract(allocator, source, filename, opts);
     }
@@ -1561,11 +1530,7 @@ pub fn extractContract(
     try frontend.parser.type_store.validateRuntimeOwners(allocator, ir_view);
     const parsed = ParsedModule.fromTypedExisting(ir_view, root, &frontend.atoms, &frontend.parser.type_store);
     var contract_opts = opts;
-    contract_opts.type_map = null;
-    contract_opts.source_types = opts.source_types orelse if (opts.type_map) |map|
-        .{ .legacy = map }
-    else
-        .direct;
+    contract_opts.source_types = opts.source_types orelse .direct;
     if (hasFileImports(ir_view)) {
         const read_file = opts.read_file orelse return error.FileImportReaderRequired;
         return extractMultiModuleContract(allocator, source, filename, read_file, &frontend.atoms, contract_opts);
@@ -1602,7 +1567,6 @@ pub fn extractPreparedEvalContract(
     try parser.type_store.validateRuntimeOwners(allocator, view);
     const parsed = ParsedModule.fromExisting(view, root, &atoms);
     var options = opts;
-    options.type_map = null;
     options.source_types = .omitted;
     if (hasFileImports(view)) {
         const reader = options.read_file orelse return error.FileImportReaderRequired;
@@ -1711,10 +1675,8 @@ fn extractMultiModuleContractWithEntry(
 
         var module_opts = opts;
         if (is_entry) {
-            module_opts.type_map = opts.type_map;
             module_opts.source_types = opts.source_types;
         } else {
-            module_opts.type_map = null;
             module_opts.source_types = .omitted;
         }
         module_opts.read_file = null;
@@ -1953,24 +1915,18 @@ test "pipeline.resolve does not emit a module after analysis allocation failure"
 
 test "TypeEnvStorage rejects a poisoned TypePool" {
     const allocator = testing.allocator;
-    var type_map = TypeMap.init("");
-    defer type_map.deinit(allocator);
-
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
 
-    try testing.expectError(error.OutOfMemory, storage.init(failing.allocator(), &type_map));
+    try testing.expectError(error.OutOfMemory, storage.initWithSource(failing.allocator(), .omitted));
     try testing.expect(storage.envPtr() == null);
-    try storage.init(allocator, &type_map);
+    try storage.initWithSource(allocator, .omitted);
     try testing.expect(storage.envPtr() != null);
 }
 
 test "TypeEnvStorage rejects a late poisoned TypePool" {
     const allocator = testing.allocator;
-    var type_map = TypeMap.init("");
-    defer type_map.deinit(allocator);
-
     var storage: TypeEnvStorage = .{};
     storage.pool = TypePool.init(allocator);
     defer storage.pool.deinit(allocator);
@@ -1981,7 +1937,7 @@ test "TypeEnvStorage rejects a late poisoned TypePool" {
     module_types_mod.populateModuleTypes(&storage.env, &storage.pool, allocator);
     abi_types_mod.populateHandlerAbiTypes(&storage.env, &storage.pool, allocator);
     try storage.pool.ensureHealthy();
-    try storage.env.populateFromTypeMap(&type_map);
+    try storage.env.populateSourceTypes(.omitted);
     try storage.pool.ensureHealthy();
 
     const record = storage.pool.addRecord(allocator, &.{.{
@@ -1998,12 +1954,12 @@ test "TypeEnvStorage rejects a late poisoned TypePool" {
     try testing.expect(storage.envPtr() == null);
 }
 
-test "TypeEnvStorage initializes module types without a TypeMap" {
+test "TypeEnvStorage initializes module types with omitted source types" {
     const allocator = testing.allocator;
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
 
-    try storage.init(allocator, null);
+    try storage.initWithSource(allocator, .omitted);
     try testing.expect(storage.envPtr() != null);
 }
 
@@ -2012,13 +1968,13 @@ test "TypeEnvStorage rejects a second initialization before allocation" {
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
 
-    try storage.init(allocator, null);
+    try storage.initWithSource(allocator, .omitted);
     const original_env = storage.envPtr().?;
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
 
     try testing.expectError(
         error.TypeEnvironmentAlreadyInitialized,
-        storage.init(failing.allocator(), null),
+        storage.initWithSource(failing.allocator(), .omitted),
     );
     try testing.expectEqual(@as(usize, 0), failing.alloc_index);
     try testing.expect(!failing.has_induced_failure);
@@ -2027,7 +1983,7 @@ test "TypeEnvStorage rejects a second initialization before allocation" {
 
     storage.deinit(allocator);
     try testing.expect(storage.envPtr() == null);
-    try storage.init(allocator, null);
+    try storage.initWithSource(allocator, .omitted);
     try testing.expect(storage.envPtr() != null);
     try storage.pool.ensureHealthy();
 }
@@ -2046,7 +2002,7 @@ test "explicit type session extraction uses the completed caller session" {
 
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
-    try storage.init(allocator, null);
+    try storage.initWithSource(allocator, .omitted);
     var type_checker = TypeChecker.init(allocator, view, null, storage.envPtr().?);
     defer type_checker.deinit();
     _ = try type_checker.check(parsed.root);
@@ -2240,18 +2196,18 @@ test "contract summary keeps selected handler separate from first named effect r
         \\  return Response.text("global");
         \\}
     ;
-    var prepared = try source_frontend_mod.PreparedSource.init(allocator, source, "duplicate-handler.ts", .{});
-    defer prepared.deinit();
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.init(allocator, prepared.parserInput());
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "duplicate-handler.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
     var analysis: ModuleAnalysisSession = .{};
-    try analysis.initFull(allocator, ParsedModule.fromExisting(view, root, &atoms), .{
-        .type_map = prepared.typeMap(),
+    try analysis.initFull(allocator, ParsedModule.fromTypedExisting(
+        accepted.ir_view,
+        accepted.root,
+        accepted.atoms,
+        accepted.type_store,
+    ), .{
+        .source_types = .direct,
         .strict = false,
     });
     defer analysis.deinit();
@@ -2524,26 +2480,20 @@ test "ModuleAnalysisSession profiles preserve type diagnostic acceptance" {
         \\  return Response.text(String(joined));
         \\}
     ;
-    var frontend = try source_frontend_mod.PreparedSource.init(
-        allocator,
-        source,
-        "profile.ts",
-        .{},
-    );
+    var frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "profile.ts");
     defer frontend.deinit();
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-    var js_parser = try JsParser.init(allocator, frontend.parserInput());
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-    const root = try js_parser.parse();
-    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const parsed = ParsedModule.fromExisting(view, root, &atoms);
-    const type_map = frontend.typeMap() orelse return error.TestExpectedTypeMap;
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    const parsed = ParsedModule.fromTypedExisting(
+        accepted.ir_view,
+        accepted.root,
+        accepted.atoms,
+        accepted.type_store,
+    );
 
     var contract_only: ModuleAnalysisSession = .{};
     try contract_only.initContractOnly(allocator, parsed, .{
-        .extraction = .{ .type_map = type_map },
+        .extraction = .{ .source_types = .direct },
     });
     defer contract_only.deinit();
     try contract_only.complete();
@@ -2553,7 +2503,7 @@ test "ModuleAnalysisSession profiles preserve type diagnostic acceptance" {
     var sound: ModuleAnalysisSession = .{};
     try sound.initSoundExtraction(allocator, parsed, .{
         .strict = false,
-        .type_map = type_map,
+        .source_types = .direct,
     });
     defer sound.deinit();
     try testing.expectError(error.SoundModeViolation, sound.complete());
@@ -2562,16 +2512,20 @@ test "ModuleAnalysisSession profiles preserve type diagnostic acceptance" {
 test "ModuleAnalysisSession full profile supports typed and untyped extraction" {
     const allocator = testing.allocator;
     const typed_source = "function handler(req: Request): Response { return Response.text('ok'); }\n";
-    var frontend = try source_frontend_mod.PreparedSource.init(allocator, typed_source, "typed.ts", .{});
+    var frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, typed_source, "typed.ts");
     defer frontend.deinit();
-    var typed_state = try parseSourceForTest(allocator, frontend.parserInput());
-    defer typed_state.js_parser.deinit();
-    const typed_view = IrView.fromIRStore(&typed_state.js_parser.nodes, &typed_state.js_parser.constants);
-    const typed_parsed = ParsedModule.fromExisting(typed_view, typed_state.root, null);
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    const typed_parsed = ParsedModule.fromTypedExisting(
+        accepted.ir_view,
+        accepted.root,
+        accepted.atoms,
+        accepted.type_store,
+    );
 
     var typed: ModuleAnalysisSession = .{};
     try typed.initFull(allocator, typed_parsed, .{
-        .type_map = frontend.typeMap(),
+        .source_types = .direct,
         .strict = false,
     });
     defer typed.deinit();
@@ -2716,21 +2670,17 @@ test "ModuleAnalysisSession contract-only flow can run after extraction" {
 fn extractOwnedSessionResultsForTest(allocator: std.mem.Allocator) !ContractExtraction {
     const source = "export function sibling() { return Date.now(); }\n" ++
         "function handler(req: Request): Response { return Response.text('ok'); }\n";
-    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, "owned.ts", .{});
+    var frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try frontend.initInPlace(allocator, allocator, source, "owned.ts");
     defer frontend.deinit();
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.init(allocator, frontend.parserInput());
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    const view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
 
     var session: ModuleAnalysisSession = .{};
     try session.initContractOnly(
         allocator,
-        ParsedModule.fromExisting(view, root, &atoms),
-        .{ .extraction = .{ .capture_export_effects = true } },
+        ParsedModule.fromTypedExisting(view, accepted.root, accepted.atoms, accepted.type_store),
+        .{ .extraction = .{ .source_types = .direct, .capture_export_effects = true } },
     );
     defer session.deinit();
     try session.complete();
@@ -2755,20 +2705,15 @@ test "ModuleAnalysisSession results survive every borrowed input" {
 
 test "ModuleAnalysisSession runs a custom callback only during extraction" {
     const allocator = testing.allocator;
-    var parsed_state = try parseSourceForTest(
-        allocator,
-        "function handler(req) { return Response.text('ok'); }\n",
-    );
-    defer parsed_state.js_parser.deinit();
-    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
-    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-    var type_map = TypeMap.init("");
-    defer type_map.deinit(allocator);
-
+    var source_owner: source_frontend_mod.DirectCheckSource = undefined;
+    try source_owner.initInPlace(allocator, allocator, "function handler(req) { return Response.text('ok'); }\n", "custom.ts");
+    defer source_owner.deinit();
+    const accepted = source_owner.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    const parsed = ParsedModule.fromTypedExisting(accepted.ir_view, accepted.root, accepted.atoms, accepted.type_store);
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initSoundExtraction(allocator, parsed, .{
         .strict = false,
-        .type_map = &type_map,
+        .source_types = .direct,
         .type_check = rejectingContractTypeCheck,
         .capture_export_effects = true,
     });
@@ -2867,10 +2812,8 @@ test "pipeline.check rejects a TypePool poisoned after resolve" {
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
 
-    var type_map = TypeMap.init("");
-    defer type_map.deinit(allocator);
     var storage: TypeEnvStorage = .{};
-    try storage.init(allocator, &type_map);
+    try storage.initWithSource(allocator, .omitted);
     defer storage.deinit(allocator);
 
     var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = false });
@@ -3062,11 +3005,9 @@ test "pipeline.resolve rejects optional module value in boolean context" {
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
 
-    var type_map = TypeMap.init(source);
-    defer type_map.deinit(allocator);
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
-    try storage.init(allocator, &type_map);
+    try storage.initWithSource(allocator, .omitted);
 
     var resolved = try resolve(allocator, parsed, .{
         .type_env = storage.envPtr(),
@@ -3099,7 +3040,7 @@ test "pipeline.resolve runs strict checker without type context" {
     try testing.expect(saw_avoidable_let);
 }
 
-test "extractContract strips TypeScript and honors strict opt out" {
+test "extractContract accepts authored TypeScript and honors strict opt out" {
     const source =
         \\function handler(req: Request): Response {
         \\  let message: string = "ok";
@@ -3174,7 +3115,7 @@ test "extractContract rejects boolean diagnostics with strict disabled" {
     );
 }
 
-test "extractContract preserves typed and untyped entry type-map selection" {
+test "extractContract keeps typed and virtual entry source rules distinct" {
     const allocator = testing.allocator;
     const typed_source =
         \\function handler(req: Request): Response {
@@ -3188,17 +3129,9 @@ test "extractContract preserves typed and untyped entry type-map selection" {
         extractContract(allocator, typed_source, "typed-entry.ts", .{ .strict = false }),
     );
 
-    var frontend = try source_frontend_mod.PreparedSource.init(
-        allocator,
-        typed_source,
-        "typed-entry.ts",
-        .{},
-    );
-    defer frontend.deinit();
-
     var untyped_contract = try extractContract(
         allocator,
-        frontend.parserInput(),
+        "function handler(req) { const port = \"bad\"; return Response.text(String(port)); }",
         "<untyped-entry>",
         .{ .strict = false },
     );
@@ -3206,22 +3139,12 @@ test "extractContract preserves typed and untyped entry type-map selection" {
     try testing.expectEqualStrings("<untyped-entry>", untyped_contract.handler.path);
 
     try testing.expectError(
-        error.SoundModeViolation,
-        extractContract(allocator, frontend.parserInput(), "<mapped-entry>", .{
-            .strict = false,
-            .type_map = frontend.typeMap().?,
-        }),
-    );
-    try testing.expectError(
         error.UnsupportedSourceExtension,
-        extractContract(allocator, frontend.parserInput(), "mapped-entry.js", .{
-            .strict = false,
-            .type_map = frontend.typeMap().?,
-        }),
+        extractContract(allocator, "function handler(req) { return Response.text(\"ok\"); }", "mapped-entry.js", .{ .strict = false }),
     );
 }
 
-test "extractContract leaves a dependency TypeMap unused" {
+test "extractContract keeps dependency annotations outside entry typing" {
     const source =
         \\import { request } from "./typed-bad.ts";
         \\function handler(req) { return Response.text("ok"); }
@@ -3524,7 +3447,7 @@ test "with no injected index each analyzer still builds its own" {
 /// reset item 0a is that every compile path, including every failure stage,
 /// leaks nothing, and a sweep can only assert that against one function that
 /// owns the whole sequence.
-fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8, type_map: *const TypeMap) !void {
+fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8) !void {
     var js_parser = try JsParser.init(allocator, source);
     defer js_parser.deinit();
     const root = try js_parser.parse();
@@ -3537,7 +3460,6 @@ fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8, typ
 
     var session: ModuleAnalysisSession = .{};
     try session.initFull(allocator, parsed, .{
-        .type_map = type_map,
         .strict = false,
         .select_verifier = true,
         .select_flow = true,
@@ -3563,13 +3485,10 @@ test "every compile stage releases what it allocated at any failure index" {
         \\}
         \\
     ;
-    var type_map = TypeMap.init("");
-    defer type_map.deinit(allocator);
-
     // The successful run first, both as a control and to learn how many
     // allocations the sweep has to cover.
     var counting = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
-    try runCompilePhasesForTest(counting.allocator(), source, &type_map);
+    try runCompilePhasesForTest(counting.allocator(), source);
     const total = counting.alloc_index;
     try testing.expect(total > 0);
 
@@ -3579,7 +3498,7 @@ test "every compile stage releases what it allocated at any failure index" {
     var i: usize = 0;
     while (i < total) : (i += 1) {
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = i });
-        runCompilePhasesForTest(failing.allocator(), source, &type_map) catch {};
+        runCompilePhasesForTest(failing.allocator(), source) catch {};
     }
 }
 
@@ -3594,7 +3513,6 @@ const Session = struct {
     allocator: std.mem.Allocator,
     resolved: *ResolvedModule,
     parsed: ParsedModule,
-    type_map: *const TypeMap,
     handler: ?NodeIndex,
 };
 
@@ -3603,21 +3521,20 @@ fn withSession(
     source: []const u8,
     comptime run: fn (Session) anyerror!void,
 ) !void {
-    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, "probe.ts", .{});
+    var frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try frontend.initInPlace(allocator, allocator, source, "probe.ts");
     defer frontend.deinit();
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-    var js_parser = try JsParser.init(allocator, frontend.parserInput());
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-    const root = try js_parser.parse();
-    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    const view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
+    const parsed = ParsedModule.fromTypedExisting(view, accepted.root, accepted.atoms, accepted.type_store);
 
-    const type_map = frontend.typeMap().?;
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
-    try storage.init(allocator, type_map);
+    try storage.initWithSource(allocator, .{ .direct = .{
+        .store = accepted.type_store,
+        .ir_view = view,
+        .atoms = accepted.atoms,
+    } });
 
     var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = true });
     defer resolved.deinit();
@@ -3625,8 +3542,7 @@ fn withSession(
         .allocator = allocator,
         .resolved = &resolved,
         .parsed = parsed,
-        .type_map = type_map,
-        .handler = handler_verifier_mod.findHandlerFunction(view, root),
+        .handler = handler_verifier_mod.findHandlerFunction(view, accepted.root),
     });
 }
 
@@ -3839,7 +3755,7 @@ test "a refused payload is a dynamic response schema in the contract, not an inf
         fn run(session: Session) anyerror!void {
             try testing.expect(session.resolved.type_checker.?.refusedExpressionCount() > 0);
             var contract = try extractContractFromParsed(session.allocator, session.parsed, "probe.ts", .{
-                .type_map = session.type_map,
+                .source_types = .direct,
                 .resolved = session.resolved,
             });
             defer contract.deinit(session.allocator);
@@ -3854,7 +3770,7 @@ test "a refused payload is a dynamic response schema in the contract, not an inf
     try withSession(testing.allocator, head ++ "  const joined = n + 2;" ++ tail, struct {
         fn run(session: Session) anyerror!void {
             var contract = try extractContractFromParsed(session.allocator, session.parsed, "probe.ts", .{
-                .type_map = session.type_map,
+                .source_types = .direct,
                 .resolved = session.resolved,
             });
             defer contract.deinit(session.allocator);
@@ -4424,36 +4340,6 @@ test "existing checker APIs preserve source selection and direct ownership" {
         \\}
         \\
     ;
-    var prepared = try source_frontend_mod.PreparedSource.init(allocator, source, "existing-checker.ts", .{});
-    defer prepared.deinit();
-    var fallback = try source_frontend_mod.PreparedSource.init(
-        allocator,
-        "function handler(req: Request): number { return 1; }\n",
-        "fallback.ts",
-        .{},
-    );
-    defer fallback.deinit();
-
-    var legacy_atoms = AtomTable.init(allocator);
-    defer legacy_atoms.deinit();
-    var legacy_parser = try JsParser.init(allocator, prepared.parserInput());
-    defer legacy_parser.deinit();
-    legacy_parser.setAtomTable(&legacy_atoms);
-    const legacy_root = try legacy_parser.parse();
-    const legacy_view = IrView.fromIRStore(&legacy_parser.nodes, &legacy_parser.constants);
-    const legacy_parsed = ParsedModule.fromExisting(legacy_view, legacy_root, &legacy_atoms);
-    var legacy_storage: TypeEnvStorage = .{};
-    defer legacy_storage.deinit(allocator);
-    try legacy_storage.initWithSource(allocator, .{ .legacy = prepared.typeMap().? });
-    var legacy_checker = TypeChecker.init(allocator, legacy_view, &legacy_atoms, legacy_storage.envPtr().?);
-    defer legacy_checker.deinit();
-    _ = try legacy_checker.check(legacy_root);
-    var legacy_resolved = try resolve(allocator, legacy_parsed, .{
-        .type_env = legacy_storage.envPtr(),
-        .strict = false,
-    });
-    defer legacy_resolved.deinit();
-
     var direct_atoms = AtomTable.init(allocator);
     defer direct_atoms.deinit();
     var direct_parser = try JsParser.initTyped(allocator, allocator, source);
@@ -4484,41 +4370,16 @@ test "existing checker APIs preserve source selection and direct ownership" {
     });
     defer direct_resolved.deinit();
 
+    var baseline_json: ?[]u8 = null;
+    defer if (baseline_json) |bytes| allocator.free(bytes);
     inline for (.{ ExistingCheckerEntry.type_session, .resolved }) |entry| {
-        var baseline = try extractExistingCheckerForTest(
-            allocator,
-            entry,
-            legacy_parsed,
-            .{},
-            &legacy_checker,
-            &legacy_resolved,
-        );
-        defer baseline.deinit(allocator);
-        try expectExistingCheckerFacts(&baseline, true);
-        const baseline_json = try serializeContractForTest(allocator, &baseline);
-        defer allocator.free(baseline_json);
-
-        var fallback_contract = try extractExistingCheckerForTest(
-            allocator,
-            entry,
-            legacy_parsed,
-            .{ .type_map = fallback.typeMap() },
-            &legacy_checker,
-            &legacy_resolved,
-        );
-        defer fallback_contract.deinit(allocator);
-        try expectExistingCheckerFacts(&fallback_contract, true);
-        const fallback_json = try serializeContractForTest(allocator, &fallback_contract);
-        defer allocator.free(fallback_json);
-        try testing.expectEqualStrings(baseline_json, fallback_json);
-
         var omitted = try extractExistingCheckerForTest(
             allocator,
             entry,
-            legacy_parsed,
+            direct_parsed,
             .{ .source_types = .omitted },
-            &legacy_checker,
-            &legacy_resolved,
+            &direct_checker,
+            &direct_resolved,
         );
         defer omitted.deinit(allocator);
         try expectExistingCheckerFacts(&omitted, false);
@@ -4535,7 +4396,11 @@ test "existing checker APIs preserve source selection and direct ownership" {
         try expectExistingCheckerFacts(&direct, true);
         const direct_json = try serializeContractForTest(allocator, &direct);
         defer allocator.free(direct_json);
-        try testing.expectEqualStrings(baseline_json, direct_json);
+        if (baseline_json) |expected| {
+            try testing.expectEqualStrings(expected, direct_json);
+        } else {
+            baseline_json = try allocator.dupe(u8, direct_json);
+        }
 
         try testing.expectError(
             error.DirectTypeSyntaxUnavailable,
@@ -4586,8 +4451,8 @@ test "contract-only graph sessions omit every supplied source selection" {
     defer for (compiled.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
     try testing.expectEqual(@as(usize, 2), compiled.modules.len);
 
-    const modes = [_]type_env_mod.SourceTypeMode{ .omitted, .legacy, .direct };
-    try testing.expectEqual(@typeInfo(type_env_mod.SourceTypeMode).@"enum".fields.len, modes.len);
+    const modes = [_]ModuleSourceTypeInput{ .omitted, .direct };
+    try testing.expectEqual(@as(usize, 2), modes.len);
     var baseline: [2]?[]u8 = @splat(null);
     defer for (baseline) |bytes| if (bytes) |owned| allocator.free(owned);
     var merged_baseline: ?[]u8 = null;
@@ -4598,20 +4463,11 @@ test "contract-only graph sessions omit every supplied source selection" {
         defer merged.deinit(allocator);
         for (compiled.modules, compiled.parsers, 0..) |module, *parser, index| {
             const graph_module = &graph.module_list.items[graph.execution_order[index]];
-            var oracle = try source_frontend_mod.PreparedSource.init(allocator, graph_module.source, graph_module.path, .{});
-            defer oracle.deinit();
-            const type_map = oracle.typeMap() orelse return error.TestUnexpectedResult;
-            try testing.expect(type_map.entries.items.len > 0);
             const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
             const parsed = ParsedModule.fromTypedExisting(view, module.root, &atoms, &parser.type_store);
-            const selected: ModuleSourceTypeInput = switch (mode) {
-                .omitted => .omitted,
-                .legacy => .{ .legacy = type_map },
-                .direct => .direct,
-            };
             var analysis: ModuleAnalysisSession = .{};
             try analysis.initContractOnly(allocator, parsed, .{ .extraction = .{
-                .source_types = selected,
+                .source_types = mode,
                 .strict = false,
             } });
             defer analysis.deinit();
@@ -4661,31 +4517,23 @@ test "contract-only graph sessions omit every supplied source selection" {
             merged_baseline = try allocator.dupe(u8, merged_json);
         }
     }
-    try testing.expectEqual(@as(usize, 6), observations);
+    try testing.expectEqual(@as(usize, 4), observations);
 }
 
-test "source graph uses only supplied legacy types and the compiled direct entry" {
+test "source graph uses compiled direct entry types and omits dependency types" {
     const allocator = testing.allocator;
-    var fallback = try source_frontend_mod.PreparedSource.init(
-        allocator,
-        "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.text(\"fallback\"); }\n",
-        "fallback.ts",
-        .{},
-    );
-    defer fallback.deinit();
     const Probe = struct {
-        var mode: type_env_mod.SourceTypeMode = .legacy;
         var entries: usize = 0;
         var dependencies: usize = 0;
 
         fn check(checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
             if (checker.env.getSourceFnSigByName("handler")) |signature| {
-                try testing.expectEqual(mode, checker.env.sourceTypeMode().?);
+                try testing.expectEqual(type_env_mod.SourceTypeMode.direct, checker.env.sourceTypeMode().?);
                 var names: std.ArrayListUnmanaged([]const u8) = .empty;
                 defer names.deinit(checker.env.allocator);
                 _ = try checker.env.extractProofMembers(signature.return_type, &names);
                 try testing.expectEqual(@as(usize, 1), names.items.len);
-                try testing.expectEqualStrings(if (mode == .legacy) "deterministic" else "pure", names.items[0]);
+                try testing.expectEqualStrings("pure", names.items[0]);
                 entries += 1;
             } else {
                 try testing.expectEqual(type_env_mod.SourceTypeMode.omitted, checker.env.sourceTypeMode().?);
@@ -4695,27 +4543,8 @@ test "source graph uses only supplied legacy types and the compiled direct entry
             return checker.check(root);
         }
     };
-    Probe.entries = 0;
-    Probe.dependencies = 0;
-    source_selection_graph_reads = 0;
-    var contract = try extractContract(allocator, sourceSelectionGraphEntry, "/source-selection/entry.ts", .{
-        .type_map = fallback.typeMap(),
-        .type_check = Probe.check,
-        .read_file = readSourceSelectionGraphFile,
-        .strict = false,
-    });
-    defer contract.deinit(allocator);
-    try testing.expect(source_selection_graph_reads > 0);
-    try testing.expectEqual(@as(usize, 1), Probe.entries);
-    try testing.expectEqual(@as(usize, 1), Probe.dependencies);
-    try testing.expect(contract.properties == null);
-    try testing.expectEqual(@as(usize, 0), contract.declared_specs.items.len);
-    try testing.expectEqual(@as(usize, 0), contract.function_capsules.items.len);
-    try testing.expectEqual(@as(usize, 0), contract.function_effect_capsules.items.len);
-    source_selection_graph_reads = 0;
     const selections = [_]?ModuleSourceTypeInput{ .direct, null };
     for (selections) |selection| {
-        Probe.mode = .direct;
         Probe.entries = 0;
         Probe.dependencies = 0;
         source_selection_graph_reads = 0;
@@ -4789,19 +4618,14 @@ fn extractOmittedContractForTest(
     source: []const u8,
     filename: []const u8,
 ) !HandlerContract {
-    var prepared = try source_frontend_mod.PreparedSource.init(allocator, source, filename, .{});
-    defer prepared.deinit();
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.init(allocator, prepared.parserInput());
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var source_owner: source_frontend_mod.DirectCheckSource = undefined;
+    try source_owner.initInPlace(allocator, allocator, source, filename);
+    defer source_owner.deinit();
+    const accepted = source_owner.acceptedCapabilities() orelse return error.TestUnexpectedResult;
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initContractOnly(
         allocator,
-        ParsedModule.fromExisting(view, root, &atoms),
+        ParsedModule.fromTypedExisting(accepted.ir_view, accepted.root, accepted.atoms, accepted.type_store),
         .{},
     );
     defer analysis.deinit();
@@ -4851,27 +4675,21 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "25db664a000473d46d26a78f89aa18ea57bf5d0e865a20013f8583ae776479f4",
     );
 
-    var prepared = try source_frontend_mod.PreparedSource.init(
-        allocator,
-        abi_source,
-        "authored-is-dict.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.init(allocator, prepared.parserInput());
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    var source_owner: source_frontend_mod.DirectCheckSource = undefined;
+    try source_owner.initInPlace(allocator, allocator, abi_source, "authored-is-dict.ts");
+    defer source_owner.deinit();
+    const accepted = source_owner.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    const parsed = ParsedModule.fromTypedExisting(accepted.ir_view, accepted.root, accepted.atoms, accepted.type_store);
     var storage: TypeEnvStorage = .{};
     defer storage.deinit(allocator);
-    try storage.initWithSource(allocator, .{ .legacy = prepared.typeMap().? });
-    var checker = TypeChecker.init(allocator, view, &atoms, storage.envPtr().?);
+    try storage.initWithSource(allocator, .{ .direct = .{
+        .store = accepted.type_store,
+        .ir_view = accepted.ir_view,
+        .atoms = accepted.atoms,
+    } });
+    var checker = TypeChecker.init(allocator, accepted.ir_view, accepted.atoms, storage.envPtr().?);
     defer checker.deinit();
-    _ = try checker.check(root);
+    _ = try checker.check(accepted.root);
     var resolved = try resolve(allocator, parsed, .{
         .type_env = storage.envPtr(),
         .strict = false,
@@ -4886,7 +4704,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         &resolved,
     );
     defer explicit_omitted.deinit(allocator);
-    try testing.expectEqual(type_env_mod.SourceTypeMode.legacy, storage.envPtr().?.sourceTypeMode().?);
+    try testing.expectEqual(type_env_mod.SourceTypeMode.direct, storage.envPtr().?.sourceTypeMode().?);
     try testing.expectEqual(@as(usize, 1), explicit_omitted.holes.items.len);
     try testing.expectEqualStrings("unknown", explicit_omitted.holes.items[0].expected_type);
 }
@@ -4959,7 +4777,7 @@ test "consumer entry points reject operational source failures before semantic a
         view,
         null,
         parsed_state.root,
-        .{ .type_source = .{ .legacy = &poisoned_env } },
+        .{ .type_source = .{ .direct = &poisoned_env } },
     ));
 
     var failed_env_allocator = std.testing.FailingAllocator.init(allocator, .{
@@ -4972,41 +4790,31 @@ test "consumer entry points reject operational source failures before semantic a
     try failed_env.ensureHealthy();
     try failed_env_pool.ensureHealthy();
     failed_env_allocator.fail_index = failed_env_allocator.alloc_index;
-    try testing.expectError(
-        error.OutOfMemory,
-        failed_env.putParsedCallTypeArgs(0, &.{failed_env_pool.idx_string}),
-    );
+    failed_env.putTypeAlias("induced_failure", failed_env_pool.idx_string);
     try testing.expect(failed_env_allocator.has_induced_failure);
+    try testing.expectError(error.OutOfMemory, failed_env.ensureHealthy());
     try failed_env_pool.ensureHealthy();
     try testing.expectError(error.OutOfMemory, effect_inference.buildEffectFacts(
         allocator,
         view,
         null,
         parsed_state.root,
-        .{ .type_source = .{ .legacy = &failed_env } },
+        .{ .type_source = .{ .direct = &failed_env } },
     ));
 
     var healthy_pool = TypePool.init(allocator);
     defer healthy_pool.deinit(allocator);
     var healthy_env = TypeEnv.init(allocator, &healthy_pool);
     defer healthy_env.deinit();
-    try testing.expectError(error.AmbiguousTypeSource, effect_inference.buildEffectFacts(
-        allocator,
-        view,
-        null,
-        parsed_state.root,
-        .{
-            .type_source = .{ .legacy = &healthy_env },
-            .type_env = &healthy_env,
-        },
-    ));
-
-    var analyzer = effect_inference.Analyzer.init(allocator, view, null);
-    defer analyzer.deinit();
-    analyzer.type_source = .{ .legacy = &healthy_env };
-    analyzer.type_env = &healthy_env;
-    try testing.expectError(error.AmbiguousTypeSource, analyzer.analyze(parsed_state.root));
-
+    var empty_store = TypeSyntax.Store.init(allocator, "const value = 1;\n");
+    defer empty_store.deinit();
+    var source_atoms = AtomTable.init(allocator);
+    defer source_atoms.deinit();
+    try healthy_env.populateSourceTypes(.{ .direct = .{
+        .store = &empty_store,
+        .ir_view = view,
+        .atoms = &source_atoms,
+    } });
     var omitted_env_allocator = std.testing.FailingAllocator.init(allocator, .{
         .fail_index = std.math.maxInt(usize),
     });
@@ -5018,15 +4826,13 @@ test "consumer entry points reject operational source failures before semantic a
     try omitted_env.ensureHealthy();
     try omitted_pool.ensureHealthy();
     omitted_env_allocator.fail_index = omitted_env_allocator.alloc_index;
-    try testing.expectError(
-        error.OutOfMemory,
-        omitted_env.putParsedCallTypeArgs(0, &.{omitted_pool.idx_string}),
-    );
+    omitted_env.putTypeAlias("induced_failure", omitted_pool.idx_string);
     try testing.expect(omitted_env_allocator.has_induced_failure);
+    try testing.expectError(error.OutOfMemory, omitted_env.ensureHealthy());
     try omitted_pool.ensureHealthy();
     try testing.expectError(
         error.OutOfMemory,
-        type_env_mod.ConsumerTypeSource.normalizeLegacy(&omitted_env),
+        type_env_mod.ConsumerTypeSource.fromEnvironment(&omitted_env),
     );
 
     var omitted_pool_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
@@ -5038,7 +4844,7 @@ test "consumer entry points reject operational source failures before semantic a
     try failed_omitted_pool_env.populateSourceTypes(.omitted);
     try testing.expectError(
         error.OutOfMemory,
-        type_env_mod.ConsumerTypeSource.normalizeLegacy(&failed_omitted_pool_env),
+        type_env_mod.ConsumerTypeSource.fromEnvironment(&failed_omitted_pool_env),
     );
 
     var healthy_omitted_pool = TypePool.init(allocator);
@@ -5060,6 +4866,11 @@ test "consumer entry points reject operational source failures before semantic a
     defer other_pool.deinit(allocator);
     var other_env = TypeEnv.init(allocator, &other_pool);
     defer other_env.deinit();
+    try other_env.populateSourceTypes(.{ .direct = .{
+        .store = &empty_store,
+        .ir_view = view,
+        .atoms = &source_atoms,
+    } });
     var wrong_environment = ContractBuilder.initForBuild(
         allocator,
         view,
@@ -5071,7 +4882,7 @@ test "consumer entry points reject operational source failures before semantic a
     );
     defer wrong_environment.deinit();
     wrong_environment.effect_facts = null;
-    wrong_environment.source_types = .{ .legacy = &other_env };
+    wrong_environment.source_types = .{ .direct = &other_env };
     try testing.expectError(error.TypeSourceEnvironmentMismatch, wrong_environment.build(
         "operational.ts",
         null,
@@ -5093,7 +4904,7 @@ test "consumer entry points reject operational source failures before semantic a
     );
     defer poisoned_builder.deinit();
     poisoned_builder.effect_facts = null;
-    poisoned_builder.source_types = .{ .legacy = &poisoned_env };
+    poisoned_builder.source_types = .{ .direct = &poisoned_env };
     try testing.expectError(error.OutOfMemory, poisoned_builder.build(
         "operational.ts",
         null,
@@ -5115,7 +4926,7 @@ test "consumer entry points reject operational source failures before semantic a
     );
     defer healthy_builder.deinit();
     healthy_builder.effect_facts = null;
-    healthy_builder.source_types = .{ .legacy = &healthy_env };
+    healthy_builder.source_types = .{ .direct = &healthy_env };
     try testing.expectError(error.CompletedEffectFactsRequired, healthy_builder.build(
         "operational.ts",
         null,
@@ -5489,16 +5300,15 @@ test "serialization failure preserves a completed direct extraction" {
 
 test "prepared evaluation contracts omit authored signatures and capsules" {
     const source = "function helper(value: number): string { return \"ok\"; } function handler(req: Request): Effects<Response, \"env\"> { return Response.text(helper(\"wrong\")); }";
-    var prepared = try source_frontend_mod.PreparedSource.init(std.testing.allocator, source, "inline.ts", .{});
-    defer prepared.deinit();
-    var expected = try extractContract(std.testing.allocator, prepared.parserInput(), "<eval>", .{ .strict = false });
-    defer expected.deinit(std.testing.allocator);
     var actual = try extractPreparedEvalContract(std.testing.allocator, source, "<eval>", .{ .strict = false });
     defer actual.deinit(std.testing.allocator);
-    const expected_json = try serializeContractForTest(std.testing.allocator, &expected);
-    defer std.testing.allocator.free(expected_json);
-    const actual_json = try serializeContractForTest(std.testing.allocator, &actual);
-    defer std.testing.allocator.free(actual_json);
-    try std.testing.expectEqualStrings(expected_json, actual_json);
+    try std.testing.expectEqualStrings("<eval>", actual.handler.path);
+    try std.testing.expectEqual(@as(usize, 1), actual.function_capsules.items.len);
+    try std.testing.expectEqualStrings("helper", actual.function_capsules.items[0].function);
+    try std.testing.expectEqual(@as(usize, 0), actual.function_capsules.items[0].declared.items.len);
+    try std.testing.expectEqual(@as(usize, 1), actual.function_effect_capsules.items.len);
+    try std.testing.expectEqualStrings("helper", actual.function_effect_capsules.items[0].function);
+    try std.testing.expectEqual(@as(usize, 0), actual.function_effect_capsules.items[0].declared.items.len);
+    try std.testing.expect(actual.declared_specs_implicit);
     try std.testing.expectError(error.UnsupportedSourceExtension, extractPreparedEvalContract(std.testing.allocator, source, "inline.ts", .{}));
 }

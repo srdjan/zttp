@@ -44,7 +44,7 @@ const precompile = @import("precompile.zig");
 // ----------------------------------------------------------------------------
 
 /// The errors the check may return for source text alone. The list comes from
-/// reading `runCheckOnPreparedSource` and the calls it makes with no schema,
+/// reading `runCheckOnParsedSource` and the calls it makes with no schema,
 /// policy or declaration in `CheckOptions`:
 ///
 ///   OutOfMemory             any allocation can fail.

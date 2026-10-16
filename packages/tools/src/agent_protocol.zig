@@ -5787,9 +5787,9 @@ test "check never answers success false with an empty diagnostics array" {
     const sources = [_][]const u8{
         // The motivating input.
         "export function handler(req) {\n  const s = \"unterminated;\n  return Response.text(s);\n}\n",
-        // A file that fails in the stripper for a different reason.
+        // A file that fails type-position admission for a different reason.
         "export function handler(req: Request): any {\n  return Response.text(\"x\");\n}\n",
-        // A file that fails in the parser rather than the stripper.
+        // A file that fails on runtime syntax in the parser.
         "export function handler(req) {\n  const n = 0x;\n  return Response.json({ n: n });\n}\n",
         // A file that fails after parsing, in the checker.
         "export function handler(req) { return Response.json({ ok: true }); }\n",
@@ -5965,18 +5965,15 @@ test "every published module example checks clean and names live modules" {
 test "every published example exercises the form it names" {
     // A clean example that no longer contains its form still checks clean, so
     // legality alone would let an edit hollow one out. The evidence is read
-    // from the parse tree or the stripper's type map wherever either records
+    // from the parse tree or the direct syntax store wherever either records
     // the form, and from the source only for the three that leave no trace.
     const a = testing.allocator;
     for (&example_registry.examples) |entry| {
-        var strip_result = try zts.strip(a, entry.source, .{});
-        defer strip_result.deinit();
-
-        var parser = try zts.parser.JsParser.init(a, strip_result.code);
-        defer parser.deinit();
-        const root = try parser.parse();
-        _ = root;
-        const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+        var frontend: zts.DirectCheckSource = undefined;
+        try frontend.initCompileInPlace(a, a, entry.source, "example.ts");
+        defer frontend.deinit();
+        const accepted = frontend.acceptedCapabilities() orelse return error.TestExpectedExample;
+        const view = accepted.ir_view;
 
         const found = switch (entry.evidence) {
             .node => |tag| blk: {
@@ -6004,11 +6001,15 @@ test "every published example exercises the form it names" {
                 }
                 break :blk false;
             },
-            .type_annotation => |kind| blk: {
-                for (strip_result.type_map.entries.items) |item| {
-                    if (item.kind == kind) break :blk true;
-                }
-                break :blk false;
+            .syntax => |kind| switch (kind) {
+                .parameter_annotation => accepted.type_store.parameter_annotations.items.len > 0,
+                .predicate_return => blk: {
+                    for (accepted.type_store.function_signatures.items) |signature| {
+                        const returned = signature.return_syntax orelse continue;
+                        if (std.meta.activeTag(returned.structure) == .predicate) break :blk true;
+                    }
+                    break :blk false;
+                },
             },
             .source_text => |text| std.mem.indexOf(u8, entry.source, text.needle) != null,
         };
@@ -6029,12 +6030,11 @@ test "the example evidence check can fail, so its verdict means something" {
     const entry = example_registry.findByFeature("match expression") orelse
         return error.TestExpectedExample;
 
-    var strip_result = try zts.strip(a, entry.source, .{});
-    defer strip_result.deinit();
-    var parser = try zts.parser.JsParser.init(a, strip_result.code);
-    defer parser.deinit();
-    _ = try parser.parse();
-    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var frontend: zts.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(a, a, entry.source, "example.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestExpectedExample;
+    const view = accepted.ir_view;
 
     var saw_while = false;
     var saw_match = false;

@@ -16,7 +16,7 @@ const strict_checker = @import("strict_checker.zig");
 const type_checker = @import("type_checker.zig");
 
 pub const ParserKind = engine.parser.ErrorKind;
-pub const StripKind = engine.stripper.StripDiagnosticKind;
+pub const StripKind = @import("zts-base").source_diagnostics.StripDiagnosticKind;
 pub const SpecKind = contracts.handler_contract.SpecDiagnostic.Kind;
 pub const PolicyCategory = engine.handler_policy.PolicyCategory;
 pub const PolicyViolationKind = engine.handler_policy.ViolationKind;
@@ -600,8 +600,8 @@ test "only explicitly shared semantic faults have multiple producers" {
     // contract spec kind set - but only the contract half ever constructed
     // anything: no code path built the three verifier variants, so the second
     // producer was declared and never wired. ZTS008 is shared by the parser
-    // and stripper. ZTS044 is shared because type syntax is stripped before
-    // the parser can check its depth.
+    // and type-position admission. ZTS044 is shared by the compatibility
+    // diagnostic family and the parser's depth check.
     const shared_codes = [_][]const u8{ "ZTS008", "ZTS044" };
     var duplicate_count: usize = 0;
     for (all_entries, 0..) |entry, index| {

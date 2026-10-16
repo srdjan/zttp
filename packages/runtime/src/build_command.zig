@@ -2709,10 +2709,6 @@ test "project build compiler enforces configured capability policy" {
     }));
 }
 
-// The public Parser already exposes this field to runtime consumers.
-// This test uses its type until the source frontend owns direct parsing.
-const CertificateSyntaxParser = @TypeOf(@as(zts.Parser, undefined).js_parser);
-
 test "direct source contracts preserve certificate bytes and proof IR" {
     const allocator = std.testing.allocator;
     const fixtures = [_][]const u8{
@@ -2727,68 +2723,40 @@ test "direct source contracts preserve certificate bytes and proof IR" {
         ,
     };
     try std.testing.expectEqual(@as(usize, 2), fixtures.len);
-    for (fixtures) |source| {
-        var prepared = try zts.PreparedSource.init(allocator, source, "handler.ts", .{});
-        defer prepared.deinit();
-        var legacy_atoms = zts.AtomTable.init(allocator);
-        defer legacy_atoms.deinit();
-        var direct_atoms = zts.AtomTable.init(allocator);
-        defer direct_atoms.deinit();
-        var legacy = try CertificateSyntaxParser.init(allocator, prepared.parserInput());
-        defer legacy.deinit();
-        legacy.setAtomTable(&legacy_atoms);
-        var direct = try CertificateSyntaxParser.initTyped(allocator, allocator, source);
+    const expected_certificates = [_]struct { len: usize, sha256: []const u8, proof_nodes: usize }{
+        .{ .len = 1349, .sha256 = "36955f2f082db8771693754baf18933351c7b8041301b13179fd2a220a3aacec", .proof_nodes = 5 },
+        .{ .len = 1729, .sha256 = "5c403574a2be5dae43fcdc9630580a1546939bd1f94a199c64bba32f84c85529", .proof_nodes = 9 },
+    };
+    for (fixtures, expected_certificates) |source, expected| {
+        var direct: zts.DirectCheckSource = undefined;
+        try direct.initCompileInPlace(allocator, allocator, source, "handler.ts");
         defer direct.deinit();
-        direct.setAtomTable(&direct_atoms);
-        const legacy_root = try legacy.parse();
-        const direct_root = try direct.parse();
-        const legacy_view = zts.IrView.fromIRStore(&legacy.nodes, &legacy.constants);
-        const direct_view = zts.IrView.fromIRStore(&direct.nodes, &direct.constants);
-        const legacy_handler = zts.findHandlerFunction(legacy_view, legacy_root) orelse
-            return error.TestUnexpectedResult;
+        const accepted = direct.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+        const direct_root = accepted.root;
+        const direct_view = accepted.ir_view;
         const direct_handler = zts.findHandlerFunction(direct_view, direct_root) orelse
             return error.TestUnexpectedResult;
-        try std.testing.expectEqual(legacy_root, direct_root);
-        try std.testing.expectEqual(legacy_handler, direct_handler);
-
-        var legacy_proof = try zts.lowerProofIr(allocator, legacy_view, legacy_root, legacy_handler, null);
-        defer legacy_proof.deinit();
         var direct_proof = try zts.lowerProofIr(allocator, direct_view, direct_root, direct_handler, null);
         defer direct_proof.deinit();
-        try std.testing.expect(legacy_proof.nodes.len > 0);
-        try std.testing.expectEqualDeep(legacy_proof.nodes, direct_proof.nodes);
-        try std.testing.expectEqual(legacy_proof.handler_function, direct_proof.handler_function);
-
-        var legacy_analysis: zts.pipeline.ModuleAnalysisSession = .{};
-        try legacy_analysis.initFull(allocator, .fromExisting(legacy_view, legacy_root, &legacy_atoms), .{
-            .type_map = prepared.typeMap(),
-        });
-        defer legacy_analysis.deinit();
+        try std.testing.expectEqual(expected.proof_nodes, direct_proof.nodes.len);
         var direct_analysis: zts.pipeline.ModuleAnalysisSession = .{};
         try direct_analysis.initFull(allocator, .fromTypedExisting(
             direct_view,
             direct_root,
-            &direct_atoms,
-            &direct.type_store,
+            accepted.atoms,
+            accepted.type_store,
         ), .{ .source_types = .direct });
         defer direct_analysis.deinit();
-        try legacy_analysis.complete();
         try direct_analysis.complete();
-        var legacy_contract = try legacy_analysis.extractContract("handler.ts");
-        defer legacy_contract.deinit(allocator);
         var direct_contract = try direct_analysis.extractContract("handler.ts");
         defer direct_contract.deinit(allocator);
-        const legacy_json = try serializeContractJson(allocator, &legacy_contract);
-        defer allocator.free(legacy_json);
         const direct_json = try serializeContractJson(allocator, &direct_contract);
         defer allocator.free(direct_json);
-        try std.testing.expect(legacy_json.len > 0);
-        try std.testing.expectEqualSlices(u8, legacy_json, direct_json);
-        try std.testing.expectEqualDeep(legacy_contract.source_identity, direct_contract.source_identity);
-        try std.testing.expectEqualDeep(
-            artifact_graph.identityFromContract(&legacy_contract),
-            artifact_graph.identityFromContract(&direct_contract),
-        );
+        try std.testing.expectEqual(@as(usize, 2354), direct_json.len);
+        var contract_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(direct_json, &contract_digest, .{});
+        const contract_hex = std.fmt.bytesToHex(contract_digest, .lower);
+        try std.testing.expectEqualStrings("e0776adc60496b5897e1cc6dca0178591a382cf8f12db84ac69935646d7ca4a3", &contract_hex);
 
         // Contract parity is independent of compiler and certificate encoding.
         // Both certificate builds receive the same completed compilation.
@@ -2797,46 +2765,33 @@ test "direct source contracts preserve certificate bytes and proof IR" {
         });
         defer compiled.deinit(allocator);
         const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualDeep(legacy_proof.nodes, evidence.proof.nodes);
-        try std.testing.expectEqual(legacy_proof.handler_function, evidence.proof.handler_function);
         try std.testing.expectEqualDeep(direct_proof.nodes, evidence.proof.nodes);
         try std.testing.expectEqual(direct_proof.handler_function, evidence.proof.handler_function);
-        const legacy_policy = zts.handler_policy.contractToRuntimePolicy(&legacy_contract, null);
         const direct_policy = zts.handler_policy.contractToRuntimePolicy(&direct_contract, null);
-        const legacy_policy_bytes = try self_extract.serializePolicy(allocator, &legacy_policy);
-        defer allocator.free(legacy_policy_bytes);
         const direct_policy_bytes = try self_extract.serializePolicy(allocator, &direct_policy);
         defer allocator.free(direct_policy_bytes);
-        try std.testing.expectEqualSlices(u8, legacy_policy_bytes, direct_policy_bytes);
-        try std.testing.expectEqualDeep(dischargedProperties(&legacy_contract), dischargedProperties(&direct_contract));
         const inputs = proof_certificate.Inputs{
             .evidence = &evidence,
-            .properties = dischargedProperties(&legacy_contract),
+            .properties = dischargedProperties(&direct_contract),
             .artifact = .{
                 .bytecode = compiled.bytecode,
                 .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-                .contract_section = legacy_json,
-                .policy_section_digest = artifact_graph.digestOf(legacy_policy_bytes),
-                .identity = artifact_graph.identityFromContract(&legacy_contract),
+                .contract_section = direct_json,
+                .policy_section_digest = artifact_graph.digestOf(direct_policy_bytes),
+                .identity = artifact_graph.identityFromContract(&direct_contract),
             },
-            .contract_digest = artifact_graph.digestOf(legacy_json),
-            .runtime_policy_digest = artifact_graph.digestOf(legacy_policy_bytes),
+            .contract_digest = artifact_graph.digestOf(direct_json),
+            .runtime_policy_digest = artifact_graph.digestOf(direct_policy_bytes),
             .development = false,
         };
-        var direct_inputs = inputs;
-        direct_inputs.properties = dischargedProperties(&direct_contract);
-        direct_inputs.artifact.policy_section_digest = artifact_graph.digestOf(direct_policy_bytes);
-        direct_inputs.runtime_policy_digest = artifact_graph.digestOf(direct_policy_bytes);
-        direct_inputs.artifact.contract_section = direct_json;
-        direct_inputs.artifact.identity = artifact_graph.identityFromContract(&direct_contract);
-        direct_inputs.contract_digest = artifact_graph.digestOf(direct_json);
-        var legacy_certificate = try proof_certificate.build(allocator, inputs);
-        defer legacy_certificate.deinit();
-        var direct_certificate = try proof_certificate.build(allocator, direct_inputs);
+        var direct_certificate = try proof_certificate.build(allocator, inputs);
         defer direct_certificate.deinit();
-        try std.testing.expect(legacy_certificate.bytes.len > 0);
-        try std.testing.expectEqualSlices(u8, legacy_certificate.bytes, direct_certificate.bytes);
-        try std.testing.checkAllAllocationFailures(allocator, buildDirectCertificateForAllocationTest, .{direct_inputs});
+        try std.testing.expectEqual(expected.len, direct_certificate.bytes.len);
+        var certificate_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(direct_certificate.bytes, &certificate_digest, .{});
+        const certificate_hex = std.fmt.bytesToHex(certificate_digest, .lower);
+        try std.testing.expectEqualStrings(expected.sha256, &certificate_hex);
+        try std.testing.checkAllAllocationFailures(allocator, buildDirectCertificateForAllocationTest, .{inputs});
     }
 }
 

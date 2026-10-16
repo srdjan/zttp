@@ -1263,10 +1263,11 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     );
     defer allocator.free(source);
 
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
     _ = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
@@ -1274,7 +1275,11 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
 
     var match_node: NodeIndex = null_node;
     var i: NodeIndex = 0;

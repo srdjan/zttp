@@ -33,7 +33,6 @@ pub const builtins = @import("builtins/root.zig");
 pub const parser = @import("parser/root.zig");
 pub const pool = @import("pool.zig");
 pub const http = @import("http.zig");
-pub const stripper = @import("stripper.zig");
 pub const source_frontend = @import("source_frontend.zig");
 pub const printer = @import("printer.zig");
 pub const node_types = @import("node_types.zig");

@@ -1,21 +1,9 @@
 //! The canonical formatter (D3 section 2), fail closed.
 //!
-//! ## What it prints from, and why not the IR
-//!
-//! D3 section 2 said "an AST-to-source printer over the parsed IR plus
-//! retained trivia". Measured against this repository, that shape cannot print
-//! this repository's sources. The IR the parser produces is type-erased:
-//! `stripper.strip` blanks every annotation before `JsParser` sees the text,
-//! so a printer over the IR would delete every `: T`, every `type` and
-//! `interface` declaration, and the `import type` clauses of 23 of the 58
-//! tracked example files. `TypeMapKind` has no member for a type-only import
-//! at all, so that loss is not even recoverable from the side table.
-//!
-//! What this prints from instead is the token stream of the source as written,
-//! plus trivia and one selected type-syntax source. Legacy input uses the
-//! stripper's type map. Direct input borrows a completed parser-owned Store.
-//! Every token is carried through verbatim, and only inter-token whitespace is
-//! decided here.
+//! The printer reads the original token stream and trivia. A parsed input also
+//! supplies its typed syntax store; an original-source input observes the same
+//! printable regions directly. Every token is carried through verbatim, and
+//! only inter-token whitespace is decided here.
 //!
 //! ## Fail closed, and how that is enforced rather than declared
 //!
@@ -28,14 +16,9 @@
 //!
 //! ## Types are opaque
 //!
-//! A type annotation, a type argument list, and a whole `type`, `interface`,
-//! or `distinct type` declaration are printed as the bytes the author wrote.
-//! The stripper already decided where each one starts and ends - that is what
-//! the type map is - and re-deciding it here would be a second answer to a
-//! question that already has one. So the canonical form of this phase does not
-//! canonicalize type layout, the same way it does not reflow a comment. It
-//! also removes the `<` ambiguity from the layout engine: a `<` the stripper
-//! did not record is a comparison, and prints spaced like one.
+//! A type annotation, type argument list, or whole type declaration is printed
+//! as authored bytes. The syntax store or source observer marks that region,
+//! so layout does not reinterpret an ambiguous `<` as a comparison.
 
 const std = @import("std");
 const token_mod = @import("parser/token.zig");
@@ -44,7 +27,6 @@ const TokenType = token_mod.TokenType;
 const Tokenizer = @import("parser/tokenizer.zig").Tokenizer;
 const trivia = @import("parser/trivia.zig");
 const TypeSyntax = @import("parser/type_syntax.zig");
-const source_frontend = @import("source_frontend.zig");
 
 pub const Error = error{ UnprintableConstruct, OutOfMemory };
 
@@ -67,8 +49,8 @@ pub const Refusal = enum {
     missing_semicolon,
     /// A comment somewhere no layout rule places it.
     comment_position,
-    /// The TypeScript stripper rejected the source, so the type spans this
-    /// printer needs do not exist.
+    /// Source admission rejected the source, so the type spans this printer
+    /// needs do not exist. The public refusal name remains stable.
     strip_failed,
     /// The output did not re-lex to its input. A defect guard: the refusal is
     /// the failure, not the rewritten file.
@@ -97,7 +79,6 @@ pub const Options = struct {
 
 pub const Input = union(enum) {
     original_source: []const u8,
-    legacy_source: []const u8,
     parsed_store: *const TypeSyntax.Store,
 };
 
@@ -230,45 +211,6 @@ fn collectSourceRegions(
             .end = declarationEnd(source, declaration.body.end),
         }),
     };
-    return finalizeRegions(arena, &regions);
-}
-
-fn collectLegacyRegions(
-    arena: std.mem.Allocator,
-    source: []const u8,
-    options: Options,
-) Error![]Region {
-    var prepared = source_frontend.PreparedSource.init(arena, source, "<printer>.ts", .{ .report_errors = false }) catch
-        return refuse(options, .strip_failed);
-    defer prepared.deinit();
-    const type_map = prepared.typeMap() orelse return refuse(options, .strip_failed);
-
-    var regions: std.ArrayListUnmanaged(Region) = .empty;
-    for (type_map.entries.items) |entry| {
-        if (entry.source_end <= entry.source_start) continue;
-        const span: Region = switch (entry.kind) {
-            // The recorded span is the interior of the `<...>`, so the
-            // delimiters come with it or the layout engine would have to
-            // decide what a bare `<` is.
-            .generic_params, .call_type_arguments => .{
-                .start = entry.source_start -| 1,
-                .end = @min(entry.source_end + 1, @as(u32, @intCast(source.len))),
-            },
-            // A type declaration is opaque as a whole statement: the body span
-            // alone would leave `type Foo =` to be laid out as code.
-            .type_alias, .distinct_type => .{
-                .start = declarationStart(source, entry.name_start),
-                .end = declarationEnd(source, entry.source_end),
-            },
-            .var_annotation,
-            .param_annotation,
-            .return_annotation,
-            .type_guard_annotation,
-            => .{ .start = entry.source_start, .end = entry.source_end },
-        };
-        try appendTrimmedRegion(arena, source, &regions, span);
-    }
-
     return finalizeRegions(arena, &regions);
 }
 
@@ -1583,7 +1525,7 @@ const Renderer = struct {
             while (j < chunks.len and (chunks[j] == .comment or chunks[j] == .blank)) j += 1;
             if (j < chunks.len) head = chunks[j];
             // `export type Foo = ...` is one verbatim chunk after `export`
-            // only when the stripper recorded it; otherwise it is a statement.
+            // only when the syntax observer recorded it.
             if (head == .verbatim) return j + 1;
         }
         const block_form = head == .tok and switch (head.tok.tok.type) {
@@ -1751,7 +1693,6 @@ fn printInto(
 ) Error![]const u8 {
     const source = switch (input) {
         .original_source => |value| value,
-        .legacy_source => |value| value,
         .parsed_store => |store| store.source,
     };
     if (std.mem.indexOfScalar(u8, source, '\r') != null) {
@@ -1767,7 +1708,6 @@ fn printInto(
 
     const regions = switch (input) {
         .original_source => try collectSourceRegions(arena, source, options),
-        .legacy_source => try collectLegacyRegions(arena, source, options),
         .parsed_store => |store| blk: {
             store.validate() catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -2075,19 +2015,15 @@ test "direct printer preserves measured legacy behavior" {
 
         switch (fixture.outcome) {
             .output => |expected| {
-                const legacy = try printInput(testing.allocator, .{ .legacy_source = fixture.source }, .{});
-                defer testing.allocator.free(legacy);
                 const direct = try printInput(
                     testing.allocator,
                     .{ .parsed_store = &parser.type_store },
                     .{},
                 );
                 defer testing.allocator.free(direct);
-                try testing.expectEqualStrings(legacy, direct);
                 try testing.expectEqualStrings(expected, direct);
             },
             .refusal => |expected| {
-                try expectSelectedRefusal(.{ .legacy_source = fixture.source }, expected);
                 try expectSelectedRefusal(.{ .parsed_store = &parser.type_store }, expected);
             },
         }
@@ -2120,11 +2056,9 @@ fn runDirectPrinterAllocationSweep(allocator: std.mem.Allocator, source: []const
     defer parser.deinit();
     _ = try parser.parse();
 
-    const legacy = try printInput(testing.allocator, .{ .legacy_source = source }, .{});
-    defer testing.allocator.free(legacy);
     const direct = try printInput(allocator, .{ .parsed_store = &parser.type_store }, .{});
     defer allocator.free(direct);
-    try testing.expectEqualStrings(legacy, direct);
+    try testing.expect(direct.len > 0);
     try testing.expect(parser.type_store.annotations.items.len > 0);
     try testing.expect(parser.type_store.declarations.items.len > 0);
     try testing.expect(parser.type_store.generic_owners.items.len > 0);
@@ -2408,8 +2342,8 @@ test "two record arguments do not hug: only the last one can break" {
 }
 
 test "a type declaration prints as the author wrote it" {
-    // Types are opaque: the stripper decided the span, and re-deciding the
-    // layout inside it here would be a second answer to a settled question.
+    // Types are opaque: the syntax store supplies their spans, and this
+    // layout pass preserves their authored bytes.
     const source =
         \\structural Shape = {
         \\      kind: string;

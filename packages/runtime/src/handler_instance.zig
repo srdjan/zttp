@@ -1829,18 +1829,15 @@ fn logParseErrors(allocator: std.mem.Allocator, view: zq.SourceView, errors: []c
 test "a load parse failure renders its code, file, source line, and underline" {
     const allocator = std.testing.allocator;
     const source = "const a = 1;\nconst b = while;\n";
-    var prepared = try zq.PreparedSource.init(allocator, source, "bad.ts", .{});
-    defer prepared.deinit();
+    var frontend: zq.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "bad.ts");
+    defer frontend.deinit();
+    switch (frontend.parse_outcome) {
+        .parser_refused => {},
+        else => return error.TestExpectedParseFailure,
+    }
 
-    var strings = zq.StringTable.init(allocator);
-    defer strings.deinit();
-    var atoms = zq.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var p = try zq.Parser.init(allocator, prepared.parserInput(), &strings, &atoms);
-    defer p.deinit();
-    if (p.parse()) |_| return error.TestExpectedParseFailure else |_| {}
-
-    const text = try renderParseErrors(allocator, prepared.sourceView(), p.js_parser.getErrors());
+    const text = try renderParseErrors(allocator, frontend.sourceView(), frontend.parserErrors());
     defer allocator.free(text);
     try std.testing.expect(std.mem.indexOf(u8, text, "error[ZTS") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "  --> bad.ts:2:") != null);

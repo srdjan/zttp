@@ -15,7 +15,7 @@
 //! Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 const std = @import("std");
-const stripper = @import("zts-engine").stripper;
+const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
@@ -574,7 +574,7 @@ pub const HandlerVerifier = struct {
     }
 
     /// Format diagnostics to a writer. Requires source text for context lines.
-    pub fn formatDiagnostics(self: *const HandlerVerifier, source: stripper.SourceView, writer: anytype) !void {
+    pub fn formatDiagnostics(self: *const HandlerVerifier, source: SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
             const span = loc.span();
@@ -1760,7 +1760,7 @@ test "diagnostic formatting" {
     var output_buf: std.ArrayList(u8) = .empty;
     defer output_buf.deinit(std.testing.allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &output_buf);
-    try verifier.formatDiagnostics(stripper.SourceView.of(source), &aw.writer);
+    try verifier.formatDiagnostics(SourceView.of(source), &aw.writer);
     output_buf = aw.toArrayList();
     try std.testing.expect(output_buf.items.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error[ZTS302]") != null);
@@ -1791,12 +1791,11 @@ test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
 /// tested while being unreachable in the product.
 fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
     const allocator = std.testing.allocator;
-
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1812,13 +1811,17 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     @import("abi_types.zig").populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
 
-    var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, null, &env);
+    var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer type_checker.deinit();
     _ = try type_checker.check(root);
 
-    var verifier = HandlerVerifier.init(allocator, ir_view, null, &env, &type_checker);
+    var verifier = HandlerVerifier.init(allocator, ir_view, &atoms, &env, &type_checker);
     defer verifier.deinit();
 
     const errors = try verifier.verify(handler_fn);
@@ -1829,18 +1832,17 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
 /// reads reference counts off the IR and needs no type environment.
 fn countUnusedVariableWarnings(source: []const u8) !u32 {
     const allocator = std.testing.allocator;
-
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     const handler_fn = findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
 
-    var verifier = HandlerVerifier.init(allocator, ir_view, null, null, null);
+    var verifier = HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
     defer verifier.deinit();
     _ = try verifier.verify(handler_fn);
 
@@ -1862,12 +1864,10 @@ const RouteVerifierCounts = struct {
 
 fn routeVerifierCounts(source: []const u8) !RouteVerifierCounts {
     const allocator = std.testing.allocator;
-    var stripped = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer stripped.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, stripped.code);
-    defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2170,11 +2170,11 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
         \\}
     ;
 
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2183,7 +2183,7 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
         return;
     };
 
-    var verifier = HandlerVerifier.init(allocator, ir_view, null, null, null);
+    var verifier = HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
     defer verifier.deinit();
     _ = try verifier.verify(handler_fn);
 
@@ -2220,13 +2220,10 @@ fn optionalAccessHelp(
     , .{ import_line, producer });
     defer allocator.free(source);
 
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
-    defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
@@ -2325,13 +2322,10 @@ test "ZTS309 stays silent once the optional is narrowed" {
         \\}
     ;
 
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
-    defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();

@@ -1,7 +1,7 @@
 //! Type Checker: validates types across the IR tree.
 //!
-//! Walks the IR tree produced by the parser, consulting the TypeEnv (populated
-//! from the stripper's TypeMap) to check:
+//! Walks the IR tree produced by the parser, consulting the TypeEnv populated
+//! from parser-owned type syntax to check:
 //! - Variable declarations match their type annotations
 //! - Function call arguments match parameter types
 //! - Property access on known record types
@@ -15,7 +15,7 @@
 //! Only annotated values are checked - unannotated code passes through unchecked.
 
 const std = @import("std");
-const stripper = @import("zts-engine").stripper;
+const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
 const json_utils = @import("zts-base").json_utils;
@@ -144,9 +144,6 @@ pub const TypeChecker = struct {
     /// Consulted only where a declared parameter type is load-bearing:
     /// match-discriminant exhaustiveness.
     param_types: std.AutoHashMapUnmanaged(u64, TypeIndex),
-    /// Next declaration occurrence for each name atom. The stripper records
-    /// the same semantic occurrence, so annotation binding is coordinate-free.
-    var_name_ordinals: std.AutoHashMapUnmanaged(u16, u32),
     /// Lexically active declarations, including untyped shadows. Upvalues use
     /// this stack to resolve the nearest declaration by name.
     active_declared_types: std.ArrayListUnmanaged(ActiveDeclaredType),
@@ -202,7 +199,6 @@ pub const TypeChecker = struct {
             .binding_types = .empty,
             .binding_callables = .empty,
             .param_types = .empty,
-            .var_name_ordinals = .empty,
             .active_declared_types = .empty,
             .narrowed = .empty,
             .narrow_journal = .empty,
@@ -228,7 +224,6 @@ pub const TypeChecker = struct {
         self.binding_types.deinit(self.allocator);
         self.binding_callables.deinit(self.allocator);
         self.param_types.deinit(self.allocator);
-        self.var_name_ordinals.deinit(self.allocator);
         self.active_declared_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
         self.context_types.deinit(self.allocator);
@@ -368,7 +363,7 @@ pub const TypeChecker = struct {
     // Diagnostic formatting
     // -------------------------------------------------------------------
 
-    pub fn formatDiagnostics(self: *const TypeChecker, source: stripper.SourceView, writer: anytype) !void {
+    pub fn formatDiagnostics(self: *const TypeChecker, source: SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
             const span = loc.span();
@@ -2701,23 +2696,9 @@ pub const TypeChecker = struct {
         declaration: NodeIndex,
         binding: ir.BindingRef,
     ) TypeIndex {
-        const declared = switch (self.env.sourceTypeMode() orelse .legacy) {
+        const declared = switch (self.env.sourceTypeMode() orelse .omitted) {
             .direct => self.env.getVarTypeForDeclaration(self.ir_view, declaration) orelse null_type_idx,
             .omitted => null_type_idx,
-            .legacy => legacy: {
-                const name = self.resolveAtomName(binding.name_atom) orelse {
-                    self.pushActiveDeclared(binding.name_atom, null_type_idx);
-                    return null_type_idx;
-                };
-                const gop = self.var_name_ordinals.getOrPut(self.allocator, binding.name_atom) catch {
-                    self.markAllocationFailure();
-                    return null_type_idx;
-                };
-                if (!gop.found_existing) gop.value_ptr.* = 0;
-                const ordinal = gop.value_ptr.*;
-                gop.value_ptr.* += 1;
-                break :legacy self.env.getVarTypeByNameOrdinal(name, ordinal) orelse null_type_idx;
-            },
         };
         if (declared != null_type_idx) {
             self.env.bindVarType(binding.scope_id, binding.name_atom, declared) catch self.markAllocationFailure();
@@ -3087,9 +3068,8 @@ pub const TypeChecker = struct {
         violated: struct { name: []const u8, arg: TypeIndex, constraint: TypeIndex },
     };
 
-    /// Explicit type arguments written at this call, if any. Keyed by the byte
-    /// offset of the call's `(`, which is what the stripper recorded one past
-    /// the closing `>`.
+    /// Explicit type arguments written at this call, if any. The direct type
+    /// environment keys them by the call's runtime owner node.
     fn explicitTypeArgs(self: *const TypeChecker, node: NodeIndex) ?type_env_mod.CallTypeArgs {
         return self.env.getCallTypeArgsForCall(self.ir_view, node);
     }
@@ -3848,7 +3828,7 @@ pub const TypeChecker = struct {
         // The upper bound, where the callee's own parameter list is known. A
         // signature without that list (a module export, a global) is checked
         // against its own table elsewhere. A source function has no optional
-        // parameter (the stripper refuses `?:`), so the bound is one count.
+        // parameter (the parser refuses `?:`), so the bound is one count.
         if (sig.max_arg_count) |max_arg_count| {
             if (call.args_count > max_arg_count) {
                 self.addArgCountMismatch(node, max_arg_count, @intCast(call.args_count));
@@ -3915,8 +3895,7 @@ pub const TypeChecker = struct {
     /// Report ZTS212 when a declared annotation names an alias whose cycle no
     /// data constructor guards (spec 5.7). The alias is decided once in
     /// `TypeEnv`; this is the site that gives the verdict a source location,
-    /// since the declaration itself is blanked by the stripper and reaches the
-    /// parser as whitespace.
+    /// since the declaration has no runtime node after direct parsing.
     fn reportIfNonContractive(self: *TypeChecker, declared: TypeIndex, node: NodeIndex) void {
         if (declared == null_type_idx or node == null_node) return;
         if (!self.env.isNonContractiveType(declared)) return;
@@ -4313,10 +4292,11 @@ test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
 
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     const allocator = std.testing.allocator;
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var pool = TypePool.init(allocator);
@@ -4325,8 +4305,12 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
     const errors = try checker.check(root);
     try std.testing.expectEqual(expect_errors, errors);
@@ -4344,12 +4328,11 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
 /// test that means to pin a particular refusal names it.
 fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []const u8) !void {
     const allocator = std.testing.allocator;
-
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -4361,9 +4344,13 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
 
     const errors = try checker.check(root);
@@ -4383,12 +4370,11 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
 /// this function, so an index would dangle.
 fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     const allocator = std.testing.allocator;
-
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -4400,9 +4386,13 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
     _ = try checker.check(root);
 
@@ -4833,11 +4823,11 @@ fn freeSeenDiagnostics(allocator: std.mem.Allocator, seen: []SeenDiagnostic) voi
 /// Type check `source` and return its diagnostics. `strict_follows` is the
 /// flag the pipeline sets when the strict checker runs after this one.
 fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_follows: bool) ![]SeenDiagnostic {
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -4849,9 +4839,13 @@ fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_fol
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
     checker.strict_checker_follows = strict_follows;
     _ = try checker.check(root);
@@ -5825,11 +5819,11 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
         \\
     );
 
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, aw.writer.buffered(), .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, aw.writer.buffered());
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -5841,9 +5835,13 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
@@ -5970,12 +5968,11 @@ test "TypeChecker: toReversed type-checks clean" {
 /// with this function, so an index would dangle.
 fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8 {
     const allocator = std.testing.allocator;
-
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -5987,9 +5984,13 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
     _ = try checker.check(root);
 
@@ -7154,10 +7155,11 @@ test "a call that merely carries a callback keeps its mismatch at the outer retu
         \\}
     ;
 
-    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
     defer parser.deinit();
+    parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
@@ -7167,9 +7169,13 @@ test "a call that merely carries a callback keeps its mismatch at the outer retu
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
 
-    var checker = TypeChecker.init(allocator, ir_view, null, &env);
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
     _ = try checker.check(root);
 

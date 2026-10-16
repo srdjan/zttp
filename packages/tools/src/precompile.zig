@@ -51,12 +51,12 @@ fn debugPrint(comptime fmt: []const u8, args: anytype) void {
     }
 }
 
-/// Print a TypeScript strip failure with `file:line:column` and a remediation
-/// message when the stripper supplied a structured diagnostic, falling back to
+/// Print a TypeScript admission failure with `file:line:column` and a remediation
+/// message when parsing supplied a structured diagnostic, falling back to
 /// the bare error name when it did not (OOM and other location-free failures).
 /// Render parse errors for a person: the ZTS code, `file:line:column`, the
-/// source line, and an underline. Positions are translated out of the stripped
-/// text into the file the author wrote. Caller owns the result.
+/// source line, and an underline. Positions refer to the original source.
+/// Caller owns the result.
 fn renderParseErrors(
     allocator: std.mem.Allocator,
     view: zts.SourceView,
@@ -1127,7 +1127,6 @@ pub fn runCheckOnlyFromSourceWithOptions(
 }
 
 /// Direct TypeScript diagnostics use original source coordinates.
-/// The legacy virtual path retains its source-view mapping.
 fn runCheckOnlyFromSourceWithPathAllocator(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
@@ -1135,24 +1134,18 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     handler_path: []const u8,
     opts: CheckOptions,
 ) !CheckResult {
-    var prepared_source: ?zts.PreparedSource = null;
-    defer if (prepared_source) |*prepared| prepared.deinit();
-    // The legacy path reports the boundary before source-view mapping.
     var already_mapped: usize = 0;
 
-    var result = try runCheckOnPreparedSource(
+    var result = try runCheckOnParsedSource(
         allocator,
         path_allocator,
         source,
         handler_path,
         opts,
-        &prepared_source,
         &already_mapped,
     );
     errdefer result.deinit(allocator);
-    if (prepared_source) |*prepared| {
-        remapDiagnosticsToSource(&result, prepared.sourceView(), already_mapped);
-    } else if (result.is_typescript and result.stages_run.contains(.parse)) {
+    if (result.is_typescript and result.stages_run.contains(.parse)) {
         remapDiagnosticsToSource(&result, .{ .text = source, .normalize_positions = true }, already_mapped);
     }
 
@@ -1194,13 +1187,12 @@ fn appendCheckAdmissionDiagnostic(
     }
 }
 
-fn runCheckOnPreparedSource(
+fn runCheckOnParsedSource(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
     source: []const u8,
     handler_path: []const u8,
     opts: CheckOptions,
-    prepared_out: *?zts.PreparedSource,
     already_mapped: *usize,
 ) !CheckResult {
     const sql_schema_path = opts.sql_schema_path;
@@ -1293,7 +1285,6 @@ fn runCheckOnPreparedSource(
             }
         },
         .virtual_javascript => virtual: {
-            prepared_out.* = null;
             legacy_parser = try zts.parser.JsParser.init(allocator, source);
             const parser = &legacy_parser.?;
             parser.setAtomTable(&legacy_atoms);
@@ -6379,7 +6370,7 @@ test "compileHandler projects verifier properties only when verification runs" {
     try std.testing.expect(props.optional_safe);
 }
 
-test "contract-only extraction without TypeMap preserves verifier properties" {
+test "contract-only extraction without source types preserves verifier properties" {
     const allocator = std.testing.allocator;
     const source =
         \\import { jwtVerify } from "zttp:auth";
@@ -7493,15 +7484,14 @@ test "router public checks prove clean routes and fail closed on unresolved disp
 }
 
 fn parseFailureText(allocator: std.mem.Allocator, source: []const u8, path: []const u8) ![]u8 {
-    var prepared = try zts.PreparedSource.init(allocator, source, path, .{});
-    defer prepared.deinit();
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-    if (js_parser.parse()) |_| return error.TestExpectedParseFailure else |_| {}
-    return renderParseErrors(allocator, prepared.sourceView(), js_parser.errors.getErrors());
+    var frontend: zts.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, path);
+    defer frontend.deinit();
+    switch (frontend.parse_outcome) {
+        .parser_refused => {},
+        else => return error.TestExpectedParseFailure,
+    }
+    return renderParseErrors(allocator, frontend.sourceView(), frontend.parserErrors());
 }
 
 test "parse failure text names the code, file, line, and underline" {

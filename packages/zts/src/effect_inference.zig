@@ -182,7 +182,6 @@ pub const EffectFactsOptions = struct {
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
     module_facts: ?*const module_facts_mod.ModuleFacts = null,
     type_source: ?type_env_mod.ConsumerTypeSource = null,
-    type_env: ?*const type_env_mod.TypeEnv = null,
     imported_effects: []const ImportedEffect = &.{},
     contract_projection: ContractProjection = .unrequested,
 };
@@ -480,7 +479,7 @@ pub const Analyzer = struct {
     }
 
     pub fn analyze(self: *Analyzer, root: NodeIndex) !void {
-        const source = try normalizeTypeSource(self.type_source, self.type_env);
+        const source = self.type_source orelse type_env_mod.ConsumerTypeSource.omitted;
         const original_env = self.type_env;
         self.type_env = try source.validate();
         defer self.type_env = original_env;
@@ -2280,7 +2279,7 @@ pub fn buildEffectFacts(
     root: NodeIndex,
     options: EffectFactsOptions,
 ) !EffectFacts {
-    const source = try normalizeTypeSource(options.type_source, options.type_env);
+    const source = options.type_source orelse type_env_mod.ConsumerTypeSource.omitted;
     _ = try source.validate();
     var analyzer = Analyzer.initWithManifestRegistry(
         allocator,
@@ -2297,14 +2296,6 @@ pub fn buildEffectFacts(
     errdefer result.deinit(allocator);
     _ = try source.validate();
     return result;
-}
-
-fn normalizeTypeSource(
-    explicit: ?type_env_mod.ConsumerTypeSource,
-    legacy: ?*const type_env_mod.TypeEnv,
-) !type_env_mod.ConsumerTypeSource {
-    if (explicit != null and legacy != null) return error.AmbiguousTypeSource;
-    return explicit orelse try type_env_mod.ConsumerTypeSource.normalizeLegacy(legacy);
 }
 
 fn projectEffectFacts(

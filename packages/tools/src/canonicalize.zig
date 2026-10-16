@@ -851,9 +851,8 @@ pub fn lineSpan(source: []const u8, line_num: u32) ?Span {
 /// Convert a 1-based (line, column) byte position into a byte offset into
 /// `source`. Returns null when the position is out of range. Column is a byte
 /// column (the tokenizer computes it as `pos - line_start + 1`), and the
-/// TypeScript stripper preserves byte positions by blanking stripped spans
-/// with spaces, so a diagnostic column maps to the same byte offset in the
-/// original source the rewriter scans.
+/// The TypeScript parser reports positions in the original source, so a
+/// diagnostic column maps to the same byte offset the rewriter scans.
 fn lineColToOffset(source: []const u8, line: u32, column: u32) ?usize {
     if (line == 0 or column == 0) return null;
     var current: u32 = 1;

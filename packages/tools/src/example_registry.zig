@@ -20,8 +20,8 @@
 //! form it names, so an edit that quietly drops the construct fails rather than
 //! leaving a published example that teaches nothing. Where the parse tree
 //! records the form, the evidence is a node tag and the gate walks the tree.
-//! Where the form is type-level, it is a type-map kind and the gate walks the
-//! stripper's map. Three forms leave neither trace and say so on the row.
+//! Where the form is type-level, the gate inspects its direct syntax owner.
+//! Three forms leave neither trace and say so on the row.
 
 const std = @import("std");
 
@@ -30,7 +30,11 @@ const zts = @import("zts");
 pub const NodeTag = zts.parser.NodeTag;
 pub const BinaryOp = zts.parser.BinaryOp;
 pub const VarKind = zts.parser.Node.VarDecl.VarKind;
-pub const TypeMapKind = zts.TypeMapKind;
+
+pub const SyntaxEvidence = enum {
+    parameter_annotation,
+    predicate_return,
+};
 
 /// What proves the example exercises the form its row names.
 pub const Evidence = union(enum) {
@@ -43,9 +47,8 @@ pub const Evidence = union(enum) {
     /// The parse tree contains a binary operation with this operator. `??` is a
     /// binary op like `+`, so the tag alone would not separate them.
     binary_operator: BinaryOp,
-    /// The stripper's type map contains an annotation of this kind. The form is
-    /// type-level, so it is gone before the parser runs.
-    type_annotation: TypeMapKind,
+    /// A direct syntax owner records this type-level form.
+    syntax: SyntaxEvidence,
     /// Neither trace exists. `needle` must appear in the source, and `reason`
     /// says why nothing stronger is available - a text match is the weakest
     /// evidence here and is used only where the alternative is none.
@@ -291,7 +294,7 @@ pub const examples = [_]Example{
     },
     .{
         .feature = "type annotations",
-        .evidence = .{ .type_annotation = .param_annotation },
+        .evidence = .{ .syntax = .parameter_annotation },
         .source =
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;
@@ -373,7 +376,7 @@ pub const examples = [_]Example{
     },
     .{
         .feature = "type guards (x is T)",
-        .evidence = .{ .type_annotation = .type_guard_annotation },
+        .evidence = .{ .syntax = .predicate_return },
         .source =
         \\
         \\structural Guard<T> = Proof<T, "state_isolated">;

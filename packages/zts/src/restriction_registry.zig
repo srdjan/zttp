@@ -452,7 +452,7 @@ pub const entries = [_]RestrictionEntry{
         .nature = .language_simplicity,
         // `import type` and `export type { ... }` keep the keyword: both name
         // a declaration made elsewhere rather than making one, and the
-        // stripper handles them before the declaration path.
+        // parser handles them before the declaration path.
         .note = "write `structural Name = ...;`",
         .enforced_by = &.{"ZTS050"},
     },

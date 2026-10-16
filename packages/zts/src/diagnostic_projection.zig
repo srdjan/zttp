@@ -15,7 +15,7 @@ const type_checker = @import("type_checker.zig");
 const RepairIntent = @import("repair_intent.zig").RepairIntent;
 const SourceLocation = @import("zts-engine").parser.SourceLocation;
 const ParseError = @import("zts-engine").parser.ParseError;
-const SourceView = @import("zts-engine").stripper.SourceView;
+const SourceView = @import("zts-base").source_diagnostics.SourceView;
 
 pub const Source = enum {
     boolean,

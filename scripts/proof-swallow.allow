@@ -185,7 +185,6 @@ packages/zts/src/type_checker.zig admitOneTypePredicate catch-poison
 packages/zts/src/type_checker.zig bindCallableMetadata catch-block
 packages/zts/src/type_checker.zig bindForOfElement catch-poison
 packages/zts/src/type_checker.zig bindPatternBindings catch-poison
-packages/zts/src/type_checker.zig bindVarDeclaration catch-block
 packages/zts/src/type_checker.zig bindVarDeclaration catch-poison
 packages/zts/src/type_checker.zig endNarrowScope catch-poison
 packages/zts/src/type_checker.zig inferObjectLiteralType catch-block
@@ -231,11 +230,6 @@ packages/zts/src/type_checker.zig reportIfUnencodable catch-value
 packages/zts/src/type_env.zig findNonContractiveAliases catch-poison
 packages/zts/src/type_env.zig instantiateCompositeMembers catch-block
 packages/zts/src/type_env.zig internName catch-block
-packages/zts/src/type_env.zig populateFromTypeMap catch-block
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison
-packages/zts/src/type_env.zig processDistinctType catch-poison
-packages/zts/src/type_env.zig processTypeAlias catch-poison
-packages/zts/src/type_env.zig processVarAnnotation catch-poison
 packages/zts/src/type_env.zig pushGenericScope catch-poison
 packages/zts/src/type_env.zig putTypeAlias catch-poison
 packages/zts/src/type_env.zig registerCapsuleAlias catch-poison
@@ -300,25 +294,10 @@ packages/zts/src/type_checker.zig registerParamTypes catch-poison@2
 packages/zts/src/type_checker.zig schemaValueToType catch-block@2
 packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
 
-# TypeEnv and its pool reject poison before a caller can use the partial type
-# maps. The numbered rows cover separate insertions in the same function.
+# TypeEnv and its pool reject poison before a caller can use partial semantic
+# types. The numbered rows cover separate insertions in the same function.
 packages/zts/src/type_env.zig findNonContractiveAliases catch-poison@2
 packages/zts/src/type_env.zig internName catch-block@2
-packages/zts/src/type_env.zig populateFromTypeMap catch-block@2
-packages/zts/src/type_env.zig populateFromTypeMap catch-block@3
-packages/zts/src/type_env.zig populateFromTypeMap catch-block@4
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@2
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@3
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@4
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@5
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@6
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@7
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@8
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@9
-packages/zts/src/type_env.zig populateFromTypeMap catch-poison@10
-packages/zts/src/type_env.zig processTypeAlias catch-poison@2
-packages/zts/src/type_env.zig processVarAnnotation catch-poison@2
-packages/zts/src/type_env.zig processVarAnnotation catch-poison@3
 
 # A closure's parameter labels (F1): a failed insert marks allocation poison,
 # the same handling as the user-call summary. Both checker entry points reject

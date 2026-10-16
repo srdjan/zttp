@@ -30,7 +30,7 @@ const engine_roots = [_][]const u8{
     "builtins/root.zig",
     "parser/root.zig",
     "http.zig",
-    "stripper.zig",
+    "source_frontend.zig",
     "modules/root.zig",
     "bytecode_cache.zig",
 };

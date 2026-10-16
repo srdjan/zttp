@@ -90,7 +90,7 @@ while IFS= read -r -d '' file; do
   fi
 
   # Pass 2: normalize that output into `twice`. Keep the extension so the
-  # stripper picks the same mode for both passes.
+  # parser picks the same source mode for both passes.
   cp "$work/once" "$work/pass1.ts"
   if ! "$ZTS" normalize "$work/pass1.ts" "${schema_args[@]+"${schema_args[@]}"}" > "$work/twice" 2>/dev/null; then
     echo "FAIL $file: normalize refused its own output" >&2

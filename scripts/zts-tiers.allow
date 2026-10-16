@@ -19,7 +19,7 @@ zts-base module_specifier.zig
 zts-base profile_identity.zig
 zts-base route_match.zig
 zts-base status_text.zig
-zts-base type_map.zig
+zts-base source_diagnostics.zig
 
 zts-contracts contract_json_parser.zig
 zts-contracts contracts_root.zig
@@ -109,7 +109,6 @@ zts security_events.zig
 zts source_frontend.zig
 zts sqlite.zig
 zts string.zig
-zts stripper.zig
 zts tests/asi_census.zig
 zts tests/frontend_fuzz.zig
 zts tests/opcode_parity.zig
@@ -172,7 +171,7 @@ zts-compiler type_env.zig
 zts-compiler type_key.zig
 zts-compiler type_pool.zig
 zts-compiler type_syntax_lowering.zig
-zts-compiler typed_frontend_compare.zig
+zts-compiler typed_frontend_tests.zig
 
 # root.zig is the module every consumer imports. It re-exports the four tiers
 zts-umbrella root.zig

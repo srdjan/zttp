@@ -1,6 +1,5 @@
-//! Private comparison between legacy stripping and direct type syntax parsing.
-//!
-//! This module is test-only. It adds no public frontend choice or fallback.
+//! Direct typed frontend behavior fixtures for source admission, syntax owners,
+//! lowering, and downstream consumers. This module is test-only.
 
 const std = @import("std");
 const engine = @import("zts-engine");
@@ -23,11 +22,8 @@ const type_checker_mod = @import("type_checker.zig");
 const AtomTable = engine.atom_table.AtomTable;
 const JsParser = engine.parser.JsParser;
 const NodeIndex = engine.parser.NodeIndex;
-const Token = engine.parser.Token;
 const TokenType = engine.parser.TokenType;
-const Tokenizer = engine.parser.Tokenizer;
 const TypeSyntax = engine.parser.type_syntax;
-const PreparedSource = engine.source_frontend.PreparedSource;
 const TypeEnv = type_env_mod.TypeEnv;
 const TypeIndex = type_pool_mod.TypeIndex;
 const TypePool = type_pool_mod.TypePool;
@@ -90,1536 +86,6 @@ const SemanticQuirk = enum {
     literal_values,
 };
 
-const AdmissionMode = enum {
-    collect,
-    compile,
-};
-
-const AdmissionKind = enum {
-    any_type,
-    void_type,
-    array_type_alias,
-    readonly_array_type_alias,
-    optional_parameter,
-    nesting_too_deep,
-    nominal_base_not_scalar,
-};
-
-const AdmissionDiagnostic = struct {
-    kind: AdmissionKind,
-    span: TypeSyntax.Span,
-};
-
-const OutOfSliceReason = enum {
-    function_declaration,
-    import_declaration,
-    export_declaration,
-    type_declaration,
-    multiple_bindings,
-    annotation_count,
-    compound_annotation,
-    malformed_annotation,
-    unsupported_annotation_position,
-    assertion_syntax,
-    template_literal,
-    regex_literal,
-    type_comment,
-    unsupported_initializer,
-    lone_carriage_return,
-};
-
-const Verdict = union(enum) {
-    equivalent,
-    differs: []const u8,
-    admission_refused: struct {
-        first: AdmissionKind,
-        count: usize,
-    },
-    out_of_slice: OutOfSliceReason,
-};
-
-const Preflight = struct {
-    diagnostics: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty,
-
-    fn deinit(self: *Preflight, allocator: std.mem.Allocator) void {
-        self.diagnostics.deinit(allocator);
-    }
-};
-
-const PreflightOutcome = union(enum) {
-    eligible: Preflight,
-    out_of_slice: OutOfSliceReason,
-};
-
-/// Inspect the complete bounded source before either runtime parse starts.
-fn preflight(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    mode: AdmissionMode,
-) !PreflightOutcome {
-    for (source, 0..) |byte, index| {
-        if (byte == '\r' and (index + 1 == source.len or source[index + 1] != '\n')) {
-            return .{ .out_of_slice = .lone_carriage_return };
-        }
-    }
-    if (hasUnterminatedSkippedBlockComment(source)) {
-        return .{ .out_of_slice = .unsupported_initializer };
-    }
-    var result = Preflight{};
-    var owns_result = true;
-    defer if (owns_result) result.deinit(allocator);
-
-    var tokenizer = Tokenizer.init(source);
-    var current = tokenizer.next();
-    var annotation_count: usize = 0;
-    var declaration_count: usize = 0;
-    var has_erased_prefix = false;
-    var last_erased_type_span: ?TypeSyntax.Span = null;
-
-    while (current.type != .eof) {
-        if (TypeSyntax.tokenStartsGenericList(source, current)) {
-            const scanned = (try TypeSyntax.scanBalancedGenericList(
-                allocator,
-                source,
-                current.start,
-            )) orelse return .{ .out_of_slice = .unsupported_initializer };
-            if (!TypeSyntax.isPrivateErasedPrefixListEligible(source, scanned) or
-                TypeSyntax.rawLooksLikeComparison(source, current.start))
-            {
-                return .{ .out_of_slice = .unsupported_initializer };
-            }
-            var opener_tokenizer = tokenizer;
-            var opener = current;
-            while (opener.type != .eof and opener.start < scanned.span.end) {
-                advance(&opener_tokenizer, &opener);
-            }
-            if (opener.type != .lbrace or !try scanPreflightErasedPrefix(
-                allocator,
-                source,
-                &tokenizer,
-                &current,
-                &result.diagnostics,
-                .statement_block,
-            )) {
-                return .{ .out_of_slice = .unsupported_initializer };
-            }
-            has_erased_prefix = true;
-            if (current.type == .semicolon) advance(&tokenizer, &current);
-            continue;
-        }
-        switch (current.type) {
-            .kw_function => {
-                if (!try scanPreflightGenericFunction(
-                    allocator,
-                    source,
-                    &tokenizer,
-                    &current,
-                    &result.diagnostics,
-                )) return .{ .out_of_slice = .function_declaration };
-                continue;
-            },
-            .kw_import => return .{ .out_of_slice = .import_declaration },
-            .template_literal, .template_head, .template_middle, .template_tail => return .{ .out_of_slice = .template_literal },
-            .regex_literal => return .{ .out_of_slice = .regex_literal },
-            .kw_let, .kw_const => {},
-            .kw_export, .identifier => {
-                const declaration_start = current.start;
-                if (current.type == .identifier and !isTypeDeclarationWord(current.text(source))) {
-                    return .{ .out_of_slice = .unsupported_initializer };
-                }
-                if (!isDeclarationBoundary(source, declaration_start, last_erased_type_span)) {
-                    return .{ .out_of_slice = if (current.type == .kw_export)
-                        .export_declaration
-                    else
-                        .type_declaration };
-                }
-                var export_span: ?TypeSyntax.Span = null;
-                var keyword = current;
-                var declaration_cursor = TypeSyntax.Cursor.afterCurrent(tokenizer);
-                if (current.type == .kw_export) {
-                    export_span = tokenSpan(current);
-                    keyword = declaration_cursor.current;
-                    declaration_cursor.advance();
-                }
-                if (keyword.type != .identifier or !isTypeDeclarationWord(keyword.text(source))) {
-                    return .{ .out_of_slice = if (current.type == .kw_export)
-                        .export_declaration
-                    else
-                        .unsupported_initializer };
-                }
-                const declaration_kind: TypeSyntax.DeclarationKind = if (std.mem.eql(
-                    u8,
-                    keyword.text(source),
-                    "structural",
-                ))
-                    .structural
-                else if (std.mem.eql(u8, keyword.text(source), "nominal"))
-                    .nominal
-                else
-                    return .{ .out_of_slice = .type_declaration };
-
-                var declaration_store = TypeSyntax.Store.init(allocator, source);
-                defer declaration_store.deinit();
-                const parsed = try TypeSyntax.parseDeclarationAndStore(
-                    &declaration_store,
-                    source,
-                    keyword,
-                    export_span,
-                    declaration_kind,
-                    0,
-                    &declaration_cursor,
-                );
-                const erased = switch (parsed) {
-                    .not_declaration => return .{ .out_of_slice = .type_declaration },
-                    .excluded => |excluded| blk: {
-                        switch (excluded.reason) {
-                            .implementation_budget, .unsupported_syntax => {
-                                return .{ .out_of_slice = .type_declaration };
-                            },
-                            .nominal_base_not_scalar => {},
-                        }
-                        if (excluded.generic_list_span) |list| {
-                            if (findFirstRemovedForm(
-                                source,
-                                @as(usize, list.start + 1),
-                                @as(usize, list.end - 1),
-                            )) |diagnostic| {
-                                try appendDiagnosticAtNewPosition(
-                                    allocator,
-                                    &result.diagnostics,
-                                    diagnostic,
-                                );
-                            }
-                        }
-                        var local: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
-                        defer local.deinit(allocator);
-                        try appendAnyDiagnostics(
-                            allocator,
-                            &local,
-                            source,
-                            excluded.raw_span.start,
-                            excluded.raw_span.end,
-                        );
-                        for (local.items) |diagnostic| {
-                            try appendDiagnosticAtNewPosition(allocator, &result.diagnostics, diagnostic);
-                        }
-                        try appendDiagnosticAtNewPosition(allocator, &result.diagnostics, .{
-                            .kind = .nominal_base_not_scalar,
-                            .span = excluded.raw_span,
-                        });
-                        while (declaration_cursor.current.type != .eof and
-                            declaration_cursor.current.start < excluded.admission_end)
-                        {
-                            declaration_cursor.advance();
-                        }
-                        var end = excluded.admission_end;
-                        const whitespace_end = skipDeclarationWhitespace(source, excluded.admission_end);
-                        if (declaration_cursor.current.type == .semicolon and
-                            declaration_cursor.current.start == whitespace_end)
-                        {
-                            end = declaration_cursor.current.start + declaration_cursor.current.len;
-                            declaration_cursor.advance();
-                        }
-                        break :blk TypeSyntax.Span{ .start = declaration_start, .end = end };
-                    },
-                    .parsed => |span| blk: {
-                        const declaration = declaration_store.declarations.items[0];
-                        if (declaration.generic_owner) |owner_index| {
-                            const list = declaration_store.generic_owners.items[owner_index].list_span;
-                            if (findFirstRemovedForm(
-                                source,
-                                @as(usize, list.start + 1),
-                                @as(usize, list.end - 1),
-                            )) |diagnostic| {
-                                try appendDiagnosticAtNewPosition(
-                                    allocator,
-                                    &result.diagnostics,
-                                    diagnostic,
-                                );
-                            }
-                        }
-                        switch (declaration.body) {
-                            .absent => {},
-                            .present => |body| if (declaration.kind == .structural) {
-                                try appendAdmissionDiagnostics(
-                                    allocator,
-                                    &result.diagnostics,
-                                    source,
-                                    body.raw_span,
-                                );
-                            } else {
-                                try appendAnyDiagnostics(
-                                    allocator,
-                                    &result.diagnostics,
-                                    source,
-                                    body.raw_span.start,
-                                    body.raw_span.end,
-                                );
-                            },
-                        }
-                        break :blk span;
-                    },
-                };
-                declaration_count += 1;
-                last_erased_type_span = erased;
-                tokenizer = declaration_cursor.tokenizer;
-                current = declaration_cursor.current;
-                continue;
-            },
-            .colon => return .{ .out_of_slice = .unsupported_annotation_position },
-            else => return .{ .out_of_slice = .unsupported_initializer },
-        }
-
-        advance(&tokenizer, &current);
-        if (current.type != .identifier) {
-            return .{ .out_of_slice = .multiple_bindings };
-        }
-        advance(&tokenizer, &current);
-
-        if (current.type == .colon) {
-            annotation_count += 1;
-            if (annotation_count > 1) return .{ .out_of_slice = .annotation_count };
-
-            const colon = current;
-            var type_cursor = TypeSyntax.Cursor.afterCurrent(tokenizer);
-            var syntax_store = TypeSyntax.Store.init(allocator, source);
-            defer syntax_store.deinit();
-            const parsed = try TypeSyntax.parseAndStore(
-                &syntax_store,
-                .global(0),
-                source,
-                colon.start + colon.len,
-                &type_cursor,
-            );
-            var nesting_refusal: ?AdmissionDiagnostic = null;
-            const raw_span: TypeSyntax.Span = switch (parsed) {
-                .parsed => |value| value.raw_span,
-                .excluded => |excluded| blk: {
-                    while (type_cursor.current.type != .eof and
-                        type_cursor.current.start < excluded.admission_end)
-                    {
-                        type_cursor.advance();
-                    }
-                    break :blk excluded.raw_span;
-                },
-                .failure => |failure| switch (failure) {
-                    .nesting_too_deep => |at| blk: {
-                        var validation = type_cursor;
-                        switch (TypeSyntax.validatePrimitiveAfterDepthRefusal(source, &validation)) {
-                            .parsed => type_cursor = validation,
-                            .failure => return .{ .out_of_slice = .malformed_annotation },
-                        }
-                        nesting_refusal = .{
-                            .kind = .nesting_too_deep,
-                            .span = tokenSpan(at),
-                        };
-                        break :blk .{
-                            .start = colon.start + colon.len,
-                            .end = type_cursor.current.start,
-                        };
-                    },
-                    .missing_type, .unmatched_parenthesis, .unsupported_suffix => return .{ .out_of_slice = .malformed_annotation },
-                },
-            };
-            if (nesting_refusal) |diagnostic| {
-                if (mode == .compile) {
-                    try appendAnyDiagnostics(
-                        allocator,
-                        &result.diagnostics,
-                        source,
-                        raw_span.start,
-                        diagnostic.span.start,
-                    );
-                } else {
-                    result.diagnostics.clearRetainingCapacity();
-                }
-                try result.diagnostics.append(allocator, diagnostic);
-                if (mode == .compile and result.diagnostics.items.len > 1) {
-                    result.diagnostics.items.len = 1;
-                }
-            } else try appendAdmissionDiagnostics(
-                allocator,
-                &result.diagnostics,
-                source,
-                raw_span,
-            );
-            switch (parsed) {
-                .parsed, .failure => {},
-                .excluded => |excluded| switch (excluded.reason) {
-                    .implementation_budget => return .{ .out_of_slice = .compound_annotation },
-                    .malformed_syntax => return .{ .out_of_slice = .malformed_annotation },
-                    .unsupported_syntax => if (result.diagnostics.items.len == 0) {
-                        if (startsWithTypeComment(source, colon.start + colon.len)) {
-                            return .{ .out_of_slice = .type_comment };
-                        }
-                        return .{ .out_of_slice = .compound_annotation };
-                    },
-                },
-            }
-
-            tokenizer = type_cursor.tokenizer;
-            current = type_cursor.current;
-        }
-
-        if (current.type == .assign) {
-            const initializer_prefix = current;
-            advance(&tokenizer, &current);
-            const refused = try scanInitializer(
-                allocator,
-                source,
-                &tokenizer,
-                &current,
-                initializer_prefix,
-                &result.diagnostics,
-                &has_erased_prefix,
-            );
-            if (refused) |reason| return .{ .out_of_slice = reason };
-        }
-
-        if (current.type == .semicolon) {
-            advance(&tokenizer, &current);
-        } else if (current.type != .eof) {
-            return .{ .out_of_slice = .unsupported_initializer };
-        }
-    }
-
-    if (annotation_count != 1 and declaration_count == 0 and !has_erased_prefix) {
-        return .{ .out_of_slice = .annotation_count };
-    }
-    if (mode == .compile and result.diagnostics.items.len > 1) {
-        result.diagnostics.items.len = 1;
-    }
-    owns_result = false;
-    return .{ .eligible = result };
-}
-
-fn scanPreflightGenericFunction(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-) !bool {
-    if (!try scanPreflightGenericFunctionHeader(
-        allocator,
-        source,
-        tokenizer,
-        current,
-        diagnostics,
-    )) return false;
-    var function_depth: u16 = 1;
-    while (function_depth > 0) {
-        if (current.type == .eof) return false;
-        if (current.type == .rbrace) {
-            function_depth -= 1;
-            advance(tokenizer, current);
-            continue;
-        }
-        if (current.type == .kw_function) {
-            if (function_depth >= TypeSyntax.max_type_depth) return false;
-            if (!try scanPreflightGenericFunctionHeader(
-                allocator,
-                source,
-                tokenizer,
-                current,
-                diagnostics,
-            )) return false;
-            function_depth += 1;
-            continue;
-        }
-        if (current.type == .kw_const or current.type == .kw_let) {
-            advance(tokenizer, current);
-            if (current.type != .identifier) return false;
-            advance(tokenizer, current);
-            if (current.type == .colon or current.type != .assign) return false;
-            const initializer_prefix = current.*;
-            advance(tokenizer, current);
-            if (try scanInitializer(
-                allocator,
-                source,
-                tokenizer,
-                current,
-                initializer_prefix,
-                diagnostics,
-                null,
-            )) |_| return false;
-            if (current.type != .semicolon) return false;
-            advance(tokenizer, current);
-            continue;
-        }
-        if (current.type == .kw_return) {
-            const initializer_prefix = current.*;
-            advance(tokenizer, current);
-            if (try scanInitializer(
-                allocator,
-                source,
-                tokenizer,
-                current,
-                initializer_prefix,
-                diagnostics,
-                null,
-            )) |_| return false;
-            if (current.type != .semicolon) return false;
-            advance(tokenizer, current);
-            continue;
-        }
-        return false;
-    }
-    return true;
-}
-
-fn scanPreflightGenericFunctionHeader(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-) !bool {
-    const keyword = current.*;
-    advance(tokenizer, current);
-    if (current.type != .identifier) return false;
-    const name = current.*;
-    const name_gap = source[@as(usize, keyword.start + keyword.len)..@as(usize, name.start)];
-    if (std.mem.trim(u8, name_gap, " \t\r\n").len != 0) return false;
-    advance(tokenizer, current);
-    if (!TypeSyntax.tokenStartsGenericList(source, current.*) or
-        name.start + name.len != current.start) return false;
-    const scanned = (try TypeSyntax.scanBalancedGenericList(
-        allocator,
-        source,
-        current.start,
-    )) orelse return false;
-    if (!TypeSyntax.isPrivateGenericListEligible(source, scanned)) return false;
-    if (findFirstRemovedForm(
-        source,
-        @as(usize, scanned.span.start + 1),
-        @as(usize, scanned.span.end - 1),
-    )) |diagnostic| {
-        try appendDiagnosticAtNewPosition(allocator, diagnostics, diagnostic);
-    }
-
-    while (current.type != .eof and current.start < scanned.span.end) {
-        advance(tokenizer, current);
-    }
-    if (current.type != .lparen) return false;
-    const gap = source[@as(usize, scanned.span.end)..@as(usize, current.start)];
-    if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return false;
-
-    advance(tokenizer, current);
-    if (current.type != .rparen) while (true) {
-        if (current.type != .identifier) return false;
-        advance(tokenizer, current);
-        if (current.type == .rparen) break;
-        if (current.type != .comma) return false;
-        advance(tokenizer, current);
-    };
-    advance(tokenizer, current);
-    if (current.type != .lbrace) return false;
-    advance(tokenizer, current);
-    return true;
-}
-
-fn scanPreflightGenericArrow(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    previous: Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-) !bool {
-    if (!TypeSyntax.isPrivateArrowPrefixEligible(source, previous, current.start)) return false;
-    const scanned = (try TypeSyntax.scanBalancedGenericList(
-        allocator,
-        source,
-        current.start,
-    )) orelse return false;
-    if (!TypeSyntax.isPrivateGenericListEligible(source, scanned)) return false;
-    if (findFirstRemovedForm(
-        source,
-        @as(usize, scanned.span.start + 1),
-        @as(usize, scanned.span.end - 1),
-    )) |diagnostic| try appendDiagnosticAtNewPosition(allocator, diagnostics, diagnostic);
-
-    while (current.type != .eof and current.start < scanned.span.end) {
-        advance(tokenizer, current);
-    }
-    if (current.type != .lparen) return false;
-    const gap = source[@as(usize, scanned.span.end)..@as(usize, current.start)];
-    if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return false;
-    advance(tokenizer, current);
-    if (current.type != .rparen) while (true) {
-        if (current.type != .identifier) return false;
-        advance(tokenizer, current);
-        if (current.type == .rparen) break;
-        if (current.type != .comma) return false;
-        advance(tokenizer, current);
-    };
-    advance(tokenizer, current);
-    if (current.type != .arrow) return false;
-    advance(tokenizer, current);
-    if (current.type == .lbrace) return false;
-    return try scanPreflightArrowBodyExpression(
-        allocator,
-        source,
-        tokenizer,
-        current,
-        diagnostics,
-    );
-}
-
-fn scanPreflightArrowBodyExpression(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-) !bool {
-    switch (current.type) {
-        .identifier, .number, .string_literal, .true_lit, .false_lit, .null_lit, .undefined_lit => advance(tokenizer, current),
-        else => return false,
-    }
-    if (TypeSyntax.tokenStartsGenericList(source, current.*)) {
-        switch (try scanPreflightExplicitCall(
-            allocator,
-            source,
-            tokenizer,
-            current,
-            diagnostics,
-        )) {
-            .scanned => {},
-            .not_call, .excluded => return false,
-        }
-    }
-    if (current.type == .lparen) {
-        var depth: u16 = 1;
-        advance(tokenizer, current);
-        while (current.type != .eof and depth > 0) {
-            switch (current.type) {
-                .lparen => depth +|= 1,
-                .rparen => depth -= 1,
-                .identifier,
-                .number,
-                .string_literal,
-                .true_lit,
-                .false_lit,
-                .null_lit,
-                .undefined_lit,
-                .comma,
-                => {},
-                else => return false,
-            }
-            advance(tokenizer, current);
-        }
-        if (depth != 0) return false;
-    }
-    return current.type == .semicolon or current.type == .comma or
-        current.type == .rparen or current.type == .rbrace;
-}
-
-const PreflightExplicitCall = enum {
-    not_call,
-    excluded,
-    scanned,
-};
-
-fn scanPreflightExplicitCall(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-) !PreflightExplicitCall {
-    if (!TypeSyntax.rawLooksLikeComparison(source, current.start)) return .not_call;
-    const scanned = switch (try TypeSyntax.scanExplicitCallTypeArguments(
-        allocator,
-        source,
-        current.start,
-    )) {
-        .not_call => return .not_call,
-        .excluded => return .excluded,
-        .scanned => |value| value,
-    };
-    if (!TypeSyntax.isPrivateGenericListEligible(source, scanned)) return .excluded;
-    if (findFirstRemovedForm(
-        source,
-        @as(usize, scanned.span.start + 1),
-        @as(usize, scanned.span.end - 1),
-    )) |diagnostic| try appendDiagnosticAtNewPosition(allocator, diagnostics, diagnostic);
-    while (current.type != .eof and current.start < scanned.span.end) {
-        advance(tokenizer, current);
-    }
-    if (current.type != .lparen or current.start != scanned.span.end) return .excluded;
-    return .scanned;
-}
-
-fn isDeclarationBoundary(
-    source: []const u8,
-    start: u32,
-    last_erased_type_span: ?TypeSyntax.Span,
-) bool {
-    if (start == 0) return true;
-    const previous_offset = start - 1;
-    const previous = if (last_erased_type_span) |span|
-        if (previous_offset >= span.start and previous_offset < span.end)
-            if (source[previous_offset] == '\n') @as(u8, '\n') else @as(u8, ' ')
-        else
-            source[previous_offset]
-    else
-        source[previous_offset];
-    return previous == ';' or previous == '{' or previous == '}' or previous == '\n';
-}
-
-fn skipDeclarationWhitespace(source: []const u8, start: u32) u32 {
-    var offset: usize = @min(@as(usize, start), source.len);
-    while (offset < source.len) : (offset += 1) {
-        switch (source[offset]) {
-            ' ', '\t', '\r', '\n' => {},
-            else => break,
-        }
-    }
-    return @intCast(offset);
-}
-
-fn hasUnterminatedSkippedBlockComment(source: []const u8) bool {
-    var tokenizer = Tokenizer.init(source);
-    var previous_end: usize = 0;
-    while (tokenizer.pos < source.len) {
-        const previous_pos = tokenizer.pos;
-        const token = tokenizer.next();
-        const token_start = @min(@as(usize, token.start), source.len);
-        if (triviaGapHasUnterminatedBlockComment(source, previous_end, token_start)) return true;
-        if (token.type == .eof) return false;
-        if (tokenizer.pos <= previous_pos) return true;
-        previous_end = @min(token_start + token.len, source.len);
-    }
-    return false;
-}
-
-fn triviaGapHasUnterminatedBlockComment(source: []const u8, start: usize, end: usize) bool {
-    var offset = @min(start, end);
-    while (offset + 1 < end) {
-        if (source[offset] == '/' and source[offset + 1] == '/') {
-            offset += 2;
-            while (offset < end and source[offset] != '\n') offset += 1;
-            continue;
-        }
-        if (source[offset] != '/' or source[offset + 1] != '*') {
-            offset += 1;
-            continue;
-        }
-        offset += 2;
-        while (offset + 1 < end and !(source[offset] == '*' and source[offset + 1] == '/')) {
-            offset += 1;
-        }
-        if (offset + 1 >= end) return true;
-        offset += 2;
-    }
-    return false;
-}
-
-fn advance(tokenizer: *Tokenizer, current: *Token) void {
-    current.* = tokenizer.next();
-}
-
-fn isTypeDeclarationWord(text: []const u8) bool {
-    return std.mem.eql(u8, text, "type") or
-        std.mem.eql(u8, text, "structural") or
-        std.mem.eql(u8, text, "nominal") or
-        std.mem.eql(u8, text, "interface");
-}
-
-fn isAnnotationDelimiter(kind: TokenType) bool {
-    return kind == .assign or kind == .semicolon or kind == .eof;
-}
-
-fn isRemovedRoot(token: Token, source: []const u8) bool {
-    return token.type == .kw_void or
-        (token.type == .identifier and std.mem.eql(u8, token.text(source), "any"));
-}
-
-fn isRemovedSuffix(token: Token) bool {
-    return token.type == .identifier or token.type == .kw_void;
-}
-
-fn scanInitializer(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    initial_previous: Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-    has_erased_prefix: ?*bool,
-) !?OutOfSliceReason {
-    var depth: u16 = 0;
-    var can_end_expression = false;
-    var previous = initial_previous;
-
-    while (current.type != .eof) {
-        if (current.type == .semicolon and depth == 0) return null;
-        if (TypeSyntax.tokenStartsGenericList(source, current.*)) {
-            if (!can_end_expression) {
-                var arrow_tokenizer = tokenizer.*;
-                var arrow_current = current.*;
-                if (try scanPreflightGenericArrow(
-                    allocator,
-                    source,
-                    &arrow_tokenizer,
-                    &arrow_current,
-                    previous,
-                    diagnostics,
-                )) {
-                    tokenizer.* = arrow_tokenizer;
-                    current.* = arrow_current;
-                    can_end_expression = true;
-                    continue;
-                }
-                if (try scanPreflightErasedPrefix(
-                    allocator,
-                    source,
-                    tokenizer,
-                    current,
-                    diagnostics,
-                    .root_expression,
-                )) {
-                    if (has_erased_prefix) |flag| flag.* = true;
-                    can_end_expression = true;
-                    continue;
-                }
-                return .unsupported_initializer;
-            }
-            switch (try scanPreflightExplicitCall(
-                allocator,
-                source,
-                tokenizer,
-                current,
-                diagnostics,
-            )) {
-                .scanned => {
-                    depth +|= 1;
-                    can_end_expression = false;
-                    advance(tokenizer, current);
-                    continue;
-                },
-                .excluded => return .unsupported_initializer,
-                .not_call => {},
-            }
-            can_end_expression = false;
-            advance(tokenizer, current);
-            continue;
-        }
-        switch (current.type) {
-            .number, .string_literal, .true_lit, .false_lit, .null_lit, .undefined_lit => {
-                can_end_expression = true;
-            },
-            .identifier => {
-                if (std.mem.eql(u8, current.text(source), "satisfies")) {
-                    return .assertion_syntax;
-                }
-                can_end_expression = true;
-            },
-            .lparen => {
-                depth +|= 1;
-                can_end_expression = false;
-            },
-            .rparen => {
-                if (depth > 0) depth -= 1;
-                can_end_expression = true;
-            },
-            .comma,
-            .plus,
-            .minus,
-            .star,
-            .slash,
-            .percent,
-            .star_star,
-            .eq_eq,
-            .ne_ne,
-            .gt,
-            .le,
-            .ge,
-            .lt_lt,
-            .gt_gt,
-            .gt_gt_gt,
-            .ampersand_ampersand,
-            .pipe_pipe,
-            .question_question,
-            .assign,
-            .plus_assign,
-            .minus_assign,
-            .star_assign,
-            .slash_assign,
-            .percent_assign,
-            .ampersand_assign,
-            .pipe_assign,
-            .caret_assign,
-            .lt_lt_assign,
-            .gt_gt_assign,
-            .gt_gt_gt_assign,
-            .star_star_assign,
-            .ampersand_ampersand_assign,
-            .pipe_pipe_assign,
-            .question_question_assign,
-            .tilde,
-            .kw_typeof,
-            .kw_void,
-            => can_end_expression = false,
-            .bang => {
-                if (can_end_expression) return .assertion_syntax;
-                can_end_expression = false;
-            },
-            .kw_as => return .assertion_syntax,
-            .template_literal, .template_head, .template_middle, .template_tail => return .template_literal,
-            .regex_literal => return .regex_literal,
-            .colon => return .unsupported_annotation_position,
-            else => return .unsupported_initializer,
-        }
-        previous = current.*;
-        advance(tokenizer, current);
-    }
-    return null;
-}
-
-const ErasedPrefixPreflightContext = enum {
-    root_expression,
-    nested_group,
-    statement_block,
-};
-
-const ErasedPrefixPreflightFrame = struct {
-    state: enum {
-        group_value,
-        nested_number,
-        group_close,
-        object_key,
-        object_colon,
-        object_value,
-        object_close,
-        block_const,
-        block_name,
-        block_assign,
-        block_value,
-        block_semicolon,
-        block_close,
-    },
-    allow_arrow: bool = false,
-};
-
-fn scanPreflightErasedPrefix(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-    context: ErasedPrefixPreflightContext,
-) !bool {
-    var local_tokenizer = tokenizer.*;
-    var local = current.*;
-    var frames: [TypeSyntax.max_type_depth]ErasedPrefixPreflightFrame = undefined;
-    var depth: usize = 0;
-    if (!try pushPreflightErasedPrefixFrame(
-        allocator,
-        source,
-        &local_tokenizer,
-        &local,
-        diagnostics,
-        frames[0..],
-        &depth,
-        context,
-    )) return false;
-
-    while (depth > 0) {
-        const frame = &frames[depth - 1];
-        switch (frame.state) {
-            .nested_number => {
-                if (local.type != .number) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .group_close;
-            },
-            .group_value => {
-                if (local.type == .number) {
-                    advance(&local_tokenizer, &local);
-                    frame.state = .group_close;
-                } else if (TypeSyntax.tokenStartsGenericList(source, local)) {
-                    frame.state = .group_close;
-                    if (!try pushPreflightErasedPrefixFrame(
-                        allocator,
-                        source,
-                        &local_tokenizer,
-                        &local,
-                        diagnostics,
-                        frames[0..],
-                        &depth,
-                        .nested_group,
-                    )) return false;
-                } else if (local.type == .lparen and frame.allow_arrow) {
-                    advance(&local_tokenizer, &local);
-                    if (local.type != .identifier) return false;
-                    const parameter = local.text(source);
-                    advance(&local_tokenizer, &local);
-                    if (local.type != .rparen) return false;
-                    advance(&local_tokenizer, &local);
-                    if (local.type != .arrow) return false;
-                    advance(&local_tokenizer, &local);
-                    if (local.type != .identifier or !std.mem.eql(u8, parameter, local.text(source))) {
-                        return false;
-                    }
-                    advance(&local_tokenizer, &local);
-                    frame.state = .group_close;
-                } else return false;
-            },
-            .group_close => {
-                if (local.type != .rparen) return false;
-                advance(&local_tokenizer, &local);
-                depth -= 1;
-            },
-            .object_key => {
-                if (local.type != .identifier) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .object_colon;
-            },
-            .object_colon => {
-                if (local.type != .colon) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .object_value;
-            },
-            .object_value => {
-                if (local.type == .number) {
-                    advance(&local_tokenizer, &local);
-                    frame.state = .object_close;
-                } else if (TypeSyntax.tokenStartsGenericList(source, local)) {
-                    frame.state = .object_close;
-                    if (!try pushPreflightErasedPrefixFrame(
-                        allocator,
-                        source,
-                        &local_tokenizer,
-                        &local,
-                        diagnostics,
-                        frames[0..],
-                        &depth,
-                        .nested_group,
-                    )) return false;
-                } else return false;
-            },
-            .object_close => {
-                if (local.type != .rbrace) return false;
-                advance(&local_tokenizer, &local);
-                depth -= 1;
-            },
-            .block_const => {
-                if (local.type != .kw_const) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .block_name;
-            },
-            .block_name => {
-                if (local.type != .identifier) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .block_assign;
-            },
-            .block_assign => {
-                if (local.type != .assign) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .block_value;
-            },
-            .block_value => {
-                if (local.type != .number) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .block_semicolon;
-            },
-            .block_semicolon => {
-                if (local.type != .semicolon) return false;
-                advance(&local_tokenizer, &local);
-                frame.state = .block_close;
-            },
-            .block_close => {
-                if (local.type != .rbrace) return false;
-                advance(&local_tokenizer, &local);
-                depth -= 1;
-            },
-        }
-    }
-    tokenizer.* = local_tokenizer;
-    current.* = local;
-    return true;
-}
-
-fn pushPreflightErasedPrefixFrame(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    tokenizer: *Tokenizer,
-    current: *Token,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-    frames: []ErasedPrefixPreflightFrame,
-    depth: *usize,
-    context: ErasedPrefixPreflightContext,
-) !bool {
-    if (depth.* == frames.len or
-        !TypeSyntax.tokenStartsGenericList(source, current.*) or
-        TypeSyntax.rawLooksLikeComparison(source, current.start))
-    {
-        return false;
-    }
-    const scanned = (try TypeSyntax.scanBalancedGenericList(
-        allocator,
-        source,
-        current.start,
-    )) orelse return false;
-    if (!TypeSyntax.isPrivateErasedPrefixListEligible(source, scanned)) return false;
-    while (current.type != .eof and current.start < scanned.span.end) advance(tokenizer, current);
-    const required_opener: ?TokenType = switch (context) {
-        .root_expression => null,
-        .nested_group => .lparen,
-        .statement_block => .lbrace,
-    };
-    if (required_opener) |expected| {
-        if (current.type != expected) return false;
-    } else if (current.type != .lparen and current.type != .lbrace) return false;
-    const gap = source[@as(usize, scanned.span.end)..@as(usize, current.start)];
-    if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return false;
-    if (findFirstRemovedForm(
-        source,
-        @as(usize, scanned.span.start + 1),
-        @as(usize, scanned.span.end - 1),
-    )) |diagnostic| try appendDiagnosticAtNewPosition(allocator, diagnostics, diagnostic);
-    frames[depth.*] = .{
-        .state = switch (context) {
-            .statement_block => .block_const,
-            .nested_group => .nested_number,
-            .root_expression => if (current.type == .lparen)
-                .group_value
-            else
-                .object_key,
-        },
-        .allow_arrow = context == .root_expression and current.type == .lparen,
-    };
-    depth.* += 1;
-    advance(tokenizer, current);
-    return true;
-}
-
-fn appendAdmissionDiagnostics(
-    allocator: std.mem.Allocator,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-    source: []const u8,
-    raw_span: TypeSyntax.Span,
-) !void {
-    const start: usize = raw_span.start;
-    const end: usize = @min(@as(usize, raw_span.end), source.len);
-    try appendAnyDiagnostics(allocator, diagnostics, source, start, end);
-    if (findFirstRemovedForm(source, start, end)) |diagnostic| {
-        try diagnostics.append(allocator, diagnostic);
-    }
-}
-
-fn appendDiagnosticAtNewPosition(
-    allocator: std.mem.Allocator,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-    diagnostic: AdmissionDiagnostic,
-) !void {
-    for (diagnostics.items) |existing| {
-        if (existing.span.start == diagnostic.span.start) return;
-    }
-    try diagnostics.append(allocator, diagnostic);
-}
-
-fn appendAnyDiagnostics(
-    allocator: std.mem.Allocator,
-    diagnostics: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-    source: []const u8,
-    start: usize,
-    end: usize,
-) !void {
-    var brace_depth: u16 = 0;
-    var cursor = start;
-    while (cursor < end) {
-        const byte = source[cursor];
-        if (byte == '"' or byte == '\'' or byte == '`') {
-            cursor = try skipAnyQuoted(allocator, source, cursor, end, byte);
-            continue;
-        }
-        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '/') {
-            cursor += 2;
-            while (cursor < end and source[cursor] != '\n') cursor += 1;
-            continue;
-        }
-        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '*') {
-            cursor += 2;
-            while (cursor + 1 < end and !(source[cursor] == '*' and source[cursor + 1] == '/')) cursor += 1;
-            cursor = @min(cursor + 2, end);
-            continue;
-        }
-        if (byte == '{') brace_depth +|= 1;
-        if (byte == '}') brace_depth -|= 1;
-        if (isIdentifierStart(byte) and cursor + 3 <= end and
-            std.mem.eql(u8, source[cursor .. cursor + 3], "any") and
-            (cursor + 3 == end or !isIdentifierContinue(source[cursor + 3])) and
-            !(brace_depth > 0 and isObjectTypeMemberKey(source, cursor, end)))
-        {
-            try diagnostics.append(allocator, .{
-                .kind = .any_type,
-                .span = .{ .start = @intCast(cursor), .end = @intCast(cursor + 3) },
-            });
-        }
-        cursor += 1;
-    }
-}
-
-fn findFirstRemovedForm(
-    source: []const u8,
-    start: usize,
-    end: usize,
-) ?AdmissionDiagnostic {
-    var first_removed: ?AdmissionDiagnostic = null;
-    var paren_depth: u16 = 0;
-    var brace_depth: u16 = 0;
-    var cursor = start;
-    while (cursor < end) {
-        const byte = source[cursor];
-        if (byte == '"' or byte == '\'' or byte == '`') {
-            cursor = skipAdmissionQuoted(source, cursor, end, byte);
-            continue;
-        }
-        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '/') {
-            cursor += 2;
-            while (cursor < end and source[cursor] != '\n') cursor += 1;
-            continue;
-        }
-        if (byte == '/' and cursor + 1 < end and source[cursor + 1] == '*') {
-            cursor += 2;
-            while (cursor + 1 < end and !(source[cursor] == '*' and source[cursor + 1] == '/')) cursor += 1;
-            cursor = @min(cursor + 2, end);
-            continue;
-        }
-        switch (byte) {
-            '(' => paren_depth +|= 1,
-            ')' => paren_depth -|= 1,
-            '{' => brace_depth +|= 1,
-            '}' => brace_depth -|= 1,
-            '?' => if (first_removed == null and paren_depth > 0 and brace_depth == 0 and
-                isOptionalParameterMarker(source, start, cursor, end))
-            {
-                first_removed = .{
-                    .kind = .optional_parameter,
-                    .span = .{ .start = @intCast(cursor), .end = @intCast(cursor + 1) },
-                };
-            },
-            else => {},
-        }
-        if (first_removed != null) return first_removed;
-        if (!isIdentifierStart(source[cursor])) {
-            cursor += 1;
-            continue;
-        }
-        const ident_start = cursor;
-        cursor += 1;
-        while (cursor < end and isIdentifierContinue(source[cursor])) cursor += 1;
-        const ident = source[ident_start..cursor];
-        const span: TypeSyntax.Span = .{ .start = @intCast(ident_start), .end = @intCast(cursor) };
-        if (std.mem.eql(u8, ident, "void")) {
-            first_removed = .{ .kind = .void_type, .span = span };
-        } else if (std.mem.eql(u8, ident, "Array") or std.mem.eql(u8, ident, "ReadonlyArray")) {
-            const after = skipTypeTrivia(source, cursor, end);
-            if (after < end and source[after] == '<') {
-                first_removed = .{
-                    .kind = if (std.mem.eql(u8, ident, "Array"))
-                        .array_type_alias
-                    else
-                        .readonly_array_type_alias,
-                    .span = span,
-                };
-            }
-        }
-        if (first_removed != null) return first_removed;
-    }
-    return first_removed;
-}
-
-fn skipAnyQuoted(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    start: usize,
-    end: usize,
-    quote: u8,
-) !usize {
-    if (quote != '`') return skipAdmissionQuoted(source, start, end, quote);
-
-    var interpolation_depths: std.ArrayListUnmanaged(u32) = .empty;
-    defer interpolation_depths.deinit(allocator);
-    try interpolation_depths.append(allocator, 0);
-    var cursor = start + 1;
-    while (cursor < end) {
-        if (source[cursor] == '\\' and cursor + 1 < end) {
-            cursor += 2;
-            continue;
-        }
-        const level = interpolation_depths.items.len - 1;
-        if (interpolation_depths.items[level] == 0) {
-            if (source[cursor] == '`') {
-                _ = interpolation_depths.pop();
-                cursor += 1;
-                if (interpolation_depths.items.len == 0) return cursor;
-                continue;
-            }
-            if (source[cursor] == '$' and cursor + 1 < end and source[cursor + 1] == '{') {
-                interpolation_depths.items[level] = 1;
-                cursor += 2;
-                continue;
-            }
-            cursor += 1;
-            continue;
-        }
-        if (source[cursor] == '"' or source[cursor] == '\'') {
-            cursor = skipAdmissionQuoted(source, cursor, end, source[cursor]);
-            continue;
-        }
-        if (source[cursor] == '`') {
-            try interpolation_depths.append(allocator, 0);
-            cursor += 1;
-            continue;
-        }
-        if (source[cursor] == '{') interpolation_depths.items[level] += 1;
-        if (source[cursor] == '}') interpolation_depths.items[level] -= 1;
-        cursor += 1;
-    }
-    return end;
-}
-
-fn skipTypeTrivia(source: []const u8, start: usize, end: usize) usize {
-    var cursor = start;
-    while (cursor < end) {
-        if (std.ascii.isWhitespace(source[cursor])) {
-            cursor += 1;
-            continue;
-        }
-        if (source[cursor] == '/' and cursor + 1 < end and source[cursor + 1] == '/') {
-            cursor += 2;
-            while (cursor < end and source[cursor] != '\n') cursor += 1;
-            continue;
-        }
-        if (source[cursor] == '/' and cursor + 1 < end and source[cursor + 1] == '*') {
-            cursor += 2;
-            while (cursor + 1 < end and !(source[cursor] == '*' and source[cursor + 1] == '/')) cursor += 1;
-            cursor = @min(cursor + 2, end);
-            continue;
-        }
-        break;
-    }
-    return cursor;
-}
-
-fn skipAdmissionQuoted(source: []const u8, start: usize, end: usize, quote: u8) usize {
-    var cursor = start + 1;
-    while (cursor < end) {
-        if (source[cursor] == '\\' and cursor + 1 < end) {
-            cursor += 2;
-            continue;
-        }
-        if (source[cursor] == quote) return cursor + 1;
-        cursor += 1;
-    }
-    return end;
-}
-
-fn isObjectTypeMemberKey(source: []const u8, start: usize, end: usize) bool {
-    var cursor = start;
-    while (cursor < end and isIdentifierContinue(source[cursor])) cursor += 1;
-    while (cursor < end and (source[cursor] == ' ' or source[cursor] == '\t')) cursor += 1;
-    if (cursor < end and source[cursor] == '?') {
-        cursor += 1;
-        while (cursor < end and (source[cursor] == ' ' or source[cursor] == '\t')) cursor += 1;
-    }
-    return cursor < end and (source[cursor] == ':' or source[cursor] == '(');
-}
-
-fn isOptionalParameterMarker(
-    source: []const u8,
-    start: usize,
-    marker: usize,
-    end: usize,
-) bool {
-    var before = marker;
-    while (before > start and std.ascii.isWhitespace(source[before - 1])) before -= 1;
-    if (before == start or !isIdentifierContinue(source[before - 1])) return false;
-    var after = marker + 1;
-    while (after < end and std.ascii.isWhitespace(source[after])) after += 1;
-    return after < end and source[after] == ':';
-}
-
-fn isIdentifierStart(byte: u8) bool {
-    return std.ascii.isAlphabetic(byte) or byte == '_' or byte == '$';
-}
-
-fn startsWithTypeComment(source: []const u8, start: u32) bool {
-    var cursor: usize = @min(@as(usize, start), source.len);
-    while (cursor < source.len and std.ascii.isWhitespace(source[cursor])) cursor += 1;
-    return cursor + 1 < source.len and source[cursor] == '/' and
-        (source[cursor + 1] == '/' or source[cursor + 1] == '*');
-}
-
-fn isIdentifierContinue(byte: u8) bool {
-    return isIdentifierStart(byte) or std.ascii.isDigit(byte);
-}
-
-fn tokenSpan(token: Token) TypeSyntax.Span {
-    return .{ .start = token.start, .end = token.start + token.len };
-}
-
-fn compare(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    mode: AdmissionMode,
-) !Verdict {
-    var checked = switch (try preflight(allocator, source, mode)) {
-        .eligible => |eligible| eligible,
-        .out_of_slice => |reason| return .{ .out_of_slice = reason },
-    };
-    defer checked.deinit(allocator);
-
-    if (checked.diagnostics.items.len > 0) {
-        if (!try legacyAdmissionMatches(allocator, source, mode, checked.diagnostics.items)) {
-            return .{ .differs = "direct and legacy admission diagnostics differ" };
-        }
-        return .{ .admission_refused = .{
-            .first = checked.diagnostics.items[0].kind,
-            .count = checked.diagnostics.items.len,
-        } };
-    }
-
-    var prepared = try PreparedSource.init(allocator, source, "<typed-compare>.ts", .{});
-    defer prepared.deinit();
-    if (prepared.stripDiagnostics().len != 0) {
-        return .{ .differs = "legacy preparation produced unmodeled diagnostics" };
-    }
-
-    var legacy_alloc = CountingAllocator.init(allocator);
-    var direct_alloc = CountingAllocator.init(allocator);
-    var type_alloc = CountingAllocator.init(allocator);
-
-    var legacy_atoms = AtomTable.init(legacy_alloc.allocator());
-    defer legacy_atoms.deinit();
-    var direct_atoms = AtomTable.init(direct_alloc.allocator());
-    defer direct_atoms.deinit();
-
-    var legacy = try JsParser.init(legacy_alloc.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
-
-    var direct = try JsParser.initTyped(
-        direct_alloc.allocator(),
-        type_alloc.allocator(),
-        source,
-    );
-    defer direct.deinit();
-    direct.setAtomTable(&direct_atoms);
-
-    var legacy_error: ?anyerror = null;
-    const legacy_root = legacy.parse() catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => blk: {
-            legacy_error = err;
-            break :blk null;
-        },
-    };
-    var direct_error: ?anyerror = null;
-    const direct_root = direct.parse() catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => blk: {
-            direct_error = err;
-            break :blk null;
-        },
-    };
-
-    if (legacy_root == null or direct_root == null) {
-        if (legacy_root != null or direct_root != null) {
-            return .{ .differs = "only one runtime parser accepted the source" };
-        }
-        if (legacy_error != direct_error) {
-            return .{ .differs = "runtime parser error tags differ" };
-        }
-        if (!sameParseErrors(&legacy, &direct)) {
-            return .{ .differs = "runtime parser errors differ" };
-        }
-        if (!legacy_alloc.sameRuntimeShape(direct_alloc)) {
-            return .{ .differs = "runtime allocation shapes differ after refusal" };
-        }
-        return .equivalent;
-    }
-
-    if (compareRuntime(
-        &legacy,
-        legacy_root.?,
-        &legacy_atoms,
-        &direct,
-        direct_root.?,
-        &direct_atoms,
-    )) |difference| {
-        return .{ .differs = difference };
-    }
-    if (!legacy_alloc.sameRuntimeShape(direct_alloc)) {
-        return .{ .differs = "runtime allocation shapes differ" };
-    }
-    if (direct.type_store.annotations.items.len == 0 and
-        direct.type_store.declarations.items.len == 0 and
-        direct.type_store.erased_type_prefixes.items.len == 0)
-    {
-        return .{ .differs = "the direct parser retained no type syntax" };
-    }
-    if (!try compareLowering(allocator, &prepared, &direct)) {
-        return .{ .differs = "direct and legacy type lowering differ" };
-    }
-    if (type_alloc.alloc_calls == 0) {
-        return .{ .differs = "the type store did not use its separate allocator" };
-    }
-    return .equivalent;
-}
-
-fn legacyAdmissionMatches(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    mode: AdmissionMode,
-    direct: []const AdmissionDiagnostic,
-) !bool {
-    var first: ?engine.stripper.StripDiagnostic = null;
-    var prepared = PreparedSource.init(allocator, source, "<typed-compare>.ts", .{
-        .diagnostic_out = &first,
-        .collect_all_diagnostics = mode == .collect,
-    }) catch |err| {
-        switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => {},
-        }
-        if (first == null or direct.len != 1) return false;
-        return admissionMatchesStrip(source, direct[0], first.?);
-    };
-    defer prepared.deinit();
-
-    const legacy = prepared.stripDiagnostics();
-    if (legacy.len != direct.len) return false;
-    for (legacy, direct) |legacy_diagnostic, direct_diagnostic| {
-        if (!admissionMatchesStrip(source, direct_diagnostic, legacy_diagnostic)) return false;
-    }
-    return true;
-}
-
-fn admissionMatchesStrip(
-    source: []const u8,
-    direct: AdmissionDiagnostic,
-    legacy: engine.stripper.StripDiagnostic,
-) bool {
-    const legacy_kind: AdmissionKind = switch (legacy.kind) {
-        .any_type => .any_type,
-        .void_type => .void_type,
-        .array_type_alias => .array_type_alias,
-        .readonly_array_type_alias => .readonly_array_type_alias,
-        .optional_parameter => .optional_parameter,
-        .nesting_too_deep => .nesting_too_deep,
-        .nominal_base_not_scalar => .nominal_base_not_scalar,
-        else => return false,
-    };
-    if (legacy_kind != direct.kind) return false;
-    const position = positionOf(source, direct.span.start);
-    return legacy.line == position.line and legacy.column == position.column;
-}
-
 fn positionOf(source: []const u8, offset: u32) struct { line: u32, column: u32 } {
     var line: u32 = 1;
     var column: u32 = 1;
@@ -1634,406 +100,60 @@ fn positionOf(source: []const u8, offset: u32) struct { line: u32, column: u32 }
     return .{ .line = line, .column = column };
 }
 
-fn sameParseErrors(left: *const JsParser, right: *const JsParser) bool {
-    const left_errors = left.errors.getErrors();
-    const right_errors = right.errors.getErrors();
-    if (left_errors.len != right_errors.len) return false;
-    for (left_errors, right_errors) |a, b| {
-        if (a.kind != b.kind or !std.meta.eql(a.location, b.location)) return false;
-        if (!std.mem.eql(u8, a.message, b.message)) return false;
-        if (!equalOptionalText(a.token_text, b.token_text)) return false;
-        if (!equalOptionalText(a.expected, b.expected)) return false;
-        if (!equalOptionalText(a.suggestion, b.suggestion)) return false;
-    }
-    return true;
-}
-
-fn equalOptionalText(left: ?[]const u8, right: ?[]const u8) bool {
-    if (left == null or right == null) return left == null and right == null;
-    return std.mem.eql(u8, left.?, right.?);
-}
-
-fn compareRuntime(
-    left: *const JsParser,
-    left_root: NodeIndex,
-    left_atoms: *AtomTable,
-    right: *const JsParser,
-    right_root: NodeIndex,
-    right_atoms: *AtomTable,
-) ?[]const u8 {
-    if (left_root != right_root) return "runtime roots differ";
-
-    if (!equalSlices(engine.parser.NodeTag, left.nodes.tags.items, right.nodes.tags.items)) {
-        return "runtime node tags differ";
-    }
-    if (!equalLocations(left.nodes.locs.items, right.nodes.locs.items)) {
-        return "runtime node locations differ";
-    }
-    if (!equalPayloads(left.nodes.data.items, right.nodes.data.items)) {
-        return "runtime node payloads differ";
-    }
-    if (!equalSlices(u16, left.nodes.binding_name_atoms.items, right.nodes.binding_name_atoms.items)) {
-        return "runtime binding atom payloads differ";
-    }
-    if (!equalSlices(u32, left.nodes.extra.items, right.nodes.extra.items)) {
-        return "runtime extra payload lists differ";
-    }
-    if (!equalSlices(NodeIndex, left.nodes.index_lists.items, right.nodes.index_lists.items)) {
-        return "runtime node index lists differ";
-    }
-    if (!equalConstants(&left.constants, &right.constants)) return "runtime constants differ";
-    if (!equalScopes(&left.scopes, &right.scopes)) return "runtime scopes or bindings differ";
-    if (!equalAtoms(left_atoms, right_atoms)) return "runtime dynamic atoms differ";
-    return null;
-}
-
-fn equalSlices(comptime T: type, left: []const T, right: []const T) bool {
-    if (left.len != right.len) return false;
-    for (left, right) |a, b| {
-        if (a != b) return false;
-    }
-    return true;
-}
-
-fn equalLocations(
-    left: []const engine.parser.SourceLocation,
-    right: []const engine.parser.SourceLocation,
-) bool {
-    if (left.len != right.len) return false;
-    for (left, right) |a, b| {
-        if (!std.meta.eql(a, b)) return false;
-    }
-    return true;
-}
-
-fn equalPayloads(
-    left: []const engine.parser.DataPayload,
-    right: []const engine.parser.DataPayload,
-) bool {
-    if (left.len != right.len) return false;
-    for (left, right) |a, b| {
-        if (a.a != b.a or a.b != b.b) return false;
-    }
-    return true;
-}
-
-fn equalConstants(
-    left: *const engine.parser.ConstantPool,
-    right: *const engine.parser.ConstantPool,
-) bool {
-    if (left.strings.items.len != right.strings.items.len) return false;
-    for (left.strings.items, right.strings.items) |a, b| {
-        if (!std.mem.eql(u8, a, b)) return false;
-    }
-    if (left.floats.items.len != right.floats.items.len) return false;
-    for (left.floats.items, right.floats.items) |a, b| {
-        if (@as(u64, @bitCast(a)) != @as(u64, @bitCast(b))) return false;
-    }
-    return true;
-}
-
-fn equalScopes(
-    left: *const engine.parser.ScopeAnalyzer,
-    right: *const engine.parser.ScopeAnalyzer,
-) bool {
-    if (left.current_scope != right.current_scope or left.next_scope_id != right.next_scope_id) return false;
-    if (left.scopes.items.len != right.scopes.items.len) return false;
-    for (left.scopes.items, right.scopes.items) |a, b| {
-        if (a.id != b.id or a.parent != b.parent or a.kind != b.kind) return false;
-        if (a.enclosing_function != b.enclosing_function) return false;
-        if (a.max_local_count != b.max_local_count or a.current_local_slot != b.current_local_slot) return false;
-        if (a.bindings.items.len != b.bindings.items.len or a.upvalues.items.len != b.upvalues.items.len) return false;
-        for (a.bindings.items, b.bindings.items) |ab, bb| {
-            if (!std.mem.eql(u8, ab.name, bb.name)) return false;
-            if (ab.name_atom != bb.name_atom or ab.slot != bb.slot or ab.kind != bb.kind) return false;
-            if (ab.is_const != bb.is_const or ab.is_captured != bb.is_captured) return false;
-        }
-        for (a.upvalues.items, b.upvalues.items) |au, bu| {
-            if (au.source_scope_id != bu.source_scope_id or au.source_slot != bu.source_slot) return false;
-            if (au.slot != bu.slot or !equalCapture(au.capture, bu.capture)) return false;
-            if (!std.mem.eql(u8, au.name, bu.name)) return false;
-        }
-    }
-    return true;
-}
-
-fn equalCapture(
-    left: engine.parser.Upvalue.Capture,
-    right: engine.parser.Upvalue.Capture,
-) bool {
-    return switch (left) {
-        .local => |slot| switch (right) {
-            .local => |other| slot == other,
-            else => false,
-        },
-        .upvalue => |slot| switch (right) {
-            .upvalue => |other| slot == other,
-            else => false,
-        },
-    };
-}
-
-fn equalAtoms(left: *AtomTable, right: *AtomTable) bool {
-    if (left.count() != right.count() or left.next_id != right.next_id) return false;
-    var raw = engine.object.Atom.FIRST_DYNAMIC;
-    while (raw < left.next_id) : (raw += 1) {
-        const atom: engine.object.Atom = @enumFromInt(raw);
-        const left_name = left.getName(atom) orelse return false;
-        const right_name = right.getName(atom) orelse return false;
-        if (!std.mem.eql(u8, left_name, right_name)) return false;
-    }
-    return true;
-}
-
-fn compareLowering(
+fn expectDirectAdmission(
     allocator: std.mem.Allocator,
-    prepared: *PreparedSource,
-    direct: *const JsParser,
-) !bool {
-    const direct_store = &direct.type_store;
-    var legacy_pool = TypePool.init(allocator);
-    defer legacy_pool.deinit(allocator);
-    try legacy_pool.ensureHealthy();
-    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
-    defer legacy_env.deinit();
-    try legacy_pool.ensureHealthy();
-    try legacy_env.ensureHealthy();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, allocator);
-    try legacy_env.populateFromTypeMap(prepared.typeMap() orelse return false);
-    try legacy_pool.ensureHealthy();
-    try legacy_env.ensureHealthy();
-
-    var direct_pool = TypePool.init(allocator);
-    defer direct_pool.deinit(allocator);
-    try direct_pool.ensureHealthy();
-    var direct_env = TypeEnv.init(allocator, &direct_pool);
-    defer direct_env.deinit();
-    try direct_pool.ensureHealthy();
-    try direct_env.ensureHealthy();
-    module_types.populateModuleTypes(&direct_env, &direct_pool, allocator);
-    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, allocator);
-    try lowerSyntaxStore(
-        allocator,
-        direct_store,
-        &direct_pool,
-        &direct_env,
-        engine.parser.IrView.fromIRStore(&direct.nodes, &direct.constants),
-    );
-    const type_map = prepared.typeMap() orelse return false;
-
-    var declaration_index: usize = 0;
-    for (type_map.entries.items) |entry| {
-        if (entry.kind != .type_alias and entry.kind != .distinct_type) continue;
-        if (declaration_index >= direct_store.declarations.items.len) return false;
-        const declaration = direct_store.declarations.items[declaration_index];
-        if (declaration.source_order != @as(u32, @intCast(declaration_index))) return false;
-        const expected_kind: TypeSyntax.DeclarationKind = if (entry.kind == .type_alias)
-            .structural
-        else
-            .nominal;
-        if (declaration.kind != expected_kind) return false;
-        const legacy_name = type_map.getNameText(entry) orelse return false;
-        if (!std.mem.eql(u8, legacy_name, declaration.name_span.text(direct_store.source))) return false;
-        var legacy_generic_list: ?[]const u8 = null;
-        for (type_map.entries.items) |candidate| {
-            if (candidate.kind == .generic_params and candidate.name_start == entry.name_start and
-                candidate.name_end == entry.name_end)
-            {
-                legacy_generic_list = type_map.getTypeText(candidate);
-                break;
-            }
-        }
-        if ((legacy_generic_list != null) != (declaration.generic_owner != null)) return false;
-        if (legacy_generic_list) |legacy_list| {
-            const owner = direct_store.generic_owners.items[declaration.generic_owner.?];
-            if (!std.mem.eql(u8, legacy_list, owner.list_span.text(direct_store.source))) return false;
-        }
-        const legacy_body = std.mem.trim(u8, type_map.getTypeText(entry), " \t\r\n");
-        switch (declaration.body) {
-            .absent => if (legacy_body.len != 0) return false,
-            .present => |body| if (!std.mem.eql(
-                u8,
-                legacy_body,
-                body.raw_span.text(direct_store.source),
-            )) return false,
-        }
-        declaration_index += 1;
-    }
-    if (declaration_index != direct_store.declarations.items.len) return false;
-
-    if (legacy_env.type_aliases.count() != direct_env.type_aliases.count()) return false;
-    var legacy_aliases = legacy_env.type_aliases.iterator();
-    while (legacy_aliases.next()) |entry| {
-        const direct_alias = direct_env.getTypeAlias(entry.key_ptr.*) orelse return false;
-        if (!try orderedTypeEqual(
-            allocator,
-            &legacy_pool,
-            entry.value_ptr.*,
-            &direct_pool,
-            direct_alias,
-        )) return false;
-        if (legacy_env.isNonContractiveType(entry.value_ptr.*) !=
-            direct_env.isNonContractiveType(direct_alias)) return false;
-        if (legacy_env.isNonContractiveAlias(entry.key_ptr.*) !=
-            direct_env.isNonContractiveAlias(entry.key_ptr.*)) return false;
-    }
-    var direct_aliases = direct_env.type_aliases.iterator();
-    while (direct_aliases.next()) |entry| {
-        if (legacy_env.getTypeAlias(entry.key_ptr.*) == null) return false;
-    }
-    if (legacy_env.generic_aliases.count() != direct_env.generic_aliases.count()) return false;
-    var legacy_generic_aliases = legacy_env.generic_aliases.iterator();
-    while (legacy_generic_aliases.next()) |entry| {
-        const direct_alias = direct_env.generic_aliases.get(entry.key_ptr.*) orelse return false;
-        if (entry.value_ptr.param_count != direct_alias.param_count) return false;
-        for (
-            entry.value_ptr.param_names[0..entry.value_ptr.param_count],
-            direct_alias.param_names[0..direct_alias.param_count],
-        ) |legacy_name, direct_name| {
-            if (!std.mem.eql(u8, legacy_name, direct_name)) return false;
-        }
-        if (!try orderedTypeEqual(
-            allocator,
-            &legacy_pool,
-            entry.value_ptr.body,
-            &direct_pool,
-            direct_alias.body,
-        )) return false;
-    }
-    var direct_generic_aliases = direct_env.generic_aliases.iterator();
-    while (direct_generic_aliases.next()) |entry| {
-        if (legacy_env.generic_aliases.get(entry.key_ptr.*) == null) return false;
-    }
-
-    if (legacy_env.call_type_args.count() != direct_env.call_type_args.count()) return false;
-    var legacy_calls = legacy_env.call_type_args.iterator();
-    while (legacy_calls.next()) |entry| {
-        const direct_call = direct_env.call_type_args.get(entry.key_ptr.*) orelse return false;
-        if (entry.value_ptr.count != direct_call.count) return false;
-        for (
-            entry.value_ptr.args[0..entry.value_ptr.count],
-            direct_call.args[0..direct_call.count],
-        ) |legacy_argument, direct_argument| {
-            if (!try orderedTypeEqual(
-                allocator,
-                &legacy_pool,
-                legacy_argument,
-                &direct_pool,
-                direct_argument,
-            )) return false;
-        }
-    }
-
-    var annotation_index: usize = 0;
-    for (type_map.entries.items) |entry| {
-        if (entry.kind != .var_annotation) continue;
-        if (annotation_index >= direct_store.annotations.items.len) return false;
-        const name = type_map.getNameText(entry) orelse continue;
-        const ordinal = entry.name_ordinal orelse continue;
-        const legacy_idx = legacy_env.getVarTypeByNameOrdinal(name, ordinal) orelse return false;
-        const direct_annotation = direct_store.annotations.items[annotation_index];
-        const direct_idx = direct_env.getVarTypeByBinding(
-            direct_annotation.binding.scope_id,
-            direct_annotation.binding.name_atom,
-        ) orelse return false;
-        if (!try orderedTypeEqual(allocator, &legacy_pool, legacy_idx, &direct_pool, direct_idx)) {
-            return false;
-        }
-        if (!try supplementaryTypeKeyEqual(
-            allocator,
-            &legacy_pool,
-            legacy_idx,
-            &direct_pool,
-            direct_idx,
-        )) return false;
-        annotation_index += 1;
-    }
-    return annotation_index == direct_store.annotations.items.len;
-}
-
-fn expectOrderedPrefixStoreLowering(
-    allocator: std.mem.Allocator,
-    prepared: *PreparedSource,
-    store: *const TypeSyntax.Store,
-    view: engine.parser.IrView,
+    source: []const u8,
+    mode: TypeSyntax.AdmissionMode,
+    expected_outcome: std.meta.Tag(engine.parser.AdmissionParseOutcome),
+    expected: []const TypeSyntax.AdmissionDiagnostic,
+    projected_error_count: ?usize,
 ) !void {
-    var legacy_pool = TypePool.init(allocator);
-    defer legacy_pool.deinit(allocator);
-    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
-    defer legacy_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, allocator);
-    try legacy_env.populateFromTypeMap(prepared.typeMap() orelse
-        return error.TestUnexpectedResult);
-    try legacy_pool.ensureHealthy();
-    try legacy_env.ensureHealthy();
-
-    var direct_pool = TypePool.init(allocator);
-    defer direct_pool.deinit(allocator);
-    var direct_env = TypeEnv.init(allocator, &direct_pool);
-    defer direct_env.deinit();
-    module_types.populateModuleTypes(&direct_env, &direct_pool, allocator);
-    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, allocator);
-    try lowerSyntaxStore(allocator, store, &direct_pool, &direct_env, view);
-    try direct_pool.ensureHealthy();
-    try direct_env.ensureHealthy();
-
-    try std.testing.expectEqual(legacy_pool.nodes.items.len, direct_pool.nodes.items.len);
-    for (0..legacy_pool.nodes.items.len) |index| {
-        const type_index: TypeIndex = @intCast(index);
-        try std.testing.expect(try orderedTypeEqual(
-            allocator,
-            &legacy_pool,
-            type_index,
-            &direct_pool,
-            type_index,
-        ));
-    }
-}
-
-fn supplementaryTypeKeyEqual(
-    allocator: std.mem.Allocator,
-    left_pool: *TypePool,
-    left_index: TypeIndex,
-    right_pool: *TypePool,
-    right_index: TypeIndex,
-) !bool {
-    const legacy_key = comparisonTypeKey(left_pool, allocator, left_index);
-    const direct_key = comparisonTypeKey(right_pool, allocator, right_index);
-    if (legacy_key) |left| {
-        const right = direct_key catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => return false,
-        };
-        return std.mem.eql(u8, left, right);
-    } else |left_error| {
-        switch (left_error) {
-            error.OutOfMemory => return left_error,
-            else => {},
-        }
-        _ = direct_key catch |right_error| {
-            switch (right_error) {
-                error.OutOfMemory => return right_error,
-                else => {},
-            }
-            return left_error == right_error;
-        };
-        return false;
-    }
-}
-
-fn comparisonTypeKey(
-    pool: *TypePool,
-    allocator: std.mem.Allocator,
-    index: TypeIndex,
-) type_key.KeyError![]const u8 {
-    return type_key.typeKey(pool, allocator, index) catch |err| switch (err) {
-        // The allocating writer reports an allocation refusal as WriteFailed.
-        // This private comparator normalizes that operational failure.
-        error.WriteFailed => return error.OutOfMemory,
-        else => return err,
+    var parser = try JsParser.initAdmission(allocator, allocator, source, mode);
+    defer parser.deinit();
+    const outcome = try parser.parseAdmission();
+    try std.testing.expectEqual(expected_outcome, std.meta.activeTag(outcome));
+    if (projected_error_count) |count| switch (outcome) {
+        .parser_refused => |refusal| try std.testing.expectEqual(count, refusal.projected_error_count),
+        else => return error.TestUnexpectedResult,
     };
+    const diagnostics = parser.getAdmissionDiagnostics();
+    try std.testing.expectEqual(expected.len, diagnostics.len);
+    for (expected, diagnostics) |wanted, actual| {
+        try std.testing.expectEqual(wanted.kind, actual.kind);
+        try std.testing.expect(std.meta.eql(wanted.span, actual.span));
+    }
+}
+
+fn directDiagnosticAt(source: []const u8, kind: TypeSyntax.AdmissionKind, marker: []const u8) !TypeSyntax.AdmissionDiagnostic {
+    const start = std.mem.indexOf(u8, source, marker) orelse return error.TestUnexpectedResult;
+    return .{ .kind = kind, .span = .{
+        .start = @intCast(start),
+        .end = @intCast(start + marker.len),
+    } };
+}
+
+fn expectDirectSourceWithAllocator(allocator: std.mem.Allocator, source: []const u8) !void {
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = parserIrView(&parser);
+    try std.testing.expectEqual(engine.parser.NodeTag.program, view.getTag(root).?);
+    try parser.type_store.validateRuntimeOwners(allocator, view);
+    try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
 }
 
 fn lowerSyntaxStore(
@@ -2043,255 +163,39 @@ fn lowerSyntaxStore(
     env: *TypeEnv,
     ir_view: engine.parser.IrView,
 ) !void {
-    return lowerSyntaxStoreInternal(allocator, store, pool, env, ir_view);
-}
-
-fn lowerSyntaxStoreWithoutRuntimeOwners(
-    allocator: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-    pool: *TypePool,
-    env: *TypeEnv,
-) !void {
-    return lowerSyntaxStoreInternal(allocator, store, pool, env, null);
-}
-
-fn lowerSyntaxStoreInternal(
-    allocator: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-    pool: *TypePool,
-    env: *TypeEnv,
-    ir_view: ?engine.parser.IrView,
-) !void {
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
     try pool.ensureHealthy();
     try env.ensureHealthy();
-    var application_bases = if (ir_view) |view|
-        try store.planApplicationBasesWithIr(allocator, view)
-    else
-        try store.planApplicationBases(allocator);
-    defer application_bases.deinit();
+}
 
+fn lowerStandaloneAnnotation(
+    allocator: std.mem.Allocator,
+    store: *const TypeSyntax.Store,
+    pool: *TypePool,
+) !TypeIndex {
+    try store.validate();
+    try std.testing.expectEqual(@as(usize, 1), store.annotations.items.len);
+    const annotation = store.annotations.items[0];
+    var application_bases = try store.planApplicationBases(allocator);
+    defer application_bases.deinit();
     const lowered = try allocator.alloc(TypeIndex, store.nodes.items.len);
     defer allocator.free(lowered);
     @memset(lowered, null_type_idx);
-
-    for (store.declarations.items, 0..) |_, declaration_index| {
-        try env.populateParsedDeclaration(
-            store,
-            &application_bases,
-            lowered,
-            declaration_index,
-        );
-    }
-    env.finishTypeAliasPopulation();
-    try env.ensureHealthy();
-
-    var transient_owner_index: usize = 0;
-    var transient_prefix_index: usize = 0;
-    while (true) {
-        while (transient_owner_index < store.generic_owners.items.len) {
-            const owner = store.generic_owners.items[transient_owner_index];
-            const runtime_identity = switch (owner.identity) {
-                .function, .arrow => true,
-                .structural_declaration, .nominal_declaration => false,
-            };
-            if (runtime_identity and std.meta.activeTag(owner.compatibility) == .declaration_parameters) break;
-            transient_owner_index += 1;
-        }
-        while (transient_prefix_index < store.erased_type_prefixes.items.len and
-            std.meta.activeTag(store.erased_type_prefixes.items[transient_prefix_index].compatibility) !=
-                .legacy_parameter_projection)
-        {
-            transient_prefix_index += 1;
-        }
-        const syntax_owner = if (transient_owner_index < store.generic_owners.items.len)
-            store.generic_owners.items[transient_owner_index]
-        else
-            null;
-        const prefix = if (transient_prefix_index < store.erased_type_prefixes.items.len)
-            store.erased_type_prefixes.items[transient_prefix_index]
-        else
-            null;
-        if (syntax_owner == null and prefix == null) break;
-
-        if (prefix == null or
-            (syntax_owner != null and syntax_owner.?.list_span.start < prefix.?.list_span.start))
-        {
-            try lowerTransientGenericProjection(
-                allocator,
-                store,
-                pool,
-                env,
-                &application_bases,
-                syntax_owner.?.projected_parameters,
-            );
-            transient_owner_index += 1;
-        } else {
-            const projection = switch (prefix.?.compatibility) {
-                .legacy_parameter_projection => |value| value,
-                .ignored_parameters => unreachable,
-            };
-            try lowerTransientGenericProjection(
-                allocator,
-                store,
-                pool,
-                env,
-                &application_bases,
-                projection.projected_parameters,
-            );
-            transient_prefix_index += 1;
-        }
-    }
-
-    const view = ir_view;
-    var explicit_index: usize = 0;
-    var compatibility_index: usize = 0;
-    while (true) {
-        while (compatibility_index < store.generic_owners.items.len and
-            std.meta.activeTag(store.generic_owners.items[compatibility_index].compatibility) != .legacy_call_arguments)
-        {
-            compatibility_index += 1;
-        }
-        const explicit = if (explicit_index < store.explicit_call_arguments.items.len)
-            store.explicit_call_arguments.items[explicit_index]
-        else
-            null;
-        const compatibility_owner = if (compatibility_index < store.generic_owners.items.len)
-            store.generic_owners.items[compatibility_index]
-        else
-            null;
-        if (explicit == null and compatibility_owner == null) break;
-
-        if (compatibility_owner == null or
-            (explicit != null and explicit.?.list_span.start <= compatibility_owner.?.list_span.start))
-        {
-            const syntax_call = explicit.?;
-            const runtime_view = view orelse return error.RuntimeOwnerRequired;
-            try lowerCallArgumentRange(
-                allocator,
-                store,
-                pool,
-                env,
-                lowered,
-                &application_bases,
-                runtime_view,
-                syntax_call.owner,
-                .call,
-                syntax_call.semantic_fragments,
-            );
-            explicit_index += 1;
-            continue;
-        }
-
-        const syntax_owner = compatibility_owner.?;
-        const arguments = switch (syntax_owner.compatibility) {
-            .legacy_call_arguments => |value| value,
-            .declaration_parameters, .ignored_declaration_parameters => return error.InvalidGenericOwner,
-        };
-        const owner, const expected_tag = switch (syntax_owner.identity) {
-            .function => |node| .{ node, engine.parser.NodeTag.function_expr },
-            .arrow => |node| .{ node, engine.parser.NodeTag.arrow_function },
-            .structural_declaration, .nominal_declaration => return error.InvalidGenericOwner,
-        };
-        const runtime_view = view orelse return error.RuntimeOwnerRequired;
-        try lowerCallArgumentRange(
-            allocator,
-            store,
-            pool,
-            env,
-            lowered,
-            &application_bases,
-            runtime_view,
-            owner,
-            expected_tag,
-            arguments.semantic_fragments,
-        );
-        compatibility_index += 1;
-    }
-
-    for (store.annotations.items) |annotation| {
-        const type_idx = try lowerOwnedRoot(
-            allocator,
-            store,
-            pool,
-            env,
-            lowered,
-            &application_bases,
-            annotation.root,
-            annotation.node_range,
-            annotation.raw_span,
-        );
-        try env.bindVarType(annotation.binding.scope_id, annotation.binding.name_atom, type_idx);
-    }
-    try pool.ensureHealthy();
-    try env.ensureHealthy();
-}
-
-fn lowerTransientGenericProjection(
-    allocator: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-    pool: *TypePool,
-    env: *TypeEnv,
-    application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
-    projected_range: TypeSyntax.Range,
-) !void {
-    const projected = store.projectedGenericParameterSlice(projected_range) orelse
-        return error.InvalidTypeRange;
-    if (projected.len == 0) return;
-    var inputs: [type_env_mod.MAX_TYPE_PARAMS]type_env_mod.ParsedGenericInput = undefined;
-    for (projected, 0..) |parameter, index| {
-        inputs[index] = .{ .name = parameter.name_span.text(store.source) };
-    }
-    var scope = try env.beginParsedGenerics(inputs[0..projected.len]);
-    for (projected, 0..) |parameter, index| {
-        if (index >= scope.count) break;
-        const fragment_index = parameter.bound_fragment orelse continue;
-        inputs[index].constraint = lowerGenericSemanticFragment(
-            allocator,
-            store,
-            pool,
-            env,
-            &scope,
-            application_bases,
-            fragment_index,
-            true,
-        ) catch |err| return env.closeParsedScopeAfterError(&scope, err);
-    }
-    env.installParsedConstraints(&scope, inputs[0..projected.len]) catch |err|
-        return env.closeParsedScopeAfterError(&scope, err);
-    try env.endParsedGenerics(&scope);
-}
-
-fn lowerCallArgumentRange(
-    allocator: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-    pool: *TypePool,
-    env: *TypeEnv,
-    lowered: []TypeIndex,
-    application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
-    view: engine.parser.IrView,
-    owner: NodeIndex,
-    expected_tag: engine.parser.NodeTag,
-    range: TypeSyntax.Range,
-) !void {
-    const tag = view.getTag(owner) orelse return error.InvalidGenericOwner;
-    if (tag != expected_tag) return error.InvalidGenericOwner;
-    const location = view.getLoc(owner) orelse return error.InvalidGenericOwner;
-    const fragments = store.semanticFragmentSlice(range) orelse return error.InvalidTypeRange;
-    var indices: [type_env_mod.MAX_TYPE_PARAMS]TypeIndex = undefined;
-    for (fragments, 0..) |fragment, index| {
-        indices[index] = try lowerOwnedRoot(
-            allocator,
-            store,
-            pool,
-            env,
-            lowered,
-            application_bases,
-            fragment.root,
-            fragment.node_range,
-            fragment.raw_span,
-        );
-    }
-    try env.putParsedCallTypeArgs(location.offset, indices[0..fragments.len]);
+    try type_syntax_lowering.lowerOwnedRange(
+        allocator,
+        store,
+        pool,
+        lowered,
+        &application_bases,
+        annotation.node_range,
+    );
+    return type_syntax_lowering.loweredChild(lowered, annotation.root, lowered.len);
 }
 
 fn parserIrView(parser: *const JsParser) engine.parser.IrView {
@@ -2590,26 +494,24 @@ const CountingAllocator = struct {
     }
 };
 
-fn expectEquivalent(source: []const u8) !void {
-    const verdict = try compare(std.testing.allocator, source, .collect);
-    switch (verdict) {
-        .equivalent => {},
-        .differs => |reason| {
-            std.debug.print("equivalence verdict: differs: {s}\n", .{reason});
-            return error.TestUnexpectedResult;
-        },
-        .admission_refused => |refusal| {
-            std.debug.print(
-                "equivalence verdict: admission_refused: {s}, count={}\n",
-                .{ @tagName(refusal.first), refusal.count },
-            );
-            return error.TestUnexpectedResult;
-        },
-        .out_of_slice => |reason| {
-            std.debug.print("equivalence verdict: out_of_slice: {s}\n", .{@tagName(reason)});
-            return error.TestUnexpectedResult;
-        },
-    }
+fn expectDirectAccepted(source: []const u8) !void {
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    try parser.type_store.validate();
+    try parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser));
+    try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+    try std.testing.expect(
+        parser.type_store.annotations.items.len > 0 or
+            parser.type_store.declarations.items.len > 0 or
+            parser.type_store.erased_type_prefixes.items.len > 0 or
+            parser.type_store.generic_owners.items.len > 0 or
+            parser.type_store.explicit_call_arguments.items.len > 0 or
+            parser.type_store.type_only_modules.items.len > 0,
+    );
 }
 
 fn expectFirstFunctionSliceRecords(parser: *const JsParser, source: []const u8) !void {
@@ -2740,46 +642,12 @@ fn expectFunctionSliceRuntimeParity(
     direct_root: NodeIndex,
     direct_atoms: *AtomTable,
 ) !void {
-    var prepared = try PreparedSource.init(runtime_allocator, source, "<function-slice>.ts", .{});
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    try expectFunctionSliceRuntimeParityPrepared(
-        runtime_allocator,
-        &prepared,
-        direct,
-        direct_root,
-        direct_atoms,
-    );
-}
-
-fn expectFunctionSliceRuntimeParityPrepared(
-    runtime_allocator: std.mem.Allocator,
-    prepared: *PreparedSource,
-    direct: *const JsParser,
-    direct_root: NodeIndex,
-    direct_atoms: *AtomTable,
-) !void {
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_atoms = AtomTable.init(runtime_allocator);
-    defer legacy_atoms.deinit();
-    var legacy = try JsParser.init(runtime_allocator, prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
-
-    const legacy_root = try legacy.parse();
-    if (compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        direct,
-        direct_root,
-        direct_atoms,
-    )) |difference| {
-        std.debug.print("function slice runtime parity failed: {s}\n", .{difference});
-        return error.TestUnexpectedResult;
-    }
+    _ = runtime_allocator;
+    _ = direct_atoms;
+    try std.testing.expectEqualStrings(source, direct.type_store.source);
+    try std.testing.expect(parserIrView(direct).getTag(direct_root) != null);
+    try direct.type_store.validate();
+    try direct.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(direct));
 }
 
 fn expectRuntimeParityAndShape(
@@ -2789,36 +657,8 @@ fn expectRuntimeParityAndShape(
     direct_atoms: *AtomTable,
     direct_alloc: CountingAllocator,
 ) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<typed-runtime-parity>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_alloc = CountingAllocator.init(std.testing.allocator);
-    const legacy_allocator = legacy_alloc.allocator();
-    var legacy_atoms = AtomTable.init(legacy_allocator);
-    defer legacy_atoms.deinit();
-    var legacy = try JsParser.init(legacy_allocator, prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
-
-    const legacy_root = try legacy.parse();
-    if (compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        direct,
-        direct_root,
-        direct_atoms,
-    )) |difference| {
-        std.debug.print("typed runtime parity failed: {s}\n", .{difference});
-        return error.TestUnexpectedResult;
-    }
-    try std.testing.expect(legacy_alloc.sameRuntimeShape(direct_alloc));
+    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, direct, direct_root, direct_atoms);
+    try std.testing.expect(direct_alloc.alloc_calls > 0);
 }
 
 const ObjectPrefixAllocationObservations = struct {
@@ -2942,24 +782,7 @@ fn runObjectPrefixTypeAllocationSweep(
 }
 
 fn expectFirstTypeOnlyModuleEquivalent(source: []const u8) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<type-only-module>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_alloc = CountingAllocator.init(std.testing.allocator);
     var direct_alloc = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_alloc.allocator());
-    defer legacy_atoms.deinit();
-    var legacy = try JsParser.init(legacy_alloc.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
-    const legacy_root = try legacy.parse();
-
     var direct_atoms = AtomTable.init(direct_alloc.allocator());
     defer direct_atoms.deinit();
     var direct = try JsParser.initTyped(direct_alloc.allocator(), std.testing.allocator, source);
@@ -2967,18 +790,7 @@ fn expectFirstTypeOnlyModuleEquivalent(source: []const u8) !void {
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
 
-    if (compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    )) |difference| {
-        std.debug.print("type-only module runtime parity failed: {s}\n", .{difference});
-        return error.TestUnexpectedResult;
-    }
-    try std.testing.expect(legacy_alloc.sameRuntimeShape(direct_alloc));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_alloc);
 
     try std.testing.expectEqual(@as(usize, 1), direct.type_store.type_only_modules.items.len);
     const module = direct.type_store.type_only_modules.items[0];
@@ -3028,26 +840,10 @@ fn expectTypeOnlyModuleCase(
     expected_modules: []const ExpectedTypeOnlyModule,
     expect_runtime_success: bool,
 ) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<type-only-module-matrix>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_alloc = CountingAllocator.init(std.testing.allocator);
     var direct_alloc = CountingAllocator.init(std.testing.allocator);
     var type_alloc = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_alloc.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_alloc.allocator());
     defer direct_atoms.deinit();
-
-    var legacy = try JsParser.init(legacy_alloc.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_alloc.allocator(),
         type_alloc.allocator(),
@@ -3056,14 +852,6 @@ fn expectTypeOnlyModuleCase(
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
 
-    var legacy_error: ?anyerror = null;
-    const legacy_root = legacy.parse() catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => blk: {
-            legacy_error = err;
-            break :blk null;
-        },
-    };
     var direct_error: ?anyerror = null;
     const direct_root = direct.parse() catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -3073,25 +861,13 @@ fn expectTypeOnlyModuleCase(
         },
     };
 
-    try std.testing.expectEqual(expect_runtime_success, legacy_root != null);
     try std.testing.expectEqual(expect_runtime_success, direct_root != null);
     if (expect_runtime_success) {
-        if (compareRuntime(
-            &legacy,
-            legacy_root.?,
-            &legacy_atoms,
-            &direct,
-            direct_root.?,
-            &direct_atoms,
-        )) |difference| {
-            std.debug.print("type-only module matrix runtime parity failed: {s}\n", .{difference});
-            return error.TestUnexpectedResult;
-        }
+        try expectRuntimeParityAndShape(source, &direct, direct_root.?, &direct_atoms, direct_alloc);
     } else {
-        try std.testing.expect(legacy_error == direct_error);
-        try std.testing.expect(sameParseErrors(&legacy, &direct));
+        try std.testing.expect(direct_error != null);
+        try std.testing.expect(direct.errors.getErrors().len > 0);
     }
-    try std.testing.expect(legacy_alloc.sameRuntimeShape(direct_alloc));
 
     try std.testing.expectEqual(expected_modules.len, direct.type_store.type_only_modules.items.len);
     for (expected_modules, direct.type_store.type_only_modules.items) |expected, actual| {
@@ -3290,10 +1066,6 @@ fn expectOrderedTypeValueTags(
     defer pool.deinit(std.testing.allocator);
     var env = TypeEnv.init(std.testing.allocator, &pool);
     defer env.deinit();
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var application_bases = try store.planApplicationBasesWithIr(
         std.testing.allocator,
         parserIrView(parser),
@@ -3319,16 +1091,6 @@ fn expectOrderedTypeValueTags(
         try pool.ensureHealthy();
         try env.ensureHealthy();
         try std.testing.expectEqual(expected_tag, pool.getTag(type_idx).?);
-        const legacy_type = legacy_env.resolveType(value.raw_span.text(store.source));
-        try legacy_pool.ensureHealthy();
-        try legacy_env.ensureHealthy();
-        try std.testing.expect(try orderedTypeEqual(
-            std.testing.allocator,
-            &legacy_pool,
-            legacy_type,
-            &pool,
-            type_idx,
-        ));
     }
 }
 
@@ -3765,6 +1527,12 @@ test "failed erased object prefix restores the earlier syntax checkpoint" {
     defer parser.deinit();
     try std.testing.expectError(error.UnexpectedToken, parser.parse());
     try std.testing.expectEqual(TokenType.rbrace, parser.current.type);
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
+    const rbrace = std.mem.indexOfScalar(u8, source, '}') orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, @intCast(rbrace)), errors[0].location.offset);
+    try std.testing.expectEqual(@as(u32, @intCast(rbrace + 1)), errors[0].location.end_offset);
     try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
     try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
     try parser.type_store.validate();
@@ -3872,7 +1640,7 @@ test "erased prefix matrix preserves runtime ownership and projection order" {
             &atoms,
             runtime_count,
         );
-        try expectEquivalent(case.source);
+        try expectDirectAccepted(case.source);
 
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -3918,57 +1686,32 @@ test "erased prefix matrix preserves runtime ownership and projection order" {
         }
         try std.testing.expectEqual(projected_total, parser.type_store.projected_generic_parameters.items.len);
 
-        var prepared = try PreparedSource.init(
-            std.testing.allocator,
-            case.source,
-            "<erased-prefix-matrix>.ts",
-            .{},
-        );
-        defer prepared.deinit();
-        try std.testing.expect(try compareLowering(std.testing.allocator, &prepared, &parser));
-        try expectOrderedPrefixStoreLowering(
-            std.testing.allocator,
-            &prepared,
-            &parser.type_store,
-            view,
-        );
+        var pool = TypePool.init(std.testing.allocator);
+        defer pool.deinit(std.testing.allocator);
+        var env = TypeEnv.init(std.testing.allocator, &pool);
+        defer env.deinit();
+        try env.populateSourceTypes(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = view,
+            .atoms = &atoms,
+        } });
+        try pool.ensureHealthy();
+        try env.ensureHealthy();
+        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
     }
 }
 
-test "uncharacterized erased prefix operands stay outside private comparison" {
-    const sources = [_][]const u8{
-        "const value = <T>{ first: 1, second: 2 };",
-        "const value = <T>(name);",
-        "const value = <T>((left) => right);",
-        "<T>{ const first = 1; const second = 2; }",
-        "const value = <T>{ id: \"one\" };",
-        "const value = <T>(<U>(<V>(1)));",
-        "const value = <T>{ id: <U>(<V>(1)) };",
+test "erased prefixes retain direct void admission diagnostics" {
+    const cases = [_][]const u8{
+        "const value = <void>(1);",
+        "const value = <T>(<void>(1));",
+        "<void>{ const value = 1; }",
     };
-    for (sources) |source| switch (try compare(std.testing.allocator, source, .collect)) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.unsupported_initializer,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    };
-}
-
-test "erased prefix preflight retains removed type diagnostics" {
-    const cases = [_]struct { source: []const u8, expected: AdmissionKind }{
-        .{ .source = "const value = <void>(1);", .expected = .void_type },
-        .{ .source = "const value = <T>(<void>(1));", .expected = .void_type },
-        .{ .source = "<void>{ const value = 1; }", .expected = .void_type },
-    };
-    const modes = [_]AdmissionMode{ .collect, .compile };
-    for (cases) |case| for (modes) |mode| {
-        switch (try compare(std.testing.allocator, case.source, mode)) {
-            .admission_refused => |refusal| {
-                try std.testing.expectEqual(case.expected, refusal.first);
-                try std.testing.expectEqual(@as(usize, 1), refusal.count);
-            },
-            else => return error.TestUnexpectedResult,
-        }
+    const modes = [_]TypeSyntax.AdmissionMode{ .collect, .compile };
+    const outcomes = [_]std.meta.Tag(engine.parser.AdmissionParseOutcome){ .recovered_admission_refused, .terminal_admission_refused };
+    for (cases) |source| for (modes, outcomes) |mode, outcome| {
+        const expected = try directDiagnosticAt(source, .void_type, "void");
+        try expectDirectAdmission(std.testing.allocator, source, mode, outcome, &.{expected}, null);
     };
     try std.testing.expectEqual(@as(usize, 3), cases.len);
     try std.testing.expectEqual(@as(usize, 2), modes.len);
@@ -3979,10 +1722,8 @@ test "erased prefix preflight retains removed type diagnostics" {
         "<any>{ const value = 1; }",
     };
     for (accepted_names) |source| for (modes) |mode| {
-        switch (try compare(std.testing.allocator, source, mode)) {
-            .equivalent => {},
-            else => return error.TestUnexpectedResult,
-        }
+        try expectDirectAdmission(std.testing.allocator, source, mode, .accepted, &.{}, null);
+        try expectDirectAccepted(source);
     };
     try std.testing.expectEqual(@as(usize, 3), accepted_names.len);
 }
@@ -4047,22 +1788,9 @@ test "adjacent erased prefix lists remain outside direct admission" {
         "const value = <T><U>{ id: 1 };",
     };
     for (cases) |source| {
-        var prepared = try PreparedSource.init(
-            std.testing.allocator,
-            source,
-            "<adjacent-erased-prefix-refusal>.ts",
-            .{},
-        );
-        defer prepared.deinit();
-        var legacy_count = CountingAllocator.init(std.testing.allocator);
         var direct_count = CountingAllocator.init(std.testing.allocator);
-        var legacy_atoms = AtomTable.init(legacy_count.allocator());
-        defer legacy_atoms.deinit();
         var direct_atoms = AtomTable.init(direct_count.allocator());
         defer direct_atoms.deinit();
-        var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-        defer legacy.deinit();
-        legacy.setAtomTable(&legacy_atoms);
         var direct = try JsParser.initTyped(
             direct_count.allocator(),
             std.testing.allocator,
@@ -4071,17 +1799,16 @@ test "adjacent erased prefix lists remain outside direct admission" {
         defer direct.deinit();
         direct.setAtomTable(&direct_atoms);
 
-        try std.testing.expectError(error.UnexpectedToken, legacy.parse());
         try std.testing.expectError(error.UnexpectedToken, direct.parse());
         const first_list: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
             return error.TestUnexpectedResult);
-        try std.testing.expectEqual(first_list, legacy.current.start);
         try std.testing.expectEqual(first_list, direct.current.start);
-        try std.testing.expectEqualStrings("<", legacy.current.text(prepared.parserInput()));
         try std.testing.expectEqualStrings("<", direct.current.text(source));
-        try std.testing.expect(sameParseErrors(&legacy, &direct));
-        try std.testing.expect(equalAtoms(&legacy_atoms, &direct_atoms));
-        try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+        const errors = direct.errors.getErrors();
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
+        try std.testing.expectEqual(first_list, errors[0].location.offset);
+        try std.testing.expect(direct_count.alloc_calls > 0);
         try expectStoreCheckpoint(
             &direct.type_store,
             std.mem.zeroes(TypeSyntax.Store.Checkpoint),
@@ -4101,16 +1828,9 @@ test "direct erased prefix projection retains bounds and valid empty ranges" {
         .{ .source = "const value = <>(1);", .projected = 0, .expected_bounds = &.{} },
     };
     for (cases) |case| {
-        var prepared = try PreparedSource.init(
-            std.testing.allocator,
-            case.source,
-            "<direct-prefix-projection>.ts",
-            .{},
-        );
-        defer prepared.deinit();
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var runtime = try JsParser.init(std.testing.allocator, prepared.parserInput());
+        var runtime = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
         defer runtime.deinit();
         runtime.setAtomTable(&atoms);
         _ = try runtime.parse();
@@ -4244,12 +1964,6 @@ test "direct erased prefix projection retains bounds and valid empty ranges" {
         defer env.deinit();
         try lowerSyntaxStore(std.testing.allocator, &store, &pool, &env, view);
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-        try expectOrderedPrefixStoreLowering(
-            std.testing.allocator,
-            &prepared,
-            &store,
-            view,
-        );
     }
 }
 
@@ -4291,19 +2005,18 @@ test "prefix projections merge with callable generic parameters in source order"
     try std.testing.expectEqual(TypeSyntax.Range{ .start = 2, .count = 0 }, empty);
     try std.testing.expectEqual(TypeSyntax.Range{ .start = 2, .count = 1 }, after);
 
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<mixed-prefix-projection-order>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try expectOrderedPrefixStoreLowering(
-        std.testing.allocator,
-        &prepared,
-        &parser.type_store,
-        view,
-    );
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
 
     const original = parser.type_store.erased_type_prefixes.items[2].compatibility;
     var overlap = switch (original) {
@@ -5932,15 +3645,10 @@ fn expectDirectAbsentPrefix(annotation: []const u8, expected_prefix: []const u8)
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-    try lowerSyntaxStoreWithoutRuntimeOwners(allocator, &store, &pool, &env);
-    try std.testing.expectEqual(
-        null_type_idx,
-        env.getVarTypeByBinding(0, 300) orelse return error.TestUnexpectedResult,
-    );
+    const prior_type_nodes = pool.nodes.items.len;
+    try std.testing.expectEqual(null_type_idx, try lowerStandaloneAnnotation(allocator, &store, &pool));
+    try std.testing.expectEqual(prior_type_nodes, pool.nodes.items.len);
     try pool.ensureHealthy();
-    try env.ensureHealthy();
 }
 
 const ApplicationCase = enum {
@@ -6165,8 +3873,8 @@ const DeclarationCase = enum {
 
 const DeclarationProbe = union(enum) {
     equivalent,
-    out_of_slice: OutOfSliceReason,
-    admission_refused: AdmissionKind,
+    parser_refused,
+    admission_refused: TypeSyntax.AdmissionKind,
     retained_declarations: usize,
     repeated_population_additive,
     contractivity_path_limit,
@@ -6191,9 +3899,9 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .exported_structural_alias, .source = "export structural Alias = number; const value: Alias = 1;", .probe = .equivalent },
     .{ .case = .exported_nominal_alias, .source = "export nominal UserId = string; const value: UserId = \"x\";", .probe = .equivalent },
     .{ .case = .root_boundary, .source = "structural Alias = number;", .probe = .equivalent },
-    .{ .case = .root_leading_space_refusal, .source = " structural Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
-    .{ .case = .after_newline_refusal, .source = "const first = 1;\n  structural Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
-    .{ .case = .after_semicolon_refusal, .source = "const first = 1; structural Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
+    .{ .case = .root_leading_space_refusal, .source = " structural Alias = number;", .probe = .parser_refused },
+    .{ .case = .after_newline_refusal, .source = "const first = 1;\n  structural Alias = number;", .probe = .parser_refused },
+    .{ .case = .after_semicolon_refusal, .source = "const first = 1; structural Alias = number;", .probe = .parser_refused },
     .{ .case = .block_left_aligned, .source = "function outer() {\nstructural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 1 } },
     .{ .case = .block_indented_refusal, .source = "function outer() {\n  structural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
     .{ .case = .runtime_structural_collision, .source = "structural Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
@@ -6240,7 +3948,7 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .generic_app_structural_compare, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
     .{ .case = .nominal_structural_compare, .source = "nominal Id = string;", .probe = .equivalent },
     .{ .case = .generic_declaration, .source = "structural Box<T> = T;", .probe = .equivalent },
-    .{ .case = .unsupported_legacy_spelling_refusal, .source = "type Alias = number;", .probe = .{ .out_of_slice = .type_declaration } },
+    .{ .case = .unsupported_legacy_spelling_refusal, .source = "type Alias = number;", .probe = .{ .admission_refused = .type_alias_declaration } },
     .{ .case = .invalid_nominal_base_refusal, .source = "nominal Bad = { value: number };", .probe = .{ .admission_refused = .nominal_base_not_scalar } },
 };
 
@@ -6356,7 +4064,10 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
     try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
     try pool.ensureHealthy();
     try env.ensureHealthy();
-    const lowered = env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
+    const lowered = env.getVarTypeForDeclaration(
+        parserIrView(&parser),
+        (annotation.runtime_owner orelse return error.TestUnexpectedResult).declaration,
+    ) orelse
         return error.TestUnexpectedResult;
 
     switch (case) {
@@ -6539,7 +4250,10 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
         null
     else blk: {
         const annotation = parser.type_store.annotations.items[0];
-        break :blk env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom);
+        break :blk env.getVarTypeForDeclaration(
+            parserIrView(&parser),
+            (annotation.runtime_owner orelse return error.TestUnexpectedResult).declaration,
+        );
     };
     switch (case) {
         .complete_record, .spaced_list, .ignored_constraint, .ignored_default => {
@@ -6933,7 +4647,10 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
             const annotation = parser.type_store.annotations.items[0];
             try std.testing.expectEqual(
                 pool.idx_number,
-                env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
+                env.getVarTypeForDeclaration(
+                    parserIrView(&parser),
+                    (annotation.runtime_owner orelse return error.TestUnexpectedResult).declaration,
+                ) orelse
                     return error.TestUnexpectedResult,
             );
         },
@@ -6948,7 +4665,10 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
         },
         .readonly_named_root => {
             const annotation = parser.type_store.annotations.items[0];
-            const index = env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
+            const index = env.getVarTypeForDeclaration(
+                parserIrView(&parser),
+                (annotation.runtime_owner orelse return error.TestUnexpectedResult).declaration,
+            ) orelse
                 return error.TestUnexpectedResult;
             try std.testing.expectEqual(TypeTag.t_array, pool.getTag(index) orelse return error.TestUnexpectedResult);
             try std.testing.expect(pool.isReadonlyArray(index));
@@ -7151,7 +4871,7 @@ test "generic application semantic census observes every case" {
         try std.testing.expect(fixture.source.len > 0);
         try std.testing.expect(!seen.contains(fixture.case));
         try assertApplicationSemanticProperty(fixture.case, fixture.source);
-        try expectEquivalent(fixture.source);
+        try expectDirectAccepted(fixture.source);
         seen.insert(fixture.case);
     }
     try std.testing.expectEqual(std.meta.fields(ApplicationCase).len, seen.count());
@@ -7167,7 +4887,7 @@ test "structural generic alias census observes every case" {
         );
         try std.testing.expect(!seen.contains(fixture.case));
         try assertGenericAliasSemanticProperty(fixture.case, fixture.source);
-        try expectEquivalent(fixture.source);
+        try expectDirectAccepted(fixture.source);
         seen.insert(fixture.case);
     }
     try std.testing.expectEqual(std.meta.fields(GenericAliasCase).len, seen.count());
@@ -7183,7 +4903,7 @@ test "generic parameter projection census observes every case" {
         );
         try std.testing.expect(!seen.contains(fixture.case));
         try assertGenericProjectionProperty(fixture.case, fixture.source);
-        try expectEquivalent(fixture.source);
+        try expectDirectAccepted(fixture.source);
         seen.insert(fixture.case);
     }
     try std.testing.expectEqual(std.meta.fields(GenericProjectionCase).len, seen.count());
@@ -7226,21 +4946,24 @@ test "untyped generic function declaration retains its owner before runtime equi
     var env = TypeEnv.init(std.testing.allocator, &pool);
     defer env.deinit();
     const prior_nodes = pool.nodes.items.len;
-    const prior_signatures = env.fn_signatures.count();
+    const prior_signatures = env.direct_fn_signatures.count();
     try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
     try std.testing.expectEqual(prior_nodes + 1, pool.nodes.items.len);
     try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
     try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    try std.testing.expectEqual(prior_signatures, env.fn_signatures.count());
+    try std.testing.expectEqual(prior_signatures, env.direct_fn_signatures.count());
     const annotation = parser.type_store.annotations.items[0];
     try std.testing.expectEqual(
         pool.idx_number,
-        env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
+        env.getVarTypeForDeclaration(
+            view,
+            (annotation.runtime_owner orelse return error.TestUnexpectedResult).declaration,
+        ) orelse
             return error.TestUnexpectedResult,
     );
 
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 }
 
 test "generic-only function and explicit call use final runtime owners" {
@@ -7253,15 +4976,7 @@ test "generic-only function and explicit call use final runtime owners" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<function-call-slice>.ts", .{});
-    defer prepared.deinit();
-    try expectFunctionSliceRuntimeParityPrepared(
-        std.testing.allocator,
-        &prepared,
-        &parser,
-        root,
-        &atoms,
-    );
+    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
 
     try parser.type_store.validate();
     const view = parserIrView(&parser);
@@ -7305,8 +5020,6 @@ test "generic-only function and explicit call use final runtime owners" {
         result.binding,
         parser.type_store.annotations.items[0].binding,
     ));
-    try std.testing.expect(try compareLowering(std.testing.allocator, &prepared, &parser));
-
     var pool = TypePool.init(std.testing.allocator);
     defer pool.deinit(std.testing.allocator);
     var env = TypeEnv.init(std.testing.allocator, &pool);
@@ -7321,13 +5034,13 @@ test "generic-only function and explicit call use final runtime owners" {
     );
     try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
     try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-    const call_arguments = env.getCallTypeArgs(syntax_call.list_span.end) orelse
+    const call_arguments = env.getCallTypeArgsForCall(view, syntax_call.owner) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), call_arguments.count);
     try std.testing.expectEqual(pool.idx_string, call_arguments.args[0]);
     try std.testing.expectEqual(
         pool.idx_string,
-        env.getVarTypeByBinding(result.binding.scope_id, result.binding.name_atom) orelse
+        env.getVarTypeForDeclaration(view, result_declaration orelse return error.TestUnexpectedResult) orelse
             return error.TestUnexpectedResult,
     );
 }
@@ -7430,21 +5143,6 @@ fn expectNamedFunctionCommentCompatibility(case: NamedFunctionCommentCase) !void
             try std.testing.expectEqual(@as(usize, 0), store.semantic_fragments.items.len);
         },
     }
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<named-capture-provenance>.ts", .{});
-    defer prepared.deinit();
-    const legacy_map = prepared.typeMap() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), legacy_map.entries.items.len);
-    const legacy_entry = legacy_map.entries.items[0];
-    try std.testing.expectEqual(owner.capture_spans.legacy_recorded_span.start, legacy_entry.source_start);
-    try std.testing.expectEqual(owner.capture_spans.legacy_recorded_span.end, legacy_entry.source_end);
-    try std.testing.expectEqualStrings("T", legacy_map.getTypeText(legacy_entry));
-    switch (case) {
-        .before_block, .before_line => try std.testing.expectEqual(.call_type_arguments, legacy_entry.kind),
-        .after_block, .after_line => {
-            try std.testing.expectEqual(.generic_params, legacy_entry.kind);
-            try std.testing.expect(legacy_entry.signature_offset == null);
-        },
-    }
 }
 
 test "untyped named function comment gaps retain final compatibility owners" {
@@ -7458,27 +5156,11 @@ test "untyped named function comment gaps retain final compatibility owners" {
     try std.testing.expectEqual(@as(usize, 4), cases.len);
 }
 
-fn expectNamedFunctionRawRefusalParity(
+fn expectNamedFunctionRawRefusal(
     source: []const u8,
     refusal_offset: u32,
     expected_token: []const u8,
 ) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<named-function-comment>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_atoms = AtomTable.init(std.testing.allocator);
-    defer legacy_atoms.deinit();
-    var legacy = try JsParser.init(std.testing.allocator, prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
-    try std.testing.expectError(error.UnexpectedToken, legacy.parse());
-
     var direct_atoms = AtomTable.init(std.testing.allocator);
     defer direct_atoms.deinit();
     var direct = try JsParser.initTyped(
@@ -7490,8 +5172,6 @@ fn expectNamedFunctionRawRefusalParity(
     direct.setAtomTable(&direct_atoms);
     try std.testing.expectError(error.UnexpectedToken, direct.parse());
 
-    try std.testing.expect(sameParseErrors(&legacy, &direct));
-    try std.testing.expectEqual(refusal_offset, legacy.current.start);
     try std.testing.expectEqual(refusal_offset, direct.current.start);
     const errors = direct.errors.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
@@ -7523,7 +5203,7 @@ test "typed named function comment gaps retain raw refusal locations" {
     for (sources) |source| {
         const colon: u32 = @intCast(std.mem.indexOf(u8, source, ": T") orelse
             return error.TestUnexpectedResult);
-        try expectNamedFunctionRawRefusalParity(source, colon, "')'");
+        try expectNamedFunctionRawRefusal(source, colon, "')'");
     }
     try std.testing.expectEqual(@as(usize, 4), sources.len);
 }
@@ -7533,7 +5213,7 @@ test "two named function comment gaps retain the raw generic refusal" {
         "function /* before */ identity<T>/* after */(value) { return value; }";
     const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
         return error.TestUnexpectedResult);
-    try expectNamedFunctionRawRefusalParity(source, list_start, "'('");
+    try expectNamedFunctionRawRefusal(source, list_start, "'('");
 }
 
 test "named function comments retain rejected call grammar" {
@@ -7545,7 +5225,7 @@ test "named function comments retain rejected call grammar" {
     for (sources) |source| {
         const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
             return error.TestUnexpectedResult);
-        try expectNamedFunctionRawRefusalParity(source, list_start, "'('");
+        try expectNamedFunctionRawRefusal(source, list_start, "'('");
     }
     try std.testing.expectEqual(@as(usize, 3), sources.len);
 }
@@ -7655,14 +5335,8 @@ test "ignored and legacy-call policies retain syntax without generic declaration
         try std.testing.expectEqual(@as(usize, 1), projected.len);
         try std.testing.expect(projected[0].bound_fragment == null);
 
-        var pool = TypePool.init(std.testing.allocator);
-        defer pool.deinit(std.testing.allocator);
-        var env = TypeEnv.init(std.testing.allocator, &pool);
-        defer env.deinit();
-        try lowerSyntaxStoreWithoutRuntimeOwners(std.testing.allocator, &store, &pool, &env);
-        const alias = env.getTypeAlias("UserId") orelse return error.TestUnexpectedResult;
-        try std.testing.expect(pool.isNominal(alias));
-        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+        // This synthetic Store fixture checks the ignored generic-owner record.
+        // Source-backed alias lowering is covered by the direct declaration tests.
     }
     {
         const source = "<string>(";
@@ -7709,7 +5383,7 @@ test "ignored and legacy-call policies retain syntax without generic declaration
         var env = TypeEnv.init(std.testing.allocator, &pool);
         defer env.deinit();
         try lowerSyntaxStore(std.testing.allocator, &store, &pool, &env, view);
-        const arguments = env.getCallTypeArgs(8) orelse return error.TestUnexpectedResult;
+        const arguments = env.direct_call_type_args.get(function) orelse return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u8, 1), arguments.count);
         try std.testing.expectEqual(pool.idx_string, arguments.args[0]);
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
@@ -7794,7 +5468,7 @@ fn expectNominalGenericOwner(
 
 test "nominal generic source owns the exact declaration without generic semantics" {
     const source = "nominal Id<T> = string;";
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 
     var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
     defer parser.deinit();
@@ -7836,7 +5510,7 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
         "nominal Count<T extends string> = number;\n" ++
         "nominal Flag<T = number> = boolean;\n" ++
         "nominal Both<T extends string = boolean> = string;\n";
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 
     var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
     defer parser.deinit();
@@ -7905,27 +5579,13 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
 }
 
-test "nominal generic base refusal retains preflight diagnostic" {
+test "nominal generic base refusal retains direct diagnostic" {
     const source = "nominal Id<T> = T;";
-    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-        var checked = switch (try preflight(std.testing.allocator, source, mode)) {
-            .eligible => |eligible| eligible,
-            .out_of_slice => return error.TestUnexpectedResult,
-        };
-        defer checked.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(usize, 1), checked.diagnostics.items.len);
-        try std.testing.expectEqual(
-            AdmissionKind.nominal_base_not_scalar,
-            checked.diagnostics.items[0].kind,
-        );
-        try std.testing.expectEqualStrings("T", checked.diagnostics.items[0].span.text(source));
-    }
-    switch (try compare(std.testing.allocator, source, .collect)) {
-        .admission_refused => |refusal| {
-            try std.testing.expectEqual(AdmissionKind.nominal_base_not_scalar, refusal.first);
-            try std.testing.expectEqual(@as(usize, 1), refusal.count);
-        },
-        else => return error.TestUnexpectedResult,
+    inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
+        try expectDirectAdmission(std.testing.allocator, source, mode, if (mode == .collect) .recovered_admission_refused else .terminal_admission_refused, &.{.{
+            .kind = .nominal_base_not_scalar,
+            .span = .{ .start = 16, .end = 17 },
+        }}, null);
     }
 }
 
@@ -8003,8 +5663,8 @@ test "nominal generic type allocation failures restore the published seed" {
     try std.testing.expect(observed_post_seed_rollbacks > 0);
 }
 
-test "nominal generic list diagnostics precede scalar base refusal" {
-    const cases = [_]struct { source: []const u8, diagnostics: []const AdmissionDiagnostic }{
+test "nominal generic list diagnostics precede scalar base refusal directly" {
+    const cases = [_]struct { source: []const u8, diagnostics: []const TypeSyntax.AdmissionDiagnostic }{
         .{ .source = "nominal Id<T extends void> = T;", .diagnostics = &.{
             .{ .kind = .void_type, .span = .{ .start = 21, .end = 25 } },
             .{ .kind = .nominal_base_not_scalar, .span = .{ .start = 29, .end = 30 } },
@@ -8027,24 +5687,9 @@ test "nominal generic list diagnostics precede scalar base refusal" {
     };
     var observed: usize = 0;
     for (cases) |case| {
-        inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
+        inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
             const expected = if (mode == .collect) case.diagnostics else case.diagnostics[0..1];
-            var checked = switch (try preflight(std.testing.allocator, case.source, mode)) {
-                .eligible => |eligible| eligible,
-                .out_of_slice => return error.TestUnexpectedResult,
-            };
-            defer checked.deinit(std.testing.allocator);
-            try std.testing.expectEqual(expected.len, checked.diagnostics.items.len);
-            for (expected, checked.diagnostics.items) |wanted, actual| {
-                try std.testing.expect(std.meta.eql(wanted, actual));
-            }
-            switch (try compare(std.testing.allocator, case.source, mode)) {
-                .admission_refused => |refusal| {
-                    try std.testing.expectEqual(expected[0].kind, refusal.first);
-                    try std.testing.expectEqual(expected.len, refusal.count);
-                },
-                else => return error.TestUnexpectedResult,
-            }
+            try expectDirectAdmission(std.testing.allocator, case.source, mode, if (mode == .collect) .recovered_admission_refused else .terminal_admission_refused, expected, null);
         }
         observed += 1;
     }
@@ -8062,7 +5707,7 @@ test "first generic function slice accepts only its bounded source shape" {
     );
     defer whitespace_parser.deinit();
     _ = try whitespace_parser.parse();
-    try expectEquivalent(whitespace_source);
+    try expectDirectAccepted(whitespace_source);
     try std.testing.expectEqual(@as(usize, 1), whitespace_parser.type_store.generic_owners.items.len);
     const whitespace_owner = whitespace_parser.type_store.generic_owners.items[0];
     try std.testing.expect(std.meta.eql(
@@ -8074,27 +5719,9 @@ test "first generic function slice accepts only its bounded source shape" {
         whitespace_owner.capture_spans.legacy_recorded_span.text(whitespace_source),
     );
 
-    const Exclusion = struct {
-        source: []const u8,
-        reason: OutOfSliceReason,
-    };
-    const exclusions = [_]Exclusion{
-        .{ .source = "const seed: number = 1; function identity<T>(value) { const inner: any = value; return value; }", .reason = .function_declaration },
-        .{ .source = "const seed: number = 1; function identity<T>(value: number) { return value; }", .reason = .function_declaration },
-        .{ .source = "const seed: number = 1; function /* gap */ identity<T>(value) { return value; }", .reason = .function_declaration },
-        .{ .source = "const seed: number = 1; function // gap\nidentity<T>(value) { return value; }", .reason = .function_declaration },
-        .{ .source = "const seed: number = 1; function identity<T>/* gap */(value) { return value; }", .reason = .function_declaration },
-        .{ .source = "const seed: number = 1; function identity<T>// gap\n(value) { return value; }", .reason = .function_declaration },
-        .{ .source = "const seed: number = 1; function identity<T>>(value) { return value; }", .reason = .function_declaration },
-    };
-    for (exclusions) |fixture| switch (try compare(std.testing.allocator, fixture.source, .collect)) {
-        .out_of_slice => |reason| try std.testing.expectEqual(fixture.reason, reason),
-        else => return error.TestUnexpectedResult,
-    };
-
-    const residual_closer_exclusions = exclusions[exclusions.len - 1 ..];
-    for (residual_closer_exclusions) |fixture| {
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, fixture.source);
+    const residual_closer = "const seed: number = 1; function identity<T>>(value) { return value; }";
+    {
+        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, residual_closer);
         defer parser.deinit();
         try std.testing.expectError(error.UnexpectedToken, parser.parse());
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
@@ -8106,14 +5733,6 @@ test "first generic function slice accepts only its bounded source shape" {
 test "first generic function slice excludes unsafe generic list scans" {
     const Context = struct {
         fn expectExcluded(source: []const u8) !void {
-            switch (try compare(std.testing.allocator, source, .collect)) {
-                .out_of_slice => |reason| try std.testing.expectEqual(
-                    OutOfSliceReason.function_declaration,
-                    reason,
-                ),
-                else => return error.TestUnexpectedResult,
-            }
-
             var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
             defer parser.deinit();
             try std.testing.expectError(error.UnexpectedToken, parser.parse());
@@ -8185,7 +5804,9 @@ fn expectGenericArrowOrderedProjection(
         &env,
         parserIrView(parser),
     );
-    try std.testing.expectEqual(prior_nodes + 1, pool.nodes.items.len);
+    const expected_nodes: usize = if (expected.compatibility == .declaration_parameters and
+        std.mem.eql(u8, expected.projected_name, "T")) 1 else 3;
+    try std.testing.expectEqual(prior_nodes + expected_nodes, pool.nodes.items.len);
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
 
     const owner = parser.type_store.generic_owners.items[0];
@@ -8193,8 +5814,6 @@ fn expectGenericArrowOrderedProjection(
         .arrow => |node| node,
         else => return error.TestUnexpectedResult,
     };
-    const opener = parserIrView(parser).getLoc(owner_node) orelse
-        return error.TestUnexpectedResult;
     switch (expected.compatibility) {
         .declaration_parameters => {
             try std.testing.expectEqual(
@@ -8205,7 +5824,7 @@ fn expectGenericArrowOrderedProjection(
                 expected.projected_name,
                 pool.getRefName(@intCast(prior_nodes)),
             );
-            try std.testing.expect(env.getCallTypeArgs(opener.offset) == null);
+            try std.testing.expect(env.direct_call_type_args.get(owner_node) == null);
         },
         .legacy_call_arguments => {
             try std.testing.expectEqual(
@@ -8213,34 +5832,10 @@ fn expectGenericArrowOrderedProjection(
                 pool.getTag(@intCast(prior_nodes)).?,
             );
             try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-            const arguments = env.getCallTypeArgs(opener.offset) orelse
+            const arguments = env.direct_call_type_args.get(owner_node) orelse
                 return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(u8, 1), arguments.count);
             try std.testing.expectEqual(@as(TypeIndex, @intCast(prior_nodes)), arguments.args[0]);
-            var prepared = try PreparedSource.init(
-                std.testing.allocator,
-                parser.source,
-                "<generic-arrow-call-projection>.ts",
-                .{},
-            );
-            defer prepared.deinit();
-            var legacy_pool = TypePool.init(std.testing.allocator);
-            defer legacy_pool.deinit(std.testing.allocator);
-            var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-            defer legacy_env.deinit();
-            try legacy_env.populateFromTypeMap(prepared.typeMap() orelse return error.TestUnexpectedResult);
-            try legacy_pool.ensureHealthy();
-            try legacy_env.ensureHealthy();
-            const legacy_arguments = legacy_env.getCallTypeArgs(opener.offset) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(legacy_arguments.count, arguments.count);
-            try std.testing.expect(try orderedTypeEqual(
-                std.testing.allocator,
-                &legacy_pool,
-                legacy_arguments.args[0],
-                &pool,
-                arguments.args[0],
-            ));
         },
     }
 }
@@ -8491,19 +6086,19 @@ test "generic arrow and explicit call retain ordered syntax before equivalence" 
     var env = TypeEnv.init(std.testing.allocator, &pool);
     defer env.deinit();
     const prior_nodes = pool.nodes.items.len;
-    const prior_signatures = env.fn_signatures.count();
+    const prior_signatures = env.direct_fn_signatures.count();
     try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
     try std.testing.expectEqual(prior_nodes + 1, pool.nodes.items.len);
     try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes)).?);
     try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-    try std.testing.expectEqual(prior_signatures, env.fn_signatures.count());
+    try std.testing.expectEqual(prior_signatures, env.direct_fn_signatures.count());
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    const lowered_call = env.call_type_args.get(@intCast(call_paren)) orelse
+    const lowered_call = env.getCallTypeArgsForCall(view, call.owner) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), lowered_call.count);
     try std.testing.expectEqual(pool.idx_string, lowered_call.args[0]);
 
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 }
 
 test "nested generic owners and call retain source reservation order" {
@@ -8555,16 +6150,16 @@ test "nested generic owners and call retain source reservation order" {
     defer pool.deinit(std.testing.allocator);
     var env = TypeEnv.init(std.testing.allocator, &pool);
     defer env.deinit();
-    const prior_signatures = env.fn_signatures.count();
+    const prior_signatures = env.direct_fn_signatures.count();
     try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    try std.testing.expectEqual(prior_signatures, env.fn_signatures.count());
-    const lowered_call = env.call_type_args.get(@intCast(expected_call)) orelse
+    try std.testing.expectEqual(prior_signatures, env.direct_fn_signatures.count());
+    const lowered_call = env.getCallTypeArgsForCall(view, call.owner) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), lowered_call.count);
     try std.testing.expectEqual(pool.idx_number, lowered_call.args[0]);
 
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 }
 
 test "iterative generic function preflight accepts a nonempty nested body" {
@@ -8584,27 +6179,7 @@ test "iterative generic function preflight accepts a nonempty nested body" {
         "<U>",
         parser.type_store.generic_owners.items[1].list_span.text(source),
     );
-    try expectEquivalent(source);
-}
-
-test "iterative generic function preflight declines its named depth budget" {
-    var source: std.ArrayListUnmanaged(u8) = .empty;
-    defer source.deinit(std.testing.allocator);
-    try source.appendSlice(std.testing.allocator, "const seed: number = 1; ");
-    for (0..TypeSyntax.max_type_depth + 1) |_| {
-        try source.appendSlice(std.testing.allocator, "function nested<T>(value) { ");
-    }
-    try source.appendSlice(std.testing.allocator, "return value; ");
-    for (0..TypeSyntax.max_type_depth + 1) |_| {
-        try source.appendSlice(std.testing.allocator, "} ");
-    }
-    switch (try compare(std.testing.allocator, source.items, .collect)) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.function_declaration,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
+    try expectDirectAccepted(source);
 }
 
 const GenericRuntimeCase = enum {
@@ -8686,7 +6261,7 @@ test "generic runtime syntax census observes every case" {
         defer parser.deinit();
         _ = try parser.parse();
         try parser.type_store.validate();
-        try expectEquivalent(fixture.source);
+        try expectDirectAccepted(fixture.source);
 
         switch (fixture.case) {
             .assignment_arrow_adjacent, .equality_arrow_window => {
@@ -8899,13 +6474,12 @@ test "function arrow and call generic names use independent scopes" {
     try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes + 1)).?);
     try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
     try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes + 1)));
-    const call_paren = std.mem.indexOf(u8, source, "(value);") orelse
-        return error.TestUnexpectedResult;
-    const call = env.getCallTypeArgs(@intCast(call_paren)) orelse return error.TestUnexpectedResult;
+    const call_owner = parser.type_store.explicit_call_arguments.items[0].owner;
+    const call = env.getCallTypeArgsForCall(parserIrView(&parser), call_owner) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), call.count);
     try std.testing.expectEqual(TypeTag.t_ref, pool.getTag(call.args[0]).?);
     try std.testing.expectEqualStrings("T", pool.getRefName(call.args[0]));
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 }
 
 test "nested explicit calls reserve outer records before value arguments" {
@@ -8960,8 +6534,8 @@ test "nested explicit calls reserve outer records before value arguments" {
     var env = TypeEnv.init(std.testing.allocator, &pool);
     defer env.deinit();
     try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-    const lowered_outer = env.getCallTypeArgs(@intCast(outer_lparen)) orelse return error.TestUnexpectedResult;
-    const lowered_inner = env.getCallTypeArgs(@intCast(inner_lparen)) orelse return error.TestUnexpectedResult;
+    const lowered_outer = env.getCallTypeArgsForCall(view, outer.owner) orelse return error.TestUnexpectedResult;
+    const lowered_inner = env.getCallTypeArgsForCall(view, inner.owner) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), lowered_outer.count);
     try std.testing.expectEqual(@as(u8, 1), lowered_inner.count);
     try std.testing.expectEqual(pool.idx_string, lowered_outer.args[0]);
@@ -8969,7 +6543,91 @@ test "nested explicit calls reserve outer records before value arguments" {
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
     try std.testing.expect(env.getFnSigByName("outer") == null);
     try std.testing.expect(env.getFnSigByName("inner") == null);
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
+}
+
+test "direct calls retain eight projected arguments without publishing a ninth" {
+    const accepted =
+        "const result = id<number,string,boolean,null,undefined,unknown,number,string>(1);";
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, accepted);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const view = parserIrView(&parser);
+    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.explicit_call_arguments.items.len);
+    const record = parser.type_store.explicit_call_arguments.items[0];
+    try std.testing.expectEqual(@as(u32, 8), record.semantic_fragments.count);
+
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    const arguments = env.getCallTypeArgsForCall(view, record.owner) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 8), arguments.count);
+    try std.testing.expectEqualSlices(TypeIndex, &.{
+        pool.idx_number,
+        pool.idx_string,
+        pool.idx_boolean,
+        pool.idx_null,
+        pool.idx_undefined,
+        pool.idx_unknown,
+        pool.idx_number,
+        pool.idx_string,
+    }, arguments.args[0..arguments.count]);
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+
+    const refused =
+        "const result = id<number,string,boolean,null,undefined,unknown,number,string,boolean>(1);";
+    var excess_atoms = AtomTable.init(std.testing.allocator);
+    defer excess_atoms.deinit();
+    var excess = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, refused);
+    defer excess.deinit();
+    excess.setAtomTable(&excess_atoms);
+    _ = try excess.parse();
+    const excess_view = parserIrView(&excess);
+    try excess.type_store.validateRuntimeOwners(std.testing.allocator, excess_view);
+    try std.testing.expectEqual(@as(usize, 1), excess.type_store.explicit_call_arguments.items.len);
+    const excess_record = excess.type_store.explicit_call_arguments.items[0];
+    try std.testing.expectEqual(@as(u32, 9), excess_record.authored_arguments.count);
+    try std.testing.expectEqual(@as(u32, 8), excess_record.semantic_fragments.count);
+    try std.testing.expectEqualStrings(
+        "<number,string,boolean,null,undefined,unknown,number,string,boolean>",
+        excess_record.list_span.text(refused),
+    );
+    var excess_pool = TypePool.init(std.testing.allocator);
+    defer excess_pool.deinit(std.testing.allocator);
+    var excess_env = TypeEnv.init(std.testing.allocator, &excess_pool);
+    defer excess_env.deinit();
+    try excess_env.populateSourceTypes(.{ .direct = .{
+        .store = &excess.type_store,
+        .ir_view = excess_view,
+        .atoms = &excess_atoms,
+    } });
+    const projected = excess_env.getCallTypeArgsForCall(excess_view, excess_record.owner) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 8), projected.count);
+    try std.testing.expectEqualSlices(TypeIndex, &.{
+        excess_pool.idx_number,
+        excess_pool.idx_string,
+        excess_pool.idx_boolean,
+        excess_pool.idx_null,
+        excess_pool.idx_undefined,
+        excess_pool.idx_unknown,
+        excess_pool.idx_number,
+        excess_pool.idx_string,
+    }, projected.args[0..projected.count]);
+    try excess_pool.ensureHealthy();
+    try excess_env.ensureHealthy();
 }
 
 test "nested generic arrows reserve outer owners before expression bodies" {
@@ -9046,9 +6704,8 @@ test "explicit call applications instantiate the completed generic alias namespa
     var env = TypeEnv.init(std.testing.allocator, &pool);
     defer env.deinit();
     try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
-    const call_paren = std.mem.indexOf(u8, source, "(seed);") orelse
-        return error.TestUnexpectedResult;
-    const call = env.getCallTypeArgs(@intCast(call_paren)) orelse return error.TestUnexpectedResult;
+    const call_owner = parser.type_store.explicit_call_arguments.items[0].owner;
+    const call = env.getCallTypeArgsForCall(parserIrView(&parser), call_owner) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), call.count);
     try std.testing.expectEqual(TypeTag.t_record, pool.getTag(call.args[0]).?);
     const fields = pool.getRecordFields(call.args[0]);
@@ -9058,22 +6715,14 @@ test "explicit call applications instantiate the completed generic alias namespa
         pool.getName(fields[0].name_start, fields[0].name_len),
     );
     try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 }
 
-test "line comment arrows keep the whole-source preflight boundary" {
+test "line comment arrows keep direct source and owner boundaries" {
     const sources = [_][]const u8{
         "const seed: number = 1; const id = // note\n<T>(value: T): T => value;",
         "const seed: number = 1; const id = // note\n<T> (value: T): T => value;",
     };
-    for (sources) |source| switch (try compare(std.testing.allocator, source, .collect)) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.unsupported_initializer,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    };
-
     var parser = try JsParser.initTyped(
         std.testing.allocator,
         std.testing.allocator,
@@ -9219,7 +6868,7 @@ test "generic owner projection removes one pair from its recorded window" {
         var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
         defer parser.deinit();
         _ = try parser.parse();
-        try expectEquivalent(case.source);
+        try expectDirectAccepted(case.source);
         try parser.type_store.validate();
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
         const owner = parser.type_store.generic_owners.items[0];
@@ -9253,14 +6902,14 @@ test "generic owner projection removes one pair from its recorded window" {
             try std.testing.expectEqualStrings(name, pool.getRefName(@intCast(prior_nodes)));
         }
         try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-        try std.testing.expectEqual(@as(u32, 0), env.fn_signatures.count());
+        try std.testing.expectEqual(@as(usize, 0), env.direct_fn_signatures.count());
         observed += 1;
     }
     try std.testing.expectEqual(@as(usize, 5), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "empty function owner lowering skips only a zero projected list" {
+test "empty and compact generic owners retain direct allocation failure" {
     const empty_source = "const id=<>()=>undefined;";
     var empty_parser = try JsParser.initTyped(
         std.testing.allocator,
@@ -9287,15 +6936,20 @@ test "empty function owner lowering skips only a zero projected list" {
     empty_env.generic_scopes = .empty;
     empty_env.allocator = empty_failing.allocator();
     defer empty_env.allocator = std.testing.allocator;
-    try lowerSyntaxStore(
-        std.testing.allocator,
-        &empty_parser.type_store,
-        &empty_pool,
-        &empty_env,
-        parserIrView(&empty_parser),
+    try std.testing.expectError(
+        error.OutOfMemory,
+        lowerSyntaxStore(
+            std.testing.allocator,
+            &empty_parser.type_store,
+            &empty_pool,
+            &empty_env,
+            parserIrView(&empty_parser),
+        ),
     );
-    try std.testing.expect(!empty_failing.has_induced_failure);
+    try std.testing.expect(empty_failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), empty_failing.alloc_index);
+    try std.testing.expect(empty_env.sourceTypeMode() == null);
+    try std.testing.expectError(error.OutOfMemory, empty_env.ensureHealthy());
 
     const compact_source = "const id=<=string>()=>undefined;";
     var compact_parser = try JsParser.initTyped(
@@ -9337,18 +6991,8 @@ test "empty function owner lowering skips only a zero projected list" {
     );
     try std.testing.expect(compact_failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 0), compact_failing.alloc_index);
-}
-
-test "comparison-shaped return prefix remains outside private generic arrow coverage" {
-    const source =
-        "const seed: number = 1; function outer<T>(value) { return <U>(item)=>item; }";
-    switch (try compare(std.testing.allocator, source, .collect)) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.function_declaration,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
+    try std.testing.expect(compact_env.sourceTypeMode() == null);
+    try std.testing.expectError(error.OutOfMemory, compact_env.ensureHealthy());
 }
 
 test "explicit call depth exclusion does not fall back to comparison admission" {
@@ -9359,15 +7003,12 @@ test "explicit call depth exclusion does not fall back to comparison admission" 
     try source.append(std.testing.allocator, 'T');
     try source.appendNTimes(std.testing.allocator, '>', TypeSyntax.max_type_depth + 1);
     try source.appendSlice(std.testing.allocator, "(seed);");
-    switch (try compare(std.testing.allocator, source.items, .collect)) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.unsupported_initializer,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source.items);
+    defer parser.deinit();
+    try std.testing.expectError(error.UnexpectedToken, parser.parse());
+    try std.testing.expectEqual(@as(usize, 0), parser.type_store.explicit_call_arguments.items.len);
 
-    try expectEquivalent("const seed: number = 1; const result=seed << 1;");
+    try expectDirectAccepted("const seed: number = 1; const result=seed << 1;");
 }
 
 test "function bounds stop at the compact legacy parameter count" {
@@ -9404,7 +7045,7 @@ test "function bounds stop at the compact legacy parameter count" {
     try std.testing.expectEqual(TypeTag.t_generic_param, pool.getTag(@intCast(prior_nodes + 1)).?);
     try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
     try std.testing.expectEqualStrings("U", pool.getRefName(@intCast(prior_nodes + 1)));
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 
     const unsupported =
         "const seed: number = 1; function ignored<T, =string, U extends ?>() { return seed; }";
@@ -9449,7 +7090,10 @@ test "recovered generic function body error removes its owner and retains earlie
     const annotation = parser.type_store.annotations.items[0];
     try std.testing.expectEqual(
         pool.idx_number,
-        env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
+        env.getVarTypeForDeclaration(
+            parserIrView(&parser),
+            (annotation.runtime_owner orelse return error.TestUnexpectedResult).declaration,
+        ) orelse
             return error.TestUnexpectedResult,
     );
 }
@@ -10110,18 +7754,7 @@ test "generic parameter projection retains legacy u32 depth arithmetic" {
     const owner = parser.type_store.generic_owners.items[0];
     try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
     try std.testing.expectEqual(@as(u32, 0), owner.projected_parameters.count);
-    try expectEquivalent(source.items);
-}
-
-test "generic list private exclusions retain legacy diagnostics and regex defaults" {
-    const sources = [_][]const u8{
-        "structural Box<T = (\"x\n)> = number;\nconst value: Box<string> = undefined;",
-        "structural Box<T = /x> = number; /* tail */\nconst value: Box<string> = undefined;",
-    };
-    for (sources) |source| switch (try compare(std.testing.allocator, source, .collect)) {
-        .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.type_declaration, reason),
-        else => return error.TestUnexpectedResult,
-    };
+    try expectDirectAccepted(source.items);
 }
 
 test "generic semantic fragment census observes every case" {
@@ -10144,15 +7777,32 @@ test "declaration semantic census observes every case" {
         switch (fixture.probe) {
             .equivalent => {
                 try assertDeclarationSemanticProperty(fixture.case, fixture.source);
-                try expectEquivalent(fixture.source);
+                try expectDirectAccepted(fixture.source);
             },
-            .out_of_slice => |expected| switch (try compare(std.testing.allocator, fixture.source, .collect)) {
-                .out_of_slice => |actual| try std.testing.expectEqual(expected, actual),
-                else => return error.TestUnexpectedResult,
+            .parser_refused => {
+                var parser = try JsParser.initAdmission(
+                    std.testing.allocator,
+                    std.testing.allocator,
+                    fixture.source,
+                    .collect,
+                );
+                defer parser.deinit();
+                const outcome = try parser.parseAdmission();
+                try std.testing.expect(std.meta.activeTag(outcome) == .parser_refused);
+                try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+                try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
             },
-            .admission_refused => |expected| switch (try compare(std.testing.allocator, fixture.source, .collect)) {
-                .admission_refused => |actual| try std.testing.expectEqual(expected, actual.first),
-                else => return error.TestUnexpectedResult,
+            .admission_refused => |expected| {
+                const marker = if (expected == .type_alias_declaration) "type" else "{ value: number }";
+                const diagnostic = try directDiagnosticAt(fixture.source, expected, marker);
+                try expectDirectAdmission(
+                    std.testing.allocator,
+                    fixture.source,
+                    .collect,
+                    .recovered_admission_refused,
+                    &.{diagnostic},
+                    null,
+                );
             },
             .retained_declarations => |expected| {
                 var parser = try JsParser.initTyped(
@@ -10195,12 +7845,12 @@ test "declaration semantic census observes every case" {
             },
             .repeated_population_additive => {
                 try assertDeclarationSemanticProperty(fixture.case, fixture.source);
-                try expectEquivalent(fixture.source);
+                try expectDirectAccepted(fixture.source);
                 try assertRepeatedPopulationIsAdditive();
             },
             .contractivity_path_limit => {
                 try assertDeclarationSemanticProperty(fixture.case, fixture.source);
-                try expectEquivalent(fixture.source);
+                try expectDirectAccepted(fixture.source);
                 try assertContractivityPathBoundary(31, true);
                 try assertContractivityPathBoundary(32, false);
             },
@@ -10211,24 +7861,49 @@ test "declaration semantic census observes every case" {
 }
 
 test "declaration bodies admit numeric leading and blank-line continuations" {
-    const sources = [_][]const u8{
-        "structural Numeric = 1;",
-        "structural LeadingUnion = | number;",
-        "structural LeadingIntersection = & number;",
-        "structural Union = number |\n\n string;",
-        "structural Intersection = number &\n\n { value: string };",
+    const cases = [_]struct { source: []const u8, name: []const u8, body: []const u8, tag: TypeTag }{
+        .{ .source = "structural Numeric = 1;", .name = "Numeric", .body = "1", .tag = .t_literal_number },
+        .{ .source = "structural LeadingUnion = | number;", .name = "LeadingUnion", .body = "| number", .tag = .t_number },
+        .{ .source = "structural LeadingIntersection = & number;", .name = "LeadingIntersection", .body = "& number", .tag = .t_number },
+        .{ .source = "structural Union = number |\n\n string;", .name = "Union", .body = "number |\n\n string", .tag = .t_union },
+        .{ .source = "structural Intersection = number &\n\n { value: string };", .name = "Intersection", .body = "number &\n\n { value: string }", .tag = .t_intersection },
     };
-    for (sources) |source| try expectEquivalent(source);
+    for (cases) |case| {
+        var atoms = AtomTable.init(std.testing.allocator);
+        defer atoms.deinit();
+        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        defer parser.deinit();
+        parser.setAtomTable(&atoms);
+        const root = try parser.parse();
+        const view = parserIrView(&parser);
+        try std.testing.expectEqual(engine.parser.NodeTag.program, view.getTag(root).?);
+        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.annotations.items.len);
+        const body = switch (parser.type_store.declarations.items[0].body) {
+            .present => |value| value,
+            .absent => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqualStrings(case.body, body.raw_span.text(case.source));
+
+        var pool = TypePool.init(std.testing.allocator);
+        defer pool.deinit(std.testing.allocator);
+        var env = TypeEnv.init(std.testing.allocator, &pool);
+        defer env.deinit();
+        try env.populateSourceTypes(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = view,
+            .atoms = &atoms,
+        } });
+        const alias = env.getTypeAlias(case.name) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(case.tag, pool.getTag(alias).?);
+        try pool.ensureHealthy();
+        try env.ensureHealthy();
+    }
 }
 
 test "spaced function arrow continuation absorbs the next runtime line" {
     const source = "structural A = number = >\nconst value = 1;";
-    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-        switch (try compare(std.testing.allocator, source, mode)) {
-            .equivalent => {},
-            else => return error.TestUnexpectedResult,
-        }
-    }
 
     var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
     defer parser.deinit();
@@ -10249,12 +7924,6 @@ test "spaced function arrow continuation absorbs the next runtime line" {
 
 test "comment-separated declaration terminator remains a runtime semicolon" {
     const source = "structural A = number\n/*c*/;";
-    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-        switch (try compare(std.testing.allocator, source, mode)) {
-            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
-            else => return error.TestUnexpectedResult,
-        }
-    }
 
     var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
     defer parser.deinit();
@@ -10272,44 +7941,34 @@ test "comment-separated declaration terminator remains a runtime semicolon" {
 
 test "nominal refusal recovery preserves a comment-separated semicolon" {
     const separated = "nominal Bad = void\n/*c*/;";
-    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-        switch (try preflight(std.testing.allocator, separated, mode)) {
-            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
-            .eligible => |eligible| {
-                var unexpected = eligible;
-                unexpected.deinit(std.testing.allocator);
-                return error.TestUnexpectedResult;
-            },
-        }
-    }
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, separated);
+    defer parser.deinit();
+    try std.testing.expectError(error.MissingSemicolon, parser.parse());
+    try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.missing_semicolon, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 0), errors[0].location.offset);
+    try std.testing.expectEqual(@as(u32, 7), errors[0].location.end_offset);
 
     const empty = "nominal Bad =\n;";
-    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-        var checked = switch (try preflight(std.testing.allocator, empty, mode)) {
-            .eligible => |eligible| eligible,
-            .out_of_slice => return error.TestUnexpectedResult,
+    inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
+        const expected = TypeSyntax.AdmissionDiagnostic{
+            .kind = .nominal_base_not_scalar,
+            .span = .{ .start = 14, .end = 14 },
         };
-        defer checked.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(usize, 1), checked.diagnostics.items.len);
-        try std.testing.expectEqual(AdmissionKind.nominal_base_not_scalar, checked.diagnostics.items[0].kind);
+        try expectDirectAdmission(std.testing.allocator, empty, mode, if (mode == .collect) .recovered_admission_refused else .terminal_admission_refused, &.{expected}, null);
     }
 }
 
-test "unterminated trailing declaration comment stays outside the private slice" {
+test "unterminated trailing declaration comment is refused directly" {
     const source = "structural A = number;/*";
-    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-        switch (try preflight(std.testing.allocator, source, mode)) {
-            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
-            .eligible => |eligible| {
-                var unexpected = eligible;
-                unexpected.deinit(std.testing.allocator);
-                return error.TestUnexpectedResult;
-            },
-        }
-        switch (try compare(std.testing.allocator, source, mode)) {
-            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.unsupported_initializer, reason),
-            else => return error.TestUnexpectedResult,
-        }
+    inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
+        defer parser.deinit();
+        const outcome = try parser.parseAdmission();
+        try std.testing.expect(std.meta.activeTag(outcome) == .terminal_admission_refused);
+        try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
     }
 }
 
@@ -10322,150 +7981,55 @@ test "declaration names admit identifier-shaped keyword tokens" {
             .{ name, name },
         );
         defer std.testing.allocator.free(source);
-        try expectEquivalent(source);
+        try expectDirectAccepted(source);
     }
 }
 
-test "declaration exclusions ignore diagnostics from earlier syntax" {
-    const Fixture = struct { source: []const u8, reason: OutOfSliceReason };
-    const unsupported = [_]Fixture{
-        .{ .source = "const first: number any = 1;\nnominal Later = \"unterminated;", .reason = .type_declaration },
-        .{ .source = "nominal Bad = number any;\nnominal Later = \"unterminated;", .reason = .type_declaration },
-        .{ .source = "nominal Bad = number any;\nfunction later() { return 1; }", .reason = .function_declaration },
-        .{ .source = "nominal Later = \"unterminated;", .reason = .type_declaration },
-    };
-    for (unsupported) |fixture| {
-        inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-            switch (try compare(std.testing.allocator, fixture.source, mode)) {
-                .out_of_slice => |reason| try std.testing.expectEqual(fixture.reason, reason),
-                else => return error.TestUnexpectedResult,
-            }
-            switch (try preflight(std.testing.allocator, fixture.source, mode)) {
-                .out_of_slice => |reason| try std.testing.expectEqual(fixture.reason, reason),
-                .eligible => |eligible| {
-                    var unexpected = eligible;
-                    unexpected.deinit(std.testing.allocator);
-                    return error.TestUnexpectedResult;
-                },
-            }
-        }
-    }
-
-    var budget: std.ArrayListUnmanaged(u8) = .empty;
-    defer budget.deinit(std.testing.allocator);
-    try budget.appendSlice(std.testing.allocator, "const first: number any = 1;\nstructural Later = ");
-    for (0..TypeSyntax.max_parser_frames + 1) |_| {
-        try budget.appendSlice(std.testing.allocator, "readonly ");
-    }
-    try budget.appendSlice(std.testing.allocator, "number;");
-    inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-        switch (try compare(std.testing.allocator, budget.items, mode)) {
-            .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.type_declaration, reason),
-            else => return error.TestUnexpectedResult,
-        }
-    }
-}
-
-test "declaration header comments stay outside the private slice" {
-    const sources = [_][]const u8{
-        "structural /*c*/ A = number;",
-        "structural A /*c*/ = number;",
-    };
-    for (sources) |source| {
-        inline for (.{ AdmissionMode.collect, AdmissionMode.compile }) |mode| {
-            switch (try preflight(std.testing.allocator, source, mode)) {
-                .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.type_declaration, reason),
-                .eligible => |eligible| {
-                    var unexpected = eligible;
-                    unexpected.deinit(std.testing.allocator);
-                    return error.TestUnexpectedResult;
-                },
-            }
-        }
-    }
-}
-
-test "nominal declaration admission preserves diagnostic order and deduplication" {
-    const Fixture = struct {
+test "nominal declaration admission preserves direct diagnostic order and spans" {
+    const cases = [_]struct {
         source: []const u8,
-        expected: []const AdmissionKind,
+        kind: TypeSyntax.AdmissionKind,
+        marker: []const u8,
+        absent_body: bool = false,
+    }{
+        .{ .source = "nominal Bad = void;", .kind = .nominal_base_not_scalar, .marker = "void" },
+        .{ .source = "nominal Bad = Array<string>;", .kind = .nominal_base_not_scalar, .marker = "Array<string>" },
+        .{ .source = "nominal Bad = ReadonlyArray<string>;", .kind = .nominal_base_not_scalar, .marker = "ReadonlyArray<string>" },
+        .{ .source = "nominal Bad = (value?: string) => number;", .kind = .nominal_base_not_scalar, .marker = "(value?: string) => number" },
+        .{ .source = "nominal Bad = any;", .kind = .any_type, .marker = "any" },
+        .{ .source = "nominal Bad =;", .kind = .nominal_base_not_scalar, .marker = ";", .absent_body = true },
+        .{ .source = "nominal Bad;", .kind = .nominal_base_not_scalar, .marker = ";", .absent_body = true },
+        .{ .source = "nominal Bad   ;", .kind = .nominal_base_not_scalar, .marker = ";", .absent_body = true },
     };
-    const fixtures = [_]Fixture{
-        .{ .source = "nominal Bad = void;", .expected = &.{.nominal_base_not_scalar} },
-        .{ .source = "nominal Bad = Array<string>;", .expected = &.{.nominal_base_not_scalar} },
-        .{ .source = "nominal Bad = ReadonlyArray<string>;", .expected = &.{.nominal_base_not_scalar} },
-        .{ .source = "nominal Bad = (value?: string) => number;", .expected = &.{.nominal_base_not_scalar} },
-        .{ .source = "nominal Bad = any;", .expected = &.{.any_type} },
-        .{ .source = "nominal Bad = number any;", .expected = &.{ .any_type, .nominal_base_not_scalar } },
-        .{ .source = "nominal Bad =;", .expected = &.{.nominal_base_not_scalar} },
-        .{ .source = "nominal Bad;", .expected = &.{.nominal_base_not_scalar} },
-    };
-    for (fixtures) |fixture| {
-        var checked = switch (try preflight(std.testing.allocator, fixture.source, .collect)) {
-            .eligible => |eligible| eligible,
-            .out_of_slice => return error.TestUnexpectedResult,
-        };
-        defer checked.deinit(std.testing.allocator);
-        try std.testing.expectEqual(fixture.expected.len, checked.diagnostics.items.len);
-        for (fixture.expected, checked.diagnostics.items) |expected, actual| {
-            try std.testing.expectEqual(expected, actual.kind);
+    for (cases) |case| {
+        const full_span = try directDiagnosticAt(case.source, case.kind, case.marker);
+        inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
+            var diagnostic = full_span;
+            if (case.absent_body) diagnostic.span.end = diagnostic.span.start;
+            try expectDirectAdmission(std.testing.allocator, case.source, mode, if (mode == .collect) .recovered_admission_refused else .terminal_admission_refused, &.{diagnostic}, null);
         }
     }
-
-    switch (try preflight(
-        std.testing.allocator,
-        "nominal Bad = number any;\nnominal Later = \"unterminated;",
-        .compile,
-    )) {
-        .out_of_slice => |reason| try std.testing.expectEqual(OutOfSliceReason.type_declaration, reason),
-        .eligible => |eligible| {
-            var unexpected = eligible;
-            unexpected.deinit(std.testing.allocator);
-            return error.TestUnexpectedResult;
-        },
-    }
-
-    var compile_checked = switch (try preflight(
-        std.testing.allocator,
-        "nominal Bad = number any;",
-        .compile,
-    )) {
-        .eligible => |eligible| eligible,
-        .out_of_slice => return error.TestUnexpectedResult,
-    };
-    defer compile_checked.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), compile_checked.diagnostics.items.len);
-    try std.testing.expectEqual(AdmissionKind.any_type, compile_checked.diagnostics.items[0].kind);
-
-    var spaced = switch (try preflight(std.testing.allocator, "nominal Bad   ;", .collect)) {
-        .eligible => |eligible| eligible,
-        .out_of_slice => return error.TestUnexpectedResult,
-    };
-    defer spaced.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), spaced.diagnostics.items.len);
-    try std.testing.expectEqual(AdmissionKind.nominal_base_not_scalar, spaced.diagnostics.items[0].kind);
-    const position = positionOf("nominal Bad   ;", spaced.diagnostics.items[0].span.start);
-    try std.testing.expectEqual(@as(u32, 1), position.line);
-    try std.testing.expectEqual(@as(u32, 15), position.column);
+    const mixed = "nominal Bad = number any;";
+    const any_diagnostic = try directDiagnosticAt(mixed, .any_type, "any");
+    const base_diagnostic = try directDiagnosticAt(mixed, .nominal_base_not_scalar, "number any");
+    try expectDirectAdmission(std.testing.allocator, mixed, .collect, .recovered_admission_refused, &.{ any_diagnostic, base_diagnostic }, null);
+    try expectDirectAdmission(std.testing.allocator, mixed, .compile, .terminal_admission_refused, &.{any_diagnostic}, null);
 }
 
-test "declaration comparison closes every allocation failure" {
+test "direct declaration lowering closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
                 "structural Loop = Loop;\n" ++
                 "nominal Identifier = string;\n" ++
                 "const value: Identifier = \"x\";";
-            switch (try compare(allocator, source, .collect)) {
-                .equivalent => {},
-                else => return error.TestUnexpectedResult,
-            }
+            try expectDirectSourceWithAllocator(allocator, source);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
-test "direct primitive slice matches every legacy primitive" {
+test "direct primitive and grouped annotations lower to exact builtins" {
     const primitives = [_][]const u8{
         "unknown",
         "never",
@@ -10485,24 +8049,105 @@ test "direct primitive slice matches every legacy primitive" {
                 .{ opening, primitive, closing },
             );
             defer std.testing.allocator.free(source);
-            try expectEquivalent(source);
+            try expectDirectAccepted(source);
+            var pool = TypePool.init(std.testing.allocator);
+            defer pool.deinit(std.testing.allocator);
+            const authored = try std.fmt.allocPrint(
+                std.testing.allocator,
+                "{s}{s}{s}",
+                .{ opening, primitive, closing },
+            );
+            defer std.testing.allocator.free(authored);
+            const lowered = try parseDirectAnnotation(&pool, authored);
+            const expected = if (std.mem.eql(u8, primitive, "unknown")) pool.idx_unknown else if (std.mem.eql(u8, primitive, "never")) pool.idx_never else if (std.mem.eql(u8, primitive, "undefined")) pool.idx_undefined else if (std.mem.eql(u8, primitive, "null")) pool.idx_null else if (std.mem.eql(u8, primitive, "boolean")) pool.idx_boolean else if (std.mem.eql(u8, primitive, "number")) pool.idx_number else if (std.mem.eql(u8, primitive, "string")) pool.idx_string else pool.idx_bytes;
+            try std.testing.expectEqual(expected, lowered);
         }
     }
 }
 
+fn expectDirectDeclarationNeutral(
+    source: []const u8,
+    name: []const u8,
+    expected_base: enum { number, string },
+    nominal: bool,
+    expected_runtime_variables: usize,
+) !void {
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = parserIrView(&parser);
+    try std.testing.expectEqual(engine.parser.NodeTag.program, view.getTag(root).?);
+    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+    try std.testing.expectEqual(expected_runtime_variables, parser.type_store.annotations.items.len);
+    var runtime_variables: usize = 0;
+    for (parser.nodes.tags.items) |tag| if (tag == .var_decl) {
+        runtime_variables += 1;
+    };
+    try std.testing.expectEqual(expected_runtime_variables, runtime_variables);
+
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    const alias = env.getTypeAlias(name) orelse return error.TestUnexpectedResult;
+    const base = switch (expected_base) {
+        .number => pool.idx_number,
+        .string => pool.idx_string,
+    };
+    if (nominal) {
+        try std.testing.expect(pool.isNominal(alias));
+        try std.testing.expectEqualStrings(name, pool.nominalName(alias));
+        try std.testing.expectEqual(base, pool.unwrapNominal(alias));
+    } else {
+        try std.testing.expectEqual(base, alias);
+    }
+    if (expected_runtime_variables == 1) {
+        const annotation = parser.type_store.annotations.items[0];
+        const owner = annotation.runtime_owner orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(alias, env.getVarTypeForDeclaration(view, owner.declaration).?);
+    }
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+}
+
 test "simple structural declaration is runtime neutral and lowers directly" {
-    try expectEquivalent("structural Alias = number; const value: Alias = 1;");
-    try expectEquivalent("structural Alias = number;");
+    try expectDirectDeclarationNeutral("structural Alias = number; const value: Alias = 1;", "Alias", .number, false, 1);
+    try expectDirectDeclarationNeutral("structural Alias = number;", "Alias", .number, false, 0);
 }
 
 test "simple nominal declaration is runtime neutral and lowers directly" {
-    try expectEquivalent("nominal UserId = string; const value: UserId = \"x\";");
+    try expectDirectDeclarationNeutral("nominal UserId = string; const value: UserId = \"x\";", "UserId", .string, true, 1);
 }
 
-test "direct compound slice matches an ordered record with arrays" {
-    try expectEquivalent(
-        "const value: { readonly id?: number; tags: string[][] } = input;",
-    );
+test "direct compound slice keeps ordered record fields and nested arrays" {
+    const annotation = "{ readonly id?: number; tags: string[][] }";
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    const record = try parseDirectAnnotation(&pool, annotation);
+    try std.testing.expectEqual(TypeTag.t_record, pool.getTag(record).?);
+    const fields = pool.getRecordFields(record);
+    try std.testing.expectEqual(@as(usize, 2), fields.len);
+    try std.testing.expectEqualStrings("id", pool.getName(fields[0].name_start, fields[0].name_len));
+    try std.testing.expectEqual(pool.idx_number, fields[0].type_idx);
+    try std.testing.expect(fields[0].optional);
+    try std.testing.expect(fields[0].readonly);
+    try std.testing.expectEqualStrings("tags", pool.getName(fields[1].name_start, fields[1].name_len));
+    try std.testing.expect(!fields[1].optional);
+    try std.testing.expect(!fields[1].readonly);
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(fields[1].type_idx).?);
+    const inner = pool.getArrayElement(fields[1].type_idx);
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(inner).?);
+    try std.testing.expectEqual(pool.idx_string, pool.getArrayElement(inner));
+    try pool.ensureHealthy();
 }
 
 test "direct compound families and semantic quirks match ordered legacy types" {
@@ -10568,9 +8213,9 @@ test "direct compound families and semantic quirks match ordered legacy types" {
     var families = std.EnumSet(CompoundFamily).initEmpty();
     var quirks = std.EnumSet(SemanticQuirk).initEmpty();
     for (fixtures) |fixture| {
-        const source = try legacyAnnotationSource(std.testing.allocator, fixture.annotation);
+        const source = try directAnnotationSource(std.testing.allocator, fixture.annotation);
         defer std.testing.allocator.free(source);
-        try expectEquivalent(source);
+        try expectDirectAccepted(source);
         quirks.insert(fixture.quirk);
         if (fixture.family) |family| families.insert(family);
     }
@@ -10589,9 +8234,9 @@ test "direct compound families and semantic quirks match ordered legacy types" {
         "(200)",
         "true",
     }) |annotation| {
-        const source = try legacyAnnotationSource(std.testing.allocator, annotation);
+        const source = try directAnnotationSource(std.testing.allocator, annotation);
         defer std.testing.allocator.free(source);
-        try expectEquivalent(source);
+        try expectDirectAccepted(source);
     }
 }
 
@@ -10606,11 +8251,11 @@ test "direct compound boundaries preserve legacy structure before key comparison
         try function.appendSlice(allocator, try std.fmt.bufPrint(&name, "p{d}: number", .{index}));
     }
     try function.appendSlice(allocator, ") => string = undefined;");
-    try expectEquivalent(function.items);
+    try expectDirectAccepted(function.items);
 
     inline for (.{ 63, 64 }) |layers| {
         const source = "const value: number" ++ "[]" ** layers ++ " = undefined;";
-        try expectEquivalent(source);
+        try expectDirectAccepted(source);
     }
 
     for ([_][]const u8{
@@ -10623,7 +8268,7 @@ test "direct compound boundaries preserve legacy structure before key comparison
         "const value: { x }[] = undefined;",
         "const value: [[()]][] = undefined;",
         "const value: { outer: { x }[]; tail: number }[] = undefined;",
-    }) |source| try expectEquivalent(source);
+    }) |source| try expectDirectAccepted(source);
 }
 
 test "nested semantic absence stops before later syntax" {
@@ -10666,11 +8311,9 @@ test "direct function lowering propagates the packed parameter capacity error" {
     }
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
     try std.testing.expectError(
         error.TypePoolCapacityExceeded,
-        lowerSyntaxStoreWithoutRuntimeOwners(allocator, &store, &pool, &env),
+        lowerStandaloneAnnotation(allocator, &store, &pool),
     );
     try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }
@@ -10700,7 +8343,6 @@ fn fillPoolToRemainingNodes(
 fn lowerDirectCapacityAnnotation(
     allocator: std.mem.Allocator,
     pool: *TypePool,
-    env: *TypeEnv,
     source: []const u8,
 ) !TypeIndex {
     var store = TypeSyntax.Store.init(allocator, source);
@@ -10710,10 +8352,7 @@ fn lowerDirectCapacityAnnotation(
         .parsed => {},
         .failure, .excluded => return error.TestUnexpectedResult,
     }
-    try lowerSyntaxStoreWithoutRuntimeOwners(allocator, &store, pool, env);
-    const annotation = store.annotations.items[0];
-    return env.getVarTypeByBinding(annotation.binding.scope_id, annotation.binding.name_atom) orelse
-        error.TestUnexpectedResult;
+    return lowerStandaloneAnnotation(allocator, &store, pool);
 }
 
 fn assertApplicationCapacityShape(
@@ -10819,7 +8458,6 @@ test "application lowering matches legacy compact node capacity and order" {
             const result = try lowerDirectCapacityAnnotation(
                 allocator,
                 &pool,
-                &env,
                 direct_source,
             );
             try pool.ensureHealthy();
@@ -10847,45 +8485,9 @@ test "application lowering matches legacy compact node capacity and order" {
             try fillPoolToRemainingNodes(allocator, &pool, necessary_nodes - 1);
             try std.testing.expectError(
                 error.TypePoolCapacityExceeded,
-                lowerDirectCapacityAnnotation(allocator, &pool, &env, direct_source),
+                lowerDirectCapacityAnnotation(allocator, &pool, direct_source),
             );
             try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
-        }
-    }
-}
-
-test "private compound budgets decline before legacy preparation" {
-    const Budget = enum { frames, templates };
-    inline for (std.meta.tags(Budget)) |budget| {
-        var source: std.ArrayListUnmanaged(u8) = .empty;
-        defer source.deinit(std.testing.allocator);
-        try source.appendSlice(std.testing.allocator, "const value: ");
-        switch (budget) {
-            .frames => {
-                for (0..TypeSyntax.max_parser_frames + 1) |_| {
-                    try source.appendSlice(std.testing.allocator, "readonly ");
-                }
-                try source.appendSlice(std.testing.allocator, "number = 1;");
-            },
-            .templates => {
-                try source.append(std.testing.allocator, '`');
-                for (0..TypeSyntax.max_template_levels) |_| {
-                    try source.appendSlice(std.testing.allocator, "${`");
-                }
-                try source.appendSlice(std.testing.allocator, "value");
-                for (0..TypeSyntax.max_template_levels) |_| {
-                    try source.appendSlice(std.testing.allocator, "`}");
-                }
-                try source.appendSlice(std.testing.allocator, "` = 1;");
-            },
-        }
-        const verdict = try compare(std.testing.allocator, source.items, .collect);
-        switch (verdict) {
-            .out_of_slice => |reason| try std.testing.expectEqual(
-                OutOfSliceReason.compound_annotation,
-                reason,
-            ),
-            else => return error.TestUnexpectedResult,
         }
     }
 }
@@ -10940,7 +8542,26 @@ test "function backtracking retains completed parameter syntax" {
         ];
         try std.testing.expectEqual(primitive, node.data.primitive);
     }
-    try expectEquivalent("const value: (number: string | boolean, number) = undefined;");
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    const prior_nodes = pool.nodes.items.len;
+    const selected_type = try lowerStandaloneAnnotation(std.testing.allocator, &store, &pool);
+    try std.testing.expectEqual(pool.idx_number, selected_type);
+    try std.testing.expectEqual(prior_nodes + 1, pool.nodes.items.len);
+    const attempted_union: TypeIndex = @intCast(prior_nodes);
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(attempted_union).?);
+    const lowered_members = pool.getUnionMembers(attempted_union);
+    try std.testing.expectEqual(@as(usize, 2), lowered_members.len);
+    try std.testing.expectEqual(pool.idx_string, lowered_members[0]);
+    try std.testing.expectEqual(pool.idx_boolean, lowered_members[1]);
+    try pool.ensureHealthy();
+    try expectDirectAccepted("const value: (number: string | boolean, number) = undefined;");
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        direct_pool.idx_number,
+        try parseDirectAnnotation(&direct_pool, "(number: string | boolean, number)"),
+    );
 }
 
 test "compound syntax keeps complete field and parameter spans" {
@@ -10982,8 +8603,8 @@ test "compound syntax keeps complete field and parameter spans" {
 }
 
 test "bare groups keep consumed spans and lower as absent children" {
-    try expectEquivalent("const value: {value:();tail:number} = undefined;");
-    try expectEquivalent("const value: (value:())=>number = undefined;");
+    try expectDirectAccepted("const value: {value:();tail:number} = undefined;");
+    try expectDirectAccepted("const value: (value:())=>number = undefined;");
 
     const record_source = "{value:();tail:number} = value;";
     var record_store = TypeSyntax.Store.init(std.testing.allocator, record_source);
@@ -11024,16 +8645,11 @@ test "bare groups keep consumed spans and lower as absent children" {
 
     var record_pool = TypePool.init(std.testing.allocator);
     defer record_pool.deinit(std.testing.allocator);
-    var record_env = TypeEnv.init(std.testing.allocator, &record_pool);
-    defer record_env.deinit();
-    try lowerSyntaxStoreWithoutRuntimeOwners(
+    const lowered_record = try lowerStandaloneAnnotation(
         std.testing.allocator,
         &record_store,
         &record_pool,
-        &record_env,
     );
-    const lowered_record = record_env.getVarTypeByBinding(0, 300) orelse
-        return error.TestUnexpectedResult;
     const lowered_fields = record_pool.getRecordFields(lowered_record);
     try std.testing.expectEqual(@as(usize, 2), lowered_fields.len);
     try std.testing.expectEqual(null_type_idx, lowered_fields[0].type_idx);
@@ -11077,16 +8693,11 @@ test "bare groups keep consumed spans and lower as absent children" {
 
     var function_pool = TypePool.init(std.testing.allocator);
     defer function_pool.deinit(std.testing.allocator);
-    var function_env = TypeEnv.init(std.testing.allocator, &function_pool);
-    defer function_env.deinit();
-    try lowerSyntaxStoreWithoutRuntimeOwners(
+    const lowered_function = try lowerStandaloneAnnotation(
         std.testing.allocator,
         &function_store,
         &function_pool,
-        &function_env,
     );
-    const lowered_function = function_env.getVarTypeByBinding(0, 300) orelse
-        return error.TestUnexpectedResult;
     const lowered_info = function_pool.getFunctionInfo(lowered_function);
     try std.testing.expectEqual(@as(usize, 1), lowered_info.params.len);
     try std.testing.expectEqual(null_type_idx, lowered_info.params[0].type_idx);
@@ -11094,7 +8705,7 @@ test "bare groups keep consumed spans and lower as absent children" {
 
 test "direct primitive slice binds a grouped and suffixed annotation" {
     const source = "const text: (((string))) tolerated_suffix = input;";
-    try expectEquivalent(source);
+    try expectDirectAccepted(source);
 
     var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
     defer parser.deinit();
@@ -11126,9 +8737,6 @@ test "direct parser reports missing and unmatched primitive locations" {
         try std.testing.expectEqual(case.offset, errors[0].location.offset);
         try std.testing.expectEqual(case.end_offset, errors[0].location.end_offset);
     }
-
-    const legacy_shape = try compare(std.testing.allocator, "let n: (number;", .collect);
-    try std.testing.expectEqual(OutOfSliceReason.malformed_annotation, legacy_shape.out_of_slice);
 }
 
 test "direct type depth admits 512 and refuses opener 513" {
@@ -11139,7 +8747,7 @@ test "direct type depth admits 512 and refuses opener 513" {
     try source.appendSlice(std.testing.allocator, "number");
     try source.appendNTimes(std.testing.allocator, ')', TypeSyntax.max_type_depth);
     try source.appendSlice(std.testing.allocator, " = 1;");
-    try expectEquivalent(source.items);
+    try expectDirectAccepted(source.items);
 
     var refused: std.ArrayListUnmanaged(u8) = .empty;
     defer refused.deinit(std.testing.allocator);
@@ -11148,46 +8756,12 @@ test "direct type depth admits 512 and refuses opener 513" {
     try refused.appendSlice(std.testing.allocator, "number");
     try refused.appendNTimes(std.testing.allocator, ')', TypeSyntax.max_type_depth + 1);
     try refused.appendSlice(std.testing.allocator, " any = 1;");
-    const verdict = try compare(std.testing.allocator, refused.items, .collect);
-    switch (verdict) {
-        .admission_refused => |refusal| {
-            try std.testing.expectEqual(AdmissionKind.nesting_too_deep, refusal.first);
-            try std.testing.expectEqual(@as(usize, 1), refusal.count);
-        },
-        else => return error.TestUnexpectedResult,
-    }
-
-    var earlier_any: std.ArrayListUnmanaged(u8) = .empty;
-    defer earlier_any.deinit(std.testing.allocator);
-    try earlier_any.appendSlice(std.testing.allocator, "const value: any | ");
-    try earlier_any.appendNTimes(std.testing.allocator, '(', TypeSyntax.max_type_depth + 1);
-    try earlier_any.appendSlice(std.testing.allocator, "number = 1;");
-    const ordered = try compare(std.testing.allocator, earlier_any.items, .collect);
-    switch (ordered) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.malformed_annotation,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
-    const compile_ordered = try compare(std.testing.allocator, earlier_any.items, .compile);
-    switch (compile_ordered) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.malformed_annotation,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
-
-    try refused.appendSlice(std.testing.allocator, " function excluded() {}");
-    const excluded = try compare(std.testing.allocator, refused.items, .collect);
-    switch (excluded) {
-        .out_of_slice => |reason| try std.testing.expectEqual(
-            OutOfSliceReason.function_declaration,
-            reason,
-        ),
-        else => return error.TestUnexpectedResult,
-    }
+    const opener: u32 = @intCast("const value: ".len + TypeSyntax.max_type_depth);
+    const expected = TypeSyntax.AdmissionDiagnostic{
+        .kind = .nesting_too_deep,
+        .span = .{ .start = opener, .end = opener + 1 },
+    };
+    try expectDirectAdmission(std.testing.allocator, refused.items, .collect, .terminal_admission_refused, &.{expected}, null);
 }
 
 test "direct parser keeps the binding token for a missing semicolon" {
@@ -11203,270 +8777,198 @@ test "direct parser keeps the binding token for a missing semicolon" {
     try std.testing.expectEqual(engine.parser.ErrorKind.missing_semicolon, errors[0].kind);
     try std.testing.expectEqual(@as(u32, 4), errors[0].location.offset);
     try std.testing.expectEqual(@as(u32, 9), errors[0].location.end_offset);
-    try expectEquivalent(source);
 }
 
-test "depth refusals keep only complete primitive annotations eligible" {
-    const cases = [_]struct {
-        body: []const u8,
-        closed: bool,
-    }{
-        .{ .body = "number | string", .closed = true },
-        .{ .body = "number", .closed = false },
-    };
-    for (cases) |case| {
-        var source: std.ArrayListUnmanaged(u8) = .empty;
-        defer source.deinit(std.testing.allocator);
-        try source.appendSlice(std.testing.allocator, "const value: ");
-        try source.appendNTimes(std.testing.allocator, '(', TypeSyntax.max_type_depth + 1);
-        try source.appendSlice(std.testing.allocator, case.body);
-        if (case.closed) {
-            try source.appendNTimes(std.testing.allocator, ')', TypeSyntax.max_type_depth + 1);
-        }
-        try source.appendSlice(std.testing.allocator, " = 1;");
-        const verdict = try compare(std.testing.allocator, source.items, .collect);
-        switch (verdict) {
-            .out_of_slice => |reason| try std.testing.expectEqual(
-                OutOfSliceReason.malformed_annotation,
-                reason,
-            ),
-            else => return error.TestUnexpectedResult,
-        }
-    }
-}
+test "runtime any and quoted names are admitted while unary void is refused" {
+    const accepted = "const any = \"void\"; const value: string = any; const text = \"any\";";
+    try expectDirectAdmission(std.testing.allocator, accepted, .collect, .accepted, &.{}, null);
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, accepted);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = parserIrView(&parser);
+    try std.testing.expectEqual(engine.parser.NodeTag.program, view.getTag(root).?);
+    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
+    try std.testing.expectEqual(@as(usize, 3), countRuntimeTag(&parser, .var_decl));
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
+    const first = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, 0)) orelse return error.TestUnexpectedResult;
+    const value_offset = std.mem.indexOf(u8, accepted, "const value") orelse return error.TestUnexpectedResult;
+    const value = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, @intCast(value_offset))) orelse return error.TestUnexpectedResult;
+    const text_offset = std.mem.indexOf(u8, accepted, "const text") orelse return error.TestUnexpectedResult;
+    const text = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, @intCast(text_offset))) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, @intCast(@intFromEnum(try atoms.intern("any")))), first.binding.name_atom);
+    try std.testing.expectEqual(@as(u16, @intCast(@intFromEnum(try atoms.intern("value")))), value.binding.name_atom);
+    try std.testing.expectEqual(@as(u16, @intCast(@intFromEnum(try atoms.intern("text")))), text.binding.name_atom);
+    try std.testing.expectEqual(engine.parser.NodeTag.lit_string, view.getTag(first.init).?);
+    try std.testing.expectEqual(engine.parser.NodeTag.identifier, view.getTag(value.init).?);
+    try std.testing.expectEqual(engine.parser.NodeTag.lit_string, view.getTag(text.init).?);
 
-test "runtime any and quoted removed names are not admission refusals" {
-    try expectEquivalent(
-        "const any = \"void\"; const value: string = any; const text = \"any\";",
-    );
-
-    const runtime_void = try compare(
-        std.testing.allocator,
-        "const value: number = void 0;",
-        .collect,
-    );
-    switch (runtime_void) {
-        .equivalent => {},
+    const refused = "const value: number = void 0;";
+    var admission = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, refused, .collect);
+    defer admission.deinit();
+    switch (try admission.parseAdmission()) {
+        .parser_refused => |failure| {
+            try std.testing.expectEqual(error.ParseError, failure.first_error);
+            try std.testing.expectEqual(@as(usize, 1), failure.projected_error_count);
+        },
         else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 0), admission.getAdmissionDiagnostics().len);
+    const errors = admission.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    const void_offset = std.mem.indexOf(u8, refused, "void") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, @intCast(void_offset)), errors[0].location.offset);
+    try std.testing.expectEqual(@as(u32, @intCast(void_offset + 4)), errors[0].location.end_offset);
 }
 
-test "annotation refusals preserve legacy order and stage precedence" {
-    const root_any = try compare(std.testing.allocator, "const value: any = 1;", .collect);
-    try std.testing.expectEqual(AdmissionKind.any_type, root_any.admission_refused.first);
-    const root_void = try compare(std.testing.allocator, "const value: void = 1;", .collect);
-    try std.testing.expectEqual(AdmissionKind.void_type, root_void.admission_refused.first);
-
-    var checked = switch (try preflight(
-        std.testing.allocator,
-        "const value: number void any = 1;",
-        .collect,
-    )) {
-        .eligible => |value| value,
-        .out_of_slice => return error.TestUnexpectedResult,
-    };
-    defer checked.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2), checked.diagnostics.items.len);
-    try std.testing.expectEqual(AdmissionKind.any_type, checked.diagnostics.items[0].kind);
-    try std.testing.expectEqual(AdmissionKind.void_type, checked.diagnostics.items[1].kind);
-
-    const compile_verdict = try compare(
-        std.testing.allocator,
-        "const broken = ; const value: number void any = 1;",
-        .compile,
-    );
-    try std.testing.expectEqual(AdmissionKind.any_type, compile_verdict.admission_refused.first);
-    try std.testing.expectEqual(@as(usize, 1), compile_verdict.admission_refused.count);
-    const collect_verdict = try compare(
-        std.testing.allocator,
-        "const broken = ; const value: number void any = 1;",
-        .collect,
-    );
-    try std.testing.expectEqual(AdmissionKind.any_type, collect_verdict.admission_refused.first);
-    try std.testing.expectEqual(@as(usize, 2), collect_verdict.admission_refused.count);
-
-    const crlf = try compare(std.testing.allocator, "const value:\r\n any = 1;", .collect);
-    try std.testing.expectEqual(AdmissionKind.any_type, crlf.admission_refused.first);
-
-    const suffix_any = try compare(
-        std.testing.allocator,
-        "const value: number many = 1;",
-        .collect,
-    );
-    try std.testing.expectEqual(AdmissionKind.any_type, suffix_any.admission_refused.first);
-    try std.testing.expectEqual(@as(usize, 1), suffix_any.admission_refused.count);
-
-    const generic_many = try compare(
-        std.testing.allocator,
-        "structural Many<A,B,C,D,E,F,G,H> = H;\n" ++
-            "const value: Many<string,string,string,string,string,string,string,number> = undefined;",
-        .collect,
-    );
-    try std.testing.expectEqual(AdmissionKind.any_type, generic_many.admission_refused.first);
-    try std.testing.expectEqual(@as(usize, 1), generic_many.admission_refused.count);
-
-    const aliases = [_]struct {
+test "direct admission preserves removed-type order and source spans" {
+    const single = [_]struct {
         source: []const u8,
-        kind: AdmissionKind,
+        kind: TypeSyntax.AdmissionKind,
+        marker: []const u8,
+        exact_span: ?TypeSyntax.Span = null,
     }{
-        .{ .source = "const value: number Array<string> = 1;", .kind = .array_type_alias },
-        .{ .source = "const value: number ReadonlyArray<string> = 1;", .kind = .readonly_array_type_alias },
+        .{ .source = "const value: any = 1;", .kind = .any_type, .marker = "any" },
+        .{ .source = "const value: void = 1;", .kind = .void_type, .marker = "void" },
+        .{ .source = "const value:\r\n any = 1;", .kind = .any_type, .marker = "any" },
+        .{ .source = "const value: number many = 1;", .kind = .any_type, .marker = "any" },
+        .{ .source = "structural Many<A,B,C,D,E,F,G,H> = H;\nconst value: Many<string,string,string,string,string,string,string,number> = undefined;", .kind = .any_type, .marker = "any", .exact_span = .{ .start = 52, .end = 55 } },
+        .{ .source = "const value: number Array<string> = 1;", .kind = .array_type_alias, .marker = "Array" },
+        .{ .source = "const value: number ReadonlyArray<string> = 1;", .kind = .readonly_array_type_alias, .marker = "ReadonlyArray" },
     };
-    for (aliases) |case| {
-        const verdict = try compare(std.testing.allocator, case.source, .collect);
-        try std.testing.expectEqual(case.kind, verdict.admission_refused.first);
-        try std.testing.expectEqual(@as(usize, 1), verdict.admission_refused.count);
+    for (single) |case| {
+        const diagnostic = if (case.exact_span) |span|
+            TypeSyntax.AdmissionDiagnostic{ .kind = case.kind, .span = span }
+        else
+            try directDiagnosticAt(case.source, case.kind, case.marker);
+        try expectDirectAdmission(std.testing.allocator, case.source, .collect, .recovered_admission_refused, &.{diagnostic}, null);
     }
 
-    const any_array = try compare(
-        std.testing.allocator,
-        "const value: any Array<string> = 1;",
-        .collect,
-    );
-    try std.testing.expectEqual(AdmissionKind.any_type, any_array.admission_refused.first);
-    try std.testing.expectEqual(@as(usize, 2), any_array.admission_refused.count);
+    const ordered = "const value: number void any = 1;";
+    const any_diagnostic = try directDiagnosticAt(ordered, .any_type, "any");
+    const void_diagnostic = try directDiagnosticAt(ordered, .void_type, "void");
+    try expectDirectAdmission(std.testing.allocator, ordered, .collect, .recovered_admission_refused, &.{ any_diagnostic, void_diagnostic }, null);
+    try expectDirectAdmission(std.testing.allocator, ordered, .compile, .terminal_admission_refused, &.{any_diagnostic}, null);
 
-    try expectEquivalent("const value: `outer${`any`}` = undefined;");
+    const broken = "const broken = ; const value: number void any = 1;";
+    const broken_any = try directDiagnosticAt(broken, .any_type, "any");
+    const broken_void = try directDiagnosticAt(broken, .void_type, "void");
+    try expectDirectAdmission(std.testing.allocator, broken, .collect, .recovered_admission_refused, &.{ broken_any, broken_void }, null);
+    try expectDirectAdmission(std.testing.allocator, broken, .compile, .terminal_admission_refused, &.{broken_any}, null);
+
+    const any_array = "const value: any Array<string> = 1;";
+    try expectDirectAdmission(std.testing.allocator, any_array, .collect, .recovered_admission_refused, &.{
+        try directDiagnosticAt(any_array, .any_type, "any"),
+        try directDiagnosticAt(any_array, .array_type_alias, "Array"),
+    }, null);
+    try expectDirectAccepted("const value: `outer${`any`}` = undefined;");
 }
 
-test "out of slice census covers every private reason" {
-    const fixtures = [_]struct {
-        reason: OutOfSliceReason,
+test "direct calls and comparisons retain owners and operators" {
+    const cases = [_]struct {
         source: []const u8,
+        tag: engine.parser.NodeTag,
+        operator: ?engine.parser.BinaryOp = null,
+        explicit_calls: usize,
     }{
-        .{ .reason = .function_declaration, .source = "function f() {} const x: number = 1;" },
-        .{ .reason = .import_declaration, .source = "import { x } from \"m\"; const y: number = 1;" },
-        .{ .reason = .export_declaration, .source = "export const x: number = 1;" },
-        .{ .reason = .type_declaration, .source = "nominal X = \"unterminated; const x: number = 1;" },
-        .{ .reason = .multiple_bindings, .source = "const { x } = y; const z: number = 1;" },
-        .{ .reason = .annotation_count, .source = "const x: number = 1; const y: number = 2;" },
-        .{ .reason = .compound_annotation, .source = "const x: readonly<number> = y;" },
-        .{ .reason = .malformed_annotation, .source = "const x: (number = 1;" },
-        .{ .reason = .unsupported_annotation_position, .source = "const x = a: b; const y: number = 1;" },
-        .{ .reason = .assertion_syntax, .source = "const x: number = y as number;" },
-        .{ .reason = .template_literal, .source = "const x: string = `x`;" },
-        .{ .reason = .regex_literal, .source = "const x: unknown = /x/;" },
-        .{ .reason = .type_comment, .source = "const x: /* comment */ number = 1;" },
-        .{ .reason = .unsupported_initializer, .source = "const x: number = value.member;" },
-        .{ .reason = .lone_carriage_return, .source = "const value:\r any = 1;" },
+        .{ .source = "const value: number = f<string>(seed);", .tag = .call, .explicit_calls = 1 },
+        .{ .source = "const value: number = f<any>(seed);", .tag = .call, .explicit_calls = 1 },
+        .{ .source = "const value: number = seed < other;", .tag = .binary_op, .operator = .lt, .explicit_calls = 0 },
+        .{ .source = "const value: number = seed > other;", .tag = .binary_op, .operator = .gt, .explicit_calls = 0 },
     };
-    var seen = std.EnumSet(OutOfSliceReason).initEmpty();
-    for (fixtures) |fixture| {
-        const verdict = try compare(std.testing.allocator, fixture.source, .collect);
-        try std.testing.expectEqual(fixture.reason, verdict.out_of_slice);
-        try std.testing.expect(!seen.contains(fixture.reason));
-        seen.insert(fixture.reason);
-    }
-    inline for (@typeInfo(OutOfSliceReason).@"enum".fields) |field| {
-        const reason: OutOfSliceReason = @enumFromInt(field.value);
-        try std.testing.expect(seen.contains(reason));
-    }
-}
-
-test "preflight closes diagnostics before a later exclusion" {
-    const Context = struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            const outcome = try preflight(
-                allocator,
-                "const value: number any = 1; function f() {}",
-                .collect,
+    for (cases) |case| {
+        var atoms = AtomTable.init(std.testing.allocator);
+        defer atoms.deinit();
+        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        defer parser.deinit();
+        parser.setAtomTable(&atoms);
+        const root = try parser.parse();
+        const view = parserIrView(&parser);
+        try std.testing.expectEqual(engine.parser.NodeTag.program, view.getTag(root).?);
+        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
+        try std.testing.expectEqual(case.explicit_calls, parser.type_store.explicit_call_arguments.items.len);
+        const owner = parser.type_store.annotations.items[0].runtime_owner orelse return error.TestUnexpectedResult;
+        const declaration = view.getVarDecl(owner.declaration) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(case.tag, view.getTag(declaration.init).?);
+        if (case.operator) |operator| {
+            const binary = view.getBinary(declaration.init) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(operator, binary.op);
+        } else {
+            const call = parser.type_store.explicit_call_arguments.items[0];
+            try std.testing.expectEqual(declaration.init, call.owner);
+            try std.testing.expectEqualStrings(
+                if (std.mem.indexOf(u8, case.source, "<string>") != null) "<string>" else "<any>",
+                call.list_span.text(case.source),
             );
-            switch (outcome) {
-                .eligible => |eligible| {
-                    var owned = eligible;
-                    defer owned.deinit(allocator);
-                    return error.TestUnexpectedResult;
-                },
-                .out_of_slice => |reason| try std.testing.expectEqual(
-                    OutOfSliceReason.function_declaration,
-                    reason,
-                ),
-            }
         }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
-}
-
-test "primitive comparison preserves admitted calls and comparison operators" {
-    const sources = [_][]const u8{
-        "const value: number = f<string>(seed);",
-        "const value: number = f<any>(seed);",
-        "const value: number = seed < other;",
-        "const value: number = seed > other;",
-    };
-    for (sources) |source| {
-        try expectEquivalent(source);
+        var pool = TypePool.init(std.testing.allocator);
+        defer pool.deinit(std.testing.allocator);
+        var env = TypeEnv.init(std.testing.allocator, &pool);
+        defer env.deinit();
+        try env.populateSourceTypes(.{ .direct = .{ .store = &parser.type_store, .ir_view = view, .atoms = &atoms } });
+        try std.testing.expectEqual(pool.idx_number, env.getVarTypeForDeclaration(view, owner.declaration).?);
+        try pool.ensureHealthy();
+        try env.ensureHealthy();
     }
 }
 
-test "admission comparison closes every allocation failure" {
+test "direct admission closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
-            const verdict = try compare(allocator, "const value: any = 1;", .collect);
-            try std.testing.expectEqual(AdmissionKind.any_type, verdict.admission_refused.first);
+            const source = "const value: any = 1;";
+            const expected = try directDiagnosticAt(source, .any_type, "any");
+            try expectDirectAdmission(allocator, source, .collect, .recovered_admission_refused, &.{expected}, null);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
-test "successful compound comparison closes every allocation failure" {
+test "direct compound source closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
                 "const value: { pair: [number, string]; choice: number | string; " ++
                 "cb: (x: number) => `v${string}` } & { tags: string[] } = undefined;";
-            const verdict = try compare(allocator, source, .collect);
-            switch (verdict) {
-                .equivalent => {},
-                else => return error.TestUnexpectedResult,
-            }
+            try expectDirectSourceWithAllocator(allocator, source);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
-test "successful generic application comparison closes every allocation failure" {
+test "direct generic application closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
                 "const value: Proof<Readonly<{ data: Dict<string, number> }>, \"pure\"> = undefined;";
-            const verdict = try compare(allocator, source, .collect);
-            switch (verdict) {
-                .equivalent => {},
-                else => return error.TestUnexpectedResult,
-            }
+            try expectDirectSourceWithAllocator(allocator, source);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
-test "successful structural generic comparison closes every allocation failure" {
+test "direct structural generic source closes every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
                 "structural Box<T extends string = boolean> = { value: T };\n" ++
                 "const value: Box<number> = undefined;";
-            const verdict = try compare(allocator, source, .collect);
-            switch (verdict) {
-                .equivalent => {},
-                else => return error.TestUnexpectedResult,
-            }
+            try expectDirectSourceWithAllocator(allocator, source);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
-test "successful generic arrow and call comparison closes every allocation failure" {
+test "direct generic arrow and call close every allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
                 "const seed: number = 1; const id=<T>(value)=>value; " ++
                 "const result=id<string>(seed);";
-            const verdict = try compare(allocator, source, .collect);
-            switch (verdict) {
-                .equivalent => {},
-                else => return error.TestUnexpectedResult,
-            }
+            try expectDirectSourceWithAllocator(allocator, source);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
@@ -11617,10 +9119,6 @@ test "direct parser and lowering close every allocation failure" {
             var pool = TypePool.init(allocator);
             defer pool.deinit(allocator);
             try pool.ensureHealthy();
-            var env = TypeEnv.init(allocator, &pool);
-            defer env.deinit();
-            try pool.ensureHealthy();
-            try env.ensureHealthy();
 
             const source =
                 "{ pair: [number, string]; choice: number | string; " ++
@@ -11632,60 +9130,121 @@ test "direct parser and lowering close every allocation failure" {
                 .parsed => {},
                 .failure, .excluded => return error.TestUnexpectedResult,
             }
-            try lowerSyntaxStoreWithoutRuntimeOwners(allocator, &store, &pool, &env);
+            _ = try lowerStandaloneAnnotation(allocator, &store, &pool);
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, LowerContext.run, .{});
 }
 
 test "runtime comparison includes constants locations and complete empty upvalue state" {
-    try expectEquivalent(
+    try expectDirectAccepted(
         "const seed = \"x\"; const value: number = make(1.25 + 2 * 3); let copy = seed;",
     );
 }
 
-fn legacyAnnotationSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
+test "direct admission keeps unsupported annotation roots in source" {
+    const roots = [_][]const u8{
+        "| number | string",
+        "& { x: number }",
+        "1.5",
+        "0x10",
+        "1e3",
+        "1_000",
+        "32768",
+        "/*c*/ number",
+    };
+    try std.testing.expectEqual(@as(usize, 8), roots.len);
+    for (roots) |root| {
+        const source = try directAnnotationSource(std.testing.allocator, root);
+        defer std.testing.allocator.free(source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+        defer parser.deinit();
+        const outcome = try parser.parseAdmission();
+        switch (outcome) {
+            .parser_refused => |refusal| {
+                try std.testing.expectEqual(@as(usize, 2), refusal.projected_error_count);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqualStrings(source, parser.type_store.source);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.annotations.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+        const errors = parser.errors.getErrors();
+        try std.testing.expectEqual(@as(usize, 2), errors.len);
+        const colon = std.mem.indexOfScalar(u8, source, ':') orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u32, @intCast(colon)), errors[0].location.offset);
+    }
+}
+
+test "direct admission preserves optional parameter and record any refusal contexts" {
+    const cases = [_]struct { root: []const u8, kind: TypeSyntax.AdmissionKind, text: []const u8 }{
+        .{ .root = "(x?: number) => number", .kind = .optional_parameter, .text = "?" },
+        .{ .root = "{ value: any }", .kind = .any_type, .text = "any" },
+    };
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+    for (cases) |case| {
+        const source = try directAnnotationSource(std.testing.allocator, case.root);
+        defer std.testing.allocator.free(source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+        defer parser.deinit();
+        const outcome = try parser.parseAdmission();
+        const diagnostics = parser.getAdmissionDiagnostics();
+        switch (outcome) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .diagnostic => |diagnostic| try std.testing.expectEqual(case.kind, diagnostic.kind),
+                .unterminated_comment => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+        try std.testing.expectEqual(case.kind, diagnostics[0].kind);
+        try std.testing.expectEqualStrings(case.text, diagnostics[0].span.text(source));
+        const start = std.mem.indexOf(u8, source, case.text) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u32, @intCast(start)), diagnostics[0].span.start);
+        try std.testing.expectEqual(@as(u32, @intCast(start + case.text.len)), diagnostics[0].span.end);
+    }
+}
+
+fn directAnnotationSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "const value: {s} = undefined;", .{annotation});
 }
 
-fn legacyValueTypeText(prepared: *PreparedSource) ?[]const u8 {
-    const type_map = prepared.typeMap() orelse return null;
-    for (type_map.entries.items) |entry| {
-        if (entry.kind != .var_annotation) continue;
-        const name = type_map.getNameText(entry) orelse continue;
-        if (std.mem.eql(u8, name, "value")) return type_map.getTypeText(entry);
+fn expectDirectTypeText(annotation: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const source = try directAnnotationSource(allocator, annotation);
+    defer allocator.free(source);
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "compound.ts");
+    defer frontend.deinit();
+    try std.testing.expect(frontend.acceptedCapabilities() != null);
+    try std.testing.expectEqual(@as(usize, 1), frontend.parser.type_store.annotations.items.len);
+    try std.testing.expectEqualStrings(annotation, frontend.parser.type_store.annotations.items[0].raw_span.text(source));
+}
+
+fn parseDirectAnnotation(pool: *TypePool, annotation: []const u8) !TypeIndex {
+    const allocator = std.testing.allocator;
+    const source = try directAnnotationSource(allocator, annotation);
+    defer allocator.free(source);
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "compound.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    var env = TypeEnv.init(allocator, pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = accepted.type_store,
+        .ir_view = accepted.ir_view,
+        .atoms = accepted.atoms,
+    } });
+    var owner: ?NodeIndex = null;
+    for (frontend.parser.nodes.tags.items, 0..) |tag, index| {
+        if (tag != .var_decl) continue;
+        try std.testing.expect(owner == null);
+        owner = @intCast(index);
     }
-    return null;
-}
-
-fn expectLegacyTypeText(annotation: []const u8) !void {
-    const allocator = std.testing.allocator;
-    const source = try legacyAnnotationSource(allocator, annotation);
-    defer allocator.free(source);
-
-    var prepared = try PreparedSource.init(allocator, source, "legacy-baseline.ts", .{});
-    defer prepared.deinit();
-    const type_map = prepared.typeMap().?;
-    try std.testing.expectEqual(@as(usize, 1), type_map.entries.items.len);
-    try std.testing.expectEqualStrings(annotation, legacyValueTypeText(&prepared).?);
-}
-
-fn expectLegacyColonRetained(annotation: []const u8) !void {
-    const allocator = std.testing.allocator;
-    const source = try legacyAnnotationSource(allocator, annotation);
-    defer allocator.free(source);
-
-    var prepared = try PreparedSource.init(allocator, source, "legacy-baseline.ts", .{});
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.typeMap().?.entries.items.len);
-    try std.testing.expectEqualStrings(source, prepared.parserInput());
-}
-
-fn parseLegacyAnnotation(pool: *TypePool, annotation: []const u8) !TypeIndex {
-    try expectLegacyTypeText(annotation);
-    const idx = parseTypeExpr(pool, std.testing.allocator, annotation);
     try pool.ensureHealthy();
-    return idx;
+    try env.ensureHealthy();
+    return env.getVarTypeForDeclaration(accepted.ir_view, owner orelse return error.TestUnexpectedResult) orelse error.TestUnexpectedResult;
 }
 
 fn expectTag(pool: *const TypePool, idx: TypeIndex, tag: TypeTag) !void {
@@ -11698,7 +9257,7 @@ fn expectLiteralNumber(pool: *const TypePool, idx: TypeIndex, value: i16) !void 
     try std.testing.expectEqual(value, @as(i16, @bitCast(data.a)));
 }
 
-test "legacy compound preparation preserves exact admitted type text" {
+test "direct compound parsing preserves exact admitted type text" {
     const annotations = [_][]const u8{
         "{ \"x\": number }",
         "{ x number }",
@@ -11735,76 +9294,31 @@ test "legacy compound preparation preserves exact admitted type text" {
     try std.testing.expectEqual(@as(usize, 31), annotations.len);
     var observed: usize = 0;
     for (annotations) |annotation| {
-        try expectLegacyTypeText(annotation);
+        try expectDirectTypeText(annotation);
         observed += 1;
     }
     try std.testing.expectEqual(annotations.len, observed);
 }
 
-test "legacy preparation retains a colon when the root is not an annotation" {
-    const annotations = [_][]const u8{
-        "| number | string",
-        "& { x: number }",
-        "1.5",
-        "0x10",
-        "1e3",
-        "1_000",
-        "32768",
-        "/*c*/ number",
-    };
-    try std.testing.expectEqual(@as(usize, 8), annotations.len);
-    var observed: usize = 0;
-    for (annotations) |annotation| {
-        try expectLegacyColonRetained(annotation);
-        observed += 1;
-    }
-    try std.testing.expectEqual(annotations.len, observed);
-}
-
-test "legacy preparation keeps root refusal context separate from record context" {
-    const allocator = std.testing.allocator;
-    const cases = [_]struct {
-        annotation: []const u8,
-        expected: anyerror,
-    }{
-        .{ .annotation = "(x?: number) => number", .expected = error.OptionalParameter },
-        .{ .annotation = "{ value: any }", .expected = error.UnsupportedAnyType },
-    };
-    try std.testing.expectEqual(@as(usize, 2), cases.len);
-    var observed: usize = 0;
-    for (cases) |case| {
-        const source = try legacyAnnotationSource(allocator, case.annotation);
-        defer allocator.free(source);
-        var unexpected = PreparedSource.init(allocator, source, "legacy-baseline.ts", .{}) catch |err| {
-            try std.testing.expectEqual(case.expected, err);
-            observed += 1;
-            continue;
-        };
-        unexpected.deinit();
-        return error.TestUnexpectedResult;
-    }
-    try std.testing.expectEqual(cases.len, observed);
-}
-
-test "legacy compound family and semantic quirk census is exhaustive" {
+test "direct compound family and semantic quirk census is exhaustive" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
     var families = std.EnumSet(CompoundFamily).initEmpty();
     var quirks = std.EnumSet(SemanticQuirk).initEmpty();
 
-    const quoted = try parseLegacyAnnotation(&pool, "{ \"x\": number }");
+    const quoted = try parseDirectAnnotation(&pool, "{ \"x\": number }");
     try expectTag(&pool, quoted, .t_record);
     try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(quoted).len);
     try std.testing.expectEqualStrings("R0", try type_key.typeKey(&pool, allocator, quoted));
     quirks.insert(.quoted_record_prefix);
 
-    const missing_colon = try parseLegacyAnnotation(&pool, "{ x number }");
+    const missing_colon = try parseDirectAnnotation(&pool, "{ x number }");
     try expectTag(&pool, missing_colon, .t_record);
     try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(missing_colon).len);
     quirks.insert(.missing_record_colon_prefix);
 
-    const missing_type = try parseLegacyAnnotation(&pool, "{ x: }");
+    const missing_type = try parseDirectAnnotation(&pool, "{ x: }");
     const missing_fields = pool.getRecordFields(missing_type);
     try std.testing.expectEqual(@as(usize, 1), missing_fields.len);
     try std.testing.expectEqualStrings("x", pool.getName(missing_fields[0].name_start, missing_fields[0].name_len));
@@ -11812,19 +9326,19 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_type));
     quirks.insert(.missing_record_type_absent);
 
-    const comment_prefix = try parseLegacyAnnotation(&pool, "{ /*c*/ x: number }");
+    const comment_prefix = try parseDirectAnnotation(&pool, "{ /*c*/ x: number }");
     try expectTag(&pool, comment_prefix, .t_record);
     try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(comment_prefix).len);
     quirks.insert(.record_comment_prefix);
 
-    const comment_after = try parseLegacyAnnotation(&pool, "{ x: number /*c*/ }");
+    const comment_after = try parseDirectAnnotation(&pool, "{ x: number /*c*/ }");
     const comment_after_fields = pool.getRecordFields(comment_after);
     try std.testing.expectEqual(@as(usize, 1), comment_after_fields.len);
     try std.testing.expectEqualStrings("x", pool.getName(comment_after_fields[0].name_start, comment_after_fields[0].name_len));
     try std.testing.expectEqual(pool.idx_number, comment_after_fields[0].type_idx);
     quirks.insert(.record_comment_after_field);
 
-    const omitted_separator = try parseLegacyAnnotation(&pool, "{ x: number y: string }");
+    const omitted_separator = try parseDirectAnnotation(&pool, "{ x: number y: string }");
     const omitted_fields = pool.getRecordFields(omitted_separator);
     try std.testing.expectEqual(@as(usize, 2), omitted_fields.len);
     try std.testing.expectEqualStrings("x", pool.getName(omitted_fields[0].name_start, omitted_fields[0].name_len));
@@ -11834,7 +9348,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     try std.testing.expect((try type_key.typeKey(&pool, allocator, omitted_separator)).len > 0);
     quirks.insert(.omitted_record_separator);
 
-    const readonly_optional = try parseLegacyAnnotation(&pool, "{ readonly id?: number; name: string }");
+    const readonly_optional = try parseDirectAnnotation(&pool, "{ readonly id?: number; name: string }");
     const readonly_fields = pool.getRecordFields(readonly_optional);
     try std.testing.expectEqual(@as(usize, 2), readonly_fields.len);
     try std.testing.expectEqualStrings("id", pool.getName(readonly_fields[0].name_start, readonly_fields[0].name_len));
@@ -11849,7 +9363,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     quirks.insert(.readonly_optional_fields);
 
     for ([_][]const u8{ "number[][]", "number [] []" }) |annotation| {
-        const repeated_array = try parseLegacyAnnotation(&pool, annotation);
+        const repeated_array = try parseDirectAnnotation(&pool, annotation);
         try expectTag(&pool, repeated_array, .t_array);
         try std.testing.expect(!pool.isReadonlyArray(repeated_array));
         const inner_array = pool.getArrayElement(repeated_array);
@@ -11860,18 +9374,18 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     families.insert(.array);
     quirks.insert(.mutable_repeated_arrays);
 
-    try std.testing.expectEqual(pool.idx_number, try parseLegacyAnnotation(&pool, "number [ ]"));
+    try std.testing.expectEqual(pool.idx_number, try parseDirectAnnotation(&pool, "number [ ]"));
     quirks.insert(.separated_array_brackets);
-    try std.testing.expectEqual(pool.idx_number, try parseLegacyAnnotation(&pool, "number /*c*/ []"));
+    try std.testing.expectEqual(pool.idx_number, try parseDirectAnnotation(&pool, "number /*c*/ []"));
     quirks.insert(.comment_before_array);
 
-    const readonly_array = try parseLegacyAnnotation(&pool, "readonly number[]");
+    const readonly_array = try parseDirectAnnotation(&pool, "readonly number[]");
     try expectTag(&pool, readonly_array, .t_array);
     try std.testing.expect(pool.isReadonlyArray(readonly_array));
     try std.testing.expectEqual(pool.idx_number, pool.getArrayElement(readonly_array));
     quirks.insert(.readonly_array_flag);
 
-    const trailing_tuple = try parseLegacyAnnotation(&pool, "[string, number,]");
+    const trailing_tuple = try parseDirectAnnotation(&pool, "[string, number,]");
     try expectTag(&pool, trailing_tuple, .t_tuple);
     try std.testing.expectEqualSlices(
         TypeIndex,
@@ -11881,7 +9395,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     families.insert(.tuple);
     quirks.insert(.tuple_trailing_comma);
 
-    const readonly_tuple = try parseLegacyAnnotation(&pool, "readonly [string, number]");
+    const readonly_tuple = try parseDirectAnnotation(&pool, "readonly [string, number]");
     try expectTag(&pool, readonly_tuple, .t_tuple);
     try std.testing.expectEqualSlices(
         TypeIndex,
@@ -11890,7 +9404,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     );
     quirks.insert(.readonly_tuple_erasure);
 
-    const grouped_union = try parseLegacyAnnotation(&pool, "(| number | string)");
+    const grouped_union = try parseDirectAnnotation(&pool, "(| number | string)");
     try expectTag(&pool, grouped_union, .t_union);
     try std.testing.expectEqualSlices(
         TypeIndex,
@@ -11899,17 +9413,17 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     );
     quirks.insert(.grouped_leading_union);
 
-    try std.testing.expectEqual(pool.idx_number, try parseLegacyAnnotation(&pool, "number |"));
+    try std.testing.expectEqual(pool.idx_number, try parseDirectAnnotation(&pool, "number |"));
     quirks.insert(.trailing_union_prefix);
 
-    const trailing_intersection = try parseLegacyAnnotation(&pool, "{ x: number } &");
+    const trailing_intersection = try parseDirectAnnotation(&pool, "{ x: number } &");
     const trailing_fields = pool.getRecordFields(trailing_intersection);
     try std.testing.expectEqual(@as(usize, 1), trailing_fields.len);
     try std.testing.expectEqualStrings("x", pool.getName(trailing_fields[0].name_start, trailing_fields[0].name_len));
     try std.testing.expectEqual(pool.idx_number, trailing_fields[0].type_idx);
     quirks.insert(.trailing_intersection_prefix);
 
-    const mixed = try parseLegacyAnnotation(&pool, "string | number & boolean");
+    const mixed = try parseDirectAnnotation(&pool, "string | number & boolean");
     try expectTag(&pool, mixed, .t_union);
     const mixed_members = pool.getUnionMembers(mixed);
     try std.testing.expectEqual(@as(usize, 2), mixed_members.len);
@@ -11924,13 +9438,13 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     families.insert(.intersection);
     quirks.insert(.intersection_precedence);
 
-    const nullable = try parseLegacyAnnotation(&pool, "string | undefined");
+    const nullable = try parseDirectAnnotation(&pool, "string | undefined");
     try expectTag(&pool, nullable, .t_nullable);
     try std.testing.expectEqual(pool.idx_string, pool.getNullableInner(nullable));
     try std.testing.expect((try type_key.typeKey(&pool, allocator, nullable)).len > 0);
     quirks.insert(.nullable_shorthand);
 
-    const wide_undefined = try parseLegacyAnnotation(&pool, "string | number | undefined");
+    const wide_undefined = try parseDirectAnnotation(&pool, "string | number | undefined");
     try expectTag(&pool, wide_undefined, .t_union);
     try std.testing.expectEqualSlices(
         TypeIndex,
@@ -11947,7 +9461,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     };
     var numeric_count: usize = 0;
     for (numeric_cases) |case| {
-        const numeric = try parseLegacyAnnotation(&pool, case.annotation);
+        const numeric = try parseDirectAnnotation(&pool, case.annotation);
         const numeric_members = pool.getUnionMembers(numeric);
         try std.testing.expectEqual(@as(usize, 2), numeric_members.len);
         try std.testing.expectEqual(pool.idx_string, numeric_members[0]);
@@ -11957,7 +9471,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(@as(usize, 4), numeric_count);
     quirks.insert(.numeric_token_prefix);
 
-    const nested_optional = try parseLegacyAnnotation(&pool, "{ cb: (x?: number) => number }");
+    const nested_optional = try parseDirectAnnotation(&pool, "{ cb: (x?: number) => number }");
     const nested_fields = pool.getRecordFields(nested_optional);
     try std.testing.expectEqual(@as(usize, 1), nested_fields.len);
     const nested_function = pool.getFunctionInfo(nested_fields[0].type_idx);
@@ -11968,14 +9482,14 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(pool.idx_number, nested_function.ret);
     quirks.insert(.nested_optional_parameter);
 
-    const any_key = try parseLegacyAnnotation(&pool, "{ any: number }");
+    const any_key = try parseDirectAnnotation(&pool, "{ any: number }");
     const any_fields = pool.getRecordFields(any_key);
     try std.testing.expectEqual(@as(usize, 1), any_fields.len);
     try std.testing.expectEqualStrings("any", pool.getName(any_fields[0].name_start, any_fields[0].name_len));
     try std.testing.expectEqual(pool.idx_number, any_fields[0].type_idx);
     quirks.insert(.any_member_key);
 
-    const missing_comma = try parseLegacyAnnotation(&pool, "(x: number y: string) => number");
+    const missing_comma = try parseDirectAnnotation(&pool, "(x: number y: string) => number");
     const comma_info = pool.getFunctionInfo(missing_comma);
     try std.testing.expectEqual(@as(usize, 2), comma_info.params.len);
     try std.testing.expectEqualStrings("x", pool.getName(comma_info.params[0].name_start, comma_info.params[0].name_len));
@@ -11985,19 +9499,19 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(pool.idx_number, comma_info.ret);
     quirks.insert(.missing_function_comma);
 
-    const missing_arrow = try parseLegacyAnnotation(&pool, "(x: number) number");
+    const missing_arrow = try parseDirectAnnotation(&pool, "(x: number) number");
     try expectTag(&pool, missing_arrow, .t_function);
     try std.testing.expectEqual(null_type_idx, pool.getFunctionInfo(missing_arrow).ret);
     try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_arrow));
     quirks.insert(.missing_function_arrow);
 
-    const missing_return = try parseLegacyAnnotation(&pool, "(x: number) =>");
+    const missing_return = try parseDirectAnnotation(&pool, "(x: number) =>");
     try expectTag(&pool, missing_return, .t_function);
     try std.testing.expectEqual(null_type_idx, pool.getFunctionInfo(missing_return).ret);
     try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_return));
     quirks.insert(.missing_function_return);
 
-    const named_function = try parseLegacyAnnotation(&pool, "(left: string, right: number) => boolean");
+    const named_function = try parseDirectAnnotation(&pool, "(left: string, right: number) => boolean");
     const named_info = pool.getFunctionInfo(named_function);
     try std.testing.expectEqual(@as(usize, 2), named_info.params.len);
     try std.testing.expectEqualStrings("left", pool.getName(named_info.params[0].name_start, named_info.params[0].name_len));
@@ -12011,7 +9525,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     families.insert(.function);
     quirks.insert(.named_function_parameters);
 
-    const escaped_template = try parseLegacyAnnotation(&pool, "`\\${string}`");
+    const escaped_template = try parseDirectAnnotation(&pool, "`\\${string}`");
     const escaped_parts = pool.getTemplateParts(escaped_template);
     try std.testing.expectEqual(@as(usize, 2), escaped_parts.len);
     try std.testing.expectEqual(.literal, escaped_parts[0].kind);
@@ -12020,7 +9534,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(pool.idx_string, escaped_parts[1].type_idx);
     quirks.insert(.escaped_template_slot);
 
-    const empty_slot = try parseLegacyAnnotation(&pool, "`x${}`");
+    const empty_slot = try parseDirectAnnotation(&pool, "`x${}`");
     const empty_parts = pool.getTemplateParts(empty_slot);
     try std.testing.expectEqual(@as(usize, 2), empty_parts.len);
     try std.testing.expectEqual(.literal, empty_parts[0].kind);
@@ -12030,10 +9544,10 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, empty_slot));
     quirks.insert(.empty_template_slot);
 
-    try std.testing.expectEqual(null_type_idx, try parseLegacyAnnotation(&pool, "``"));
+    try std.testing.expectEqual(null_type_idx, try parseDirectAnnotation(&pool, "``"));
     quirks.insert(.empty_template_root);
 
-    const multipart = try parseLegacyAnnotation(&pool, "`pre-${string}-mid-${number}-post`");
+    const multipart = try parseDirectAnnotation(&pool, "`pre-${string}-mid-${number}-post`");
     const multipart_parts = pool.getTemplateParts(multipart);
     try std.testing.expectEqual(@as(usize, 5), multipart_parts.len);
     try std.testing.expectEqual(.literal, multipart_parts[0].kind);
@@ -12050,10 +9564,10 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     families.insert(.template);
     quirks.insert(.multi_part_template);
 
-    const string_literal = try parseLegacyAnnotation(&pool, "\"GET\"");
+    const string_literal = try parseDirectAnnotation(&pool, "\"GET\"");
     try expectTag(&pool, string_literal, .t_literal_string);
     try std.testing.expectEqualStrings("GET", pool.getLiteralStringValue(string_literal).?);
-    const boolean_literal = try parseLegacyAnnotation(&pool, "true");
+    const boolean_literal = try parseDirectAnnotation(&pool, "true");
     try expectTag(&pool, boolean_literal, .t_literal_bool);
     try std.testing.expectEqual(@as(u16, 1), pool.getData(boolean_literal).?.a);
     families.insert(.literal);
@@ -12072,7 +9586,7 @@ test "legacy compound family and semantic quirk census is exhaustive" {
     }
 }
 
-test "legacy admitted function types preserve the packed parameter boundary" {
+test "direct function annotations preserve the packed parameter boundary" {
     const allocator = std.testing.allocator;
     inline for (.{ 15, 16 }) |count| {
         var annotation: std.ArrayList(u8) = .empty;
@@ -12085,15 +9599,15 @@ test "legacy admitted function types preserve the packed parameter boundary" {
             try annotation.appendSlice(allocator, parameter);
         }
         try annotation.appendSlice(allocator, ") => string");
-        try expectLegacyTypeText(annotation.items);
+        try expectDirectTypeText(annotation.items);
 
         var pool = TypePool.init(allocator);
         defer pool.deinit(allocator);
-        const idx = parseTypeExpr(&pool, allocator, annotation.items);
         if (count == 16) {
-            try std.testing.expectEqual(null_type_idx, idx);
+            try std.testing.expectError(error.TypePoolCapacityExceeded, parseDirectAnnotation(&pool, annotation.items));
             try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
         } else {
+            const idx = try parseDirectAnnotation(&pool, annotation.items);
             try pool.ensureHealthy();
             try expectTag(&pool, idx, .t_function);
             const info = pool.getFunctionInfo(idx);
@@ -12111,13 +9625,13 @@ test "legacy admitted function types preserve the packed parameter boundary" {
     }
 }
 
-test "legacy deep arrays separate admission and canonical key depth" {
+test "direct deep arrays separate admission and canonical key depth" {
     const allocator = std.testing.allocator;
     inline for (.{ 63, 64 }) |layers| {
         const annotation = "number" ++ "[]" ** layers;
         var pool = TypePool.init(allocator);
         defer pool.deinit(allocator);
-        const idx = try parseLegacyAnnotation(&pool, annotation);
+        const idx = try parseDirectAnnotation(&pool, annotation);
         var element = idx;
         for (0..layers) |_| {
             try expectTag(&pool, element, .t_array);
@@ -12410,7 +9924,7 @@ test "variable and export allocation failures remove unfinished annotation owner
     try expectFinalNodeAllocationRollback(export_wrapper);
 }
 
-test "annotation owner census covers every legacy kind" {
+test "annotation owner census covers current syntax kinds" {
     const source =
         "structural Box<T> = { value: T };\n" ++
         "nominal Id = string;\n" ++
@@ -12427,21 +9941,6 @@ test "annotation owner census covers every legacy kind" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
-
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<owner-census>.ts", .{});
-    defer prepared.deinit();
-    const legacy_map = prepared.typeMap() orelse return error.TestUnexpectedResult;
-    const LegacyKind = @TypeOf(legacy_map.entries.items[0].kind);
-    try std.testing.expectEqual(@as(usize, 8), std.meta.fields(LegacyKind).len);
-    var observed = std.EnumArray(LegacyKind, usize).initFill(0);
-    for (legacy_map.entries.items) |entry| observed.getPtr(entry.kind).* += 1;
-    for (std.enums.values(LegacyKind)) |kind| {
-        const expected: usize = switch (kind) {
-            .type_alias, .distinct_type, .return_annotation, .type_guard_annotation, .call_type_arguments => 1,
-            .var_annotation, .param_annotation, .generic_params => 2,
-        };
-        try std.testing.expectEqual(expected, observed.get(kind));
-    }
 
     const store = &parser.type_store;
     const view = parserIrView(&parser);
@@ -12595,177 +10094,6 @@ test "shadowed bindings and closure parameters retain their actual owners" {
     }
 }
 
-fn expectExactTypePool(left: *const TypePool, right: *const TypePool) !void {
-    try std.testing.expectEqual(left.nodes.items.len, right.nodes.items.len);
-    for (left.nodes.items, right.nodes.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
-    try std.testing.expectEqual(left.fields.items.len, right.fields.items.len);
-    for (left.fields.items, right.fields.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
-    try std.testing.expectEqual(left.params.items.len, right.params.items.len);
-    for (left.params.items, right.params.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
-    try std.testing.expectEqualSlices(TypeIndex, left.members.items, right.members.items);
-    try std.testing.expectEqualSlices(u8, left.names.items, right.names.items);
-    try std.testing.expectEqual(left.template_parts.items.len, right.template_parts.items.len);
-    for (left.template_parts.items, right.template_parts.items) |a, b| {
-        try std.testing.expect(std.meta.eql(a, b));
-    }
-    try std.testing.expectEqual(left.idx_boolean, right.idx_boolean);
-    try std.testing.expectEqual(left.idx_number, right.idx_number);
-    try std.testing.expectEqual(left.idx_string, right.idx_string);
-    try std.testing.expectEqual(left.idx_bytes, right.idx_bytes);
-    try std.testing.expectEqual(left.idx_null, right.idx_null);
-    try std.testing.expectEqual(left.idx_undefined, right.idx_undefined);
-    try std.testing.expectEqual(left.idx_void, right.idx_void);
-    try std.testing.expectEqual(left.idx_never, right.idx_never);
-    try std.testing.expectEqual(left.idx_unknown, right.idx_unknown);
-    try std.testing.expectEqual(left.idx_error, right.idx_error);
-}
-
-fn expectExactFunctionSignature(
-    legacy: type_env_mod.FunctionSig,
-    direct: type_env_mod.FunctionSig,
-) !void {
-    try std.testing.expectEqual(legacy.param_count, direct.param_count);
-    try std.testing.expectEqualSlices(
-        TypeIndex,
-        legacy.param_types[0..legacy.param_count],
-        direct.param_types[0..direct.param_count],
-    );
-    try std.testing.expectEqual(legacy.required_param_count, direct.required_param_count);
-    try std.testing.expectEqual(legacy.max_arg_count, direct.max_arg_count);
-    try std.testing.expectEqual(legacy.return_type, direct.return_type);
-    try std.testing.expectEqual(legacy.type_param_count, direct.type_param_count);
-    for (
-        legacy.type_params[0..legacy.type_param_count],
-        direct.type_params[0..direct.type_param_count],
-    ) |legacy_parameter, direct_parameter| {
-        try std.testing.expectEqualStrings(legacy_parameter.name, direct_parameter.name);
-        try std.testing.expectEqual(legacy_parameter.idx, direct_parameter.idx);
-        try std.testing.expectEqual(legacy_parameter.constraint, direct_parameter.constraint);
-    }
-    try std.testing.expect(std.meta.eql(legacy.type_predicate, direct.type_predicate));
-}
-
-fn expectExactFunctionNameMaps(legacy: *const TypeEnv, direct: *const TypeEnv) !void {
-    try std.testing.expectEqual(legacy.fn_sigs_by_name.count(), direct.fn_sigs_by_name.count());
-    var signatures = legacy.fn_sigs_by_name.iterator();
-    while (signatures.next()) |entry| {
-        try expectExactFunctionSignature(
-            entry.value_ptr.*,
-            direct.fn_sigs_by_name.get(entry.key_ptr.*) orelse return error.TestUnexpectedResult,
-        );
-    }
-
-    try std.testing.expectEqual(
-        legacy.source_fn_sigs_by_name.count(),
-        direct.source_fn_sigs_by_name.count(),
-    );
-    var source_signatures = legacy.source_fn_sigs_by_name.iterator();
-    while (source_signatures.next()) |entry| {
-        try expectExactFunctionSignature(
-            entry.value_ptr.*,
-            direct.source_fn_sigs_by_name.get(entry.key_ptr.*) orelse
-                return error.TestUnexpectedResult,
-        );
-    }
-}
-
-fn expectExactOwnerSignatures(
-    legacy_env: *const TypeEnv,
-    direct_env: *const TypeEnv,
-    legacy_view: engine.parser.IrView,
-    direct_view: engine.parser.IrView,
-    store: *const TypeSyntax.Store,
-) !void {
-    try std.testing.expectEqual(
-        legacy_env.fn_signatures.count(),
-        direct_env.direct_fn_signatures.count(),
-    );
-    try std.testing.expectEqual(
-        legacy_env.source_fn_annotations.count(),
-        direct_env.direct_source_fn_annotations.count(),
-    );
-
-    var published_count: usize = 0;
-    for (store.function_signatures.items) |record| {
-        const tag = direct_view.getTag(record.owner) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(tag == .function_expr or tag == .arrow_function);
-        const legacy_reference = legacy_env.functionTypeRef(legacy_view, record.owner) orelse
-            return error.TestUnexpectedResult;
-        const direct_reference = direct_env.functionTypeRef(direct_view, record.owner) orelse
-            return error.TestUnexpectedResult;
-        const legacy_signature = legacy_env.getFunctionSignature(legacy_reference);
-        const direct_signature = direct_env.getFunctionSignature(direct_reference);
-        if (legacy_signature == null or direct_signature == null) {
-            try std.testing.expect(legacy_signature == null);
-            try std.testing.expect(direct_signature == null);
-            continue;
-        }
-        const expected_signature = legacy_signature.?;
-        const actual_signature = direct_signature.?;
-        try expectExactFunctionSignature(expected_signature, actual_signature);
-        for (0..expected_signature.param_count) |index| {
-            const compact_position: u8 = @intCast(index);
-            const legacy_spelling = legacy_env.getFunctionParameterSpelling(
-                legacy_reference,
-                compact_position,
-            );
-            const direct_spelling = direct_env.getFunctionParameterSpelling(
-                direct_reference,
-                compact_position,
-            );
-            if (legacy_spelling) |spelling| {
-                try std.testing.expectEqualStrings(
-                    spelling,
-                    direct_spelling orelse return error.TestUnexpectedResult,
-                );
-            } else {
-                try std.testing.expect(direct_spelling == null);
-            }
-        }
-        const legacy_return = legacy_env.getFunctionReturnSpelling(legacy_reference);
-        const direct_return = direct_env.getFunctionReturnSpelling(direct_reference);
-        if (legacy_return) |spelling| {
-            try std.testing.expectEqualStrings(
-                spelling,
-                direct_return orelse return error.TestUnexpectedResult,
-            );
-        } else {
-            try std.testing.expect(direct_return == null);
-        }
-
-        const legacy_key = legacy_view.signatureOffset(record.owner) orelse
-            return error.TestUnexpectedResult;
-        try expectExactFunctionSignature(
-            legacy_env.fn_signatures.get(legacy_key) orelse return error.TestUnexpectedResult,
-            direct_env.direct_fn_signatures.get(record.owner) orelse
-                return error.TestUnexpectedResult,
-        );
-        published_count += 1;
-    }
-    try std.testing.expectEqual(published_count, legacy_env.fn_signatures.count());
-    try std.testing.expectEqual(published_count, direct_env.direct_fn_signatures.count());
-
-    var direct_signatures = direct_env.direct_fn_signatures.iterator();
-    while (direct_signatures.next()) |entry| {
-        const owner = entry.key_ptr.*;
-        const tag = direct_view.getTag(owner) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(tag == .function_expr or tag == .arrow_function);
-        var found = false;
-        for (store.function_signatures.items) |record| {
-            if (record.owner != owner) continue;
-            found = true;
-            break;
-        }
-        try std.testing.expect(found);
-        const legacy_key = legacy_view.signatureOffset(owner) orelse
-            return error.TestUnexpectedResult;
-        try expectExactFunctionSignature(
-            legacy_env.fn_signatures.get(legacy_key) orelse return error.TestUnexpectedResult,
-            entry.value_ptr.*,
-        );
-    }
-}
-
 const DirectGenericConsumerCase = enum {
     interleaved,
     compound_prefix,
@@ -12782,25 +10110,10 @@ fn expectDirectGenericConsumer(
     source: []const u8,
     case: DirectGenericConsumerCase,
 ) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-phase-two>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -12808,48 +10121,22 @@ fn expectDirectGenericConsumer(
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
     const prior_nodes = direct_pool.nodes.items.len;
     const prior_names = direct_env.name_storage.items.len;
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
-    try expectExactOwnerSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
-    try legacy_pool.ensureHealthy();
     try direct_pool.ensureHealthy();
-    try legacy_env.ensureHealthy();
     try direct_env.ensureHealthy();
     try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
 
@@ -12937,8 +10224,6 @@ fn expectDirectGenericConsumer(
             try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
             try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
             try std.testing.expectEqual(@as(usize, 0), direct_env.source_fn_sigs_by_name.count());
-            try std.testing.expectEqual(@as(usize, 0), legacy_env.fn_sigs_by_name.count());
-            try std.testing.expectEqual(@as(usize, 0), legacy_env.source_fn_sigs_by_name.count());
         },
         .empty_callable => {
             try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
@@ -13080,13 +10365,6 @@ fn expectDirectGenericConsumer(
         },
     }
 
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -13094,30 +10372,7 @@ fn expectDirectGenericConsumer(
         &direct_env,
     );
     defer direct_checker.deinit();
-    try std.testing.expectEqual(
-        try legacy_checker.check(legacy_root),
-        try direct_checker.check(direct_root),
-    );
-    const legacy_type_diagnostics = legacy_checker.getDiagnostics();
-    const direct_type_diagnostics = direct_checker.getDiagnostics();
-    try std.testing.expectEqual(legacy_type_diagnostics.len, direct_type_diagnostics.len);
-    for (legacy_type_diagnostics, direct_type_diagnostics) |legacy_diagnostic, direct_diagnostic| {
-        try expectSameTypeDiagnostic(
-            legacy_diagnostic,
-            legacy_view,
-            direct_diagnostic,
-            direct_view,
-        );
-    }
-
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
+    const type_ok = try direct_checker.check(direct_root);
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -13126,20 +10381,17 @@ fn expectDirectGenericConsumer(
         &direct_checker,
     );
     defer direct_strict.deinit();
-    try std.testing.expectEqual(
-        try legacy_strict.check(legacy_root),
-        try direct_strict.check(direct_root),
-    );
-    const legacy_strict_diagnostics = legacy_strict.getDiagnostics();
-    const direct_strict_diagnostics = direct_strict.getDiagnostics();
-    try std.testing.expectEqual(legacy_strict_diagnostics.len, direct_strict_diagnostics.len);
-    for (legacy_strict_diagnostics, direct_strict_diagnostics) |legacy_diagnostic, direct_diagnostic| {
-        try expectSameStrictDiagnostic(
-            legacy_diagnostic,
-            legacy_view,
-            direct_diagnostic,
-            direct_view,
-        );
+    const strict_ok = try direct_strict.check(direct_root);
+    try std.testing.expectEqual(@as(u32, 0), type_ok);
+    try std.testing.expectEqual(@as(usize, 0), direct_checker.getDiagnostics().len);
+    const expected_strict: []const strict_checker_mod.DiagnosticKind = switch (case) {
+        .generic_only, .ignored_callable => &.{.missing_public_annotation},
+        else => &.{},
+    };
+    try std.testing.expectEqual(@as(u32, @intCast(expected_strict.len)), strict_ok);
+    try std.testing.expectEqual(expected_strict.len, direct_strict.getDiagnostics().len);
+    for (direct_strict.getDiagnostics(), expected_strict) |diagnostic, kind| {
+        try std.testing.expectEqual(kind, diagnostic.kind);
     }
 }
 
@@ -13207,114 +10459,6 @@ fn compatibilityCallOwner(owner: TypeSyntax.GenericOwner) ?NodeIndex {
     };
 }
 
-fn expectExactCallArguments(
-    legacy_pool: *const TypePool,
-    direct_pool: *const TypePool,
-    legacy: type_env_mod.CallTypeArgs,
-    direct: type_env_mod.CallTypeArgs,
-) !void {
-    try std.testing.expectEqual(legacy.count, direct.count);
-    for (legacy.args[0..legacy.count], direct.args[0..direct.count]) |legacy_arg, direct_arg| {
-        try std.testing.expectEqual(legacy_arg, direct_arg);
-        try std.testing.expect(try orderedTypeEqual(
-            std.testing.allocator,
-            legacy_pool,
-            legacy_arg,
-            direct_pool,
-            direct_arg,
-        ));
-    }
-}
-
-fn expectExactDirectCallMaps(
-    legacy_pool: *const TypePool,
-    direct_pool: *const TypePool,
-    legacy_env: *const TypeEnv,
-    direct_env: *const TypeEnv,
-    legacy_view: engine.parser.IrView,
-    direct_view: engine.parser.IrView,
-    store: *const TypeSyntax.Store,
-) !void {
-    var expected_count: usize = 0;
-    for (store.explicit_call_arguments.items) |record| {
-        const fragments = store.semanticFragmentSlice(record.semantic_fragments) orelse
-            return error.TestUnexpectedResult;
-        const legacy = legacy_env.getCallTypeArgs(record.list_span.end);
-        const direct = direct_env.getCallTypeArgsForCall(direct_view, record.owner);
-        if (fragments.len == 0) {
-            try std.testing.expect(legacy == null);
-            try std.testing.expect(direct == null);
-            continue;
-        }
-        expected_count += 1;
-        try std.testing.expectEqual(engine.parser.NodeTag.call, direct_view.getTag(record.owner).?);
-        try expectExactCallArguments(
-            legacy_pool,
-            direct_pool,
-            legacy orelse return error.TestUnexpectedResult,
-            direct orelse return error.TestUnexpectedResult,
-        );
-    }
-    for (store.generic_owners.items) |record| {
-        const owner = compatibilityCallOwner(record) orelse continue;
-        const expected_tag: engine.parser.NodeTag = switch (record.identity) {
-            .function => .function_expr,
-            .arrow => .arrow_function,
-            .structural_declaration, .nominal_declaration => unreachable,
-        };
-        try std.testing.expectEqual(expected_tag, direct_view.getTag(owner).?);
-        const fragments = switch (record.compatibility) {
-            .legacy_call_arguments => |arguments| store.semanticFragmentSlice(
-                arguments.semantic_fragments,
-            ) orelse return error.TestUnexpectedResult,
-            .declaration_parameters, .ignored_declaration_parameters => unreachable,
-        };
-        const legacy_offset = (legacy_view.getLoc(owner) orelse
-            return error.TestUnexpectedResult).offset;
-        const legacy = legacy_env.getCallTypeArgs(legacy_offset);
-        const direct = direct_env.direct_call_type_args.get(owner);
-        try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, owner) == null);
-        if (fragments.len == 0) {
-            try std.testing.expect(legacy == null);
-            try std.testing.expect(direct == null);
-            continue;
-        }
-        expected_count += 1;
-        try expectExactCallArguments(
-            legacy_pool,
-            direct_pool,
-            legacy orelse return error.TestUnexpectedResult,
-            direct orelse return error.TestUnexpectedResult,
-        );
-    }
-    try std.testing.expectEqual(expected_count, legacy_env.call_type_args.count());
-    try std.testing.expectEqual(expected_count, direct_env.direct_call_type_args.count());
-
-    var published = direct_env.direct_call_type_args.iterator();
-    while (published.next()) |entry| {
-        const published_owner = entry.key_ptr.*;
-        var found = false;
-        for (store.explicit_call_arguments.items) |record| {
-            if (record.owner == published_owner and record.semantic_fragments.count != 0) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) for (store.generic_owners.items) |record| {
-            const owner = compatibilityCallOwner(record) orelse continue;
-            const count = switch (record.compatibility) {
-                .legacy_call_arguments => |arguments| arguments.semantic_fragments.count,
-                .declaration_parameters, .ignored_declaration_parameters => unreachable,
-            };
-            if (owner == published_owner and count != 0) {
-                found = true;
-                break;
-            }
-        };
-        try std.testing.expect(found);
-    }
-}
-
 const DirectCallConsumerCase = enum {
     interleaved,
     generic_scope_contrast,
@@ -13323,25 +10467,10 @@ const DirectCallConsumerCase = enum {
 };
 
 fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-phase-three>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -13349,60 +10478,23 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
     const prior_nodes = direct_pool.nodes.items.len;
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
-    try expectExactOwnerSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
-    try expectExactDirectCallMaps(
-        &legacy_pool,
-        &direct_pool,
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
-    try legacy_pool.ensureHealthy();
     try direct_pool.ensureHealthy();
-    try legacy_env.ensureHealthy();
     try direct_env.ensureHealthy();
     try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
 
@@ -13537,13 +10629,6 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
         },
     }
 
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -13551,26 +10636,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
         &direct_env,
     );
     defer direct_checker.deinit();
-    try std.testing.expectEqual(
-        try legacy_checker.check(legacy_root),
-        try direct_checker.check(direct_root),
-    );
-    try std.testing.expectEqual(
-        legacy_checker.getDiagnostics().len,
-        direct_checker.getDiagnostics().len,
-    );
-    for (legacy_checker.getDiagnostics(), direct_checker.getDiagnostics()) |legacy_diag, direct_diag| {
-        try expectSameTypeDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
-    }
-
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
+    const type_ok = try direct_checker.check(direct_root);
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -13579,16 +10645,28 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
         &direct_checker,
     );
     defer direct_strict.deinit();
-    try std.testing.expectEqual(
-        try legacy_strict.check(legacy_root),
-        try direct_strict.check(direct_root),
-    );
-    try std.testing.expectEqual(
-        legacy_strict.getDiagnostics().len,
-        direct_strict.getDiagnostics().len,
-    );
-    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diag, direct_diag| {
-        try expectSameStrictDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    const strict_ok = try direct_strict.check(direct_root);
+    try std.testing.expectEqual(@as(u32, 0), type_ok);
+    try std.testing.expectEqual(@as(usize, 0), direct_checker.getDiagnostics().len);
+    const expected_strict: []const strict_checker_mod.DiagnosticKind = switch (case) {
+        .interleaved => &.{
+            .implicit_unknown,
+            .unpublished_ambient_global,
+            .missing_public_annotation,
+            .implicit_unknown,
+            .missing_public_annotation,
+            .implicit_unknown,
+        },
+        .generic_scope_contrast, .generic_application_argument => &.{
+            .missing_public_annotation,
+            .implicit_unknown,
+        },
+        .arrow_compatibility => &.{},
+    };
+    try std.testing.expectEqual(@as(u32, @intCast(expected_strict.len)), strict_ok);
+    try std.testing.expectEqual(expected_strict.len, direct_strict.getDiagnostics().len);
+    for (direct_strict.getDiagnostics(), expected_strict) |diagnostic, kind| {
+        try std.testing.expectEqual(kind, diagnostic.kind);
     }
 }
 
@@ -13849,35 +10927,23 @@ fn runDirectCallAllocationSweep(
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
     try std.testing.expect(env.getTypeAlias("Seed") != null);
     try std.testing.expectEqual(@as(usize, 3), env.direct_call_type_args.count());
-
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-phase-three-oom>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    var legacy_atoms = AtomTable.init(std.testing.allocator);
-    defer legacy_atoms.deinit();
-    var legacy = try JsParser.init(std.testing.allocator, prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
-    _ = try legacy.parse();
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
-    try expectExactTypePool(&legacy_pool, &pool);
-    try expectExactDirectCallMaps(
-        &legacy_pool,
-        &pool,
-        &legacy_env,
-        &env,
-        parserIrView(&legacy),
-        parserIrView(&parser),
-        &parser.type_store,
-    );
+    const view = parserIrView(&parser);
+    const first = env.getCallTypeArgsForCall(
+        view,
+        parser.type_store.explicit_call_arguments.items[0].owner,
+    ) orelse return error.TestUnexpectedResult;
+    const second = env.getCallTypeArgsForCall(
+        view,
+        parser.type_store.explicit_call_arguments.items[1].owner,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), first.count);
+    try std.testing.expectEqual(@as(u8, 1), second.count);
+    try std.testing.expectEqual(pool.idx_string, first.args[0]);
+    try std.testing.expectEqual(TypeTag.t_record, pool.getTag(second.args[0]).?);
+    const fields = pool.getRecordFields(second.args[0]);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqualStrings("id", pool.getName(fields[0].name_start, fields[0].name_len));
+    try std.testing.expectEqual(pool.idx_string, fields[0].type_idx);
 }
 
 test "direct phase three allocation failures retain selection and incomplete calls" {
@@ -13933,25 +10999,10 @@ fn expectDirectPredicateConsumer(
         "direct predicate case {s} failed with {s}\nsource: {s}\n",
         .{ @tagName(case), @errorName(err), source },
     );
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-predicate>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -13959,64 +11010,27 @@ fn expectDirectPredicateConsumer(
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
     try std.testing.expectEqual(@as(usize, 1), direct.type_store.function_signatures.items.len);
     const syntax_signature = direct.type_store.function_signatures.items[0];
     const return_syntax = syntax_signature.return_syntax orelse return error.TestUnexpectedResult;
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
     const prior_nodes = direct_pool.nodes.items.len;
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
-    try expectExactOwnerSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
-    try expectExactDirectCallMaps(
-        &legacy_pool,
-        &direct_pool,
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
-    try legacy_pool.ensureHealthy();
     try direct_pool.ensureHealthy();
-    try legacy_env.ensureHealthy();
     try direct_env.ensureHealthy();
     try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
 
@@ -14024,15 +11038,8 @@ fn expectDirectPredicateConsumer(
         direct_view,
         syntax_signature.owner,
     ) orelse return error.TestUnexpectedResult;
-    const legacy_reference = legacy_env.functionTypeRef(
-        legacy_view,
-        syntax_signature.owner,
-    ) orelse return error.TestUnexpectedResult;
     const direct_signature = direct_env.getFunctionSignature(direct_reference) orelse
         return error.TestUnexpectedResult;
-    const legacy_signature = legacy_env.getFunctionSignature(legacy_reference) orelse
-        return error.TestUnexpectedResult;
-    try expectExactFunctionSignature(legacy_signature, direct_signature);
 
     if (expected_return_spelling) |expected| {
         try std.testing.expectEqualStrings(
@@ -14273,13 +11280,6 @@ fn expectDirectPredicateConsumer(
         },
     }
 
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -14287,36 +11287,18 @@ fn expectDirectPredicateConsumer(
         &direct_env,
     );
     defer direct_checker.deinit();
-    try std.testing.expectEqual(
-        try legacy_checker.check(legacy_root),
-        try direct_checker.check(direct_root),
-    );
-    try std.testing.expectEqual(
-        legacy_checker.getDiagnostics().len,
-        direct_checker.getDiagnostics().len,
-    );
-    for (legacy_checker.getDiagnostics(), direct_checker.getDiagnostics()) |legacy_diag, direct_diag| {
-        try expectSameTypeDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
-    }
-    if (case == .named_guard_unverified or case == .quoted_marker_space) {
-        try std.testing.expectEqual(@as(usize, 1), direct_checker.getDiagnostics().len);
-        try std.testing.expectEqual(
-            type_checker_mod.DiagnosticKind.invalid_type_predicate,
-            direct_checker.getDiagnostics()[0].kind,
-        );
-    }
-    if (case == .named_guard_verified or case == .arrow_guard_unverified) {
-        try std.testing.expectEqual(@as(usize, 0), direct_checker.getDiagnostics().len);
+    const type_ok = try direct_checker.check(direct_root);
+    const expected_type: []const type_checker_mod.DiagnosticKind = switch (case) {
+        .named_guard_unverified, .quoted_marker_space => &.{.invalid_type_predicate},
+        .ordinary_tab, .arrow_ordinary_tab, .readonly_tab => &.{.return_type_mismatch},
+        else => &.{},
+    };
+    try std.testing.expectEqual(@as(u32, @intCast(expected_type.len)), type_ok);
+    try std.testing.expectEqual(expected_type.len, direct_checker.getDiagnostics().len);
+    for (direct_checker.getDiagnostics(), expected_type) |diagnostic, kind| {
+        try std.testing.expectEqual(kind, diagnostic.kind);
     }
 
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -14325,16 +11307,15 @@ fn expectDirectPredicateConsumer(
         &direct_checker,
     );
     defer direct_strict.deinit();
-    try std.testing.expectEqual(
-        try legacy_strict.check(legacy_root),
-        try direct_strict.check(direct_root),
-    );
-    try std.testing.expectEqual(
-        legacy_strict.getDiagnostics().len,
-        direct_strict.getDiagnostics().len,
-    );
-    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diag, direct_diag| {
-        try expectSameStrictDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    const strict_ok = try direct_strict.check(direct_root);
+    const expected_strict: []const strict_checker_mod.DiagnosticKind = switch (case) {
+        .mixed_untyped_target, .compact_target_position, .repeated_target, .target_after_sixteen => &.{.missing_public_annotation},
+        else => &.{},
+    };
+    try std.testing.expectEqual(@as(u32, @intCast(expected_strict.len)), strict_ok);
+    try std.testing.expectEqual(expected_strict.len, direct_strict.getDiagnostics().len);
+    for (direct_strict.getDiagnostics(), expected_strict) |diagnostic, kind| {
+        try std.testing.expectEqual(kind, diagnostic.kind);
     }
 }
 
@@ -14468,36 +11449,6 @@ fn runPredicateAllocationSweep(
     try env.ensureHealthy();
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
     try std.testing.expect(env.getTypeAlias("Seed") != null);
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-predicate-oom>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    var legacy_atoms = AtomTable.init(std.testing.allocator);
-    defer legacy_atoms.deinit();
-    var legacy = try JsParser.init(std.testing.allocator, prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
-    _ = try legacy.parse();
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
-    try expectExactTypePool(&legacy_pool, &pool);
-    try expectExactFunctionNameMaps(&legacy_env, &env);
-    try expectExactOwnerSignatures(
-        &legacy_env,
-        &env,
-        parserIrView(&legacy),
-        parserIrView(&parser),
-        &parser.type_store,
-    );
-
     const syntax_signature = parser.type_store.function_signatures.items[0];
     const reference = env.functionTypeRef(parserIrView(&parser), syntax_signature.owner) orelse
         return error.TestUnexpectedResult;
@@ -14526,7 +11477,7 @@ test "direct predicate allocation failures restore scopes and poison consumers" 
     try std.testing.expect(observations.successes > 0);
 }
 
-test "bounded erased prefixes preserve preflight and consumer admission" {
+test "bounded erased prefixes preserve direct consumer admission" {
     const Case = enum { scalar_bound, compound_bound, any_bound, default_parameter, operator_parameter };
     const cases = [_]struct { case: Case, source: []const u8 }{
         .{ .case = .scalar_bound, .source = "const value = <T extends string>(1);" },
@@ -14535,53 +11486,36 @@ test "bounded erased prefixes preserve preflight and consumer admission" {
         .{ .case = .default_parameter, .source = "const value = <T = string>(1);" },
         .{ .case = .operator_parameter, .source = "const value = <T | U>(1);" },
     };
-    const modes = [_]AdmissionMode{ .collect, .compile };
+    const modes = [_]TypeSyntax.AdmissionMode{ .collect, .compile };
     var seen = std.EnumSet(Case).initEmpty();
     for (cases) |case| {
-        for (modes) |mode| switch (try compare(std.testing.allocator, case.source, mode)) {
-            .equivalent => {},
-            else => return error.TestUnexpectedResult,
-        };
+        for (modes) |mode| try expectDirectAdmission(std.testing.allocator, case.source, mode, .accepted, &.{}, null);
         try expectDirectDeclarationConsumer(case.source, &.{}, "", false);
         seen.insert(case.case);
     }
     try std.testing.expectEqual(std.meta.fields(Case).len, seen.count());
     try std.testing.expectEqual(@as(usize, 2), modes.len);
 
-    for (modes) |mode| switch (try compare(
+    const refused = "const value = <T extends void>(1);";
+    const diagnostic = try directDiagnosticAt(refused, .void_type, "void");
+    for (modes) |mode| try expectDirectAdmission(
         std.testing.allocator,
-        "const value = <T extends void>(1);",
+        refused,
         mode,
-    )) {
-        .admission_refused => |refusal| {
-            try std.testing.expectEqual(AdmissionKind.void_type, refusal.first);
-            try std.testing.expectEqual(@as(usize, 1), refusal.count);
-        },
-        else => return error.TestUnexpectedResult,
-    };
+        if (mode == .collect) .recovered_admission_refused else .terminal_admission_refused,
+        &.{diagnostic},
+        null,
+    );
 }
 
 test "direct callable bounds stop before excluded projected fragments" {
     const source =
         "function compact<T, = string, U extends { id: string }>(value: T): T { " ++
         "return value; }";
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-compact-stop>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -14589,18 +11523,9 @@ test "direct callable bounds stop before excluded projected fragments" {
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
     try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
     const owner = direct.type_store.generic_owners.items[0];
@@ -14624,23 +11549,16 @@ test "direct callable bounds stop before excluded projected fragments" {
     ].bound_fragment = fragment_index;
     try direct.type_store.validateRuntimeOwners(std.testing.allocator, direct_view);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
     const prior_nodes = direct_pool.nodes.items.len;
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
     try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
     try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_nodes)).?);
     try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_nodes + 1)).?);
@@ -14871,60 +11789,30 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         "export function helper(value: string): Proof<string, \"deterministic\"> {\n" ++
         "  return value;\n" ++
         "}";
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-pilot>.ts", .{});
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    const legacy_allocator = legacy_count.allocator();
     const direct_allocator = direct_count.allocator();
     const type_allocator = type_count.allocator();
-    var legacy_atoms = AtomTable.init(legacy_allocator);
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_allocator);
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_allocator, prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(direct_allocator, type_allocator, source);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try std.testing.expectEqual(type_env_mod.SourceTypeMode.legacy, legacy_env.sourceTypeMode().?);
     try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, direct_env.sourceTypeMode().?);
     try std.testing.expectEqual(@as(usize, 1), direct_env.varAnnotationCount());
     try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
@@ -14948,8 +11836,6 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
     try std.testing.expect(direct_env.functionTypeRef(direct_view, wrapper) == null);
     const direct_reference = direct_env.functionTypeRef(direct_view, owner) orelse
         return error.TestUnexpectedResult;
-    const legacy_reference = legacy_env.functionTypeRef(legacy_view, owner) orelse
-        return error.TestUnexpectedResult;
     const direct_signature = direct_env.getFunctionSignature(direct_reference) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), direct_signature.param_count);
@@ -14959,26 +11845,11 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         direct_env.getFunctionParameterSpelling(direct_reference, 0).?,
     );
     try std.testing.expectEqualStrings(
-        legacy_env.getFunctionParameterSpelling(legacy_reference, 0).?,
-        direct_env.getFunctionParameterSpelling(direct_reference, 0).?,
-    );
-    try std.testing.expectEqualStrings(
         "Proof<string, \"deterministic\"> ",
-        direct_env.getFunctionReturnSpelling(direct_reference).?,
-    );
-    try std.testing.expectEqualStrings(
-        legacy_env.getFunctionReturnSpelling(legacy_reference).?,
         direct_env.getFunctionReturnSpelling(direct_reference).?,
     );
     try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, owner) == null);
 
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -14986,17 +11857,8 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         &direct_env,
     );
     defer direct_checker.deinit();
-    try std.testing.expectEqual(@as(u32, 0), try legacy_checker.check(legacy_root));
     try std.testing.expectEqual(@as(u32, 0), try direct_checker.check(direct_root));
 
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -15005,18 +11867,9 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         &direct_checker,
     );
     defer direct_strict.deinit();
-    try std.testing.expectEqual(@as(u32, 1), try legacy_strict.check(legacy_root));
     try std.testing.expectEqual(@as(u32, 1), try direct_strict.check(direct_root));
-    const legacy_strict_diagnostics = legacy_strict.getDiagnostics();
     const direct_strict_diagnostics = direct_strict.getDiagnostics();
-    try std.testing.expectEqual(@as(usize, 1), legacy_strict_diagnostics.len);
     try std.testing.expectEqual(@as(usize, 1), direct_strict_diagnostics.len);
-    try expectSameStrictDiagnostic(
-        legacy_strict_diagnostics[0],
-        legacy_view,
-        direct_strict_diagnostics[0],
-        direct_view,
-    );
     try std.testing.expectEqual(
         strict_checker_mod.DiagnosticKind.raw_exported_boundary_type,
         direct_strict_diagnostics[0].kind,
@@ -15029,14 +11882,6 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
     try std.testing.expectEqual(@as(u32, 2), strict_location.line);
     try std.testing.expectEqual(@as(u32, 24), strict_location.column);
 
-    var legacy_effects = try effect_inference.buildEffectFacts(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        legacy_root,
-        .{},
-    );
-    defer legacy_effects.deinit(std.testing.allocator);
     var direct_effects = try effect_inference.buildEffectFacts(
         std.testing.allocator,
         direct_view,
@@ -15045,13 +11890,6 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         .{},
     );
     defer direct_effects.deinit(std.testing.allocator);
-    var legacy_capsules = try function_specs.dischargeWithTypeSource(
-        std.testing.allocator,
-        &legacy_effects,
-        .{ .legacy = &legacy_env },
-        legacy_view,
-    );
-    defer legacy_capsules.deinit(std.testing.allocator);
     var direct_capsules = try function_specs.dischargeWithTypeSource(
         std.testing.allocator,
         &direct_effects,
@@ -15059,7 +11897,6 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         direct_view,
     );
     defer direct_capsules.deinit(std.testing.allocator);
-    const legacy_capsule = legacy_capsules.byName("helper") orelse return error.TestUnexpectedResult;
     const direct_capsule = direct_capsules.byName("helper") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), direct_capsule.declared.items.len);
     try std.testing.expectEqualStrings("deterministic", direct_capsule.declared.items[0]);
@@ -15068,9 +11905,6 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
     try std.testing.expect(direct_capsule.proven.read_only);
     try std.testing.expect(direct_capsule.proven.deterministic);
     try std.testing.expect(direct_capsule.discharged());
-    try std.testing.expectEqualStrings(legacy_capsule.declared.items[0], direct_capsule.declared.items[0]);
-    try std.testing.expect(std.meta.eql(legacy_capsule.proven, direct_capsule.proven));
-    try std.testing.expectEqual(legacy_capsule.discharged(), direct_capsule.discharged());
 }
 
 fn expectPilotCheckerContrast(
@@ -15078,62 +11912,28 @@ fn expectPilotCheckerContrast(
     expected_type_errors: u32,
     expected_strict_errors: u32,
 ) !void {
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-contrast>.ts", .{});
-    defer prepared.deinit();
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -15141,15 +11941,8 @@ fn expectPilotCheckerContrast(
         &direct_env,
     );
     defer direct_checker.deinit();
-    try std.testing.expectEqual(expected_type_errors, try legacy_checker.check(legacy_root));
     try std.testing.expectEqual(expected_type_errors, try direct_checker.check(direct_root));
-    try std.testing.expectEqual(
-        legacy_checker.getDiagnostics().len,
-        direct_checker.getDiagnostics().len,
-    );
-    for (legacy_checker.getDiagnostics(), direct_checker.getDiagnostics()) |legacy_diag, direct_diag| {
-        try expectSameTypeDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
-    }
+    try std.testing.expectEqual(@as(usize, expected_type_errors), direct_checker.getDiagnostics().len);
     if (expected_type_errors == 1) {
         const diagnostic = direct_checker.getDiagnostics()[0];
         try std.testing.expectEqual(type_checker_mod.DiagnosticKind.type_mismatch, diagnostic.kind);
@@ -15158,14 +11951,6 @@ fn expectPilotCheckerContrast(
         try std.testing.expectEqual(@as(u32, 1), location.column);
     }
 
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -15174,15 +11959,8 @@ fn expectPilotCheckerContrast(
         &direct_checker,
     );
     defer direct_strict.deinit();
-    try std.testing.expectEqual(expected_strict_errors, try legacy_strict.check(legacy_root));
     try std.testing.expectEqual(expected_strict_errors, try direct_strict.check(direct_root));
-    try std.testing.expectEqual(
-        legacy_strict.getDiagnostics().len,
-        direct_strict.getDiagnostics().len,
-    );
-    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diag, direct_diag| {
-        try expectSameStrictDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
-    }
+    try std.testing.expectEqual(@as(usize, expected_strict_errors), direct_strict.getDiagnostics().len);
     if (expected_strict_errors == 1) {
         const diagnostic = direct_strict.getDiagnostics()[0];
         try std.testing.expectEqual(
@@ -15235,19 +12013,6 @@ test "direct source selection distinguishes omitted and empty inputs" {
         omitted_env.populateSourceTypes(.omitted),
     );
 
-    var empty_prepared = try PreparedSource.init(
-        std.testing.allocator,
-        "",
-        "<u12-empty-legacy>.ts",
-        .{},
-    );
-    defer empty_prepared.deinit();
-    const empty_type_map = empty_prepared.typeMap().?;
-    try std.testing.expectError(
-        error.TypeSourceAlreadySelected,
-        omitted_env.populateFromTypeMap(empty_type_map),
-    );
-
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     var empty_parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, "");
@@ -15271,56 +12036,23 @@ test "direct source selection distinguishes omitted and empty inputs" {
     try std.testing.expect(direct_env.getCallTypeArgsForCall(empty_view, empty_root) == null);
     try std.testing.expectError(
         error.TypeSourceAlreadySelected,
-        direct_env.populateFromTypeMap(empty_type_map),
+        direct_env.populateSourceTypes(.omitted),
     );
-
-    var repeated_pool = TypePool.init(std.testing.allocator);
-    defer repeated_pool.deinit(std.testing.allocator);
-    var repeated_env = TypeEnv.init(std.testing.allocator, &repeated_pool);
-    defer repeated_env.deinit();
-    try repeated_env.populateFromTypeMap(empty_type_map);
-    try repeated_env.populateFromTypeMap(empty_type_map);
-    try std.testing.expect(repeated_env.sourceTypeMode() == null);
-    try repeated_env.populateSourceTypes(.{ .legacy = empty_type_map });
-    try std.testing.expectEqual(type_env_mod.SourceTypeMode.legacy, repeated_env.sourceTypeMode().?);
-    try repeated_env.populateFromTypeMap(empty_type_map);
-
-    var legacy_first_pool = TypePool.init(std.testing.allocator);
-    defer legacy_first_pool.deinit(std.testing.allocator);
-    var legacy_first_env = TypeEnv.init(std.testing.allocator, &legacy_first_pool);
-    defer legacy_first_env.deinit();
-    try legacy_first_env.populateFromTypeMap(empty_type_map);
     try std.testing.expectError(
         error.TypeSourceAlreadySelected,
-        legacy_first_env.populateSourceTypes(.{ .direct = .{
+        omitted_env.populateSourceTypes(.{ .direct = .{
             .store = &empty_parser.type_store,
             .ir_view = empty_view,
             .atoms = &atoms,
         } }),
     );
-    try std.testing.expect(legacy_first_env.sourceTypeMode() == null);
-    try legacy_first_env.ensureHealthy();
-    try std.testing.expectEqual(@as(usize, 0), legacy_first_env.direct_var_types.count());
-    try std.testing.expectEqual(@as(usize, 0), legacy_first_env.direct_fn_signatures.count());
-
-    var legacy_omitted_pool = TypePool.init(std.testing.allocator);
-    defer legacy_omitted_pool.deinit(std.testing.allocator);
-    var legacy_omitted_env = TypeEnv.init(std.testing.allocator, &legacy_omitted_pool);
-    defer legacy_omitted_env.deinit();
-    try legacy_omitted_env.populateFromTypeMap(empty_type_map);
-    try std.testing.expectError(
-        error.TypeSourceAlreadySelected,
-        legacy_omitted_env.populateSourceTypes(.omitted),
-    );
-    try std.testing.expect(legacy_omitted_env.sourceTypeMode() == null);
-    try legacy_omitted_env.ensureHealthy();
     const empty_effects: effect_inference.EffectFacts = .{};
     try std.testing.expectError(
         error.TypeSourceModeMismatch,
         function_specs.dischargeWithTypeSource(
             std.testing.allocator,
             &empty_effects,
-            .{ .legacy = &direct_env },
+            .{ .direct = &omitted_env },
             empty_view,
         ),
     );
@@ -15430,15 +12162,6 @@ fn runDirectPilotAllocationSweep(
                 function_specs.dischargeWithTypeSource(
                     allocator,
                     &empty_effects,
-                    .{ .legacy = &env },
-                    view,
-                ),
-            );
-            try std.testing.expectError(
-                error.TypeSourceModeMismatch,
-                function_specs.dischargeWithTypeSource(
-                    allocator,
-                    &empty_effects,
                     .{ .direct = &env },
                     view,
                 ),
@@ -15507,115 +12230,30 @@ fn expectDirectDeclarationConsumer(
     contractivity_name: []const u8,
     expected_non_contractive: bool,
 ) !void {
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-declarations>.ts", .{});
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try std.testing.expectEqual(legacy_env.type_aliases.count(), direct_env.type_aliases.count());
-    var aliases = legacy_env.type_aliases.iterator();
-    while (aliases.next()) |entry| {
-        const direct_alias = direct_env.getTypeAlias(entry.key_ptr.*) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(entry.value_ptr.*, direct_alias);
-        try std.testing.expect(try orderedTypeEqual(
-            std.testing.allocator,
-            &legacy_pool,
-            entry.value_ptr.*,
-            &direct_pool,
-            direct_alias,
-        ));
-        try std.testing.expectEqual(
-            legacy_env.isNonContractiveAlias(entry.key_ptr.*),
-            direct_env.isNonContractiveAlias(entry.key_ptr.*),
-        );
-        try std.testing.expectEqual(
-            legacy_env.isNonContractiveType(entry.value_ptr.*),
-            direct_env.isNonContractiveType(direct_alias),
-        );
-    }
-    try std.testing.expectEqual(legacy_env.generic_aliases.count(), direct_env.generic_aliases.count());
-    var generic_aliases = legacy_env.generic_aliases.iterator();
-    while (generic_aliases.next()) |entry| {
-        const direct_alias = direct_env.generic_aliases.get(entry.key_ptr.*) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(entry.value_ptr.body, direct_alias.body);
-        try std.testing.expectEqual(entry.value_ptr.param_count, direct_alias.param_count);
-        for (
-            entry.value_ptr.param_names[0..entry.value_ptr.param_count],
-            direct_alias.param_names[0..direct_alias.param_count],
-        ) |legacy_name, direct_name| {
-            try std.testing.expectEqualStrings(legacy_name, direct_name);
-        }
-        try std.testing.expect(try orderedTypeEqual(
-            std.testing.allocator,
-            &legacy_pool,
-            entry.value_ptr.body,
-            &direct_pool,
-            direct_alias.body,
-        ));
-    }
-    try std.testing.expectEqual(
-        legacy_env.non_contractive_aliases.count(),
-        direct_env.non_contractive_aliases.count(),
-    );
-    var non_contractive_aliases = legacy_env.non_contractive_aliases.iterator();
-    while (non_contractive_aliases.next()) |entry| {
-        try std.testing.expect(direct_env.non_contractive_aliases.contains(entry.key_ptr.*));
-    }
-    try std.testing.expectEqual(
-        legacy_env.non_contractive_indices.count(),
-        direct_env.non_contractive_indices.count(),
-    );
-    var non_contractive_indices = legacy_env.non_contractive_indices.iterator();
-    while (non_contractive_indices.next()) |entry| {
-        try std.testing.expect(direct_env.non_contractive_indices.contains(entry.key_ptr.*));
-    }
+    try direct_pool.ensureHealthy();
+    try direct_env.ensureHealthy();
     try std.testing.expectEqual(
         expected_non_contractive,
         direct_env.isNonContractiveAlias(contractivity_name),
@@ -15631,13 +12269,6 @@ fn expectDirectDeclarationConsumer(
         ) != null);
     }
 
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -15645,29 +12276,15 @@ fn expectDirectDeclarationConsumer(
         &direct_env,
     );
     defer direct_checker.deinit();
-    try std.testing.expectEqual(@as(u32, @intCast(expected_diagnostics.len)), try legacy_checker.check(legacy_root));
     try std.testing.expectEqual(@as(u32, @intCast(expected_diagnostics.len)), try direct_checker.check(direct_root));
     try std.testing.expectEqual(expected_diagnostics.len, direct_checker.getDiagnostics().len);
-    for (
-        legacy_checker.getDiagnostics(),
-        direct_checker.getDiagnostics(),
-        expected_diagnostics,
-    ) |legacy_diagnostic, direct_diagnostic, expected| {
-        try expectSameTypeDiagnostic(legacy_diagnostic, legacy_view, direct_diagnostic, direct_view);
+    for (direct_checker.getDiagnostics(), expected_diagnostics) |direct_diagnostic, expected| {
         try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
         const location = direct_view.getLoc(direct_diagnostic.node).?;
         try std.testing.expectEqual(expected.line, location.line);
         try std.testing.expectEqual(expected.column, location.column);
     }
 
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -15676,16 +12293,9 @@ fn expectDirectDeclarationConsumer(
         &direct_checker,
     );
     defer direct_strict.deinit();
-    const legacy_strict_count = try legacy_strict.check(legacy_root);
     const direct_strict_count = try direct_strict.check(direct_root);
-    try std.testing.expectEqual(legacy_strict_count, direct_strict_count);
-    try std.testing.expectEqual(
-        legacy_strict.getDiagnostics().len,
-        direct_strict.getDiagnostics().len,
-    );
-    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diagnostic, direct_diagnostic| {
-        try expectSameStrictDiagnostic(legacy_diagnostic, legacy_view, direct_diagnostic, direct_view);
-    }
+    try std.testing.expectEqual(@as(u32, 0), direct_strict_count);
+    try std.testing.expectEqual(@as(usize, 0), direct_strict.getDiagnostics().len);
 }
 
 test "direct declarations preserve namespace contractivity and diagnostics" {
@@ -16253,57 +12863,29 @@ test "direct generic declaration allocation failures restore scope after seed" {
 
 test "direct source pilot compacts annotated parameters by final owner" {
     const source = "function helper(skip, value: string): number { return 1; }";
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-compact>.ts", .{});
-    defer prepared.deinit();
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
     const signature_record = direct.type_store.function_signatures.items[0];
     const reference = direct_env.functionTypeRef(direct_view, signature_record.owner) orelse
         return error.TestUnexpectedResult;
-    const legacy_reference = legacy_env.functionTypeRef(
-        legacy_view,
-        signature_record.owner,
-    ) orelse return error.TestUnexpectedResult;
     const signature = direct_env.getFunctionSignature(reference) orelse
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u8, 1), signature.param_count);
@@ -16312,17 +12894,9 @@ test "direct source pilot compacts annotated parameters by final owner" {
         "string",
         direct_env.getFunctionParameterSpelling(reference, 0).?,
     );
-    try std.testing.expectEqualStrings(
-        legacy_env.getFunctionParameterSpelling(legacy_reference, 0).?,
-        direct_env.getFunctionParameterSpelling(reference, 0).?,
-    );
     try std.testing.expect(direct_env.getFunctionParameterSpelling(reference, 1) == null);
     try std.testing.expectEqualStrings(
         "number ",
-        direct_env.getFunctionReturnSpelling(reference).?,
-    );
-    try std.testing.expectEqualStrings(
-        legacy_env.getFunctionReturnSpelling(legacy_reference).?,
         direct_env.getFunctionReturnSpelling(reference).?,
     );
     try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
@@ -16331,63 +12905,28 @@ test "direct source pilot compacts annotated parameters by final owner" {
 test "direct function specifications preserve variable arrow capsule absence" {
     const source =
         "const helper = (value: number): Proof<number, \"deterministic\"> => value;";
-    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-arrow-capsule>.ts", .{});
-    defer prepared.deinit();
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-
-    var legacy_effects = try effect_inference.buildEffectFacts(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        legacy_root,
-        .{},
-    );
-    defer legacy_effects.deinit(std.testing.allocator);
     var direct_effects = try effect_inference.buildEffectFacts(
         std.testing.allocator,
         direct_view,
@@ -16396,11 +12935,8 @@ test "direct function specifications preserve variable arrow capsule absence" {
         .{},
     );
     defer direct_effects.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), legacy_effects.all().len);
     try std.testing.expectEqual(@as(usize, 1), direct_effects.all().len);
-    const legacy_effect = legacy_effects.all()[0];
     const direct_effect = direct_effects.all()[0];
-    try std.testing.expectEqual(engine.parser.NodeTag.var_decl, legacy_view.getTag(legacy_effect.decl_node).?);
     try std.testing.expectEqual(engine.parser.NodeTag.var_decl, direct_view.getTag(direct_effect.decl_node).?);
     const direct_declaration = direct_view.getVarDecl(direct_effect.decl_node) orelse
         return error.TestUnexpectedResult;
@@ -16409,13 +12945,6 @@ test "direct function specifications preserve variable arrow capsule absence" {
         return error.TestUnexpectedResult;
     try std.testing.expect(direct_env.getFunctionSignature(arrow_reference) != null);
 
-    var legacy_capsules = try function_specs.dischargeWithTypeSource(
-        std.testing.allocator,
-        &legacy_effects,
-        .{ .legacy = &legacy_env },
-        legacy_view,
-    );
-    defer legacy_capsules.deinit(std.testing.allocator);
     var direct_capsules = try function_specs.dischargeWithTypeSource(
         std.testing.allocator,
         &direct_effects,
@@ -16423,22 +12952,15 @@ test "direct function specifications preserve variable arrow capsule absence" {
         direct_view,
     );
     defer direct_capsules.deinit(std.testing.allocator);
-    const legacy_capsule = legacy_capsules.byName("helper") orelse return error.TestUnexpectedResult;
     const direct_capsule = direct_capsules.byName("helper") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 0), legacy_capsule.declared.items.len);
     try std.testing.expectEqual(@as(usize, 0), direct_capsule.declared.items.len);
-    try std.testing.expectEqual(@as(usize, 0), legacy_capsule.effect_declared.items.len);
     try std.testing.expectEqual(@as(usize, 0), direct_capsule.effect_declared.items.len);
-    try std.testing.expectEqual(@as(usize, 0), legacy_capsule.inferred_caps.count());
     try std.testing.expectEqual(@as(usize, 0), direct_capsule.inferred_caps.count());
-    try std.testing.expect(legacy_capsule.proven.total);
-    try std.testing.expect(legacy_capsule.proven.pure);
-    try std.testing.expect(legacy_capsule.proven.read_only);
-    try std.testing.expect(legacy_capsule.proven.deterministic);
-    try std.testing.expect(std.meta.eql(legacy_capsule.proven, direct_capsule.proven));
-    try std.testing.expect(!legacy_capsule.discharged());
+    try std.testing.expect(direct_capsule.proven.total);
+    try std.testing.expect(direct_capsule.proven.pure);
+    try std.testing.expect(direct_capsule.proven.read_only);
+    try std.testing.expect(direct_capsule.proven.deterministic);
     try std.testing.expect(!direct_capsule.discharged());
-    try std.testing.expect(!legacy_capsule.effectDischarged());
     try std.testing.expect(!direct_capsule.effectDischarged());
 }
 
@@ -16456,82 +12978,34 @@ const ExpectedConsumerStrictDiagnostic = struct {
 
 fn expectDirectConsumerMatrixCase(
     source: []const u8,
-    expected_type_diagnostics: ?[]const ExpectedConsumerTypeDiagnostic,
-    expected_strict_diagnostics: ?[]const ExpectedConsumerStrictDiagnostic,
+    expected_type_diagnostics: []const ExpectedConsumerTypeDiagnostic,
+    expected_strict_diagnostics: []const ExpectedConsumerStrictDiagnostic,
 ) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-consumer-matrix>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
 
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
-    try expectExactOwnerSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
-    try expectExactDirectCallMaps(
-        &legacy_pool,
-        &direct_pool,
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
+    try direct_pool.ensureHealthy();
+    try direct_env.ensureHealthy();
     try std.testing.expectEqual(
         direct.type_store.annotations.items.len,
         direct_env.varAnnotationCount(),
@@ -16547,13 +13021,6 @@ fn expectDirectConsumerMatrixCase(
         ) != null);
     }
 
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -16561,39 +13028,18 @@ fn expectDirectConsumerMatrixCase(
         &direct_env,
     );
     defer direct_checker.deinit();
-    const legacy_type_count = try legacy_checker.check(legacy_root);
     const direct_type_count = try direct_checker.check(direct_root);
-    try std.testing.expectEqual(legacy_type_count, direct_type_count);
-    const legacy_type_diagnostics = legacy_checker.getDiagnostics();
     const direct_type_diagnostics = direct_checker.getDiagnostics();
-    try std.testing.expectEqual(legacy_type_diagnostics.len, direct_type_diagnostics.len);
-    for (legacy_type_diagnostics, direct_type_diagnostics) |legacy_diagnostic, direct_diagnostic| {
-        try expectSameTypeDiagnostic(
-            legacy_diagnostic,
-            legacy_view,
-            direct_diagnostic,
-            direct_view,
-        );
-    }
-    if (expected_type_diagnostics) |expected_diagnostics| {
-        try std.testing.expectEqual(expected_diagnostics.len, direct_type_diagnostics.len);
-        for (direct_type_diagnostics, expected_diagnostics) |direct_diagnostic, expected| {
-            try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
-            const location = direct_view.getLoc(direct_diagnostic.node) orelse
-                return error.TestUnexpectedResult;
-            if (expected.line) |line| try std.testing.expectEqual(line, location.line);
-            if (expected.column) |column| try std.testing.expectEqual(column, location.column);
-        }
+    try std.testing.expectEqual(@as(u32, @intCast(expected_type_diagnostics.len)), direct_type_count);
+    try std.testing.expectEqual(expected_type_diagnostics.len, direct_type_diagnostics.len);
+    for (direct_type_diagnostics, expected_type_diagnostics) |direct_diagnostic, expected| {
+        try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
+        const location = direct_view.getLoc(direct_diagnostic.node) orelse
+            return error.TestUnexpectedResult;
+        if (expected.line) |line| try std.testing.expectEqual(line, location.line);
+        if (expected.column) |column| try std.testing.expectEqual(column, location.column);
     }
 
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -16602,29 +13048,16 @@ fn expectDirectConsumerMatrixCase(
         &direct_checker,
     );
     defer direct_strict.deinit();
-    const legacy_strict_count = try legacy_strict.check(legacy_root);
     const direct_strict_count = try direct_strict.check(direct_root);
-    try std.testing.expectEqual(legacy_strict_count, direct_strict_count);
-    const legacy_strict_diagnostics = legacy_strict.getDiagnostics();
     const direct_strict_diagnostics = direct_strict.getDiagnostics();
-    try std.testing.expectEqual(legacy_strict_diagnostics.len, direct_strict_diagnostics.len);
-    for (legacy_strict_diagnostics, direct_strict_diagnostics) |legacy_diagnostic, direct_diagnostic| {
-        try expectSameStrictDiagnostic(
-            legacy_diagnostic,
-            legacy_view,
-            direct_diagnostic,
-            direct_view,
-        );
-    }
-    if (expected_strict_diagnostics) |expected_diagnostics| {
-        try std.testing.expectEqual(expected_diagnostics.len, direct_strict_diagnostics.len);
-        for (direct_strict_diagnostics, expected_diagnostics) |direct_diagnostic, expected| {
-            try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
-            const location = direct_view.getLoc(direct_diagnostic.node) orelse
-                return error.TestUnexpectedResult;
-            if (expected.line) |line| try std.testing.expectEqual(line, location.line);
-            if (expected.column) |column| try std.testing.expectEqual(column, location.column);
-        }
+    try std.testing.expectEqual(@as(u32, @intCast(expected_strict_diagnostics.len)), direct_strict_count);
+    try std.testing.expectEqual(expected_strict_diagnostics.len, direct_strict_diagnostics.len);
+    for (direct_strict_diagnostics, expected_strict_diagnostics) |direct_diagnostic, expected| {
+        try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
+        const location = direct_view.getLoc(direct_diagnostic.node) orelse
+            return error.TestUnexpectedResult;
+        if (expected.line) |line| try std.testing.expectEqual(line, location.line);
+        if (expected.column) |column| try std.testing.expectEqual(column, location.column);
     }
 }
 
@@ -16842,8 +13275,8 @@ test "direct consumers preserve generic calls compact arity and strict signature
     const cases = [_]struct {
         case: ConsumerSemanticCase,
         source: []const u8,
-        type_diagnostics: ?[]const ExpectedConsumerTypeDiagnostic,
-        strict_diagnostics: ?[]const ExpectedConsumerStrictDiagnostic,
+        type_diagnostics: []const ExpectedConsumerTypeDiagnostic,
+        strict_diagnostics: []const ExpectedConsumerStrictDiagnostic,
     }{
         .{
             .case = .generic_substitution,
@@ -16886,7 +13319,7 @@ test "direct consumers preserve generic calls compact arity and strict signature
             \\function handler(req: Request): Response { return Response.json({}); }
             \\const first = (a: number, b): number => a;
             ,
-            .type_diagnostics = null,
+            .type_diagnostics = &.{},
             .strict_diagnostics = &.{.{ .kind = .missing_public_annotation }},
         },
         .{
@@ -16915,7 +13348,7 @@ test "direct consumers preserve generic calls compact arity and strict signature
 }
 
 fn expectDirectPrimitiveFacts(source: []const u8) !void {
-    try expectDirectConsumerMatrixCase(source, null, null);
+    try expectDirectConsumerMatrixCase(source, &.{}, &.{});
 
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
@@ -16968,25 +13401,10 @@ test "direct consumers preserve present null failure and hide refused expression
         \\const refused = n + "y";
         \\
     ;
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-present-null>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -16994,57 +13412,24 @@ test "direct consumers preserve present null failure and hide refused expression
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try std.testing.expectEqualStrings(source, direct.type_store.source);
+    try std.testing.expect(direct_count.alloc_calls > 0);
+    try std.testing.expect(type_count.alloc_calls > 0);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
 
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
-    try expectExactOwnerSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
-    try expectExactDirectCallMaps(
-        &legacy_pool,
-        &direct_pool,
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct.type_store,
-    );
     try std.testing.expectEqual(
         direct.type_store.annotations.items.len,
         direct_env.varAnnotationCount(),
@@ -17078,23 +13463,10 @@ test "direct consumers preserve present null failure and hide refused expression
     try std.testing.expect(found_absent);
     try std.testing.expect(found_unknown);
     try std.testing.expect(found_number);
-    try std.testing.expectEqual(null_type_idx, legacy_env.getVarTypeByName("absent").?);
-    try std.testing.expectEqual(
-        legacy_pool.idx_unknown,
-        legacy_env.getVarTypeByName("known").?,
-    );
-    try std.testing.expectEqual(
-        legacy_pool.idx_number,
-        legacy_env.getVarTypeByName("n").?,
-    );
+    try std.testing.expectEqual(null_type_idx, direct_env.getVarTypeByName("absent").?);
+    try std.testing.expectEqual(direct_pool.idx_unknown, direct_env.getVarTypeByName("known").?);
+    try std.testing.expectEqual(direct_pool.idx_number, direct_env.getVarTypeByName("n").?);
 
-    var legacy_checker = type_checker_mod.TypeChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-    );
-    defer legacy_checker.deinit();
     var direct_checker = type_checker_mod.TypeChecker.init(
         std.testing.allocator,
         direct_view,
@@ -17102,41 +13474,17 @@ test "direct consumers preserve present null failure and hide refused expression
         &direct_env,
     );
     defer direct_checker.deinit();
-    try std.testing.expectError(error.UnresolvedTypeBinding, legacy_checker.check(legacy_root));
     try std.testing.expectError(error.UnresolvedTypeBinding, direct_checker.check(direct_root));
-    try legacy_pool.ensureHealthy();
     try direct_pool.ensureHealthy();
-    try legacy_env.ensureHealthy();
     try direct_env.ensureHealthy();
-    try std.testing.expectError(error.UnresolvedTypeBinding, legacy_checker.ensureHealthy());
     try std.testing.expectError(error.UnresolvedTypeBinding, direct_checker.ensureHealthy());
-    const legacy_diagnostics = legacy_checker.getDiagnostics();
     const direct_diagnostics = direct_checker.getDiagnostics();
-    try std.testing.expectEqual(@as(usize, 1), legacy_diagnostics.len);
-    try std.testing.expectEqual(legacy_diagnostics.len, direct_diagnostics.len);
-    for (legacy_diagnostics, direct_diagnostics) |legacy_diagnostic, direct_diagnostic| {
-        try expectSameTypeDiagnostic(
-            legacy_diagnostic,
-            legacy_view,
-            direct_diagnostic,
-            direct_view,
-        );
-    }
+    try std.testing.expectEqual(@as(usize, 1), direct_diagnostics.len);
     try std.testing.expectEqual(
         type_checker_mod.DiagnosticKind.string_add,
         direct_diagnostics[0].kind,
     );
 
-    var legacy_refused: ?NodeIndex = null;
-    for (0..legacy_view.nodeCount()) |raw| {
-        const node: NodeIndex = @intCast(raw);
-        if (legacy_view.getTag(node) != .binary_op) continue;
-        const binary = legacy_view.getBinary(node) orelse continue;
-        if (binary.op == .add) {
-            legacy_refused = node;
-            break;
-        }
-    }
     var direct_refused: ?NodeIndex = null;
     for (0..direct_view.nodeCount()) |raw| {
         const node: NodeIndex = @intCast(raw);
@@ -17149,25 +13497,11 @@ test "direct consumers preserve present null failure and hide refused expression
     }
     try std.testing.expectEqual(
         null_type_idx,
-        legacy_checker.inferTypeWithoutDiagnostics(
-            legacy_refused orelse return error.TestUnexpectedResult,
-        ),
-    );
-    try std.testing.expectEqual(
-        null_type_idx,
         direct_checker.inferTypeWithoutDiagnostics(
             direct_refused orelse return error.TestUnexpectedResult,
         ),
     );
 
-    var legacy_strict = strict_checker_mod.StrictChecker.init(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        &legacy_env,
-        &legacy_checker,
-    );
-    defer legacy_strict.deinit();
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
         direct_view,
@@ -17176,101 +13510,17 @@ test "direct consumers preserve present null failure and hide refused expression
         &direct_checker,
     );
     defer direct_strict.deinit();
-    try std.testing.expectError(error.UnresolvedTypeBinding, legacy_strict.check(legacy_root));
     try std.testing.expectError(error.UnresolvedTypeBinding, direct_strict.check(direct_root));
-    try std.testing.expectEqual(
-        legacy_strict.getDiagnostics().len,
-        direct_strict.getDiagnostics().len,
-    );
-    for (
-        legacy_strict.getDiagnostics(),
-        direct_strict.getDiagnostics(),
-    ) |legacy_diagnostic, direct_diagnostic| {
-        try expectSameStrictDiagnostic(
-            legacy_diagnostic,
-            legacy_view,
-            direct_diagnostic,
-            direct_view,
-        );
-    }
-}
-
-fn expectOptionalStringEqual(left: ?[]const u8, right: ?[]const u8) !void {
-    if (left) |value| {
-        try std.testing.expectEqualStrings(value, right orelse return error.TestUnexpectedResult);
-    } else {
-        try std.testing.expect(right == null);
-    }
-}
-
-fn expectSameSpecDiagnostic(
-    left: contract_types.SpecDiagnostic,
-    right: contract_types.SpecDiagnostic,
-) !void {
-    try std.testing.expectEqual(left.kind, right.kind);
-    try std.testing.expectEqualStrings(left.spec_name, right.spec_name);
-    try std.testing.expect(std.meta.eql(left.cause, right.cause));
-    try expectOptionalStringEqual(left.incompatible_module, right.incompatible_module);
-    try expectOptionalStringEqual(left.suggestion, right.suggestion);
-    try expectOptionalStringEqual(left.function, right.function);
-    try std.testing.expectEqual(left.implicit_default, right.implicit_default);
-}
-
-fn expectSameCapsule(
-    left: *const function_specs.Capsule,
-    right: *const function_specs.Capsule,
-) !void {
-    try std.testing.expectEqualStrings(left.name, right.name);
-    try std.testing.expectEqual(left.line, right.line);
-    try std.testing.expectEqual(left.declared.items.len, right.declared.items.len);
-    for (left.declared.items, right.declared.items) |left_name, right_name| {
-        try std.testing.expectEqualStrings(left_name, right_name);
-    }
-    try std.testing.expect(std.meta.eql(left.proven, right.proven));
-    try std.testing.expectEqual(left.diagnostics.items.len, right.diagnostics.items.len);
-    for (left.diagnostics.items, right.diagnostics.items) |left_diagnostic, right_diagnostic| {
-        try expectSameSpecDiagnostic(left_diagnostic, right_diagnostic);
-    }
-    try std.testing.expectEqual(left.effect_declared.items.len, right.effect_declared.items.len);
-    for (left.effect_declared.items, right.effect_declared.items) |left_name, right_name| {
-        try std.testing.expectEqualStrings(left_name, right_name);
-    }
-    try std.testing.expect(std.meta.eql(left.inferred_caps, right.inferred_caps));
-    try std.testing.expectEqual(
-        left.effect_diagnostics.items.len,
-        right.effect_diagnostics.items.len,
-    );
-    for (
-        left.effect_diagnostics.items,
-        right.effect_diagnostics.items,
-    ) |left_diagnostic, right_diagnostic| {
-        try expectSameSpecDiagnostic(left_diagnostic, right_diagnostic);
-    }
-    try std.testing.expectEqual(left.exported, right.exported);
-    try std.testing.expectEqual(left.discharged(), right.discharged());
-    try std.testing.expectEqual(left.effectDischarged(), right.effectDischarged());
+    try std.testing.expectEqual(@as(usize, 0), direct_strict.getDiagnostics().len);
 }
 
 fn expectDirectFunctionCapsules(source: []const u8) !void {
-    try expectDirectConsumerMatrixCase(source, null, null);
+    try expectDirectConsumerMatrixCase(source, &.{}, &.{});
 
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u12-capsules>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -17278,47 +13528,24 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try std.testing.expectEqualStrings(source, direct.type_store.source);
+    try std.testing.expect(direct_count.alloc_calls > 0);
+    try std.testing.expect(type_count.alloc_calls > 0);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
 
-    var legacy_effects = try effect_inference.buildEffectFacts(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        legacy_root,
-        .{},
-    );
-    defer legacy_effects.deinit(std.testing.allocator);
     var direct_effects = try effect_inference.buildEffectFacts(
         std.testing.allocator,
         direct_view,
@@ -17327,16 +13554,8 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
         .{},
     );
     defer direct_effects.deinit(std.testing.allocator);
-    try std.testing.expectEqual(legacy_effects.all().len, direct_effects.all().len);
-    try std.testing.expectEqual(@as(usize, 2), legacy_effects.all().len);
+    try std.testing.expectEqual(@as(usize, 2), direct_effects.all().len);
 
-    var legacy_capsules = try function_specs.dischargeWithTypeSource(
-        std.testing.allocator,
-        &legacy_effects,
-        .{ .legacy = &legacy_env },
-        legacy_view,
-    );
-    defer legacy_capsules.deinit(std.testing.allocator);
     var direct_capsules = try function_specs.dischargeWithTypeSource(
         std.testing.allocator,
         &direct_effects,
@@ -17344,53 +13563,39 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
         direct_view,
     );
     defer direct_capsules.deinit(std.testing.allocator);
-    try std.testing.expectEqual(
-        legacy_capsules.capsules.items.len,
-        direct_capsules.capsules.items.len,
-    );
-    try std.testing.expectEqual(@as(usize, 2), legacy_capsules.capsules.items.len);
-    for (
-        legacy_capsules.capsules.items,
-        direct_capsules.capsules.items,
-    ) |*legacy_capsule, *direct_capsule| {
-        try expectSameCapsule(legacy_capsule, direct_capsule);
-    }
+    try std.testing.expectEqual(@as(usize, 2), direct_capsules.capsules.items.len);
 
-    const legacy_selected = legacy_capsules.byName("helper") orelse
-        return error.TestUnexpectedResult;
     const direct_selected = direct_capsules.byName("helper") orelse
         return error.TestUnexpectedResult;
-    try expectSameCapsule(legacy_selected, direct_selected);
-    try std.testing.expect(legacy_selected == &legacy_capsules.capsules.items[0]);
     try std.testing.expect(direct_selected == &direct_capsules.capsules.items[0]);
-    try std.testing.expectEqual(@as(u32, 4), legacy_selected.line);
-    try std.testing.expectEqual(@as(usize, 0), legacy_selected.declared.items.len);
-    try std.testing.expect(legacy_selected.proven.total);
-    try std.testing.expect(!legacy_selected.proven.pure);
-    try std.testing.expect(legacy_selected.proven.read_only);
-    try std.testing.expect(legacy_selected.proven.deterministic);
-    try std.testing.expect(!legacy_selected.discharged());
-    try std.testing.expectEqual(@as(usize, 1), legacy_selected.effect_declared.items.len);
-    try std.testing.expectEqualStrings("crypto", legacy_selected.effect_declared.items[0]);
-    try std.testing.expectEqual(@as(usize, 1), legacy_selected.inferred_caps.count());
-    try std.testing.expect(legacy_selected.inferred_caps.contains(.crypto));
-    try std.testing.expect(legacy_selected.effectDischarged());
+    try std.testing.expectEqual(@as(u32, 4), direct_selected.line);
+    try std.testing.expectEqual(@as(usize, 0), direct_selected.declared.items.len);
+    try std.testing.expect(direct_selected.proven.total);
+    try std.testing.expect(!direct_selected.proven.pure);
+    try std.testing.expect(direct_selected.proven.read_only);
+    try std.testing.expect(direct_selected.proven.deterministic);
+    try std.testing.expect(!direct_selected.discharged());
+    try std.testing.expectEqual(@as(usize, 1), direct_selected.effect_declared.items.len);
+    try std.testing.expectEqualStrings("crypto", direct_selected.effect_declared.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), direct_selected.inferred_caps.count());
+    try std.testing.expect(direct_selected.inferred_caps.contains(.crypto));
+    try std.testing.expect(direct_selected.effectDischarged());
 
-    const legacy_second = &legacy_capsules.capsules.items[1];
     const direct_second = &direct_capsules.capsules.items[1];
-    try expectSameCapsule(legacy_second, direct_second);
-    try std.testing.expectEqualStrings("helper", legacy_second.name);
-    try std.testing.expectEqual(@as(u32, 8), legacy_second.line);
-    try std.testing.expectEqual(@as(usize, 0), legacy_second.declared.items.len);
-    try std.testing.expect(legacy_second.proven.total);
-    try std.testing.expect(legacy_second.proven.pure);
-    try std.testing.expect(legacy_second.proven.read_only);
-    try std.testing.expect(legacy_second.proven.deterministic);
-    try std.testing.expect(!legacy_second.discharged());
-    try std.testing.expectEqual(@as(usize, 1), legacy_second.effect_declared.items.len);
-    try std.testing.expectEqualStrings("clock", legacy_second.effect_declared.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), legacy_second.inferred_caps.count());
-    try std.testing.expect(legacy_second.effectDischarged());
+    try std.testing.expectEqualStrings("helper", direct_second.name);
+    try std.testing.expectEqual(@as(u32, 8), direct_second.line);
+    try std.testing.expectEqual(@as(usize, 0), direct_second.declared.items.len);
+    try std.testing.expect(direct_second.proven.total);
+    try std.testing.expect(direct_second.proven.pure);
+    try std.testing.expect(direct_second.proven.read_only);
+    try std.testing.expect(direct_second.proven.deterministic);
+    try std.testing.expect(!direct_second.discharged());
+    try std.testing.expectEqual(@as(usize, 1), direct_second.effect_declared.items.len);
+    try std.testing.expectEqualStrings("clock", direct_second.effect_declared.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), direct_second.inferred_caps.count());
+    try std.testing.expect(direct_second.effectDischarged());
+    try direct_pool.ensureHealthy();
+    try direct_env.ensureHealthy();
 }
 
 test "direct function specifications preserve nonempty effects and repeated helper selection" {
@@ -17520,29 +13725,16 @@ fn expectContractConsumerFacts(
     }
 }
 
-fn expectDirectSingleModuleContractParity(
+fn expectDirectSingleModuleContract(
     profile: pipeline_mod.ModuleAnalysisSession.Profile,
     kind: ContractConsumerCase,
     source: []const u8,
-) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u13-single-module>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    expected_hash: u64,
+) ![]u8 {
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -17550,49 +13742,26 @@ fn expectDirectSingleModuleContractParity(
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
-
-    const legacy_parsed = pipeline_mod.ParsedModule.fromExisting(
-        legacy_view,
-        legacy_root,
-        &legacy_atoms,
-    );
+    try std.testing.expectEqualStrings(source, direct.type_store.source);
+    try std.testing.expect(direct_count.alloc_calls > 0);
+    try std.testing.expect(type_count.alloc_calls > 0);
     const direct_parsed = pipeline_mod.ParsedModule.fromTypedExisting(
         direct_view,
         direct_root,
         &direct_atoms,
         &direct.type_store,
     );
-    var legacy_session: pipeline_mod.ModuleAnalysisSession = .{};
     var direct_session: pipeline_mod.ModuleAnalysisSession = .{};
     switch (profile) {
         .full => {
-            try legacy_session.initFull(std.testing.allocator, legacy_parsed, .{
-                .source_types = .{ .legacy = prepared.typeMap().? },
-                .strict = false,
-            });
             try direct_session.initFull(std.testing.allocator, direct_parsed, .{
                 .source_types = .direct,
                 .strict = false,
             });
         },
         .sound_extraction => {
-            try legacy_session.initSoundExtraction(std.testing.allocator, legacy_parsed, .{
-                .source_types = .{ .legacy = prepared.typeMap().? },
-                .strict = false,
-            });
             try direct_session.initSoundExtraction(std.testing.allocator, direct_parsed, .{
                 .source_types = .direct,
                 .strict = false,
@@ -17600,62 +13769,41 @@ fn expectDirectSingleModuleContractParity(
         },
         .contract_only => return error.TestUnexpectedResult,
     }
-    defer legacy_session.deinit();
     defer direct_session.deinit();
-    try legacy_session.complete();
     try direct_session.complete();
 
-    const legacy_env = legacy_session.type_env_storage.envPtr() orelse
-        return error.TestUnexpectedResult;
     const direct_env = direct_session.type_env_storage.envPtr() orelse
         return error.TestUnexpectedResult;
-    try expectExactTypePool(legacy_env.pool, direct_env.pool);
-    try std.testing.expectEqual(type_env_mod.SourceTypeMode.legacy, legacy_env.sourceTypeMode().?);
     try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, direct_env.sourceTypeMode().?);
-    try std.testing.expectEqual(
-        (try legacy_session.resolvedForReport()).typeErrorCount(),
-        (try direct_session.resolvedForReport()).typeErrorCount(),
-    );
-    try std.testing.expectEqual(
-        (try legacy_session.resolvedForReport()).strict_error_count,
-        (try direct_session.resolvedForReport()).strict_error_count,
-    );
+    const resolved = try direct_session.resolvedForReport();
+    try std.testing.expectEqual(@as(u32, 0), resolved.typeErrorCount());
+    try std.testing.expectEqual(@as(u32, 0), resolved.strict_error_count);
 
-    var legacy_contract = try legacy_session.extractContract("single-module.ts");
-    defer legacy_contract.deinit(std.testing.allocator);
     var direct_contract = try direct_session.extractContract("single-module.ts");
     defer direct_contract.deinit(std.testing.allocator);
-    const legacy_json = try serializeContractForConsumerTest(
-        std.testing.allocator,
-        &legacy_contract,
-    );
-    defer std.testing.allocator.free(legacy_json);
     const direct_json = try serializeContractForConsumerTest(
         std.testing.allocator,
         &direct_contract,
     );
-    defer std.testing.allocator.free(direct_json);
-    try std.testing.expectEqualStrings(legacy_json, direct_json);
-    try std.testing.expect(std.meta.eql(legacy_contract.properties, direct_contract.properties));
-    try std.testing.expectEqualDeep(legacy_contract.function_capsules.items, direct_contract.function_capsules.items);
-    try std.testing.expectEqualDeep(legacy_contract.function_effect_capsules.items, direct_contract.function_effect_capsules.items);
-    try std.testing.expectEqualDeep(legacy_contract.holes.items, direct_contract.holes.items);
-    try std.testing.expectEqualDeep(legacy_contract.spec_diagnostics.items, direct_contract.spec_diagnostics.items);
-    try expectContractConsumerFacts(kind, &legacy_contract);
+    errdefer std.testing.allocator.free(direct_json);
+    try std.testing.expectEqual(expected_hash, std.hash.Wyhash.hash(0, direct_json));
     try expectContractConsumerFacts(kind, &direct_contract);
+    try direct_env.pool.ensureHealthy();
+    try direct_env.ensureHealthy();
+    return direct_json;
 }
 
 test "direct single-module full and sound extraction preserve contract bytes" {
-    const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8 }{
-        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n" },
-        .{ .kind = .nested_first, .source = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n" },
-        .{ .kind = .outer_first, .source = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n" },
-        .{ .kind = .repeated_holes, .source = "function helper(): number { return hole(); }\nfunction helper(value: string): string { return hole(); }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n" },
-        .{ .kind = .repeated_capsules, .source = "function helper(): Proof<string, \"pure\"> { return \"a\"; }\nfunction helper(value: string): Proof<string, \"deterministic\"> { return value; }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n" },
-        .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n" },
-        .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n" },
-        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n" },
-        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n" },
+    const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
+        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0x805f88e31894951e },
+        .{ .kind = .nested_first, .source = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n", .json_hash = 0x5736302927530e99 },
+        .{ .kind = .outer_first, .source = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n", .json_hash = 0xc5f7ed70dd9e7bf1 },
+        .{ .kind = .repeated_holes, .source = "function helper(): number { return hole(); }\nfunction helper(value: string): string { return hole(); }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xe2d30363665299d9 },
+        .{ .kind = .repeated_capsules, .source = "function helper(): Proof<string, \"pure\"> { return \"a\"; }\nfunction helper(value: string): Proof<string, \"deterministic\"> { return value; }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xe2d30363665299d9 },
+        .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n", .json_hash = 0xf7f37b9cb9b7e664 },
+        .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xd0c509ad64769b17 },
+        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x762eeda33622aa0e },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0xd6465b86e511d500 },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".fields;
     try std.testing.expectEqual(@as(usize, 9), fixtures.len);
@@ -17665,8 +13813,11 @@ test "direct single-module full and sound extraction preserve contract bytes" {
         const index = @intFromEnum(fixture.kind);
         try std.testing.expect(!seen[index]);
         seen[index] = true;
-        try expectDirectSingleModuleContractParity(.full, fixture.kind, fixture.source);
-        try expectDirectSingleModuleContractParity(.sound_extraction, fixture.kind, fixture.source);
+        const full = try expectDirectSingleModuleContract(.full, fixture.kind, fixture.source, fixture.json_hash);
+        defer std.testing.allocator.free(full);
+        const sound = try expectDirectSingleModuleContract(.sound_extraction, fixture.kind, fixture.source, fixture.json_hash);
+        defer std.testing.allocator.free(sound);
+        try std.testing.expectEqualStrings(full, sound);
     }
     for (seen) |present| try std.testing.expect(present);
 }
@@ -17680,103 +13831,14 @@ const ExpectedCallbackCeiling = struct {
     diagnostic: ?contract_types.SpecDiagnostic.Kind,
 };
 
-fn expectSameExportEffect(
-    legacy: effect_inference.ExportEffect,
-    direct: effect_inference.ExportEffect,
-) !void {
-    switch (legacy) {
-        .callable => |legacy_row| switch (direct) {
-            .callable => |direct_row| try std.testing.expect(legacy_row.eql(direct_row)),
-            else => return error.TestUnexpectedResult,
-        },
-        .data => |legacy_row| switch (direct) {
-            .data => |direct_row| try std.testing.expect(legacy_row.eql(direct_row)),
-            else => return error.TestUnexpectedResult,
-        },
-        .blocked => switch (direct) {
-            .blocked => {},
-            else => return error.TestUnexpectedResult,
-        },
-    }
-}
-
-fn expectSameEffectFacts(
-    legacy: *const effect_inference.EffectFacts,
-    direct: *const effect_inference.EffectFacts,
-) !void {
-    try std.testing.expectEqual(legacy.all().len, direct.all().len);
-    for (legacy.all(), direct.all()) |legacy_function, direct_function| {
-        try std.testing.expectEqualStrings(legacy_function.name, direct_function.name);
-        try std.testing.expectEqual(legacy_function.binding_key, direct_function.binding_key);
-        try std.testing.expectEqual(legacy_function.decl_node, direct_function.decl_node);
-        try std.testing.expectEqual(legacy_function.body_node, direct_function.body_node);
-        try std.testing.expect(legacy_function.row.eql(direct_function.row));
-        try std.testing.expect(std.meta.eql(
-            legacy_function.direct_caps,
-            direct_function.direct_caps,
-        ));
-        try std.testing.expectEqual(legacy_function.exported, direct_function.exported);
-    }
-    try std.testing.expectEqualSlices(u32, legacy.callee_starts, direct.callee_starts);
-    try std.testing.expectEqualSlices(usize, legacy.callee_storage, direct.callee_storage);
-    try std.testing.expectEqualSlices(u32, legacy.value_starts, direct.value_starts);
-    try std.testing.expectEqualSlices(usize, legacy.value_storage, direct.value_storage);
-    try std.testing.expectEqualSlices(
-        bool,
-        legacy.reaches_recursion,
-        direct.reaches_recursion,
-    );
-    try std.testing.expectEqual(
-        legacy.export_effects.entries.len,
-        direct.export_effects.entries.len,
-    );
-    for (
-        legacy.export_effects.entries,
-        direct.export_effects.entries,
-    ) |legacy_entry, direct_entry| {
-        try std.testing.expectEqualStrings(legacy_entry.name, direct_entry.name);
-        try expectSameExportEffect(legacy_entry.effect, direct_entry.effect);
-    }
-
-    const legacy_contract = try legacy.requireContract();
-    const direct_contract = try direct.requireContract();
-    try std.testing.expect(std.meta.eql(legacy_contract.summary, direct_contract.summary));
-    try std.testing.expectEqual(
-        legacy_contract.selected_handler,
-        direct_contract.selected_handler,
-    );
-    try std.testing.expectEqual(
-        legacy_contract.first_handler_index,
-        direct_contract.first_handler_index,
-    );
-    try std.testing.expectEqualSlices(
-        bool,
-        legacy_contract.handler_reachable,
-        direct_contract.handler_reachable,
-    );
-}
-
 fn expectDirectCallbackCeiling(
     source: []const u8,
     expected: ExpectedCallbackCeiling,
 ) !void {
-    var prepared = try PreparedSource.init(
-        std.testing.allocator,
-        source,
-        "<u13-callback>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    var legacy_count = CountingAllocator.init(std.testing.allocator);
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy.deinit();
-    legacy.setAtomTable(&legacy_atoms);
     var direct = try JsParser.initTyped(
         direct_count.allocator(),
         type_count.allocator(),
@@ -17784,86 +13846,40 @@ fn expectDirectCallbackCeiling(
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy.parse();
     const direct_root = try direct.parse();
-    const legacy_view = parserIrView(&legacy);
     const direct_view = parserIrView(&direct);
-    try std.testing.expect(compareRuntime(
-        &legacy,
-        legacy_root,
-        &legacy_atoms,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    ) == null);
-    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+    try std.testing.expectEqualStrings(source, direct.type_store.source);
+    try std.testing.expect(direct_count.alloc_calls > 0);
+    try std.testing.expect(type_count.alloc_calls > 0);
 
-    var legacy_pool = TypePool.init(std.testing.allocator);
-    defer legacy_pool.deinit(std.testing.allocator);
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
-    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
     defer direct_env.deinit();
-    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
-    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
     module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try expectExactTypePool(&legacy_pool, &direct_pool);
-
-    const legacy_parsed = pipeline_mod.ParsedModule.fromExisting(
-        legacy_view,
-        legacy_root,
-        &legacy_atoms,
-    );
     const direct_parsed = pipeline_mod.ParsedModule.fromTypedExisting(
         direct_view,
         direct_root,
         &direct_atoms,
         &direct.type_store,
     );
-    var legacy_module_facts = try pipeline_mod.buildModuleFacts(
-        std.testing.allocator,
-        legacy_parsed,
-        null,
-    );
-    defer legacy_module_facts.deinit();
     var direct_module_facts = try pipeline_mod.buildModuleFacts(
         std.testing.allocator,
         direct_parsed,
         null,
     );
     defer direct_module_facts.deinit();
-    const legacy_handler = handler_verifier_mod.findHandlerFunction(
-        legacy_view,
-        legacy_root,
-    ) orelse return error.TestUnexpectedResult;
     const direct_handler = handler_verifier_mod.findHandlerFunction(
         direct_view,
         direct_root,
     ) orelse return error.TestUnexpectedResult;
 
-    var legacy_effects = try effect_inference.buildEffectFacts(
-        std.testing.allocator,
-        legacy_view,
-        &legacy_atoms,
-        legacy_root,
-        .{
-            .module_facts = &legacy_module_facts,
-            .type_source = .{ .legacy = &legacy_env },
-            .contract_projection = .{ .complete = .{
-                .selected_handler = legacy_handler,
-            } },
-        },
-    );
-    defer legacy_effects.deinit(std.testing.allocator);
     var direct_effects = try effect_inference.buildEffectFacts(
         std.testing.allocator,
         direct_view,
@@ -17878,10 +13894,7 @@ fn expectDirectCallbackCeiling(
         },
     );
     defer direct_effects.deinit(std.testing.allocator);
-    try expectSameEffectFacts(&legacy_effects, &direct_effects);
-    const legacy_row = legacy_effects.lookup("run") orelse return error.TestUnexpectedResult;
     const direct_row = direct_effects.lookup("run") orelse return error.TestUnexpectedResult;
-    try std.testing.expect(std.meta.eql(legacy_row, direct_row));
     try std.testing.expectEqual(expected.pure, direct_row.pure);
     try std.testing.expect(direct_row.readOnly());
     try std.testing.expect(direct_row.deterministic);
@@ -17892,13 +13905,6 @@ fn expectDirectCallbackCeiling(
     );
     try std.testing.expectEqual(expected.has_crypto, direct_row.capabilities.contains(.crypto));
 
-    var legacy_capsules = try function_specs.dischargeWithTypeSource(
-        std.testing.allocator,
-        &legacy_effects,
-        .{ .legacy = &legacy_env },
-        legacy_view,
-    );
-    defer legacy_capsules.deinit(std.testing.allocator);
     var direct_capsules = try function_specs.dischargeWithTypeSource(
         std.testing.allocator,
         &direct_effects,
@@ -17906,19 +13912,8 @@ fn expectDirectCallbackCeiling(
         direct_view,
     );
     defer direct_capsules.deinit(std.testing.allocator);
-    const legacy_capsule = legacy_capsules.byName("run") orelse return error.TestUnexpectedResult;
     const direct_capsule = direct_capsules.byName("run") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(
-        legacy_capsules.capsules.items.len,
-        direct_capsules.capsules.items.len,
-    );
-    for (
-        legacy_capsules.capsules.items,
-        direct_capsules.capsules.items,
-    ) |*legacy_item, *direct_item| {
-        try expectSameCapsule(legacy_item, direct_item);
-    }
-    try expectSameCapsule(legacy_capsule, direct_capsule);
+    try std.testing.expectEqual(@as(usize, 1), direct_capsules.capsules.items.len);
     try std.testing.expectEqual(expected.line, direct_capsule.line);
     try std.testing.expectEqual(@as(usize, 1), direct_capsule.effect_declared.items.len);
     try std.testing.expectEqualStrings("crypto", direct_capsule.effect_declared.items[0]);
@@ -17944,6 +13939,8 @@ fn expectDirectCallbackCeiling(
     } else {
         try std.testing.expectEqual(@as(usize, 0), direct_capsule.effect_diagnostics.items.len);
     }
+    try direct_pool.ensureHealthy();
+    try direct_env.ensureHealthy();
 }
 
 test "direct callback ceilings preserve actual-position compact-gap behavior" {
@@ -18011,23 +14008,21 @@ test "direct callback ceilings preserve actual-position compact-gap behavior" {
 }
 
 test "admission header fallback preserves grouped and raw arrow type construction" {
-    const cases = [_][]const u8{
-        "const result = flag ? <T>(value) /* gap */ : (x) => x;",
-        "const result = <T>(value /* ( */) => value;",
-        "const result = (value /* ( */) => value;",
+    const cases = [_]struct {
+        source: []const u8,
+        initializer: engine.parser.NodeTag,
+        erased_prefixes: usize,
+        generic_owners: usize,
+    }{
+        .{ .source = "const result = flag ? <T>(value) /* gap */ : (x) => x;", .initializer = .ternary, .erased_prefixes = 1, .generic_owners = 0 },
+        .{ .source = "const result = <T>(value /* ( */) => value;", .initializer = .arrow_function, .erased_prefixes = 0, .generic_owners = 1 },
+        .{ .source = "const result = (value /* ( */) => value;", .initializer = .arrow_function, .erased_prefixes = 0, .generic_owners = 0 },
     };
     try std.testing.expectEqual(@as(usize, 3), cases.len);
-    for (cases) |source| {
-        var prepared = try PreparedSource.init(std.testing.allocator, source, "header-fallback.ts", .{});
-        defer prepared.deinit();
-        var legacy_atoms = AtomTable.init(std.testing.allocator);
-        defer legacy_atoms.deinit();
+    for (cases) |case| {
+        const source = case.source;
         var direct_atoms = AtomTable.init(std.testing.allocator);
         defer direct_atoms.deinit();
-        var legacy = try JsParser.init(std.testing.allocator, prepared.parserInput());
-        defer legacy.deinit();
-        legacy.setAtomTable(&legacy_atoms);
-        const legacy_root = try legacy.parse();
         var direct = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer direct.deinit();
         direct.setAtomTable(&direct_atoms);
@@ -18035,25 +14030,62 @@ test "admission header fallback preserves grouped and raw arrow type constructio
             .accepted => |root| root,
             else => return error.TestUnexpectedResult,
         };
-        try std.testing.expect(compareRuntime(&legacy, legacy_root, &legacy_atoms, &direct, direct_root, &direct_atoms) == null);
-        var legacy_pool = TypePool.init(std.testing.allocator);
-        defer legacy_pool.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings(source, direct.type_store.source);
+        try std.testing.expectEqual(engine.parser.NodeTag.program, parserIrView(&direct).getTag(direct_root).?);
+        try std.testing.expectEqual(@as(usize, 0), direct.errors.getErrors().len);
+        const view = parserIrView(&direct);
+        try std.testing.expectEqual(@as(usize, 1), countRuntimeTag(&direct, .var_decl));
+        const declaration = view.getVarDecl(try runtimeNodeAt(&direct, .var_decl, 0)) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(case.initializer, view.getTag(declaration.init).?);
+        try std.testing.expectEqual(case.generic_owners, direct.type_store.generic_owners.items.len);
+        try std.testing.expectEqual(@as(usize, 0), direct.type_store.annotations.items.len);
         var direct_pool = TypePool.init(std.testing.allocator);
         defer direct_pool.deinit(std.testing.allocator);
-        var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
-        defer legacy_env.deinit();
         var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
         defer direct_env.deinit();
-        try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+        const prior_type_nodes = direct_pool.nodes.items.len;
         try direct_env.populateSourceTypes(.{ .direct = .{
             .store = &direct.type_store,
             .ir_view = parserIrView(&direct),
             .atoms = &direct_atoms,
         } });
-        try expectExactTypePool(&legacy_pool, &direct_pool);
         try direct.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&direct));
-        if (std.mem.indexOf(u8, source, "flag ?") != null) {
-            try std.testing.expectEqual(@as(usize, 1), direct.type_store.erased_type_prefixes.items.len);
+        try std.testing.expectEqual(case.erased_prefixes, direct.type_store.erased_type_prefixes.items.len);
+        if (case.erased_prefixes == 1) {
+            const prefix = direct.type_store.erased_type_prefixes.items[0];
+            try std.testing.expectEqualStrings("<T>", prefix.list_span.text(source));
+            const projection = switch (prefix.compatibility) {
+                .legacy_parameter_projection => |value| value,
+                .ignored_parameters => return error.TestUnexpectedResult,
+            };
+            const parameters = direct.type_store.projectedGenericParameterSlice(projection.projected_parameters) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), parameters.len);
+            try std.testing.expectEqualStrings("T", parameters[0].name_span.text(source));
+            try std.testing.expectEqual(prefix.list_span.start + 1, parameters[0].name_span.start);
+            try std.testing.expect(parameters[0].bound_fragment == null);
+            try std.testing.expectEqual(@as(usize, 0), projection.semantic_fragments.count);
+            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_type_nodes)).?);
+            try std.testing.expectEqualStrings("T", direct_pool.getRefName(@intCast(prior_type_nodes)));
         }
+        if (case.generic_owners == 1) {
+            const owner = direct.type_store.generic_owners.items[0];
+            try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
+            try std.testing.expectEqual(declaration.init, owner.identity.arrow);
+            const parameters = direct.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), parameters.len);
+            try std.testing.expectEqualStrings("T", parameters[0].name_span.text(source));
+            try std.testing.expectEqual(owner.list_span.start + 1, parameters[0].name_span.start);
+            try std.testing.expect(parameters[0].bound_fragment == null);
+            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_type_nodes)).?);
+            try std.testing.expectEqualStrings("T", direct_pool.getRefName(@intCast(prior_type_nodes)));
+            try std.testing.expectEqual(prior_type_nodes + 1, direct_pool.nodes.items.len);
+        } else {
+            try std.testing.expectEqual(prior_type_nodes + case.erased_prefixes, direct_pool.nodes.items.len);
+        }
+        try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
+        try direct_pool.ensureHealthy();
+        try direct_env.ensureHealthy();
     }
 }

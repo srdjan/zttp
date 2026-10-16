@@ -13,7 +13,6 @@
 
 const std = @import("std");
 const parser = @import("../parser/root.zig");
-const source_frontend = @import("../source_frontend.zig");
 const file_io = @import("../file_io.zig");
 
 /// Parse `source` and report how many statements it terminated by insertion.
@@ -22,15 +21,13 @@ fn insertionsIn(allocator: std.mem.Allocator, source: []const u8, is_ts: bool) !
     after_rbrace: u32,
     first_line: u32,
 } {
-    const path = if (is_ts) "census.ts" else "<census>";
-    var prepared = source_frontend.PreparedSource.init(allocator, source, path, .{}) catch
+    var p = (if (is_ts)
+        parser.JsParser.initTyped(allocator, allocator, source)
+    else
+        parser.JsParser.init(allocator, source)) catch
         return .{ .insertions = 0, .after_rbrace = 0, .first_line = 0 };
-    defer prepared.deinit();
-
-    var p = try parser.JsParser.init(allocator, prepared.parserInput());
     defer p.deinit();
-    // The census measures what the old acceptance would have accepted, which
-    // is a question the refusing parser cannot answer: it stops at the first
+    // Count insertions even when the normal parser would stop at the first
     // unterminated statement.
     p.allow_asi = true;
     _ = p.parse() catch 0;

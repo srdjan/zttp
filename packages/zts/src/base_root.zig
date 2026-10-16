@@ -63,9 +63,8 @@ pub const route_match = @import("route_match.zig");
 /// a call that names a schema it would refuse (M4 T7, ZTS514).
 pub const validate_keywords = @import("validate_keywords.zig");
 
-/// The type annotations the TypeScript stripper records as it removes them.
-pub const type_map = @import("type_map.zig");
-
 test {
     @import("std").testing.refAllDecls(@This());
 }
+
+pub const source_diagnostics = @import("source_diagnostics.zig");

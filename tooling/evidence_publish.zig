@@ -831,7 +831,7 @@ fn renderCoverageMarkdown(
     try writeCodes(writer, off_registry);
     try writer.writeAll(
         "\n\nThese are real diagnostics the corpus trips that no `rule_registry` entry\n" ++
-            "carries - the parser, stripper, bool-checker, and type-checker families. The\n" ++
+            "carries - the parser, type-position admission, bool-checker, and type-checker families. The\n" ++
             "policy hash covers the registry, so it cannot see them: a change to any of these\n" ++
             "leaves the hash identical while the corpus behaves differently. A coverage count\n" ++
             "taken over the registry alone would both understate the corpus and hide that.\n\n" ++

@@ -15,9 +15,8 @@
 //! env var naming conventions. No user annotations required for basic proofs.
 
 const std = @import("std");
-const stripper = @import("zts-engine").stripper;
+const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
-const source_frontend = @import("zts-engine").source_frontend;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
@@ -1297,7 +1296,7 @@ pub const FlowChecker = struct {
         self.type_checker = checker;
     }
 
-    pub fn formatDiagnostics(self: *const FlowChecker, source: stripper.SourceView, writer: anytype) !void {
+    pub fn formatDiagnostics(self: *const FlowChecker, source: SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
             const span = loc.span();
@@ -6439,20 +6438,22 @@ fn runWithImportedFunction(
     imported_source: []const u8,
     name: []const u8,
 ) !bool {
-    var imported_prepared = try source_frontend.PreparedSource.init(allocator, imported_source, "utils.ts", .{});
-    defer imported_prepared.deinit();
-    var imported_parser = try @import("zts-engine").parser.JsParser.init(allocator, imported_prepared.parserInput());
     var imported_atoms = atom_table.AtomTable.init(allocator);
     defer imported_atoms.deinit();
-    imported_parser.setAtomTable(&imported_atoms);
+    var imported_parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, imported_source);
     defer imported_parser.deinit();
+    imported_parser.setAtomTable(&imported_atoms);
     const imported_root = try imported_parser.parse();
     const imported_view = IrView.fromIRStore(&imported_parser.nodes, &imported_parser.constants);
 
     const pipeline = @import("pipeline.zig");
     var type_env_storage: pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
-    if (imported_prepared.typeMap()) |type_map| try type_env_storage.init(allocator, type_map);
+    try type_env_storage.initWithSource(allocator, .{ .direct = .{
+        .store = &imported_parser.type_store,
+        .ir_view = imported_view,
+        .atoms = &imported_atoms,
+    } });
     var type_checker: ?type_checker_mod.TypeChecker = null;
     defer if (type_checker) |*checker| checker.deinit();
     if (type_env_storage.envPtr()) |type_env| {

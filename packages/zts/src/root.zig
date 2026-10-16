@@ -90,7 +90,6 @@ pub const parser = engine.parser;
 pub const pool = engine.pool;
 pub const http = engine.http;
 pub const bytes = engine.bytes;
-pub const stripper = engine.stripper;
 pub const printer = engine.printer;
 pub const bytecode_cache = engine.bytecode_cache;
 pub const bytecode_opt = engine.bytecode_opt;
@@ -120,7 +119,6 @@ pub const identifier = base.identifier;
 /// The supported guard surface mirrored for the compiler.
 pub const guard_catalog = base.guard_catalog;
 pub const route_match = base.route_match;
-pub const type_map = base.type_map;
 pub const type_pool = compiler.type_pool;
 pub const type_key = compiler.type_key;
 pub const type_env = compiler.type_env;
@@ -210,22 +208,16 @@ pub const proofIrNodeDomain = compiler.proof_ir.node_domain;
 pub const TranslationRecorder = engine.translation_witness.Recorder;
 pub const TranslationRewrite = engine.translation_witness.Rewrite;
 pub const TranslationRewriteKind = engine.translation_witness.RewriteKind;
-pub const StripResult = stripper.StripResult;
-pub const StripOptions = stripper.StripOptions;
-pub const StripDiagnostic = stripper.StripDiagnostic;
-pub const StripDiagnosticKind = stripper.StripDiagnosticKind;
-/// The text a diagnostic is rendered against, plus the mapping that moves a
-/// position from the stripped parse back into it. A consumer that reports a
-/// position to a human or to a repair needs this, not the stripped text.
-pub const SourceView = stripper.SourceView;
-pub const SourcePosition = stripper.Position;
+pub const StripDiagnostic = base.source_diagnostics.StripDiagnostic;
+pub const StripDiagnosticKind = base.source_diagnostics.StripDiagnosticKind;
+/// The original source bytes against which diagnostics are rendered.
+pub const SourceView = base.source_diagnostics.SourceView;
+pub const SourcePosition = base.source_diagnostics.Position;
 /// One syntax error the parser recorded. `DiagnosticProjection.writeParseErrors`
 /// renders a list of them for a human.
 pub const ParseError = parser.ParseError;
-pub const strip = stripper.strip;
 pub const SourceKind = engine.source_frontend.SourceKind;
 pub const PrepareSourceError = engine.source_frontend.PrepareError;
-pub const PreparedSource = engine.source_frontend.PreparedSource;
 pub const DirectCheckSource = engine.source_frontend.DirectCheckSource;
 pub const DirectCheckOutcome = engine.source_frontend.DirectCheckOutcome;
 pub const classifySourcePath = engine.source_frontend.classifyPath;
@@ -349,9 +341,6 @@ pub const findHandlerFunction = handler_verifier.findHandlerFunction;
 pub const BoolChecker = bool_checker.BoolChecker;
 pub const FlowChecker = flow_checker.FlowChecker;
 pub const PathGenerator = path_generator.PathGenerator;
-pub const TypeMap = type_map.TypeMap;
-pub const TypeMapEntry = type_map.TypeMapEntry;
-pub const TypeMapKind = type_map.TypeMapKind;
 pub const TypePool = type_pool.TypePool;
 pub const TypePoolError = type_pool.TypePoolError;
 pub const TypeIndex = type_pool.TypeIndex;

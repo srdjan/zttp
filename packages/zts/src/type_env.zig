@@ -1,6 +1,6 @@
 //! Type Environment: resolves type names to TypePool indices.
 //!
-//! Resolves validated syntax owners or explicit legacy TypeMap entries. Provides:
+//! Resolves validated syntax owners. Provides:
 //! - Type alias resolution (structural Foo = ...)
 //! - Interface resolution (interface Bar { ... })
 //! - Variable type annotations (const x: Type = ...)
@@ -12,27 +12,19 @@
 const std = @import("std");
 const engine = @import("zts-engine");
 const type_pool_mod = @import("type_pool.zig");
-const type_map_mod = @import("zts-base").type_map;
 const type_syntax_lowering = @import("type_syntax_lowering.zig");
 
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const null_type_idx = type_pool_mod.null_type_idx;
 const parseTypeExpr = type_pool_mod.parseTypeExpr;
-const TypeMap = type_map_mod.TypeMap;
-const TypeMapKind = type_map_mod.TypeMapKind;
-const TypeMapEntry = type_map_mod.TypeMapEntry;
 const TypeSyntax = engine.parser.type_syntax;
 const IrView = engine.parser.IrView;
 const NodeIndex = engine.parser.NodeIndex;
 const AtomTable = engine.atom_table.AtomTable;
 const Atom = engine.object.Atom;
 
-pub const SourceTypeMode = enum {
-    omitted,
-    legacy,
-    direct,
-};
+pub const SourceTypeMode = enum { omitted, direct };
 
 pub const DirectSyntaxInput = struct {
     store: *const TypeSyntax.Store,
@@ -42,49 +34,38 @@ pub const DirectSyntaxInput = struct {
 
 pub const SourceTypeInput = union(SourceTypeMode) {
     omitted,
-    legacy: *const TypeMap,
     direct: DirectSyntaxInput,
 };
 
 /// A borrowed source selection for consumers of an already-populated environment.
 pub const ConsumerTypeSource = union(SourceTypeMode) {
     omitted,
-    legacy: *const TypeEnv,
     direct: *const TypeEnv,
 
     pub fn validate(self: @This()) !?*const TypeEnv {
         return switch (self) {
             .omitted => null,
-            .legacy => |env| blk: {
-                const mode = env.sourceTypeMode();
-                if (mode != null and mode != .legacy) return error.TypeSourceModeMismatch;
-                try env.ensureHealthy();
-                try env.pool.ensureHealthy();
-                break :blk env;
-            },
             .direct => |env| blk: {
-                if (env.sourceTypeMode() != .direct) return error.TypeSourceModeMismatch;
                 try env.ensureHealthy();
                 try env.pool.ensureHealthy();
+                if (env.sourceTypeMode() != .direct) return error.TypeSourceModeMismatch;
                 break :blk env;
             },
         };
     }
 
-    pub fn normalizeLegacy(env: ?*const TypeEnv) !@This() {
+    pub fn fromEnvironment(env: ?*const TypeEnv) !@This() {
         const selected = env orelse return .omitted;
         try selected.ensureHealthy();
         try selected.pool.ensureHealthy();
-        return switch (selected.sourceTypeMode() orelse .legacy) {
+        return switch (selected.sourceTypeMode() orelse return error.TypeSourceModeMismatch) {
             .omitted => .omitted,
-            .legacy => .{ .legacy = selected },
-            .direct => error.TypeSourceModeMismatch,
+            .direct => .{ .direct = selected },
         };
     }
 };
 
-pub const FunctionTypeRef = union(enum) {
-    legacy_offset: u32,
+pub const FunctionTypeRef = struct {
     direct_owner: NodeIndex,
 };
 
@@ -162,34 +143,43 @@ fn utilityKind(name: []const u8) ?UtilityKind {
 
 test "consumer type source validates modes and health before absence" {
     const allocator = std.testing.allocator;
-    var legacy_pool = TypePool.init(allocator);
-    defer legacy_pool.deinit(allocator);
-    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
-    defer legacy_env.deinit();
-
-    const normalized_legacy = try ConsumerTypeSource.normalizeLegacy(&legacy_env);
-    try std.testing.expectEqual(&legacy_env, (try normalized_legacy.validate()).?);
-    try std.testing.expectError(
-        error.TypeSourceModeMismatch,
-        (ConsumerTypeSource{ .direct = &legacy_env }).validate(),
-    );
+    var unselected_pool = TypePool.init(allocator);
+    defer unselected_pool.deinit(allocator);
+    var unselected = TypeEnv.init(allocator, &unselected_pool);
+    defer unselected.deinit();
+    try std.testing.expectEqual(.omitted, std.meta.activeTag(try ConsumerTypeSource.fromEnvironment(null)));
+    try std.testing.expectError(error.TypeSourceModeMismatch, ConsumerTypeSource.fromEnvironment(&unselected));
+    try std.testing.expectError(error.TypeSourceModeMismatch, (ConsumerTypeSource{ .direct = &unselected }).validate());
 
     var omitted_pool = TypePool.init(allocator);
     defer omitted_pool.deinit(allocator);
-    var omitted_env = TypeEnv.init(allocator, &omitted_pool);
-    defer omitted_env.deinit();
-    try omitted_env.populateSourceTypes(.omitted);
-    try std.testing.expect(try (try ConsumerTypeSource.normalizeLegacy(&omitted_env)).validate() == null);
-    try std.testing.expectError(
-        error.TypeSourceModeMismatch,
-        (ConsumerTypeSource{ .legacy = &omitted_env }).validate(),
-    );
+    var omitted = TypeEnv.init(allocator, &omitted_pool);
+    defer omitted.deinit();
+    try omitted.populateSourceTypes(.omitted);
+    try std.testing.expect(try (try ConsumerTypeSource.fromEnvironment(&omitted)).validate() == null);
+    try std.testing.expectError(error.TypeSourceModeMismatch, (ConsumerTypeSource{ .direct = &omitted }).validate());
 
-    legacy_env.markAllocationFailure();
-    try std.testing.expectError(
-        error.OutOfMemory,
-        ConsumerTypeSource.normalizeLegacy(&legacy_env),
-    );
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, "const value: number = 1;", "selection.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    var direct_pool = TypePool.init(allocator);
+    defer direct_pool.deinit(allocator);
+    var direct = TypeEnv.init(allocator, &direct_pool);
+    defer direct.deinit();
+    try direct.populateSourceTypes(.{ .direct = .{
+        .store = accepted.type_store,
+        .ir_view = accepted.ir_view,
+        .atoms = accepted.atoms,
+    } });
+    try std.testing.expectEqual(&direct, (try (try ConsumerTypeSource.fromEnvironment(&direct)).validate()).?);
+
+    unselected.markAllocationFailure();
+    try std.testing.expectError(error.OutOfMemory, ConsumerTypeSource.fromEnvironment(&unselected));
+    try std.testing.expectError(error.OutOfMemory, (ConsumerTypeSource{ .direct = &unselected }).validate());
+    omitted_pool.failure = error.TypePoolCapacityExceeded;
+    try std.testing.expectError(error.TypePoolCapacityExceeded, ConsumerTypeSource.fromEnvironment(&omitted));
+    try std.testing.expectError(error.TypePoolCapacityExceeded, (ConsumerTypeSource{ .direct = &omitted }).validate());
 }
 
 /// The field name marking the body of an instantiated `Effects<...>` generic
@@ -282,7 +272,7 @@ pub const GenericScope = struct {
 
 /// One declared type parameter of a function signature.
 pub const GenericParam = struct {
-    /// Interned, so it outlives the TypeMap the signature was read from.
+    /// Interned, so it outlives the source syntax the signature was read from.
     name: []const u8 = "",
     /// The `t_generic_param` node the name resolves to inside the signature.
     idx: TypeIndex = null_type_idx,
@@ -355,41 +345,6 @@ pub const TypePredicate = struct {
     narrowed: TypeIndex,
 };
 
-/// Parameter names of one signature, in declaration order.
-const ParamNames = struct {
-    names: [16][]const u8 = undefined,
-    count: u8 = 0,
-
-    fn append(self: *ParamNames, name: []const u8) void {
-        if (self.count >= self.names.len) return;
-        self.names[self.count] = name;
-        self.count += 1;
-    }
-
-    fn indexOf(self: *const ParamNames, name: []const u8) ?u8 {
-        for (0..self.count) |i| {
-            if (std.mem.eql(u8, self.names[i], name)) return @intCast(i);
-        }
-        return null;
-    }
-};
-
-/// Split `v is string` into the parameter it names and the type text.
-/// Returns null when the text is not a predicate.
-pub fn parseTypePredicate(text: []const u8) ?struct { param_name: []const u8, type_text: []const u8 } {
-    const marker = " is ";
-    const at = std.mem.indexOf(u8, text, marker) orelse return null;
-    const param_name = std.mem.trim(u8, text[0..at], " \t\n\r");
-    const type_text = std.mem.trim(u8, text[at + marker.len ..], " \t\n\r");
-    if (param_name.len == 0 or type_text.len == 0) return null;
-    // The parameter position is a plain identifier; anything else means the
-    // ` is ` came from inside a type rather than from a predicate.
-    for (param_name) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '$') return null;
-    }
-    return .{ .param_name = param_name, .type_text = type_text };
-}
-
 // ---------------------------------------------------------------------------
 // Generic type alias (structural Result<T> = ...)
 // ---------------------------------------------------------------------------
@@ -401,121 +356,10 @@ pub const GenericAlias = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Type-parameter lists
-// ---------------------------------------------------------------------------
-
-/// One entry of a declared type-parameter list.
-pub const TypeParamSpec = struct {
-    name: []const u8,
-    /// Text of the `extends` bound, empty when unconstrained.
-    constraint_text: []const u8 = "",
-};
-
-/// Split a declared type-parameter list into its entries.
-///
-/// The text arrives two ways: a function's list comes in without its angle
-/// brackets (`T extends string, U`), a type alias's comes in with them
-/// (`<T, U>`), so both are accepted. Splitting on every comma is wrong,
-/// because a constraint carries commas of its own inside `<>`, `{}`, `[]`, and
-/// `()` - a naive split cuts `U extends Record<string, number>` into two
-/// entries, and the second is a type name nothing resolves.
-///
-/// Returns the number of entries written to `out`.
-pub fn splitTypeParams(text: []const u8, out: []TypeParamSpec) usize {
-    var pieces: [MAX_TYPE_PARAMS][]const u8 = undefined;
-    const piece_count = splitTopLevelCommas(text, &pieces);
-    for (pieces[0..piece_count], 0..) |piece, i| {
-        if (i >= out.len) return out.len;
-        out[i] = parseTypeParamSpec(piece);
-    }
-    return @min(piece_count, out.len);
-}
-
-/// Split a type-argument or type-parameter list on the commas that separate
-/// its entries, ignoring the commas nested inside `<>`, `{}`, `[]`, and `()`.
-/// A naive split cuts `Record<string, number>` in half and leaves two type
-/// names nothing resolves.
-///
-/// A `>` closes only while a `<` is open. The `>` of an arrow type is not a
-/// closer, and counting it as one drove the depth negative and discarded the
-/// whole list - so `T extends (s: string) => number` produced no entries at
-/// all, and the signature silently lost every type parameter it declared.
-///
-/// The surrounding angle brackets of an alias's list (`<T, U>`) are stripped
-/// first; a function's list arrives without them.
-pub fn splitTopLevelCommas(text: []const u8, out: [][]const u8) usize {
-    var body = std.mem.trim(u8, text, " \t\n\r");
-    if (body.len >= 2 and body[0] == '<' and body[body.len - 1] == '>') {
-        body = std.mem.trim(u8, body[1 .. body.len - 1], " \t\n\r");
-    }
-    if (body.len == 0) return 0;
-
-    var count: usize = 0;
-    var angle: u32 = 0;
-    var bracket: u32 = 0;
-    var piece_start: usize = 0;
-    var i: usize = 0;
-    while (i <= body.len) : (i += 1) {
-        const at_end = i == body.len;
-        const c = if (at_end) ',' else body[i];
-        switch (c) {
-            '<' => angle += 1,
-            '>' => if (angle > 0) {
-                angle -= 1;
-            },
-            '{', '[', '(' => bracket += 1,
-            '}', ']', ')' => if (bracket > 0) {
-                bracket -= 1;
-            },
-            // exhaustive: only the bracket pairs move the nesting depth. Every
-            // other byte, the separating comma included, is handled below.
-            else => {},
-        }
-        if (c != ',' or angle != 0 or bracket != 0) continue;
-        const piece = std.mem.trim(u8, body[piece_start..i], " \t\n\r");
-        piece_start = i + 1;
-        if (piece.len == 0) continue;
-        if (count >= out.len) break;
-        out[count] = piece;
-        count += 1;
-    }
-    return count;
-}
-
-fn parseTypeParamSpec(piece: []const u8) TypeParamSpec {
-    // The name runs to the first separator. A default (`T = string`) is not in
-    // the admitted subset (spec 5.6 excludes it), so the name stops at `=` as
-    // well and whatever follows is left unread rather than resolved as a bound.
-    var name_end: usize = piece.len;
-    for (piece, 0..) |c, i| {
-        if (c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '=') {
-            name_end = i;
-            break;
-        }
-    }
-    const name = piece[0..name_end];
-    const rest = std.mem.trim(u8, piece[name_end..], " \t\n\r");
-    const kw = "extends";
-    if (rest.len > kw.len and std.mem.startsWith(u8, rest, kw)) {
-        const after = rest[kw.len];
-        if (after == ' ' or after == '\t' or after == '\n' or after == '\r') {
-            return .{ .name = name, .constraint_text = std.mem.trim(u8, rest[kw.len..], " \t\n\r") };
-        }
-    }
-    return .{ .name = name };
-}
-
-// ---------------------------------------------------------------------------
 // Type Environment
 // ---------------------------------------------------------------------------
 
 pub const TypeEnv = struct {
-    const NamedVarAnnotation = struct {
-        name: []const u8,
-        ordinal: u32,
-        type_idx: TypeIndex,
-    };
-
     pool: *TypePool,
     allocator: std.mem.Allocator,
 
@@ -523,19 +367,8 @@ pub const TypeEnv = struct {
     type_aliases: std.StringHashMapUnmanaged(TypeIndex),
     /// Generic type aliases: name -> uninstantiated body + param names
     generic_aliases: std.StringHashMapUnmanaged(GenericAlias),
-    /// Variable types: packed(context_line, context_col) -> TypeIndex
-    var_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
-    /// Function signatures keyed by signature offset, the stripped-source offset
-    /// of the `(` that opens the parameter list. Read through `getFnSigAt`.
-    fn_signatures: std.AutoHashMapUnmanaged(u32, FunctionSig),
-    /// Source spellings used by declaration-shape rules, keyed by signature
-    /// offset and parameter position. Keeping them outside `FunctionSig` avoids
-    /// copying sixteen slices through every name and location signature map.
-    source_fn_annotations: std.AutoHashMapUnmanaged(u64, []const u8),
     /// Variable name -> declared type (for name-based lookup)
     var_types_by_name: std.StringHashMapUnmanaged(TypeIndex),
-    /// All variable annotations keyed by semantic (name, occurrence), in source order.
-    var_annotations: std.ArrayListUnmanaged(NamedVarAnnotation),
     /// Scoped binding identity: packed(scope_id, name_atom) -> declared type.
     var_types_by_binding: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Direct annotations keyed by their final runtime declaration.
@@ -552,9 +385,6 @@ pub const TypeEnv = struct {
     direct_source_fn_annotations: std.AutoHashMapUnmanaged(DirectSourceAnnotationKey, []const u8),
     /// Generic scope stack
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
-    /// Explicit call-site type arguments, keyed by the byte offset of the
-    /// call's `(` in the stripped source.
-    call_type_args: std.AutoHashMapUnmanaged(u32, CallTypeArgs),
     /// Direct call and compatibility arguments keyed by final runtime owner.
     direct_call_type_args: std.AutoHashMapUnmanaged(NodeIndex, CallTypeArgs),
     /// Alias names whose definition contains a cycle that no data constructor
@@ -580,7 +410,6 @@ pub const TypeEnv = struct {
     /// the same flag for the same reason.
     allocation_failed: bool = false,
     source_selection: ?SourceTypeMode = null,
-    legacy_source_populated: bool = false,
     direct_annotation_count: usize = 0,
     direct_accumulator_events: usize = 0,
     next_generic_owner_token: u64 = 1,
@@ -591,11 +420,7 @@ pub const TypeEnv = struct {
             .allocator = allocator,
             .type_aliases = .empty,
             .generic_aliases = .empty,
-            .var_types = .empty,
-            .fn_signatures = .empty,
-            .source_fn_annotations = .empty,
             .var_types_by_name = .empty,
-            .var_annotations = .empty,
             .var_types_by_binding = .empty,
             .direct_var_types = .empty,
             .fn_sigs_by_name = .empty,
@@ -603,7 +428,6 @@ pub const TypeEnv = struct {
             .direct_fn_signatures = .empty,
             .direct_source_fn_annotations = .empty,
             .generic_scopes = .empty,
-            .call_type_args = .empty,
             .direct_call_type_args = .empty,
             .non_contractive_aliases = .empty,
             .non_contractive_indices = .empty,
@@ -621,8 +445,7 @@ pub const TypeEnv = struct {
     }
 
     /// Register the ambient proof and effect capsules. Idempotent;
-    /// user-declared aliases of the same name overwrite the built-in
-    /// (last-write-wins matches the existing populateFromTypeMap pattern).
+    /// user-declared aliases of the same name overwrite the built-in.
     pub fn registerBuiltins(self: *TypeEnv) void {
         // Proof<T, S> and Effects<T, S> share the capsule shape
         // `T & { <marker>: S }`; they differ only in the marker field.
@@ -673,11 +496,7 @@ pub const TypeEnv = struct {
         self.non_contractive_indices.deinit(self.allocator);
         self.type_aliases.deinit(self.allocator);
         self.generic_aliases.deinit(self.allocator);
-        self.var_types.deinit(self.allocator);
-        self.fn_signatures.deinit(self.allocator);
-        self.source_fn_annotations.deinit(self.allocator);
         self.var_types_by_name.deinit(self.allocator);
-        self.var_annotations.deinit(self.allocator);
         self.var_types_by_binding.deinit(self.allocator);
         self.direct_var_types.deinit(self.allocator);
         self.fn_sigs_by_name.deinit(self.allocator);
@@ -685,7 +504,6 @@ pub const TypeEnv = struct {
         self.direct_fn_signatures.deinit(self.allocator);
         self.direct_source_fn_annotations.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
-        self.call_type_args.deinit(self.allocator);
         self.direct_call_type_args.deinit(self.allocator);
         for (self.name_storage.items) |name| {
             self.allocator.free(name);
@@ -694,7 +512,7 @@ pub const TypeEnv = struct {
     }
 
     // -------------------------------------------------------------------
-    // Population from TypeMap
+    // Population from direct syntax
     // -------------------------------------------------------------------
 
     const DirectHeaderCursor = struct {
@@ -734,17 +552,9 @@ pub const TypeEnv = struct {
         if (self.source_selection != null) return error.TypeSourceAlreadySelected;
         switch (input) {
             .omitted => {
-                if (self.legacy_source_populated) return error.TypeSourceAlreadySelected;
                 self.source_selection = .omitted;
             },
-            .legacy => |type_map| {
-                self.source_selection = .legacy;
-                try self.populateFromTypeMap(type_map);
-                try self.pool.ensureHealthy();
-                try self.ensureHealthy();
-            },
             .direct => |direct| {
-                if (self.legacy_source_populated) return error.TypeSourceAlreadySelected;
                 var application_bases = validation: {
                     errdefer |err| switch (err) {
                         error.OutOfMemory => self.markAllocationFailure(),
@@ -1747,355 +1557,6 @@ pub const TypeEnv = struct {
         return atoms.getName(atom);
     }
 
-    /// Populate the environment from a TypeMap (extracted by the stripper).
-    /// Processes entries in order: type aliases first, then interfaces,
-    /// then variable/param/return annotations.
-    pub fn populateFromTypeMap(
-        self: *TypeEnv,
-        tm: *const TypeMap,
-    ) error{TypeSourceAlreadySelected}!void {
-        if (self.source_selection == .direct or self.source_selection == .omitted) {
-            return error.TypeSourceAlreadySelected;
-        }
-        self.legacy_source_populated = true;
-
-        // First pass: type aliases and interfaces (defines the type namespace)
-        // Collect generic_params entries keyed by (name_start, name_end) for alias lookup.
-        var generic_params_map: std.AutoHashMapUnmanaged(u64, TypeMapEntry) = .empty;
-        defer generic_params_map.deinit(self.allocator);
-        for (tm.entries.items) |entry| {
-            if (entry.kind == .generic_params and entry.name_start != 0) {
-                const key = (@as(u64, entry.name_start) << 32) | entry.name_end;
-                generic_params_map.put(self.allocator, key, entry) catch self.markAllocationFailure();
-            }
-        }
-
-        for (tm.entries.items) |entry| {
-            switch (entry.kind) {
-                .type_alias => self.processTypeAlias(tm, entry, &generic_params_map),
-                .distinct_type => self.processDistinctType(tm, entry),
-                // exhaustive: this is the type-namespace pass. The annotation
-                // kinds it skips are consumed by the second pass below, so
-                // nothing is dropped - only deferred.
-                else => {},
-            }
-        }
-
-        // The type namespace is complete here, so a name that is still
-        // unresolved is unresolved rather than not-yet-defined, and a cycle is
-        // a real cycle. Contractivity is decided once, before any annotation
-        // is resolved against these names.
-        self.finishTypeAliasPopulation();
-
-        // Type parameters declared by a signature, keyed by the offset of its
-        // opening `(` - the same key its parameter and return
-        // annotations carry. Built before the annotations are resolved,
-        // because `xs: T[]` only resolves `T` to a type parameter while that
-        // parameter is in scope; without this the name falls through to an
-        // unresolved reference and nothing can be inferred from it later.
-        var fn_generics_by_signature: std.AutoHashMapUnmanaged(u32, DeclaredGenerics) = .empty;
-        defer fn_generics_by_signature.deinit(self.allocator);
-        for (tm.entries.items) |entry| {
-            if (entry.kind != .generic_params) continue;
-            const sig_key = entry.signature_offset orelse continue;
-            const declared = self.declareGenerics(tm.getTypeText(entry));
-            if (declared.count == 0) continue;
-            fn_generics_by_signature.put(self.allocator, sig_key, declared) catch self.markAllocationFailure();
-        }
-
-        // Explicit type arguments at call sites. Keyed by the byte offset of
-        // the call's `(`, which is one past the recorded `>`; the stripper
-        // blanks rather than deletes, so offsets in the stripped source the
-        // parser reads are the offsets recorded here.
-        for (tm.entries.items) |entry| {
-            if (entry.kind != .call_type_arguments) continue;
-            var args: CallTypeArgs = .{};
-            // Depth-aware for the same reason the declaration side is: a single
-            // type argument carries its own commas, and splitting on all of them
-            // made `make<Record<string, number>>(1)` read as two arguments and
-            // refused a correct call for the wrong arity.
-            var arg_texts: [MAX_TYPE_PARAMS][]const u8 = undefined;
-            const arg_count = splitTopLevelCommas(tm.getTypeText(entry), &arg_texts);
-            for (arg_texts[0..arg_count]) |arg_text| {
-                args.args[args.count] = self.resolveType(arg_text);
-                args.count += 1;
-            }
-            if (args.count == 0) continue;
-            self.call_type_args.put(self.allocator, entry.source_end + 1, args) catch self.markAllocationFailure();
-        }
-
-        // Second pass: variable and function annotations
-        // Group param and return annotations by signature to build function sigs
-        var fn_params_by_signature: std.AutoHashMapUnmanaged(u32, FunctionSig) = .empty;
-        defer fn_params_by_signature.deinit(self.allocator);
-        var fn_names_by_signature: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
-        defer fn_names_by_signature.deinit(self.allocator);
-        // Parameter names in declaration order, so a type predicate can say
-        // which parameter `v is string` names. Only the predicate reads these,
-        // so they stay local rather than growing `FunctionSig`.
-        var fn_param_names_by_signature: std.AutoHashMapUnmanaged(u32, ParamNames) = .empty;
-        defer fn_param_names_by_signature.deinit(self.allocator);
-
-        for (tm.entries.items) |entry| {
-            switch (entry.kind) {
-                .var_annotation => self.processVarAnnotation(tm, entry),
-                .param_annotation => {
-                    const sig_key = entry.signature_offset orelse continue;
-                    const gop = fn_params_by_signature.getOrPut(self.allocator, sig_key) catch {
-                        self.markAllocationFailure();
-                        continue;
-                    };
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = .{};
-                    }
-                    const type_text = tm.getTypeText(entry);
-                    const generics = fn_generics_by_signature.get(sig_key);
-                    const type_idx = self.resolveTypeInGenerics(type_text, generics);
-                    if (gop.value_ptr.param_count < 16) {
-                        const param_index = gop.value_ptr.param_count;
-                        gop.value_ptr.param_types[param_index] = type_idx;
-                        const annotation = self.internName(type_text);
-                        self.source_fn_annotations.put(
-                            self.allocator,
-                            sourceFnAnnotationKey(sig_key, param_index),
-                            annotation,
-                        ) catch self.markAllocationFailure();
-                        gop.value_ptr.param_count += 1;
-                    }
-                    if (tm.getNameText(entry)) |param_name| {
-                        const names = fn_param_names_by_signature.getOrPut(self.allocator, sig_key) catch {
-                            self.markAllocationFailure();
-                            continue;
-                        };
-                        if (!names.found_existing) names.value_ptr.* = .{};
-                        names.value_ptr.append(self.internName(param_name));
-                    }
-                },
-                .return_annotation => {
-                    const sig_key = entry.signature_offset orelse continue;
-                    const type_text = tm.getTypeText(entry);
-                    const generics = fn_generics_by_signature.get(sig_key);
-                    const type_idx = self.resolveTypeInGenerics(type_text, generics);
-                    const gop = fn_params_by_signature.getOrPut(self.allocator, sig_key) catch {
-                        self.markAllocationFailure();
-                        continue;
-                    };
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = .{};
-                    }
-                    gop.value_ptr.return_type = type_idx;
-                    const annotation = self.internName(type_text);
-                    self.source_fn_annotations.put(
-                        self.allocator,
-                        sourceFnAnnotationKey(sig_key, return_annotation_slot),
-                        annotation,
-                    ) catch self.markAllocationFailure();
-                    if (tm.getNameText(entry)) |name| {
-                        const owned_name = self.internName(name);
-                        fn_names_by_signature.put(self.allocator, sig_key, owned_name) catch self.markAllocationFailure();
-                    }
-                },
-                .type_guard_annotation => {
-                    const sig_key = entry.signature_offset orelse continue;
-                    // `v is string` is a return annotation that also declares a
-                    // narrowing. The function returns a boolean; the predicate
-                    // is recorded next to the signature and admitted later,
-                    // once the checker has read the body that claims it.
-                    const gop = fn_params_by_signature.getOrPut(self.allocator, sig_key) catch {
-                        self.markAllocationFailure();
-                        continue;
-                    };
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = .{};
-                    }
-                    gop.value_ptr.return_type = self.pool.idx_boolean;
-                    if (tm.getNameText(entry)) |name| {
-                        const owned_name = self.internName(name);
-                        fn_names_by_signature.put(self.allocator, sig_key, owned_name) catch self.markAllocationFailure();
-                    }
-                    const parsed = parseTypePredicate(tm.getTypeText(entry)) orelse continue;
-                    const names = fn_param_names_by_signature.get(sig_key) orelse continue;
-                    const index = names.indexOf(parsed.param_name) orelse continue;
-                    const generics = fn_generics_by_signature.get(sig_key);
-                    const narrowed = self.resolveTypeInGenerics(parsed.type_text, generics);
-                    if (narrowed == null_type_idx) continue;
-                    gop.value_ptr.type_predicate = .{ .param_index = index, .narrowed = narrowed };
-                },
-                // exhaustive: mirror of the first pass. The kinds skipped here
-                // are the type-namespace ones already processed above.
-                else => {},
-            }
-        }
-
-        // Merge function signatures
-        var iter = fn_params_by_signature.iterator();
-        while (iter.next()) |kv| {
-            if (fn_generics_by_signature.get(kv.key_ptr.*)) |declared| {
-                kv.value_ptr.type_params = declared.params;
-                kv.value_ptr.type_param_count = declared.count;
-            }
-            self.fn_signatures.put(self.allocator, kv.key_ptr.*, kv.value_ptr.*) catch self.markAllocationFailure();
-            if (fn_names_by_signature.get(kv.key_ptr.*)) |name| {
-                self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
-                self.source_fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
-            }
-        }
-    }
-
-    const DeclaredGenerics = struct {
-        params: [MAX_TYPE_PARAMS]GenericParam = @splat(.{}),
-        count: u8 = 0,
-    };
-
-    /// Resolve a declared type-parameter list into pool nodes plus bounds.
-    /// Constraints resolve with every parameter of the list already in scope,
-    /// so `<T, U extends T>` sees `T`.
-    fn declareGenerics(self: *TypeEnv, params_text: []const u8) DeclaredGenerics {
-        var specs: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
-        const spec_count = splitTypeParams(params_text, &specs);
-        if (spec_count == 0) return .{};
-
-        var declared: DeclaredGenerics = .{};
-        const depth_before = self.generic_scopes.items.len;
-        self.pushGenericScope();
-        if (self.generic_scopes.items.len == depth_before) return .{};
-        defer self.popGenericScope();
-        for (specs[0..spec_count]) |spec| {
-            if (spec.name.len == 0) continue;
-            declared.params[declared.count] = .{
-                .name = self.internName(spec.name),
-                .idx = self.addGenericParam(spec.name),
-            };
-            declared.count += 1;
-        }
-        for (specs[0..spec_count], 0..) |spec, i| {
-            if (i >= declared.count) break;
-            if (spec.constraint_text.len == 0) continue;
-            const constraint = self.resolveBound(spec.constraint_text);
-            declared.params[i].constraint = constraint;
-            self.generic_scopes.items[self.generic_scopes.items.len - 1].setConstraint(spec.name, constraint);
-        }
-        return declared;
-    }
-
-    /// Resolve an `extends` bound. Identical to `resolveType` except that it
-    /// also recognizes the checker-only bounds spec 6.2 names, which are legal
-    /// in bound position and nowhere else - `DictKey` is not a source alias, so
-    /// writing it as a type annotation still reaches an unresolved name.
-    fn resolveBound(self: *TypeEnv, bound_text: []const u8) TypeIndex {
-        const trimmed = std.mem.trim(u8, bound_text, " \t\n\r");
-        if (std.mem.eql(u8, trimmed, "DictKey")) {
-            // The admitted key types are `string`, `number`, and a `distinct
-            // type` over either. A distinct type is assignable to its base
-            // (amendment A5), so this union is exactly that acceptance set,
-            // and `boolean` is outside it.
-            return self.pool.addUnion(self.allocator, &.{ self.pool.idx_string, self.pool.idx_number });
-        }
-        return self.resolveType(bound_text);
-    }
-
-    /// Resolve an annotation with a signature's type parameters in scope, so a
-    /// bare `T` reaches the parameter node rather than a same-named alias.
-    fn resolveTypeInGenerics(self: *TypeEnv, type_text: []const u8, generics: ?DeclaredGenerics) TypeIndex {
-        const declared = generics orelse return self.resolveType(type_text);
-        if (declared.count == 0) return self.resolveType(type_text);
-        const depth_before = self.generic_scopes.items.len;
-        self.pushGenericScope();
-        if (self.generic_scopes.items.len == depth_before) return self.resolveType(type_text);
-        defer self.popGenericScope();
-        const top = &self.generic_scopes.items[self.generic_scopes.items.len - 1];
-        for (declared.params[0..declared.count]) |param| {
-            top.addConstrainedParam(param.name, param.idx, param.constraint);
-        }
-        return self.resolveType(type_text);
-    }
-
-    fn processTypeAlias(
-        self: *TypeEnv,
-        tm: *const TypeMap,
-        entry: TypeMapEntry,
-        generic_params_map: *const std.AutoHashMapUnmanaged(u64, TypeMapEntry),
-    ) void {
-        const name = tm.getNameText(entry) orelse return;
-        const type_text = tm.getTypeText(entry);
-        if (type_text.len == 0) return;
-
-        // Check for matching generic_params entry (same name range).
-        const gp_key = (@as(u64, entry.name_start) << 32) | entry.name_end;
-        if (generic_params_map.get(gp_key)) |gp_entry| {
-            const params_text = tm.getTypeText(gp_entry);
-            if (params_text.len > 0) {
-                // Parse comma-separated param names and resolve body in generic scope.
-                var alias = GenericAlias{};
-                self.pushGenericScope();
-
-                // The stripper records an alias's list with its angle brackets
-                // still on (`<V>`), so splitting on commas alone made the one
-                // parameter name `<V>`, which no `t_ref` in the body ever
-                // matched: every generic alias resolved to its uninstantiated
-                // body and every argument checked against it was accepted.
-                var specs: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
-                const spec_count = splitTypeParams(params_text, &specs);
-                for (specs[0..spec_count]) |spec| {
-                    if (spec.name.len == 0) continue;
-                    if (alias.param_count >= 8) break;
-                    _ = self.addGenericParam(spec.name);
-                    alias.param_names[alias.param_count] = self.internName(spec.name);
-                    alias.param_count += 1;
-                }
-
-                alias.body = self.resolveType(type_text);
-                self.popGenericScope();
-
-                const owned_name = self.internName(name);
-                self.generic_aliases.put(self.allocator, owned_name, alias) catch self.markAllocationFailure();
-                return;
-            }
-        }
-
-        // Non-generic alias: simple name -> type mapping.
-        const type_idx = self.resolveType(type_text);
-        const owned_name = self.internName(name);
-        self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
-    }
-
-    fn processDistinctType(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
-        const name = tm.getNameText(entry) orelse return;
-        const type_text = tm.getTypeText(entry);
-        if (type_text.len == 0) return;
-
-        // Resolve the base type, then create a nominal alias.
-        const base_idx = self.resolveType(type_text);
-        if (base_idx == null_type_idx) return;
-        const nominal_idx = self.pool.addNominalAlias(self.allocator, base_idx, name);
-        if (nominal_idx == null_type_idx) return;
-
-        const owned_name = self.internName(name);
-        self.type_aliases.put(self.allocator, owned_name, nominal_idx) catch self.markAllocationFailure();
-    }
-
-    fn processVarAnnotation(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
-        const type_text = tm.getTypeText(entry);
-        if (type_text.len == 0) return;
-
-        const type_idx = self.resolveType(type_text);
-        const key = packLocationKey(entry.context_line, entry.context_col);
-        self.var_types.put(self.allocator, key, type_idx) catch self.markAllocationFailure();
-
-        // Also store by name for name-based lookup
-        if (tm.getNameText(entry)) |name| {
-            const owned_name = self.internName(name);
-            self.var_types_by_name.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
-            if (entry.name_ordinal) |ordinal| {
-                self.var_annotations.append(self.allocator, .{
-                    .name = owned_name,
-                    .ordinal = ordinal,
-                    .type_idx = type_idx,
-                }) catch self.markAllocationFailure();
-            }
-        }
-    }
-
     // -------------------------------------------------------------------
     // Type resolution
     // -------------------------------------------------------------------
@@ -2353,7 +1814,7 @@ pub const TypeEnv = struct {
     }
 
     /// Add the current alias census to the retained contractivity maps.
-    /// Repeated legacy population is additive, so this operation clears nothing.
+    /// Repeated namespace updates are additive, so this operation clears nothing.
     pub fn finishTypeAliasPopulation(self: *TypeEnv) void {
         self.findNonContractiveAliases();
     }
@@ -2522,23 +1983,8 @@ pub const TypeEnv = struct {
         return self.var_types_by_name.get(name);
     }
 
-    /// Resolve one declaration annotation by semantic name occurrence.
-    pub fn getVarTypeByNameOrdinal(self: *const TypeEnv, name: []const u8, ordinal: u32) ?TypeIndex {
-        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
-        for (self.var_annotations.items) |annotation| {
-            if (annotation.ordinal == ordinal and std.mem.eql(u8, annotation.name, name)) {
-                return annotation.type_idx;
-            }
-        }
-        return null;
-    }
-
     pub fn varAnnotationCount(self: *const TypeEnv) usize {
-        return switch (self.source_selection orelse .legacy) {
-            .omitted => 0,
-            .legacy => self.var_annotations.items.len,
-            .direct => self.direct_annotation_count,
-        };
+        return if (self.source_selection == .direct) self.direct_annotation_count else 0;
     }
 
     /// Read one direct annotation through its final declaration owner.
@@ -2575,35 +2021,24 @@ pub const TypeEnv = struct {
         return self.source_fn_sigs_by_name.get(name);
     }
 
-    /// Select a source signature without mixing direct owners and legacy offsets.
+    /// Select a source signature through its validated runtime owner.
     pub fn functionTypeRef(
         self: *const TypeEnv,
         view: IrView,
         owner: NodeIndex,
     ) ?FunctionTypeRef {
+        if (self.source_selection != .direct) return null;
         const tag = view.getTag(owner) orelse return null;
         if (tag != .function_expr and tag != .arrow_function) return null;
-        return switch (self.source_selection orelse .legacy) {
-            .omitted => null,
-            .legacy => .{ .legacy_offset = view.signatureOffset(owner) orelse return null },
-            .direct => .{ .direct_owner = owner },
-        };
+        return .{ .direct_owner = owner };
     }
 
     pub fn getFunctionSignature(
         self: *const TypeEnv,
         reference: FunctionTypeRef,
     ) ?FunctionSig {
-        return switch (reference) {
-            .legacy_offset => |offset| switch (self.source_selection orelse .legacy) {
-                .legacy => self.getFnSigAt(offset),
-                .omitted, .direct => null,
-            },
-            .direct_owner => |owner| if (self.source_selection == .direct)
-                self.direct_fn_signatures.get(owner)
-            else
-                null,
-        };
+        if (self.source_selection != .direct) return null;
+        return self.direct_fn_signatures.get(reference.direct_owner);
     }
 
     pub fn getFunctionParameterSpelling(
@@ -2611,38 +2046,22 @@ pub const TypeEnv = struct {
         reference: FunctionTypeRef,
         compact_position: u8,
     ) ?[]const u8 {
-        return switch (reference) {
-            .legacy_offset => |offset| switch (self.source_selection orelse .legacy) {
-                .legacy => self.getSourceFnParamAnnotation(self.signatureKeyAt(offset), compact_position),
-                .omitted, .direct => null,
-            },
-            .direct_owner => |owner| if (self.source_selection == .direct)
-                self.direct_source_fn_annotations.get(.{
-                    .owner = owner,
-                    .slot = compact_position,
-                })
-            else
-                null,
-        };
+        if (self.source_selection != .direct) return null;
+        return self.direct_source_fn_annotations.get(.{
+            .owner = reference.direct_owner,
+            .slot = compact_position,
+        });
     }
 
     pub fn getFunctionReturnSpelling(
         self: *const TypeEnv,
         reference: FunctionTypeRef,
     ) ?[]const u8 {
-        return switch (reference) {
-            .legacy_offset => |offset| switch (self.source_selection orelse .legacy) {
-                .legacy => self.getSourceFnReturnAnnotation(self.signatureKeyAt(offset)),
-                .omitted, .direct => null,
-            },
-            .direct_owner => |owner| if (self.source_selection == .direct)
-                self.direct_source_fn_annotations.get(.{
-                    .owner = owner,
-                    .slot = return_annotation_slot,
-                })
-            else
-                null,
-        };
+        if (self.source_selection != .direct) return null;
+        return self.direct_source_fn_annotations.get(.{
+            .owner = reference.direct_owner,
+            .slot = return_annotation_slot,
+        });
     }
 
     /// Look up a type alias by name.
@@ -2658,46 +2077,10 @@ pub const TypeEnv = struct {
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
     }
 
-    /// The key of the signature whose parameter list opens at `parser_offset`,
-    /// an offset in the text the parser read. This is the offset of the same
-    /// `(` in the stripped source, where the stripper recorded the signature.
-    /// Two functions never share a key, whatever line or name they have.
-    pub fn signatureKeyAt(self: *const TypeEnv, parser_offset: u32) u32 {
-        _ = self;
-        return parser_offset;
-    }
-
-    /// Look up the signature whose parameter list opens at `parser_offset`.
-    /// Absent when that function carries no annotation at all.
-    pub fn getFnSigAt(self: *const TypeEnv, parser_offset: u32) ?FunctionSig {
-        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
-        return self.fn_signatures.get(self.signatureKeyAt(parser_offset));
-    }
-
-    /// Exact source spelling of one declared parameter annotation of the
-    /// signature `key` names (see `signatureKeyAt`).
-    pub fn getSourceFnParamAnnotation(self: *const TypeEnv, key: u32, index: u8) ?[]const u8 {
-        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
-        return self.source_fn_annotations.get(sourceFnAnnotationKey(key, index));
-    }
-
-    /// Exact source spelling of the return annotation of the signature `key`
-    /// names (see `signatureKeyAt`).
-    pub fn getSourceFnReturnAnnotation(self: *const TypeEnv, key: u32) ?[]const u8 {
-        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
-        return self.source_fn_annotations.get(sourceFnAnnotationKey(key, return_annotation_slot));
-    }
-
     /// Refuse consumers that would otherwise interpret allocation-dropped
     /// declarations as declarations the author never wrote.
     pub fn ensureHealthy(self: *const TypeEnv) error{OutOfMemory}!void {
         if (self.allocation_failed) return error.OutOfMemory;
-    }
-
-    /// Explicit type arguments written at the call whose `(` sits at `offset`.
-    pub fn getCallTypeArgs(self: *const TypeEnv, offset: u32) ?CallTypeArgs {
-        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
-        return self.call_type_args.get(offset);
     }
 
     /// Read actual call arguments. Compatibility owners are not calls.
@@ -2707,11 +2090,8 @@ pub const TypeEnv = struct {
         call: NodeIndex,
     ) ?CallTypeArgs {
         if (view.getTag(call) != .call) return null;
-        return switch (self.source_selection orelse .legacy) {
-            .omitted => null,
-            .legacy => self.call_type_args.get((view.getLoc(call) orelse return null).offset),
-            .direct => self.direct_call_type_args.get(call),
-        };
+        if (self.source_selection != .direct) return null;
+        return self.direct_call_type_args.get(call);
     }
 
     /// Walk a TypeIndex (typically a function return-type annotation),
@@ -3143,26 +2523,6 @@ pub const TypeEnv = struct {
         try self.ensureHealthy();
     }
 
-    pub fn putParsedCallTypeArgs(
-        self: *TypeEnv,
-        lparen_offset: u32,
-        indices: []const TypeIndex,
-    ) !void {
-        try self.pool.ensureHealthy();
-        try self.ensureHealthy();
-        var arguments: CallTypeArgs = .{};
-        const count = @min(indices.len, MAX_TYPE_PARAMS);
-        if (count == 0) return;
-        @memcpy(arguments.args[0..count], indices[0..count]);
-        arguments.count = @intCast(count);
-        {
-            errdefer self.markAllocationFailure();
-            try self.call_type_args.put(self.allocator, lparen_offset, arguments);
-        }
-        try self.pool.ensureHealthy();
-        try self.ensureHealthy();
-    }
-
     pub fn endParsedGenerics(self: *TypeEnv, owner: *ParsedGenericScope) !void {
         _ = try self.validateParsedGenericScope(owner);
         self.popGenericScope();
@@ -3247,11 +2607,6 @@ pub const TypeEnv = struct {
     }
 };
 
-fn packLocationKey(line: u32, col: u32) u32 {
-    // Pack line (20 bits) + col (12 bits) into u32
-    return (line << 12) | (col & 0xFFF);
-}
-
 const ParsedGenericApiCase = enum {
     exact_dict_key_bound,
     scope_name_storage,
@@ -3261,7 +2616,6 @@ const ParsedGenericApiCase = enum {
     compact_capacity,
     empty_name_consumes_capacity,
     null_body_publication,
-    call_argument_capacity,
     cross_environment_owner,
     poisoned_pool_cleanup,
     poisoned_environment_cleanup,
@@ -3403,16 +2757,6 @@ test "parsed generic API census observes every case" {
                         try std.testing.expectEqual(null_type_idx, alias.body);
                         try env.endParsedGenerics(&owner);
                     },
-                    .call_argument_capacity => {
-                        try env.putParsedCallTypeArgs(42, &.{
-                            pool.idx_string, pool.idx_number,    pool.idx_boolean, pool.idx_null,
-                            pool.idx_bytes,  pool.idx_undefined, pool.idx_never,   pool.idx_unknown,
-                            pool.idx_string,
-                        });
-                        const arguments = env.getCallTypeArgs(42) orelse return error.TestUnexpectedResult;
-                        try std.testing.expectEqual(@as(u8, @intCast(MAX_TYPE_PARAMS)), arguments.count);
-                        try std.testing.expectEqual(pool.idx_unknown, arguments.args[7]);
-                    },
                     .poisoned_pool_cleanup => {
                         const prior = env.generic_scopes.items.len;
                         var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
@@ -3455,6 +2799,43 @@ test "parsed generic API census observes every case" {
         seen.insert(case);
     }
     try std.testing.expectEqual(std.meta.fields(ParsedGenericApiCase).len, seen.count());
+}
+
+test "direct call arguments retain eight entries under allocation failure" {
+    const allocator = std.testing.allocator;
+    const source = "const value = pick<string, number, boolean, null, Bytes, undefined, never, unknown, string>();";
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "arguments.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), accepted.type_store.explicit_call_arguments.items.len);
+    const call = accepted.type_store.explicit_call_arguments.items[0].owner;
+    try std.testing.expectEqual(engine.parser.NodeTag.call, accepted.ir_view.getTag(call).?);
+    const Context = struct {
+        fn run(failing: std.mem.Allocator, input: DirectSyntaxInput, owner: NodeIndex, successes: *usize) !void {
+            var pool = TypePool.init(failing);
+            defer pool.deinit(failing);
+            var env = TypeEnv.init(failing, &pool);
+            defer env.deinit();
+            try pool.ensureHealthy();
+            try env.ensureHealthy();
+            try env.populateSourceTypes(.{ .direct = input });
+            const arguments = env.getCallTypeArgsForCall(input.ir_view, owner) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 8), arguments.count);
+            try std.testing.expectEqualSlices(TypeIndex, &.{
+                pool.idx_string, pool.idx_number,    pool.idx_boolean, pool.idx_null,
+                pool.idx_bytes,  pool.idx_undefined, pool.idx_never,   pool.idx_unknown,
+            }, arguments.args[0..arguments.count]);
+            successes.* += 1;
+        }
+    };
+    var successes: usize = 0;
+    try std.testing.checkAllAllocationFailures(allocator, Context.run, .{
+        DirectSyntaxInput{ .store = accepted.type_store, .ir_view = accepted.ir_view, .atoms = accepted.atoms },
+        call,
+        &successes,
+    });
+    try std.testing.expect(successes > 0);
 }
 
 test "captured generic set supports repeated scope use without semantic allocation" {
@@ -3742,10 +3123,6 @@ test "parsed generic scope entry preserves an outer scope across allocation fail
 
 const return_annotation_slot = std.math.maxInt(u8);
 
-fn sourceFnAnnotationKey(key: u32, slot: u8) u64 {
-    return (@as(u64, key) << 8) | slot;
-}
-
 fn packBindingNameKey(scope_id: u16, name_atom: u16) u32 {
     return (@as(u32, scope_id) << 16) | name_atom;
 }
@@ -3776,14 +3153,16 @@ fn installTestBoxGenericAlias(env: *TypeEnv) !void {
     });
 }
 
-/// Byte span of `needle` inside `haystack`, for tests that hand-build a
-/// `TypeMap` instead of running the stripper. They used to hardcode the
-/// offsets, which made every one of them a hostage to the width of the
-/// declaration keyword: renaming `type` to `structural` moved each span by
-/// six bytes and failed seven tests that have nothing to do with keywords.
-fn testSpan(haystack: []const u8, needle: []const u8) struct { start: u32, end: u32 } {
-    const at = std.mem.indexOf(u8, haystack, needle).?;
-    return .{ .start = @intCast(at), .end = @intCast(at + needle.len) };
+fn populateTestSource(env: *TypeEnv, source: []const u8) !void {
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(env.allocator, env.allocator, source, "types.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = accepted.type_store,
+        .ir_view = accepted.ir_view,
+        .atoms = accepted.atoms,
+    } });
 }
 
 test "TypeEnv basic type alias resolution" {
@@ -3796,23 +3175,7 @@ test "TypeEnv basic type alias resolution" {
 
     // Simulate: structural Config = { port: number }
     const source = "structural Config = { port: number };";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
-
-    const body_span = testSpan(source, "{ port: number }");
-    const name_span = testSpan(source, "Config");
-
-    try tm.addEntry(allocator, .{
-        .kind = .type_alias,
-        .source_start = body_span.start, // "{ port: number }"
-        .source_end = body_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start, // "Config"
-        .name_end = name_span.end,
-    });
-
-    try env.populateFromTypeMap(&tm);
+    try populateTestSource(&env, source);
 
     const config_idx = env.getTypeAlias("Config");
     try std.testing.expect(config_idx != null);
@@ -3828,20 +3191,7 @@ test "TypeEnv variable annotation" {
     defer env.deinit();
 
     const source = "const port: number = 8080;";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
-
-    try tm.addEntry(allocator, .{
-        .kind = .var_annotation,
-        .source_start = 12, // "number"
-        .source_end = 18,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = 6, // "port"
-        .name_end = 10,
-    });
-
-    try env.populateFromTypeMap(&tm);
+    try populateTestSource(&env, source);
 
     const port_type = env.getVarTypeByName("port");
     try std.testing.expect(port_type != null);
@@ -3874,36 +3224,7 @@ test "TypeEnv resolves type aliases in annotations" {
 
     // First: define a type alias
     const source = "structural Status = number;const code: Status = 200;";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
-
-    const body_span = testSpan(source, "number");
-    const name_span = testSpan(source, "Status");
-
-    try tm.addEntry(allocator, .{
-        .kind = .type_alias,
-        .source_start = body_span.start, // "number"
-        .source_end = body_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start, // "Status"
-        .name_end = name_span.end,
-    });
-
-    const ann_span = testSpan(source, "Status = 200");
-    const code_span = testSpan(source, "code");
-
-    try tm.addEntry(allocator, .{
-        .kind = .var_annotation,
-        .source_start = ann_span.start, // "Status"
-        .source_end = ann_span.start + 6,
-        .context_line = 1,
-        .context_col = 22,
-        .name_start = code_span.start, // "code"
-        .name_end = code_span.end,
-    });
-
-    try env.populateFromTypeMap(&tm);
+    try populateTestSource(&env, source);
 
     // "Status" should resolve to number
     const status_idx = env.getTypeAlias("Status");
@@ -3925,46 +3246,9 @@ test "TypeEnv function signature from params and return" {
     defer env.deinit();
 
     const source = "function add(a: number, b: number): number { }";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
+    try populateTestSource(&env, source);
 
-    // param a: number
-    try tm.addEntry(allocator, .{
-        .kind = .param_annotation,
-        .source_start = 16, // "number"
-        .source_end = 22,
-        .context_line = 1,
-        .signature_offset = 1,
-        .context_col = 1,
-        .name_start = 13, // "a"
-        .name_end = 14,
-    });
-    // param b: number
-    try tm.addEntry(allocator, .{
-        .kind = .param_annotation,
-        .source_start = 27, // "number"
-        .source_end = 33,
-        .context_line = 1,
-        .signature_offset = 1,
-        .context_col = 1,
-        .name_start = 24, // "b"
-        .name_end = 25,
-    });
-    // return: number
-    try tm.addEntry(allocator, .{
-        .kind = .return_annotation,
-        .source_start = 36, // "number"
-        .source_end = 42,
-        .context_line = 1,
-        .signature_offset = 1,
-        .context_col = 1,
-        .name_start = 0,
-        .name_end = 0,
-    });
-
-    try env.populateFromTypeMap(&tm);
-
-    const sig = env.getFnSigAt(1);
+    const sig = env.getSourceFnSigByName("add");
     try std.testing.expect(sig != null);
     try std.testing.expectEqual(@as(u8, 2), sig.?.param_count);
     try std.testing.expectEqual(pool.idx_number, sig.?.param_types[0]);
@@ -4007,49 +3291,7 @@ test "TypeEnv generic type alias Result<string>" {
     // Simulate: structural Result<T> = { ok: boolean; value: T; error: string }
     //           const auth: Result<object> = jwtVerify(token, secret);
     const source = "structural Result<T> = { ok: boolean; value: T; error: string };const auth: Result<object> = jwtVerify();";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
-
-    const body_span = testSpan(source, "{ ok: boolean; value: T; error: string }");
-    const name_span = testSpan(source, "Result");
-
-    // type_alias entry: body is "{ ok: boolean; value: T; error: string }"
-    try tm.addEntry(allocator, .{
-        .kind = .type_alias,
-        .source_start = body_span.start, // "{ ok: boolean; value: T; error: string }"
-        .source_end = body_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start, // "Result"
-        .name_end = name_span.end,
-    });
-
-    // generic_params entry: "T" (same name range as the alias)
-    const param_span = testSpan(source, "T>");
-    try tm.addEntry(allocator, .{
-        .kind = .generic_params,
-        .source_start = param_span.start, // "T"
-        .source_end = param_span.start + 1,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start, // "Result"
-        .name_end = name_span.end,
-    });
-
-    // var annotation: auth: Result<object>
-    const ann_span = testSpan(source, "Result<object>");
-    const auth_span = testSpan(source, "auth");
-    try tm.addEntry(allocator, .{
-        .kind = .var_annotation,
-        .source_start = ann_span.start, // "Result<object>"
-        .source_end = ann_span.end,
-        .context_line = 1,
-        .context_col = 58,
-        .name_start = auth_span.start, // "auth"
-        .name_end = auth_span.end,
-    });
-
-    try env.populateFromTypeMap(&tm);
+    try populateTestSource(&env, source);
 
     // "Result" should be in generic_aliases, not type_aliases
     try std.testing.expect(env.getTypeAlias("Result") == null);
@@ -4082,46 +3324,7 @@ test "TypeEnv generic alias with multiple params" {
     // Simulate: structural Pair<A, B> = { first: A; second: B }
     //           const p: Pair<string, number> = ...
     const source = "structural Pair<A, B> = { first: A; second: B };const p: Pair<string, number> = x;";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
-
-    const body_span = testSpan(source, "{ first: A; second: B }");
-    const name_span = testSpan(source, "Pair");
-
-    try tm.addEntry(allocator, .{
-        .kind = .type_alias,
-        .source_start = body_span.start, // "{ first: A; second: B }"
-        .source_end = body_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start, // "Pair"
-        .name_end = name_span.end,
-    });
-
-    const param_span = testSpan(source, "A, B");
-    try tm.addEntry(allocator, .{
-        .kind = .generic_params,
-        .source_start = param_span.start, // "A, B"
-        .source_end = param_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start,
-        .name_end = name_span.end,
-    });
-
-    const ann_span = testSpan(source, "Pair<string, number>");
-    const p_span = testSpan(source, "p: Pair<");
-    try tm.addEntry(allocator, .{
-        .kind = .var_annotation,
-        .source_start = ann_span.start, // "Pair<string, number>"
-        .source_end = ann_span.end,
-        .context_line = 1,
-        .context_col = 42,
-        .name_start = p_span.start, // "p"
-        .name_end = p_span.start + 1,
-    });
-
-    try env.populateFromTypeMap(&tm);
+    try populateTestSource(&env, source);
 
     const p_type = env.getVarTypeByName("p");
     try std.testing.expect(p_type != null);
@@ -4292,23 +3495,7 @@ test "TypeEnv intersection alias type AB = A & B" {
     // substitutes alias names when the entire annotation text matches; nested
     // identifiers in compound expressions remain refs - same behaviour as union).
     const source = "structural AB = A & B;";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
-
-    const body_span = testSpan(source, "A & B");
-    const name_span = testSpan(source, "AB");
-
-    try tm.addEntry(allocator, .{
-        .kind = .type_alias,
-        .source_start = body_span.start, // "A & B"
-        .source_end = body_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start, // "AB"
-        .name_end = name_span.end,
-    });
-
-    try env.populateFromTypeMap(&tm);
+    try populateTestSource(&env, source);
 
     const ab_idx = env.getTypeAlias("AB");
     try std.testing.expect(ab_idx != null);
@@ -4336,23 +3523,9 @@ test "TypeEnv return-type intersection X & Y" {
 
     // function f(): X & Y { ... }
     const source = "function f(): X & Y { return null; }";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
+    try populateTestSource(&env, source);
 
-    try tm.addEntry(allocator, .{
-        .kind = .return_annotation,
-        .source_start = 14, // "X & Y"
-        .source_end = 19,
-        .context_line = 7,
-        .signature_offset = 7,
-        .context_col = 1,
-        .name_start = 0,
-        .name_end = 0,
-    });
-
-    try env.populateFromTypeMap(&tm);
-
-    const sig = env.getFnSigAt(7);
+    const sig = env.getSourceFnSigByName("f");
     try std.testing.expect(sig != null);
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(sig.?.return_type).?);
 }
@@ -4530,45 +3703,9 @@ test "extractProofMembers walks a generic Proof alias to its literal union" {
     const source =
         "structural Guardrails<T> = Proof<T, \"idempotent\" | \"deterministic\">;" ++
         "function handler(): Guardrails<Response> { return null; }";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
+    try populateTestSource(&env, source);
 
-    const body_span = testSpan(source, "Proof<T, \"idempotent\" | \"deterministic\">");
-    const name_span = testSpan(source, "Guardrails");
-    try tm.addEntry(allocator, .{
-        .kind = .type_alias,
-        .source_start = body_span.start,
-        .source_end = body_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start,
-        .name_end = name_span.end,
-    });
-    const param_span = testSpan(source, "T>");
-    try tm.addEntry(allocator, .{
-        .kind = .generic_params,
-        .source_start = param_span.start,
-        .source_end = param_span.start + 1,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start,
-        .name_end = name_span.end,
-    });
-    const ret_span = testSpan(source, "Guardrails<Response>");
-    try tm.addEntry(allocator, .{
-        .kind = .return_annotation,
-        .source_start = ret_span.start,
-        .source_end = ret_span.end,
-        .context_line = 7,
-        .signature_offset = 7,
-        .context_col = 1,
-        .name_start = 0,
-        .name_end = 0,
-    });
-
-    try env.populateFromTypeMap(&tm);
-
-    const sig = env.getFnSigAt(7) orelse return error.MissingSig;
+    const sig = env.getSourceFnSigByName("handler") orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -4588,23 +3725,9 @@ test "extractProofMembers handles an inline Proof return capsule" {
     defer env.deinit();
 
     const source = "function handler(): Proof<Response, \"idempotent\"> { return null; }";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
+    try populateTestSource(&env, source);
 
-    try tm.addEntry(allocator, .{
-        .kind = .return_annotation,
-        .source_start = testSpan(source, "Proof<Response, \"idempotent\">").start,
-        .source_end = testSpan(source, "Proof<Response, \"idempotent\">").end,
-        .context_line = 3,
-        .signature_offset = 3,
-        .context_col = 1,
-        .name_start = 0,
-        .name_end = 0,
-    });
-
-    try env.populateFromTypeMap(&tm);
-
-    const sig = env.getFnSigAt(3) orelse return error.MissingSig;
+    const sig = env.getSourceFnSigByName("handler") orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -4623,23 +3746,9 @@ test "extractProofMembers returns empty when no Proof marker" {
     defer env.deinit();
 
     const source = "function handler(): Response { return null; }";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
+    try populateTestSource(&env, source);
 
-    try tm.addEntry(allocator, .{
-        .kind = .return_annotation,
-        .source_start = 20,
-        .source_end = 28,
-        .context_line = 5,
-        .signature_offset = 5,
-        .context_col = 1,
-        .name_start = 0,
-        .name_end = 0,
-    });
-
-    try env.populateFromTypeMap(&tm);
-
-    const sig = env.getFnSigAt(5) orelse return error.MissingSig;
+    const sig = env.getSourceFnSigByName("handler") orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -4696,23 +3805,9 @@ test "extractProofMembers handles inline return type Proof<T, \"name\">" {
 
     // function load(): Proof<string, "read_only"> { ... }
     const source = "function load(): Proof<string, \"read_only\"> { return \"\"; }";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
+    try populateTestSource(&env, source);
 
-    try tm.addEntry(allocator, .{
-        .kind = .return_annotation,
-        .source_start = 17,
-        .source_end = 43,
-        .context_line = 4,
-        .signature_offset = 4,
-        .context_col = 1,
-        .name_start = 0,
-        .name_end = 0,
-    });
-
-    try env.populateFromTypeMap(&tm);
-
-    const sig = env.getFnSigAt(4) orelse return error.MissingSig;
+    const sig = env.getSourceFnSigByName("load") orelse return error.MissingSig;
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
@@ -4908,23 +4003,7 @@ test "TypeEnv leading-pipe union literal" {
 
     // structural Names = | "a" | "b" | "c"
     const source = "structural Names = | \"a\" | \"b\" | \"c\";";
-    var tm = TypeMap.init(source);
-    defer tm.deinit(allocator);
-
-    const body_span = testSpan(source, "| \"a\" | \"b\" | \"c\"");
-    const name_span = testSpan(source, "Names");
-
-    try tm.addEntry(allocator, .{
-        .kind = .type_alias,
-        .source_start = body_span.start,
-        .source_end = body_span.end,
-        .context_line = 1,
-        .context_col = 1,
-        .name_start = name_span.start,
-        .name_end = name_span.end,
-    });
-
-    try env.populateFromTypeMap(&tm);
+    try populateTestSource(&env, source);
 
     const names_idx = env.getTypeAlias("Names");
     try std.testing.expect(names_idx != null);
@@ -4932,65 +4011,17 @@ test "TypeEnv leading-pipe union literal" {
     try std.testing.expectEqual(@as(usize, 3), pool.getUnionMembers(names_idx.?).len);
 }
 
-test "splitTypeParams reads an alias list, which arrives with its angle brackets" {
-    // The stripper records a function's list without the brackets and an
-    // alias's with them. Splitting on commas alone made the alias's one
-    // parameter name `<V>`, which no `t_ref` in the body matched, so every
-    // generic alias resolved to its uninstantiated body.
-    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
-
-    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("<V>", &out));
-    try std.testing.expectEqualStrings("V", out[0].name);
-    try std.testing.expectEqualStrings("", out[0].constraint_text);
-
-    try std.testing.expectEqual(@as(usize, 2), splitTypeParams("T, U", &out));
-    try std.testing.expectEqualStrings("T", out[0].name);
-    try std.testing.expectEqualStrings("U", out[1].name);
-}
-
-test "splitTypeParams keeps a constraint that carries its own commas" {
-    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
-    const count = splitTypeParams("T, U extends Record<string, number>", &out);
-    try std.testing.expectEqual(@as(usize, 2), count);
-    try std.testing.expectEqualStrings("T", out[0].name);
-    try std.testing.expectEqualStrings("U", out[1].name);
-    try std.testing.expectEqualStrings("Record<string, number>", out[1].constraint_text);
-}
-
-test "splitTypeParams reads an extends bound and stops a name at a default" {
-    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
-
-    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("T extends { id: string }", &out));
-    try std.testing.expectEqualStrings("T", out[0].name);
-    try std.testing.expectEqualStrings("{ id: string }", out[0].constraint_text);
-
-    // `extendsFoo` is a type name, not a bound.
-    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("Textends", &out));
-    try std.testing.expectEqualStrings("Textends", out[0].name);
-    try std.testing.expectEqualStrings("", out[0].constraint_text);
-
-    // Defaults are outside the admitted subset; the name still reads cleanly.
-    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("T = string", &out));
-    try std.testing.expectEqualStrings("T", out[0].name);
-}
-
-test "a generic alias instantiates through the stripper's own recording" {
-    // End-to-end over the real TypeMap rather than a hand-built one: the
-    // hand-built tests passed while the pipeline was broken, because they
-    // wrote the parameter list the way the alias path wanted to read it.
+test "a generic alias instantiates through direct syntax" {
+    // Parse the source and populate the environment through the same direct
+    // path used by consumers, including the generic declaration and use.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("zts-engine").stripper.strip(
-        allocator,
-        "structural Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n",
-        .{},
-    );
-    defer strip_result.deinit();
+    const source = "structural Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n";
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try populateTestSource(&env, source);
 
     const box = env.resolveType("Box<string>");
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(box).?);
@@ -4999,40 +4030,69 @@ test "a generic alias instantiates through the stripper's own recording" {
     try std.testing.expectEqual(pool.idx_string, fields[0].type_idx);
 }
 
-test "splitTypeParams keeps a list whose bound is a function type" {
-    // The `>` of `=>` was counted as a closing angle bracket, which drove the
-    // depth negative and emitted no entries at all - so the signature lost
-    // every type parameter and its bound went unchecked.
-    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
+test "direct generic signatures preserve nested bounds and identifier names" {
+    const allocator = std.testing.allocator;
+    const source =
+        "function comma<T, U extends Record<string, number>>(a: T, b: U): T { return a; }\n" ++
+        "function named<Textends>(a: Textends): Textends { return a; }\n" ++
+        "function arrow<T extends (s: string) => number, U>(a: T, b: U): T { return a; }\n";
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try populateTestSource(&env, source);
+    try std.testing.expectEqual(@as(usize, 3), env.direct_fn_signatures.count());
 
-    const one = splitTypeParams("T extends (s: string) => number", &out);
-    try std.testing.expectEqual(@as(usize, 1), one);
-    try std.testing.expectEqualStrings("T", out[0].name);
-    try std.testing.expectEqualStrings("(s: string) => number", out[0].constraint_text);
+    const cases = [_]struct { function_name: []const u8, parameter_names: []const []const u8 }{
+        .{ .function_name = "comma", .parameter_names = &.{ "T", "U" } },
+        .{ .function_name = "named", .parameter_names = &.{"Textends"} },
+        .{ .function_name = "arrow", .parameter_names = &.{ "T", "U" } },
+    };
+    for (cases) |case| {
+        const signature = env.getSourceFnSigByName(case.function_name) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(case.parameter_names.len, signature.type_param_count);
+        try std.testing.expectEqual(case.parameter_names.len, signature.param_count);
+        for (case.parameter_names, 0..) |name, index| {
+            try std.testing.expectEqualStrings(name, signature.type_params[index].name);
+            try std.testing.expectEqual(type_pool_mod.TypeTag.t_generic_param, pool.getTag(signature.type_params[index].idx).?);
+            try std.testing.expectEqual(signature.type_params[index].idx, signature.param_types[index]);
+        }
+        try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
+    }
 
-    const two = splitTypeParams("T extends (s: string) => number, U", &out);
-    try std.testing.expectEqual(@as(usize, 2), two);
-    try std.testing.expectEqualStrings("U", out[1].name);
+    const comma = env.getSourceFnSigByName("comma").?;
+    try std.testing.expectEqual(null_type_idx, comma.type_params[0].constraint);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_generic_app, pool.getTag(comma.type_params[1].constraint).?);
+    const record = pool.getGenericAppInfo(comma.type_params[1].constraint);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(record.base).?);
+    try std.testing.expectEqualStrings("Record", pool.getRefName(record.base));
+    try std.testing.expectEqualSlices(TypeIndex, &.{ pool.idx_string, pool.idx_number }, record.args);
+
+    const named = env.getSourceFnSigByName("named").?;
+    try std.testing.expectEqual(null_type_idx, named.type_params[0].constraint);
+
+    const arrow = env.getSourceFnSigByName("arrow").?;
+    try std.testing.expectEqual(null_type_idx, arrow.type_params[1].constraint);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_function, pool.getTag(arrow.type_params[0].constraint).?);
+    const bound = pool.getFunctionInfo(arrow.type_params[0].constraint);
+    try std.testing.expectEqual(@as(usize, 1), bound.params.len);
+    try std.testing.expectEqualStrings("s", pool.getName(bound.params[0].name_start, bound.params[0].name_len));
+    try std.testing.expectEqual(pool.idx_string, bound.params[0].type_idx);
+    try std.testing.expect(!bound.params[0].optional);
+    try std.testing.expectEqual(pool.idx_number, bound.ret);
 }
 
 test "a type-parameter list wrapped across lines still reaches its signature" {
-    // The stripper records the list after `skipBalancedAngles` has moved its
-    // line counter to the closing `>`, while the parameter and return
-    // annotations are keyed to the line the signature starts on. Keyed apart,
-    // the signature read as monomorphic and its bound was never checked.
+    // The list and annotations span several lines. They must attach to the
+    // same function owner so the signature keeps its type parameters.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("zts-engine").stripper.strip(
-        allocator,
-        "function pick<\n  T,\n  U extends { id: string }\n>(a: T, b: U): T {\n  return a;\n}\n",
-        .{},
-    );
-    defer strip_result.deinit();
+    const source = "function pick<\n  T,\n  U extends { id: string }\n>(a: T, b: U): T {\n  return a;\n}\n";
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try populateTestSource(&env, source);
 
     const sig = env.getFnSigByName("pick") orelse return error.MissingSig;
     try std.testing.expectEqual(@as(u8, 2), sig.type_param_count);
@@ -5045,20 +4105,15 @@ test "an explicit type argument carrying a comma is one argument" {
     // `make<Record<string, number>>(1)` split on every comma read as two
     // arguments and the call was refused for the wrong arity.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("zts-engine").stripper.strip(
-        allocator,
-        "function make<T>(n: number): T {\n  return hole();\n}\nconst v = make<Record<string, number>>(1);\n",
-        .{},
-    );
-    defer strip_result.deinit();
+    const source = "function make<T>(n: number): T {\n  return hole();\n}\nconst v = make<Record<string, number>>(1);\n";
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try populateTestSource(&env, source);
 
-    var it = env.call_type_args.iterator();
+    var it = env.direct_call_type_args.iterator();
     var seen: usize = 0;
     while (it.next()) |entry| {
         try std.testing.expectEqual(@as(u8, 1), entry.value_ptr.count);
@@ -5072,18 +4127,13 @@ test "readonly on an array alias survives to the resolved type" {
     // `t_ref` when the modifier is read and the modifier was dropped: a
     // declared read-only value was accepted by a mutating parameter.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("zts-engine").stripper.strip(
-        allocator,
-        "structural Items = string[];\nconst f: readonly Items = [\"a\"];\n",
-        .{},
-    );
-    defer strip_result.deinit();
+    const source = "structural Items = string[];\nconst f: readonly Items = [\"a\"];\n";
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try populateTestSource(&env, source);
 
     const resolved = env.resolveType("readonly Items");
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_array, pool.getTag(resolved).?);
@@ -5096,17 +4146,21 @@ test "functions on one line and nested functions of one name keep separate signa
     const allocator = std.testing.allocator;
     const source = "function a(x: number): number { function h(p: number): number { return p; } return h(x); }\n" ++
         "function b(): number { function h(p: number, q: number): number { return p + q; } return h(1, 2); }\n";
-    var strip_result = try engine.stripper.strip(allocator, source, .{});
-    defer strip_result.deinit();
-    var parser = try engine.parser.JsParser.init(allocator, strip_result.code);
-    defer parser.deinit();
-    _ = try parser.parse();
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "owners.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    const parser = &frontend.parser;
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    try env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = accepted.type_store,
+        .ir_view = accepted.ir_view,
+        .atoms = accepted.atoms,
+    } });
 
     // Every function node finds its own signature: `a` and its `h` share a
     // line, and the two `h` share a name.
@@ -5114,7 +4168,8 @@ test "functions on one line and nested functions of one name keep separate signa
     var seen: usize = 0;
     for (parser.nodes.tags.items, 0..) |tag, idx| {
         if (tag != .function_expr) continue;
-        const sig = env.getFnSigAt(parser.nodes.locs.items[idx].offset) orelse return error.TestUnexpectedResult;
+        const reference = env.functionTypeRef(accepted.ir_view, @intCast(idx)) orelse return error.TestUnexpectedResult;
+        const sig = env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
         counts[seen] = sig.param_count;
         seen += 1;
     }
@@ -5144,12 +4199,9 @@ const GrowthCountingAllocator = struct {
         } };
     }
 
-    fn sameShape(self: GrowthCountingAllocator, other: GrowthCountingAllocator) bool {
-        return self.alloc_calls == other.alloc_calls and
-            self.resize_calls == other.resize_calls and
-            self.remap_calls == other.remap_calls and
-            self.free_calls == other.free_calls and
-            self.live_bytes == other.live_bytes;
+    /// Successful allocations, resizes, remaps, frees, and remaining bytes.
+    fn shape(self: GrowthCountingAllocator) [5]usize {
+        return .{ self.alloc_calls, self.resize_calls, self.remap_calls, self.free_calls, self.live_bytes };
     }
 
     fn countAlloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
@@ -5200,64 +4252,11 @@ fn growthParserView(parser: *const engine.parser.JsParser) IrView {
     return IrView.fromIRStore(&parser.nodes, &parser.constants);
 }
 
-fn growthEqualRuntime(
-    left: *const engine.parser.JsParser,
-    left_root: NodeIndex,
-    left_atoms: *AtomTable,
-    right: *const engine.parser.JsParser,
-    right_root: NodeIndex,
-    right_atoms: *AtomTable,
-) bool {
-    if (left_root != right_root) return false;
-    if (!std.mem.eql(engine.parser.NodeTag, left.nodes.tags.items, right.nodes.tags.items)) return false;
-    if (left.nodes.locs.items.len != right.nodes.locs.items.len) return false;
-    for (left.nodes.locs.items, right.nodes.locs.items) |a, b| if (!std.meta.eql(a, b)) return false;
-    if (left.nodes.data.items.len != right.nodes.data.items.len) return false;
-    for (left.nodes.data.items, right.nodes.data.items) |a, b| {
-        if (a.a != b.a or a.b != b.b) return false;
-    }
-    if (!std.mem.eql(u16, left.nodes.binding_name_atoms.items, right.nodes.binding_name_atoms.items)) return false;
-    if (!std.mem.eql(u32, left.nodes.extra.items, right.nodes.extra.items)) return false;
-    if (!std.mem.eql(NodeIndex, left.nodes.index_lists.items, right.nodes.index_lists.items)) return false;
-    if (left.constants.strings.items.len != right.constants.strings.items.len) return false;
-    for (left.constants.strings.items, right.constants.strings.items) |a, b| {
-        if (!std.mem.eql(u8, a, b)) return false;
-    }
-    if (left.constants.floats.items.len != right.constants.floats.items.len) return false;
-    for (left.constants.floats.items, right.constants.floats.items) |a, b| {
-        if (@as(u64, @bitCast(a)) != @as(u64, @bitCast(b))) return false;
-    }
-    if (left.scopes.current_scope != right.scopes.current_scope or
-        left.scopes.next_scope_id != right.scopes.next_scope_id or
-        left.scopes.scopes.items.len != right.scopes.scopes.items.len) return false;
-    for (left.scopes.scopes.items, right.scopes.scopes.items) |a, b| {
-        if (a.id != b.id or a.parent != b.parent or a.kind != b.kind or
-            a.enclosing_function != b.enclosing_function or
-            a.max_local_count != b.max_local_count or
-            a.current_local_slot != b.current_local_slot or
-            a.bindings.items.len != b.bindings.items.len or
-            a.upvalues.items.len != b.upvalues.items.len) return false;
-        for (a.bindings.items, b.bindings.items) |ab, bb| {
-            if (!std.mem.eql(u8, ab.name, bb.name) or
-                ab.name_atom != bb.name_atom or ab.slot != bb.slot or
-                ab.kind != bb.kind or ab.is_const != bb.is_const or
-                ab.is_captured != bb.is_captured) return false;
-        }
-        for (a.upvalues.items, b.upvalues.items) |au, bu| {
-            if (au.source_scope_id != bu.source_scope_id or au.source_slot != bu.source_slot or
-                au.slot != bu.slot or !std.meta.eql(au.capture, bu.capture) or
-                !std.mem.eql(u8, au.name, bu.name)) return false;
-        }
-    }
-    if (left_atoms.count() != right_atoms.count() or left_atoms.next_id != right_atoms.next_id) return false;
-    var raw = Atom.FIRST_DYNAMIC;
-    while (raw < left_atoms.next_id) : (raw += 1) {
-        const atom: Atom = @enumFromInt(raw);
-        const left_name = left_atoms.getName(atom) orelse return false;
-        const right_name = right_atoms.getName(atom) orelse return false;
-        if (!std.mem.eql(u8, left_name, right_name)) return false;
-    }
-    return true;
+fn growthExpectRuntime(parser: *const engine.parser.JsParser, root: NodeIndex) !void {
+    try std.testing.expect(!parser.hasErrors());
+    const view = growthParserView(parser);
+    try std.testing.expectEqual(engine.parser.NodeTag.program, view.getTag(root).?);
+    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
 }
 
 fn growthExpectExactPool(left: *const TypePool, right: *const TypePool) !void {
@@ -5380,17 +4379,9 @@ const GrowthTrace = struct {
     }
 };
 
-fn growthIsSignatureEvent(kind: TypeMapKind) bool {
-    return switch (kind) {
-        .param_annotation, .return_annotation, .type_guard_annotation => true,
-        // exhaustive: other TypeMap kinds do not access the temporary signature accumulator.
-        else => false,
-    };
-}
-
-fn growthBuildLegacyTrace(
+fn growthBuildExpectedTrace(
     allocator: std.mem.Allocator,
-    map: *const TypeMap,
+    event_keys: []const u32,
     events: []GrowthTraceEvent,
     keys: []u32,
 ) !usize {
@@ -5398,15 +4389,17 @@ fn growthBuildLegacyTrace(
     defer accumulator.deinit(allocator);
     var event_count: usize = 0;
     var key_count: usize = 0;
-    for (map.entries.items) |entry| {
-        if (!growthIsSignatureEvent(entry.kind)) continue;
+    for (event_keys) |key| {
         if (event_count >= events.len) return error.TestUnexpectedResult;
-        const key = entry.signature_offset orelse return error.TestUnexpectedResult;
+        const before_capacity = accumulator.capacity();
+        const before_count = accumulator.count();
         const gop = try accumulator.getOrPut(allocator, key);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         events[event_count] = .{
             .key = key,
             .found_existing = gop.found_existing,
+            .before_capacity = before_capacity,
+            .before_count = before_count,
             .after_capacity = accumulator.capacity(),
             .after_count = accumulator.count(),
             .keys_start = key_count,
@@ -5424,59 +4417,61 @@ fn growthBuildLegacyTrace(
 }
 
 fn growthExpectTraceEqual(
-    legacy_events: []const GrowthTraceEvent,
-    legacy_keys: []const u32,
+    expected_events: []const GrowthTraceEvent,
+    expected_keys: []const u32,
     direct: *const GrowthTrace,
 ) ![2]usize {
     try std.testing.expect(!direct.invalid);
     try std.testing.expect(!direct.pending);
-    try std.testing.expectEqual(legacy_events.len, direct.event_count);
+    try std.testing.expectEqual(expected_events.len, direct.event_count);
     var boundaries: [2]usize = undefined;
     var boundary_count: usize = 0;
     var previous_capacity: usize = 0;
-    for (legacy_events, direct.events[0..direct.event_count], 0..) |legacy, actual, index| {
-        try std.testing.expectEqual(legacy.key, actual.key);
-        try std.testing.expectEqual(legacy.found_existing, actual.found_existing);
-        try std.testing.expectEqual(legacy.after_capacity, actual.after_capacity);
-        try std.testing.expectEqual(legacy.after_count, actual.after_count);
-        try std.testing.expectEqual(legacy.keys_count, actual.keys_count);
+    for (expected_events, direct.events[0..direct.event_count], 0..) |expected, actual, index| {
+        try std.testing.expectEqual(expected.key, actual.key);
+        try std.testing.expectEqual(expected.found_existing, actual.found_existing);
+        try std.testing.expectEqual(expected.before_capacity, actual.before_capacity);
+        try std.testing.expectEqual(expected.before_count, actual.before_count);
+        try std.testing.expectEqual(expected.after_capacity, actual.after_capacity);
+        try std.testing.expectEqual(expected.after_count, actual.after_count);
+        try std.testing.expectEqual(expected.after_count, actual.accumulator_count);
+        try std.testing.expectEqual(expected.keys_count, actual.keys_count);
         try std.testing.expectEqualSlices(
             u32,
-            legacy_keys[legacy.keys_start..][0..legacy.keys_count],
+            expected_keys[expected.keys_start..][0..expected.keys_count],
             direct.keys[actual.keys_start..][0..actual.keys_count],
         );
-        if (previous_capacity != 0 and legacy.after_capacity > previous_capacity) {
-            try std.testing.expect(legacy.found_existing);
+        if (previous_capacity != 0 and expected.after_capacity > previous_capacity) {
+            try std.testing.expect(expected.found_existing);
             if (boundary_count >= boundaries.len) return error.TestUnexpectedResult;
             boundaries[boundary_count] = index;
             boundary_count += 1;
         }
-        previous_capacity = legacy.after_capacity;
+        previous_capacity = expected.after_capacity;
     }
     try std.testing.expectEqual(boundaries.len, boundary_count);
     return boundaries;
 }
 
 fn growthExpectFinalSignatures(
-    legacy: *const TypeEnv,
+    expected: *const TypeEnv,
     direct: *const TypeEnv,
-    legacy_view: IrView,
     direct_view: IrView,
     store: *const TypeSyntax.Store,
 ) !void {
-    try std.testing.expectEqual(legacy.fn_signatures.count(), direct.direct_fn_signatures.count());
+    try std.testing.expectEqual(expected.direct_fn_signatures.count(), direct.direct_fn_signatures.count());
     for (store.function_signatures.items) |record| {
-        const key = direct_view.signatureOffset(record.owner) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(key, legacy_view.signatureOffset(record.owner).?);
+        const expected_ref = expected.functionTypeRef(direct_view, record.owner) orelse
+            return error.TestUnexpectedResult;
         const direct_ref = direct.functionTypeRef(direct_view, record.owner) orelse
             return error.TestUnexpectedResult;
         try growthExpectExactSignature(
-            legacy.getFnSigAt(key) orelse return error.TestUnexpectedResult,
+            expected.getFunctionSignature(expected_ref) orelse return error.TestUnexpectedResult,
             direct.getFunctionSignature(direct_ref) orelse return error.TestUnexpectedResult,
         );
     }
-    try std.testing.expectEqual(legacy.fn_sigs_by_name.count(), direct.fn_sigs_by_name.count());
-    var fallback_signatures = legacy.fn_sigs_by_name.iterator();
+    try std.testing.expectEqual(expected.fn_sigs_by_name.count(), direct.fn_sigs_by_name.count());
+    var fallback_signatures = expected.fn_sigs_by_name.iterator();
     while (fallback_signatures.next()) |entry| {
         try growthExpectExactSignature(
             entry.value_ptr.*,
@@ -5484,10 +4479,10 @@ fn growthExpectFinalSignatures(
         );
     }
     try std.testing.expectEqual(
-        legacy.source_fn_sigs_by_name.count(),
+        expected.source_fn_sigs_by_name.count(),
         direct.source_fn_sigs_by_name.count(),
     );
-    var source_signatures = legacy.source_fn_sigs_by_name.iterator();
+    var source_signatures = expected.source_fn_sigs_by_name.iterator();
     while (source_signatures.next()) |entry| {
         try growthExpectExactSignature(
             entry.value_ptr.*,
@@ -5544,72 +4539,132 @@ const growth_source_reordered =
 
 const growth_source_same_line = "function useNumber(value: number): number {   inner(value);   function inner(item: number): number { return item; }   return value; } function padding0(value: number): number { return value; } function padding1(value: number): number { return value; } function padding2(value: number): number { return value; } function padding3(value: number): number { return value; } function padding4(value: number): number { return value; } function padding5(value: number): number { return value; } function padding6(value: number): number { return value; } function padding7(value: number): number { return value; } function useText(value: string): string {   inner(value, \"\");   function inner(item: string, suffix: string): string { return item; }   return value; } export function handler(req: Request): Response {   return Response.json({ number: useNumber(1), text: useText(\"x\") }); } ";
 
-fn growthExpectTraceCase(source: []const u8) ![2]usize {
-    const allocator = std.testing.allocator;
-    var prepared = try engine.source_frontend.PreparedSource.init(
-        allocator,
-        source,
-        "<native-growth>.ts",
-        .{},
-    );
-    defer prepared.deinit();
-    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+const GrowthCase = enum { plain, reordered, same_line };
 
-    var legacy_count = GrowthCountingAllocator.init(allocator);
+fn growthSource(case: GrowthCase) []const u8 {
+    return switch (case) {
+        .plain => growth_source_plain,
+        .reordered => growth_source_reordered,
+        .same_line => growth_source_same_line,
+    };
+}
+
+// Recorded annotation events, including repeated events for the same signature.
+const growth_keys_plain = [_]u32{
+    18,  18,  76,  76,  151, 151, 210, 210, 269, 269, 328, 328, 387, 387,
+    446, 446, 505, 505, 564, 564, 622, 622, 684, 684, 684, 781, 781,
+};
+const growth_keys_reordered = [_]u32{
+    16,  16,  78,  78,  78,  169, 169, 228, 228, 287, 287, 346, 346, 405,
+    405, 464, 464, 523, 523, 582, 582, 642, 642, 700, 700, 781, 781,
+};
+const growth_keys_same_line = [_]u32{
+    18,  18,  76,  76,  151, 151, 210, 210, 269, 269, 328, 328, 387, 387,
+    446, 446, 505, 505, 564, 564, 622, 622, 684, 684, 684, 781, 781,
+};
+
+fn growthEventKeys(case: GrowthCase) []const u32 {
+    return switch (case) {
+        .plain => &growth_keys_plain,
+        .reordered => &growth_keys_reordered,
+        .same_line => &growth_keys_same_line,
+    };
+}
+
+fn growthSignature(params: []const TypeIndex, return_type: TypeIndex) FunctionSig {
+    var signature: FunctionSig = .{ .param_count = @intCast(params.len), .return_type = return_type };
+    @memcpy(signature.param_types[0..params.len], params);
+    return signature;
+}
+
+fn growthExpectTraceSignatures(
+    env: *const TypeEnv,
+    parser: *const engine.parser.JsParser,
+    atoms: *AtomTable,
+    case: GrowthCase,
+) !void {
+    const view = growthParserView(parser);
+    const names = [_][]const u8{
+        if (case == .reordered) "useText" else "useNumber", "inner",
+        "padding0",                                         "padding1",
+        "padding2",                                         "padding3",
+        "padding4",                                         "padding5",
+        "padding6",                                         "padding7",
+        if (case == .reordered) "useNumber" else "useText", "inner",
+        "handler",
+    };
+    try std.testing.expectEqual(@as(usize, 13), parser.type_store.function_signatures.items.len);
+    try std.testing.expectEqual(@as(usize, 13), env.direct_fn_signatures.count());
+    try std.testing.expectEqual(@as(usize, 12), env.fn_sigs_by_name.count());
+    try std.testing.expectEqual(@as(usize, 12), env.source_fn_sigs_by_name.count());
+    const event_keys = growthEventKeys(case);
+    var event_index: usize = 0;
+    for (parser.type_store.function_signatures.items, names, 0..) |record, name, index| {
+        try std.testing.expectEqual(event_keys[event_index], view.signatureOffset(record.owner).?);
+        try std.testing.expectEqual(engine.parser.NodeTag.function_expr, view.getTag(record.owner).?);
+        const function = view.getFunction(record.owner) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqualStrings(name, TypeEnv.runtimeAtomName(atoms, function.name_atom).?);
+        const reference = env.functionTypeRef(view, record.owner) orelse return error.TestUnexpectedResult;
+        const actual = env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
+        const text_signature = if (case == .reordered) index < 2 else index == 10 or index == 11;
+        const param_count: usize = if (text_signature and std.mem.eql(u8, name, "inner")) 2 else 1;
+        var parameter_type = if (text_signature) env.pool.idx_string else env.pool.idx_number;
+        var return_type = parameter_type;
+        if (index == 12) {
+            try std.testing.expectEqual(@as(u8, 1), actual.param_count);
+            parameter_type = actual.param_types[0];
+            return_type = actual.return_type;
+            try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, env.pool.getTag(parameter_type).?);
+            try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, env.pool.getTag(return_type).?);
+            try std.testing.expectEqualStrings("Request", env.pool.getRefName(parameter_type));
+            try std.testing.expectEqualStrings("Response", env.pool.getRefName(return_type));
+        }
+        const params = [_]TypeIndex{ parameter_type, parameter_type };
+        const expected = growthSignature(params[0..param_count], return_type);
+        try growthExpectExactSignature(expected, actual);
+        if (!std.mem.eql(u8, name, "inner")) {
+            try growthExpectExactSignature(expected, env.getFnSigByName(name).?);
+            try growthExpectExactSignature(expected, env.source_fn_sigs_by_name.get(name).?);
+        }
+        event_index += param_count + 1;
+    }
+    try std.testing.expectEqual(event_keys.len, event_index);
+    const inner = env.getFnSigByName("inner") orelse return error.TestUnexpectedResult;
+    try growthExpectExactSignature(growthSignature(&.{env.pool.idx_number}, env.pool.idx_number), inner);
+    try growthExpectExactSignature(inner, env.source_fn_sigs_by_name.get("inner").?);
+}
+
+fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
+    const allocator = std.testing.allocator;
     var direct_count = GrowthCountingAllocator.init(allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy_parser = try engine.parser.JsParser.init(
-        legacy_count.allocator(),
-        prepared.parserInput(),
-    );
-    defer legacy_parser.deinit();
-    legacy_parser.setAtomTable(&legacy_atoms);
     var direct_parser = try engine.parser.JsParser.initTyped(
         direct_count.allocator(),
         allocator,
-        source,
+        growthSource(case),
     );
     defer direct_parser.deinit();
     direct_parser.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy_parser.parse();
     const direct_root = try direct_parser.parse();
-    try std.testing.expect(growthEqualRuntime(
-        &legacy_parser,
-        legacy_root,
-        &legacy_atoms,
-        &direct_parser,
-        direct_root,
-        &direct_atoms,
-    ));
-    try std.testing.expect(legacy_count.sameShape(direct_count));
-    const legacy_view = growthParserView(&legacy_parser);
+    try growthExpectRuntime(&direct_parser, direct_root);
+    const allocation_shape: [5]usize = switch (case) {
+        .plain, .same_line => .{ 55, 0, 0, 11, 15965 },
+        .reordered => .{ 55, 0, 0, 11, 15949 },
+    };
+    try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
 
-    var legacy_pool = TypePool.init(allocator);
-    defer legacy_pool.deinit(allocator);
     var direct_pool = TypePool.init(allocator);
     defer direct_pool.deinit(allocator);
-    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(allocator, &direct_pool);
     defer direct_env.deinit();
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct_parser.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try growthExpectExactPool(&legacy_pool, &direct_pool);
-    try growthExpectFinalSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct_parser.type_store,
-    );
+    try growthExpectTraceSignatures(&direct_env, &direct_parser, &direct_atoms, case);
 
     const max_events = 64;
     const max_keys = max_events * 32;
@@ -5617,10 +4672,10 @@ fn growthExpectTraceCase(source: []const u8) ![2]usize {
     defer allocator.free(direct_events);
     const direct_keys = try allocator.alloc(u32, max_keys);
     defer allocator.free(direct_keys);
-    const legacy_events = try allocator.alloc(GrowthTraceEvent, max_events);
-    defer allocator.free(legacy_events);
-    const legacy_keys = try allocator.alloc(u32, max_keys);
-    defer allocator.free(legacy_keys);
+    const expected_events = try allocator.alloc(GrowthTraceEvent, max_events);
+    defer allocator.free(expected_events);
+    const expected_keys = try allocator.alloc(u32, max_keys);
+    defer allocator.free(expected_keys);
     var trace: GrowthTrace = .{
         .events = direct_events,
         .keys = direct_keys,
@@ -5636,45 +4691,27 @@ fn growthExpectTraceCase(source: []const u8) ![2]usize {
         .atoms = &direct_atoms,
     } }, trace.observer());
     try growthExpectExactPool(&direct_pool, &trace_pool);
-    try growthExpectFinalSignatures(
-        &legacy_env,
-        &trace_env,
-        legacy_view,
-        direct_view,
-        &direct_parser.type_store,
-    );
-
-    var parameter_count: usize = 0;
+    try growthExpectFinalSignatures(&direct_env, &trace_env, direct_view, &direct_parser.type_store);
+    try std.testing.expectEqual(@as(usize, 14), direct_parser.type_store.parameter_annotations.items.len);
     var return_count: usize = 0;
-    for (prepared.typeMap().?.entries.items) |entry| switch (entry.kind) {
-        .param_annotation => parameter_count += 1,
-        .return_annotation => return_count += 1,
-        // exhaustive: this source contains no guards; other kinds do not contribute header events.
-        else => {},
-    };
-    try std.testing.expectEqual(@as(usize, 14), parameter_count);
+    for (direct_parser.type_store.function_signatures.items) |signature| {
+        if (signature.return_syntax != null) return_count += 1;
+    }
     try std.testing.expectEqual(@as(usize, 13), return_count);
-    const legacy_event_count = try growthBuildLegacyTrace(
-        allocator,
-        prepared.typeMap().?,
-        legacy_events,
-        legacy_keys,
-    );
-    try std.testing.expectEqual(parameter_count + return_count, legacy_event_count);
-    return growthExpectTraceEqual(
-        legacy_events[0..legacy_event_count],
-        legacy_keys,
-        &trace,
-    );
+    const event_keys = growthEventKeys(case);
+    try std.testing.expectEqual(@as(usize, 27), event_keys.len);
+    const expected_event_count = try growthBuildExpectedTrace(allocator, event_keys, expected_events, expected_keys);
+    try std.testing.expectEqual(@as(usize, 27), expected_event_count);
+    return growthExpectTraceEqual(expected_events[0..expected_event_count], expected_keys, &trace);
 }
 
-test "direct signature replay matches legacy capacity and bucket order at two growth boundaries" {
-    const plain = try growthExpectTraceCase(growth_source_plain);
-    const reordered = try growthExpectTraceCase(growth_source_reordered);
-    const same_line = try growthExpectTraceCase(growth_source_same_line);
-    try std.testing.expect(plain[0] != plain[1]);
-    try std.testing.expect(reordered[0] != reordered[1]);
-    try std.testing.expect(same_line[0] != same_line[1]);
+test "direct signature replay preserves capacity and bucket order at two growth boundaries" {
+    const plain = try growthExpectTraceCase(.plain);
+    const reordered = try growthExpectTraceCase(.reordered);
+    const same_line = try growthExpectTraceCase(.same_line);
+    try std.testing.expectEqual([2]usize{ 11, 23 }, plain);
+    try std.testing.expectEqual([2]usize{ 12, 24 }, reordered);
+    try std.testing.expectEqual([2]usize{ 11, 23 }, same_line);
 }
 
 test "direct signature replay retains exact nested generic arrow and same-line owners" {
@@ -5683,55 +4720,28 @@ test "direct signature replay retains exact nested generic arrow and same-line o
         "function same(value: number): number { return value; } return value; } " ++
         "function same(value: string): string { return value; } " ++
         "const arrow = <U extends string>(value: U): U => value;";
-    var prepared = try engine.source_frontend.PreparedSource.init(allocator, source, "<growth-owners>.ts", .{});
-    defer prepared.deinit();
-    var legacy_count = GrowthCountingAllocator.init(allocator);
     var direct_count = GrowthCountingAllocator.init(allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy_parser = try engine.parser.JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy_parser.deinit();
-    legacy_parser.setAtomTable(&legacy_atoms);
     var direct_parser = try engine.parser.JsParser.initTyped(direct_count.allocator(), allocator, source);
     defer direct_parser.deinit();
     direct_parser.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy_parser.parse();
     const direct_root = try direct_parser.parse();
-    try std.testing.expect(growthEqualRuntime(
-        &legacy_parser,
-        legacy_root,
-        &legacy_atoms,
-        &direct_parser,
-        direct_root,
-        &direct_atoms,
-    ));
-    try std.testing.expect(legacy_count.sameShape(direct_count));
-    const legacy_view = growthParserView(&legacy_parser);
+    try growthExpectRuntime(&direct_parser, direct_root);
+    try std.testing.expectEqual([5]usize{ 20, 0, 0, 2, 4543 }, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
-    var legacy_pool = TypePool.init(allocator);
-    defer legacy_pool.deinit(allocator);
     var direct_pool = TypePool.init(allocator);
     defer direct_pool.deinit(allocator);
-    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(allocator, &direct_pool);
     defer direct_env.deinit();
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct_parser.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try growthExpectExactPool(&legacy_pool, &direct_pool);
-    try growthExpectFinalSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct_parser.type_store,
-    );
+    try std.testing.expectEqual(@as(usize, 4), direct_env.direct_fn_signatures.count());
+    try std.testing.expectEqual(@as(usize, 2), direct_env.fn_sigs_by_name.count());
+    try std.testing.expectEqual(@as(usize, 2), direct_env.source_fn_sigs_by_name.count());
     try std.testing.expectEqual(@as(usize, 4), direct_parser.type_store.function_signatures.items.len);
     var owners: [4]NodeIndex = undefined;
     var repeated_same: [2]NodeIndex = undefined;
@@ -5739,8 +4749,15 @@ test "direct signature replay retains exact nested generic arrow and same-line o
     var arrow_count: usize = 0;
     for (direct_parser.type_store.function_signatures.items, 0..) |record, index| {
         owners[index] = record.owner;
-        const key = direct_view.signatureOffset(record.owner) orelse return error.TestUnexpectedResult;
-        try std.testing.expect(legacy_env.getFnSigAt(key) != null);
+        const expected_offsets = [_]u32{ 32, 61, 132, 206 };
+        try std.testing.expectEqual(expected_offsets[index], direct_view.signatureOffset(record.owner).?);
+        const reference = direct_env.functionTypeRef(direct_view, record.owner) orelse return error.TestUnexpectedResult;
+        const signature = direct_env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u8, 1), signature.param_count);
+        if (index == 1 or index == 2) {
+            const expected_type = if (index == 1) direct_pool.idx_number else direct_pool.idx_string;
+            try growthExpectExactSignature(growthSignature(&.{expected_type}, expected_type), signature);
+        }
         const function = direct_view.getFunction(record.owner) orelse return error.TestUnexpectedResult;
         const name = TypeEnv.runtimeAtomName(&direct_atoms, function.name_atom);
         if (name != null and std.mem.eql(u8, name.?, "same")) {
@@ -5780,83 +4797,103 @@ test "direct signature replay retains exact nested generic arrow and same-line o
         const signature = direct_env.getFunctionSignature(reference) orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
+        try std.testing.expectEqual(@as(?u8, null), signature.required_param_count);
+        try std.testing.expectEqual(@as(?u8, null), signature.max_arg_count);
+        try std.testing.expect(signature.type_predicate == null);
+        const is_outer = owner == owners[0];
+        const expected_name = if (is_outer) "T" else "U";
+        try std.testing.expectEqualStrings(expected_name, signature.type_params[0].name);
+        try std.testing.expectEqualStrings(expected_name, direct_pool.getRefName(signature.type_params[0].idx));
+        try std.testing.expectEqual(type_pool_mod.TypeTag.t_generic_param, direct_pool.getTag(signature.type_params[0].idx).?);
+        try std.testing.expectEqual(
+            if (is_outer) direct_pool.idx_number else direct_pool.idx_string,
+            signature.type_params[0].constraint,
+        );
         try std.testing.expect(signature.type_params[0].idx == signature.param_types[0]);
         try std.testing.expect(signature.type_params[0].idx == signature.return_type);
     }
+    const same = direct_env.getFnSigByName("same") orelse return error.TestUnexpectedResult;
+    try growthExpectExactSignature(growthSignature(&.{direct_pool.idx_string}, direct_pool.idx_string), same);
+    try growthExpectExactSignature(same, direct_env.source_fn_sigs_by_name.get("same").?);
+    const outer_reference = direct_env.functionTypeRef(direct_view, owners[0]).?;
+    try growthExpectExactSignature(direct_env.getFunctionSignature(outer_reference).?, direct_env.getFnSigByName("outer").?);
+    try growthExpectExactSignature(direct_env.getFnSigByName("outer").?, direct_env.source_fn_sigs_by_name.get("outer").?);
 }
 
+const GrowthSignatureCase = enum { parameter, return_value, guard, arrow, generic_only };
+
 fn growthExpectSignatureKind(
+    case: GrowthSignatureCase,
     source: []const u8,
     expected_events: usize,
     expected_signatures: usize,
     expected_names: usize,
 ) !void {
     const allocator = std.testing.allocator;
-    var prepared = try engine.source_frontend.PreparedSource.init(allocator, source, "<growth-kind>.ts", .{});
-    defer prepared.deinit();
-    var legacy_count = GrowthCountingAllocator.init(allocator);
     var direct_count = GrowthCountingAllocator.init(allocator);
-    var legacy_atoms = AtomTable.init(legacy_count.allocator());
-    defer legacy_atoms.deinit();
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var legacy_parser = try engine.parser.JsParser.init(legacy_count.allocator(), prepared.parserInput());
-    defer legacy_parser.deinit();
-    legacy_parser.setAtomTable(&legacy_atoms);
     var direct_parser = try engine.parser.JsParser.initTyped(direct_count.allocator(), allocator, source);
     defer direct_parser.deinit();
     direct_parser.setAtomTable(&direct_atoms);
-    const legacy_root = try legacy_parser.parse();
     const direct_root = try direct_parser.parse();
-    try std.testing.expect(growthEqualRuntime(
-        &legacy_parser,
-        legacy_root,
-        &legacy_atoms,
-        &direct_parser,
-        direct_root,
-        &direct_atoms,
-    ));
-    try std.testing.expect(legacy_count.sameShape(direct_count));
-    const legacy_view = growthParserView(&legacy_parser);
+    try growthExpectRuntime(&direct_parser, direct_root);
+    const allocation_shape: [5]usize = switch (case) {
+        .parameter, .arrow => .{ 13, 0, 0, 1, 3124 },
+        .return_value => .{ 12, 0, 0, 1, 2913 },
+        .guard => .{ 13, 0, 0, 1, 3125 },
+        .generic_only => .{ 13, 0, 0, 1, 3128 },
+    };
+    try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
-    var legacy_pool = TypePool.init(allocator);
-    defer legacy_pool.deinit(allocator);
     var direct_pool = TypePool.init(allocator);
     defer direct_pool.deinit(allocator);
-    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
-    defer legacy_env.deinit();
     var direct_env = TypeEnv.init(allocator, &direct_pool);
     defer direct_env.deinit();
-    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
     try direct_env.populateSourceTypes(.{ .direct = .{
         .store = &direct_parser.type_store,
         .ir_view = direct_view,
         .atoms = &direct_atoms,
     } });
-    try growthExpectExactPool(&legacy_pool, &direct_pool);
-    try growthExpectFinalSignatures(
-        &legacy_env,
-        &direct_env,
-        legacy_view,
-        direct_view,
-        &direct_parser.type_store,
-    );
     try std.testing.expectEqual(expected_events, direct_env.direct_accumulator_events);
     try std.testing.expectEqual(expected_signatures, direct_env.direct_fn_signatures.count());
     try std.testing.expectEqual(expected_names, direct_env.fn_sigs_by_name.count());
+    try std.testing.expectEqual(expected_names, direct_env.source_fn_sigs_by_name.count());
+    try std.testing.expectEqual(expected_signatures, direct_parser.type_store.function_signatures.items.len);
+    if (case == .generic_only) {
+        try std.testing.expectEqual(@as(usize, 1), direct_parser.type_store.generic_owners.items.len);
+        return;
+    }
+    var expected = switch (case) {
+        .parameter => growthSignature(&.{direct_pool.idx_string}, null_type_idx),
+        .return_value => growthSignature(&.{}, direct_pool.idx_string),
+        .guard => growthSignature(&.{direct_pool.idx_unknown}, direct_pool.idx_boolean),
+        .arrow => growthSignature(&.{direct_pool.idx_string}, direct_pool.idx_string),
+        .generic_only => unreachable,
+    };
+    if (case == .guard) expected.type_predicate = .{ .param_index = 0, .narrowed = direct_pool.idx_string };
+    const owner = direct_parser.type_store.function_signatures.items[0].owner;
+    const reference = direct_env.functionTypeRef(direct_view, owner) orelse return error.TestUnexpectedResult;
+    try growthExpectExactSignature(expected, direct_env.getFunctionSignature(reference).?);
+    if (expected_names != 0) {
+        const name = if (case == .guard) "guard" else "value";
+        try growthExpectExactSignature(expected, direct_env.getFnSigByName(name).?);
+        try growthExpectExactSignature(expected, direct_env.source_fn_sigs_by_name.get(name).?);
+    }
 }
 
 test "direct signature replay covers parameter return guard generic-only and atom-zero cases" {
-    try growthExpectSignatureKind("const value = (item: string) => item;", 1, 1, 0);
-    try growthExpectSignatureKind("function value(): string { return \"x\"; }", 1, 1, 1);
+    try growthExpectSignatureKind(.parameter, "const value = (item: string) => item;", 1, 1, 0);
+    try growthExpectSignatureKind(.return_value, "function value(): string { return \"x\"; }", 1, 1, 1);
     try growthExpectSignatureKind(
+        .guard,
         "function guard(value: unknown): value is string { return true; }",
         2,
         1,
         1,
     );
-    try growthExpectSignatureKind("const value = (item: string): string => item;", 2, 1, 0);
-    try growthExpectSignatureKind("function identity<T>(value) { return value; }", 0, 0, 0);
+    try growthExpectSignatureKind(.arrow, "const value = (item: string): string => item;", 2, 1, 0);
+    try growthExpectSignatureKind(.generic_only, "function identity<T>(value) { return value; }", 0, 0, 0);
 
     const allocator = std.testing.allocator;
     const source = "function named(value: string): string { return value; } " ++
@@ -6255,28 +5292,27 @@ const GrowthFallbackObserver = struct {
 };
 
 test "direct signature replay preserves existing entries after failed growth" {
-    const boundaries = try growthExpectTraceCase(growth_source_plain);
+    const boundaries = try growthExpectTraceCase(.plain);
     for (boundaries) |target_event| {
         const allocator = std.testing.allocator;
-        var prepared = try engine.source_frontend.PreparedSource.init(
-            allocator,
-            growth_source_plain,
-            "<failed-growth>.ts",
-            .{},
-        );
-        defer prepared.deinit();
         var atoms = AtomTable.init(allocator);
         defer atoms.deinit();
         var parser = try engine.parser.JsParser.initTyped(allocator, allocator, growth_source_plain);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
-        _ = try parser.parse();
+        const root = try parser.parse();
+        try growthExpectRuntime(&parser, root);
         const view = growthParserView(&parser);
-        var legacy_pool = TypePool.init(allocator);
-        defer legacy_pool.deinit(allocator);
-        var legacy_env = TypeEnv.init(allocator, &legacy_pool);
-        defer legacy_env.deinit();
-        try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+        var expected_pool = TypePool.init(allocator);
+        defer expected_pool.deinit(allocator);
+        var expected_env = TypeEnv.init(allocator, &expected_pool);
+        defer expected_env.deinit();
+        try expected_env.populateSourceTypes(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = view,
+            .atoms = &atoms,
+        } });
+        try growthExpectTraceSignatures(&expected_env, &parser, &atoms, .plain);
 
         var failing = std.testing.FailingAllocator.init(allocator, .{});
         const injected = failing.allocator();
@@ -6305,11 +5341,10 @@ test "direct signature replay preserves existing entries after failed growth" {
         try std.testing.expect(failing.has_induced_failure);
         try direct_env.ensureHealthy();
         try direct_pool.ensureHealthy();
-        try growthExpectExactPool(&legacy_pool, &direct_pool);
+        try growthExpectExactPool(&expected_pool, &direct_pool);
         try growthExpectFinalSignatures(
-            &legacy_env,
+            &expected_env,
             &direct_env,
-            view,
             view,
             &parser.type_store,
         );

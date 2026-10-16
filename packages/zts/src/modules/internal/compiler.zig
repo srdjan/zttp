@@ -149,6 +149,10 @@ test "compileAll returns a clean error instead of panicking when parser-init all
 
 test "selected graph profiles preserve reads bytecode and complete atoms" {
     const allocator = std.testing.allocator;
+    const BytecodeExpectation = struct {
+        len: usize,
+        sha256: []const u8,
+    };
     const Case = struct {
         entry: []const u8,
         dependency: ?[]const u8 = null,
@@ -156,17 +160,31 @@ test "selected graph profiles preserve reads bytecode and complete atoms" {
         dependency_profile: module_graph.Module.SourceProfile = .direct,
         reads: usize,
         parse_error: ?anyerror = null,
+        bytecode: []const BytecodeExpectation = &.{},
+        atom_names: []const []const u8 = &.{},
     };
     const cases = [_]Case{
-        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished\n", .dependency = "export const value = 1;\n", .entry_profile = .raw, .reads = 1 },
-        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished\n", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1 },
-        .{ .entry = "import { value } from \"./dep.ts\"; /* closed */\n", .dependency = "export const value = 1; /* closed */\n", .entry_profile = .direct, .reads = 1 },
-        .{ .entry = "/*\n", .entry_profile = .raw, .reads = 0 },
+        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished\n", .dependency = "export const value = 1;\n", .entry_profile = .raw, .reads = 1, .bytecode = &.{
+            .{ .len = 51, .sha256 = "aa6352585d0b7732aa25aefee8d07a573c4c62c9aa0ed3ebdc29377fc89e27c6" },
+            .{ .len = 53, .sha256 = "a18994befbbfb3e5240251fef74d30491434ffdb9d3991b9299412834ae84636" },
+        }, .atom_names = &.{"existing_prefix"} },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished\n", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .bytecode = &.{
+            .{ .len = 51, .sha256 = "aa6352585d0b7732aa25aefee8d07a573c4c62c9aa0ed3ebdc29377fc89e27c6" },
+            .{ .len = 84, .sha256 = "66b7fd09c12f1f05040a1c27d93f5a1461020411d67a1802670ccbfe19338b04" },
+        }, .atom_names = &.{ "existing_prefix", "result" } },
+        .{ .entry = "import { value } from \"./dep.ts\"; /* closed */\n", .dependency = "export const value = 1; /* closed */\n", .entry_profile = .direct, .reads = 1, .bytecode = &.{
+            .{ .len = 51, .sha256 = "aa6352585d0b7732aa25aefee8d07a573c4c62c9aa0ed3ebdc29377fc89e27c6" },
+            .{ .len = 53, .sha256 = "a18994befbbfb3e5240251fef74d30491434ffdb9d3991b9299412834ae84636" },
+        }, .atom_names = &.{"existing_prefix"} },
+        .{ .entry = "/*\n", .entry_profile = .raw, .reads = 0, .bytecode = &.{.{ .len = 42, .sha256 = "2c78e9e9d91bb19892b64a6cfa0e59415c64094ea7352143f03170af42897e10" }}, .atom_names = &.{"existing_prefix"} },
         .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished", .dependency = "export const value = 1;\n", .entry_profile = .raw, .reads = 0, .parse_error = error.MissingSemicolon },
         .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .parse_error = error.MissingSemicolon },
-        .{ .entry = "/*", .entry_profile = .raw, .reads = 0 },
+        .{ .entry = "/*", .entry_profile = .raw, .reads = 0, .bytecode = &.{.{ .len = 42, .sha256 = "2c78e9e9d91bb19892b64a6cfa0e59415c64094ea7352143f03170af42897e10" }}, .atom_names = &.{"existing_prefix"} },
         .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value: number = 1; /* unfinished\n", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .parse_error = error.MissingSemicolon },
-        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "const marker: \"open\n = \"open\"; export const value = 1;\n", .entry_profile = .direct, .reads = 1 },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "const marker: \"open\n = \"open\"; export const value = 1;\n", .entry_profile = .direct, .reads = 1, .bytecode = &.{
+            .{ .len = 89, .sha256 = "ecb3ef0fc0786551d6cd77934550dd9c5626190474e4ecfe8cb0e9dcfa9568a9" },
+            .{ .len = 84, .sha256 = "a387c5d27495651f6d7b988fc430052958ce145a8e10175203148d20ceb491e7" },
+        }, .atom_names = &.{ "existing_prefix", "marker", "result" } },
     };
     const Reader = struct {
         var source: ?[]const u8 = null;
@@ -207,63 +225,37 @@ test "selected graph profiles preserve reads bytecode and complete atoms" {
             try std.testing.expectError(expected, compiler.compileAll(&graph));
             continue;
         }
-        // The legacy oracle selects complete raw source after any preparation failure.
-        var oracle = module_graph.ModuleGraph.init(allocator);
-        defer oracle.deinit();
-        for (graph.module_list.items) |module| {
-            const prepared = @import("../../source_frontend.zig").PreparedSource.init(allocator, module.source, module.path, .{}) catch |err| switch (err) {
-                error.OutOfMemory => return err,
-                else => null,
-            };
-            var owned_prepared = prepared;
-            defer if (owned_prepared) |*owner| owner.deinit();
-            const source = if (owned_prepared) |*owner| owner.parserInput() else module.source;
-            const path = try allocator.dupe(u8, module.path);
-            errdefer allocator.free(path);
-            const copied = try allocator.dupe(u8, source);
-            errdefer allocator.free(copied);
-            try oracle.module_list.append(allocator, .{ .path = path, .source = copied, .source_profile = .raw, .dependencies = &.{}, .state = .visited });
-        }
-        oracle.execution_order = try allocator.dupe(module_graph.ModuleIndex, graph.execution_order);
         var atoms = context.AtomTable.init(allocator);
         defer atoms.deinit();
-        var old_atoms = context.AtomTable.init(allocator);
-        defer old_atoms.deinit();
         _ = try atoms.intern("existing_prefix");
-        _ = try old_atoms.intern("existing_prefix");
         var strings = string.StringTable.init(allocator);
         defer strings.deinit();
-        var old_strings = string.StringTable.init(allocator);
-        defer old_strings.deinit();
         var compiler = ModuleCompiler.init(allocator, &atoms, &strings);
-        var old_compiler = ModuleCompiler.init(allocator, &old_atoms, &old_strings);
         Reader.source = "export const value = 999;\n";
         var actual = try compiler.compileAll(&graph);
         defer actual.deinit();
         defer for (actual.codegens) |*cg| cg.freeOwnedConstantPayloads();
-        var expected = try old_compiler.compileAll(&oracle);
-        defer expected.deinit();
-        defer for (expected.codegens) |*cg| cg.freeOwnedConstantPayloads();
         try std.testing.expectEqual(case.reads, Reader.reads);
-        try std.testing.expectEqual(old_atoms.next_id, atoms.next_id);
-        for (object.Atom.FIRST_DYNAMIC..atoms.next_id) |id| {
-            try std.testing.expectEqualStrings(old_atoms.getName(@enumFromInt(id)).?, atoms.getName(@enumFromInt(id)).?);
+        try std.testing.expectEqual(case.atom_names.len, atoms.next_id - object.Atom.FIRST_DYNAMIC);
+        for (case.atom_names, object.Atom.FIRST_DYNAMIC..) |name, id| {
+            try std.testing.expectEqualStrings(name, atoms.getName(@enumFromInt(id)).?);
         }
         try std.testing.expect(graph.execution_order.len > 0);
         try std.testing.expectEqual(graph.execution_order.len, actual.modules.len);
-        try std.testing.expectEqual(graph.execution_order.len, expected.modules.len);
-        for (actual.modules, expected.modules, actual.parsers, actual.codegens) |*module, *old_module, *parser, *cg| {
+        try std.testing.expectEqual(case.bytecode.len, actual.modules.len);
+        for (actual.modules, actual.parsers, actual.codegens, case.bytecode) |*module, *parser, *cg, expected| {
             try std.testing.expect(cg.scopes == &parser.scopes);
             try std.testing.expect(cg.ir.ir_constants == &parser.constants);
             try std.testing.expect(cg.ir.impl.ir_store == &parser.nodes);
-            var actual_buffer: [4096]u8 = undefined;
-            var expected_buffer: [4096]u8 = undefined;
+            var buffer: [4096]u8 = undefined;
             const cache = @import("../../bytecode_cache.zig");
-            var actual_writer = cache.SliceWriter{ .buffer = &actual_buffer };
-            var expected_writer = cache.SliceWriter{ .buffer = &expected_buffer };
-            try cache.serializeBytecodeWithAtomsAndShapes(&module.func, &atoms, module.shapes, &actual_writer, allocator);
-            try cache.serializeBytecodeWithAtomsAndShapes(&old_module.func, &old_atoms, old_module.shapes, &expected_writer, allocator);
-            try std.testing.expectEqualSlices(u8, expected_writer.getWritten(), actual_writer.getWritten());
+            var writer = cache.SliceWriter{ .buffer = &buffer };
+            try cache.serializeBytecodeWithAtomsAndShapes(&module.func, &atoms, module.shapes, &writer, allocator);
+            try std.testing.expectEqual(expected.len, writer.getWritten().len);
+            var digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(writer.getWritten(), &digest, .{});
+            const hex = std.fmt.bytesToHex(digest, .lower);
+            try std.testing.expectEqualStrings(expected.sha256, &hex);
         }
     }
 }

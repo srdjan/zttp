@@ -302,7 +302,7 @@ pub const ContractBuilder = struct {
     ) !HandlerContract {
         if (self.type_checker) |tc| try tc.ensureHealthy();
         const source_types = self.source_types orelse
-            try type_env_mod.ConsumerTypeSource.normalizeLegacy(self.type_env);
+            try type_env_mod.ConsumerTypeSource.fromEnvironment(self.type_env);
         const source_env = try source_types.validate();
         if (source_env) |selected| {
             if (self.type_env == null or self.type_env.? != selected) {
@@ -553,7 +553,7 @@ pub const ContractBuilder = struct {
         source_types: type_env_mod.ConsumerTypeSource,
     ) !void {
         switch (source_types) {
-            .legacy, .direct => return,
+            .direct => return,
             .omitted => {},
         }
         const env = self.type_env orelse return;
@@ -1021,7 +1021,6 @@ pub const ContractBuilder = struct {
     ) []const u8 {
         const env = switch (self.source_types orelse return "unknown") {
             .omitted => return "unknown",
-            .legacy => |env| env,
             .direct => |env| env,
         };
         const owner = switch (self.ir_view.getTag(decl) orelse return "unknown") {
@@ -1043,7 +1042,6 @@ pub const ContractBuilder = struct {
         buf: []u8,
     ) []const u8 {
         const env = switch (self.source_types orelse return "unknown") {
-            .legacy => |env| env,
             .direct => |env| env,
             .omitted => blk: {
                 const semantic = self.type_env orelse return "unknown";

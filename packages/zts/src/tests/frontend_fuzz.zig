@@ -1,19 +1,20 @@
 //! Fuzz and stress tests for the source frontends: the tokenizer, the
-//! TypeScript stripper and parser.
+//! direct TypeScript parser and runtime parser.
 //!
 //! The contract these tests pin is narrower than "the frontend is correct".
 //! For any input, each stage must return a result or a typed error. It must
 //! not panic, hang, overflow the stack, leak, or read outside the source. Any
-//! position it reports must lie inside the source it was given, and an error
-//! that is not an out-of-memory error must say where it happened. Per stage:
+//! physical span it reports must lie inside the source it was given, and an
+//! error that is not an out-of-memory error must say where it happened. Per stage:
 //!
 //!   tokenizer  finishes within source.len + 1 tokens and ends in EOF. Every
 //!              token span lies inside the source and starts at or after the
 //!              end of the previous token. Line and column match a recount
 //!              from the bytes. A save and restore replays the same tokens.
-//!   stripper   returns a result or a StripError. A result keeps the source
-//!              length. Its type map and diagnostics stay inside the source.
-//!              A refusal carries a diagnostic inside the source.
+//!   typed      returns an admitted program or a classified refusal in compile
+//!              and collect modes. Syntax owners and physical diagnostic spans
+//!              refer to the original source. Published positions retain their
+//!              admission presentation coordinates.
 //!   parser     returns a program or an error from a closed set. A refusal has
 //!              recorded errors, and each recorded span lies inside the input.
 //!
@@ -30,8 +31,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const parse_mod = @import("../parser/parse.zig");
-const stripper = @import("../stripper.zig");
 const source_frontend = @import("../source_frontend.zig");
+const TypeSyntax = @import("../parser/type_syntax.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const Token = tokenizer_mod.Token;
@@ -64,6 +65,14 @@ const seeds = [_][]const u8{
     "const s = `${ {`${ {} }`} }`;",
     // type annotations
     "function f(a: number, b: string[]): { x: number } | null { return null; }",
+    "structural Box<T> = { v: T }; const b: Box<number> = { v: 1 };",
+    "function id<T>(value: T): T { return value; } const n = id<number>(1);",
+    "import type { Shape } from \"./types\";\nconst n: number = 1;",
+    "export type { Shape } from \"./types\";\nconst n: number = 1;",
+    "const value = <T>(1);",
+    "const value: any = 1;",
+    "const value = ;",
+    "const value: { /* unfinished",
     "structural Box<T> = { v: T };\nconst b: Box<Array<number>> = { v: [1] };",
     "nominal Id = string;\nstructural P = { id: Id; tags: string[] };\n",
     "const a = x as number; const b = y satisfies string; let c: any = 1;",
@@ -180,6 +189,13 @@ const Stats = struct {
     tokens: usize = 0,
     /// Save and restore replays that were compared.
     replays: usize = 0,
+    outcomes: std.EnumArray(std.meta.Tag(source_frontend.DirectCheckOutcome), usize) = .initFill(0),
+    annotations: usize = 0,
+    declarations: usize = 0,
+    signatures: usize = 0,
+    generics: usize = 0,
+    type_modules: usize = 0,
+    erased_prefixes: usize = 0,
 };
 
 fn countNewlines(text: []const u8) u32 {
@@ -281,61 +297,165 @@ fn checkTokenizer(src: []const u8, stats: *Stats) !void {
 }
 
 // ----------------------------------------------------------------------------
-// Stripper contract
+// Direct typed source contract
 // ----------------------------------------------------------------------------
 
-fn checkStripWith(allocator: std.mem.Allocator, src: []const u8, base: stripper.StripOptions, stats: *Stats) !void {
-    var options = base;
-    var diag: ?stripper.StripDiagnostic = null;
-    options.diagnostic_out = &diag;
-    const newlines = countNewlines(src);
-
-    var result = stripper.strip(allocator, src, options) catch |err| switch (err) {
-        error.OutOfMemory => return,
-        else => {
-            stats.rejected += 1;
-            if (diag) |d| {
-                try expectPositionInside(src, d.line, d.column);
-                stats.located += 1;
-            }
-            return;
-        },
-    };
-    defer result.deinit();
-    stats.ok += 1;
-
-    if (!options.collect_all_diagnostics) try std.testing.expectEqual(src.len, result.code.len);
-    for (result.type_map.entries.items) |entry| {
-        try std.testing.expect(entry.source_start <= entry.source_end);
-        try std.testing.expect(entry.source_end <= src.len);
-        try std.testing.expect(entry.name_start <= entry.name_end);
-        try std.testing.expect(entry.name_end <= src.len);
-        try std.testing.expect(entry.context_line >= 1);
-        try std.testing.expect(entry.context_line <= newlines + 1);
-    }
-    for (result.diagnostics) |d| {
-        try expectPositionInside(src, d.line, d.column);
-        const at = result.sourcePosition(src, d.line, d.column);
-        try expectPositionInside(src, at.line, at.column);
-    }
-    const probes = [_]u32{ 0, @intCast(result.code.len / 2), @intCast(result.code.len) };
-    for (probes) |probe| {
-        try std.testing.expect(result.sourceOffset(probe) <= src.len);
+fn initTypedOwner(
+    owner: *source_frontend.DirectCheckSource,
+    allocator: std.mem.Allocator,
+    type_allocator: std.mem.Allocator,
+    src: []const u8,
+    mode: TypeSyntax.AdmissionMode,
+) !void {
+    switch (mode) {
+        .compile => try owner.initCompileInPlace(allocator, type_allocator, src, "fuzz.ts"),
+        .collect => try owner.initInPlace(allocator, type_allocator, src, "fuzz.ts"),
     }
 }
 
-const strip_variants = [_]struct { name: []const u8, options: stripper.StripOptions }{
-    .{ .name = "default", .options = .{} },
-    .{ .name = "collect_all_diagnostics", .options = .{ .collect_all_diagnostics = true } },
-};
+fn expectSpanInside(src: []const u8, start: u32, end: u32) !void {
+    try std.testing.expect(start <= end);
+    try std.testing.expect(end <= src.len);
+}
 
-fn checkStripper(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
-    for (strip_variants) |variant| {
-        checkStripWith(allocator, src, variant.options, stats) catch |err| {
-            std.debug.print("stripper variant {s} failed\n", .{variant.name});
-            return err;
-        };
+fn expectAdmissionInside(src: []const u8, diagnostic: TypeSyntax.AdmissionDiagnostic) !void {
+    try expectSpanInside(src, diagnostic.span.start, diagnostic.span.end);
+    const position = diagnostic.positionIn(src);
+    // Admission presentation retains compatibility cursor rewinds.
+    // Its coordinates need not equal the physical span's line and column.
+    if (diagnostic.presentation != null) {
+        try std.testing.expect(position.line >= 1);
+        try std.testing.expect(position.column >= 1);
+    } else {
+        try expectPositionInside(src, position.line, position.column);
     }
+}
+
+fn checkTyped(
+    allocator: std.mem.Allocator,
+    src: []const u8,
+    mode: TypeSyntax.AdmissionMode,
+    stats: *Stats,
+) !void {
+    var owner: source_frontend.DirectCheckSource = undefined;
+    try initTypedOwner(&owner, allocator, allocator, src, mode);
+    defer owner.deinit();
+    try std.testing.expectEqualStrings(src, owner.sourceView().text);
+    stats.outcomes.getPtr(std.meta.activeTag(owner.outcome().*)).* += 1;
+    switch (owner.outcome().*) {
+        .accepted => |root| {
+            stats.ok += 1;
+            const accepted = owner.acceptedCapabilities() orelse return error.MissingAcceptedCapabilities;
+            try std.testing.expectEqual(root, accepted.root);
+            try std.testing.expectEqual(.program, accepted.ir_view.getTag(root).?);
+            try std.testing.expect(!owner.parser.hasErrors());
+            const store = accepted.type_store;
+            try store.validate();
+            stats.annotations += store.annotations.items.len;
+            stats.declarations += store.declarations.items.len;
+            stats.signatures += store.function_signatures.items.len;
+            stats.generics += store.generic_owners.items.len;
+            stats.type_modules += store.type_only_modules.items.len;
+            stats.erased_prefixes += store.erased_type_prefixes.items.len;
+        },
+        .recovered_admission_refused => {
+            try std.testing.expectEqual(TypeSyntax.AdmissionMode.collect, mode);
+            stats.rejected += 1;
+            const diagnostics = owner.selectedAdmissionDiagnostics();
+            try std.testing.expect(diagnostics.len > 0);
+            for (diagnostics) |diagnostic| try expectAdmissionInside(src, diagnostic);
+            stats.located += 1;
+        },
+        .parser_refused => |refusal| {
+            stats.rejected += 1;
+            try expectKnownParserError(refusal.first_error);
+            const errors = owner.parserErrors();
+            try std.testing.expectEqual(refusal.projected_error_count, errors.len);
+            try std.testing.expect(errors.len > 0);
+            for (errors) |recorded| {
+                const location = recorded.location;
+                try expectPositionInside(src, location.line, location.column);
+                const span = location.span();
+                try expectSpanInside(src, span.start, span.end);
+            }
+            stats.located += 1;
+        },
+        .terminal_admission_refused => |failure| {
+            stats.rejected += 1;
+            switch (failure) {
+                .diagnostic => |diagnostic| try expectAdmissionInside(src, diagnostic),
+                .unterminated_comment => |comment| {
+                    try expectSpanInside(src, comment.opener, comment.@"resume");
+                    try std.testing.expect(comment.opener + 2 <= src.len);
+                    try std.testing.expectEqualStrings("/*", src[comment.opener..][0..2]);
+                },
+            }
+            stats.located += 1;
+        },
+    }
+    if (owner.outcome().* != .accepted) {
+        try std.testing.expect(owner.acceptedCapabilities() == null);
+    }
+    if (owner.parser.getLastAdmissionObservation()) |diagnostic| try expectAdmissionInside(src, diagnostic);
+}
+
+fn expectTypedStats(stats: Stats, mode: TypeSyntax.AdmissionMode, syntax_floor: bool) !void {
+    try std.testing.expectEqual(stats.calls, stats.ok + stats.rejected);
+    try std.testing.expectEqual(stats.rejected, stats.located);
+    try std.testing.expect(stats.ok > 0);
+    try std.testing.expect(stats.rejected > 0);
+    try std.testing.expect(stats.located > 0);
+    if (mode == .compile) try std.testing.expectEqual(@as(usize, 0), stats.outcomes.get(.recovered_admission_refused));
+    if (syntax_floor) {
+        inline for (@typeInfo(std.meta.Tag(source_frontend.DirectCheckOutcome)).@"enum".fields) |field| {
+            const tag: std.meta.Tag(source_frontend.DirectCheckOutcome) = @enumFromInt(field.value);
+            if (mode != .compile or tag != .recovered_admission_refused) {
+                try std.testing.expect(stats.outcomes.get(tag) > 0);
+            }
+        }
+        try std.testing.expect(stats.annotations > 0);
+        try std.testing.expect(stats.declarations > 0);
+        try std.testing.expect(stats.signatures > 0);
+        try std.testing.expect(stats.generics > 0);
+        try std.testing.expect(stats.type_modules > 0);
+        try std.testing.expect(stats.erased_prefixes > 0);
+    }
+}
+
+test "direct admission replay retains the unterminated string after a colon" {
+    const source = ":'\n";
+    for ([_]TypeSyntax.AdmissionMode{ .compile, .collect }) |mode| {
+        var owner: source_frontend.DirectCheckSource = undefined;
+        try initTypedOwner(&owner, std.testing.allocator, std.testing.allocator, source, mode);
+        defer owner.deinit();
+
+        try std.testing.expect(owner.acceptedCapabilities() == null);
+        try std.testing.expectEqual(.terminal_admission_refused, std.meta.activeTag(owner.outcome().*));
+        const failure = owner.outcome().terminal_admission_refused;
+        try std.testing.expectEqual(.diagnostic, std.meta.activeTag(failure));
+        try std.testing.expectEqual(@as(usize, 1), owner.parser.getAdmissionDiagnostics().len);
+        const diagnostic = failure.diagnostic;
+        try std.testing.expectEqual(.unterminated_string, diagnostic.kind);
+        try std.testing.expectEqual(@as(u32, 2), diagnostic.span.start);
+        try std.testing.expectEqual(@as(u32, 3), diagnostic.span.end);
+        const position = diagnostic.positionIn(source);
+        try std.testing.expectEqual(@as(u32, 1), position.line);
+        try std.testing.expectEqual(@as(u32, 3), position.column);
+    }
+}
+
+test "source-only admission observes the unterminated string after a colon" {
+    const source = ":'\n";
+    const failure = (try source_frontend.checkSourceAdmission(std.testing.allocator, source)) orelse
+        return error.ExpectedSourceAdmissionRefusal;
+    try std.testing.expectEqual(.diagnostic, std.meta.activeTag(failure));
+    const diagnostic = failure.diagnostic;
+    try std.testing.expectEqual(.unterminated_string, diagnostic.kind);
+    try std.testing.expectEqual(@as(u32, 2), diagnostic.span.start);
+    try std.testing.expectEqual(@as(u32, 3), diagnostic.span.end);
+    const position = diagnostic.positionIn(source);
+    try std.testing.expectEqual(@as(u32, 1), position.line);
+    try std.testing.expectEqual(@as(u32, 3), position.column);
 }
 
 // ----------------------------------------------------------------------------
@@ -355,6 +475,8 @@ const parser_errors = [_][]const u8{
     "InvalidEscapeSequence",
     "StringLineContinuation",
     "TooManyLocals",
+    "TooManyConstants",
+    "TypeOnlyModuleLexicallyExcluded",
 };
 
 fn expectKnownParserError(err: anyerror) !void {
@@ -365,13 +487,11 @@ fn expectKnownParserError(err: anyerror) !void {
     return error.UnclassifiedParserError;
 }
 
-/// Parse `input` and check what came back. `view` maps a position in `input`
-/// back to the file the author wrote, when a frontend rewrote the text.
+/// Parse the original input and check its result and diagnostic positions.
 fn checkParseInput(
     allocator: std.mem.Allocator,
     input: []const u8,
     mode: ParseMode,
-    view: ?stripper.SourceView,
     stats: *Stats,
 ) !void {
     var parser = (switch (mode) {
@@ -401,45 +521,24 @@ fn checkParseInput(
             const span = loc.span();
             try std.testing.expect(span.start <= span.end);
             try std.testing.expect(span.end <= input.len);
-            if (view) |v| {
-                const at = v.position(loc.line, loc.column);
-                try expectPositionInside(v.text, at.line, at.column);
-            }
             stats.located += 1;
         }
     }
 }
 
 fn checkParser(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
-    try checkParseInput(allocator, src, .program, null, stats);
+    try checkParseInput(allocator, src, .program, stats);
 }
 
 fn checkExpression(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
-    try checkParseInput(allocator, src, .expression, null, stats);
-}
-
-/// The path real sources take: strip TypeScript, then parse the result.
-fn checkPipelineAs(allocator: std.mem.Allocator, src: []const u8, path: []const u8, options: stripper.StripOptions, stats: *Stats) !void {
-    var prepared = source_frontend.PreparedSource.init(allocator, src, path, options) catch |err| switch (err) {
-        error.OutOfMemory => return,
-        else => {
-            stats.rejected += 1;
-            return;
-        },
-    };
-    defer prepared.deinit();
-    try checkParseInput(allocator, prepared.parserInput(), .program, prepared.sourceView(), stats);
-}
-
-fn checkPipeline(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
-    try checkPipelineAs(allocator, src, "fuzz.ts", .{}, stats);
+    try checkParseInput(allocator, src, .expression, stats);
 }
 
 // ----------------------------------------------------------------------------
 // Targets
 // ----------------------------------------------------------------------------
 
-const Target = enum { tokenizer, stripper, parser, expression, pipeline };
+const Target = enum { tokenizer, typed_compile, typed_collect, parser, expression };
 
 fn checkOne(target: Target, src: []const u8, stats: *Stats) !void {
     const allocator = std.testing.allocator;
@@ -448,10 +547,10 @@ fn checkOne(target: Target, src: []const u8, stats: *Stats) !void {
     if (src.len == 0) stats.empty += 1;
     switch (target) {
         .tokenizer => try checkTokenizer(src, stats),
-        .stripper => try checkStripper(allocator, src, stats),
+        .typed_compile => try checkTyped(allocator, src, .compile, stats),
+        .typed_collect => try checkTyped(allocator, src, .collect, stats),
         .parser => try checkParser(allocator, src, stats),
         .expression => try checkExpression(allocator, src, stats),
-        .pipeline => try checkPipeline(allocator, src, stats),
     }
 }
 
@@ -698,11 +797,11 @@ fn buildNested(allocator: std.mem.Allocator, shape: Shape, depth: usize) !std.Ar
 
 const type_shapes = [_]Shape{
     .{ .name = "tuple", .prefix = "structural Deep = ", .open = "[", .core = "string", .close = "]", .suffix = ";" },
-    .{ .name = "generic", .prefix = "structural Deep = ", .open = "Array<", .core = "string", .close = ">", .suffix = ";" },
+    .{ .name = "generic", .prefix = "structural Deep = ", .open = "Box<", .core = "string", .close = ">", .suffix = ";" },
     .{ .name = "object", .prefix = "structural Deep = ", .open = "{ a: ", .core = "string", .close = "}", .suffix = ";" },
     .{ .name = "paren", .prefix = "structural Deep = ", .open = "(", .core = "string", .close = ")", .suffix = ";" },
     .{ .name = "function type", .prefix = "structural Deep = ", .open = "(a: ", .core = "string", .close = ") => string", .suffix = ";" },
-    .{ .name = "annotation", .prefix = "const x: ", .open = "Array<", .core = "string", .close = ">", .suffix = " = [];" },
+    .{ .name = "annotation", .prefix = "const x: ", .open = "Box<", .core = "string", .close = ">", .suffix = " = [];" },
 };
 
 const value_shapes = [_]Shape{
@@ -737,59 +836,97 @@ fn parserNestingTooDeep(parser: *const Parser) bool {
     return false;
 }
 
-// The stripper limit is 512 levels of type syntax and of value nesting that
-// the stripper tracks itself. The error carries a diagnostic.
-test "nesting: the stripper refuses type nesting past 512 and accepts it below" {
+test "nesting: direct admission accepts type depth 512 and refuses opener 513" {
     const allocator = std.testing.allocator;
-    for (type_shapes) |shape| {
-        for ([_]usize{ 1, 64, 512 }) |depth| {
-            var source = try buildNested(allocator, shape, depth);
-            defer source.deinit(allocator);
-            if (stripper.strip(allocator, source.items, .{})) |stripped| {
-                var result = stripped;
-                result.deinit();
-            } else |err| try std.testing.expect(err != error.NestingTooDeep);
+    try std.testing.expectEqual(@as(usize, 6), type_shapes.len);
+    for ([_]TypeSyntax.AdmissionMode{ .compile, .collect }) |mode| {
+        var accepted: usize = 0;
+        var refused: usize = 0;
+        for (type_shapes) |shape| {
+            for ([_]usize{ 1, 64, 512 }) |depth| {
+                errdefer std.debug.print("type depth {d} {s} in {s}\n", .{ depth, shape.name, @tagName(mode) });
+                var source = try buildNested(allocator, shape, depth);
+                defer source.deinit(allocator);
+                var owner: source_frontend.DirectCheckSource = undefined;
+                try initTypedOwner(&owner, allocator, allocator, source.items, mode);
+                defer owner.deinit();
+                try std.testing.expectEqual(.accepted, std.meta.activeTag(owner.outcome().*));
+                try std.testing.expect(owner.acceptedCapabilities() != null);
+                accepted += 1;
+            }
+            for ([_]usize{ 513, 2000, very_deep }) |depth| {
+                errdefer std.debug.print("type depth {d} {s} in {s}\n", .{ depth, shape.name, @tagName(mode) });
+                var source = try buildNested(allocator, shape, depth);
+                defer source.deinit(allocator);
+                var owner: source_frontend.DirectCheckSource = undefined;
+                try initTypedOwner(&owner, allocator, allocator, source.items, mode);
+                defer owner.deinit();
+                switch (owner.outcome().*) {
+                    .terminal_admission_refused => |failure| switch (failure) {
+                        .diagnostic => |diagnostic| {
+                            try std.testing.expectEqual(TypeSyntax.AdmissionKind.nesting_too_deep, diagnostic.kind);
+                            try expectAdmissionInside(source.items, diagnostic);
+                        },
+                        else => return error.ExpectedTypeNestingDiagnostic,
+                    },
+                    else => return error.ExpectedTypeNestingRefusal,
+                }
+                try std.testing.expect(owner.acceptedCapabilities() == null);
+                refused += 1;
+            }
         }
-        for ([_]usize{ 513, 2000, very_deep }) |depth| {
-            var source = try buildNested(allocator, shape, depth);
-            defer source.deinit(allocator);
-            var diag: ?stripper.StripDiagnostic = null;
-            try std.testing.expectError(
-                error.NestingTooDeep,
-                stripper.strip(allocator, source.items, .{ .diagnostic_out = &diag }),
-            );
-            try std.testing.expectEqual(stripper.StripDiagnosticKind.nesting_too_deep, diag.?.kind);
-        }
+        try std.testing.expectEqual(3 * type_shapes.len, accepted);
+        try std.testing.expectEqual(3 * type_shapes.len, refused);
     }
 }
 
-test "nesting: the stripper survives value nesting of any depth" {
-    const allocator = std.testing.allocator;
-    var refused: usize = 0;
-    var accepted: usize = 0;
-    for (value_shapes) |shape| {
-        for ([_]usize{ 1, 64, 512, 513, 2000, deep_guarded }) |depth| {
-            var source = try buildNested(allocator, shape, depth);
-            defer source.deinit(allocator);
-            if (stripper.strip(allocator, source.items, .{})) |stripped| {
-                var result = stripped;
-                result.deinit();
-                accepted += 1;
-            } else |_| refused += 1;
-        }
+fn expectTypedValueNesting(owner: *const source_frontend.DirectCheckSource) !void {
+    switch (owner.outcome().*) {
+        .parser_refused => {
+            try std.testing.expect(owner.parserErrors().len > 0);
+            for (owner.parserErrors()) |diagnostic| {
+                if (diagnostic.kind == .nesting_too_deep) return;
+            }
+            return error.ExpectedValueNestingDiagnostic;
+        },
+        .terminal_admission_refused => |failure| switch (failure) {
+            .diagnostic => |diagnostic| try std.testing.expectEqual(TypeSyntax.AdmissionKind.nesting_too_deep, diagnostic.kind),
+            .unterminated_comment => return error.ExpectedValueNestingDiagnostic,
+        },
+        else => return error.ExpectedValueNestingRefusal,
     }
-    try std.testing.expect(accepted > 0);
-    try std.testing.expect(refused > 0);
-    // Parentheses and calls are tracked: depth 1 passes and depth 513 does not.
-    for ([_]usize{ 0, 3 }) |index| {
-        const shape = value_shapes[index];
-        var shallow = try buildNested(allocator, shape, 1);
-        defer shallow.deinit(allocator);
-        var ok = try stripper.strip(allocator, shallow.items, .{});
-        ok.deinit();
-        var deep = try buildNested(allocator, shape, 513);
-        defer deep.deinit(allocator);
-        try std.testing.expectError(error.NestingTooDeep, stripper.strip(allocator, deep.items, .{}));
+}
+
+test "nesting: direct admission survives every value shape and guards tracked depth" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(usize, 14), value_shapes.len);
+    for ([_]TypeSyntax.AdmissionMode{ .compile, .collect }) |mode| {
+        var stats: Stats = .{};
+        for (value_shapes) |shape| {
+            for ([_]usize{ 1, 64, 512, 513, 2000, deep_guarded }) |depth| {
+                errdefer std.debug.print("value depth {d} {s} in {s}\n", .{ depth, shape.name, @tagName(mode) });
+                var source = try buildNested(allocator, shape, depth);
+                defer source.deinit(allocator);
+                try checkOne(if (mode == .compile) .typed_compile else .typed_collect, source.items, &stats);
+            }
+        }
+        try std.testing.expectEqual(6 * value_shapes.len, stats.calls);
+        try expectTypedStats(stats, mode, false);
+        for ([_]usize{ 0, 3 }) |index| {
+            const shape = value_shapes[index];
+            var shallow = try buildNested(allocator, shape, 1);
+            defer shallow.deinit(allocator);
+            var accepted: source_frontend.DirectCheckSource = undefined;
+            try initTypedOwner(&accepted, allocator, allocator, shallow.items, mode);
+            defer accepted.deinit();
+            try std.testing.expectEqual(.accepted, std.meta.activeTag(accepted.outcome().*));
+            var deep = try buildNested(allocator, shape, 513);
+            defer deep.deinit(allocator);
+            var refused: source_frontend.DirectCheckSource = undefined;
+            try initTypedOwner(&refused, allocator, allocator, deep.items, mode);
+            defer refused.deinit();
+            try expectTypedValueNesting(&refused);
+        }
     }
 }
 
@@ -891,48 +1028,52 @@ test "nesting: the tokenizer terminates on templates and braces of any depth" {
 // Allocation failure
 // ----------------------------------------------------------------------------
 
-const StageError = error{
-    /// The stage refused the input with a typed error other than out-of-memory.
-    /// A refusal is a fail-closed outcome, so it is allowed after a failed
-    /// allocation. Only a success is not.
-    Refused,
-    OutOfMemory,
-};
+const AllocationTarget = enum { parser, compile_runtime, compile_types, collect_runtime, collect_types };
 
-/// Run one configuration of one frontend stage. `variant` selects a stripper
-/// option set and is zero for every other stage.
-fn oomStage(allocator: std.mem.Allocator, target: Target, variant: usize, src: []const u8) StageError!void {
+/// Runtime and syntax allocations fail independently. A classified refusal
+/// remains fail-closed after allocation failure; claiming acceptance does not.
+fn oomStage(allocator: std.mem.Allocator, target: AllocationTarget, src: []const u8) !void {
     switch (target) {
-        .stripper => {
-            var result = stripper.strip(allocator, src, strip_variants[variant].options) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.Refused,
-            };
-            result.deinit();
-        },
         .parser => try oomParse(allocator, src),
-        .pipeline => {
-            var prepared = source_frontend.PreparedSource.init(allocator, src, "fuzz.ts", .{}) catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return error.Refused,
+        .compile_runtime, .compile_types, .collect_runtime, .collect_types => {
+            const runtime_allocator = switch (target) {
+                .compile_runtime, .collect_runtime => allocator,
+                else => std.testing.allocator,
             };
-            defer prepared.deinit();
-            try oomParse(allocator, prepared.parserInput());
+            const type_allocator = switch (target) {
+                .compile_types, .collect_types => allocator,
+                else => std.testing.allocator,
+            };
+            const mode: TypeSyntax.AdmissionMode = switch (target) {
+                .compile_runtime, .compile_types => .compile,
+                else => .collect,
+            };
+            var owner: source_frontend.DirectCheckSource = undefined;
+            try initTypedOwner(&owner, runtime_allocator, type_allocator, src, mode);
+            defer owner.deinit();
+            switch (owner.outcome().*) {
+                .accepted => {},
+                .parser_refused => |refusal| {
+                    try expectKnownParserError(refusal.first_error);
+                    return error.Refused;
+                },
+                .recovered_admission_refused, .terminal_admission_refused => return error.Refused,
+            }
         },
-        .tokenizer, .expression => unreachable,
     }
 }
 
-fn oomParse(allocator: std.mem.Allocator, src: []const u8) StageError!void {
+fn oomParse(allocator: std.mem.Allocator, src: []const u8) !void {
     var parser = Parser.init(allocator, src) catch return error.OutOfMemory;
     defer parser.deinit();
     _ = parser.parse() catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return error.Refused,
+        else => {
+            try expectKnownParserError(err);
+            return error.Refused;
+        },
     };
 }
-
-const SweepError = error{ SwallowedOutOfMemory, LeakedOnFailure, NondeterministicAllocation };
 
 /// Fail each allocation of one stage configuration in turn, the way
 /// `std.testing.checkAllAllocationFailures` does, and return how many
@@ -940,25 +1081,31 @@ const SweepError = error{ SwallowedOutOfMemory, LeakedOnFailure, Nondeterministi
 /// without saying where, so this one prints the stack of the allocation that
 /// was made to fail. A success after a failed allocation is the error: it means
 /// the failure was dropped and the stage still claimed a clean result.
-fn sweepAllocationFailures(target: Target, variant: usize, src: []const u8) (SweepError || StageError)!usize {
+fn sweepAllocationFailures(target: AllocationTarget, src: []const u8) !usize {
     var total: usize = 0;
     {
         var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         // The unlimited run may refuse the input; only its allocation count matters.
-        oomStage(counting.allocator(), target, variant, src) catch |err| switch (err) {
+        oomStage(counting.allocator(), target, src) catch |err| switch (err) {
             error.Refused => {},
-            error.OutOfMemory => return error.OutOfMemory,
+            else => return err,
         };
+        try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
         total = counting.alloc_index;
     }
     for (0..total) |fail_index| {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
-        if (oomStage(failing.allocator(), target, variant, src)) |_| {
+        if (oomStage(failing.allocator(), target, src)) |_| {
             if (!failing.has_induced_failure) return error.NondeterministicAllocation;
             std.debug.print("allocation {d} of {d} failed and the stage still succeeded:\n", .{ fail_index, total });
             std.debug.dumpStackTrace(&failing.getStackTrace());
             return error.SwallowedOutOfMemory;
-        } else |_| {
+        } else |err| {
+            switch (err) {
+                error.OutOfMemory, error.Refused => {},
+                else => return err,
+            }
+            if (!failing.has_induced_failure) return error.NondeterministicAllocation;
             if (failing.allocated_bytes != failing.freed_bytes) {
                 std.debug.print("allocation {d} of {d} failed and the stage leaked:\n", .{ fail_index, total });
                 std.debug.dumpStackTrace(&failing.getStackTrace());
@@ -974,23 +1121,25 @@ fn sweepAllocationFailures(target: Target, variant: usize, src: []const u8) (Swe
 const oom_seed_limit = 120;
 
 test "allocation failure: no frontend stage leaks or reports success after a failed allocation" {
-    var runs: usize = 0;
-    var allocations: usize = 0;
+    var eligible_seeds: usize = 0;
+    var runs = std.EnumArray(AllocationTarget, usize).initFill(0);
+    var allocations = std.EnumArray(AllocationTarget, usize).initFill(0);
     for (seeds) |seed| {
         if (seed.len > oom_seed_limit) continue;
-        for ([_]Target{ .stripper, .parser, .pipeline }) |target| {
-            const variants: usize = if (target == .stripper) strip_variants.len else 1;
-            for (0..variants) |variant| {
-                allocations += sweepAllocationFailures(target, variant, seed) catch |err| {
-                    std.debug.print("{s} variant {d} allocation sweep failed on \"{f}\"\n", .{ @tagName(target), variant, std.zig.fmtString(seed) });
-                    return err;
-                };
-                runs += 1;
-            }
+        eligible_seeds += 1;
+        for (std.enums.values(AllocationTarget)) |target| {
+            allocations.getPtr(target).* += sweepAllocationFailures(target, seed) catch |err| {
+                std.debug.print("{s} allocation sweep failed on \"{f}\"\n", .{ @tagName(target), std.zig.fmtString(seed) });
+                return err;
+            };
+            runs.getPtr(target).* += 1;
         }
     }
-    try std.testing.expect(runs >= 3 * 20);
-    try std.testing.expect(allocations >= runs);
+    try std.testing.expect(eligible_seeds >= 20);
+    for (std.enums.values(AllocationTarget)) |target| {
+        try std.testing.expectEqual(eligible_seeds, runs.get(target));
+        try std.testing.expect(allocations.get(target) > 0);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1003,11 +1152,8 @@ test "fuzz: tokenizer holds its contract on every seed" {
     try std.testing.expect(stats.replays > 0);
 }
 
-test "fuzz: stripper holds its contract on every seed" {
-    const stats = try runSeeds(.stripper);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
-    try std.testing.expect(stats.located > 0);
+test "fuzz: direct compile holds its contract on every seed" {
+    try expectTypedStats(try runSeeds(.typed_compile), .compile, true);
 }
 
 test "fuzz: parser holds its contract on every seed" {
@@ -1024,11 +1170,8 @@ test "fuzz: parser expression profile holds its contract on every seed" {
     try std.testing.expect(stats.located > 0);
 }
 
-test "fuzz: strip and parse pipeline holds its contract on every seed" {
-    const stats = try runSeeds(.pipeline);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
-    try std.testing.expect(stats.located > 0);
+test "fuzz: direct collect holds its contract on every seed" {
+    try expectTypedStats(try runSeeds(.typed_collect), .collect, true);
 }
 
 // ----------------------------------------------------------------------------
@@ -1041,10 +1184,9 @@ test "stress: tokenizer holds its contract on generated input" {
     try std.testing.expect(stats.replays > 0);
 }
 
-test "stress: stripper holds its contract on generated input" {
-    const stats = try runStress(.stripper, 0x70C3_0002, 400);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
+test "stress: direct admission holds its contract on generated input in both modes" {
+    try expectTypedStats(try runStress(.typed_compile, 0x70C3_0002, 400), .compile, false);
+    try expectTypedStats(try runStress(.typed_collect, 0x70C3_0002, 400), .collect, false);
 }
 
 test "stress: parser holds its contract on generated input" {
@@ -1058,8 +1200,6 @@ test "stress: parser expression profile holds its contract on generated input" {
     try std.testing.expect(stats.rejected > 0);
 }
 
-test "stress: strip and parse pipeline holds its contract on generated input" {
-    const stats = try runStress(.pipeline, 0x70C3_0006, 200);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
+test "stress: direct compile holds its contract on the pipeline input stream" {
+    try expectTypedStats(try runStress(.typed_compile, 0x70C3_0006, 200), .compile, false);
 }

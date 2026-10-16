@@ -12,7 +12,7 @@
 //! interpreter catch those cases at execution time.
 
 const std = @import("std");
-const stripper = @import("zts-engine").stripper;
+const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
@@ -253,7 +253,7 @@ pub const BoolChecker = struct {
     // Diagnostic formatting (mirrors handler_verifier.zig)
     // -----------------------------------------------------------------------
 
-    pub fn formatDiagnostics(self: *const BoolChecker, source: stripper.SourceView, writer: anytype) !void {
+    pub fn formatDiagnostics(self: *const BoolChecker, source: SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
             const span = loc.span();

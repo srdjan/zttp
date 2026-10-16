@@ -559,12 +559,10 @@ test "a match record key that cannot be interned fails codegen instead of droppi
     try std.testing.expectError(error.OutOfMemory, p.parse());
 }
 
-test "typed compatibility parser delays generation and preserves raw bytecode and atoms" {
+test "typed parser delays generation and matches equivalent JavaScript bytecode and atoms" {
     const allocator = std.testing.allocator;
     const typed_source = "const reset_value: number = 4;\nfunction reset_identity(input: number): number { return input; }\n";
-    var prepared = try @import("../stripper.zig").strip(allocator, typed_source, .{});
-    defer prepared.deinit();
-    const raw_source = prepared.code;
+    const raw_source = "const reset_value         = 4;\nfunction reset_identity(input        )         { return input; }\n";
     var raw_strings = string.StringTable.init(allocator);
     defer raw_strings.deinit();
     var typed_strings = string.StringTable.init(allocator);

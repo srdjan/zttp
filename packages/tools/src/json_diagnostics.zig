@@ -136,13 +136,13 @@ pub fn fromParseErrorOwned(allocator: std.mem.Allocator, err: ParseError, file: 
     return diag;
 }
 
-/// Type stripper error codes: ZTS041-ZTS043 (inside the parser ZTS0xx range,
-/// which ends at ZTS040 plus the relocated ZTS044).
+/// Type-position admission error codes: ZTS041-ZTS043 (inside the parser
+/// ZTS0xx range, which ends at ZTS040 plus ZTS044).
 fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
     return diagnostic_catalog.stripCode(kind);
 }
 
-/// Map a TypeScript stripper rejection to a structured diagnostic so `--json`
+/// Map a TypeScript admission rejection to a structured diagnostic so `--json`
 /// consumers and the `zts expert` agent see a ZTS code, location, and
 /// suggestion instead of a swallowed `error.StripFailed`.
 pub fn fromStripError(diag: zts.StripDiagnostic, file: []const u8) JsonDiagnostic {
@@ -153,7 +153,7 @@ pub fn fromStripError(diag: zts.StripDiagnostic, file: []const u8) JsonDiagnosti
         .message = parts.msg,
         .file = file,
         .line = diag.line,
-        // Clamp instead of @intCast: a strip error past column 65535 (a minified
+        // Clamp instead of @intCast: a diagnostic past column 65535 (a minified
         // single-line bundle is one long line) would otherwise panic
         // `zttp check --json`.
         .column = @intCast(@min(diag.column, std.math.maxInt(u16))),
@@ -1217,11 +1217,9 @@ test "every diagnostic code names exactly one diagnostic" {
     // thing either way and needs no way to tell them apart. Each pair is listed
     // here with the fault it names; anything unlisted still fails.
     //
-    // `unterminated_string`: the stripper runs before the parser and hits an
-    // unterminated literal first, so it raises the parser band's existing
-    // ZTS008 rather than a second code for one fault.
-    // `nesting_too_deep`: the stripper checks type syntax that is removed
-    // before the parser checks expression syntax. Both report ZTS044.
+    // `unterminated_string`: type-position admission and runtime parsing both
+    // report ZTS008 for the same unterminated literal.
+    // `nesting_too_deep`: type syntax and expression syntax both report ZTS044.
     const shared_codes = [_]struct { code: []const u8, kinds: [2][]const u8 }{
         .{ .code = "ZTS008", .kinds = .{ "unterminated_string", "unterminated_string" } },
         .{ .code = "ZTS044", .kinds = .{ "nesting_too_deep", "nesting_too_deep" } },

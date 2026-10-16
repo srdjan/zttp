@@ -104,23 +104,6 @@ pub const CapsuleTable = struct {
     }
 };
 
-/// Discharge every user-defined helper's `Proof<...>` capsule. `effects`
-/// must contain a completed analysis. `env` may be null (no type info): then
-/// every capsule is property-free and only the `proven` facts are recorded.
-pub fn discharge(
-    allocator: std.mem.Allocator,
-    effects: *const EffectFacts,
-    env: ?*const TypeEnv,
-    ir_view: IrView,
-) !CapsuleTable {
-    return dischargeWithTypeSource(
-        allocator,
-        effects,
-        try TypeSource.normalizeLegacy(env),
-        ir_view,
-    );
-}
-
 pub fn dischargeWithTypeSource(
     allocator: std.mem.Allocator,
     effects: *const EffectFacts,
@@ -204,10 +187,6 @@ fn functionSignature(
 ) !?type_env_mod.FunctionSig {
     const env = switch (source) {
         .omitted => return null,
-        .legacy => |env| {
-            const offset = ir_view.signatureOffset(declaration) orelse return null;
-            return env.getFunctionSignature(.{ .legacy_offset = offset });
-        },
         .direct => |env| env,
     };
     const owner = switch (ir_view.getTag(declaration) orelse return error.InvalidFunctionOwner) {
@@ -291,7 +270,7 @@ test "discharge records proven facts and skips the handler" {
     var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
     defer effects.deinit(allocator);
 
-    var table = try discharge(allocator, &effects, null, view);
+    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
     defer table.deinit(allocator);
 
     // The handler is discharged via Proof<...> elsewhere; capsule discharge
@@ -328,7 +307,7 @@ test "discharge records non-total facts for a helper that may not return" {
     var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
     defer effects.deinit(allocator);
 
-    var table = try discharge(allocator, &effects, null, view);
+    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
     defer table.deinit(allocator);
 
     const maybe = table.byName("maybe") orelse return error.MissingCapsule;

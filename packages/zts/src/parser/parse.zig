@@ -555,7 +555,11 @@ pub const Parser = struct {
         if ((self.admissionSelected() or self.terminalAdmissionFailure() != null) and
             !observer.admissionSelected() and failure == null)
         {
-            return error.IncompleteSourceObservation;
+            // The parser already observed a refusal in the authored source.
+            // Source-only replay can find no diagnostic in malformed input.
+            // Keep the original refusal instead of replacing it with an
+            // empty observation.
+            return;
         }
         self.admission.?.deinit();
         self.admission = observer.admission;
@@ -590,7 +594,10 @@ pub const Parser = struct {
                 continue;
             }
             if (try self.tryConsumeAdmissionAssertion()) continue;
-            if (self.current.type == .colon and !context.in_expression and
+            // A leading colon has no declaration before it. Treating it as
+            // an annotation can hide a malformed string after the colon.
+            if (self.current.type == .colon and self.previous.type != .eof and
+                !context.in_expression and
                 !self.observedLabelColon() and !self.observedMatchArmColon())
             {
                 if (try self.collectVariableTypeAdmission(self.current)) |input| {
