@@ -181,6 +181,7 @@ pub const EffectFactsOptions = struct {
 
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
     module_facts: ?*const module_facts_mod.ModuleFacts = null,
+    type_source: ?type_env_mod.ConsumerTypeSource = null,
     type_env: ?*const type_env_mod.TypeEnv = null,
     imported_effects: []const ImportedEffect = &.{},
     contract_projection: ContractProjection = .unrequested,
@@ -381,6 +382,7 @@ pub const Analyzer = struct {
     /// stays a lower bound, which is the conservative answer this had before
     /// the type env was available at all.
     type_env: ?*const type_env_mod.TypeEnv = null,
+    type_source: ?type_env_mod.ConsumerTypeSource = null,
     /// Map binding slot to index into `functions`. Used to resolve identifier
     /// callees back to a user-defined function.
     user_fn_by_slot: std.AutoHashMapUnmanaged(u16, usize),
@@ -478,6 +480,10 @@ pub const Analyzer = struct {
     }
 
     pub fn analyze(self: *Analyzer, root: NodeIndex) !void {
+        const source = try normalizeTypeSource(self.type_source, self.type_env);
+        const original_env = self.type_env;
+        self.type_env = try source.validate();
+        defer self.type_env = original_env;
         _ = try self.resolveFacts();
         try self.collectFunctions(root);
         try self.computeModuleBindings(root);
@@ -1445,7 +1451,8 @@ pub const Analyzer = struct {
             if (tag == .function_expr or tag == .arrow_function) break :blk decl_node;
             break :blk (self.ir_view.getVarDecl(decl_node) orelse return null).init;
         };
-        const sig = env.getFnSigAt(self.ir_view.signatureOffset(fn_node) orelse return null) orelse return null;
+        const reference = env.functionTypeRef(self.ir_view, fn_node) orelse return null;
+        const sig = env.getFunctionSignature(reference) orelse return null;
         const func = self.ir_view.getFunction(fn_node) orelse return null;
 
         for (0..func.params_count) |i| {
@@ -2273,6 +2280,8 @@ pub fn buildEffectFacts(
     root: NodeIndex,
     options: EffectFactsOptions,
 ) !EffectFacts {
+    const source = try normalizeTypeSource(options.type_source, options.type_env);
+    _ = try source.validate();
     var analyzer = Analyzer.initWithManifestRegistry(
         allocator,
         ir_view,
@@ -2281,10 +2290,21 @@ pub fn buildEffectFacts(
     );
     defer analyzer.deinit();
     analyzer.facts = options.module_facts;
-    analyzer.type_env = options.type_env;
+    analyzer.type_source = source;
     analyzer.imported_effects = options.imported_effects;
     try analyzer.analyze(root);
-    return projectEffectFacts(allocator, ir_view, atoms, &analyzer, options);
+    var result = try projectEffectFacts(allocator, ir_view, atoms, &analyzer, options);
+    errdefer result.deinit(allocator);
+    _ = try source.validate();
+    return result;
+}
+
+fn normalizeTypeSource(
+    explicit: ?type_env_mod.ConsumerTypeSource,
+    legacy: ?*const type_env_mod.TypeEnv,
+) !type_env_mod.ConsumerTypeSource {
+    if (explicit != null and legacy != null) return error.AmbiguousTypeSource;
+    return explicit orelse try type_env_mod.ConsumerTypeSource.normalizeLegacy(legacy);
 }
 
 fn projectEffectFacts(

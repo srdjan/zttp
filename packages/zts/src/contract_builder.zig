@@ -94,16 +94,16 @@ fn normalizeEndpoint(raw: []const u8, out: []u8) []const u8 {
     return endpoint.normalize(raw, out) catch "";
 }
 
-/// Resolve the named top-level handler first. Keep the location lookup for
-/// anonymous and legacy shapes.
 fn handlerSignature(
-    env: *const TypeEnv,
-    handler_loc: ?ir.SourceLocation,
-) ?type_env_mod.FunctionSig {
+    source: type_env_mod.ConsumerTypeSource,
+    ir_view: IrView,
+    handler_owner: ?NodeIndex,
+) !?type_env_mod.FunctionSig {
+    const env = try source.validate() orelse return null;
     if (env.getSourceFnSigByName("handler")) |sig| return sig;
-    const loc = handler_loc orelse return null;
-    if (loc.line == 0) return null;
-    return env.getFnSigAt(loc.offset);
+    const owner = handler_owner orelse return null;
+    const reference = env.functionTypeRef(ir_view, owner) orelse return null;
+    return env.getFunctionSignature(reference);
 }
 
 fn currentPolicyHashRaw() [32]u8 {
@@ -121,6 +121,7 @@ pub const ContractBuilder = struct {
     ir_view: IrView,
     atoms: ?*atom_table.AtomTable,
     type_env: ?*const TypeEnv,
+    source_types: ?type_env_mod.ConsumerTypeSource = null,
     type_checker: ?*TypeChecker,
     /// Partner virtual-module manifests registered for this compile session.
     /// Borrowed; the registry must outlive the builder.
@@ -222,6 +223,29 @@ pub const ContractBuilder = struct {
         return self;
     }
 
+    pub fn initForBuildWithTypeSource(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        atoms: ?*atom_table.AtomTable,
+        type_env: *const TypeEnv,
+        type_checker: *TypeChecker,
+        source_types: type_env_mod.ConsumerTypeSource,
+        module_facts: *const module_facts_mod.ModuleFacts,
+        effect_facts: *const effect_inference.EffectFacts,
+    ) ContractBuilder {
+        var self = initForBuild(
+            allocator,
+            ir_view,
+            atoms,
+            type_env,
+            type_checker,
+            module_facts,
+            effect_facts,
+        );
+        self.source_types = source_types;
+        return self;
+    }
+
     fn factsRef(self: *const ContractBuilder) *const module_facts_mod.ModuleFacts {
         return self.module_facts orelse unreachable;
     }
@@ -277,6 +301,16 @@ pub const ContractBuilder = struct {
         verification: ?VerificationInfo,
     ) !HandlerContract {
         if (self.type_checker) |tc| try tc.ensureHealthy();
+        const source_types = self.source_types orelse
+            try type_env_mod.ConsumerTypeSource.normalizeLegacy(self.type_env);
+        const source_env = try source_types.validate();
+        if (source_env) |selected| {
+            if (self.type_env == null or self.type_env.? != selected) {
+                return error.TypeSourceEnvironmentMismatch;
+            }
+        }
+        try self.validateOmittedSemanticEnvironment(source_types);
+        self.source_types = source_types;
         _ = root;
         const effects = self.effect_facts orelse return error.CompletedEffectFactsRequired;
         const contract_effects = try effects.requireContract();
@@ -486,7 +520,7 @@ pub const ContractBuilder = struct {
         // narrows the set; otherwise every supported v1 spec is active.
         // Downstream surfaces read declared_specs as the mandatory active
         // set when discharging ZTS500/ZTS501/ZTS502.
-        try self.populateDeclaredSpecs(&contract, handler_loc);
+        try self.populateDeclaredSpecs(&contract, handler_fn);
 
         // Phase 4b: Proof-carrying functions. Discharge each helper's
         // `Proof<...>` capsule, append helper ZTS500/ZTS502 and caller-demand
@@ -496,7 +530,7 @@ pub const ContractBuilder = struct {
         // Phase 4c: handler capability budget. Discharge the handler's
         // `Effects<...>` budget against its inferred capability row and
         // attribute every over-budget capability (ZTS506 / ZTS607).
-        try self.dischargeCapabilityBudget(&contract, effects, contract_effects, handler_loc);
+        try self.dischargeCapabilityBudget(&contract, effects, contract_effects, handler_fn);
         // After the budget: the remaining-budget figure each hole reports is
         // the declared budget minus what the handler already spends.
         try self.collectHoles(&contract, effects);
@@ -508,7 +542,24 @@ pub const ContractBuilder = struct {
             self.exported_effects = try effects.export_effects.clone(self.allocator);
         }
 
+        _ = try source_types.validate();
+        try self.validateOmittedSemanticEnvironment(source_types);
+
         return contract;
+    }
+
+    fn validateOmittedSemanticEnvironment(
+        self: *const ContractBuilder,
+        source_types: type_env_mod.ConsumerTypeSource,
+    ) !void {
+        switch (source_types) {
+            .legacy, .direct => return,
+            .omitted => {},
+        }
+        const env = self.type_env orelse return;
+        if (env.sourceTypeMode() != .omitted) return;
+        try env.ensureHealthy();
+        try env.pool.ensureHealthy();
     }
 
     /// Transfer the captured export table to the caller.
@@ -529,13 +580,13 @@ pub const ContractBuilder = struct {
     fn populateDeclaredSpecs(
         self: *ContractBuilder,
         contract: *HandlerContract,
-        handler_loc: ?ir.SourceLocation,
+        handler_fn: ?NodeIndex,
     ) !void {
         var raw_names: std.ArrayListUnmanaged([]const u8) = .empty;
         defer raw_names.deinit(self.allocator);
 
         if (self.type_env) |env| {
-            if (handlerSignature(env, handler_loc)) |sig| {
+            if (try handlerSignature(self.source_types.?, self.ir_view, handler_fn)) |sig| {
                 if (sig.return_type != type_pool_mod.null_type_idx) {
                     // A payload this cannot read leaves `raw_names`
                     // empty, which selects the full v1 set below -
@@ -612,10 +663,10 @@ pub const ContractBuilder = struct {
         effects: *const effect_inference.EffectFacts,
         contract_effects: *const effect_inference.ContractEffectFacts,
     ) !void {
-        var table = try function_specs.discharge(
+        var table = try function_specs.dischargeWithTypeSource(
             self.allocator,
             effects,
-            self.type_env,
+            self.source_types.?,
             self.ir_view,
         );
         defer table.deinit(self.allocator);
@@ -663,50 +714,56 @@ pub const ContractBuilder = struct {
                         !cap.proven.holds(prop) and
                         !containsString(cap.declared.items, pname))
                     {
-                        try contract.spec_diagnostics.append(
-                            self.allocator,
-                            try makeMissingCapsule(self.allocator, pname, cap.name),
-                        );
+                        var missing = try makeMissingCapsule(self.allocator, pname, cap.name);
+                        errdefer missing.deinit(self.allocator);
+                        try contract.spec_diagnostics.append(self.allocator, missing);
                     }
                 }
             }
 
-            var summary = contract_types.CapsuleSummary{
-                .function = try self.allocator.dupe(u8, cap.name),
-                .line = cap.line,
-                .proven_total = cap.proven.total,
-                .proven_pure = cap.proven.pure,
-                .proven_read_only = cap.proven.read_only,
-                .proven_deterministic = cap.proven.deterministic,
-                .discharged = cap.discharged(),
-                .exported = cap.exported,
-                .handler_reachable = reachable_from_handler,
-            };
-            errdefer summary.deinit(self.allocator);
-            for (cap.declared.items) |name| {
-                try summary.declared.append(self.allocator, try self.allocator.dupe(u8, name));
+            {
+                var summary = contract_types.CapsuleSummary{
+                    .function = try self.allocator.dupe(u8, cap.name),
+                    .line = cap.line,
+                    .proven_total = cap.proven.total,
+                    .proven_pure = cap.proven.pure,
+                    .proven_read_only = cap.proven.read_only,
+                    .proven_deterministic = cap.proven.deterministic,
+                    .discharged = cap.discharged(),
+                    .exported = cap.exported,
+                    .handler_reachable = reachable_from_handler,
+                };
+                errdefer summary.deinit(self.allocator);
+                for (cap.declared.items) |name| {
+                    const owned_name = try self.allocator.dupe(u8, name);
+                    errdefer self.allocator.free(owned_name);
+                    try summary.declared.append(self.allocator, owned_name);
+                }
+                try contract.function_capsules.append(self.allocator, summary);
             }
-            try contract.function_capsules.append(self.allocator, summary);
 
-            var effect_summary = contract_types.EffectCapsuleSummary{
-                .function = try self.allocator.dupe(u8, cap.name),
-                .line = cap.line,
-                .discharged = cap.effectDischarged(),
-                .exported = cap.exported,
-                .handler_reachable = reachable_from_handler,
-            };
-            errdefer effect_summary.deinit(self.allocator);
-            for (cap.effect_declared.items) |name| {
-                try effect_summary.declared.append(self.allocator, try self.allocator.dupe(u8, name));
+            {
+                var effect_summary = contract_types.EffectCapsuleSummary{
+                    .function = try self.allocator.dupe(u8, cap.name),
+                    .line = cap.line,
+                    .discharged = cap.effectDischarged(),
+                    .exported = cap.exported,
+                    .handler_reachable = reachable_from_handler,
+                };
+                errdefer effect_summary.deinit(self.allocator);
+                for (cap.effect_declared.items) |name| {
+                    const owned_name = try self.allocator.dupe(u8, name);
+                    errdefer self.allocator.free(owned_name);
+                    try effect_summary.declared.append(self.allocator, owned_name);
+                }
+                var caps_it = cap.inferred_caps.iterator();
+                while (caps_it.next()) |c| {
+                    const owned_name = try self.allocator.dupe(u8, @tagName(c));
+                    errdefer self.allocator.free(owned_name);
+                    try effect_summary.inferred.append(self.allocator, owned_name);
+                }
+                try contract.function_effect_capsules.append(self.allocator, effect_summary);
             }
-            var caps_it = cap.inferred_caps.iterator();
-            while (caps_it.next()) |c| {
-                try effect_summary.inferred.append(
-                    self.allocator,
-                    try self.allocator.dupe(u8, @tagName(c)),
-                );
-            }
-            try contract.function_effect_capsules.append(self.allocator, effect_summary);
         }
     }
 
@@ -962,9 +1019,20 @@ pub const ContractBuilder = struct {
         decl: NodeIndex,
         buf: []u8,
     ) []const u8 {
-        const env = self.type_env orelse return "unknown";
-        const offset = self.ir_view.signatureOffset(decl) orelse return "unknown";
-        const sig = env.getFnSigAt(offset) orelse return "unknown";
+        const env = switch (self.source_types orelse return "unknown") {
+            .omitted => return "unknown",
+            .legacy => |env| env,
+            .direct => |env| env,
+        };
+        const owner = switch (self.ir_view.getTag(decl) orelse return "unknown") {
+            .function_expr, .arrow_function => decl,
+            .function_decl, .var_decl => (self.ir_view.getVarDecl(decl) orelse
+                return "unknown").init,
+            // exhaustive: other nodes do not declare callable owners, so they supply no authored return type.
+            else => return "unknown",
+        };
+        const reference = env.functionTypeRef(self.ir_view, owner) orelse return "unknown";
+        const sig = env.getFunctionSignature(reference) orelse return "unknown";
         if (sig.return_type == type_pool_mod.null_type_idx) return "unknown";
         return env.pool.formatType(env.stripProofMarkers(sig.return_type), buf);
     }
@@ -974,7 +1042,15 @@ pub const ContractBuilder = struct {
         function_name: []const u8,
         buf: []u8,
     ) []const u8 {
-        const env = self.type_env orelse return "unknown";
+        const env = switch (self.source_types orelse return "unknown") {
+            .legacy => |env| env,
+            .direct => |env| env,
+            .omitted => blk: {
+                const semantic = self.type_env orelse return "unknown";
+                if (semantic.sourceTypeMode() != .omitted) return "unknown";
+                break :blk semantic;
+            },
+        };
         const sig = env.getFnSigByName(function_name) orelse return "unknown";
         if (sig.return_type == type_pool_mod.null_type_idx) return "unknown";
         // Report the value type the expression must produce, not the capsule
@@ -1041,10 +1117,10 @@ pub const ContractBuilder = struct {
         contract: *HandlerContract,
         effects: *const effect_inference.EffectFacts,
         contract_effects: *const effect_inference.ContractEffectFacts,
-        handler_loc: ?ir.SourceLocation,
+        handler_fn: ?NodeIndex,
     ) !void {
         const env = self.type_env orelse return;
-        const sig = handlerSignature(env, handler_loc) orelse return;
+        const sig = try handlerSignature(self.source_types.?, self.ir_view, handler_fn) orelse return;
         if (sig.return_type == type_pool_mod.null_type_idx) return;
 
         var raw: std.ArrayListUnmanaged([]const u8) = .empty;

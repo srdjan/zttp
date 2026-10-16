@@ -73,6 +73,7 @@ const AtomTable = context_mod.AtomTable;
 const TypeEnv = type_env_mod.TypeEnv;
 const TypePool = type_pool_mod.TypePool;
 const TypeMap = type_map_mod.TypeMap;
+const TypeSyntax = parser_mod.type_syntax;
 const HandlerContract = handler_contract_mod.HandlerContract;
 const VerificationInfo = handler_contract_mod.VerificationInfo;
 const ContractBuilder = contract_builder_mod.ContractBuilder;
@@ -147,10 +148,25 @@ pub const ParsedModule = struct {
     ir_view: IrView,
     root: NodeIndex,
     atoms: ?*AtomTable,
+    type_store: ?*const TypeSyntax.Store = null,
 
     /// Adopt an already-parsed IR. Transitional: tighter gating belongs to WS5.
     pub fn fromExisting(ir_view: IrView, root: NodeIndex, atoms: ?*AtomTable) ParsedModule {
         return .{ .ir_view = ir_view, .root = root, .atoms = atoms };
+    }
+
+    pub fn fromTypedExisting(
+        ir_view: IrView,
+        root: NodeIndex,
+        atoms: *AtomTable,
+        type_store: *const TypeSyntax.Store,
+    ) ParsedModule {
+        return .{
+            .ir_view = ir_view,
+            .root = root,
+            .atoms = atoms,
+            .type_store = type_store,
+        };
     }
 };
 
@@ -515,6 +531,17 @@ pub const TypeEnvStorage = struct {
         allocator: std.mem.Allocator,
         type_map: ?*const TypeMap,
     ) !void {
+        return self.initWithSource(
+            allocator,
+            if (type_map) |map| .{ .legacy = map } else .omitted,
+        );
+    }
+
+    pub fn initWithSource(
+        self: *TypeEnvStorage,
+        allocator: std.mem.Allocator,
+        source: type_env_mod.SourceTypeInput,
+    ) !void {
         if (self.initialized) return error.TypeEnvironmentAlreadyInitialized;
         self.pool = TypePool.init(allocator);
         errdefer self.pool.deinit(allocator);
@@ -525,7 +552,7 @@ pub const TypeEnvStorage = struct {
         module_types_mod.populateModuleTypes(&self.env, &self.pool, allocator);
         abi_types_mod.populateHandlerAbiTypes(&self.env, &self.pool, allocator);
         try self.pool.ensureHealthy();
-        if (type_map) |map| try self.env.populateFromTypeMap(map);
+        try self.env.populateSourceTypes(source);
         try self.finishInitialization();
     }
 
@@ -558,6 +585,7 @@ pub const ExtractContractOptions = struct {
     has_default_response: bool = false,
     verification: ?VerificationInfo = null,
     type_map: ?*const TypeMap = null,
+    source_types: ?ModuleSourceTypeInput = null,
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
     type_check: ContractTypeCheckFn = runContractTypeCheck,
     read_file: ?modules_mod.module_graph.ReadFileFn = null,
@@ -570,12 +598,6 @@ pub const ExtractContractOptions = struct {
     /// `TypeChecker`, the contract is built on that checker rather than on a
     /// second pool, env, and checker constructed identically and re-checked
     /// over the same root.
-    ///
-    /// It does not replace `type_map`: a resolve with no type env (an untyped
-    /// source) leaves `type_checker` null, and extraction then builds its own
-    /// session from `type_map` as before. It also does not apply when
-    /// `type_check` is overridden, because a caller that replaced the check
-    /// wants it to run.
     resolved: ?*ResolvedModule = null,
     /// File-import effects prepared from earlier modules in one loaded graph.
     /// Borrowed through extraction only.
@@ -583,6 +605,71 @@ pub const ExtractContractOptions = struct {
     /// Return an owned export table beside the contract.
     capture_export_effects: bool = false,
 };
+
+pub const ModuleSourceTypeInput = union(type_env_mod.SourceTypeMode) {
+    omitted,
+    legacy: *const TypeMap,
+    direct,
+};
+
+fn normalizeModuleSourceTypes(
+    explicit: ?ModuleSourceTypeInput,
+    legacy: ?*const TypeMap,
+) !ModuleSourceTypeInput {
+    if (explicit != null and legacy != null) return error.AmbiguousTypeSource;
+    return explicit orelse if (legacy) |type_map| .{ .legacy = type_map } else .omitted;
+}
+
+fn sourceTypeInput(
+    parsed: ParsedModule,
+    source: ModuleSourceTypeInput,
+) !type_env_mod.SourceTypeInput {
+    return switch (source) {
+        .omitted => .omitted,
+        .legacy => |type_map| .{ .legacy = type_map },
+        .direct => .{ .direct = .{
+            .store = parsed.type_store orelse return error.DirectTypeSyntaxUnavailable,
+            .ir_view = parsed.ir_view,
+            .atoms = parsed.atoms orelse return error.DirectTypeSyntaxUnavailable,
+        } },
+    };
+}
+
+fn consumerTypeSource(
+    source: ModuleSourceTypeInput,
+    env: *const TypeEnv,
+) type_env_mod.ConsumerTypeSource {
+    return switch (source) {
+        .omitted => .omitted,
+        .legacy => .{ .legacy = env },
+        .direct => .{ .direct = env },
+    };
+}
+
+fn consumerTypeSourceForExistingChecker(
+    options: ExtractContractOptions,
+    parsed: ParsedModule,
+    env: *const TypeEnv,
+) !type_env_mod.ConsumerTypeSource {
+    if (options.source_types) |source| {
+        if (options.type_map != null) return error.AmbiguousTypeSource;
+        switch (source) {
+            .direct => _ = try sourceTypeInput(parsed, .direct),
+            .omitted, .legacy => {},
+        }
+        const selected = consumerTypeSource(source, env);
+        _ = try selected.validate();
+        return selected;
+    }
+    return type_env_mod.ConsumerTypeSource.normalizeLegacy(env);
+}
+
+fn hasAuthoredSource(source: ModuleSourceTypeInput) bool {
+    return switch (source) {
+        .omitted => false,
+        .legacy, .direct => true,
+    };
+}
 
 /// Owned outputs from one transactional contract extraction.
 pub const ContractExtraction = struct {
@@ -633,11 +720,18 @@ pub const ModuleAnalysisSession = struct {
     pub const FullOptions = struct {
         /// Borrowed through session completion and extraction.
         type_map: ?*const TypeMap = null,
+        source_types: ?ModuleSourceTypeInput = null,
         strict: bool = true,
         manifest_registry: ?*const manifest_registry_mod.Registry = null,
         policy_sections: guard_catalog.SectionSet = .{},
         select_verifier: bool = false,
         select_flow: bool = false,
+    };
+
+    const FullConfig = struct {
+        strict: bool = true,
+        manifest_registry: ?*const manifest_registry_mod.Registry = null,
+        policy_sections: guard_catalog.SectionSet = .{},
     };
 
     pub const ContractOnlyOptions = struct {
@@ -655,8 +749,9 @@ pub const ModuleAnalysisSession = struct {
     allocator: std.mem.Allocator = undefined,
     parsed: ParsedModule = undefined,
     profile: Profile = undefined,
-    full_opts: FullOptions = .{},
+    full_opts: FullConfig = .{},
     extraction_opts: ExtractContractOptions = .{},
+    source_types: ModuleSourceTypeInput = .omitted,
     contract_context: ContractContext = .{},
     state: SessionState = .uninitialized,
     type_env_storage: TypeEnvStorage = .{},
@@ -684,11 +779,17 @@ pub const ModuleAnalysisSession = struct {
         opts: FullOptions,
     ) !void {
         if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
+        const source_types = try normalizeModuleSourceTypes(opts.source_types, opts.type_map);
         self.* = .{
             .allocator = allocator,
             .parsed = parsed,
             .profile = .full,
-            .full_opts = opts,
+            .full_opts = .{
+                .strict = opts.strict,
+                .manifest_registry = opts.manifest_registry,
+                .policy_sections = opts.policy_sections,
+            },
+            .source_types = source_types,
             .state = .ready,
             .resolution_state = .ready,
             .contract_type_state = .ready,
@@ -705,11 +806,15 @@ pub const ModuleAnalysisSession = struct {
         opts: ContractOnlyOptions,
     ) !void {
         if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
+        if (opts.extraction.source_types != null and opts.extraction.type_map != null) {
+            return error.AmbiguousTypeSource;
+        }
         self.* = .{
             .allocator = allocator,
             .parsed = parsed,
             .profile = .contract_only,
             .extraction_opts = opts.extraction,
+            .source_types = .omitted,
             .contract_context = contextFromExtractOptions(opts.extraction),
             .state = .ready,
             .contract_type_state = .ready,
@@ -726,11 +831,13 @@ pub const ModuleAnalysisSession = struct {
         opts: ExtractContractOptions,
     ) !void {
         if (self.state != .uninitialized) return error.AnalysisAlreadyInitialized;
+        const source_types = try normalizeModuleSourceTypes(opts.source_types, opts.type_map);
         self.* = .{
             .allocator = allocator,
             .parsed = parsed,
             .profile = .sound_extraction,
             .extraction_opts = opts,
+            .source_types = source_types,
             .contract_context = contextFromExtractOptions(opts),
             .state = .ready,
             .resolution_state = .ready,
@@ -951,8 +1058,11 @@ pub const ModuleAnalysisSession = struct {
             self.parsed,
             self.full_opts.manifest_registry,
         );
-        if (self.full_opts.type_map) |type_map| {
-            try self.type_env_storage.init(self.allocator, type_map);
+        if (hasAuthoredSource(self.source_types)) {
+            try self.type_env_storage.initWithSource(
+                self.allocator,
+                try sourceTypeInput(self.parsed, self.source_types),
+            );
         }
         self.resolved = try resolve(self.allocator, self.parsed, .{
             .type_env = self.type_env_storage.envPtr(),
@@ -970,7 +1080,7 @@ pub const ModuleAnalysisSession = struct {
             return error.IncompatibleAnalysisProfile;
         }
 
-        try self.completeStandaloneTypeSession(null);
+        try self.completeStandaloneTypeSession();
         try self.prepareContractFacts(false);
         if (self.flow_state == .ready) {
             self.standalone_flow_checker = FlowChecker.init(
@@ -986,8 +1096,11 @@ pub const ModuleAnalysisSession = struct {
         self.resolution_facts = try buildModuleFacts(self.allocator, self.parsed, null);
         const resolution_facts = &self.resolution_facts.?;
 
-        if (self.extraction_opts.type_map) |type_map| {
-            try self.type_env_storage.init(self.allocator, type_map);
+        if (hasAuthoredSource(self.source_types)) {
+            try self.type_env_storage.initWithSource(
+                self.allocator,
+                try sourceTypeInput(self.parsed, self.source_types),
+            );
         }
         self.resolved = try resolve(self.allocator, self.parsed, .{
             .type_env = self.type_env_storage.envPtr(),
@@ -1008,18 +1121,18 @@ pub const ModuleAnalysisSession = struct {
             try checker.ensureHealthy();
             self.contract_type_state = .completed;
         } else {
-            try self.completeStandaloneTypeSession(null);
+            try self.completeStandaloneTypeSession();
         }
         try self.prepareContractFacts(false);
     }
 
-    fn completeStandaloneTypeSession(
-        self: *ModuleAnalysisSession,
-        type_map: ?*const TypeMap,
-    ) !void {
+    fn completeStandaloneTypeSession(self: *ModuleAnalysisSession) !void {
         if (self.contract_type_state != .ready) return error.AnalysisPassUnavailable;
         self.contract_type_state = .attempted;
-        try self.type_env_storage.init(self.allocator, type_map);
+        try self.type_env_storage.initWithSource(
+            self.allocator,
+            try sourceTypeInput(self.parsed, self.source_types),
+        );
         self.standalone_checker = TypeChecker.init(
             self.allocator,
             self.parsed.ir_view,
@@ -1059,7 +1172,7 @@ pub const ModuleAnalysisSession = struct {
 
     fn completedTypeChecker(self: *ModuleAnalysisSession) !*TypeChecker {
         if (self.contract_type_state == .ready) {
-            try self.completeStandaloneTypeSession(null);
+            try self.completeStandaloneTypeSession();
         }
         if (self.contract_type_state != .completed) return error.AnalysisPassIncomplete;
         if (self.resolved) |*resolved| {
@@ -1083,7 +1196,7 @@ pub const ModuleAnalysisSession = struct {
             .{
                 .manifest_registry = opts.manifest_registry,
                 .module_facts = self.completedContractFacts(),
-                .type_env = type_env,
+                .type_source = consumerTypeSource(self.source_types, type_env),
                 .imported_effects = opts.imported_effects,
                 .contract_projection = .{ .complete = .{ .selected_handler = handler_fn } },
             },
@@ -1099,11 +1212,12 @@ pub const ModuleAnalysisSession = struct {
         var opts = if (self.profile == .full) ExtractContractOptions{
             .strict = self.full_opts.strict,
             .manifest_registry = self.full_opts.manifest_registry,
-            .type_map = self.full_opts.type_map,
         } else self.extraction_opts;
+        opts.type_map = null;
+        opts.source_types = self.source_types;
         opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
-        if (self.profile == .contract_only) opts.type_map = null;
+        if (self.profile == .contract_only) opts.source_types = .omitted;
         opts.dispatch = self.contract_context.dispatch;
         opts.has_default_response = self.contract_context.has_default_response;
         opts.verification = self.contract_context.verification;
@@ -1123,6 +1237,7 @@ pub const ModuleAnalysisSession = struct {
             opts,
             checker.env,
             checker,
+            consumerTypeSource(self.source_types, checker.env),
             handler_fn,
             handler_loc,
             self.completedContractFacts(),
@@ -1137,7 +1252,10 @@ pub const ModuleAnalysisSession = struct {
         self: *ModuleAnalysisSession,
         filename: []const u8,
     ) !ContractExtraction {
-        try self.extraction_type_env_storage.init(self.allocator, self.extraction_opts.type_map);
+        try self.extraction_type_env_storage.initWithSource(
+            self.allocator,
+            try sourceTypeInput(self.parsed, self.source_types),
+        );
         self.extraction_checker = TypeChecker.init(
             self.allocator,
             self.parsed.ir_view,
@@ -1150,6 +1268,8 @@ pub const ModuleAnalysisSession = struct {
         try checker.ensureHealthy();
 
         var opts = self.extraction_opts;
+        opts.type_map = null;
+        opts.source_types = self.source_types;
         opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
         opts.dispatch = self.contract_context.dispatch;
@@ -1169,6 +1289,7 @@ pub const ModuleAnalysisSession = struct {
             opts,
             checker.env,
             checker,
+            consumerTypeSource(self.source_types, checker.env),
             handler_fn,
             handler_loc,
             self.completedContractFacts(),
@@ -1221,6 +1342,7 @@ pub fn extractContractResultFromTypeSession(
         return error.IncompatibleTypeSessionOptions;
     }
     try type_checker.ensureHealthy();
+    const source_types = try consumerTypeSourceForExistingChecker(opts, parsed, type_checker.env);
 
     const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
     const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
@@ -1231,6 +1353,7 @@ pub fn extractContractResultFromTypeSession(
         opts,
         type_checker.env,
         type_checker,
+        source_types,
         handler_fn,
         handler_loc,
     );
@@ -1265,6 +1388,7 @@ pub fn extractContractResultFromParsed(
     if (opts.type_check == runContractTypeCheck) {
         if (opts.resolved) |resolved| {
             if (resolved.type_checker) |*tc| {
+                const source_types = try consumerTypeSourceForExistingChecker(opts, parsed, tc.env);
                 var extraction = try buildContractResultWithTemporaryFacts(
                     allocator,
                     parsed,
@@ -1272,6 +1396,7 @@ pub fn extractContractResultFromParsed(
                     opts,
                     tc.env,
                     tc,
+                    source_types,
                     handler_fn,
                     handler_loc,
                 );
@@ -1282,22 +1407,18 @@ pub fn extractContractResultFromParsed(
         }
     }
 
-    var type_pool = TypePool.init(allocator);
-    defer type_pool.deinit(allocator);
+    const selected = try normalizeModuleSourceTypes(opts.source_types, opts.type_map);
 
-    var type_env = TypeEnv.init(allocator, &type_pool);
-    defer type_env.deinit();
-    module_types_mod.populateModuleTypes(&type_env, &type_pool, allocator);
-    abi_types_mod.populateHandlerAbiTypes(&type_env, &type_pool, allocator);
-    if (opts.type_map) |type_map| {
-        try type_env.populateFromTypeMap(type_map);
-    }
+    var storage: TypeEnvStorage = .{};
+    try storage.initWithSource(allocator, try sourceTypeInput(parsed, selected));
+    defer storage.deinit(allocator);
+    const type_env = storage.envPtr().?;
 
     var type_checker = TypeChecker.init(
         allocator,
         parsed.ir_view,
         parsed.atoms,
-        &type_env,
+        type_env,
     );
     defer type_checker.deinit();
     _ = try opts.type_check(&type_checker, parsed.root);
@@ -1308,8 +1429,9 @@ pub fn extractContractResultFromParsed(
         parsed,
         filename,
         opts,
-        &type_env,
+        type_env,
         &type_checker,
+        consumerTypeSource(selected, type_env),
         handler_fn,
         handler_loc,
     );
@@ -1325,6 +1447,7 @@ fn buildContractResultWithTemporaryFacts(
     opts: ExtractContractOptions,
     type_env: *const TypeEnv,
     type_checker: *TypeChecker,
+    source_types: type_env_mod.ConsumerTypeSource,
     handler_fn: ?NodeIndex,
     handler_loc: ?ir_mod.SourceLocation,
 ) !ContractExtraction {
@@ -1344,7 +1467,7 @@ fn buildContractResultWithTemporaryFacts(
         .{
             .manifest_registry = opts.manifest_registry,
             .module_facts = module_facts,
-            .type_env = type_env,
+            .type_source = source_types,
             .imported_effects = opts.imported_effects,
             .contract_projection = .{ .complete = .{ .selected_handler = handler_fn } },
         },
@@ -1358,6 +1481,7 @@ fn buildContractResultWithTemporaryFacts(
         opts,
         type_env,
         type_checker,
+        source_types,
         handler_fn,
         handler_loc,
         module_facts,
@@ -1373,17 +1497,19 @@ fn buildContractResultOn(
     opts: ExtractContractOptions,
     type_env: *const TypeEnv,
     type_checker: *TypeChecker,
+    source_types: type_env_mod.ConsumerTypeSource,
     handler_fn: ?NodeIndex,
     handler_loc: ?ir_mod.SourceLocation,
     module_facts: *const ModuleFacts,
     effect_facts: *const EffectFacts,
 ) !ContractExtraction {
-    var builder = ContractBuilder.initForBuild(
+    var builder = ContractBuilder.initForBuildWithTypeSource(
         allocator,
         parsed.ir_view,
         parsed.atoms,
         type_env,
         type_checker,
+        source_types,
         module_facts,
         effect_facts,
     );
@@ -1415,6 +1541,9 @@ pub fn extractContract(
     filename: []const u8,
     opts: ExtractContractOptions,
 ) !HandlerContract {
+    if (opts.source_types != null and opts.type_map != null) {
+        return error.AmbiguousTypeSource;
+    }
     var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, filename, .{});
     defer frontend.deinit();
 
@@ -1434,9 +1563,17 @@ pub fn extractContract(
 
     const ir_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = ParsedModule.fromExisting(ir_view, root, &atoms);
-    const effective_type_map = frontend.typeMap() orelse opts.type_map;
     var contract_opts = opts;
-    contract_opts.type_map = effective_type_map;
+    if (opts.source_types) |selected| {
+        contract_opts.type_map = null;
+        contract_opts.source_types = switch (selected) {
+            .legacy => |fallback| .{ .legacy = frontend.typeMap() orelse fallback },
+            .omitted => .omitted,
+            .direct => .direct,
+        };
+    } else {
+        contract_opts.type_map = frontend.typeMap() orelse opts.type_map;
+    }
     if (hasFileImports(ir_view)) {
         const read_file = opts.read_file orelse return error.FileImportReaderRequired;
         return extractMultiModuleContract(
@@ -1479,6 +1616,12 @@ fn extractMultiModuleContract(
     atoms: *AtomTable,
     opts: ExtractContractOptions,
 ) !HandlerContract {
+    if (opts.source_types) |source_types| {
+        switch (source_types) {
+            .direct => return error.DirectTypeSyntaxUnavailable,
+            .omitted, .legacy => {},
+        }
+    }
     var graph = modules_mod.ModuleGraph.init(allocator);
     defer graph.deinit();
     try graph.build(entry_filename, entry_source, read_file);
@@ -1511,7 +1654,13 @@ fn extractMultiModuleContract(
         const parsed = ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
 
         var module_opts = opts;
-        module_opts.type_map = if (is_entry) opts.type_map else null;
+        if (is_entry) {
+            module_opts.type_map = opts.type_map;
+            module_opts.source_types = opts.source_types;
+        } else {
+            module_opts.type_map = null;
+            module_opts.source_types = .omitted;
+        }
         module_opts.read_file = null;
         module_opts.capture_export_effects = true;
         if (!is_entry) {
@@ -4146,4 +4295,1131 @@ test "a typed parameter does not change the bytecode annotations" {
             try testing.expectEqual(@as(u32, 0), session.resolved.bool_checker.node_types.count());
         }
     }.run);
+}
+
+const ExistingCheckerEntry = enum { type_session, resolved };
+
+fn extractExistingCheckerForTest(
+    allocator: std.mem.Allocator,
+    entry: ExistingCheckerEntry,
+    parsed: ParsedModule,
+    options: ExtractContractOptions,
+    checker: *TypeChecker,
+    resolved: *ResolvedModule,
+) !HandlerContract {
+    return switch (entry) {
+        .type_session => extractContractFromTypeSession(
+            allocator,
+            parsed,
+            "existing-checker.ts",
+            options,
+            checker,
+        ),
+        .resolved => blk: {
+            var selected = options;
+            selected.resolved = resolved;
+            break :blk extractContractFromParsed(
+                allocator,
+                parsed,
+                "existing-checker.ts",
+                selected,
+            );
+        },
+    };
+}
+
+fn expectExistingCheckerFacts(contract: *const HandlerContract, authored: bool) !void {
+    try testing.expectEqual(@as(usize, 1), contract.holes.items.len);
+    try testing.expectEqualStrings(
+        if (authored) "string" else "unknown",
+        contract.holes.items[0].expected_type,
+    );
+    var saw_proof = false;
+    for (contract.function_capsules.items) |capsule| {
+        if (!std.mem.eql(u8, capsule.function, "proved")) continue;
+        try testing.expectEqual(if (authored) @as(usize, 1) else 0, capsule.declared.items.len);
+        if (authored) try testing.expectEqualStrings("deterministic", capsule.declared.items[0]);
+        saw_proof = true;
+    }
+    try testing.expect(saw_proof);
+    var saw_effect = false;
+    for (contract.function_effect_capsules.items) |capsule| {
+        if (!std.mem.eql(u8, capsule.function, "effectful")) continue;
+        try testing.expectEqual(if (authored) @as(usize, 1) else 0, capsule.declared.items.len);
+        if (authored) {
+            try testing.expectEqualStrings("crypto", capsule.declared.items[0]);
+            try testing.expectEqual(@as(usize, 1), capsule.inferred.items.len);
+            try testing.expectEqualStrings("crypto", capsule.inferred.items[0]);
+        }
+        saw_effect = true;
+    }
+    try testing.expect(saw_effect);
+}
+
+test "existing checker APIs preserve source selection and direct ownership" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\function proved(value: string): Proof<string, "deterministic"> { return value; }
+        \\function effectful(value: string): Effects<string, "crypto"> { return sha256(value); }
+        \\function incomplete(): string { return hole(); }
+        \\function handler(req: Request): Response {
+        \\  return Response.text(effectful(proved(incomplete())));
+        \\}
+        \\
+    ;
+    var prepared = try source_frontend_mod.PreparedSource.init(allocator, source, "existing-checker.ts", .{});
+    defer prepared.deinit();
+    var fallback = try source_frontend_mod.PreparedSource.init(
+        allocator,
+        "function handler(req: Request): number { return 1; }\n",
+        "fallback.ts",
+        .{},
+    );
+    defer fallback.deinit();
+
+    var legacy_atoms = AtomTable.init(allocator);
+    defer legacy_atoms.deinit();
+    var legacy_parser = try JsParser.init(allocator, prepared.parserInput());
+    defer legacy_parser.deinit();
+    legacy_parser.setAtomTable(&legacy_atoms);
+    const legacy_root = try legacy_parser.parse();
+    const legacy_view = IrView.fromIRStore(&legacy_parser.nodes, &legacy_parser.constants);
+    const legacy_parsed = ParsedModule.fromExisting(legacy_view, legacy_root, &legacy_atoms);
+    var legacy_storage: TypeEnvStorage = .{};
+    defer legacy_storage.deinit(allocator);
+    try legacy_storage.initWithSource(allocator, .{ .legacy = prepared.typeMap().? });
+    var legacy_checker = TypeChecker.init(allocator, legacy_view, &legacy_atoms, legacy_storage.envPtr().?);
+    defer legacy_checker.deinit();
+    _ = try legacy_checker.check(legacy_root);
+    var legacy_resolved = try resolve(allocator, legacy_parsed, .{
+        .type_env = legacy_storage.envPtr(),
+        .strict = false,
+    });
+    defer legacy_resolved.deinit();
+
+    var direct_atoms = AtomTable.init(allocator);
+    defer direct_atoms.deinit();
+    var direct_parser = try JsParser.initTyped(allocator, allocator, source);
+    defer direct_parser.deinit();
+    direct_parser.setAtomTable(&direct_atoms);
+    const direct_root = try direct_parser.parse();
+    const direct_view = IrView.fromIRStore(&direct_parser.nodes, &direct_parser.constants);
+    const direct_parsed = ParsedModule.fromTypedExisting(
+        direct_view,
+        direct_root,
+        &direct_atoms,
+        &direct_parser.type_store,
+    );
+    const direct_unbound = ParsedModule.fromExisting(direct_view, direct_root, &direct_atoms);
+    var direct_storage: TypeEnvStorage = .{};
+    defer direct_storage.deinit(allocator);
+    try direct_storage.initWithSource(allocator, .{ .direct = .{
+        .store = &direct_parser.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    var direct_checker = TypeChecker.init(allocator, direct_view, &direct_atoms, direct_storage.envPtr().?);
+    defer direct_checker.deinit();
+    _ = try direct_checker.check(direct_root);
+    var direct_resolved = try resolve(allocator, direct_parsed, .{
+        .type_env = direct_storage.envPtr(),
+        .strict = false,
+    });
+    defer direct_resolved.deinit();
+
+    inline for (.{ ExistingCheckerEntry.type_session, .resolved }) |entry| {
+        var baseline = try extractExistingCheckerForTest(
+            allocator,
+            entry,
+            legacy_parsed,
+            .{},
+            &legacy_checker,
+            &legacy_resolved,
+        );
+        defer baseline.deinit(allocator);
+        try expectExistingCheckerFacts(&baseline, true);
+        const baseline_json = try serializeContractForTest(allocator, &baseline);
+        defer allocator.free(baseline_json);
+
+        var fallback_contract = try extractExistingCheckerForTest(
+            allocator,
+            entry,
+            legacy_parsed,
+            .{ .type_map = fallback.typeMap() },
+            &legacy_checker,
+            &legacy_resolved,
+        );
+        defer fallback_contract.deinit(allocator);
+        try expectExistingCheckerFacts(&fallback_contract, true);
+        const fallback_json = try serializeContractForTest(allocator, &fallback_contract);
+        defer allocator.free(fallback_json);
+        try testing.expectEqualStrings(baseline_json, fallback_json);
+
+        var omitted = try extractExistingCheckerForTest(
+            allocator,
+            entry,
+            legacy_parsed,
+            .{ .source_types = .omitted },
+            &legacy_checker,
+            &legacy_resolved,
+        );
+        defer omitted.deinit(allocator);
+        try expectExistingCheckerFacts(&omitted, false);
+
+        var direct = try extractExistingCheckerForTest(
+            allocator,
+            entry,
+            direct_parsed,
+            .{ .source_types = .direct },
+            &direct_checker,
+            &direct_resolved,
+        );
+        defer direct.deinit(allocator);
+        try expectExistingCheckerFacts(&direct, true);
+        const direct_json = try serializeContractForTest(allocator, &direct);
+        defer allocator.free(direct_json);
+        try testing.expectEqualStrings(baseline_json, direct_json);
+
+        try testing.expectError(
+            error.DirectTypeSyntaxUnavailable,
+            extractExistingCheckerForTest(
+                allocator,
+                entry,
+                direct_unbound,
+                .{ .source_types = .direct },
+                &direct_checker,
+                &direct_resolved,
+            ),
+        );
+    }
+}
+
+threadlocal var source_selection_graph_reads: usize = 0;
+
+const sourceSelectionGraphEntry =
+    \\import { helper } from "./dep.ts";
+    \\function handler(req: Request): Proof<Response, "pure"> { return Response.text(helper()); }
+;
+
+fn readSourceSelectionGraphFile(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+) modules_mod.module_graph.ReadFileError![]const u8 {
+    source_selection_graph_reads += 1;
+    if (!std.mem.endsWith(u8, path, "dep.ts")) return error.FileNotFound;
+    return allocator.dupe(u8,
+        \\export function helper(): Proof<string, "deterministic"> { return "ok"; }
+    );
+}
+
+test "contract-only graph sessions omit every supplied source selection" {
+    const allocator = testing.allocator;
+    const entry_path = "/source-selection/entry.ts";
+    var graph = modules_mod.ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build(entry_path, sourceSelectionGraphEntry, readSourceSelectionGraphFile);
+    try testing.expectEqual(@as(usize, 2), graph.module_list.items.len);
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+    var compiler = modules_mod.ModuleCompiler.init(allocator, &atoms, &strings);
+    var compiled = try compiler.compileAll(&graph);
+    defer compiled.deinit();
+    defer for (compiled.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
+    try testing.expectEqual(@as(usize, 2), compiled.modules.len);
+
+    const modes = [_]type_env_mod.SourceTypeMode{ .omitted, .legacy, .direct };
+    try testing.expectEqual(@typeInfo(type_env_mod.SourceTypeMode).@"enum".fields.len, modes.len);
+    var baseline: [2]?[]u8 = @splat(null);
+    defer for (baseline) |bytes| if (bytes) |owned| allocator.free(owned);
+    var merged_baseline: ?[]u8 = null;
+    defer if (merged_baseline) |owned| allocator.free(owned);
+    var observations: usize = 0;
+    for (modes) |mode| {
+        var merged = try handler_contract_mod.initMergedContract(allocator, entry_path);
+        defer merged.deinit(allocator);
+        for (compiled.modules, compiled.parsers, 0..) |module, *parser, index| {
+            const graph_module = &graph.module_list.items[graph.execution_order[index]];
+            const type_map = if (graph_module.prepared_source) |*prepared|
+                prepared.typeMap() orelse return error.TestUnexpectedResult
+            else
+                return error.TestUnexpectedResult;
+            try testing.expect(type_map.entries.items.len > 0);
+            const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+            const parsed = ParsedModule.fromExisting(view, module.root, &atoms);
+            const selected: ModuleSourceTypeInput = switch (mode) {
+                .omitted => .omitted,
+                .legacy => .{ .legacy = type_map },
+                .direct => .direct,
+            };
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initContractOnly(allocator, parsed, .{ .extraction = .{
+                .source_types = selected,
+                .strict = false,
+            } });
+            defer analysis.deinit();
+            try analysis.complete();
+            try testing.expectEqual(type_env_mod.SourceTypeMode.omitted, analysis.type_env_storage.envPtr().?.sourceTypeMode().?);
+            var contract = try analysis.extractContract(graph_module.path);
+            defer contract.deinit(allocator);
+            const is_entry = index == compiled.modules.len - 1;
+            const capsule_count: usize = if (is_entry) 0 else 1;
+            try testing.expectEqual(capsule_count, contract.function_capsules.items.len);
+            try testing.expectEqual(capsule_count, contract.function_effect_capsules.items.len);
+            for (contract.function_capsules.items) |capsule| {
+                try testing.expectEqualStrings("helper", capsule.function);
+                try testing.expectEqual(@as(usize, 0), capsule.declared.items.len);
+            }
+            for (contract.function_effect_capsules.items) |capsule| {
+                try testing.expectEqualStrings("helper", capsule.function);
+                try testing.expectEqual(@as(usize, 0), capsule.declared.items.len);
+            }
+            try testing.expect(contract.declared_specs_implicit);
+            const defaults = @import("spec_discharge.zig").v1_spec_names;
+            try testing.expect(defaults.len > 1);
+            try testing.expectEqual(defaults.len, contract.declared_specs.items.len);
+            for (defaults) |expected| {
+                var matches: usize = 0;
+                for (contract.declared_specs.items) |actual| {
+                    if (std.mem.eql(u8, expected, actual)) matches += 1;
+                }
+                try testing.expectEqual(@as(usize, 1), matches);
+            }
+            const json = try serializeContractForTest(allocator, &contract);
+            defer allocator.free(json);
+            if (baseline[index]) |expected| {
+                try testing.expectEqualStrings(expected, json);
+            } else {
+                baseline[index] = try allocator.dupe(u8, json);
+            }
+            try handler_contract_mod.mergeModuleContract(allocator, &merged, &contract, index == compiled.modules.len - 1);
+            observations += 1;
+        }
+        try testing.expect(merged.properties == null);
+        const merged_json = try serializeContractForTest(allocator, &merged);
+        defer allocator.free(merged_json);
+        if (merged_baseline) |expected| {
+            try testing.expectEqualStrings(expected, merged_json);
+        } else {
+            merged_baseline = try allocator.dupe(u8, merged_json);
+        }
+    }
+    try testing.expectEqual(@as(usize, 6), observations);
+}
+
+test "legacy graph retains prepared entry signatures and rejects direct reparsing" {
+    const allocator = testing.allocator;
+    var fallback = try source_frontend_mod.PreparedSource.init(
+        allocator,
+        "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.text(\"fallback\"); }\n",
+        "fallback.ts",
+        .{},
+    );
+    defer fallback.deinit();
+    const Probe = struct {
+        var entries: usize = 0;
+        var dependencies: usize = 0;
+
+        fn check(checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
+            if (checker.env.getSourceFnSigByName("handler")) |signature| {
+                try testing.expectEqual(type_env_mod.SourceTypeMode.legacy, checker.env.sourceTypeMode().?);
+                var names: std.ArrayListUnmanaged([]const u8) = .empty;
+                defer names.deinit(checker.env.allocator);
+                _ = try checker.env.extractProofMembers(signature.return_type, &names);
+                try testing.expectEqual(@as(usize, 1), names.items.len);
+                try testing.expectEqualStrings("pure", names.items[0]);
+                entries += 1;
+            } else {
+                try testing.expectEqual(type_env_mod.SourceTypeMode.omitted, checker.env.sourceTypeMode().?);
+                try testing.expect(checker.env.getSourceFnSigByName("helper") == null);
+                dependencies += 1;
+            }
+            return checker.check(root);
+        }
+    };
+    Probe.entries = 0;
+    Probe.dependencies = 0;
+    source_selection_graph_reads = 0;
+    var contract = try extractContract(allocator, sourceSelectionGraphEntry, "/source-selection/entry.ts", .{
+        .type_map = fallback.typeMap(),
+        .type_check = Probe.check,
+        .read_file = readSourceSelectionGraphFile,
+        .strict = false,
+    });
+    defer contract.deinit(allocator);
+    try testing.expect(source_selection_graph_reads > 0);
+    try testing.expectEqual(@as(usize, 1), Probe.entries);
+    try testing.expectEqual(@as(usize, 1), Probe.dependencies);
+    try testing.expect(contract.properties == null);
+    try testing.expectEqual(@as(usize, 0), contract.declared_specs.items.len);
+    try testing.expectEqual(@as(usize, 0), contract.function_capsules.items.len);
+    try testing.expectEqual(@as(usize, 0), contract.function_effect_capsules.items.len);
+    source_selection_graph_reads = 0;
+    try testing.expectError(error.DirectTypeSyntaxUnavailable, extractContract(
+        allocator,
+        sourceSelectionGraphEntry,
+        "/source-selection/entry.ts",
+        .{
+            .source_types = .direct,
+            .read_file = readSourceSelectionGraphFile,
+            .strict = false,
+        },
+    ));
+    try testing.expectEqual(@as(usize, 0), source_selection_graph_reads);
+}
+
+fn expectOmittedHelperReceipt(
+    contract: *const HandlerContract,
+    function_name: []const u8,
+    expected_type: []const u8,
+    expected_json_len: usize,
+    expected_json_sha256: []const u8,
+) !void {
+    try testing.expectEqual(@as(usize, 1), contract.function_capsules.items.len);
+    const proof = contract.function_capsules.items[0];
+    try testing.expectEqualStrings(function_name, proof.function);
+    try testing.expectEqual(@as(u32, 1), proof.line);
+    try testing.expectEqual(@as(usize, 0), proof.declared.items.len);
+    try testing.expect(proof.proven_total);
+    try testing.expect(proof.proven_pure);
+    try testing.expect(proof.proven_read_only);
+    try testing.expect(proof.proven_deterministic);
+    try testing.expect(!proof.discharged);
+    try testing.expect(!proof.exported);
+    try testing.expect(proof.handler_reachable);
+
+    try testing.expectEqual(@as(usize, 1), contract.function_effect_capsules.items.len);
+    const effect = contract.function_effect_capsules.items[0];
+    try testing.expectEqualStrings(function_name, effect.function);
+    try testing.expectEqual(@as(u32, 1), effect.line);
+    try testing.expectEqual(@as(usize, 0), effect.declared.items.len);
+    try testing.expectEqual(@as(usize, 0), effect.inferred.items.len);
+    try testing.expect(!effect.discharged);
+    try testing.expect(!effect.exported);
+    try testing.expect(effect.handler_reachable);
+
+    try testing.expectEqual(@as(usize, 1), contract.holes.items.len);
+    const hole = contract.holes.items[0];
+    try testing.expectEqualStrings(function_name, hole.function);
+    try testing.expectEqual(@as(u32, 1), hole.line);
+    try testing.expectEqual(@as(u32, 36), hole.column);
+    try testing.expectEqualStrings(expected_type, hole.expected_type);
+    try testing.expectEqual(@as(usize, 0), hole.remaining_budget.items.len);
+    try testing.expect(!hole.budget_declared);
+    try testing.expectEqual(@as(usize, 0), hole.undischarged.items.len);
+    try testing.expectEqual(@as(usize, 0), hole.in_scope.items.len);
+    try testing.expectEqual(@as(usize, 1), contract.spec_diagnostics.items.len);
+
+    const json = try serializeContractForTest(testing.allocator, contract);
+    defer testing.allocator.free(json);
+    try testing.expectEqual(expected_json_len, json.len);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(json);
+    const actual_hash = std.fmt.bytesToHex(hasher.finalResult(), .lower);
+    try testing.expectEqualStrings(expected_json_sha256, &actual_hash);
+}
+
+fn extractOmittedContractForTest(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    filename: []const u8,
+) !HandlerContract {
+    var prepared = try source_frontend_mod.PreparedSource.init(allocator, source, filename, .{});
+    defer prepared.deinit();
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, prepared.parserInput());
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(
+        allocator,
+        ParsedModule.fromExisting(view, root, &atoms),
+        .{},
+    );
+    defer analysis.deinit();
+    try analysis.complete();
+    try testing.expectEqual(
+        type_env_mod.SourceTypeMode.omitted,
+        analysis.type_env_storage.envPtr().?.sourceTypeMode().?,
+    );
+    return analysis.extractContract(filename);
+}
+
+test "explicit omitted selection preserves native ABI holes and hides authored signatures" {
+    const allocator = testing.allocator;
+    const abi_source =
+        \\function isDict(): number { return hole(); }
+        \\function handler(req: Request): Response { return Response.text(String(isDict(undefined))); }
+    ;
+    var abi_contract = try extractOmittedContractForTest(
+        allocator,
+        abi_source,
+        "omitted-abi-is-dict.ts",
+    );
+    defer abi_contract.deinit(allocator);
+    try expectOmittedHelperReceipt(
+        &abi_contract,
+        "isDict",
+        "boolean",
+        3327,
+        "500be2567d2683caf9e3b5566fde9192fb3bf1bd4e2f3c8b8e4df6446d81249b",
+    );
+
+    const helper_source =
+        \\function helper(): number { return hole(); }
+        \\function handler(req: Request): Response { return Response.text(String(helper())); }
+    ;
+    var helper_contract = try extractOmittedContractForTest(
+        allocator,
+        helper_source,
+        "omitted-ordinary-helper.ts",
+    );
+    defer helper_contract.deinit(allocator);
+    try expectOmittedHelperReceipt(
+        &helper_contract,
+        "helper",
+        "unknown",
+        3331,
+        "25db664a000473d46d26a78f89aa18ea57bf5d0e865a20013f8583ae776479f4",
+    );
+
+    var prepared = try source_frontend_mod.PreparedSource.init(
+        allocator,
+        abi_source,
+        "authored-is-dict.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, prepared.parserInput());
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    try storage.initWithSource(allocator, .{ .legacy = prepared.typeMap().? });
+    var checker = TypeChecker.init(allocator, view, &atoms, storage.envPtr().?);
+    defer checker.deinit();
+    _ = try checker.check(root);
+    var resolved = try resolve(allocator, parsed, .{
+        .type_env = storage.envPtr(),
+        .strict = false,
+    });
+    defer resolved.deinit();
+    var explicit_omitted = try extractExistingCheckerForTest(
+        allocator,
+        .resolved,
+        parsed,
+        .{ .source_types = .omitted },
+        &checker,
+        &resolved,
+    );
+    defer explicit_omitted.deinit(allocator);
+    try testing.expectEqual(type_env_mod.SourceTypeMode.legacy, storage.envPtr().?.sourceTypeMode().?);
+    try testing.expectEqual(@as(usize, 1), explicit_omitted.holes.items.len);
+    try testing.expectEqualStrings("unknown", explicit_omitted.holes.items[0].expected_type);
+}
+
+test "an empty parser-owned Store selects direct and remains distinct from omitted" {
+    const allocator = testing.allocator;
+    const source = "function handler(req) { return Response.text(\"ok\"); }\n";
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try testing.expect(std.meta.eql(
+        parser.type_store.checkpoint(),
+        std.mem.zeroes(TypeSyntax.Store.Checkpoint),
+    ));
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const typed = ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store);
+
+    var direct: ModuleAnalysisSession = .{};
+    try direct.initSoundExtraction(allocator, typed, .{
+        .source_types = .direct,
+        .strict = false,
+    });
+    defer direct.deinit();
+    try direct.complete();
+    try testing.expectEqual(
+        type_env_mod.SourceTypeMode.direct,
+        direct.type_env_storage.envPtr().?.sourceTypeMode().?,
+    );
+
+    var omitted: ModuleAnalysisSession = .{};
+    try omitted.initSoundExtraction(allocator, typed, .{
+        .source_types = .omitted,
+        .strict = false,
+    });
+    defer omitted.deinit();
+    try omitted.complete();
+    try testing.expectEqual(
+        type_env_mod.SourceTypeMode.omitted,
+        omitted.type_env_storage.envPtr().?.sourceTypeMode().?,
+    );
+
+    var missing: ModuleAnalysisSession = .{};
+    try missing.initSoundExtraction(
+        allocator,
+        ParsedModule.fromExisting(view, root, &atoms),
+        .{ .source_types = .direct, .strict = false },
+    );
+    defer missing.deinit();
+    try testing.expectError(error.DirectTypeSyntaxUnavailable, missing.complete());
+    try testing.expectError(error.AnalysisAlreadyAttempted, missing.complete());
+}
+
+test "consumer entry points reject operational source failures before semantic absence" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator, "const value = 1;\n");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+
+    var poisoned_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var poisoned_pool = TypePool.init(poisoned_allocator.allocator());
+    defer poisoned_pool.deinit(poisoned_allocator.allocator());
+    try testing.expect(poisoned_allocator.has_induced_failure);
+    var poisoned_env = TypeEnv.init(allocator, &poisoned_pool);
+    defer poisoned_env.deinit();
+    try testing.expectError(error.OutOfMemory, effect_inference.buildEffectFacts(
+        allocator,
+        view,
+        null,
+        parsed_state.root,
+        .{ .type_source = .{ .legacy = &poisoned_env } },
+    ));
+
+    var failed_env_allocator = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = std.math.maxInt(usize),
+    });
+    var failed_env_pool = TypePool.init(failed_env_allocator.allocator());
+    defer failed_env_pool.deinit(failed_env_allocator.allocator());
+    var failed_env = TypeEnv.init(failed_env_allocator.allocator(), &failed_env_pool);
+    defer failed_env.deinit();
+    try failed_env.ensureHealthy();
+    try failed_env_pool.ensureHealthy();
+    failed_env_allocator.fail_index = failed_env_allocator.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        failed_env.putParsedCallTypeArgs(0, &.{failed_env_pool.idx_string}),
+    );
+    try testing.expect(failed_env_allocator.has_induced_failure);
+    try failed_env_pool.ensureHealthy();
+    try testing.expectError(error.OutOfMemory, effect_inference.buildEffectFacts(
+        allocator,
+        view,
+        null,
+        parsed_state.root,
+        .{ .type_source = .{ .legacy = &failed_env } },
+    ));
+
+    var healthy_pool = TypePool.init(allocator);
+    defer healthy_pool.deinit(allocator);
+    var healthy_env = TypeEnv.init(allocator, &healthy_pool);
+    defer healthy_env.deinit();
+    try testing.expectError(error.AmbiguousTypeSource, effect_inference.buildEffectFacts(
+        allocator,
+        view,
+        null,
+        parsed_state.root,
+        .{
+            .type_source = .{ .legacy = &healthy_env },
+            .type_env = &healthy_env,
+        },
+    ));
+
+    var analyzer = effect_inference.Analyzer.init(allocator, view, null);
+    defer analyzer.deinit();
+    analyzer.type_source = .{ .legacy = &healthy_env };
+    analyzer.type_env = &healthy_env;
+    try testing.expectError(error.AmbiguousTypeSource, analyzer.analyze(parsed_state.root));
+
+    var omitted_env_allocator = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = std.math.maxInt(usize),
+    });
+    var omitted_pool = TypePool.init(omitted_env_allocator.allocator());
+    defer omitted_pool.deinit(omitted_env_allocator.allocator());
+    var omitted_env = TypeEnv.init(omitted_env_allocator.allocator(), &omitted_pool);
+    defer omitted_env.deinit();
+    try omitted_env.populateSourceTypes(.omitted);
+    try omitted_env.ensureHealthy();
+    try omitted_pool.ensureHealthy();
+    omitted_env_allocator.fail_index = omitted_env_allocator.alloc_index;
+    try testing.expectError(
+        error.OutOfMemory,
+        omitted_env.putParsedCallTypeArgs(0, &.{omitted_pool.idx_string}),
+    );
+    try testing.expect(omitted_env_allocator.has_induced_failure);
+    try omitted_pool.ensureHealthy();
+    try testing.expectError(
+        error.OutOfMemory,
+        type_env_mod.ConsumerTypeSource.normalizeLegacy(&omitted_env),
+    );
+
+    var omitted_pool_allocator = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var failed_omitted_pool = TypePool.init(omitted_pool_allocator.allocator());
+    defer failed_omitted_pool.deinit(omitted_pool_allocator.allocator());
+    try testing.expect(omitted_pool_allocator.has_induced_failure);
+    var failed_omitted_pool_env = TypeEnv.init(allocator, &failed_omitted_pool);
+    defer failed_omitted_pool_env.deinit();
+    try failed_omitted_pool_env.populateSourceTypes(.omitted);
+    try testing.expectError(
+        error.OutOfMemory,
+        type_env_mod.ConsumerTypeSource.normalizeLegacy(&failed_omitted_pool_env),
+    );
+
+    var healthy_omitted_pool = TypePool.init(allocator);
+    defer healthy_omitted_pool.deinit(allocator);
+    var healthy_omitted_env = TypeEnv.init(allocator, &healthy_omitted_pool);
+    defer healthy_omitted_env.deinit();
+    try healthy_omitted_env.populateSourceTypes(.omitted);
+    var wrong_mode = effect_inference.Analyzer.init(allocator, view, null);
+    defer wrong_mode.deinit();
+    wrong_mode.type_source = .{ .direct = &healthy_omitted_env };
+    try testing.expectError(error.TypeSourceModeMismatch, wrong_mode.analyze(parsed_state.root));
+
+    var builder_facts = try ModuleFacts.build(allocator, view, null, null);
+    defer builder_facts.deinit();
+    var builder_effects = try effect_inference.buildEffectFacts(allocator, view, null, parsed_state.root, .{});
+    defer builder_effects.deinit(allocator);
+
+    var other_pool = TypePool.init(allocator);
+    defer other_pool.deinit(allocator);
+    var other_env = TypeEnv.init(allocator, &other_pool);
+    defer other_env.deinit();
+    var wrong_environment = ContractBuilder.initForBuild(
+        allocator,
+        view,
+        null,
+        &healthy_env,
+        null,
+        &builder_facts,
+        &builder_effects,
+    );
+    defer wrong_environment.deinit();
+    wrong_environment.effect_facts = null;
+    wrong_environment.source_types = .{ .legacy = &other_env };
+    try testing.expectError(error.TypeSourceEnvironmentMismatch, wrong_environment.build(
+        "operational.ts",
+        null,
+        null,
+        parsed_state.root,
+        null,
+        false,
+        null,
+    ));
+
+    var poisoned_builder = ContractBuilder.initForBuild(
+        allocator,
+        view,
+        null,
+        &poisoned_env,
+        null,
+        &builder_facts,
+        &builder_effects,
+    );
+    defer poisoned_builder.deinit();
+    poisoned_builder.effect_facts = null;
+    poisoned_builder.source_types = .{ .legacy = &poisoned_env };
+    try testing.expectError(error.OutOfMemory, poisoned_builder.build(
+        "operational.ts",
+        null,
+        null,
+        parsed_state.root,
+        null,
+        false,
+        null,
+    ));
+
+    var healthy_builder = ContractBuilder.initForBuild(
+        allocator,
+        view,
+        null,
+        &healthy_env,
+        null,
+        &builder_facts,
+        &builder_effects,
+    );
+    defer healthy_builder.deinit();
+    healthy_builder.effect_facts = null;
+    healthy_builder.source_types = .{ .legacy = &healthy_env };
+    try testing.expectError(error.CompletedEffectFactsRequired, healthy_builder.build(
+        "operational.ts",
+        null,
+        null,
+        parsed_state.root,
+        null,
+        false,
+        null,
+    ));
+}
+
+const directCallbackSource =
+    \\structural CryptoValue = Effects<string, "crypto">;
+    \\function run(callback: (value: string) => CryptoValue, value: string): Effects<string, "crypto"> {
+    \\  return callback(value);
+    \\}
+    \\function handler(req: Request): Response { return Response.text("ok"); }
+;
+
+fn expectDirectCallbackFacts(facts: *const EffectFacts) !void {
+    var found = false;
+    for (facts.all()) |function| {
+        if (!std.mem.eql(u8, function.name, "run")) continue;
+        try testing.expect(function.row.capabilities.contains(.crypto));
+        try testing.expect(!function.row.lower_bound);
+        try testing.expect(function.row.deterministic);
+        found = true;
+    }
+    try testing.expect(found);
+}
+
+test "direct session population closes allocation failures without retry" {
+    const allocator = testing.allocator;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store);
+    const Run = struct {
+        fn populate(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initSoundExtraction(run_allocator, module, .{
+                .source_types = .direct,
+                .strict = false,
+            });
+            defer analysis.deinit();
+            analysis.complete() catch |err| {
+                try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
+                return err;
+            };
+            try testing.expectEqual(
+                type_env_mod.SourceTypeMode.direct,
+                analysis.type_env_storage.envPtr().?.sourceTypeMode().?,
+            );
+            try analysis.type_env_storage.envPtr().?.ensureHealthy();
+            try analysis.type_env_storage.envPtr().?.pool.ensureHealthy();
+        }
+    };
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = std.math.maxInt(usize),
+    });
+    try Run.populate(counting.allocator(), parsed);
+    try testing.expect(counting.alloc_index > 0);
+    var failures: usize = 0;
+    for (0..counting.alloc_index) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        Run.populate(failing.allocator(), parsed) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(failing.has_induced_failure);
+            failures += 1;
+            continue;
+        };
+        try testing.expect(!failing.has_induced_failure);
+    }
+    try testing.expect(failures > 0);
+}
+
+test "direct callback effect projection closes every allocation failure" {
+    const allocator = testing.allocator;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var marker_allocator = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = std.math.maxInt(usize),
+    });
+    var marker_storage: TypeEnvStorage = .{};
+    defer marker_storage.deinit(marker_allocator.allocator());
+    try marker_storage.initWithSource(marker_allocator.allocator(), .{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    {
+        var marker_control = try effect_inference.buildEffectFacts(
+            marker_allocator.allocator(),
+            view,
+            &atoms,
+            root,
+            .{ .type_source = .{ .direct = marker_storage.envPtr().? } },
+        );
+        defer marker_control.deinit(marker_allocator.allocator());
+        try expectDirectCallbackFacts(&marker_control);
+    }
+
+    marker_allocator.fail_index = marker_allocator.alloc_index;
+    try testing.expectError(error.OutOfMemory, effect_inference.buildEffectFacts(
+        allocator,
+        view,
+        &atoms,
+        root,
+        .{ .type_source = .{ .direct = marker_storage.envPtr().? } },
+    ));
+    try testing.expect(marker_allocator.has_induced_failure);
+    try marker_storage.envPtr().?.ensureHealthy();
+    try marker_storage.envPtr().?.pool.ensureHealthy();
+
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    try storage.initWithSource(allocator, .{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    var module_facts = try ModuleFacts.build(allocator, view, &atoms, null);
+    defer module_facts.deinit();
+    const handler = handler_verifier_mod.findHandlerFunction(view, root);
+    const Run = struct {
+        fn project(
+            run_allocator: std.mem.Allocator,
+            ir_view: IrView,
+            atom_table: *AtomTable,
+            program: NodeIndex,
+            env: *const TypeEnv,
+            facts: *const ModuleFacts,
+            selected_handler: ?NodeIndex,
+        ) !void {
+            var effects = try effect_inference.buildEffectFacts(
+                run_allocator,
+                ir_view,
+                atom_table,
+                program,
+                .{
+                    .module_facts = facts,
+                    .type_source = .{ .direct = env },
+                    .contract_projection = .{ .complete = .{
+                        .selected_handler = selected_handler,
+                    } },
+                },
+            );
+            defer effects.deinit(run_allocator);
+            try expectDirectCallbackFacts(&effects);
+            _ = try effects.requireContract();
+        }
+    };
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = std.math.maxInt(usize),
+    });
+    try Run.project(
+        counting.allocator(),
+        view,
+        &atoms,
+        root,
+        storage.envPtr().?,
+        &module_facts,
+        handler,
+    );
+    try testing.expect(counting.alloc_index > 0);
+    var failures: usize = 0;
+    for (0..counting.alloc_index) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        Run.project(
+            failing.allocator(),
+            view,
+            &atoms,
+            root,
+            storage.envPtr().?,
+            &module_facts,
+            handler,
+        ) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            try testing.expect(failing.has_induced_failure);
+            failures += 1;
+            continue;
+        };
+        try testing.expect(!failing.has_induced_failure);
+    }
+    try testing.expect(failures > 0);
+}
+
+test "direct extraction keeps attempted state across allocation failures" {
+    const allocator = testing.allocator;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store);
+    const Run = struct {
+        const Outcome = enum {
+            success,
+            failed_before_effects,
+            failed_after_effects,
+        };
+
+        fn control(base: std.mem.Allocator, module: ParsedModule) !usize {
+            var counting = std.testing.FailingAllocator.init(base, .{
+                .fail_index = std.math.maxInt(usize),
+            });
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initSoundExtraction(counting.allocator(), module, .{
+                .source_types = .direct,
+                .strict = false,
+                .capture_export_effects = true,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+            const before = counting.alloc_index;
+            var contract = try analysis.extractContract("direct-extraction.ts");
+            defer contract.deinit(counting.allocator());
+            var export_effects = analysis.takeExportEffects() orelse
+                return error.ExportEffectsMissing;
+            defer export_effects.deinit(counting.allocator());
+            try testing.expectEqual(ModuleAnalysisSession.PassState.completed, analysis.extraction_state);
+            try testing.expectEqual(@as(usize, 1), contract.function_effect_capsules.items.len);
+            try testing.expectEqualStrings(
+                "run",
+                contract.function_effect_capsules.items[0].function,
+            );
+            return counting.alloc_index - before;
+        }
+
+        fn failAt(
+            base: std.mem.Allocator,
+            module: ParsedModule,
+            offset: usize,
+        ) !Outcome {
+            var failing = std.testing.FailingAllocator.init(base, .{
+                .fail_index = std.math.maxInt(usize),
+            });
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initSoundExtraction(failing.allocator(), module, .{
+                .source_types = .direct,
+                .strict = false,
+                .capture_export_effects = true,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+            failing.fail_index = failing.alloc_index + offset;
+            const result = analysis.extractContract("direct-extraction.ts");
+            if (result) |contract_value| {
+                var contract = contract_value;
+                defer contract.deinit(failing.allocator());
+                var export_effects = analysis.takeExportEffects() orelse
+                    return error.ExportEffectsMissing;
+                defer export_effects.deinit(failing.allocator());
+                try testing.expect(!failing.has_induced_failure);
+                return .success;
+            } else |err| {
+                try testing.expectEqual(error.OutOfMemory, err);
+                try testing.expect(failing.has_induced_failure);
+                try testing.expectEqual(ModuleAnalysisSession.PassState.attempted, analysis.extraction_state);
+                try testing.expect(analysis.takeExportEffects() == null);
+                try testing.expectError(
+                    error.ContractExtractionAlreadyAttempted,
+                    analysis.extractContract("direct-extraction.ts"),
+                );
+                try testing.expectEqual(
+                    type_env_mod.SourceTypeMode.direct,
+                    analysis.type_env_storage.envPtr().?.sourceTypeMode().?,
+                );
+                try analysis.type_env_storage.envPtr().?.ensureHealthy();
+                try analysis.type_env_storage.envPtr().?.pool.ensureHealthy();
+                return if (analysis.contract_effect_facts != null)
+                    .failed_after_effects
+                else
+                    .failed_before_effects;
+            }
+        }
+    };
+
+    const allocation_count = try Run.control(allocator, parsed);
+    try testing.expect(allocation_count > 0);
+    var failures_before_effects: usize = 0;
+    var failures_after_effects: usize = 0;
+    for (0..allocation_count) |offset| {
+        switch (try Run.failAt(allocator, parsed, offset)) {
+            .success => {},
+            .failed_before_effects => failures_before_effects += 1,
+            .failed_after_effects => failures_after_effects += 1,
+        }
+    }
+    try testing.expect(failures_before_effects > 0);
+    try testing.expect(failures_after_effects > 0);
+}
+
+test "serialization failure preserves a completed direct extraction" {
+    const allocator = testing.allocator;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(
+        allocator,
+        ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store),
+        .{ .source_types = .direct, .strict = false },
+    );
+    defer analysis.deinit();
+    try analysis.complete();
+    var contract = try analysis.extractContract("serialization.ts");
+    defer contract.deinit(allocator);
+    const baseline = try serializeContractForTest(allocator, &contract);
+    defer allocator.free(baseline);
+    try testing.expectError(error.AnalysisAlreadyAttempted, analysis.complete());
+    try testing.expectError(
+        error.ContractExtractionAlreadyAttempted,
+        analysis.extractContract("serialization.ts"),
+    );
+
+    var counting = std.testing.FailingAllocator.init(allocator, .{
+        .fail_index = std.math.maxInt(usize),
+    });
+    const counted = try serializeContractForTest(counting.allocator(), &contract);
+    counting.allocator().free(counted);
+    try testing.expect(counting.alloc_index > 0);
+
+    var failures: usize = 0;
+    var failures_after_progress: usize = 0;
+    for (0..counting.alloc_index) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        const attempted = serializeContractForTest(failing.allocator(), &contract);
+        if (attempted) |bytes| {
+            defer failing.allocator().free(bytes);
+            try testing.expect(!failing.has_induced_failure);
+            try testing.expectEqualStrings(baseline, bytes);
+        } else |err| {
+            switch (err) {
+                error.OutOfMemory, error.WriteFailed => {},
+            }
+            try testing.expect(failing.has_induced_failure);
+            failures += 1;
+            if (fail_index > 0) failures_after_progress += 1;
+        }
+
+        try testing.expectEqual(ModuleAnalysisSession.PassState.completed, analysis.extraction_state);
+        try analysis.type_env_storage.envPtr().?.ensureHealthy();
+        try analysis.type_env_storage.envPtr().?.pool.ensureHealthy();
+        try testing.expectEqualStrings("serialization.ts", contract.handler.path);
+        const after_failure = try serializeContractForTest(allocator, &contract);
+        defer allocator.free(after_failure);
+        try testing.expectEqualStrings(baseline, after_failure);
+    }
+    try testing.expect(failures > 0);
+    try testing.expect(failures_after_progress > 0);
 }

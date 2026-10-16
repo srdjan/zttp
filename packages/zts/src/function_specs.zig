@@ -24,11 +24,7 @@ const TypeEnv = type_env_mod.TypeEnv;
 const SpecDiagnostic = contract_types.SpecDiagnostic;
 const CapsuleFacts = spec_discharge.CapsuleFacts;
 
-pub const TypeSource = union(enum) {
-    omitted,
-    legacy: *const TypeEnv,
-    direct: *const TypeEnv,
-};
+pub const TypeSource = type_env_mod.ConsumerTypeSource;
 
 /// The reserved handler entry point - discharged via `Proof<...>` elsewhere.
 const handler_fn_name = "handler";
@@ -120,7 +116,7 @@ pub fn discharge(
     return dischargeWithTypeSource(
         allocator,
         effects,
-        if (env) |value| .{ .legacy = value } else .omitted,
+        try TypeSource.normalizeLegacy(env),
         ir_view,
     );
 }
@@ -131,7 +127,7 @@ pub fn dischargeWithTypeSource(
     source: TypeSource,
     ir_view: IrView,
 ) !CapsuleTable {
-    const env = try validateTypeSource(source);
+    const env = try source.validate();
     var table: CapsuleTable = .{};
     errdefer table.deinit(allocator);
 
@@ -199,25 +195,6 @@ pub fn dischargeWithTypeSource(
     }
 
     return table;
-}
-
-fn validateTypeSource(source: TypeSource) !?*const TypeEnv {
-    return switch (source) {
-        .omitted => null,
-        .legacy => |env| blk: {
-            const mode = env.sourceTypeMode();
-            if (mode != null and mode != .legacy) return error.TypeSourceModeMismatch;
-            try env.ensureHealthy();
-            try env.pool.ensureHealthy();
-            break :blk env;
-        },
-        .direct => |env| blk: {
-            if (env.sourceTypeMode() != .direct) return error.TypeSourceModeMismatch;
-            try env.ensureHealthy();
-            try env.pool.ensureHealthy();
-            break :blk env;
-        },
-    };
 }
 
 fn functionSignature(

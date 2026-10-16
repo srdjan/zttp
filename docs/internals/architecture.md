@@ -238,6 +238,43 @@ Independent atom tables support comparisons of runtime stores, source locations,
 
 Later reset phases switch production callers after private parser and consumer parity.
 
+Direct lowering plans name construction before changing the type pool.
+The plan preserves parameter, field, and template name order at the existing constructor boundaries.
+Grouped syntax retains completed parameter attempts in the existing parameter array when parsing selects the grouped child.
+Attempted parameter spans use the enclosing raw type interval; the selected semantic endpoint remains unchanged.
+Planning allocation failures leave the pool unchanged, while pool allocation failures retain the pool's unhealthy state.
+
+### Selected syntax for proof and printing
+
+`ConsumerTypeSource` borrows one omitted, legacy, or direct selection for an already-populated environment.
+Selected environments and their pools must remain healthy before consumers interpret missing metadata.
+Legacy wrappers reject direct environments; direct consumers use the explicit source input.
+
+Contract extraction keeps semantic types separate from authored signature selection.
+Handler specifications retain the existing name winner before an owner lookup.
+Nested declaration holes use final owners, while ordinary function holes retain the existing name winner.
+Omitted source typing can retain an ABI signature only through a healthy semantic environment that also selects omitted typing.
+Function capsules and callback signatures remain absent under omitted typing.
+
+Callback effect lookup uses final owners and preserves the existing actual parameter index into the compact signature.
+An earlier untyped parameter can therefore hide an annotated callback ceiling.
+Contract effects use selected source types; path effects retain their source-free analysis.
+
+`ParsedModule.fromTypedExisting` binds a borrowed syntax Store to its runtime IR and AtomTable.
+Direct single-module sessions derive population inputs from that module.
+Completed-checker reuse preserves the checker's legacy signatures unless the caller supplies an explicit source selection.
+Explicit direct reuse requires matching typed module input before temporary facts are allocated.
+Graph reparsing retains legacy input until each replacement parse supplies its own Store.
+Contract-only sessions omit authored types; serialization follows successful extraction and cannot change its completed state.
+
+The printer accepts original legacy source or a completed parser-owned Store.
+The direct source always comes from that Store.
+Carriage-return and token refusals precede Store validation.
+Direct validation propagates allocation failure; other validation failures retain the `strip_failed` refusal.
+Validation checks supplied records, so the caller must retain complete parser-owned input.
+Both inputs preserve raw type regions, declaration boundaries, generic capture windows, and ordinary token formatting for type-only modules.
+Legacy preparation retains its existing failure mapping and allocation order.
+
 ### Analysis passes
 
 Step 4 is implemented as four independent IR walkers, each traversing the same

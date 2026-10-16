@@ -46,6 +46,43 @@ pub const SourceTypeInput = union(SourceTypeMode) {
     direct: DirectSyntaxInput,
 };
 
+/// A borrowed source selection for consumers of an already-populated environment.
+pub const ConsumerTypeSource = union(SourceTypeMode) {
+    omitted,
+    legacy: *const TypeEnv,
+    direct: *const TypeEnv,
+
+    pub fn validate(self: @This()) !?*const TypeEnv {
+        return switch (self) {
+            .omitted => null,
+            .legacy => |env| blk: {
+                const mode = env.sourceTypeMode();
+                if (mode != null and mode != .legacy) return error.TypeSourceModeMismatch;
+                try env.ensureHealthy();
+                try env.pool.ensureHealthy();
+                break :blk env;
+            },
+            .direct => |env| blk: {
+                if (env.sourceTypeMode() != .direct) return error.TypeSourceModeMismatch;
+                try env.ensureHealthy();
+                try env.pool.ensureHealthy();
+                break :blk env;
+            },
+        };
+    }
+
+    pub fn normalizeLegacy(env: ?*const TypeEnv) !@This() {
+        const selected = env orelse return .omitted;
+        try selected.ensureHealthy();
+        try selected.pool.ensureHealthy();
+        return switch (selected.sourceTypeMode() orelse .legacy) {
+            .omitted => .omitted,
+            .legacy => .{ .legacy = selected },
+            .direct => error.TypeSourceModeMismatch,
+        };
+    }
+};
+
 pub const FunctionTypeRef = union(enum) {
     legacy_offset: u32,
     direct_owner: NodeIndex,
@@ -121,6 +158,38 @@ fn utilityKind(name: []const u8) ?UtilityKind {
     if (std.mem.eql(u8, name, "Required")) return .required;
     if (std.mem.eql(u8, name, "Readonly")) return .readonly;
     return null;
+}
+
+test "consumer type source validates modes and health before absence" {
+    const allocator = std.testing.allocator;
+    var legacy_pool = TypePool.init(allocator);
+    defer legacy_pool.deinit(allocator);
+    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
+    defer legacy_env.deinit();
+
+    const normalized_legacy = try ConsumerTypeSource.normalizeLegacy(&legacy_env);
+    try std.testing.expectEqual(&legacy_env, (try normalized_legacy.validate()).?);
+    try std.testing.expectError(
+        error.TypeSourceModeMismatch,
+        (ConsumerTypeSource{ .direct = &legacy_env }).validate(),
+    );
+
+    var omitted_pool = TypePool.init(allocator);
+    defer omitted_pool.deinit(allocator);
+    var omitted_env = TypeEnv.init(allocator, &omitted_pool);
+    defer omitted_env.deinit();
+    try omitted_env.populateSourceTypes(.omitted);
+    try std.testing.expect(try (try ConsumerTypeSource.normalizeLegacy(&omitted_env)).validate() == null);
+    try std.testing.expectError(
+        error.TypeSourceModeMismatch,
+        (ConsumerTypeSource{ .legacy = &omitted_env }).validate(),
+    );
+
+    legacy_env.markAllocationFailure();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        ConsumerTypeSource.normalizeLegacy(&legacy_env),
+    );
 }
 
 /// The field name marking the body of an instantiated `Effects<...>` generic

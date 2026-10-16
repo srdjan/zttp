@@ -13,6 +13,9 @@ const module_types = @import("module_types.zig");
 const abi_types = @import("abi_types.zig");
 const effect_inference = @import("effect_inference.zig");
 const function_specs = @import("function_specs.zig");
+const handler_verifier_mod = @import("handler_verifier.zig");
+const pipeline_mod = @import("pipeline.zig");
+const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
 const strict_checker_mod = @import("strict_checker.zig");
 const type_checker_mod = @import("type_checker.zig");
@@ -31,6 +34,16 @@ const TypePool = type_pool_mod.TypePool;
 const TypeTag = type_pool_mod.TypeTag;
 const null_type_idx = type_pool_mod.null_type_idx;
 const parseTypeExpr = type_pool_mod.parseTypeExpr;
+
+fn serializeContractForConsumerTest(
+    allocator: std.mem.Allocator,
+    contract: *const contract_types.HandlerContract,
+) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    try handler_contract_mod.writeContractJson(contract, &output.writer);
+    return output.toOwnedSlice();
+}
 
 const CompoundFamily = enum {
     record,
@@ -6497,7 +6510,7 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
             const group = parser.type_store.node(try syntaxChildIndex(array.data.array)) orelse
                 return error.TestUnexpectedResult;
             try std.testing.expectEqual(TypeSyntax.NodeTag.group, group.tag);
-            _ = try expectSyntaxApplication(&parser.type_store, group.data.group, "Outer", 1);
+            _ = try expectSyntaxApplication(&parser.type_store, group.data.group.child, "Outer", 1);
             try std.testing.expectEqual(
                 TypeTag.t_array,
                 pool.getTag(lowered) orelse return error.TestUnexpectedResult,
@@ -8816,7 +8829,7 @@ test "generic runtime syntax census observes every case" {
                 const group = parser.type_store.node(try syntaxChildIndex(fragments[0].root)) orelse
                     return error.TestUnexpectedResult;
                 try std.testing.expectEqual(TypeSyntax.NodeTag.group, group.tag);
-                switch (group.data.group) {
+                switch (group.data.group.child) {
                     .absent => {},
                     .present => return error.TestUnexpectedResult,
                 }
@@ -10877,7 +10890,7 @@ test "private compound budgets decline before legacy preparation" {
     }
 }
 
-test "function backtracking removes every provisional syntax item" {
+test "function backtracking retains completed parameter syntax" {
     const source = "(number: string | boolean, number) = value;";
     var store = TypeSyntax.Store.init(std.testing.allocator, source);
     defer store.deinit();
@@ -10886,12 +10899,47 @@ test "function backtracking removes every provisional syntax item" {
         .parsed => {},
         .failure, .excluded => return error.TestUnexpectedResult,
     }
-    try std.testing.expectEqual(@as(usize, 0), store.params.items.len);
-    try std.testing.expectEqual(@as(usize, 0), store.members.items.len);
-    for (store.nodes.items) |node| switch (node.data) {
-        .primitive => |primitive| try std.testing.expectEqual(TypeSyntax.Primitive.number, primitive),
-        else => {},
-    };
+    try std.testing.expectEqual(@as(usize, 1), store.params.items.len);
+    try std.testing.expectEqual(@as(usize, 2), store.members.items.len);
+    const annotation = store.annotations.items[0];
+    const group = store.nodes.items[
+        switch (annotation.root) {
+            .absent => return error.TestUnexpectedResult,
+            .present => |index| index,
+        }
+    ].data.group;
+    try std.testing.expectEqual(@as(u32, 1), group.attempted_params.count);
+    const attempted = store.paramSlice(group.attempted_params) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "number: string | boolean",
+        attempted[0].span.text(source),
+    );
+    const selected = store.nodes.items[
+        switch (group.child) {
+            .absent => return error.TestUnexpectedResult,
+            .present => |index| index,
+        }
+    ];
+    try std.testing.expectEqual(TypeSyntax.Primitive.number, selected.data.primitive);
+    const union_node = store.nodes.items[
+        switch (attempted[0].type_child) {
+            .absent => return error.TestUnexpectedResult,
+            .present => |index| index,
+        }
+    ].data.union_type;
+    const members = store.memberSlice(union_node) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), members.len);
+    const expected = [_]TypeSyntax.Primitive{ .string, .boolean };
+    for (members, expected) |member, primitive| {
+        const node = store.nodes.items[
+            switch (member) {
+                .absent => return error.TestUnexpectedResult,
+                .present => |index| index,
+            }
+        ];
+        try std.testing.expectEqual(primitive, node.data.primitive);
+    }
     try expectEquivalent("const value: (number: string | boolean, number) = undefined;");
 }
 
@@ -10967,7 +11015,7 @@ test "bare groups keep consumed spans and lower as absent children" {
     try std.testing.expectEqual(TypeSyntax.NodeTag.group, field_group.tag);
     try std.testing.expectEqualStrings("()", field_group.semantic_span.text(record_source));
     switch (field_group.data) {
-        .group => |child| switch (child) {
+        .group => |group| switch (group.child) {
             .absent => {},
             .present => return error.TestUnexpectedResult,
         },
@@ -11020,7 +11068,7 @@ test "bare groups keep consumed spans and lower as absent children" {
     try std.testing.expectEqual(TypeSyntax.NodeTag.group, parameter_group.tag);
     try std.testing.expectEqualStrings("()", parameter_group.semantic_span.text(function_source));
     switch (parameter_group.data) {
-        .group => |child| switch (child) {
+        .group => |group| switch (group.child) {
             .absent => {},
             .present => return error.TestUnexpectedResult,
         },
@@ -17360,4 +17408,604 @@ test "direct function specifications preserve nonempty effects and repeated help
         \\
     ;
     try expectDirectFunctionCapsules(source);
+}
+
+const ContractConsumerCase = enum {
+    simple,
+    nested_first,
+    outer_first,
+    repeated_holes,
+    repeated_capsules,
+    nested_hole,
+    module_arrow,
+    nonliteral_effect,
+    unknown_capability,
+};
+
+fn expectContractConsumerFacts(
+    kind: ContractConsumerCase,
+    contract: *const contract_types.HandlerContract,
+) !void {
+    switch (kind) {
+        .simple => {
+            try std.testing.expectEqual(@as(usize, 0), contract.holes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), contract.function_capsules.items.len);
+        },
+        .nested_first, .outer_first => {
+            try std.testing.expect(!contract.declared_specs_implicit);
+            try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
+            try std.testing.expectEqualStrings("pure", contract.declared_specs.items[0]);
+            try std.testing.expectEqual(@as(usize, 1), contract.function_capsules.items.len);
+            const capsule = contract.function_capsules.items[0];
+            try std.testing.expectEqualStrings("wrapper", capsule.function);
+            try std.testing.expectEqual(if (kind == .nested_first) @as(u32, 1) else 4, capsule.line);
+        },
+        .repeated_holes => {
+            try std.testing.expectEqual(@as(usize, 2), contract.holes.items.len);
+            for (contract.holes.items, 0..) |hole, index| {
+                try std.testing.expectEqualStrings("helper", hole.function);
+                try std.testing.expectEqualStrings("string", hole.expected_type);
+                try std.testing.expectEqual(@as(u32, @intCast(index + 1)), hole.line);
+                try std.testing.expectEqual(if (index == 0) @as(u32, 36) else 49, hole.column);
+                try std.testing.expectEqual(index, hole.in_scope.items.len);
+                if (index == 1) {
+                    try std.testing.expectEqualStrings("value", hole.in_scope.items[0].name);
+                    try std.testing.expectEqualStrings("string", hole.in_scope.items[0].type_name);
+                }
+                try std.testing.expect(!hole.budget_declared);
+                try std.testing.expectEqual(@as(usize, 0), hole.remaining_budget.items.len);
+                try std.testing.expectEqual(@as(usize, 0), hole.undischarged.items.len);
+            }
+            try std.testing.expectEqual(@as(usize, 2), contract.function_capsules.items.len);
+            for (contract.function_capsules.items) |capsule| {
+                try std.testing.expectEqual(@as(usize, 0), capsule.declared.items.len);
+                try std.testing.expect(!capsule.discharged);
+            }
+        },
+        .repeated_capsules => {
+            try std.testing.expectEqual(@as(usize, 2), contract.function_capsules.items.len);
+            for (contract.function_capsules.items, 0..) |capsule, index| {
+                try std.testing.expectEqualStrings("helper", capsule.function);
+                try std.testing.expectEqual(@as(u32, @intCast(index + 1)), capsule.line);
+                try std.testing.expectEqual(@as(usize, 1), capsule.declared.items.len);
+                try std.testing.expectEqualStrings(if (index == 0) "pure" else "deterministic", capsule.declared.items[0]);
+                try std.testing.expect(capsule.proven_total);
+                try std.testing.expect(capsule.proven_pure);
+                try std.testing.expect(capsule.proven_read_only);
+                try std.testing.expect(capsule.proven_deterministic);
+                try std.testing.expect(capsule.discharged);
+            }
+        },
+        .nonliteral_effect, .unknown_capability => {
+            const expected_kind: contract_types.SpecDiagnostic.Kind = if (kind == .nonliteral_effect)
+                .effect_ceiling_not_literal
+            else
+                .effect_unknown_capability;
+            var matches: usize = 0;
+            for (contract.spec_diagnostics.items) |diagnostic| {
+                if (diagnostic.kind != expected_kind) continue;
+                try std.testing.expectEqualStrings(if (kind == .nonliteral_effect) "Effects" else "unpublished-capability", diagnostic.spec_name);
+                try std.testing.expectEqual(contract_types.SpecDiagnostic.Severity.err, diagnostic.kind.severity());
+                matches += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), matches);
+            try std.testing.expectEqual(@as(u32, 1), contract.handler.line);
+            try std.testing.expectEqual(@as(u32, 17), contract.handler.column);
+        },
+        .nested_hole, .module_arrow => {
+            try std.testing.expectEqual(@as(usize, 1), contract.function_capsules.items.len);
+            try std.testing.expectEqual(@as(usize, 1), contract.function_effect_capsules.items.len);
+            try std.testing.expectEqual(@as(usize, 0), contract.function_capsules.items[0].declared.items.len);
+            try std.testing.expectEqual(@as(usize, 0), contract.function_effect_capsules.items[0].declared.items.len);
+            try std.testing.expectEqual(@as(usize, 1), contract.holes.items.len);
+            const hole = contract.holes.items[0];
+            try std.testing.expectEqualStrings(if (kind == .nested_hole) "outer" else "helper", hole.function);
+            try std.testing.expectEqualStrings(if (kind == .nested_hole) "number" else "unknown", hole.expected_type);
+            try std.testing.expectEqual(if (kind == .nested_hole) @as(u32, 2) else 1, hole.line);
+            try std.testing.expectEqual(if (kind == .nested_hole) @as(u32, 37) else 43, hole.column);
+            try std.testing.expectEqual(if (kind == .nested_hole) @as(usize, 0) else 1, hole.in_scope.items.len);
+            if (kind == .module_arrow) {
+                try std.testing.expectEqualStrings("value", hole.in_scope.items[0].name);
+                try std.testing.expectEqualStrings("string", hole.in_scope.items[0].type_name);
+            }
+        },
+    }
+    if (kind == .repeated_holes or kind == .repeated_capsules) {
+        try std.testing.expectEqual(@as(usize, 2), contract.function_effect_capsules.items.len);
+        for (contract.function_effect_capsules.items) |capsule| {
+            try std.testing.expectEqual(@as(usize, 0), capsule.declared.items.len);
+            try std.testing.expectEqual(@as(usize, 0), capsule.inferred.items.len);
+            try std.testing.expect(!capsule.discharged);
+        }
+    }
+}
+
+fn expectDirectSingleModuleContractParity(
+    profile: pipeline_mod.ModuleAnalysisSession.Profile,
+    kind: ContractConsumerCase,
+    source: []const u8,
+) !void {
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u13-single-module>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    const legacy_parsed = pipeline_mod.ParsedModule.fromExisting(
+        legacy_view,
+        legacy_root,
+        &legacy_atoms,
+    );
+    const direct_parsed = pipeline_mod.ParsedModule.fromTypedExisting(
+        direct_view,
+        direct_root,
+        &direct_atoms,
+        &direct.type_store,
+    );
+    var legacy_session: pipeline_mod.ModuleAnalysisSession = .{};
+    var direct_session: pipeline_mod.ModuleAnalysisSession = .{};
+    switch (profile) {
+        .full => {
+            try legacy_session.initFull(std.testing.allocator, legacy_parsed, .{
+                .source_types = .{ .legacy = prepared.typeMap().? },
+                .strict = false,
+            });
+            try direct_session.initFull(std.testing.allocator, direct_parsed, .{
+                .source_types = .direct,
+                .strict = false,
+            });
+        },
+        .sound_extraction => {
+            try legacy_session.initSoundExtraction(std.testing.allocator, legacy_parsed, .{
+                .source_types = .{ .legacy = prepared.typeMap().? },
+                .strict = false,
+            });
+            try direct_session.initSoundExtraction(std.testing.allocator, direct_parsed, .{
+                .source_types = .direct,
+                .strict = false,
+            });
+        },
+        .contract_only => return error.TestUnexpectedResult,
+    }
+    defer legacy_session.deinit();
+    defer direct_session.deinit();
+    try legacy_session.complete();
+    try direct_session.complete();
+
+    const legacy_env = legacy_session.type_env_storage.envPtr() orelse
+        return error.TestUnexpectedResult;
+    const direct_env = direct_session.type_env_storage.envPtr() orelse
+        return error.TestUnexpectedResult;
+    try expectExactTypePool(legacy_env.pool, direct_env.pool);
+    try std.testing.expectEqual(type_env_mod.SourceTypeMode.legacy, legacy_env.sourceTypeMode().?);
+    try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, direct_env.sourceTypeMode().?);
+    try std.testing.expectEqual(
+        (try legacy_session.resolvedForReport()).typeErrorCount(),
+        (try direct_session.resolvedForReport()).typeErrorCount(),
+    );
+    try std.testing.expectEqual(
+        (try legacy_session.resolvedForReport()).strict_error_count,
+        (try direct_session.resolvedForReport()).strict_error_count,
+    );
+
+    var legacy_contract = try legacy_session.extractContract("single-module.ts");
+    defer legacy_contract.deinit(std.testing.allocator);
+    var direct_contract = try direct_session.extractContract("single-module.ts");
+    defer direct_contract.deinit(std.testing.allocator);
+    const legacy_json = try serializeContractForConsumerTest(
+        std.testing.allocator,
+        &legacy_contract,
+    );
+    defer std.testing.allocator.free(legacy_json);
+    const direct_json = try serializeContractForConsumerTest(
+        std.testing.allocator,
+        &direct_contract,
+    );
+    defer std.testing.allocator.free(direct_json);
+    try std.testing.expectEqualStrings(legacy_json, direct_json);
+    try std.testing.expect(std.meta.eql(legacy_contract.properties, direct_contract.properties));
+    try std.testing.expectEqualDeep(legacy_contract.function_capsules.items, direct_contract.function_capsules.items);
+    try std.testing.expectEqualDeep(legacy_contract.function_effect_capsules.items, direct_contract.function_effect_capsules.items);
+    try std.testing.expectEqualDeep(legacy_contract.holes.items, direct_contract.holes.items);
+    try std.testing.expectEqualDeep(legacy_contract.spec_diagnostics.items, direct_contract.spec_diagnostics.items);
+    try expectContractConsumerFacts(kind, &legacy_contract);
+    try expectContractConsumerFacts(kind, &direct_contract);
+}
+
+test "direct single-module full and sound extraction preserve contract bytes" {
+    const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8 }{
+        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n" },
+        .{ .kind = .nested_first, .source = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n" },
+        .{ .kind = .outer_first, .source = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n" },
+        .{ .kind = .repeated_holes, .source = "function helper(): number { return hole(); }\nfunction helper(value: string): string { return hole(); }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n" },
+        .{ .kind = .repeated_capsules, .source = "function helper(): Proof<string, \"pure\"> { return \"a\"; }\nfunction helper(value: string): Proof<string, \"deterministic\"> { return value; }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n" },
+        .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n" },
+        .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n" },
+        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n" },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n" },
+    };
+    const fields = @typeInfo(ContractConsumerCase).@"enum".fields;
+    try std.testing.expectEqual(@as(usize, 9), fixtures.len);
+    try std.testing.expectEqual(fields.len, fixtures.len);
+    var seen: [fields.len]bool = @splat(false);
+    for (fixtures) |fixture| {
+        const index = @intFromEnum(fixture.kind);
+        try std.testing.expect(!seen[index]);
+        seen[index] = true;
+        try expectDirectSingleModuleContractParity(.full, fixture.kind, fixture.source);
+        try expectDirectSingleModuleContractParity(.sound_extraction, fixture.kind, fixture.source);
+    }
+    for (seen) |present| try std.testing.expect(present);
+}
+
+const ExpectedCallbackCeiling = struct {
+    has_crypto: bool,
+    pure: bool,
+    lower_bound: bool,
+    effect_discharged: bool,
+    line: u32,
+    diagnostic: ?contract_types.SpecDiagnostic.Kind,
+};
+
+fn expectSameExportEffect(
+    legacy: effect_inference.ExportEffect,
+    direct: effect_inference.ExportEffect,
+) !void {
+    switch (legacy) {
+        .callable => |legacy_row| switch (direct) {
+            .callable => |direct_row| try std.testing.expect(legacy_row.eql(direct_row)),
+            else => return error.TestUnexpectedResult,
+        },
+        .data => |legacy_row| switch (direct) {
+            .data => |direct_row| try std.testing.expect(legacy_row.eql(direct_row)),
+            else => return error.TestUnexpectedResult,
+        },
+        .blocked => switch (direct) {
+            .blocked => {},
+            else => return error.TestUnexpectedResult,
+        },
+    }
+}
+
+fn expectSameEffectFacts(
+    legacy: *const effect_inference.EffectFacts,
+    direct: *const effect_inference.EffectFacts,
+) !void {
+    try std.testing.expectEqual(legacy.all().len, direct.all().len);
+    for (legacy.all(), direct.all()) |legacy_function, direct_function| {
+        try std.testing.expectEqualStrings(legacy_function.name, direct_function.name);
+        try std.testing.expectEqual(legacy_function.binding_key, direct_function.binding_key);
+        try std.testing.expectEqual(legacy_function.decl_node, direct_function.decl_node);
+        try std.testing.expectEqual(legacy_function.body_node, direct_function.body_node);
+        try std.testing.expect(legacy_function.row.eql(direct_function.row));
+        try std.testing.expect(std.meta.eql(
+            legacy_function.direct_caps,
+            direct_function.direct_caps,
+        ));
+        try std.testing.expectEqual(legacy_function.exported, direct_function.exported);
+    }
+    try std.testing.expectEqualSlices(u32, legacy.callee_starts, direct.callee_starts);
+    try std.testing.expectEqualSlices(usize, legacy.callee_storage, direct.callee_storage);
+    try std.testing.expectEqualSlices(u32, legacy.value_starts, direct.value_starts);
+    try std.testing.expectEqualSlices(usize, legacy.value_storage, direct.value_storage);
+    try std.testing.expectEqualSlices(
+        bool,
+        legacy.reaches_recursion,
+        direct.reaches_recursion,
+    );
+    try std.testing.expectEqual(
+        legacy.export_effects.entries.len,
+        direct.export_effects.entries.len,
+    );
+    for (
+        legacy.export_effects.entries,
+        direct.export_effects.entries,
+    ) |legacy_entry, direct_entry| {
+        try std.testing.expectEqualStrings(legacy_entry.name, direct_entry.name);
+        try expectSameExportEffect(legacy_entry.effect, direct_entry.effect);
+    }
+
+    const legacy_contract = try legacy.requireContract();
+    const direct_contract = try direct.requireContract();
+    try std.testing.expect(std.meta.eql(legacy_contract.summary, direct_contract.summary));
+    try std.testing.expectEqual(
+        legacy_contract.selected_handler,
+        direct_contract.selected_handler,
+    );
+    try std.testing.expectEqual(
+        legacy_contract.first_handler_index,
+        direct_contract.first_handler_index,
+    );
+    try std.testing.expectEqualSlices(
+        bool,
+        legacy_contract.handler_reachable,
+        direct_contract.handler_reachable,
+    );
+}
+
+fn expectDirectCallbackCeiling(
+    source: []const u8,
+    expected: ExpectedCallbackCeiling,
+) !void {
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u13-callback>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+
+    const legacy_parsed = pipeline_mod.ParsedModule.fromExisting(
+        legacy_view,
+        legacy_root,
+        &legacy_atoms,
+    );
+    const direct_parsed = pipeline_mod.ParsedModule.fromTypedExisting(
+        direct_view,
+        direct_root,
+        &direct_atoms,
+        &direct.type_store,
+    );
+    var legacy_module_facts = try pipeline_mod.buildModuleFacts(
+        std.testing.allocator,
+        legacy_parsed,
+        null,
+    );
+    defer legacy_module_facts.deinit();
+    var direct_module_facts = try pipeline_mod.buildModuleFacts(
+        std.testing.allocator,
+        direct_parsed,
+        null,
+    );
+    defer direct_module_facts.deinit();
+    const legacy_handler = handler_verifier_mod.findHandlerFunction(
+        legacy_view,
+        legacy_root,
+    ) orelse return error.TestUnexpectedResult;
+    const direct_handler = handler_verifier_mod.findHandlerFunction(
+        direct_view,
+        direct_root,
+    ) orelse return error.TestUnexpectedResult;
+
+    var legacy_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        legacy_root,
+        .{
+            .module_facts = &legacy_module_facts,
+            .type_source = .{ .legacy = &legacy_env },
+            .contract_projection = .{ .complete = .{
+                .selected_handler = legacy_handler,
+            } },
+        },
+    );
+    defer legacy_effects.deinit(std.testing.allocator);
+    var direct_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        direct_root,
+        .{
+            .module_facts = &direct_module_facts,
+            .type_source = .{ .direct = &direct_env },
+            .contract_projection = .{ .complete = .{
+                .selected_handler = direct_handler,
+            } },
+        },
+    );
+    defer direct_effects.deinit(std.testing.allocator);
+    try expectSameEffectFacts(&legacy_effects, &direct_effects);
+    const legacy_row = legacy_effects.lookup("run") orelse return error.TestUnexpectedResult;
+    const direct_row = direct_effects.lookup("run") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.meta.eql(legacy_row, direct_row));
+    try std.testing.expectEqual(expected.pure, direct_row.pure);
+    try std.testing.expect(direct_row.readOnly());
+    try std.testing.expect(direct_row.deterministic);
+    try std.testing.expectEqual(expected.lower_bound, direct_row.lower_bound);
+    try std.testing.expectEqual(
+        if (expected.has_crypto) @as(usize, 1) else 0,
+        direct_row.capabilities.count(),
+    );
+    try std.testing.expectEqual(expected.has_crypto, direct_row.capabilities.contains(.crypto));
+
+    var legacy_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &legacy_effects,
+        .{ .legacy = &legacy_env },
+        legacy_view,
+    );
+    defer legacy_capsules.deinit(std.testing.allocator);
+    var direct_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &direct_effects,
+        .{ .direct = &direct_env },
+        direct_view,
+    );
+    defer direct_capsules.deinit(std.testing.allocator);
+    const legacy_capsule = legacy_capsules.byName("run") orelse return error.TestUnexpectedResult;
+    const direct_capsule = direct_capsules.byName("run") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(
+        legacy_capsules.capsules.items.len,
+        direct_capsules.capsules.items.len,
+    );
+    for (
+        legacy_capsules.capsules.items,
+        direct_capsules.capsules.items,
+    ) |*legacy_item, *direct_item| {
+        try expectSameCapsule(legacy_item, direct_item);
+    }
+    try expectSameCapsule(legacy_capsule, direct_capsule);
+    try std.testing.expectEqual(expected.line, direct_capsule.line);
+    try std.testing.expectEqual(@as(usize, 1), direct_capsule.effect_declared.items.len);
+    try std.testing.expectEqualStrings("crypto", direct_capsule.effect_declared.items[0]);
+    try std.testing.expectEqual(
+        if (expected.has_crypto) @as(usize, 1) else 0,
+        direct_capsule.inferred_caps.count(),
+    );
+    try std.testing.expectEqual(
+        expected.effect_discharged,
+        direct_capsule.effectDischarged(),
+    );
+    if (expected.diagnostic) |kind| {
+        try std.testing.expectEqual(@as(usize, 1), direct_capsule.effect_diagnostics.items.len);
+        try std.testing.expectEqual(kind, direct_capsule.effect_diagnostics.items[0].kind);
+        try std.testing.expectEqual(
+            if (expected.lower_bound) contract_types.SpecDiagnostic.Severity.err else .warn,
+            direct_capsule.effect_diagnostics.items[0].kind.severity(),
+        );
+        try std.testing.expectEqualStrings(
+            if (kind == .effect_over_declared) "crypto" else "Effects",
+            direct_capsule.effect_diagnostics.items[0].spec_name,
+        );
+    } else {
+        try std.testing.expectEqual(@as(usize, 0), direct_capsule.effect_diagnostics.items.len);
+    }
+}
+
+test "direct callback ceilings preserve actual-position compact-gap behavior" {
+    try expectDirectCallbackCeiling(
+        \\function run<T extends string>(callback: (value: T) => Effects<T, "crypto">, value: T): Effects<T, "crypto"> {
+        \\  return callback(value);
+        \\}
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+        \\
+    , .{
+        .has_crypto = false,
+        .pure = true,
+        .lower_bound = false,
+        .effect_discharged = true,
+        .line = 1,
+        .diagnostic = .effect_over_declared,
+    });
+    try expectDirectCallbackCeiling(
+        \\function run(skip, callback: (value: string) => Effects<string, "crypto">): Effects<string, "crypto"> {
+        \\  return callback("x");
+        \\}
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+        \\
+    , .{
+        .has_crypto = false,
+        .pure = true,
+        .lower_bound = true,
+        .effect_discharged = false,
+        .line = 1,
+        .diagnostic = .effect_row_lower_bound,
+    });
+    try expectDirectCallbackCeiling(
+        \\function run(callback): Effects<string, "crypto"> {
+        \\  return callback("x");
+        \\}
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+        \\
+    , .{
+        .has_crypto = false,
+        .pure = true,
+        .lower_bound = true,
+        .effect_discharged = false,
+        .line = 1,
+        .diagnostic = .effect_row_lower_bound,
+    });
+    try expectDirectCallbackCeiling(
+        \\structural CryptoValue = Effects<string, "crypto">;
+        \\
+        \\function run<T extends string>(callback: (value: T) => CryptoValue, value: T): Effects<string, "crypto"> {
+        \\  return callback(value);
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    , .{
+        .has_crypto = true,
+        .pure = false,
+        .lower_bound = false,
+        .effect_discharged = true,
+        .line = 3,
+        .diagnostic = null,
+    });
 }

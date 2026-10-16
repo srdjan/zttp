@@ -7,10 +7,583 @@ const type_pool_mod = @import("type_pool.zig");
 const TypeSyntax = engine.parser.type_syntax;
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
+const NameRef = type_pool_mod.NameRef;
 const RecordField = type_pool_mod.RecordField;
 const FuncParam = type_pool_mod.FuncParam;
 const PoolTemplatePart = type_pool_mod.TemplatePart;
 const null_type_idx = type_pool_mod.null_type_idx;
+
+const NameTarget = union(enum) {
+    field: u32,
+    parameter: u32,
+    template_part: u32,
+};
+
+const NameEvent = struct {
+    target: NameTarget,
+    next: usize,
+};
+
+const PlanAction = union(enum) {
+    visit: usize,
+    emit: struct {
+        boundary: usize,
+        target: NameTarget,
+    },
+};
+
+const NamePlan = struct {
+    allocator: std.mem.Allocator,
+    range_start: usize,
+    events: []NameEvent,
+    event_count: usize,
+    heads: []usize,
+    tails: []usize,
+    field_names: []?NameRef,
+    parameter_names: []?NameRef,
+    template_names: []?NameRef,
+
+    fn init(allocator: std.mem.Allocator, options: struct {
+        range_start: usize,
+        event_capacity: usize,
+        boundary_count: usize,
+        field_count: usize,
+        parameter_count: usize,
+        template_count: usize,
+    }) !NamePlan {
+        const events = try allocator.alloc(NameEvent, options.event_capacity);
+        errdefer allocator.free(events);
+        const heads = try allocator.alloc(usize, options.boundary_count);
+        errdefer allocator.free(heads);
+        @memset(heads, std.math.maxInt(usize));
+        const tails = try allocator.alloc(usize, options.boundary_count);
+        errdefer allocator.free(tails);
+        @memset(tails, std.math.maxInt(usize));
+        const field_names = try allocator.alloc(?NameRef, options.field_count);
+        errdefer allocator.free(field_names);
+        @memset(field_names, null);
+        const parameter_names = try allocator.alloc(?NameRef, options.parameter_count);
+        errdefer allocator.free(parameter_names);
+        @memset(parameter_names, null);
+        const template_names = try allocator.alloc(?NameRef, options.template_count);
+        errdefer allocator.free(template_names);
+        @memset(template_names, null);
+        return .{
+            .allocator = allocator,
+            .range_start = options.range_start,
+            .events = events,
+            .event_count = 0,
+            .heads = heads,
+            .tails = tails,
+            .field_names = field_names,
+            .parameter_names = parameter_names,
+            .template_names = template_names,
+        };
+    }
+
+    fn deinit(self: *NamePlan) void {
+        self.allocator.free(self.template_names);
+        self.allocator.free(self.parameter_names);
+        self.allocator.free(self.field_names);
+        self.allocator.free(self.tails);
+        self.allocator.free(self.heads);
+        self.allocator.free(self.events);
+        self.* = undefined;
+    }
+
+    fn appendEvent(self: *NamePlan, boundary: usize, target: NameTarget) !void {
+        if (boundary < self.range_start) return error.InvalidTypeRange;
+        const local_boundary = boundary - self.range_start;
+        if (local_boundary >= self.heads.len or self.event_count >= self.events.len) {
+            return error.InvalidTypeRange;
+        }
+        const event_index = self.event_count;
+        self.event_count += 1;
+        self.events[event_index] = .{ .target = target, .next = std.math.maxInt(usize) };
+        if (self.tails[local_boundary] == std.math.maxInt(usize)) {
+            self.heads[local_boundary] = event_index;
+        } else {
+            self.events[self.tails[local_boundary]].next = event_index;
+        }
+        self.tails[local_boundary] = event_index;
+    }
+
+    fn emitBoundary(
+        self: *NamePlan,
+        store: *const TypeSyntax.Store,
+        pool: *TypePool,
+        boundary: usize,
+    ) !void {
+        if (boundary < self.range_start) return error.InvalidTypeRange;
+        const local_boundary = boundary - self.range_start;
+        if (local_boundary >= self.heads.len) return error.InvalidTypeRange;
+        var event_index = self.heads[local_boundary];
+        while (event_index != std.math.maxInt(usize)) {
+            const event = self.events[event_index];
+            switch (event.target) {
+                .field => |index| {
+                    const slot: usize = index;
+                    if (slot >= self.field_names.len) return error.InvalidTypeRange;
+                    self.field_names[slot] = pool.addName(
+                        self.allocator,
+                        store.fields.items[slot].name.text(store.source),
+                    );
+                },
+                .parameter => |index| {
+                    const slot: usize = index;
+                    if (slot >= self.parameter_names.len) return error.InvalidTypeRange;
+                    self.parameter_names[slot] = pool.addName(
+                        self.allocator,
+                        store.params.items[slot].name.text(store.source),
+                    );
+                },
+                .template_part => |index| {
+                    const slot: usize = index;
+                    if (slot >= self.template_names.len) return error.InvalidTypeRange;
+                    const span = switch (store.template_parts.items[slot]) {
+                        .literal => |value| value,
+                        .type_slot => return error.InvalidTypeRange,
+                    };
+                    self.template_names[slot] = pool.addName(
+                        self.allocator,
+                        span.text(store.source),
+                    );
+                },
+            }
+            try pool.ensureHealthy();
+            event_index = event.next;
+        }
+    }
+};
+
+fn checkedAdd(total: *usize, value: usize) !void {
+    total.* = std.math.add(usize, total.*, value) catch return error.InvalidTypeRange;
+}
+
+fn localChildIndex(
+    child: TypeSyntax.Child,
+    range_start: usize,
+    range_end: usize,
+) ?usize {
+    return switch (child) {
+        .absent => null,
+        .present => |index| blk: {
+            const value: usize = index;
+            break :blk if (value >= range_start and value < range_end) value else null;
+        },
+    };
+}
+
+fn childStart(
+    child: TypeSyntax.Child,
+    range_start: usize,
+    range_end: usize,
+    subtree_starts: []const usize,
+    fallback: usize,
+) usize {
+    const index = localChildIndex(child, range_start, range_end) orelse return fallback;
+    return subtree_starts[index - range_start];
+}
+
+fn afterChild(
+    child: TypeSyntax.Child,
+    range_start: usize,
+    range_end: usize,
+    fallback: usize,
+) usize {
+    const index = localChildIndex(child, range_start, range_end) orelse return fallback;
+    return index + 1;
+}
+
+fn pushAction(actions: []PlanAction, count: *usize, action: PlanAction) !void {
+    if (count.* >= actions.len) return error.InvalidTypeRange;
+    actions[count.*] = action;
+    count.* += 1;
+}
+
+fn noteChild(
+    child: TypeSyntax.Child,
+    node_index: usize,
+    range_start: usize,
+    range_end: usize,
+    subtree_starts: []usize,
+    parented: []bool,
+) void {
+    const child_index = localChildIndex(child, range_start, range_end) orelse return;
+    if (child_index >= node_index) return;
+    const local = child_index - range_start;
+    subtree_starts[node_index - range_start] = @min(
+        subtree_starts[node_index - range_start],
+        subtree_starts[local],
+    );
+    parented[local] = true;
+}
+
+fn buildNamePlan(
+    allocator: std.mem.Allocator,
+    store: *const TypeSyntax.Store,
+    application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+    node_range: TypeSyntax.Range,
+) !NamePlan {
+    const start: usize = node_range.start;
+    const end = std.math.add(usize, start, node_range.count) catch return error.InvalidTypeRange;
+    if (end > store.nodes.items.len) return error.InvalidTypeRange;
+
+    var event_capacity: usize = 0;
+    var child_capacity: usize = 0;
+    for (store.nodes.items[start..end]) |node| switch (node.data) {
+        .primitive, .named_reference, .literal_string, .literal_number, .literal_bool => {},
+        .generic_application => |application| {
+            const arguments = store.memberSlice(application.arguments) orelse return error.InvalidTypeRange;
+            try checkedAdd(&child_capacity, arguments.len);
+        },
+        .group => |group| {
+            const parameters = store.paramSlice(group.attempted_params) orelse
+                return error.InvalidTypeRange;
+            try checkedAdd(&event_capacity, parameters.len);
+            try checkedAdd(&child_capacity, parameters.len);
+            try checkedAdd(&child_capacity, 1);
+        },
+        .readonly_modifier, .array => try checkedAdd(&child_capacity, 1),
+        .record => |range| {
+            const fields = store.fieldSlice(range) orelse return error.InvalidTypeRange;
+            try checkedAdd(&event_capacity, fields.len);
+            try checkedAdd(&child_capacity, fields.len);
+        },
+        .tuple, .union_type, .intersection => |range| {
+            const members = store.memberSlice(range) orelse return error.InvalidTypeRange;
+            try checkedAdd(&child_capacity, members.len);
+        },
+        .function => |function| {
+            const parameters = store.paramSlice(function.params) orelse return error.InvalidTypeRange;
+            try checkedAdd(&event_capacity, parameters.len);
+            try checkedAdd(&child_capacity, parameters.len);
+            try checkedAdd(&child_capacity, 1);
+        },
+        .template => |range| {
+            const parts = store.templatePartSlice(range) orelse return error.InvalidTypeRange;
+            for (parts) |part| switch (part) {
+                .literal => try checkedAdd(&event_capacity, 1),
+                .type_slot => try checkedAdd(&child_capacity, 1),
+            };
+        },
+    };
+
+    const boundary_count = std.math.add(usize, node_range.count, 1) catch
+        return error.InvalidTypeRange;
+    var plan = try NamePlan.init(allocator, .{
+        .range_start = start,
+        .event_capacity = event_capacity,
+        .boundary_count = boundary_count,
+        .field_count = store.fields.items.len,
+        .parameter_count = store.params.items.len,
+        .template_count = store.template_parts.items.len,
+    });
+    errdefer plan.deinit();
+    if (node_range.count == 0) return plan;
+
+    const subtree_starts = try allocator.alloc(usize, node_range.count);
+    defer allocator.free(subtree_starts);
+    const parented = try allocator.alloc(bool, node_range.count);
+    defer allocator.free(parented);
+    @memset(parented, false);
+    for (subtree_starts, 0..) |*subtree_start, index| subtree_start.* = start + index;
+
+    for (store.nodes.items[start..end], start..) |node, node_index| switch (node.data) {
+        .primitive, .named_reference, .literal_string, .literal_number, .literal_bool => {},
+        .generic_application => |application| {
+            noteChild(application.base, node_index, start, end, subtree_starts, parented);
+            const arguments = store.memberSlice(application.arguments) orelse return error.InvalidTypeRange;
+            for (arguments) |child| noteChild(
+                child,
+                node_index,
+                start,
+                end,
+                subtree_starts,
+                parented,
+            );
+        },
+        .group => |group| {
+            const parameters = store.paramSlice(group.attempted_params) orelse
+                return error.InvalidTypeRange;
+            for (parameters) |parameter| noteChild(
+                parameter.type_child,
+                node_index,
+                start,
+                end,
+                subtree_starts,
+                parented,
+            );
+            noteChild(group.child, node_index, start, end, subtree_starts, parented);
+        },
+        .readonly_modifier => |child| noteChild(child, node_index, start, end, subtree_starts, parented),
+        .record => |range| {
+            const fields = store.fieldSlice(range) orelse return error.InvalidTypeRange;
+            for (fields) |field| noteChild(
+                field.type_child,
+                node_index,
+                start,
+                end,
+                subtree_starts,
+                parented,
+            );
+        },
+        .array => |child| noteChild(child, node_index, start, end, subtree_starts, parented),
+        .tuple, .union_type, .intersection => |range| {
+            const members = store.memberSlice(range) orelse return error.InvalidTypeRange;
+            for (members) |child| noteChild(
+                child,
+                node_index,
+                start,
+                end,
+                subtree_starts,
+                parented,
+            );
+        },
+        .function => |function| {
+            const parameters = store.paramSlice(function.params) orelse return error.InvalidTypeRange;
+            for (parameters) |parameter| noteChild(
+                parameter.type_child,
+                node_index,
+                start,
+                end,
+                subtree_starts,
+                parented,
+            );
+            noteChild(function.ret, node_index, start, end, subtree_starts, parented);
+        },
+        .template => |range| {
+            const parts = store.templatePartSlice(range) orelse return error.InvalidTypeRange;
+            for (parts) |part| switch (part) {
+                .literal => {},
+                .type_slot => |child| noteChild(
+                    child,
+                    node_index,
+                    start,
+                    end,
+                    subtree_starts,
+                    parented,
+                ),
+            };
+        },
+    };
+
+    const visited = try allocator.alloc(bool, node_range.count);
+    defer allocator.free(visited);
+    @memset(visited, false);
+    const action_capacity = std.math.add(usize, child_capacity, event_capacity) catch
+        return error.InvalidTypeRange;
+    const actions = try allocator.alloc(PlanAction, std.math.add(usize, action_capacity, 1) catch
+        return error.InvalidTypeRange);
+    defer allocator.free(actions);
+
+    for (store.nodes.items[start..end], start..) |_, root_index| {
+        const local_root = root_index - start;
+        if (parented[local_root] or application_bases.contains(root_index)) continue;
+        var action_count: usize = 0;
+        try pushAction(actions, &action_count, .{ .visit = root_index });
+        while (action_count != 0) {
+            action_count -= 1;
+            switch (actions[action_count]) {
+                .emit => |event| try plan.appendEvent(event.boundary, event.target),
+                .visit => |node_index| {
+                    if (node_index < start or node_index >= end) continue;
+                    const local_index = node_index - start;
+                    if (visited[local_index] or application_bases.contains(node_index)) continue;
+                    visited[local_index] = true;
+                    const node = store.nodes.items[node_index];
+                    switch (node.data) {
+                        .primitive, .named_reference, .literal_string, .literal_number, .literal_bool => {},
+                        .generic_application => |application| {
+                            const arguments = store.memberSlice(application.arguments) orelse
+                                return error.InvalidTypeRange;
+                            var index = arguments.len;
+                            while (index != 0) {
+                                index -= 1;
+                                if (localChildIndex(arguments[index], start, end)) |child| {
+                                    try pushAction(actions, &action_count, .{ .visit = child });
+                                }
+                            }
+                        },
+                        .group => |group| {
+                            if (localChildIndex(group.child, start, end)) |child| {
+                                try pushAction(actions, &action_count, .{ .visit = child });
+                            }
+                            var next_boundary = childStart(
+                                group.child,
+                                start,
+                                end,
+                                subtree_starts,
+                                node_index,
+                            );
+                            const parameters = store.paramSlice(group.attempted_params) orelse
+                                return error.InvalidTypeRange;
+                            var index = parameters.len;
+                            while (index != 0) {
+                                index -= 1;
+                                const parameter = parameters[index];
+                                const parameter_index = std.math.add(
+                                    usize,
+                                    group.attempted_params.start,
+                                    index,
+                                ) catch return error.InvalidTypeRange;
+                                const parameter_target = std.math.cast(u32, parameter_index) orelse
+                                    return error.InvalidTypeRange;
+                                const boundary = afterChild(
+                                    parameter.type_child,
+                                    start,
+                                    end,
+                                    next_boundary,
+                                );
+                                try pushAction(actions, &action_count, .{ .emit = .{
+                                    .boundary = boundary,
+                                    .target = .{ .parameter = parameter_target },
+                                } });
+                                if (localChildIndex(parameter.type_child, start, end)) |child| {
+                                    try pushAction(actions, &action_count, .{ .visit = child });
+                                    next_boundary = childStart(
+                                        parameter.type_child,
+                                        start,
+                                        end,
+                                        subtree_starts,
+                                        next_boundary,
+                                    );
+                                }
+                            }
+                        },
+                        .readonly_modifier => |child| if (localChildIndex(child, start, end)) |value| {
+                            try pushAction(actions, &action_count, .{ .visit = value });
+                        },
+                        .record => |range| {
+                            const fields = store.fieldSlice(range) orelse return error.InvalidTypeRange;
+                            var next_boundary = node_index;
+                            var index = fields.len;
+                            while (index != 0) {
+                                index -= 1;
+                                const field = fields[index];
+                                const field_index = std.math.add(usize, range.start, index) catch
+                                    return error.InvalidTypeRange;
+                                const field_target = std.math.cast(u32, field_index) orelse
+                                    return error.InvalidTypeRange;
+                                const boundary = afterChild(
+                                    field.type_child,
+                                    start,
+                                    end,
+                                    next_boundary,
+                                );
+                                try pushAction(actions, &action_count, .{ .emit = .{
+                                    .boundary = boundary,
+                                    .target = .{ .field = field_target },
+                                } });
+                                if (localChildIndex(field.type_child, start, end)) |child| {
+                                    try pushAction(actions, &action_count, .{ .visit = child });
+                                    next_boundary = childStart(
+                                        field.type_child,
+                                        start,
+                                        end,
+                                        subtree_starts,
+                                        next_boundary,
+                                    );
+                                }
+                            }
+                        },
+                        .array => |child| if (localChildIndex(child, start, end)) |value| {
+                            try pushAction(actions, &action_count, .{ .visit = value });
+                        },
+                        .tuple, .union_type, .intersection => |range| {
+                            const members = store.memberSlice(range) orelse return error.InvalidTypeRange;
+                            var index = members.len;
+                            while (index != 0) {
+                                index -= 1;
+                                if (localChildIndex(members[index], start, end)) |child| {
+                                    try pushAction(actions, &action_count, .{ .visit = child });
+                                }
+                            }
+                        },
+                        .function => |function| {
+                            if (localChildIndex(function.ret, start, end)) |ret| {
+                                try pushAction(actions, &action_count, .{ .visit = ret });
+                            }
+                            var next_boundary = childStart(
+                                function.ret,
+                                start,
+                                end,
+                                subtree_starts,
+                                node_index,
+                            );
+                            const parameters = store.paramSlice(function.params) orelse
+                                return error.InvalidTypeRange;
+                            var index = parameters.len;
+                            while (index != 0) {
+                                index -= 1;
+                                const parameter = parameters[index];
+                                const parameter_index = std.math.add(
+                                    usize,
+                                    function.params.start,
+                                    index,
+                                ) catch return error.InvalidTypeRange;
+                                const parameter_target = std.math.cast(u32, parameter_index) orelse
+                                    return error.InvalidTypeRange;
+                                const boundary = afterChild(
+                                    parameter.type_child,
+                                    start,
+                                    end,
+                                    next_boundary,
+                                );
+                                try pushAction(actions, &action_count, .{ .emit = .{
+                                    .boundary = boundary,
+                                    .target = .{ .parameter = parameter_target },
+                                } });
+                                if (localChildIndex(parameter.type_child, start, end)) |child| {
+                                    try pushAction(actions, &action_count, .{ .visit = child });
+                                    next_boundary = childStart(
+                                        parameter.type_child,
+                                        start,
+                                        end,
+                                        subtree_starts,
+                                        next_boundary,
+                                    );
+                                }
+                            }
+                        },
+                        .template => |range| {
+                            const parts = store.templatePartSlice(range) orelse
+                                return error.InvalidTypeRange;
+                            var next_boundary = node_index;
+                            var index = parts.len;
+                            while (index != 0) {
+                                index -= 1;
+                                const part_index = std.math.add(usize, range.start, index) catch
+                                    return error.InvalidTypeRange;
+                                const part_target = std.math.cast(u32, part_index) orelse
+                                    return error.InvalidTypeRange;
+                                switch (parts[index]) {
+                                    .literal => try pushAction(actions, &action_count, .{ .emit = .{
+                                        .boundary = next_boundary,
+                                        .target = .{ .template_part = part_target },
+                                    } }),
+                                    .type_slot => |child| if (localChildIndex(child, start, end)) |value| {
+                                        try pushAction(actions, &action_count, .{ .visit = value });
+                                        next_boundary = childStart(
+                                            child,
+                                            start,
+                                            end,
+                                            subtree_starts,
+                                            next_boundary,
+                                        );
+                                    },
+                                }
+                            }
+                        },
+                    }
+                },
+            }
+        }
+    }
+
+    if (plan.event_count != event_capacity) return error.InvalidTypeRange;
+    return plan;
+}
 
 pub fn lowerOwnedRange(
     allocator: std.mem.Allocator,
@@ -23,7 +596,10 @@ pub fn lowerOwnedRange(
     const start: usize = node_range.start;
     const end = std.math.add(usize, start, node_range.count) catch return error.InvalidTypeRange;
     if (end > store.nodes.items.len or end > lowered.len) return error.InvalidTypeRange;
+    var name_plan = try buildNamePlan(allocator, store, application_bases, node_range);
+    defer name_plan.deinit();
     for (store.nodes.items[start..end], start..) |node, index| {
+        try name_plan.emitBoundary(store, pool, index);
         if (application_bases.contains(index)) {
             if (node.tag != .named_reference) return error.InvalidGenericApplicationBase;
             lowered[index] = null_type_idx;
@@ -61,7 +637,7 @@ pub fn lowerOwnedRange(
                 const base = pool.addRef(allocator, base_name);
                 break :blk pool.addGenericApp(allocator, base, arguments.items);
             },
-            .group => |child| try loweredChild(lowered, child, index),
+            .group => |group| try loweredChild(lowered, group.child, index),
             .readonly_modifier => |child| blk: {
                 const inner = try loweredChild(lowered, child, index);
                 if (pool.getTag(inner) == .t_array and !pool.isReadonlyArray(inner)) {
@@ -78,8 +654,11 @@ pub fn lowerOwnedRange(
                 var result: std.ArrayListUnmanaged(RecordField) = .empty;
                 defer result.deinit(allocator);
                 try result.ensureTotalCapacity(allocator, fields.len);
-                for (fields) |field| {
-                    const name = pool.addName(allocator, field.name.text(store.source));
+                for (fields, 0..) |field, field_offset| {
+                    const field_index = std.math.add(usize, range.start, field_offset) catch
+                        return error.InvalidTypeRange;
+                    const name = name_plan.field_names[field_index] orelse
+                        return error.InvalidTypeRange;
                     result.appendAssumeCapacity(.{
                         .name_start = name.start,
                         .name_len = name.len,
@@ -112,8 +691,14 @@ pub fn lowerOwnedRange(
                 var result: std.ArrayListUnmanaged(FuncParam) = .empty;
                 defer result.deinit(allocator);
                 try result.ensureTotalCapacity(allocator, params.len);
-                for (params) |parameter| {
-                    const name = pool.addName(allocator, parameter.name.text(store.source));
+                for (params, 0..) |parameter, parameter_offset| {
+                    const parameter_index = std.math.add(
+                        usize,
+                        function.params.start,
+                        parameter_offset,
+                    ) catch return error.InvalidTypeRange;
+                    const name = name_plan.parameter_names[parameter_index] orelse
+                        return error.InvalidTypeRange;
                     result.appendAssumeCapacity(.{
                         .name_start = name.start,
                         .name_len = name.len,
@@ -137,9 +722,12 @@ pub fn lowerOwnedRange(
                 var result: std.ArrayListUnmanaged(PoolTemplatePart) = .empty;
                 defer result.deinit(allocator);
                 try result.ensureTotalCapacity(allocator, parts.len);
-                for (parts) |part| switch (part) {
-                    .literal => |span| {
-                        const name = pool.addName(allocator, span.text(store.source));
+                for (parts, 0..) |part, part_offset| switch (part) {
+                    .literal => {
+                        const part_index = std.math.add(usize, range.start, part_offset) catch
+                            return error.InvalidTypeRange;
+                        const name = name_plan.template_names[part_index] orelse
+                            return error.InvalidTypeRange;
                         result.appendAssumeCapacity(.{
                             .kind = .literal,
                             .name_start = name.start,
@@ -156,6 +744,7 @@ pub fn lowerOwnedRange(
         };
         try pool.ensureHealthy();
     }
+    try name_plan.emitBoundary(store, pool, end);
 }
 
 pub fn loweredChild(
@@ -218,4 +807,198 @@ pub fn primitiveIndex(pool: *const TypePool, primitive: TypeSyntax.Primitive) Ty
         .string => pool.idx_string,
         .bytes => pool.idx_bytes,
     };
+}
+
+fn expectExactPool(left: *const TypePool, right: *const TypePool) !void {
+    try std.testing.expectEqual(left.nodes.items.len, right.nodes.items.len);
+    for (left.nodes.items, right.nodes.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqual(left.fields.items.len, right.fields.items.len);
+    for (left.fields.items, right.fields.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqual(left.params.items.len, right.params.items.len);
+    for (left.params.items, right.params.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqualSlices(TypeIndex, left.members.items, right.members.items);
+    try std.testing.expectEqualSlices(u8, left.names.items, right.names.items);
+    try std.testing.expectEqual(left.template_parts.items.len, right.template_parts.items.len);
+    for (left.template_parts.items, right.template_parts.items) |a, b| {
+        try std.testing.expect(std.meta.eql(a, b));
+    }
+}
+
+fn expectParsedLoweringMatchesLegacy(source: []const u8) !void {
+    const allocator = std.testing.allocator;
+    var legacy = TypePool.init(allocator);
+    defer legacy.deinit(allocator);
+    const legacy_root = type_pool_mod.parseTypeExpr(&legacy, allocator, source);
+    try legacy.ensureHealthy();
+
+    var store = TypeSyntax.Store.init(allocator, source);
+    defer store.deinit();
+    const value = try TypeSyntax.parseAdmittedTypeValue(&store, .{
+        .start = 0,
+        .end = @intCast(source.len),
+    });
+    const base_uses = try allocator.alloc(u8, store.nodes.items.len);
+    @memset(base_uses, 0);
+    var application_bases: TypeSyntax.Store.ApplicationBasePlan = .{
+        .allocator = allocator,
+        .uses = base_uses,
+    };
+    defer application_bases.deinit();
+    for (store.nodes.items) |node| switch (node.data) {
+        .generic_application => |application| switch (application.base) {
+            .absent => {},
+            .present => |index| base_uses[@as(usize, index)] = 1,
+        },
+        else => {},
+    };
+
+    var direct = TypePool.init(allocator);
+    defer direct.deinit(allocator);
+    const lowered = try allocator.alloc(TypeIndex, store.nodes.items.len);
+    defer allocator.free(lowered);
+    @memset(lowered, null_type_idx);
+    try lowerOwnedRange(
+        allocator,
+        &store,
+        &direct,
+        lowered,
+        &application_bases,
+        value.node_range,
+    );
+    const direct_root = try loweredChild(lowered, value.root, lowered.len);
+    try direct.ensureHealthy();
+    try std.testing.expectEqual(legacy_root, direct_root);
+    try expectExactPool(&legacy, &direct);
+}
+
+test "parsed lowering preserves legacy constructor name order" {
+    const cases = [_][]const u8{
+        "(value: T) => Effects<T, \"crypto\">",
+        "(first: Left, second: Right, third: End) => Result",
+        "{ first: Left; second: Right; third: End }",
+        "`a${Left}b${Right}c`",
+        "{ callback: (first: Left, second: `x${Right}y`) => { result: End } }",
+        "(first: Left, second:) =>",
+        "(first: Left, Right)",
+        "(first: Left, second: Right, Final)",
+        "((inner: Left, Selected), Outer)",
+        "(first: Outer<Left>, Selected)",
+        "number",
+        "()",
+    };
+    for (cases) |source| try expectParsedLoweringMatchesLegacy(source);
+}
+
+test "public lowering closes allocation failures and preserves constructor order" {
+    const source = "{ callback: (first: Left, second: `x${Right}y`) => { result: End } } = value;";
+    const allocator = std.testing.allocator;
+    var store = TypeSyntax.Store.init(allocator, source);
+    defer store.deinit();
+    var cursor = TypeSyntax.Cursor.init(source);
+    switch (try TypeSyntax.parseAndStore(&store, .global(300), source, 0, &cursor)) {
+        .parsed => {},
+        .failure, .excluded => return error.TestUnexpectedResult,
+    }
+    try store.validate();
+    var application_bases = try store.planApplicationBases(allocator);
+    defer application_bases.deinit();
+    const annotation = store.annotations.items[0];
+
+    const PoolLengths = struct {
+        nodes: usize,
+        fields: usize,
+        params: usize,
+        members: usize,
+        names: usize,
+        template_parts: usize,
+
+        fn read(pool: *const TypePool) @This() {
+            return .{
+                .nodes = pool.nodes.items.len,
+                .fields = pool.fields.items.len,
+                .params = pool.params.items.len,
+                .members = pool.members.items.len,
+                .names = pool.names.items.len,
+                .template_parts = pool.template_parts.items.len,
+            };
+        }
+    };
+    var observed_early_failure = false;
+    var observed_pool_failure = false;
+    var observed_success = false;
+    const Context = struct {
+        fn run(
+            failing_allocator: std.mem.Allocator,
+            syntax_store: *const TypeSyntax.Store,
+            bases: *const TypeSyntax.Store.ApplicationBasePlan,
+            syntax_range: TypeSyntax.Range,
+            root: TypeSyntax.Child,
+            type_source: []const u8,
+            saw_early_failure: *bool,
+            saw_pool_failure: *bool,
+            saw_success: *bool,
+        ) !void {
+            var pool = TypePool.init(failing_allocator);
+            defer pool.deinit(failing_allocator);
+            try pool.ensureHealthy();
+            const original = PoolLengths.read(&pool);
+            const lowered = try std.testing.allocator.alloc(TypeIndex, syntax_store.nodes.items.len);
+            defer std.testing.allocator.free(lowered);
+            @memset(lowered, null_type_idx);
+
+            lowerOwnedRange(
+                failing_allocator,
+                syntax_store,
+                &pool,
+                lowered,
+                bases,
+                syntax_range,
+            ) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => {
+                        if (pool.ensureHealthy()) |_| {
+                            if (std.meta.eql(original, PoolLengths.read(&pool))) {
+                                saw_early_failure.* = true;
+                            }
+                        } else |pool_err| switch (pool_err) {
+                            error.OutOfMemory => saw_pool_failure.* = true,
+                            else => return pool_err,
+                        }
+                    },
+                    else => return err,
+                }
+                return err;
+            };
+
+            try pool.ensureHealthy();
+            const direct_root = try loweredChild(lowered, root, lowered.len);
+            var legacy = TypePool.init(std.testing.allocator);
+            defer legacy.deinit(std.testing.allocator);
+            const legacy_root = type_pool_mod.parseTypeExpr(
+                &legacy,
+                std.testing.allocator,
+                type_source,
+            );
+            try legacy.ensureHealthy();
+            try std.testing.expectEqual(legacy_root, direct_root);
+            try expectExactPool(&legacy, &pool);
+            try std.testing.expect(pool.fields.items.len != 0);
+            try std.testing.expect(pool.params.items.len != 0);
+            try std.testing.expect(pool.template_parts.items.len != 0);
+            saw_success.* = true;
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{
+        &store,
+        &application_bases,
+        annotation.node_range,
+        annotation.root,
+        annotation.raw_span.text(source),
+        &observed_early_failure,
+        &observed_pool_failure,
+        &observed_success,
+    });
+    try std.testing.expect(observed_early_failure);
+    try std.testing.expect(observed_pool_failure);
+    try std.testing.expect(observed_success);
 }

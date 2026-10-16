@@ -27,41 +27,44 @@ No browser session was opened.
 
 ## Current work
 
-U1 through U11 are committed locally.
-The current commit is `f48b8295`, which completes annotation ownership.
-U12's type-consumer implementation and required checks are complete; its local commit remains pending.
-Astra accepts the complete U12 source and evidence with no remaining requirement blocker.
+U1 through U12 are committed locally; U12 is `0b7dc23b`.
+U13 source and all required checks are complete.
+Astra accepts U13 for its exact-path local commit.
 The task continues through U20 and the required quality checks.
 
-U12 adds explicit source modes and final-owner inputs for type environments, type checking, strict checking, and function specifications.
-The implementation preserves construction order, generic reuse, compact signatures, repeated-name winners, calls, predicates, and operational health.
-The corrected small gate passes all 21 steps with 2,939 tests and one skip.
-The final frontend gate passes all 45 steps with 3,757 tests and one skip.
-All 182 diagnostic corpus cases pass within the existing cost budget.
+The final focused gate passes all 57 steps, with 4,018 native tests and one skip.
+CLI separately reports 600 passes and one skip; all 182 diagnostic corpus cases pass.
+The full local script, documentation checks, formatting, and whitespace checks pass.
+The allocation sweeps pass without leaks after bounded capsule ownership corrections.
+All current proof tests remain intact after simplification.
 
-The full local script exits zero as `u12-verify.log`.
-Its aggregate tests, standalone runtime, release binaries, verified handler compilation, workflows, offline checks, and formatting pass.
-The final documentation gate exits zero across all eight steps.
-Whole-repository formatting and `git diff --check` also pass.
-The receipt table retains every failed and corrected run separately.
+Main owns the local U13 commit, then the U14 reader characterization.
+The U14 test candidate remains outside the repository and has Astra source acceptance.
+Its unfiltered execution must precede the production CHECK cutover.
 
-The simplification review applies reuse one, quality one, and comments one; efficiency and test changes remain zero.
-The review preserves every proof test, helper, observation seam, source order, and public behavior.
-Broader lowering consolidation lacks exact equivalence, while shared whitespace helpers would expand the parser API; both proposals remain excluded.
-The independent documentation review corrects current coverage, ownership, high-level entry, and bounded comparison-preflight descriptions.
-Production frontend callers still use legacy source preparation.
+Astra accepts the corrected U14 implementation design.
+The authority contains its binding rules and six review slices.
+The temporary packet SHA-256 is `49d7643bd0596092f3fcb07ff56c055d888c868f10e5bc86ab74d8f807e8d019`.
+U15 preparation is frozen outside the repository and remains unreviewed.
 
-I will record the final receipts and commit the completed U12 files on local main.
-The earlier current-work narration remains in `worklog-through-u12-acceptance.md` outside the repository.
-The authority owns detailed findings; this worklog owns current state and receipts.
+## Earlier U13 small-gate receipts
 
-U13 implementation remains unstarted.
-Astra accepts the bounded printer packet with fourteen measured legacy outputs and exact refusal and OOM behavior.
-The consumer packet still needs its measured ABI amendment and a positive callback ceiling fixture before implementation release.
-The nine-case legacy harness compiles and passes both its one-case pilot and complete run.
-Those receipts retain callback facts, transient contract fields, and six complete contract byte strings.
-The omitted native `isDict` hole expects `boolean`; the ordinary helper control expects `unknown`.
-The admission census for U14 remains preparation, with its final API refresh and production measurements pending.
+| U13 receipt | Actual result and scope |
+|---|---|
+| `u13-printer-small.log` | Exit 1; the engine root fails compilation on an error-set conversion. Other roots remain separately reported. |
+| `u13-printer-error-set.log` | Exit 0; thirteen steps, 2,703 pass, one skip. All four direct printer tests pass. |
+| `u13-consumer-api-small.log` | Exit 1; twenty-five of twenty-seven steps succeed. Native tests report 2,746 pass, one skip; CLI reports 600 pass, one skip. Only proof-swallow fails. |
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-proof-swallow-reason.log` | Exit 0; both steps pass with zero unreviewed cases. No allowance changes. |
+| `u13-consumer-tests-v1.log` | Exit 1; a cross-tier relative import blocks compiler test artifacts. |
+| `u13-consumer-tests-v1-tier.log` | Exit 1; sixteen of eighteen steps succeed, 2,946 pass, one skip, one failure. The generic-first callback differs in exact pool order. |
+| `u13-callback-pool-probe/result.log` | Exit 0; both pools contain 95 nodes. Nodes 84, 85, and 86 have different name offsets. |
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-graph-contract-matrix.log` | Exit 1; sixteen of eighteen steps succeed, 2,948 pass, one skip, one known callback failure. The graph tests and fourteen contract comparisons pass. |
+| `u13-callback-pool-probe/census-all.log` | Measurement exit 0 for eight cases after a one-case pilot. Seven cases show an ordering or speculative-write difference; absent return matches. |
+| `u13-hole-owner-baseline/all.jsonl` | Measurement script exit 0 for two CLI cases after its pilot. Each CLI exits 1 with only ZTS500 and retains the measured hole fields. |
 
 | U12 receipt | Actual result and scope |
 |---|---|
@@ -302,3 +305,118 @@ No performance improvement is claimed.
 | `member_chains` | 26360 | 14409 | 75 |
 | `module_imports` | 21440 | 15188 | 46 |
 | `html_component` | 38100 | 25132 | 110 |
+
+Main integrates seven operational tests and expands the contract matrix from seven to nine cases.
+The two added cases use measured ZTS511 and ZTS504 output at line 1, column 17.
+Astra reviews both frozen candidates independently.
+The lowering patch remains outside the repository because source review finds overlapping cleanup and one stale assertion.
+Sol prepares both corrections and a planning allocation-failure test.
+A separate Sol refreshes U14's packet without implementing that phase.
+
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-operational-prelowering.log` | Exit 1; eighteen of twenty-one steps succeed, 1,409 pass and one skips. A private constructor call blocks compiler tests; precompile passes all 240 tests. |
+
+Main corrects the operational tests to use the public contract constructor without widening visibility.
+Astra identifies that an inline callback return cannot produce the asserted marker under the retained semantics.
+Main replaces that source with the independently measured `CryptoValue` alias fixture.
+The corrected small gate runs before the lowering patch enters the repository.
+
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-operational-public-constructor.log` | Exit 1; nineteen of twenty-one steps succeed, 2,952 pass, one skips, and four fail. The existing callback pool assertion fails. Three allocation-test controls stop at SoundModeViolation before injection. |
+
+The corrected operational tests compile and their callback effect projection sweep passes.
+Their shared generic source returns a concrete alias where sound mode requires the generic return type.
+Sol prepares a valid fixture before further execution.
+Astra also requires allocation injection through the environment, actual export capture, precise failure counts, and partial serialization coverage.
+Those changes strengthen the accepted operational checks without changing production behavior.
+The corrected lowering candidate is frozen for Main and Astra review; it is not integrated yet.
+
+Astra accepts the corrected lowering source, and Main integrates the exact frozen patch after full line review.
+The strengthened native probe passes its one-case pilot, then all eight cases with the same binary.
+Every pool array and all ten primitive indices match; the backtracking case now contains 84 nodes on both paths.
+The unfiltered lowering gate runs against the integrated source.
+Operational fixture and coverage corrections remain outside the repository.
+
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-callback-pool-probe/compile-parity.log` | Exit 0; the strengthened executable compiles against integrated lowering. |
+| `u13-callback-pool-probe/parity-pilot.log` | Exit 0; the callback pools match exactly. |
+| `u13-callback-pool-probe/parity-all.log` | Exit 0; all eight cases match every pool array and primitive index. Only the case limit changes. |
+
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-lowering-v3.log` | Exit 1; nineteen of twenty-one steps succeed, 2,959 pass, one skips, and three fail. The callback regression and all six new lowering and parser tests pass. Only the three known SoundModeViolation controls fail. |
+| `u13-operational-healthy-probe/compile.log` | Exit 0; the revised healthy control compiles against integrated source. |
+| `u13-operational-healthy-probe/pilot.log` | Exit 0; sound completion, extraction, the crypto callback row, and export capture all succeed. |
+
+Main integrates the fixture-only correction after line review.
+The nongeneric callback uses string for its parameter and declared return.
+Sol continues the allocation coverage corrections against that source.
+
+U14 source review rejects several proposed shared policies because legacy producers differ.
+Main measures five general cases, two module-priority cases, and eleven producer-policy cases after separate one-case pilots.
+The immutable legacy analyzer confirms the distinct export, parameter-key, optional-parameter, assertion-position, declaration-order, and module-priority rules.
+Astra prepares a bounded correction note before any U14 implementation starts.
+The authority owns those detailed findings.
+
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-operational-complete.log` | Exit 1; nineteen of twenty-one steps succeed, 2,961 pass and one skips. Serialization has one failed error expectation. Extraction also reports two leaks and double frees in capsule cleanup. |
+
+The complete sweep exposes a pre-existing ownership defect in `dischargeFunctionCapsules`.
+A transferred proof summary retains local error cleanup, and nested string allocations can leak before append takes ownership.
+The same code exists in committed U12; the new failure sweep supplies the missing evidence.
+Sol prepares a bounded cleanup patch, and Main retains the existing public extraction sweep as its regression.
+Main corrects serialization expectations to retain the writer's measured `WriteFailed` error and owned-slice `OutOfMemory` error.
+Both require an induced allocation failure and an unchanged completed extraction.
+
+Main merges Astra's U14 corrections into the refreshed temporary packet.
+Seven lexical and recovery controls pass their measurement script after a one-case pilot.
+The raw resume position remains explicit because recording a string diagnostic alone can lose a later import.
+Astra reviews the corrected packet before implementation release.
+
+| Further U13 receipt | Actual result and scope |
+|---|---|
+| `u13-ownership-corrected.log` | Exit 1; eighteen of twenty-one steps succeed, 1,413 pass and one skips. An unreachable test switch arm prevents the compiler root from running. |
+| `u13-ownership-test-accounting.log` | Exit 0; all twenty-one steps succeed, 2,962 pass and one skips. Compiler reports 1,549 pass without leaks. All operational, public lowering, and cleanup probes pass. |
+
+Astra accepts the bounded capsule cleanup and both test corrections as source changes.
+Main preserves exact writer error tags and uses one allocator throughout the public pool failure probe.
+The new public lowerer test replaces a private test whose unchanged-pool assertions were tautological.
+Its successful control compares exact legacy pool structure with nonempty fields, parameters, and template parts.
+Its allocation sweep observes both early healthy-pool refusal and later pool allocation failure.
+
+The printer now uses its existing trim helper before appending a legacy region.
+The full profile retains only settings used after source selection.
+Parameter validation shares one range classifier, and name-plan capacities use named options.
+The inaccurate checker-reuse paragraph and private helper narration are removed.
+The focused gate checks these changes with every current proof test unchanged.
+
+| Final U13 focused receipt | Actual result and scope |
+|---|---|
+| `u13-focused-final.log` | Exit 0; all 57 steps succeed, 4,018 native tests pass and one skips. CLI separately reports 600 pass and one skip. All 182 diagnostic corpus cases pass. |
+| `u13-fmt-final.log` | Exit 0; build, packages, and tooling formatting checks pass. |
+| `u13-diff-final.log` | Exit 0; whitespace checks pass. |
+
+Astra accepts final U13 source without a remaining blocker after the bounded simplification.
+The complete local script now runs as `u13-verify-final.log`.
+Its result, final documentation checks, and the final execution audit remain pending.
+
+| Final U13 full receipt | Actual result and scope |
+|---|---|
+| `u13-verify-final.log` | Exit 0; all CI test-job steps pass. The aggregate, standalone runtime, release compilation, verified handler compilation, workflows, offline gates, and formatting pass. |
+
+The full local script passes after all final source changes.
+Final documentation checks and Astra's execution audit remain before the local commit.
+The U14 reader characterization patch remains outside the repository and has independent Astra source acceptance.
+Its execution starts only after U13 commits.
+
+| Final U13 acceptance | Actual result and scope |
+|---|---|
+| `u13-docs-final.log` | Exit 0; all eight documentation drift, link, and spine steps pass. |
+| Final Astra execution audit | ACCEPT; U13 satisfies source and execution requirements without a remaining blocker. |
+
+Main owns the exact-path local commit.
+The unchanged untracked Claude sibling plan remains excluded.

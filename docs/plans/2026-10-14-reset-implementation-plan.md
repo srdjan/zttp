@@ -3868,6 +3868,103 @@ U14 through U16 own those cutovers.
 The frontend command and `test-proof-checker`, `test-proof-ratchet`, and `test-proof-swallow` remain required unfiltered gates.
 Contract goldens establish bytes; the proof ratchet checks producer and consumer reconstruction beyond the checker alone.
 
+U12 commits locally as `0b7dc23b` after all required checks and final Astra acceptance.
+Astra then accepts the revised U13 consumer design against that committed source.
+The native legacy harness retains six complete contracts and confirms the omitted `isDict` boolean winner.
+The ordinary omitted helper remains unknown.
+The measured callback with a nested generic application retains an empty known row and its ZTS505 warning.
+The gap and untyped callbacks retain lower bounds and ZTS512 errors.
+
+Main measures one positive callback through an alias whose complete root contains `Effects<string, "crypto">`.
+The callback stays at actual position zero and retains the captured generic bound.
+The legacy row infers `crypto`, remains deterministic and read-only, becomes impure, and has no lower bound.
+The capsule declares and infers `crypto`, discharges, and emits no diagnostics.
+The corrected harness compiles, passes its one-case pilot, and passes all ten cases with only the limit changed.
+The temporary compilation first fails because replacement escaping damages a Zig multiline delimiter; that failed receipt remains separate.
+Complete sources, compiler arguments, JSON lines, and statuses remain under `u13-legacy-consumer-harness/` outside the repository.
+No certificate byte comparison has run at this point.
+
+Main integrates the printer after reviewing every changed line and the bounded allocation-order correction.
+The first printer gate fails compilation because Zig does not narrow the captured validation error into the printer's error set.
+The corrected switch returns `error.OutOfMemory` explicitly.
+The repeated unfiltered `test-zts` gate exits zero across thirteen steps, with 2,703 tests passing and one skip.
+Its four direct printer tests pass, including measured outputs, exact refusals, priority, and separate allocation failures.
+
+The consumer source review removes an unintended change to path effects; both input modes retain source-free path analysis.
+Analyzer borrowing now restores the original legacy field on success or failure.
+Astra finds two completed-checker defects before integration: default options discard signatures, and explicit direct reuse bypasses typed module input.
+The corrected reuse helper preserves the existing checker before fallback maps and checks direct capability before allocating temporary facts.
+Astra accepts the corrected production patch, printer patch, and runtime certificate test as source reviews.
+
+The first integrated gate passes ZTS, proof-ratchet, CLI, layering, and module-boundary checks.
+It records 2,746 passing native tests with one skip; the custom CLI suite records 600 passes and one skip.
+The only failed step requires an explanation for a switch that returns no authored type for a non-callable node.
+Main adds that exact explanation without changing an allowlist or runtime behavior.
+The gate's failure remains distinct from the passing suites.
+
+The runtime test compares two independent parser results and module sessions across two source fixtures.
+It compares complete contract bytes, source identities, policy bytes, properties, and complete lowered proof IR.
+Both lowered proofs also match the fixed compilation's proof before certificate construction.
+The certificate builds use each contract's own inputs and share bytecode, dependencies, and compilation evidence.
+Exact certificate bytes and the certificate allocation sweep pass within the CLI suite.
+This check establishes contract and certificate-input parity; U15 still owns independent compilation parity.
+The broader consumer behavior matrix and graph-profile checks remain pending.
+
+The first consumer test patch initially fails compilation because its relative contract import crosses the existing tier boundary.
+Main changes that import to the existing `zts-contracts` export and adds a missing `try` in one assertion.
+The corrected unfiltered gate passes 1,537 compiler tests and all 240 precompile tests, but one callback test fails.
+That failure precedes effect analysis: exact native type-pool comparison detects different name offsets.
+The complete run records 2,946 passes, one skip, and one failure across sixteen of eighteen successful build steps.
+The proof-swallow explanation passes its separate gate and this repeated gate without allowance changes.
+
+A temporary native probe confirms both pools contain ninety-five nodes for the generic-first callback source.
+Three reference or literal nodes differ only in their name offsets.
+Legacy function-type parsing adds each parameter name after its type and before the return type.
+Direct lowering currently lowers all child nodes before adding parameter names at the parent node.
+The retained name bytes prove this ordering difference; no public effect result has yet been compared for that fixture.
+Record fields and template parts also need their native interleaving checked before a general correction is accepted.
+The correction must use existing syntax ownership and retain exact pool assertions, operational health, and one-attempt behavior.
+The temporary probe, its source, compiler arguments, and direct result remain under `u13-callback-pool-probe/` outside the repository.
+
+The expanded native probe compiles, passes a one-case pilot, then measures eight cases with the same binary.
+Function parameters, record fields, template parts, nested combinations, and an absent field expose the same ordering defect.
+An absent function return retains equal nodes and names in this probe.
+All eight cases complete measurement without an admission or population error.
+
+The backtracking case exposes a separate loss: `const value: (first: Left, Right) = null;` retains eighty-four legacy nodes but eighty-three direct nodes.
+The legacy pool retains `Left` and its attempted parameter name before the selected grouped reference.
+`SyntaxParser.backtrackGroup` currently rolls those speculative syntax records back.
+An event traversal cannot reconstruct records that no longer exist.
+Public legacy CHECK admits that type syntax and reports only ZTS200 at 1:1 for assigning null to `first`.
+A new admission refusal would therefore change existing behavior.
+
+Main proposes a bounded group record that retains attempted parameters through existing owned arrays.
+The proposed lowering traverses attempted children and names without constructing a function type, then lowers the selected grouped child.
+Span validation, application masks, nested backtracking, absence, and failure cleanup need independent review before this amendment proceeds.
+No production cutover or new source grammar belongs to this correction.
+The eight-case receipts and public CHECK result remain under `u13-callback-pool-probe/` outside the repository.
+
+Astra accepts the bounded group amendment and the corrected graph and contract tests as source designs.
+The group amendment keeps the selected semantic span unchanged and validates attempted spans against the enclosing raw interval.
+Attempted nodes remain in the same owned range and use the existing parameter array.
+The lowering must emit attempted parameters without a function constructor before it lowers the selected grouped child.
+Nested attempts retain distinct parse occurrences, and failure rollback still covers all seventeen arrays.
+
+Main integrates seven contract fixtures across full and sound extraction profiles.
+The fourteen comparisons retain exact runtime stores, atoms, pool facts, contract bytes, and transient capsule and hole fields.
+Two additional CLI observations retain the nested hole's expected number at 2:37 and the module arrow's expected unknown at 1:43.
+The nested hole keeps function name `outer`; the arrow hole keeps its `value: string` scope.
+Both CLI cases report only ZTS500.
+The retained sources and JSON remain under `u13-hole-owner-baseline/` outside the repository.
+
+The graph tests compare omitted, legacy, and direct supplied inputs in contract-only sessions for both loaded modules.
+All six sessions omit authored types and retain exact module and merged contract bytes.
+The public legacy graph callback preserves the prepared entry signature over a fallback map and omits dependency signatures.
+Direct graph refusal performs zero dependency reads after a healthy legacy reader control.
+The repeated small gate passes 1,539 compiler tests and all 240 precompile tests.
+Its only failure remains the known callback pool-order assertion; the graph tests and fourteen contract comparisons pass.
+The complete run records 2,948 passes, one skip, and one failure.
+
 ### U14 through U16 preparation findings
 
 The source census separates six cutover groups and their public boundaries.
@@ -3964,6 +4061,22 @@ It also needs exact outputs for the four direct Pi tools and parse identity with
 Each cutover must census `PreparedSource`, `parserInput`, `typeMap`, `sourceView`, `strip`, source extraction, and legacy printer calls.
 Private oracle calls can remain through U16; production legacy calls must reach zero before U17.
 The phase table's frontend and additional named gates remain authoritative and unfiltered.
+
+Main closes three previously unmeasured private comparison exclusions through the unchanged legacy analyzer.
+Destructuring reports ZTS001 at 1:7.
+The `readonly<number>` fixture reaches strict analysis and reports only ZTS629 at 1:29 for unpublished global `y`.
+The type comment fixture reports ZTS002 at 1:8 and ZTS047 at 1:7 during parsing.
+These private exclusions must not become new admission refusals.
+
+The captured-refusal source contains `any` at 1:14 and includes its final LF.
+Public CHECK reports ZTS041 at that position and exits one.
+Machine `verify` with the same content override returns `success:false`, nineteen undecided properties, and an empty diagnostics array.
+Its process exits zero, and its reported digest equals the captured override digest.
+The current `check` operation ignores content overrides, so its capture test must use the existing changing root reader.
+The U14 preparation packet's generic machine-diagnostic expectation is incomplete; each operation must preserve its actual wire projection.
+The direct changing-reader test still needs execution after the cutover; these CLI observations do not prove disk replacement timing.
+The one-case pilot and four-case measurement script exit zero, while each individual command retains its direct status.
+Complete sources, requests, results, stderr, and statuses remain under `u14-admission-baseline/` outside the repository.
 
 ### U17 preparation findings
 
@@ -4127,3 +4240,257 @@ No live model call, corpus replacement, push, or release claim forms part of thi
 The original planning task ended when this document was saved and reviewed.
 The user subsequently authorized implementation through U20.
 The implementing agent owns phase completion; the user owns later publication.
+
+### U13 operational tests and lowering review
+
+Main integrates seven operational tests after reviewing every changed line.
+The tests retain exact omitted ABI and helper contracts, empty direct selection, source-error precedence, allocation failures, and serialization transaction boundaries.
+The contract matrix adds two independently measured error cases, for eighteen full and sound comparisons.
+Legacy CHECK reports ZTS511 for a nonliteral effect ceiling and ZTS504 for an unknown capability.
+Both diagnostics identify the handler at line 1, column 17; each CLI exits one and also reports ZTS500.
+The measurement receipts remain under `u13-effect-error-baseline/` outside the repository.
+
+The first bounded lowering candidate has two source-review blockers.
+Its planning buffers have overlapping error cleanup, which can free each buffer twice after a later failure.
+Its retained-backtracking test still expects every primitive to be number, although attempted syntax now contains string and boolean.
+Main and Astra independently identify the cleanup defect; Astra identifies the stale assertion.
+Sol prepares a corrected temporary patch and a planning allocation-failure test.
+No defective lowering patch enters the repository.
+
+Main strengthens the eight-case probe to compare every pool array and primitive index.
+The revised probe propagates admission and comparison failures through its exit status.
+The earlier census remains measurement evidence, not a passing parity gate.
+
+The operational tests initially fail compilation because they call the private contract constructor.
+Main replaces that call with the public constructor and borrowed facts, then removes effect facts for the malformed-input control.
+No production visibility changes.
+Astra also rejects the inline callback fixture because nested function returns retain their existing marker semantics.
+Main uses the measured `CryptoValue` alias fixture, which establishes the required capability and a nonempty callback projection.
+The backtracking review confirms that an absent parameter child still creates a completed parameter record.
+A zero-parameter backtrack therefore loses no completed child construction in the current state machine.
+
+The corrected operational gate passes 2,952 tests with one skip and four failures.
+The existing callback pool-order assertion remains red.
+Three healthy allocation controls stop at `SoundModeViolation` before injection because their generic return conflicts with a concrete alias.
+The effect projection control itself passes and observes the capability.
+Sol prepares a source that satisfies both controls before another execution.
+
+Independent review also identifies operational coverage gaps.
+Callback marker extraction uses the environment allocator, so injecting only the effect allocator cannot reach that failure.
+Extraction must enable export capture and establish a healthy non-null table before checking rollback publication.
+Failure totals must count actual failures and distinguish failures before and after effect publication.
+The health controls must include environment failure and explicit omitted normalization, beyond a poisoned legacy pool.
+Serialization must cover allocation failures after partial output, while retaining a completed extraction and exact subsequent bytes.
+These requirements refine the existing operational packet; they add no production behavior.
+
+Astra accepts the corrected lowering source, bounded to the frozen v3 patch.
+Main reviews all original and incremental changes, then integrates that exact patch.
+The revised owner releases partial allocation once and transfers complete cleanup to the planning function.
+The planner requires every name event and name slot before constructor use; it no longer inserts missing names late.
+Flat orphan syntax remains part of lowering, which preserves existing partial-parse construction effects.
+
+The strengthened native probe compiles against integrated source and passes a one-case pilot.
+The same executable then passes all eight cases, with only the case limit changed.
+Every node, field, parameter, member, name, and template-part array matches; all ten primitive indices also match.
+The backtracking case now contains 84 nodes on both paths.
+These receipts establish exact pool parity for the measured census, not complete frontend acceptance.
+The unfiltered named suites and operational corrections remain required.
+
+The unfiltered lowering gate passes the callback regression and all six new parser and lowering tests.
+It reports 2,959 passing tests, one skip, and three known operational-fixture failures.
+A revised nongeneric fixture then passes a native healthy control against integrated source.
+Sound completion, extraction, a single crypto callback row, and a non-null export table all succeed.
+The fixture-only correction enters the repository; the remaining operational coverage corrections remain pending.
+
+### U14 review of producer policies
+
+The first refreshed packet incorrectly applies one scan policy to several producers.
+Independent source review rejects that simplification because current public diagnostics differ by producer.
+Generic, explicit-call, and erased-prefix captures check removed forms without ordinary `any` collection.
+Ordinary parameters report `any` even when it names an object member; variable and return scanning exclude that key.
+Optional-parameter admission requires raw whitespace between `?` and `:`; untyped and comment-gap forms remain parser errors.
+Assertion diagnostics start at the asserted type after raw keyword whitespace and retain the legacy type-start guard.
+Mutable-export admission applies to `export let`; `export var` remains a parser error.
+
+Refused declarations retain diagnostics from their internal scans before the declaration refusal.
+Type and distinct-type declarations scan generic removed forms, then body `any`, then the declaration keyword refusal.
+Interface declarations scan generic removed forms and their extends span, but do not scan body member types for `any`.
+Recognition followed only by an endpoint scan would omit those earlier diagnostics.
+The correction uses producer-owned spans and does not add a complete-program scanner.
+
+Main measures these cases against the immutable legacy analyzer before production changes.
+`u14-admission-policy-baseline/all.jsonl` contains five cases after a one-case pilot.
+Export var reports ZTS002 at 1:1; export let reports ZTS057 at 1:1.
+Generic, prefix, and call captures report no ZTS041, although later parsing or checking can still refuse them.
+`u14-producer-policy-baseline/all.jsonl` contains eleven cases after its separate pilot.
+The parameter key reports ZTS041 at 1:26; the variable key reaches handler proof analysis.
+Typed optional syntax reports ZTS055 at 1:22; untyped and comment-gap forms report ZTS003 at 1:22.
+Spaced assertions report ZTS042 at 1:23 and ZTS043 at 1:30, respectively.
+The generic type, distinct-type, and interface fixtures retain each measured diagnostic's exact order and location.
+
+Module lexical continuation also requires a narrower rule than the first packet proposes.
+`u14-module-priority-baseline/all.jsonl` contains two cases after its pilot.
+A module quoted newline followed by recoverable any reports ZTS008 at 1:18, then ZTS041 at 2:14.
+A module quoted newline followed by an ordinary quoted newline reports only the later ZTS008 at 2:20.
+Thus recoverable continuation accumulates diagnostics, while the actual later fatal return controls replacement.
+A later retired-module refusal retains its separately measured replacement rule.
+Astra prepares exact correction sections and string-context probes before the CHECK implementation can start.
+
+### U13 allocation cleanup findings
+
+The complete operational sweep exposes an existing ownership defect in contract capsule cleanup.
+The same code exists in committed U12.
+After the contract takes a proof summary, local error cleanup remains active during later effect-summary construction.
+A later allocation failure therefore frees that summary locally and again through contract cleanup.
+Nested string duplication also leaks when the following append cannot allocate.
+The sweep reports two leaks and double-free diagnostics in `dischargeFunctionCapsules`.
+Sol prepares a bounded ownership correction; the existing public extraction sweep remains the regression evidence.
+
+The serialization sweep also corrects its expected error contract.
+The allocating writer maps write-buffer allocation failure to `WriteFailed`; owned-slice allocation can still report `OutOfMemory`.
+The test retains both exact errors only when allocation injection causes the failure.
+It continues to require completed extraction, healthy analysis storage, and exact subsequent serialization bytes.
+No production serialization error mapping changes.
+
+### U14 string contexts and recovery evidence
+
+Main measures seven lexical and recovery controls with the immutable legacy analyzer.
+A one-case pilot and the same seven-case script both exit zero.
+The ordinary value followed by a retired import reports only ZTS008 at 1:20.
+The quoted object key reports only ZTS008 at 1:22; the runtime import reports only ZTS008 at 1:28.
+The interpolation and type-span controls instead reach the later retired import and report only ZTS053 at 3:1.
+The recovery string reports ZTS008 at 2:6, and the recovery import reports ZTS053 at 2:1.
+Exact source bytes and complete outputs remain under `u14-string-context-baseline/` outside the repository.
+
+These outcomes require caller-specific continuation and raw resume positions.
+A tokenizer can consume beyond the newline, so recording a diagnostic alone cannot preserve later import recognition.
+The dedicated admission profile restores an affected token or span checkpoint and resumes at the bounded legacy endpoint.
+Normal parser initializers and ordinary tokenizer behavior remain unchanged.
+Recovery returns eligible import, export, and declaration starts to existing statement dispatch.
+Publication health also checks retained allocation failure and changes generation when deduplication suppresses an appended diagnostic.
+
+Imported CHECK needs more than replacement parsing and typed module facts.
+Its type environment must populate from the imported Store, exact view, and actual atom table.
+Its healthy effect analyzer must select the explicit direct source input.
+The failed-type path retains omitted typing, blocked effects, and its existing early read stop.
+The separate fault and summary traversals retain their paths, revisions, and reader observations.
+
+### U14 accepted implementation boundary
+
+Astra accepts the refreshed CHECK design after the measured producer and lexical corrections.
+The accepted temporary packet has SHA-256 `49d7643bd0596092f3fcb07ff56c055d888c868f10e5bc86ab74d8f807e8d019`.
+This authority retains the binding requirements below; the temporary packet supplies implementation navigation.
+U14 starts only after U13 passes its required checks and receives its local commit.
+
+The existing typed parser owns admission through its existing producers.
+No complete-program preflight or second statement grammar becomes a production acceptance rule.
+A dedicated admission initializer leaves ordinary `init` and private comparison `initTyped` behavior unchanged.
+Original source bytes provide runtime locations, diagnostics, and identities.
+The Store retains seventeen arrays.
+A separate collector retains diagnostic order, offset deduplication, generation, and caller-specific fatal selection.
+Each reached diagnostic changes generation even when deduplication prevents an appended row.
+Native allocation failures remain distinct from semantic and diagnostic refusals.
+
+The complete admission vocabulary remains fixed:
+
+| Kind | Existing code | Producer boundary |
+|---|---|---|
+| `any_type` | ZTS041 | Confirmed type spans, under the owning producer's policy. |
+| `as_assertion` | ZTS042 | Existing Pratt expression path with the legacy type-start guard. |
+| `satisfies_assertion` | ZTS043 | Existing Pratt expression path with exact identifier recognition. |
+| `unterminated_string` | ZTS008 | Every committed string consumer, with its caller's continuation policy. |
+| `nominal_base_not_scalar` | ZTS048 | Existing nominal exclusion and admission endpoint. |
+| `interface_declaration` | ZTS049 | Existing raw declaration recognition and internal scan order. |
+| `type_alias_declaration` | ZTS050 | Existing raw declaration recognition and internal scan order. |
+| `distinct_type_declaration` | ZTS051 | Existing raw declaration recognition and internal scan order. |
+| `legacy_types_import` | ZTS053 | Existing type-only module scan, when reached. |
+| `default_parameter` | ZTS054 | Existing header recognition and default-expression boundary. |
+| `optional_parameter` | ZTS055 | Header question mark followed by raw whitespace and a colon. |
+| `default_export` | ZTS056 | Existing export recognition and underlying declaration boundary. |
+| `mutable_export` | ZTS057 | Existing export-let recognition; export-var remains a parser error. |
+| `array_type_alias` | ZTS058 | Confirmed type spans under the owning producer's policy. |
+| `readonly_array_type_alias` | ZTS059 | Confirmed type spans under the owning producer's policy. |
+| `void_type` | ZTS060 | Confirmed type spans under the owning producer's policy. |
+| `nesting_too_deep` | ZTS044 | Existing bounded type and module scanners with caller-specific propagation. |
+
+The diagnostic catalog retains codes, messages, suggestions, and the compatibility producer tag `type_stripper`.
+Assertions retain the asserted type start after raw keyword whitespace.
+Refused declarations retain the outer export location where the existing raw producer uses that location.
+Generic, call, prefix, parameter, general-type, nominal, and refused-declaration scans retain their distinct measured policies.
+An already recorded assertion refusal survives a later semantic parsing failure in its recovery scan.
+
+Top-level admission recovery follows the existing block recovery model and guarantees token progress.
+Recovery returns eligible raw import, export, and declaration starts to the existing statement dispatcher.
+It retains raw resume positions when a caught string scan advances tokenization beyond a later eligible producer.
+A local publication checkpoint contains error count, diagnostic count, and admission generation.
+Publication also requires that the error list has no retained allocation failure.
+An earlier diagnostic does not poison a later independent valid statement.
+A refused enclosing producer restores all seventeen Store arrays.
+No refused outcome publishes a partial program root.
+
+`DirectCheckSource` initializes in final caller storage because its parser borrows its atom table.
+It borrows source and path, and owns atoms, parser state, runtime IR, diagnostics, and Store.
+Accepted construction validates the Store and final runtime owners before publishing the root.
+Parser cleanup precedes atom cleanup.
+The owner exposes original-byte source views and typed parsed modules without a TypeMap accessor.
+
+TypeScript CHECK roots use that owner and select explicit direct source typing.
+Virtual JavaScript retains its current path until U16; unsupported extensions retain ZTS052.
+The public strip stage remains first.
+Admission refusal retains only that stage; parse refusal retains strip followed by parse.
+Accepted input preserves import validation, optimization, analysis, verification, flow, contract, path, trace, specification, and canonical order.
+Optimization retains runtime owner identities, and CHECK rebuilds its IR view at the existing boundary.
+No direct refusal retries legacy preparation.
+
+Imported TypeScript files own the same direct source object in stable caller storage.
+Read, admission, parse, validation, and facts failures retain the existing `Unreadable` result.
+Facts die before the source owner; owned source bytes die last.
+Imported type storage and healthy effect analysis both select explicit direct inputs.
+The failed-type path retains omitted typing, blocked nested effects, and the early read stop.
+Separate summary and fault traversals retain dependency paths, depth, cycles, revisions, and the measured three-read observation.
+
+Machine CHECK retains captured disk bytes and ignores request content overrides.
+Machine VERIFY retains its override and its separate output projection.
+The captured-any override retains digest `c8b4df16533c13f0566e41167dfd71099034d0660147424605c41ab19be39989`.
+CHECK reports ZTS041 at 1:14 and exits one for those bytes.
+VERIFY returns process exit zero, false success, nineteen `not_decided` properties, and no diagnostics.
+The native admission reader characterization must establish one captured root read before the production CHECK cutover.
+It must prove that later replacement disk bytes cannot change the captured digest or diagnostics.
+
+The implementation uses six sequential review slices:
+
+| Slice | Owned files | Exact bounded verification |
+|---|---|---|
+| Admission records and local policies | `packages/zts/src/parser/type_syntax.zig` | `zig build test-zts -j1`; exhaustive seventeen-kind census, exact policy order, allocation cleanup. |
+| Parser producers and recovery | `packages/zts/src/parser/parse.zig` | `zig build test-zts test-zts-layering -j1`; all retained lexical controls, recovery, owner identities, and rollback. |
+| Stable direct owner | `packages/zts/src/source_frontend.zig`, `packages/zts/src/root.zig` | `zig build test-zts test-module-boundary test-zts-layering -j1`; lifetime, root publication, and validation allocation failures. |
+| TypeScript CHECK root | `packages/tools/src/precompile.zig`, `packages/tools/src/json_diagnostics.zig` | `zig build test-precompile test-zts-cli test-agent-protocol -j1`; reader characterization first, then all seventeen public results and exact stages. |
+| Imported TypeScript consumers | `packages/tools/src/precompile.zig` | `zig build test-precompile -j1`; separate traversal revisions, three-read observation, and failed-type early stop. |
+| Machine and expert projections | `packages/tools/src/agent_protocol.zig`, `packages/pi/src/tools/zts_expert_verify_paths.zig` | `zig build test-agent-protocol test-standin test-expert-app test-expert-golden -j1`; capture, overrides, digest, and separate VERIFY projection. |
+
+Each slice receives source review and its unfiltered bounded checks before its dependent slice starts.
+The complete U14 frontend command, phase extras, and common verification still apply at phase completion.
+Allocation probes require an empty checkpoint before seed publication.
+Only independently observed seed publication permits a later seeded rollback assertion.
+A nonempty failure floor must prove that injection reaches work after that seed.
+No additional feature, public selector, corpus replacement, or diagnostic format change belongs to this phase.
+
+### U13 final source and focused acceptance
+
+Astra accepts final U13 source without a remaining blocker after the bounded simplification.
+The final unfiltered focused command includes the complete frontend set, proof checker, proof ratchet, proof-swallow, and CLI.
+All 57 steps pass, with 4,018 native tests and one skip.
+The CLI separately reports 600 passes and one skip; its certificate comparisons pass.
+All 182 diagnostic corpus cases pass.
+Formatting covers build code, packages, and tooling; whitespace checks also pass.
+The full local script, final documentation checks, execution audit, and local commit remain required before U13 completes.
+
+The complete local script exits zero after all final U13 source changes.
+Its aggregate, standalone runtime, release compilation, verified handler compilation, workflows, offline gates, and formatting pass.
+The script does not run the separate release-readiness mode, and this reset makes no release claim.
+The final documentation checks and Astra execution audit remain before the local U13 commit.
+
+Final documentation drift, link, and spine checks pass all eight steps.
+Astra accepts U13 against the final source and execution receipts without a remaining requirement blocker.
+U13 is ready for its exact-path local commit.
+The next phase starts with native CHECK and VERIFY reader characterization before any production cutover.

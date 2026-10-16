@@ -161,7 +161,7 @@ pub const Node = struct {
         primitive: Primitive,
         named_reference: Span,
         generic_application: struct { base: Child, arguments: Range },
-        group: Child,
+        group: struct { child: Child, attempted_params: Range },
         readonly_modifier: Child,
         record: Range,
         array: Child,
@@ -1206,7 +1206,16 @@ pub const Store = struct {
                         return error.InvalidTypeRange;
                     for (arguments) |argument| try validateChild(argument, index);
                 },
-                .group => |child| try validateChild(child, index),
+                .group => |group| {
+                    try validateChild(group.child, index);
+                    const parameters = self.paramSlice(group.attempted_params) orelse
+                        return error.InvalidTypeRange;
+                    for (parameters) |parameter| {
+                        try self.validateSpan(parameter.span);
+                        try self.validateSpan(parameter.name);
+                        try validateChild(parameter.type_child, index);
+                    }
+                },
                 .readonly_modifier => |child| try validateChild(child, index),
                 .record => |range| {
                     const values = self.fieldSlice(range) orelse return error.InvalidTypeRange;
@@ -1248,7 +1257,30 @@ pub const Store = struct {
                 },
             }
         }
+        var parameter_count: usize = 0;
+        for (self.nodes.items, 0..) |syntax_node, index| {
+            const parameter_range = parameterRange(syntax_node) orelse continue;
+            const parameters = self.paramSlice(parameter_range) orelse
+                return error.InvalidTypeRange;
+            parameter_count = std.math.add(usize, parameter_count, parameters.len) catch
+                return error.InvalidTypeRange;
+            for (self.nodes.items[0..index]) |prior_node| {
+                const prior_range = parameterRange(prior_node) orelse continue;
+                if (rangesOverlap(parameter_range, prior_range)) {
+                    return error.SharedTypeParameter;
+                }
+            }
+        }
+        if (parameter_count != self.params.items.len) return error.UnownedTypeParameter;
         try validateChild(root, self.nodes.items.len);
+    }
+
+    fn parameterRange(syntax_node: Node) ?Range {
+        return switch (syntax_node.data) {
+            .group => |group| group.attempted_params,
+            .function => |function| function.params,
+            else => null,
+        };
     }
 
     pub fn validate(self: *const Store) !void {
@@ -1555,7 +1587,12 @@ pub const Store = struct {
                     return error.InvalidTypeRange;
                 for (arguments) |argument| markOrdinaryUse(argument, ordinary_uses);
             },
-            .group => |child| markOrdinaryUse(child, ordinary_uses),
+            .group => |group| {
+                const parameters = self.paramSlice(group.attempted_params) orelse
+                    return error.InvalidTypeRange;
+                for (parameters) |parameter| markOrdinaryUse(parameter.type_child, ordinary_uses);
+                markOrdinaryUse(group.child, ordinary_uses);
+            },
             .readonly_modifier => |child| markOrdinaryUse(child, ordinary_uses),
             .record => |range| {
                 const fields = self.fieldSlice(range) orelse return error.InvalidTypeRange;
@@ -1612,7 +1649,7 @@ pub const Store = struct {
         }
         try validateChild(annotation.root, self.nodes.items.len);
         try validateOwnedChild(annotation.root, annotation.node_range);
-        try self.validateOwnedNodes(annotation.node_range);
+        try self.validateOwnedNodes(annotation.node_range, annotation.raw_span);
     }
 
     fn validateAnnotationRuntimeOwner(
@@ -1648,7 +1685,7 @@ pub const Store = struct {
         }
         try validateChild(value.root, self.nodes.items.len);
         try validateOwnedChild(value.root, value.node_range);
-        try self.validateOwnedNodes(value.node_range);
+        try self.validateOwnedNodes(value.node_range, value.raw_span);
     }
 
     fn validateParameterAnnotation(self: *const Store, parameter: ParameterAnnotation) !void {
@@ -2179,7 +2216,7 @@ pub const Store = struct {
                 }
                 try validateChild(body.root, self.nodes.items.len);
                 try validateOwnedChild(body.root, body.node_range);
-                try self.validateOwnedNodes(body.node_range);
+                try self.validateOwnedNodes(body.node_range, body.raw_span);
             },
         }
     }
@@ -2209,7 +2246,7 @@ pub const Store = struct {
         }
         try validateChild(fragment.root, self.nodes.items.len);
         try validateOwnedChild(fragment.root, fragment.node_range);
-        try self.validateOwnedNodes(fragment.node_range);
+        try self.validateOwnedNodes(fragment.node_range, fragment.raw_span);
     }
 
     fn validateCaptureSpans(self: *const Store, capture_spans: GenericCaptureSpans) !void {
@@ -2506,7 +2543,7 @@ pub const Store = struct {
         }
     }
 
-    fn validateOwnedNodes(self: *const Store, owner: Range) !void {
+    fn validateOwnedNodes(self: *const Store, owner: Range, raw_span: Span) !void {
         const start: usize = owner.start;
         const end = std.math.add(usize, start, owner.count) catch return error.InvalidTypeRange;
         if (end > self.nodes.items.len) return error.InvalidTypeRange;
@@ -2518,7 +2555,19 @@ pub const Store = struct {
                     return error.InvalidTypeRange;
                 for (arguments) |argument| try validateOwnedChild(argument, owner);
             },
-            .group => |child| try validateOwnedChild(child, owner),
+            .group => |group| {
+                try validateOwnedChild(group.child, owner);
+                const parameters = self.paramSlice(group.attempted_params) orelse
+                    return error.InvalidTypeRange;
+                for (parameters) |parameter| {
+                    if (!spanContains(raw_span, parameter.span) or
+                        !spanContains(raw_span, parameter.name))
+                    {
+                        return error.InvalidTypeSpan;
+                    }
+                    try validateOwnedChild(parameter.type_child, owner);
+                }
+            },
             .readonly_modifier => |child| try validateOwnedChild(child, owner),
             .record => |range| {
                 const fields = self.fieldSlice(range) orelse return error.InvalidTypeRange;
@@ -5100,6 +5149,7 @@ const ParenFrame = struct {
     pending_start: u32 = 0,
     pending_optional: bool = false,
     params: std.ArrayListUnmanaged(Parameter) = .empty,
+    attempted_params: Range = .{ .start = 0, .count = 0 },
 };
 
 const TemplateFrame = struct {
@@ -5606,7 +5656,10 @@ const SyntaxParser = struct {
                             frame.start,
                             close_end,
                             .group,
-                            .{ .group = .absent },
+                            .{ .group = .{
+                                .child = .absent,
+                                .attempted_params = frame.attempted_params,
+                            } },
                         );
                         grouped.semantic_present = false;
                         self.complete(grouped);
@@ -5655,7 +5708,10 @@ const SyntaxParser = struct {
                     frame.start,
                     self.pos,
                     .group,
-                    .{ .group = parsed.child },
+                    .{ .group = .{
+                        .child = parsed.child,
+                        .attempted_params = frame.attempted_params,
+                    } },
                 );
                 var result = grouped;
                 result.semantic_present = parsed.semantic_present;
@@ -5666,7 +5722,11 @@ const SyntaxParser = struct {
 
     fn backtrackGroup(self: *SyntaxParser) !void {
         const frame = &self.frames.items[self.frames.items.len - 1].paren;
-        self.store.rollback(frame.attempt);
+        if (frame.params.items.len == 0) {
+            self.store.rollback(frame.attempt);
+        } else {
+            frame.attempted_params = try self.store.appendParams(frame.params.items);
+        }
         frame.params.clearRetainingCapacity();
         self.pos = frame.group_start;
         frame.state = .wait_group;
@@ -7327,7 +7387,7 @@ test "type owners reject direct indirect and overlapping cross-owner ranges" {
                     .absent => return error.TestUnexpectedResult,
                     .present => |index| index,
                 };
-                store.nodes.items[root].data.group = .{ .present = 0 };
+                store.nodes.items[root].data.group.child = .{ .present = 0 };
                 try std.testing.expectError(error.InvalidTypeChild, store.validate());
             },
             .indirect_member_child => {
@@ -7801,7 +7861,10 @@ test "type store validation rejects invalid nodes without erasing prior syntax" 
             .tag => .{
                 .tag = .primitive,
                 .semantic_span = .{ .start = 0, .end = 6 },
-                .data = .{ .group = .absent },
+                .data = .{ .group = .{
+                    .child = .absent,
+                    .attempted_params = .{ .start = 0, .count = 0 },
+                } },
             },
             .range => .{
                 .tag = .record,
@@ -7811,7 +7874,10 @@ test "type store validation rejects invalid nodes without erasing prior syntax" 
             .child => .{
                 .tag = .group,
                 .semantic_span = .{ .start = 0, .end = 6 },
-                .data = .{ .group = .{ .present = index } },
+                .data = .{ .group = .{
+                    .child = .{ .present = index },
+                    .attempted_params = .{ .start = 0, .count = 0 },
+                } },
             },
             .span => .{
                 .tag = .primitive,
@@ -7850,6 +7916,114 @@ test "type store validation rejects invalid nodes without erasing prior syntax" 
     try std.testing.expectError(error.InvalidTypeSpan, store.validate());
     store.annotations.items[0] = valid;
     try store.validate();
+}
+
+test "group metadata retains completed parameter attempts" {
+    const source = "(first: Left, second: Right, Final)";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    const value = try parseAdmittedTypeValue(&store, .{
+        .start = 0,
+        .end = @intCast(source.len),
+    });
+    const root = switch (value.root) {
+        .absent => return error.TestUnexpectedResult,
+        .present => |index| index,
+    };
+    const group = switch (store.nodes.items[root].data) {
+        .group => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    const attempted = store.paramSlice(group.attempted_params) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 2), attempted.len);
+    try std.testing.expectEqualStrings("first: Left", attempted[0].span.text(source));
+    try std.testing.expectEqualStrings("second: Right", attempted[1].span.text(source));
+    const selected = switch (group.child) {
+        .absent => return error.TestUnexpectedResult,
+        .present => |index| store.nodes.items[index],
+    };
+    try std.testing.expectEqual(NodeTag.named_reference, selected.tag);
+    try std.testing.expectEqualStrings("first", selected.data.named_reference.text(source));
+    try std.testing.expectEqual(@as(u32, @intCast(source.len)), value.raw_span.end);
+    const selected_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ':').?);
+    try std.testing.expectEqual(selected_end, value.semantic_prefix_end);
+    try std.testing.expectEqual(selected_end, store.nodes.items[root].semantic_span.end);
+    try store.validateTypeValue(value);
+}
+
+test "group metadata participates in application planning" {
+    const source = "(first: Outer<Left>, Selected) = value;";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    switch (try parseAndStore(&store, .global(300), source, 0, &cursor)) {
+        .parsed => {},
+        .failure, .excluded => return error.TestUnexpectedResult,
+    }
+    var plan = try store.planApplicationBases(std.testing.allocator);
+    defer plan.deinit();
+    const annotation = store.annotations.items[0];
+    const group = switch (store.nodes.items[
+        switch (annotation.root) {
+            .absent => return error.TestUnexpectedResult,
+            .present => |index| index,
+        }
+    ].data) {
+        .group => |result| result,
+        else => return error.TestUnexpectedResult,
+    };
+    const attempted = store.paramSlice(group.attempted_params) orelse
+        return error.TestUnexpectedResult;
+    const application = store.nodes.items[
+        switch (attempted[0].type_child) {
+            .absent => return error.TestUnexpectedResult,
+            .present => |index| index,
+        }
+    ].data.generic_application;
+    const base = switch (application.base) {
+        .absent => return error.TestUnexpectedResult,
+        .present => |index| index,
+    };
+    try std.testing.expect(plan.contains(base));
+    try store.validate();
+}
+
+test "group metadata validation uses the admitted raw interval" {
+    const source = "(first: Left, Right) suffix";
+    const raw_end: u32 = @intCast(std.mem.indexOf(u8, source, ") suffix").? + 1);
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    const value = try parseAdmittedTypeValue(&store, .{ .start = 0, .end = raw_end });
+    const root = switch (value.root) {
+        .absent => return error.TestUnexpectedResult,
+        .present => |index| index,
+    };
+    const attempted_params = store.nodes.items[root].data.group.attempted_params;
+    store.params.items[@as(usize, attempted_params.start)].span = .{
+        .start = raw_end + 1,
+        .end = @intCast(source.len),
+    };
+    try std.testing.expectError(error.InvalidTypeSpan, store.validateTypeValue(value));
+}
+
+test "group metadata allocation failure restores every store array" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const source = "(first: Left, second: Right, Final)";
+            var store = Store.init(allocator, source);
+            defer store.deinit();
+            const before = store.checkpoint();
+            _ = parseAdmittedTypeValue(&store, .{
+                .start = 0,
+                .end = @intCast(source.len),
+            }) catch |err| {
+                try std.testing.expect(std.meta.eql(before, store.checkpoint()));
+                return err;
+            };
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
 fn parseReturnForTest(store: *Store) !ReturnSyntax {
