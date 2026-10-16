@@ -641,7 +641,14 @@ fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const count = try precompile.runGenTests(allocator, target, &aw.writer);
+    const count = precompile.runGenTests(allocator, target, &aw.writer) catch |err| switch (err) {
+        error.FileNotFound, error.AccessDenied, error.IsDir => {
+            // precompile already printed `Error reading handler file`.
+            std.debug.print("Next: check the handler path, or run `gen-tests` with no argument inside a project.\n", .{});
+            std.process.exit(1);
+        },
+        else => return err,
+    };
     buf = aw.toArrayList();
 
     if (output_path) |out_path| {

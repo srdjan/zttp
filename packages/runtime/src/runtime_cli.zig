@@ -533,7 +533,7 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
     }
 
     var handler_set = has_embedded or project != null;
-    try applyServeFlags(allocator, argv, &config, &handler_set);
+    try applyServeFlags(allocator, argv, &config, &handler_set, null);
 
     if (!handler_set) {
         std.log.err("No handler specified. Use `zttp init`, `zttp serve <file>`, or build with -Dhandler=<path>.", .{});
@@ -551,6 +551,7 @@ fn applyServeFlags(
     argv: []const []const u8,
     config: *ServerConfig,
     handler_set: *bool,
+    rejected: ?*?[]const u8,
 ) !void {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -611,6 +612,7 @@ fn applyServeFlags(
             config.handler = .{ .file_path = arg };
             handler_set.* = true;
         } else {
+            if (rejected) |slot| slot.* = arg;
             return error.UnknownOption;
         }
     }
@@ -624,7 +626,21 @@ pub fn validateServeFlags(allocator: std.mem.Allocator, argv: []const []const u8
     defer arena.deinit();
     var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
     var handler_set = false;
-    try applyServeFlags(arena.allocator(), argv, &config, &handler_set);
+    try applyServeFlags(arena.allocator(), argv, &config, &handler_set, null);
+}
+
+/// The flag `serve` refuses as unknown in `argv`, or null. It runs the same
+/// grammar as `validateServeFlags`, so the flag list lives in one place. A
+/// `--help` before the flag would have stopped the original parse, so the
+/// rerun prints nothing that the original run did not.
+pub fn unknownServeFlag(argv: []const []const u8) ?[]const u8 {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    var handler_set = false;
+    var rejected: ?[]const u8 = null;
+    applyServeFlags(arena.allocator(), argv, &config, &handler_set, &rejected) catch {};
+    return rejected;
 }
 
 /// Plain-language text for a `serve` flag-parse error. Unlisted errors keep the
@@ -640,10 +656,19 @@ pub fn serveFlagErrorMessage(err: anyerror) []const u8 {
 }
 
 /// The one-line failure for a bad serve flag, as `command` ("serve" or "dev")
-/// reports it. The text lives in `buf`. If `buf` is too small, this returns
-/// the bare message.
-pub fn formatFlagFailure(buf: []u8, command: []const u8, err: anyerror) []const u8 {
+/// reports it. An unknown option is named when `argv` contains it. The text
+/// lives in `buf`. If `buf` is too small, this returns the bare message.
+pub fn formatFlagFailure(buf: []u8, command: []const u8, err: anyerror, argv: []const []const u8) []const u8 {
     const message = serveFlagErrorMessage(err);
+    if (err == error.UnknownOption) {
+        if (unknownServeFlag(argv)) |flag| {
+            return std.fmt.bufPrint(
+                buf,
+                "zttp {s}: unknown option '{s}'. Run `zttp {s} --help` for usage.",
+                .{ command, flag, command },
+            ) catch message;
+        }
+    }
     return std.fmt.bufPrint(
         buf,
         "zttp {s}: {s}. Run `zttp {s} --help` for usage.",
@@ -655,15 +680,28 @@ test "formatFlagFailure names the command in both places" {
     var buf: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
         "zttp dev: the port must be a whole number from 0 to 65535 (-p, --port). Run `zttp dev --help` for usage.",
-        formatFlagFailure(&buf, "dev", error.InvalidPort),
+        formatFlagFailure(&buf, "dev", error.InvalidPort, &.{}),
     );
     try std.testing.expectEqualStrings(
         "zttp serve: -h and --host need a host name. Run `zttp serve --help` for usage.",
-        formatFlagFailure(&buf, "serve", error.MissingHostValue),
+        formatFlagFailure(&buf, "serve", error.MissingHostValue, &.{}),
     );
     try std.testing.expectEqualStrings(
         "zttp dev: OutOfMemory. Run `zttp dev --help` for usage.",
-        formatFlagFailure(&buf, "dev", error.OutOfMemory),
+        formatFlagFailure(&buf, "dev", error.OutOfMemory, &.{}),
+    );
+    try std.testing.expectEqualStrings(
+        "zttp serve: unknown option '--bogus'. Run `zttp serve --help` for usage.",
+        formatFlagFailure(&buf, "serve", error.UnknownOption, &.{ "-p", "3000", "handler.ts", "--bogus" }),
+    );
+    // A flag value that looks like an option is not the rejected flag.
+    try std.testing.expectEqualStrings(
+        "zttp dev: unknown option '-x'. Run `zttp dev --help` for usage.",
+        formatFlagFailure(&buf, "dev", error.UnknownOption, &.{ "-h", "-weird-host", "-x" }),
+    );
+    try std.testing.expectEqualStrings(
+        "zttp dev: unknown option. Run `zttp dev --help` for usage.",
+        formatFlagFailure(&buf, "dev", error.UnknownOption, &.{}),
     );
 }
 

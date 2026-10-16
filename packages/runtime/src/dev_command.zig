@@ -31,7 +31,7 @@ fn validateForwardedServeFlags(allocator: std.mem.Allocator, argv: []const []con
     runtime_cli.validateServeFlags(allocator, forwarded.items) catch |err| {
         if (!builtin.is_test) {
             var buf: [256]u8 = undefined;
-            std.debug.print("{s}\n", .{runtime_cli.formatFlagFailure(&buf, "dev", err)});
+            std.debug.print("{s}\n", .{runtime_cli.formatFlagFailure(&buf, "dev", err, forwarded.items)});
         }
         return error.InvalidServeFlags;
     };

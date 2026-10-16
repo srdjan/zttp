@@ -953,8 +953,10 @@ fn runBuild(
     }
 
     const source = caps.read_source(caps.context, allocator, handler_path) catch |err| {
-        std.log.err("Failed to read handler '{s}': {}", .{ handler_path, err });
-        return err;
+        std.log.err("Failed to read handler '{s}': {s}", .{ handler_path, precompile.readFailureReason(err) });
+        // Printed above; a distinct error lets the command exit 1 without a
+        // stack trace and without hiding an unprinted FileNotFound elsewhere.
+        return error.HandlerReadFailed;
     };
     defer allocator.free(source);
 

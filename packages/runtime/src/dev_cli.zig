@@ -199,7 +199,7 @@ fn cmdServe(ctx: cli_help.Ctx) anyerror!void {
     // propagating a raw Zig error (which prints a stack trace).
     runtime_cli.serveCommandWithEnviron(ctx.allocator, ctx.args, ctx.environ) catch |err| {
         var buf: [256]u8 = undefined;
-        std.debug.print("{s}\n", .{runtime_cli.formatFlagFailure(&buf, "serve", err)});
+        std.debug.print("{s}\n", .{runtime_cli.formatFlagFailure(&buf, "serve", err, ctx.args)});
         std.process.exit(1);
     };
     return;
@@ -274,7 +274,7 @@ fn cmdCompile(ctx: cli_help.Ctx) anyerror!void {
             printNoProjectConfigDiagnostic(ctx.command);
             std.process.exit(1);
         }
-        if (err == error.MissingArgument or isDeclarationBuildError(err)) {
+        if (err == error.MissingArgument or err == error.HandlerReadFailed or isDeclarationBuildError(err)) {
             std.process.exit(1);
         }
         return err;
@@ -302,6 +302,7 @@ fn cmdBuild(ctx: cli_help.Ctx) anyerror!void {
         }
         if (err == error.MissingArgument or
             err == error.UnknownOption or
+            err == error.HandlerReadFailed or
             err == error.PolicyContextFailed or
             err == error.PolicyViolation or
             isDeclarationBuildError(err))
