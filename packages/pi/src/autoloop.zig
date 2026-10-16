@@ -711,11 +711,10 @@ fn applyPlans(
 
         if (!candidate.ok) continue;
 
-        var workspace_lock = try change_transaction.WorkspaceLock.acquire(allocator, options.workspace_root);
-        defer workspace_lock.deinit();
-        _ = try change_transaction.recoverAllLocked(allocator, &workspace_lock, options.workspace_root);
+        var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, options.workspace_root);
+        defer workspace.deinit();
 
-        var prepared = change_set.prepare(allocator, options.workspace_root, turn.ChangeSet{
+        var prepared = change_set.prepare(allocator, workspace.root(), turn.ChangeSet{
             .file = options.file,
             .content = candidate.proposed_content,
         }) catch |err| switch (err) {
@@ -775,9 +774,7 @@ fn applyPlans(
         defer receipt_json.deinit();
         try ui_payload.writeJson(receipt_json.writer(), receipt_payload);
 
-        var committed = try change_transaction.commitLocked(
-            allocator,
-            &workspace_lock,
+        var committed = try workspace.commit(
             &prepared,
             &snapshot,
             proof,
@@ -806,12 +803,7 @@ fn applyPlans(
                 .ui_payload = receipt_payload,
             } });
         }
-        try change_transaction.markReceiptedLocked(
-            allocator,
-            &workspace_lock,
-            options.workspace_root,
-            &proof.proof_id,
-        );
+        try workspace.markReceipted(&proof.proof_id);
 
         // Auto-replay: confirm in the engine what the proof claimed about
         // each defeated and new witness. The note lands in the transcript
@@ -1257,12 +1249,14 @@ test "applyPlans commits a compiler-planned repair through one receipted change 
         std.mem.count(u8, events, "\"k\":\"verified_change_set\""),
     );
 
-    var lock = try change_transaction.WorkspaceLock.acquire(allocator, tmp.abs_path);
-    defer lock.deinit();
-    try testing.expectEqual(
-        @as(usize, 0),
-        try change_transaction.recoverAllLocked(allocator, &lock, tmp.abs_path),
-    );
+    var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, tmp.abs_path);
+    defer workspace.deinit();
+    const pending = try workspace.pendingReceipts();
+    defer {
+        for (pending) |*receipt| receipt.deinit(allocator);
+        allocator.free(pending);
+    }
+    try testing.expectEqual(@as(usize, 0), pending.len);
 }
 
 test "behavior-changing plans remain outside the automatic lane" {

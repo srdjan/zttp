@@ -19,8 +19,9 @@ The agent's job is narrow:
 2. Propose an edit in response to user intent.
 3. Prove the edit passes every compiler rule before it lands.
 
-Step three is the compiler gate. The agent runs `edit_simulate` before each apply.
-The model cannot emit text that bypasses this check.
+Step three uses `aggregate_proof` over captured source baselines and candidates.
+The caller applies its approval policy before `change_transaction` commits the
+proved change set. Model tool calls cannot bypass that write path.
 
 ## Where it lives
 
@@ -33,6 +34,10 @@ packages/pi/
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
     expert_workflow.zig   # deterministic task routing hints before first model round-trip
     veto.zig              # runVeto: wraps zts_cli.edit_simulate for pre-apply gate
+    change_set.zig        # canonical targets, normalized candidates, exact baselines
+    workspace_snapshot.zig # captures and rechecks the complete proof read set
+    aggregate_proof.zig   # proves the candidate change set against its baseline
+    change_transaction.zig # recovered workspace owner, source commit, durable receipts
     transcript.zig        # OwnedEntry union + renderers
     expert_persona.zig    # buildSystemPromptWithContext: prologue + skill + live rule / feature / module snapshots + optional AGENTS.md
     repl.zig              # line-buffered REPL + slash command router
@@ -105,12 +110,26 @@ file contains `~/.zttp/{skills,prompts,extensions,models.json}`,
 
 ## Key features
 
-### Compile-in-the-loop veto (`veto.zig`)
+### Proof and workspace commits
 
-The loop rejects every proposed edit whose `edit_simulate.simulate()`
-run reports a new violation. Pre-existing violations do not block new
-edits, only newly introduced ones. Failures feed back as a `retry_draft`
-turn event.
+`propose_change_set` supplies candidates to the expert loop. The loop captures
+authoritative baselines and the proof read set, obtains aggregate proof, and
+applies the caller's approval policy. Rejections feed back as a `retry_draft`
+turn event. Tools such as `pi_goal_candidate` may also run `edit_simulate` while
+building a proposal; that result does not authorize a source write.
+
+`change_transaction.RecoveredWorkspace` is the production source-write owner.
+Acquisition holds the canonical workspace lock and completes recovery before
+commit or receipt methods become available. Commit rejects another workspace's
+prepared change set and rechecks the proof read set before source renames. A
+failed commit requires closing and reacquiring the owner. Recovery may retain
+durable progress before returning an error; it does not promise rollback.
+
+The loop, autoloop, and ledger replay use this owner for commits. Agent startup
+recovers before provider initialization, then separately acquires an owner to
+reconcile pending receipts. For persisted sessions, session receipt storage
+must succeed before workspace acknowledgement. A failed append leaves the
+receipt pending for retry.
 
 ### Expert workflow hints (`expert_workflow.zig`)
 

@@ -63,7 +63,7 @@ pub const CommitReceipt = struct {
 
 /// A committed workspace receipt that has not yet been durably acknowledged by
 /// its owning session journal. The transaction directory remains authoritative
-/// until `markReceiptedLocked` succeeds.
+/// until `RecoveredWorkspace.markReceipted` succeeds.
 pub const PendingReceipt = struct {
     transaction_id: [64]u8,
     json: []u8,
@@ -74,14 +74,15 @@ pub const PendingReceipt = struct {
     }
 };
 
-pub const WorkspaceLock = struct {
+const WorkspaceLock = struct {
     allocator: std.mem.Allocator,
     fd: std.c.fd_t,
     path: []u8,
+    workspace_root: []u8,
 
     pub fn acquire(allocator: std.mem.Allocator, workspace_root: []const u8) !WorkspaceLock {
         const canonical_workspace = try common.resolveInsideWorkspace(allocator, workspace_root, ".");
-        defer allocator.free(canonical_workspace);
+        errdefer allocator.free(canonical_workspace);
         const state_dir = try std.fs.path.resolve(allocator, &.{ canonical_workspace, ".zttp" });
         defer allocator.free(state_dir);
         var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -101,14 +102,92 @@ pub const WorkspaceLock = struct {
         );
         errdefer std.Io.Threaded.closeFd(fd);
         try lockExclusiveNonBlocking(fd);
-        return .{ .allocator = allocator, .fd = fd, .path = path };
+        return .{ .allocator = allocator, .fd = fd, .path = path, .workspace_root = canonical_workspace };
     }
 
     pub fn deinit(self: *WorkspaceLock) void {
         _ = std.c.flock(self.fd, std.posix.LOCK.UN);
         std.Io.Threaded.closeFd(self.fd);
         self.allocator.free(self.path);
+        self.allocator.free(self.workspace_root);
         self.* = undefined;
+    }
+};
+
+pub const AcquisitionPhase = enum { locking, recovering };
+
+/// Holds one canonical workspace lock after recovery has completed. A failed
+/// commit may leave durable progress; close and reacquire before further use.
+/// Approval and aggregate proof remain the responsibility of the caller.
+pub const RecoveredWorkspace = struct {
+    lock: WorkspaceLock,
+    needs_recovery: bool = false,
+
+    pub fn acquire(allocator: std.mem.Allocator, workspace_root: []const u8) !RecoveredWorkspace {
+        return acquireReporting(allocator, workspace_root, null);
+    }
+
+    /// Reports the failing phase without changing the native error. The expert
+    /// loop uses this to preserve its lock and recovery diagnostics.
+    pub fn acquireReporting(
+        allocator: std.mem.Allocator,
+        workspace_root: []const u8,
+        failure_phase: ?*AcquisitionPhase,
+    ) !RecoveredWorkspace {
+        return acquireWithOptions(allocator, workspace_root, failure_phase, .{});
+    }
+
+    fn acquireWithOptions(
+        allocator: std.mem.Allocator,
+        workspace_root: []const u8,
+        failure_phase: ?*AcquisitionPhase,
+        options: RecoveryOptions,
+    ) !RecoveredWorkspace {
+        if (failure_phase) |phase| phase.* = .locking;
+        var lock = try WorkspaceLock.acquire(allocator, workspace_root);
+        errdefer lock.deinit();
+        if (failure_phase) |phase| phase.* = .recovering;
+        _ = try recoverAllLockedWithOptions(allocator, &lock, lock.workspace_root, options);
+        return .{ .lock = lock };
+    }
+
+    pub fn deinit(self: *RecoveredWorkspace) void {
+        self.lock.deinit();
+        self.* = undefined;
+    }
+
+    pub fn root(self: *const RecoveredWorkspace) []const u8 {
+        return self.lock.workspace_root;
+    }
+
+    fn ensureReady(self: *const RecoveredWorkspace) !void {
+        if (self.needs_recovery) return error.WorkspaceRecoveryRequired;
+    }
+
+    pub fn commit(
+        self: *RecoveredWorkspace,
+        prepared: *const change_set.PreparedChangeSet,
+        snapshot: *const workspace_snapshot.Snapshot,
+        proof: *const aggregate_proof.AggregateProof,
+        options: CommitOptions,
+    ) !CommitReceipt {
+        try self.ensureReady();
+        errdefer self.needs_recovery = true;
+        if (!std.mem.eql(u8, self.root(), prepared.workspace_root)) return error.WorkspaceRootMismatch;
+        return commitLocked(self.lock.allocator, &self.lock, prepared, snapshot, proof, options);
+    }
+
+    /// Returned receipts use the allocator supplied to acquire.
+    pub fn pendingReceipts(self: *const RecoveredWorkspace) ![]PendingReceipt {
+        try self.ensureReady();
+        return pendingReceiptsLocked(self.lock.allocator, &self.lock, self.root());
+    }
+
+    /// Call only after the receipt is durable in its owning persistence surface.
+    /// Acknowledgement remains idempotent after a failed synchronization.
+    pub fn markReceipted(self: *const RecoveredWorkspace, transaction_id: *const [64]u8) !void {
+        try self.ensureReady();
+        return markReceiptedLocked(self.lock.allocator, &self.lock, self.root(), transaction_id);
     }
 };
 
@@ -126,7 +205,7 @@ const Manifest = struct {
     changes: []const ManifestChange,
 };
 
-pub fn commitLocked(
+fn commitLocked(
     allocator: std.mem.Allocator,
     lock: *const WorkspaceLock,
     prepared: *const change_set.PreparedChangeSet,
@@ -198,7 +277,7 @@ pub fn commitLocked(
 /// an incomplete transaction instead of guessing whether its source writes are
 /// authoritative. Results are sorted by transaction id for deterministic
 /// reconstruction.
-pub fn pendingReceiptsLocked(
+fn pendingReceiptsLocked(
     allocator: std.mem.Allocator,
     lock: *const WorkspaceLock,
     workspace_root: []const u8,
@@ -265,7 +344,7 @@ pub fn pendingReceiptsLocked(
 /// Durably records that the exact committed receipt is now present in its
 /// owning persistence surface. This is idempotent and never removes the
 /// workspace receipt.
-pub fn markReceiptedLocked(
+fn markReceiptedLocked(
     allocator: std.mem.Allocator,
     lock: *const WorkspaceLock,
     workspace_root: []const u8,
@@ -283,7 +362,7 @@ pub fn markReceiptedLocked(
 /// Test-capable acknowledgement entry point. Default options are identical to
 /// `markReceiptedLocked`; injected failures occur at named durable-effect
 /// boundaries.
-pub fn markReceiptedLockedWithOptions(
+fn markReceiptedLockedWithOptions(
     allocator: std.mem.Allocator,
     lock: *const WorkspaceLock,
     workspace_root: []const u8,
@@ -306,7 +385,7 @@ pub fn markReceiptedLockedWithOptions(
     }
 }
 
-pub fn recoverAllLocked(
+fn recoverAllLocked(
     allocator: std.mem.Allocator,
     lock: *const WorkspaceLock,
     workspace_root: []const u8,
@@ -317,7 +396,7 @@ pub fn recoverAllLocked(
 /// Test-capable recovery entry point. Default options are identical to
 /// `recoverAllLocked`; injected failures occur at named durable-effect
 /// boundaries.
-pub fn recoverAllLockedWithOptions(
+fn recoverAllLockedWithOptions(
     allocator: std.mem.Allocator,
     lock: *const WorkspaceLock,
     workspace_root: []const u8,
@@ -2186,17 +2265,251 @@ test "full read set mutation causes zero writes" {
     var fixture = try Fixture.init(testing.allocator, &tmp);
     defer fixture.deinit(testing.allocator);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/context.ts", .data = "concurrent" });
-    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
-    defer lock.deinit();
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
     try testing.expectError(
         error.ProofReadSetChanged,
-        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{}),
+        workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{}),
     );
     for (fixture.prepared.changes) |change| {
         const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
         defer testing.allocator.free(bytes);
         try testing.expectEqualStrings(change.baseline.bytes().?, bytes);
     }
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expectError(error.WorkspaceRecoveryRequired, workspace.pendingReceipts());
+}
+
+test "recovered workspace completes recovery before exposing receipts" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(error.InjectedTransactionFailure, commitLocked(
+            testing.allocator,
+            &lock,
+            &fixture.prepared,
+            &fixture.snapshot,
+            &fixture.proof,
+            .{ .fault = .{ .after_rename = 0 } },
+        ));
+    }
+    try expectTargetState(fixture.prepared.changes[0], .candidate);
+    try expectTargetState(fixture.prepared.changes[1], .baseline);
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try expectFixtureCandidates(&fixture, true);
+    const pending = try workspace.pendingReceipts();
+    defer {
+        for (pending) |*receipt| receipt.deinit(testing.allocator);
+        testing.allocator.free(pending);
+    }
+    try testing.expectEqual(@as(usize, 1), pending.len);
+    try testing.expectEqualStrings(&fixture.proof.proof_id, &pending[0].transaction_id);
+    try workspace.markReceipted(&pending[0].transaction_id);
+    try workspace.markReceipted(&pending[0].transaction_id);
+    const acknowledged = try workspace.pendingReceipts();
+    defer {
+        for (acknowledged) |*receipt| receipt.deinit(testing.allocator);
+        testing.allocator.free(acknowledged);
+    }
+    try testing.expectEqual(@as(usize, 0), acknowledged.len);
+}
+
+test "recovered workspace releases its lock after a recovery conflict" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(error.InjectedTransactionFailure, commitLocked(
+            testing.allocator,
+            &lock,
+            &fixture.prepared,
+            &fixture.snapshot,
+            &fixture.proof,
+            .{ .fault = .after_applying },
+        ));
+    }
+    try setTargetState(fixture.prepared.changes[1], .third);
+    var phase: AcquisitionPhase = .locking;
+    try testing.expectError(error.WorkspaceRecoveryConflict, RecoveredWorkspace.acquireReporting(
+        testing.allocator,
+        fixture.root,
+        &phase,
+    ));
+    try testing.expectEqual(AcquisitionPhase.recovering, phase);
+    try expectTargetState(fixture.prepared.changes[0], .baseline);
+    try expectTargetState(fixture.prepared.changes[1], .third);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try setTargetState(fixture.prepared.changes[1], .baseline);
+    }
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try expectFixtureCandidates(&fixture, true);
+}
+
+test "recovered workspace binds canonical roots before checking proof inputs" {
+    var first_tmp = testing.tmpDir(.{});
+    defer first_tmp.cleanup();
+    var first = try Fixture.init(testing.allocator, &first_tmp);
+    defer first.deinit(testing.allocator);
+    var second_tmp = testing.tmpDir(.{});
+    defer second_tmp.cleanup();
+    var second = try Fixture.init(testing.allocator, &second_tmp);
+    defer second.deinit(testing.allocator);
+    const alias = try std.fmt.allocPrint(testing.allocator, "{s}/src/..", .{first.root});
+    defer testing.allocator.free(alias);
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, alias);
+    defer workspace.deinit();
+    try testing.expectEqualStrings(first.root, workspace.root());
+    var phase: AcquisitionPhase = .recovering;
+    try testing.expectError(error.WorkspaceChangeSetActive, RecoveredWorkspace.acquireReporting(
+        testing.allocator,
+        first.root,
+        &phase,
+    ));
+    try testing.expectEqual(AcquisitionPhase.locking, phase);
+
+    try second_tmp.dir.writeFile(testing.io, .{ .sub_path = "src/context.ts", .data = "changed" });
+    try testing.expectError(error.WorkspaceRootMismatch, workspace.commit(
+        &second.prepared,
+        &second.snapshot,
+        &second.proof,
+        .{},
+    ));
+    try expectFixtureCandidates(&first, false);
+    try expectFixtureCandidates(&second, false);
+    for ([_]*const Fixture{ &first, &second }) |fixture| {
+        const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+        defer testing.allocator.free(transaction_dir);
+        try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    }
+    try testing.expectError(error.WorkspaceRecoveryRequired, workspace.pendingReceipts());
+    try testing.expectError(error.WorkspaceRecoveryRequired, workspace.markReceipted(&first.proof.proof_id));
+    try testing.expectError(error.WorkspaceRecoveryRequired, workspace.commit(&first.prepared, &first.snapshot, &first.proof, .{}));
+}
+
+test "recovered workspace requires close and reopen after failed commits" {
+    const cases = [_]struct { fault: FaultPoint, candidates: bool }{
+        .{ .fault = .before_manifest_write, .candidates = false },
+        .{ .fault = .after_prepared, .candidates = false },
+        .{ .fault = .{ .after_rename = 0 }, .candidates = true },
+        .{ .fault = .after_committed, .candidates = true },
+    };
+    for (cases) |case| {
+        var tmp = testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var fixture = try Fixture.init(testing.allocator, &tmp);
+        defer fixture.deinit(testing.allocator);
+        {
+            var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+            defer workspace.deinit();
+            try testing.expectError(error.InjectedTransactionFailure, workspace.commit(
+                &fixture.prepared,
+                &fixture.snapshot,
+                &fixture.proof,
+                .{ .fault = case.fault },
+            ));
+            try testing.expectError(error.WorkspaceRecoveryRequired, workspace.pendingReceipts());
+            try testing.expectError(error.WorkspaceRecoveryRequired, workspace.markReceipted(&fixture.proof.proof_id));
+            try testing.expectError(error.WorkspaceRecoveryRequired, workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{}));
+            try testing.expectError(error.WorkspaceChangeSetActive, RecoveredWorkspace.acquire(testing.allocator, fixture.root));
+        }
+        var reopened = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+        defer reopened.deinit();
+        try expectFixtureCandidates(&fixture, case.candidates);
+        const pending = try reopened.pendingReceipts();
+        defer {
+            for (pending) |*receipt| receipt.deinit(testing.allocator);
+            testing.allocator.free(pending);
+        }
+        try testing.expectEqual(@as(usize, if (case.candidates) 1 else 0), pending.len);
+        if (case.candidates) {
+            try testing.expectEqualStrings(&fixture.proof.proof_id, &pending[0].transaction_id);
+            try reopened.markReceipted(&fixture.proof.proof_id);
+        } else {
+            var receipt = try reopened.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+            defer receipt.deinit(testing.allocator);
+            try expectFixtureCandidates(&fixture, true);
+        }
+    }
+}
+
+test "failed owner acquisition preserves durable recovery progress" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(error.InjectedTransactionFailure, commitLocked(
+            testing.allocator,
+            &lock,
+            &fixture.prepared,
+            &fixture.snapshot,
+            &fixture.proof,
+            .{ .fault = .after_applying },
+        ));
+    }
+    var phase: AcquisitionPhase = .locking;
+    try testing.expectError(error.InjectedTransactionFailure, RecoveredWorkspace.acquireWithOptions(
+        testing.allocator,
+        fixture.root,
+        &phase,
+        .{ .fault = .after_committed_marker },
+    ));
+    try testing.expectEqual(AcquisitionPhase.recovering, phase);
+    try expectFixtureCandidates(&fixture, true);
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    try testing.expect(try markerPresent(testing.allocator, transaction_dir, "committed"));
+    try testing.expect(!try markerPresent(testing.allocator, transaction_dir, "receipted"));
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    const pending = try workspace.pendingReceipts();
+    defer {
+        for (pending) |*receipt| receipt.deinit(testing.allocator);
+        testing.allocator.free(pending);
+    }
+    try testing.expectEqual(@as(usize, 1), pending.len);
+    try testing.expectEqualStrings(&fixture.proof.proof_id, &pending[0].transaction_id);
+}
+
+test "recovered workspace rejects invalid roots during lock acquisition" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "file", .data = "preserved" });
+    const cases = [_]struct { name: []const u8, expected: anyerror }{
+        .{ .name = "missing", .expected = error.PathOutsideWorkspace },
+        .{ .name = "file", .expected = error.NotDir },
+    };
+    for (cases) |case| {
+        const invalid = try std.fs.path.join(testing.allocator, &.{ root, case.name });
+        defer testing.allocator.free(invalid);
+        var phase: AcquisitionPhase = .recovering;
+        try testing.expectError(case.expected, RecoveredWorkspace.acquireReporting(testing.allocator, invalid, &phase));
+        try testing.expectEqual(AcquisitionPhase.locking, phase);
+    }
+    const file = try std.fs.path.join(testing.allocator, &.{ root, "file" });
+    defer testing.allocator.free(file);
+    const bytes = try zts.file_io.readFile(testing.allocator, file, 64);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("preserved", bytes);
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, root);
+    defer workspace.deinit();
 }
 
 test "workspace lock excludes a second writer" {

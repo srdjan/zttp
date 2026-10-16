@@ -638,27 +638,21 @@ fn runTurnBody(
                     });
                 }
                 const call_id = try std.fmt.allocPrint(ta, "propose_change_set-{d}", .{transcript.len()});
-                var workspace_lock = change_transaction.WorkspaceLock.acquire(ta, options.workspace_root) catch |err| {
+                var acquisition_phase: change_transaction.AcquisitionPhase = .locking;
+                var workspace = change_transaction.RecoveredWorkspace.acquireReporting(ta, options.workspace_root, &acquisition_phase) catch |err| {
                     if (err == error.OutOfMemory) return err;
-                    const message = try std.fmt.allocPrint(
-                        ta,
-                        "change set rejected before proof: workspace transaction lock failed ({s}); no source was written.",
-                        .{@errorName(err)},
-                    );
-                    try appendChangeSetToolUse(allocator, ta, transcript, call_id, proposal, null);
-                    try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = message } });
-                    try appendEditToolResult(allocator, transcript, call_id, false, message);
-                    next_event = .{ .change_set_verified = .{ .ok = false, .llm_text = message } };
-                    continue;
-                };
-                defer workspace_lock.deinit();
-                _ = change_transaction.recoverAllLocked(ta, &workspace_lock, options.workspace_root) catch |err| {
-                    if (err == error.OutOfMemory) return err;
-                    const message = try std.fmt.allocPrint(
-                        ta,
-                        "change set rejected before proof: workspace recovery failed ({s}); resolve the recorded transaction conflict before retrying.",
-                        .{@errorName(err)},
-                    );
+                    const message = switch (acquisition_phase) {
+                        .locking => try std.fmt.allocPrint(
+                            ta,
+                            "change set rejected before proof: workspace transaction lock failed ({s}); no source was written.",
+                            .{@errorName(err)},
+                        ),
+                        .recovering => try std.fmt.allocPrint(
+                            ta,
+                            "change set rejected before proof: workspace recovery failed ({s}); resolve the recorded transaction conflict before retrying.",
+                            .{@errorName(err)},
+                        ),
+                    };
                     try appendChangeSetToolUse(allocator, ta, transcript, call_id, proposal, null);
                     try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = message } });
                     try appendEditToolResult(allocator, transcript, call_id, false, message);
@@ -666,7 +660,9 @@ fn runTurnBody(
                     continue;
                 };
 
-                var prepared = change_set.prepare(ta, options.workspace_root, proposal) catch |err| {
+                defer workspace.deinit();
+
+                var prepared = change_set.prepare(ta, workspace.root(), proposal) catch |err| {
                     if (err == error.OutOfMemory) return err;
                     const message = try std.fmt.allocPrint(
                         ta,
@@ -724,7 +720,7 @@ fn runTurnBody(
                             if (!candidate.verified() or std.mem.eql(u8, repaired_source, proposal.content))
                                 break :repair;
 
-                            var repaired_prepared = change_set.prepare(ta, options.workspace_root, .{
+                            var repaired_prepared = change_set.prepare(ta, workspace.root(), .{
                                 .file = proposal.file,
                                 .content = repaired_source,
                             }) catch |err| switch (err) {
@@ -753,7 +749,7 @@ fn runTurnBody(
                                         ta,
                                         transcript,
                                         options,
-                                        &workspace_lock,
+                                        &workspace,
                                         &repaired_prepared,
                                         &repaired_snapshot,
                                         repaired_proof,
@@ -809,7 +805,7 @@ fn runTurnBody(
                                 ta,
                                 transcript,
                                 options,
-                                &workspace_lock,
+                                &workspace,
                                 &prepared,
                                 &snapshot,
                                 proof,
@@ -1085,7 +1081,7 @@ fn applyVerifiedChangeSet(
     arena: std.mem.Allocator,
     transcript: *transcript_mod.Transcript,
     options: RunOptions,
-    workspace_lock: *const change_transaction.WorkspaceLock,
+    workspace: *change_transaction.RecoveredWorkspace,
     prepared: *const change_set.PreparedChangeSet,
     snapshot: *const workspace_snapshot.Snapshot,
     proof: *const aggregate_proof.AggregateProof,
@@ -1123,9 +1119,7 @@ fn applyVerifiedChangeSet(
     defer receipt_json.deinit();
     try ui_payload_mod.writeJson(receipt_json.writer(), receipt_payload);
 
-    var committed = change_transaction.commitLocked(
-        arena,
-        workspace_lock,
+    var committed = workspace.commit(
         prepared,
         snapshot,
         proof,
@@ -1157,12 +1151,7 @@ fn applyVerifiedChangeSet(
     } });
     receipt_owned = false;
     if (options.receipt_durability == .workspace) {
-        try change_transaction.markReceiptedLocked(
-            arena,
-            workspace_lock,
-            prepared.workspace_root,
-            &proof.proof_id,
-        );
+        try workspace.markReceipted(&proof.proof_id);
     }
     return .{ .applied = true };
 }

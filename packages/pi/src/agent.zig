@@ -625,9 +625,8 @@ pub const AgentSession = struct {
 };
 
 fn recoverWorkspaceSourcesBeforeBackend(allocator: std.mem.Allocator) !void {
-    var lock = try change_transaction.WorkspaceLock.acquire(allocator, ".");
-    defer lock.deinit();
-    _ = try change_transaction.recoverAllLocked(allocator, &lock, ".");
+    var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, ".");
+    defer workspace.deinit();
 }
 
 fn transactionIdFromEntry(entry: *const transcript_mod.OwnedEntry) ?[]const u8 {
@@ -702,10 +701,9 @@ fn reconcileWorkspaceReceipts(
     allocator: std.mem.Allocator,
     session: *AgentSession,
 ) !void {
-    var lock = try change_transaction.WorkspaceLock.acquire(allocator, ".");
-    defer lock.deinit();
-    _ = try change_transaction.recoverAllLocked(allocator, &lock, ".");
-    const pending = try change_transaction.pendingReceiptsLocked(allocator, &lock, ".");
+    var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, ".");
+    defer workspace.deinit();
+    const pending = try workspace.pendingReceipts();
     defer {
         for (pending) |*receipt| receipt.deinit(allocator);
         allocator.free(pending);
@@ -714,12 +712,7 @@ fn reconcileWorkspaceReceipts(
         if (!transcriptHasTransaction(session, &receipt.transaction_id))
             try appendRecoveredReceipt(allocator, session, receipt);
         if (session.events_path != null) try persistTranscriptTail(allocator, session);
-        try change_transaction.markReceiptedLocked(
-            allocator,
-            &lock,
-            ".",
-            &receipt.transaction_id,
-        );
+        try workspace.markReceipted(&receipt.transaction_id);
     }
 }
 
@@ -2223,11 +2216,11 @@ test "startup completes workspace recovery before provider credential validation
     };
     defer proof.deinit(allocator);
     {
-        var lock = try change_transaction.WorkspaceLock.acquire(allocator, root);
-        defer lock.deinit();
+        var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, root);
+        defer workspace.deinit();
         try testing.expectError(
             error.InjectedTransactionFailure,
-            change_transaction.commitLocked(allocator, &lock, &prepared, &snapshot, &proof, .{
+            workspace.commit(&prepared, &snapshot, &proof, .{
                 .fault = .{ .after_rename = 0 },
             }),
         );
@@ -2259,7 +2252,7 @@ test "startup completes workspace recovery before provider credential validation
     try testing.expectEqualStrings("new-b", second);
 }
 
-test "committed workspace receipt is appended to a session exactly once" {
+test "committed receipt retries failed session persistence before acknowledgement" {
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2297,11 +2290,11 @@ test "committed workspace receipt is appended to a session exactly once" {
     defer receipt_json.deinit();
     try ui_payload.writeJson(receipt_json.writer(), receipt_payload);
     {
-        var lock = try change_transaction.WorkspaceLock.acquire(allocator, root);
-        defer lock.deinit();
+        var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, root);
+        defer workspace.deinit();
         try testing.expectError(
             error.InjectedTransactionFailure,
-            change_transaction.commitLocked(allocator, &lock, &prepared, &snapshot, &proof, .{
+            workspace.commit(&prepared, &snapshot, &proof, .{
                 .receipt_json = receipt_json.written(),
                 .fault = .after_committed,
             }),
@@ -2317,6 +2310,24 @@ test "committed workspace receipt is appended to a session exactly once" {
     const events_path = try std.fs.path.resolve(allocator, &.{ root, "events.jsonl" });
     defer allocator.free(events_path);
     session.events_path = try allocator.dupe(u8, events_path);
+    try tmp.dir.createDirPath(testing.io, "events.jsonl");
+
+    try testing.expectError(error.IsDir, reconcileWorkspaceReceipts(allocator, &session));
+    try testing.expectEqual(@as(usize, 1), session.transcript.len());
+    try testing.expectEqual(@as(usize, 0), session.last_persisted_len);
+    {
+        var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, root);
+        defer workspace.deinit();
+        const pending = try workspace.pendingReceipts();
+        defer {
+            for (pending) |*receipt| receipt.deinit(allocator);
+            allocator.free(pending);
+        }
+        try testing.expectEqual(@as(usize, 1), pending.len);
+        try testing.expectEqualStrings(&proof.proof_id, &pending[0].transaction_id);
+        try testing.expectEqualStrings(receipt_json.written(), pending[0].json);
+    }
+    try tmp.dir.deleteDir(testing.io, "events.jsonl");
     session.journal_writer = try session_events.JournalWriter.open(allocator, events_path);
 
     try reconcileWorkspaceReceipts(allocator, &session);
@@ -2335,6 +2346,15 @@ test "committed workspace receipt is appended to a session exactly once" {
     var reconstructed = try reconstructor.reconstructTranscript(allocator, events_path, null);
     defer reconstructed.deinit(allocator);
     try testing.expectEqual(@as(usize, 1), reconstructed.len());
+    try testing.expectEqualStrings(&proof.proof_id, transactionIdFromEntry(reconstructed.at(0)).?);
+    var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, root);
+    defer workspace.deinit();
+    const pending = try workspace.pendingReceipts();
+    defer {
+        for (pending) |*receipt| receipt.deinit(allocator);
+        allocator.free(pending);
+    }
+    try testing.expectEqual(@as(usize, 0), pending.len);
 }
 
 /// All proof-guarantee booleans set to `value`. Used to exercise the metrics

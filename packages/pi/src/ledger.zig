@@ -243,9 +243,8 @@ pub fn replayBundleInWorkspace(
     workspace_root: []const u8,
     bundle: *const ExportBundle,
 ) !ReplayResult {
-    var workspace_lock = try change_transaction.WorkspaceLock.acquire(allocator, workspace_root);
-    defer workspace_lock.deinit();
-    _ = try change_transaction.recoverAllLocked(allocator, &workspace_lock, workspace_root);
+    var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, workspace_root);
+    defer workspace.deinit();
 
     for (bundle.change_sets, 0..) |change_set_receipt, index| {
         const receipt = change_set_receipt.payload;
@@ -256,7 +255,7 @@ pub fn replayBundleInWorkspace(
             .file = change.file,
             .content = change.after,
         };
-        var prepared = change_set.prepare(allocator, workspace_root, .{
+        var prepared = change_set.prepare(allocator, workspace.root(), .{
             .file = primary_file,
             .content = receipt.changes[0].after,
             .additional = additional,
@@ -295,9 +294,7 @@ pub fn replayBundleInWorkspace(
         var receipt_json = TextBuffer.init(allocator);
         defer receipt_json.deinit();
         try ui_payload.writeJson(receipt_json.writer(), .{ .verified_change_set = receipt });
-        var committed = change_transaction.commitLocked(
-            allocator,
-            &workspace_lock,
+        var committed = workspace.commit(
             &prepared,
             &snapshot,
             proof,
@@ -306,12 +303,7 @@ pub fn replayBundleInWorkspace(
             return replayFailure(allocator, .apply_failure, index, primary_file, @errorName(err));
         };
         defer committed.deinit(allocator);
-        try change_transaction.markReceiptedLocked(
-            allocator,
-            &workspace_lock,
-            workspace_root,
-            &proof.proof_id,
-        );
+        try workspace.markReceipted(&proof.proof_id);
     }
 
     return .{
