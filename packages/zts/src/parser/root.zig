@@ -165,12 +165,15 @@ pub const Parser = struct {
     max_local_count: u8,
     constants: ConstantsList,
     root_node: NodeIndex = @import("ir.zig").null_node,
+    typed_phase: ?TypedPhase = null,
 
     // Strings/atoms kept for API compatibility (not used by new parser)
     strings: *string.StringTable,
     atoms: ?*atom_table_mod.AtomTable,
 
     /// Wrapper for constants to provide .items interface
+    const TypedPhase = enum { ready, attempted, ir_ready };
+
     pub const ConstantsList = struct {
         items: []const value.JSValue,
     };
@@ -197,6 +200,69 @@ pub const Parser = struct {
         return p;
     }
 
+    pub fn initTyped(
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+        strings: *string.StringTable,
+        atoms: *atom_table_mod.AtomTable,
+    ) !Parser {
+        var result: Parser = .{
+            .allocator = allocator,
+            .source = source,
+            .js_parser = try JsParser.initAdmission(allocator, type_allocator, source, .compile),
+            .code_gen = null,
+            .max_local_count = 0,
+            .constants = .{ .items = &.{} },
+            .strings = strings,
+            .atoms = atoms,
+            .typed_phase = .ready,
+        };
+        result.js_parser.setAtomTable(atoms);
+        return result;
+    }
+
+    pub fn parseTypedIr(self: *Parser) !AdmissionParseOutcome {
+        if (self.typed_phase != .ready) return error.InvalidParserPhase;
+        self.typed_phase = .attempted;
+        const outcome = try self.js_parser.parseAdmission();
+        switch (outcome) {
+            .accepted => |root| {
+                _ = ir_opt.optimizeIR(self.allocator, &self.js_parser.nodes, &self.js_parser.constants, root) catch {};
+                try self.js_parser.type_store.validateRuntimeOwners(
+                    self.js_parser.type_store.allocator,
+                    IrView.fromIRStore(&self.js_parser.nodes, &self.js_parser.constants),
+                );
+                self.root_node = root;
+                self.typed_phase = .ir_ready;
+            },
+            else => {},
+        }
+        return outcome;
+    }
+
+    pub fn generateParsed(self: *Parser, codegen_allocator: std.mem.Allocator) ![]const u8 {
+        if (self.typed_phase != .ir_ready) return error.InvalidParserPhase;
+        self.typed_phase = .attempted;
+        self.code_gen = CodeGen.initWithIRStore(
+            codegen_allocator,
+            &self.js_parser.nodes,
+            &self.js_parser.constants,
+            &self.js_parser.scopes,
+            self.strings,
+            self.atoms,
+        );
+        errdefer {
+            self.code_gen.?.freeOwnedConstantPayloads();
+            self.code_gen.?.deinit();
+            self.code_gen = null;
+        }
+        const function = try self.code_gen.?.generate(self.root_node);
+        self.max_local_count = @intCast(function.local_count);
+        self.constants = .{ .items = function.constants };
+        return function.code;
+    }
+
     pub fn deinit(self: *Parser) void {
         if (self.code_gen) |*cg| {
             cg.deinit();
@@ -206,6 +272,7 @@ pub const Parser = struct {
 
     /// Parse and generate bytecode, returns bytecode slice
     pub fn parse(self: *Parser) ![]const u8 {
+        if (self.typed_phase != null) return error.InvalidParserPhase;
         return self.parseWithCodegenAllocator(self.allocator);
     }
 
@@ -214,6 +281,7 @@ pub const Parser = struct {
     /// compile-time microbench to isolate codegen allocation from parser/IR
     /// allocation; production paths call `parse()` with both identical.
     pub fn parseWithCodegenAllocator(self: *Parser, codegen_alloc: std.mem.Allocator) ![]const u8 {
+        if (self.typed_phase != null) return error.InvalidParserPhase;
         const root = try self.js_parser.parse();
         self.root_node = root;
 
@@ -489,4 +557,281 @@ test "a match record key that cannot be interned fails codegen instead of droppi
     defer p.deinit();
 
     try std.testing.expectError(error.OutOfMemory, p.parse());
+}
+
+test "typed compatibility parser delays generation and preserves raw bytecode and atoms" {
+    const allocator = std.testing.allocator;
+    const typed_source = "const reset_value: number = 4;\nfunction reset_identity(input: number): number { return input; }\n";
+    var prepared = try @import("../stripper.zig").strip(allocator, typed_source, .{});
+    defer prepared.deinit();
+    const raw_source = prepared.code;
+    var raw_strings = string.StringTable.init(allocator);
+    defer raw_strings.deinit();
+    var typed_strings = string.StringTable.init(allocator);
+    defer typed_strings.deinit();
+    var raw_atoms = atom_table_mod.AtomTable.init(allocator);
+    defer raw_atoms.deinit();
+    var typed_atoms = atom_table_mod.AtomTable.init(allocator);
+    defer typed_atoms.deinit();
+    _ = try raw_atoms.intern("reset_prefix");
+    _ = try typed_atoms.intern("reset_prefix");
+    var raw = try Parser.init(allocator, raw_source, &raw_strings, &raw_atoms);
+    defer raw.deinit();
+    var typed = try Parser.initTyped(allocator, allocator, typed_source, &typed_strings, &typed_atoms);
+    defer typed.deinit();
+    const before = typed.js_parser.tokens_advanced;
+    try std.testing.expectError(error.InvalidParserPhase, typed.generateParsed(allocator));
+    try std.testing.expectError(error.InvalidParserPhase, typed.parse());
+    try std.testing.expectError(error.InvalidParserPhase, typed.parseWithCodegenAllocator(allocator));
+    try std.testing.expectEqual(before, typed.js_parser.tokens_advanced);
+    try std.testing.expectEqual(@as(usize, 1), typed_atoms.count());
+    try std.testing.expectError(error.InvalidParserPhase, raw.parseTypedIr());
+    try std.testing.expectError(error.InvalidParserPhase, raw.generateParsed(allocator));
+    const root = switch (try typed.parseTypedIr()) {
+        .accepted => |node| node,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(NodeTag.program, typed.js_parser.nodes.getTag(root));
+    try std.testing.expect(typed.code_gen == null);
+    try std.testing.expectEqual(@as(usize, 0), typed.constants.items.len);
+    try std.testing.expectEqual(@as(usize, 0), typed.getShapes().len);
+    try std.testing.expectEqual(@as(usize, 1), typed.js_parser.type_store.annotations.items.len);
+    try std.testing.expectEqualStrings("number", typed.js_parser.type_store.annotations.items[0].raw_span.text(typed_source));
+    try std.testing.expectError(error.InvalidParserPhase, typed.parseTypedIr());
+    const parsed_progress = typed.js_parser.tokens_advanced;
+    const typed_code = try typed.generateParsed(allocator);
+    defer typed.code_gen.?.freeOwnedConstantPayloads();
+    const raw_code = try raw.parse();
+    defer raw.code_gen.?.freeOwnedConstantPayloads();
+    try std.testing.expect(typed_code.len > 0);
+    try std.testing.expectEqualSlices(u8, raw_code, typed_code);
+    try std.testing.expectEqual(raw.max_local_count, typed.max_local_count);
+    const cache = @import("../bytecode_cache.zig");
+    var raw_buffer: [4096]u8 = undefined;
+    var typed_buffer: [4096]u8 = undefined;
+    var raw_writer: cache.SliceWriter = .{ .buffer = &raw_buffer };
+    var typed_writer: cache.SliceWriter = .{ .buffer = &typed_buffer };
+    try cache.serializeConstants(raw.constants.items, &raw_writer, allocator);
+    try cache.serializeConstants(typed.constants.items, &typed_writer, allocator);
+    try std.testing.expect(raw_writer.pos > @sizeOf(u16));
+    try std.testing.expectEqualSlices(u8, raw_writer.getWritten(), typed_writer.getWritten());
+
+    try std.testing.expectEqual(raw_atoms.count(), typed_atoms.count());
+    try std.testing.expectEqual(raw_atoms.next_id, typed_atoms.next_id);
+    for (object.Atom.FIRST_DYNAMIC..raw_atoms.next_id) |atom_id| {
+        const atom: object.Atom = @enumFromInt(atom_id);
+        try std.testing.expectEqualStrings(raw_atoms.getName(atom).?, typed_atoms.getName(atom).?);
+    }
+    try std.testing.expectEqual(parsed_progress, typed.js_parser.tokens_advanced);
+    try std.testing.expectError(error.InvalidParserPhase, typed.generateParsed(allocator));
+    try std.testing.expectError(error.InvalidParserPhase, typed.parseTypedIr());
+    try std.testing.expectEqual(parsed_progress, typed.js_parser.tokens_advanced);
+    try std.testing.expectEqualSlices(u8, raw_code, typed_code);
+}
+
+test "typed compatibility refusals consume the parse attempt" {
+    const sources = [_][]const u8{ "const value: any = 1;\n", "const value: number = ;\n" };
+    for (sources, 0..) |source, index| {
+        var strings = string.StringTable.init(std.testing.allocator);
+        defer strings.deinit();
+        var atoms = atom_table_mod.AtomTable.init(std.testing.allocator);
+        defer atoms.deinit();
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source, &strings, &atoms);
+        defer parser.deinit();
+        switch (try parser.parseTypedIr()) {
+            .terminal_admission_refused => try std.testing.expectEqual(@as(usize, 0), index),
+            .parser_refused => try std.testing.expectEqual(@as(usize, 1), index),
+            else => return error.TestUnexpectedResult,
+        }
+        const progress = parser.js_parser.tokens_advanced;
+        try std.testing.expectError(error.InvalidParserPhase, parser.parseTypedIr());
+        try std.testing.expectError(error.InvalidParserPhase, parser.generateParsed(std.testing.allocator));
+        try std.testing.expectError(error.InvalidParserPhase, parser.parse());
+        try std.testing.expectEqual(progress, parser.js_parser.tokens_advanced);
+        try std.testing.expectEqual(null_node, parser.root_node);
+        try std.testing.expect(parser.code_gen == null);
+    }
+}
+
+test "typed generation failures clean published float and nested function payloads" {
+    const source =
+        "const top: number = 1.25;\n" ++
+        "function outer(value: number): number {\n" ++
+        "  function inner(input: number): number { return input + 2.5; }\n" ++
+        "  const local: number = 3.75;\n" ++
+        "  return inner(value) + local;\n" ++
+        "}\n" ++
+        "const tail: number = 4.125;\n";
+    const Floors = struct { after_float: usize = 0, after_function: usize = 0, after_dispatch: usize = 0 };
+    const WitnessAllocator = struct {
+        backing: std.mem.Allocator,
+        parser: *Parser,
+        floors: *Floors,
+        fail_after_dispatch: bool = false,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.fail_after_dispatch) {
+                if (self.parser.code_gen) |*generator| {
+                    for (generator.constants.items) |constant| {
+                        if (!constant.isExternPtr()) continue;
+                        const function = constant.toExternPtr(bytecode.FunctionBytecode);
+                        if (function.pattern_dispatch) |dispatch| {
+                            if (dispatch.patterns.len == 0) continue;
+                            self.floors.after_dispatch += 1;
+                            return null;
+                        }
+                    }
+                }
+            }
+            const memory = self.backing.rawAlloc(len, alignment, return_address);
+            if (memory == null) {
+                if (self.parser.code_gen) |*generator| {
+                    var float_published = false;
+                    var function_published = false;
+                    for (generator.constants.items) |constant| {
+                        float_published = float_published or constant.isFloat64();
+                        function_published = function_published or constant.isExternPtr();
+                    }
+                    if (float_published) self.floors.after_float += 1;
+                    if (function_published) self.floors.after_function += 1;
+                }
+            }
+            return memory;
+        }
+        fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.backing.rawResize(memory, alignment, new_len, return_address);
+        }
+        fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, return_address: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.backing.rawRemap(memory, alignment, new_len, return_address);
+        }
+        fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.backing.rawFree(memory, alignment, return_address);
+        }
+    };
+    const Context = struct {
+        fn run(codegen_allocator: std.mem.Allocator, floors: *Floors) !void {
+            var strings = string.StringTable.init(std.testing.allocator);
+            defer strings.deinit();
+            var atoms = atom_table_mod.AtomTable.init(std.testing.allocator);
+            defer atoms.deinit();
+            var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source, &strings, &atoms);
+            defer parser.deinit();
+            const root = switch (try parser.parseTypedIr()) {
+                .accepted => |node| node,
+                else => return error.TestUnexpectedResult,
+            };
+            var witness: WitnessAllocator = .{ .backing = codegen_allocator, .parser = &parser, .floors = floors };
+            const code = parser.generateParsed(witness.allocator()) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => {
+                        try std.testing.expect(parser.code_gen == null);
+                        try std.testing.expectEqual(@as(u8, 0), parser.max_local_count);
+                        try std.testing.expectEqual(@as(usize, 0), parser.constants.items.len);
+                        try std.testing.expectEqual(@as(usize, 0), parser.getShapes().len);
+                        try std.testing.expectEqual(@as(usize, 0), parser.getLineTable().len);
+                        try std.testing.expectEqual(root, parser.root_node);
+                        try parser.js_parser.type_store.validateRuntimeOwners(std.testing.allocator, IrView.fromIRStore(&parser.js_parser.nodes, &parser.js_parser.constants));
+                        try std.testing.expectError(error.InvalidParserPhase, parser.generateParsed(std.testing.allocator));
+                        try std.testing.expectError(error.InvalidParserPhase, parser.parseTypedIr());
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            defer parser.code_gen.?.freeOwnedConstantPayloads();
+            try std.testing.expect(code.len > 0);
+        }
+    };
+    var floors: Floors = .{};
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{&floors});
+    try std.testing.expect(floors.after_float > 0);
+    try std.testing.expect(floors.after_function > 0);
+
+    const dispatch_source =
+        "function handler(request: Request): Response {\n" ++
+        "  const url: string = request.url;\n" ++
+        "  return match (url) {\n" ++
+        "    when '/api/a': Response.json({ ok: true }),\n" ++
+        "    default: Response.text('missing')\n" ++
+        "  };\n" ++
+        "}\n" ++
+        "const tail: number = 1.25;\n";
+    var strings = string.StringTable.init(std.testing.allocator);
+    defer strings.deinit();
+    var atoms = atom_table_mod.AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, dispatch_source, &strings, &atoms);
+    defer parser.deinit();
+    const root = switch (try parser.parseTypedIr()) {
+        .accepted => |node| node,
+        else => return error.TestUnexpectedResult,
+    };
+    var witness: WitnessAllocator = .{ .backing = std.testing.allocator, .parser = &parser, .floors = &floors, .fail_after_dispatch = true };
+    try std.testing.expectError(error.OutOfMemory, parser.generateParsed(witness.allocator()));
+    try std.testing.expect(floors.after_dispatch > 0);
+    try std.testing.expect(parser.code_gen == null);
+    try std.testing.expectEqual(@as(usize, 0), parser.constants.items.len);
+    try std.testing.expectEqual(root, parser.root_node);
+    try std.testing.expectError(error.InvalidParserPhase, parser.generateParsed(std.testing.allocator));
+}
+
+test "typed parse and validation allocation failures consume the attempt" {
+    const source = "const reset_value: number = 4;\nfunction identity(input: number): number { return input; }\n";
+    const Context = struct {
+        fn run(failing_allocator: std.mem.Allocator, type_failures: bool, after_parse: *usize, during_parse: *usize) !void {
+            const allocator = if (type_failures) std.testing.allocator else failing_allocator;
+            const type_allocator = if (type_failures) failing_allocator else std.testing.allocator;
+            var strings = string.StringTable.init(std.testing.allocator);
+            defer strings.deinit();
+            var atoms = atom_table_mod.AtomTable.init(std.testing.allocator);
+            defer atoms.deinit();
+            var parser = try Parser.initTyped(allocator, type_allocator, source, &strings, &atoms);
+            defer parser.deinit();
+            const before = parser.js_parser.current.start;
+            const outcome = parser.parseTypedIr() catch |err| {
+                switch (err) {
+                    error.OutOfMemory => {
+                        const count = parser.js_parser.nodes.tags.items.len;
+                        if (count > 0 and parser.js_parser.current.type == .eof and
+                            parser.js_parser.nodes.getTag(@intCast(count - 1)) == .program)
+                        {
+                            after_parse.* += 1;
+                        } else if (parser.js_parser.current.start > before) {
+                            during_parse.* += 1;
+                        }
+                        const progress = parser.js_parser.tokens_advanced;
+                        try std.testing.expectError(error.InvalidParserPhase, parser.parseTypedIr());
+                        try std.testing.expectError(error.InvalidParserPhase, parser.generateParsed(std.testing.allocator));
+                        try std.testing.expectError(error.InvalidParserPhase, parser.parse());
+                        try std.testing.expectEqual(progress, parser.js_parser.tokens_advanced);
+                        try std.testing.expectEqual(null_node, parser.root_node);
+                        try std.testing.expect(parser.code_gen == null);
+                        try std.testing.expectEqual(@as(usize, 0), parser.constants.items.len);
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            switch (outcome) {
+                .accepted => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expect(parser.root_node != null_node);
+        }
+    };
+    var after_type_parse: usize = 0;
+    var during_type_parse: usize = 0;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{ true, &after_type_parse, &during_type_parse });
+    try std.testing.expect(after_type_parse > 0);
+    var after_runtime_parse: usize = 0;
+    var during_runtime_parse: usize = 0;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{ false, &after_runtime_parse, &during_runtime_parse });
+    try std.testing.expect(during_runtime_parse > 0);
 }

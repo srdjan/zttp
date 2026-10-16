@@ -1533,7 +1533,7 @@ fn buildContractResultOn(
     };
 }
 
-/// Strip TypeScript when needed, parse and resolve the source, then return
+/// Parse and resolve the original source, then return
 /// an owned handler contract. The caller must deinit the returned contract.
 pub fn extractContract(
     allocator: std.mem.Allocator,
@@ -1544,50 +1544,56 @@ pub fn extractContract(
     if (opts.source_types != null and opts.type_map != null) {
         return error.AmbiguousTypeSource;
     }
-    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, filename, .{});
-    defer frontend.deinit();
-
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-
-    var js_parser = try parser_mod.JsParser.init(allocator, frontend.parserInput());
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-    const root = try js_parser.parse();
-    _ = parser_mod.optimizeIR(
-        allocator,
-        &js_parser.nodes,
-        &js_parser.constants,
-        root,
-    ) catch {};
-
-    const ir_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const parsed = ParsedModule.fromExisting(ir_view, root, &atoms);
-    var contract_opts = opts;
-    if (opts.source_types) |selected| {
-        contract_opts.type_map = null;
-        contract_opts.source_types = switch (selected) {
-            .legacy => |fallback| .{ .legacy = frontend.typeMap() orelse fallback },
-            .omitted => .omitted,
-            .direct => .direct,
-        };
-    } else {
-        contract_opts.type_map = frontend.typeMap() orelse opts.type_map;
+    if (source_frontend_mod.classifyPath(filename) == .virtual_javascript) {
+        return extractVirtualContract(allocator, source, filename, opts);
     }
+    var frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, filename);
+    defer frontend.deinit();
+    const root = switch (frontend.parse_outcome) {
+        .accepted => |accepted| accepted,
+        .parser_refused => |refusal| return refusal.first_error,
+        .terminal_admission_refused => |failure| return source_frontend_mod.prepareErrorForAdmissionFailure(failure),
+        .recovered_admission_refused => unreachable,
+    };
+    _ = parser_mod.optimizeIR(allocator, &frontend.parser.nodes, &frontend.parser.constants, root) catch {};
+    const ir_view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
+    try frontend.parser.type_store.validateRuntimeOwners(allocator, ir_view);
+    const parsed = ParsedModule.fromTypedExisting(ir_view, root, &frontend.atoms, &frontend.parser.type_store);
+    var contract_opts = opts;
+    contract_opts.type_map = null;
+    contract_opts.source_types = opts.source_types orelse if (opts.type_map) |map|
+        .{ .legacy = map }
+    else
+        .direct;
     if (hasFileImports(ir_view)) {
         const read_file = opts.read_file orelse return error.FileImportReaderRequired;
-        return extractMultiModuleContract(
-            allocator,
-            frontend.parserInput(),
-            filename,
-            read_file,
-            &atoms,
-            contract_opts,
-        );
+        return extractMultiModuleContract(allocator, source, filename, read_file, &frontend.atoms, contract_opts);
     }
 
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initSoundExtraction(allocator, parsed, contract_opts);
+    defer analysis.deinit();
+    try analysis.complete();
+    return analysis.extractContract(filename);
+}
+
+fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, filename: []const u8, opts: ExtractContractOptions) !HandlerContract {
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try parser_mod.JsParser.init(allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    _ = parser_mod.optimizeIR(allocator, &parser.nodes, &parser.constants, root) catch {};
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    if (hasFileImports(view)) {
+        const read_file = opts.read_file orelse return error.FileImportReaderRequired;
+        return extractMultiModuleContract(allocator, source, filename, read_file, &atoms, opts);
+    }
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, opts);
     defer analysis.deinit();
     try analysis.complete();
     return analysis.extractContract(filename);
@@ -1616,12 +1622,6 @@ fn extractMultiModuleContract(
     atoms: *AtomTable,
     opts: ExtractContractOptions,
 ) !HandlerContract {
-    if (opts.source_types) |source_types| {
-        switch (source_types) {
-            .direct => return error.DirectTypeSyntaxUnavailable,
-            .omitted, .legacy => {},
-        }
-    }
     var graph = modules_mod.ModuleGraph.init(allocator);
     defer graph.deinit();
     try graph.build(entry_filename, entry_source, read_file);
@@ -1651,7 +1651,10 @@ fn extractMultiModuleContract(
         const module = &graph.module_list.items[graph_idx];
         const is_entry = idx == entry_index;
         const module_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const parsed = ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
+        const parsed = if (module.source_profile == .direct)
+            ParsedModule.fromTypedExisting(module_view, compiled_module.root, atoms, &js_parser.type_store)
+        else
+            ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
 
         var module_opts = opts;
         if (is_entry) {
@@ -4542,13 +4545,12 @@ test "contract-only graph sessions omit every supplied source selection" {
         defer merged.deinit(allocator);
         for (compiled.modules, compiled.parsers, 0..) |module, *parser, index| {
             const graph_module = &graph.module_list.items[graph.execution_order[index]];
-            const type_map = if (graph_module.prepared_source) |*prepared|
-                prepared.typeMap() orelse return error.TestUnexpectedResult
-            else
-                return error.TestUnexpectedResult;
+            var oracle = try source_frontend_mod.PreparedSource.init(allocator, graph_module.source, graph_module.path, .{});
+            defer oracle.deinit();
+            const type_map = oracle.typeMap() orelse return error.TestUnexpectedResult;
             try testing.expect(type_map.entries.items.len > 0);
             const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-            const parsed = ParsedModule.fromExisting(view, module.root, &atoms);
+            const parsed = ParsedModule.fromTypedExisting(view, module.root, &atoms, &parser.type_store);
             const selected: ModuleSourceTypeInput = switch (mode) {
                 .omitted => .omitted,
                 .legacy => .{ .legacy = type_map },
@@ -4609,7 +4611,7 @@ test "contract-only graph sessions omit every supplied source selection" {
     try testing.expectEqual(@as(usize, 6), observations);
 }
 
-test "legacy graph retains prepared entry signatures and rejects direct reparsing" {
+test "source graph uses only supplied legacy types and the compiled direct entry" {
     const allocator = testing.allocator;
     var fallback = try source_frontend_mod.PreparedSource.init(
         allocator,
@@ -4619,17 +4621,18 @@ test "legacy graph retains prepared entry signatures and rejects direct reparsin
     );
     defer fallback.deinit();
     const Probe = struct {
+        var mode: type_env_mod.SourceTypeMode = .legacy;
         var entries: usize = 0;
         var dependencies: usize = 0;
 
         fn check(checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
             if (checker.env.getSourceFnSigByName("handler")) |signature| {
-                try testing.expectEqual(type_env_mod.SourceTypeMode.legacy, checker.env.sourceTypeMode().?);
+                try testing.expectEqual(mode, checker.env.sourceTypeMode().?);
                 var names: std.ArrayListUnmanaged([]const u8) = .empty;
                 defer names.deinit(checker.env.allocator);
                 _ = try checker.env.extractProofMembers(signature.return_type, &names);
                 try testing.expectEqual(@as(usize, 1), names.items.len);
-                try testing.expectEqualStrings("pure", names.items[0]);
+                try testing.expectEqualStrings(if (mode == .legacy) "deterministic" else "pure", names.items[0]);
                 entries += 1;
             } else {
                 try testing.expectEqual(type_env_mod.SourceTypeMode.omitted, checker.env.sourceTypeMode().?);
@@ -4657,17 +4660,24 @@ test "legacy graph retains prepared entry signatures and rejects direct reparsin
     try testing.expectEqual(@as(usize, 0), contract.function_capsules.items.len);
     try testing.expectEqual(@as(usize, 0), contract.function_effect_capsules.items.len);
     source_selection_graph_reads = 0;
-    try testing.expectError(error.DirectTypeSyntaxUnavailable, extractContract(
-        allocator,
-        sourceSelectionGraphEntry,
-        "/source-selection/entry.ts",
-        .{
-            .source_types = .direct,
+    const selections = [_]?ModuleSourceTypeInput{ .direct, null };
+    for (selections) |selection| {
+        Probe.mode = .direct;
+        Probe.entries = 0;
+        Probe.dependencies = 0;
+        source_selection_graph_reads = 0;
+        var direct = try extractContract(allocator, sourceSelectionGraphEntry, "/source-selection/entry.ts", .{
+            .source_types = selection,
             .read_file = readSourceSelectionGraphFile,
+            .type_check = Probe.check,
             .strict = false,
-        },
-    ));
-    try testing.expectEqual(@as(usize, 0), source_selection_graph_reads);
+        });
+        defer direct.deinit(allocator);
+        try testing.expectEqual(@as(usize, 1), source_selection_graph_reads);
+        try testing.expectEqual(@as(usize, 1), Probe.entries);
+        try testing.expectEqual(@as(usize, 1), Probe.dependencies);
+        try testing.expect(direct.properties == null);
+    }
 }
 
 fn expectOmittedHelperReceipt(

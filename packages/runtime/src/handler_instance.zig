@@ -786,34 +786,53 @@ pub const HandlerInstance = struct {
     fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8, refresh_handler: bool) !?[]const u8 {
         self.last_opt_stats = .{};
         self.interpreter.resetProfilingCounters();
-        var prepared = zq.PreparedSource.init(self.allocator, code, filename, .{}) catch |err| {
-            if (err != error.UnsupportedSourceExtension) {
-                std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
-            }
-            return err;
-        };
-        defer prepared.deinit();
-        // Logged diagnostics name the file the author wrote, not the stripped
-        // text that was parsed.
-        const diag_view = prepared.sourceView();
-
-        // Parse the source code
-        var p = try zq.Parser.init(self.allocator, prepared.parserInput(), self.strings, &self.ctx.atoms);
+        const source_kind = zq.classifySourcePath(filename);
+        if (source_kind == .unsupported) return error.UnsupportedSourceExtension;
+        var diag_view = zq.SourceView.of(code);
+        diag_view.name = filename;
+        diag_view.normalize_positions = source_kind.isTyped();
+        var p = if (source_kind.isTyped())
+            try zq.Parser.initTyped(self.allocator, self.allocator, code, self.strings, &self.ctx.atoms)
+        else
+            try zq.Parser.init(self.allocator, code, self.strings, &self.ctx.atoms);
         defer p.deinit();
-
-        const bytecode_data = p.parse() catch |err| {
-            logParseErrors(self.allocator, diag_view, p.js_parser.getErrors());
-            return err;
-        };
+        var bytecode_data: []const u8 = undefined;
+        if (source_kind.isTyped()) {
+            switch (try p.parseTypedIr()) {
+                .accepted => {},
+                .parser_refused => |refusal| {
+                    logParseErrors(self.allocator, diag_view, p.js_parser.getProjectedErrors());
+                    return refusal.first_error;
+                },
+                .terminal_admission_refused => |failure| {
+                    const err = zq.prepareErrorForAdmissionFailure(failure);
+                    std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
+                    return err;
+                },
+                .recovered_admission_refused => unreachable,
+            }
+        } else {
+            bytecode_data = p.parse() catch |err| {
+                logParseErrors(self.allocator, diag_view, p.js_parser.getErrors());
+                return err;
+            };
+        }
 
         {
             const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
-            const parsed = zq.pipeline.ParsedModule.fromExisting(ir_view, p.root_node, &self.ctx.atoms);
+            const parsed = if (source_kind.isTyped())
+                zq.pipeline.ParsedModule.fromTypedExisting(ir_view, p.root_node, &self.ctx.atoms, &p.js_parser.type_store)
+            else
+                zq.pipeline.ParsedModule.fromExisting(ir_view, p.root_node, &self.ctx.atoms);
 
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
             defer type_env_storage.deinit(self.allocator);
-            if (prepared.typeMap()) |type_map| {
-                try type_env_storage.init(self.allocator, type_map);
+            if (source_kind.isTyped()) {
+                try type_env_storage.initWithSource(self.allocator, .{ .direct = .{
+                    .store = &p.js_parser.type_store,
+                    .ir_view = ir_view,
+                    .atoms = &self.ctx.atoms,
+                } });
             }
 
             var resolved = try zq.pipeline.resolve(
@@ -860,6 +879,8 @@ pub const HandlerInstance = struct {
                 return error.SoundModeViolation;
             }
         }
+
+        if (source_kind.isTyped()) bytecode_data = try p.generateParsed(self.allocator);
 
         // Resolve module imports and register virtual module native functions
         const has_file_imports = try self.resolveModuleImports(&p);

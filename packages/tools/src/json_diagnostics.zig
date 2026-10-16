@@ -166,6 +166,13 @@ pub fn fromAdmissionError(
     diag: parser.type_syntax.AdmissionDiagnostic,
     file: []const u8,
 ) JsonDiagnostic {
+    return fromStripError(stripDiagnosticFromAdmission(source, diag), file);
+}
+
+pub fn stripDiagnosticFromAdmission(
+    source: []const u8,
+    diag: parser.type_syntax.AdmissionDiagnostic,
+) zts.StripDiagnostic {
     const kind: zts.StripDiagnosticKind = switch (diag.kind) {
         .any_type => .any_type,
         .as_assertion => .as_assertion,
@@ -186,11 +193,11 @@ pub fn fromAdmissionError(
         .nesting_too_deep => .nesting_too_deep,
     };
     const position = diag.positionIn(source);
-    return fromStripError(.{
+    return .{
         .kind = kind,
         .line = position.line,
         .column = position.column,
-    }, file);
+    };
 }
 
 pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
@@ -1374,4 +1381,17 @@ test "admission diagnostics preserve explicit presentation before legacy clampin
     try std.testing.expectEqual(@as(u32, std.math.maxInt(u16)), outside.column);
     try std.testing.expectEqual(@as(u32, 0), outside.start_offset);
     try std.testing.expectEqual(@as(u32, 0), outside.end_offset);
+}
+
+test "human admission projection preserves full guidance and wide coordinates" {
+    const source = "";
+    const diagnostic = stripDiagnosticFromAdmission(source, .{
+        .kind = .optional_parameter,
+        .span = .{ .start = 0, .end = 0 },
+        .presentation = .{ .line = 7, .column = 70_000 },
+    });
+    try std.testing.expectEqual(@as(u32, 7), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 70_000), diagnostic.column);
+    try std.testing.expectEqualStrings(zts.StripDiagnosticKind.optional_parameter.message(), diagnostic.kind.message());
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic.kind.message(), "; ") != null);
 }

@@ -239,6 +239,10 @@ pub const CodeGen = struct {
         for (constants) |val| {
             if (val.isExternPtr()) {
                 const func_bc = val.toExternPtr(FunctionBytecode);
+                if (func_bc.pattern_dispatch) |dispatch| {
+                    dispatch.deinit();
+                    self.allocator.destroy(dispatch);
+                }
                 // Recursively free nested constants
                 self.freeConstantsContents(func_bc.constants);
                 // Free the duped slices
@@ -510,7 +514,11 @@ pub const CodeGen = struct {
             ._pad = 0,
             .value = f,
         };
-        const idx = try self.addConstant(JSValue.fromPtr(float_box));
+        const idx = self.addConstant(JSValue.fromPtr(float_box)) catch |err| {
+            self.allocator.destroy(float_box);
+            return err;
+        };
+
         try self.emitPushConst(idx);
         self.pushStack(1);
     }
@@ -1634,6 +1642,7 @@ pub const CodeGen = struct {
         var restored = false;
         errdefer if (!restored) {
             self.code.deinit(self.allocator);
+            self.freeConstantsContents(self.constants.items);
             self.constants.deinit(self.allocator);
             self.upvalue_info.deinit(self.allocator);
             self.line_table.deinit(self.allocator);
@@ -1683,20 +1692,24 @@ pub const CodeGen = struct {
         // Transfer ownership of the ArrayList buffers directly (toOwnedSlice)
         // rather than dupe; same heap ownership, skips the allocation + copy
         // on each nested function body.
+        var payload_published = false;
         const func_bc = try self.allocator.create(FunctionBytecode);
-        errdefer self.allocator.destroy(func_bc);
+        errdefer if (!payload_published) self.allocator.destroy(func_bc);
 
         const code_copy = try self.code.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(code_copy);
+        errdefer if (!payload_published) self.allocator.free(code_copy);
 
         const consts_copy = try self.constants.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(consts_copy);
+        errdefer if (!payload_published) {
+            self.freeConstantsContents(consts_copy);
+            self.allocator.free(consts_copy);
+        };
 
         const upvalue_copy = try upvalue_info_list.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(upvalue_copy);
+        errdefer if (!payload_published) self.allocator.free(upvalue_copy);
 
         const line_table_copy = try self.line_table.toOwnedSlice(self.allocator);
-        errdefer self.allocator.free(line_table_copy);
+        errdefer if (!payload_published) self.allocator.free(line_table_copy);
 
         func_bc.* = .{
             .header = .{},
@@ -1726,6 +1739,13 @@ pub const CodeGen = struct {
             }
         }
 
+        errdefer if (!payload_published) {
+            if (func_bc.pattern_dispatch) |dispatch| {
+                dispatch.deinit();
+                self.allocator.destroy(dispatch);
+            }
+        };
+
         // Clean up function-local state (code/constants are now owned by func_bc copies)
         self.code.deinit(self.allocator);
         self.constants.deinit(self.allocator);
@@ -1753,6 +1773,7 @@ pub const CodeGen = struct {
 
         // Add function bytecode to parent constants and emit opcode
         const func_idx = try self.addConstant(JSValue.fromExternPtr(func_bc));
+        payload_published = true;
         const upvalue_count: u8 = @intCast(scope.upvalues.items.len);
 
         if (upvalue_count > 0) {

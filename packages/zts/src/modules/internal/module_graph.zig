@@ -44,21 +44,34 @@ pub const ReadFileError = error{
 pub const Module = struct {
     path: []const u8,
     source: []const u8,
-    prepared_source: ?source_frontend.PreparedSource,
+    source_profile: SourceProfile = .raw,
     dependencies: []ModuleIndex,
     state: DfsState,
 
     const DfsState = enum { unvisited, visiting, visited };
 
-    pub fn parserInput(self: *const Module) []const u8 {
-        return if (self.prepared_source) |*prepared|
-            prepared.parserInput()
-        else
-            self.source;
+    pub const SourceProfile = enum { direct, raw };
+
+    pub fn initParser(self: *const Module, allocator: std.mem.Allocator) !zts_parser.JsParser {
+        return switch (self.source_profile) {
+            .direct => zts_parser.JsParser.initAdmission(allocator, allocator, self.source, .compile),
+            .raw => zts_parser.JsParser.init(allocator, self.source),
+        };
+    }
+
+    pub fn parse(self: *const Module, parser: *zts_parser.JsParser) !zts_parser.NodeIndex {
+        return switch (self.source_profile) {
+            .raw => parser.parse(),
+            .direct => switch (try parser.parseAdmission()) {
+                .accepted => |root| root,
+                .parser_refused => |refusal| return refusal.first_error,
+                .terminal_admission_refused => |failure| return source_frontend.prepareErrorForAdmissionFailure(failure),
+                .recovered_admission_refused => unreachable,
+            },
+        };
     }
 
     fn deinit(self: *Module, allocator: std.mem.Allocator) void {
-        if (self.prepared_source) |*prepared| prepared.deinit();
         allocator.free(self.path);
         allocator.free(self.source);
         if (self.dependencies.len > 0) {
@@ -66,6 +79,26 @@ pub const Module = struct {
         }
     }
 };
+
+fn selectSourceProfile(allocator: std.mem.Allocator, source: []const u8, path: []const u8) !Module.SourceProfile {
+    switch (source_frontend.classifyPath(path)) {
+        .unsupported => return error.UnsupportedSourceExtension,
+        .virtual_javascript => return .raw,
+        .typescript => {},
+    }
+    var parser = try zts_parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    return switch (try parser.parseAdmission()) {
+        .accepted, .parser_refused => .direct,
+        .recovered_admission_refused => unreachable,
+        .terminal_admission_refused => |failure| blk: {
+            std.debug.print("TypeScript strip failed for module '{s}': {}\n", .{
+                path, source_frontend.prepareErrorForAdmissionFailure(failure),
+            });
+            break :blk .raw;
+        },
+    };
+}
 
 pub const ModuleGraph = struct {
     allocator: std.mem.Allocator,
@@ -127,34 +160,17 @@ pub const ModuleGraph = struct {
     fn addModule(self: *ModuleGraph, owned_path: []const u8, owned_source: []const u8) !ModuleIndex {
         const idx: ModuleIndex = @intCast(self.module_list.items.len);
 
-        // Prepare the exact parser input and source map once. Invalid source
-        // still belongs in the graph so the compiler's check reports it, but
-        // allocation failure must not be mistaken for invalid source.
-        var prepared_source: ?source_frontend.PreparedSource = null;
         var ownership_transferred = false;
         errdefer if (!ownership_transferred) {
-            if (prepared_source) |*prepared| prepared.deinit();
             self.allocator.free(owned_path);
             self.allocator.free(owned_source);
         };
-        prepared_source = source_frontend.PreparedSource.init(
-            self.allocator,
-            owned_source,
-            owned_path,
-            .{},
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.UnsupportedSourceExtension => return error.UnsupportedSourceExtension,
-            else => blk: {
-                std.debug.print("TypeScript strip failed for module '{s}': {}\n", .{ owned_path, err });
-                break :blk null;
-            },
-        };
+        const source_profile = try selectSourceProfile(self.allocator, owned_source, owned_path);
 
         try self.module_list.append(self.allocator, .{
             .path = owned_path,
             .source = owned_source,
-            .prepared_source = prepared_source,
+            .source_profile = source_profile,
             .dependencies = &.{},
             .state = .unvisited,
         });
@@ -171,13 +187,12 @@ pub const ModuleGraph = struct {
 
         var module = &self.module_list.items[module_idx];
         const module_path = module.path;
-        const source = module.parserInput();
 
         // Quick-parse to extract import declarations
-        var js_parser = try zts_parser.JsParser.init(self.allocator, source);
+        var js_parser = try module.initParser(self.allocator);
         defer js_parser.deinit();
 
-        _ = js_parser.parse() catch return; // Parse errors handled later during compilation
+        _ = module.parse(&js_parser) catch return; // Parse errors handled later during compilation
         const view = zts_parser.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
         // Extract file imports
@@ -363,4 +378,237 @@ test "module graph: typed preparation closes every allocation failure" {
         }
     };
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
+}
+
+test "graph source selection bounds every hard admission producer" {
+    const cases = [_]struct { kind: zts_parser.type_syntax.AdmissionKind, source: []const u8 }{
+        .{ .kind = .any_type, .source = "import type { A } /* ; */ from \"./a\";\nconst value: any = 1;\n" },
+        .{ .kind = .as_assertion, .source = "import type { A } /* ; */ from \"./a\";\nconst value = source as string;\n" },
+        .{ .kind = .satisfies_assertion, .source = "import type { A } /* ; */ from \"./a\";\nconst value = source satisfies string;\n" },
+        .{ .kind = .unterminated_string, .source = "import type { A } /* ; */ from \"./a\";\nconst value = \"open\nconst after = 1;\n" },
+        .{ .kind = .nominal_base_not_scalar, .source = "import type { A } /* ; */ from \"./a\";\nnominal Box = T;\n" },
+        .{ .kind = .interface_declaration, .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n" },
+        .{ .kind = .type_alias_declaration, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = string;\n" },
+        .{ .kind = .distinct_type_declaration, .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n" },
+        .{ .kind = .legacy_types_import, .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from '" ++ @import("zts-base").module_specifier.retired_types_module ++ "';\n" },
+        .{ .kind = .default_parameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value = 1) { return value; }\n" },
+        .{ .kind = .optional_parameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value?: string) { return value; }\n" },
+        .{ .kind = .default_export, .source = "import type { A } /* ; */ from \"./a\";\nexport default 1;\n" },
+        .{ .kind = .mutable_export, .source = "import type { A } /* ; */ from \"./a\";\nexport let value = 1;\n" },
+        .{ .kind = .array_type_alias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = Array<string>;\n" },
+        .{ .kind = .readonly_array_type_alias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = ReadonlyArray<string>;\n" },
+        .{ .kind = .void_type, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = void;\n" },
+        .{ .kind = .nesting_too_deep, .source = "import type { A } /* ; */ from \"./a\";\nconst value: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{ string;\n" },
+    };
+    try std.testing.expectEqual(std.meta.fields(zts_parser.type_syntax.AdmissionKind).len, cases.len);
+    var seen = std.EnumSet(zts_parser.type_syntax.AdmissionKind).initEmpty();
+    const Reader = struct {
+        fn read(_: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
+            return error.FileNotFound;
+        }
+    };
+    for (cases) |case| {
+        try std.testing.expect(!seen.contains(case.kind));
+        seen.insert(case.kind);
+        var parser = try zts_parser.JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .diagnostic => |diagnostic| try std.testing.expectEqual(case.kind, diagnostic.kind),
+                .unterminated_comment => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        var graph = ModuleGraph.init(std.testing.allocator);
+        defer graph.deinit();
+        try graph.build("entry.ts", case.source, Reader.read);
+        try std.testing.expectEqual(Module.SourceProfile.raw, graph.module_list.items[0].source_profile);
+    }
+    var comment = try zts_parser.JsParser.initAdmission(std.testing.allocator, std.testing.allocator, "/* unfinished\n", .compile);
+    defer comment.deinit();
+    switch (try comment.parseAdmission()) {
+        .terminal_admission_refused => |failure| switch (failure) {
+            .unterminated_comment => {},
+            .diagnostic => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    var comment_graph = ModuleGraph.init(std.testing.allocator);
+    defer comment_graph.deinit();
+    try comment_graph.build("entry.ts", "/* unfinished\n", Reader.read);
+    try std.testing.expectEqual(Module.SourceProfile.raw, comment_graph.module_list.items[0].source_profile);
+    const contrasts = [_]struct { source: []const u8, path: []const u8, profile: Module.SourceProfile }{
+        .{ .source = "const value: any = 1;", .path = "<virtual>", .profile = .raw },
+        .{ .source = "const marker: \"open\n = \"open\"; export const value = 1;\n", .path = "entry.ts", .profile = .direct },
+        .{ .source = "const value: number = ;\n", .path = "entry.ts", .profile = .direct },
+    };
+    for (contrasts) |control| {
+        var graph = ModuleGraph.init(std.testing.allocator);
+        defer graph.deinit();
+        try graph.build(control.path, control.source, Reader.read);
+        try std.testing.expectEqual(control.profile, graph.module_list.items[0].source_profile);
+    }
+    var unsupported = ModuleGraph.init(std.testing.allocator);
+    defer unsupported.deinit();
+    try std.testing.expectError(error.UnsupportedSourceExtension, unsupported.build("entry.js", "", Reader.read));
+}
+
+test "graph build allocation failure cannot select raw" {
+    const source = "structural Label = string;\nconst label: Label = \"value\";\nexport const result: Label = label;\n";
+    const Run = struct {
+        fn read(_: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
+            return error.FileNotFound;
+        }
+        fn build(allocator: std.mem.Allocator) !void {
+            var graph = ModuleGraph.init(allocator);
+            defer graph.deinit();
+            try graph.build("entry.ts", source, read);
+            try std.testing.expectEqual(@as(usize, 1), graph.module_list.items.len);
+            try std.testing.expectEqual(Module.SourceProfile.direct, graph.module_list.items[0].source_profile);
+        }
+    };
+    var calibration = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    try Run.build(calibration.allocator());
+    try std.testing.expect(calibration.alloc_index > 0);
+    var native_failures: usize = 0;
+    for (0..calibration.alloc_index) |index| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index });
+        Run.build(failing.allocator()) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            native_failures += 1;
+        };
+    }
+    try std.testing.expect(native_failures > 0);
+}
+
+test "selected discovery parser distinguishes initialization and parse allocation failures" {
+    const source = "structural Label = string;\nconst label: Label = \"ready\";\nimport { value } from \"./dep.ts\";\n";
+    const allocator = std.testing.allocator;
+    var calibration = std.testing.FailingAllocator.init(allocator, .{});
+    var module: Module = .{ .path = "entry.ts", .source = source, .source_profile = .direct, .dependencies = &.{}, .state = .unvisited };
+    var parser = try module.initParser(calibration.allocator());
+    defer parser.deinit();
+    _ = try module.parse(&parser);
+    var init_failures: usize = 0;
+    var parse_failures: usize = 0;
+    var progressed_parse_failures: usize = 0;
+    for (0..calibration.alloc_index) |index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = index });
+        var selected = module.initParser(failing.allocator()) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            init_failures += 1;
+            continue;
+        };
+        defer selected.deinit();
+        _ = module.parse(&selected) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.has_induced_failure);
+            if (selected.current.start > 0) progressed_parse_failures += 1;
+            parse_failures += 1;
+            continue;
+        };
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+    try std.testing.expect(init_failures > 0);
+    try std.testing.expect(parse_failures > 0);
+    try std.testing.expect(progressed_parse_failures > 0);
+}
+
+const GraphSingleFailure = struct {
+    failing: std.testing.FailingAllocator,
+    const Self = @This();
+    fn allocator(self: *Self) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        if (self.failing.has_induced_failure) return self.failing.internal_allocator.rawAlloc(len, alignment, ret);
+        return self.failing.allocator().rawAlloc(len, alignment, ret);
+    }
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, size: usize, ret: usize) bool {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.failing.internal_allocator.rawResize(memory, alignment, size, ret);
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, size: usize, ret: usize) ?[*]u8 {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.failing.internal_allocator.rawRemap(memory, alignment, size, ret);
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        self.failing.internal_allocator.rawFree(memory, alignment, ret);
+    }
+};
+
+test "graph discovery retains its tolerant native parse boundary" {
+    const source = "import { value } from \"./dep.ts\";\nconst result: number = value;\n";
+    const Run = struct {
+        fn read(_: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
+            // Keep reader allocation healthy to isolate discovery parser failures.
+            return std.testing.allocator.dupe(u8, "export const value = 1;\n");
+        }
+        fn build(failing: *GraphSingleFailure) !usize {
+            var graph = ModuleGraph.init(failing.allocator());
+            defer graph.deinit();
+            try graph.build("/probe/entry.ts", source, read);
+            try std.testing.expectEqual(Module.SourceProfile.direct, graph.module_list.items[0].source_profile);
+            return graph.module_list.items.len;
+        }
+    };
+    var calibration: GraphSingleFailure = .{ .failing = std.testing.FailingAllocator.init(std.testing.allocator, .{}) };
+    try std.testing.expectEqual(@as(usize, 2), try Run.build(&calibration));
+    var tolerated: usize = 0;
+    var propagated: usize = 0;
+    for (0..calibration.failing.alloc_index) |index| {
+        var failing: GraphSingleFailure = .{ .failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = index }) };
+        const count = Run.build(&failing) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expect(failing.failing.has_induced_failure);
+            propagated += 1;
+            continue;
+        };
+        if (count == 1) {
+            try std.testing.expect(failing.failing.has_induced_failure);
+            tolerated += 1;
+        } else try std.testing.expectEqual(@as(usize, 2), count);
+    }
+    try std.testing.expect(propagated > 0);
+    try std.testing.expect(tolerated > 0);
+}
+
+test "graph preparation propagates native admission allocation failures" {
+    const source = "structural Label = string;\nconst label: Label = \"value\";\nexport const result: Label = label;\n";
+    const allocator = std.testing.allocator;
+    var calibration = std.testing.FailingAllocator.init(allocator, .{});
+    const owned_path = try calibration.allocator().dupe(u8, "entry.ts");
+    defer calibration.allocator().free(owned_path);
+    const owned_source = try calibration.allocator().dupe(u8, source);
+    defer calibration.allocator().free(owned_source);
+    var parser = try zts_parser.JsParser.initAdmission(calibration.allocator(), calibration.allocator(), owned_source, .compile);
+    defer parser.deinit();
+    const parse_start = calibration.alloc_index;
+    switch (try parser.parseAdmission()) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const parse_end = calibration.alloc_index;
+    try std.testing.expect(parse_end > parse_start);
+    const Reader = struct {
+        fn read(_: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
+            return error.FileNotFound;
+        }
+    };
+    var failures: usize = 0;
+    for (parse_start..parse_end) |index| {
+        var failing: GraphSingleFailure = .{ .failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = index }) };
+        var graph = ModuleGraph.init(failing.allocator());
+        defer graph.deinit();
+        try std.testing.expectError(error.OutOfMemory, graph.build("entry.ts", source, Reader.read));
+        try std.testing.expect(failing.failing.has_induced_failure);
+        try std.testing.expectEqual(@as(usize, 0), graph.module_list.items.len);
+        failures += 1;
+    }
+    try std.testing.expectEqual(parse_end - parse_start, failures);
+    try std.testing.expect(failures > 0);
 }

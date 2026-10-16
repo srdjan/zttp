@@ -1194,31 +1194,6 @@ fn appendCheckAdmissionDiagnostic(
     }
 }
 
-fn checkAdmissionFailureError(failure: zts.parser.AdmissionFailure) zts.PrepareSourceError {
-    return switch (failure) {
-        .unterminated_comment => error.UnterminatedComment,
-        .diagnostic => |diagnostic| switch (diagnostic.kind) {
-            .any_type => error.UnsupportedAnyType,
-            .as_assertion => error.UnsupportedAsAssertion,
-            .satisfies_assertion => error.UnsupportedSatisfiesAssertion,
-            .unterminated_string => error.UnterminatedString,
-            .nominal_base_not_scalar => error.NominalBaseNotScalar,
-            .interface_declaration => error.InterfaceDeclaration,
-            .type_alias_declaration => error.TypeAliasDeclaration,
-            .distinct_type_declaration => error.DistinctTypeDeclaration,
-            .legacy_types_import => error.LegacyTypesImport,
-            .default_parameter => error.DefaultParameter,
-            .optional_parameter => error.OptionalParameter,
-            .default_export => error.DefaultExport,
-            .mutable_export => error.MutableExport,
-            .array_type_alias => error.ArrayTypeAlias,
-            .readonly_array_type_alias => error.ReadonlyArrayTypeAlias,
-            .void_type => error.VoidType,
-            .nesting_too_deep => error.NestingTooDeep,
-        },
-    };
-}
-
 fn runCheckOnPreparedSource(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
@@ -1288,7 +1263,7 @@ fn runCheckOnPreparedSource(
                     if (source_owner.terminalAdmissionDiagnostic()) |diagnostic| {
                         appendCheckAdmissionDiagnostic(allocator, &result, source, diagnostic, handler_path);
                     }
-                    if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{checkAdmissionFailureError(failure)});
+                    if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{zts.prepareErrorForAdmissionFailure(failure)});
                     result.parse_errors = 1;
                     return result;
                 },
@@ -1992,35 +1967,39 @@ pub fn compileHandler(
     const manifest_registry = opts.manifest_registry;
 
     const source_kind = zts.classifySourcePath(filename);
-    var strip_diag: ?zts.StripDiagnostic = null;
-    var prepared = zts.PreparedSource.init(allocator, source, filename, .{
-        .diagnostic_out = &strip_diag,
-    }) catch |err| {
-        debugPrintStripError(filename, err, strip_diag);
-        return err;
-    };
-    defer prepared.deinit();
-    if (source_kind.isTyped() and !builtin.is_test) debugPrint("TypeScript stripped successfully\n", .{});
-
-    // Rendered against the author's file, not the stripped text that was
-    // parsed; see runCheckOnPreparedSource.
-    const diag_view = prepared.sourceView();
-
-    // Initialize string table and atom table for parsing
+    if (source_kind == .unsupported) return error.UnsupportedSourceExtension;
+    var diag_view = zts.SourceView.of(source);
+    diag_view.name = filename;
+    diag_view.normalize_positions = source_kind.isTyped();
     var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
-
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-
-    // Parse the source code (single pass for IR + bytecode)
-    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
+    var js_parser = switch (source_kind) {
+        .typescript => try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile),
+        .virtual_javascript => try zts.parser.JsParser.init(allocator, source),
+        .unsupported => unreachable,
+    };
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-
-    const root = js_parser.parse() catch |err| {
-        // Print parse errors
-        printParseErrors(allocator, diag_view, js_parser.errors.getErrors());
+    const root = if (source_kind.isTyped()) switch (try js_parser.parseAdmission()) {
+        .accepted => |accepted| accepted,
+        .parser_refused => |refusal| {
+            printParseErrors(allocator, diag_view, js_parser.getProjectedErrors());
+            return refusal.first_error;
+        },
+        .terminal_admission_refused => |failure| {
+            const err = zts.prepareErrorForAdmissionFailure(failure);
+            if (js_parser.getLastAdmissionObservation()) |diagnostic| {
+                debugPrintStripError(filename, err, json_diag.stripDiagnosticFromAdmission(source, diagnostic));
+            } else {
+                debugPrintStripError(filename, err, null);
+            }
+            return err;
+        },
+        .recovered_admission_refused => unreachable,
+    } else js_parser.parse() catch |err| {
+        printParseErrors(allocator, diag_view, js_parser.getProjectedErrors());
         return err;
     };
 
@@ -2061,14 +2040,18 @@ pub fn compileHandler(
     ) catch {};
 
     const ir_view_check = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view_check, root, &atoms);
+    if (source_kind.isTyped()) try js_parser.type_store.validateRuntimeOwners(allocator, ir_view_check);
+    const parsed = if (source_kind.isTyped())
+        zts.pipeline.ParsedModule.fromTypedExisting(ir_view_check, root, &atoms, &js_parser.type_store)
+    else
+        zts.pipeline.ParsedModule.fromExisting(ir_view_check, root, &atoms);
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
         allocator,
         parsed,
         .{
-            .type_map = prepared.typeMap(),
+            .source_types = if (source_kind.isTyped()) .direct else .omitted,
             .strict = opts.strict,
             .manifest_registry = manifest_registry,
             // Which sections the author wrote, not what is in them: the
@@ -2108,7 +2091,7 @@ pub fn compileHandler(
         if (!builtin.is_test) debugPrint("Boolean check passed\n", .{});
     }
 
-    if (prepared.typeMap() != null) {
+    if (source_kind.isTyped()) {
         const tc_diags = resolved.typeDiagnostics();
         if (tc_diags.len > 0 and !builtin.is_test) {
             var tc_output: std.ArrayList(u8) = .empty;
@@ -2287,8 +2270,8 @@ pub fn compileHandler(
         code_gen.setNodeTypes(&resolved.bool_checker.node_types);
     }
 
-    const func = try code_gen.generate(root);
     defer code_gen.freeOwnedConstantPayloads();
+    const func = try code_gen.generate(root);
 
     if (!builtin.is_test) debugPrint("Parsed successfully: {d} bytes of bytecode\n", .{func.code.len});
 

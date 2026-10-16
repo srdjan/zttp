@@ -6325,3 +6325,299 @@ The final documentation and spine gate passes all eight steps in `u14-docs-final
 The final status contains only the eleven owned modified files and the untouched untracked Claude plan.
 U14 is complete before its exact-path local commit.
 U15 production integration starts only after that commit.
+
+### U15 temporary caller and ownership review
+
+U14 commits as `7b4cf5b2` after its complete local receipt and final Astra acceptance.
+The delayed parser passes 1,169 unfiltered engine tests, with one skip.
+The receipt is `u15-delayed-runtime/engine-v1.log` outside the repository.
+
+The first compilation draft passes all 253 precompile tests.
+The second graph draft passes 1,172 engine tests, with one skip.
+The corresponding compiler root passes all 1,549 tests.
+The receipts are `u15-callers/precompile-v1.log`, `engine-v2.log`, and `compiler-v2b.log` outside the repository.
+An initial compiler invocation declares an unused module and stops before execution.
+The corrected invocation removes only that unused declaration.
+
+Astra finds that the old graph compiler moves parsers after CodeGen borrows their fields.
+The new graph compiler allocates exact slices before constructing owners in final storage.
+A completed prefix owns cleanup after a later failure.
+Failed code generators release completed payloads before parsers close.
+Successful payload lifetimes remain unchanged.
+
+The draft retains the accepted direct or raw profile before discovery and shared atom insertion.
+Native preparation errors propagate, while discovery retains its existing tolerant parse boundary.
+Compilation uses the retained source and profile without another read or fallback.
+Source extraction selects the actual compiled entry Store, and dependencies omit authored types.
+Explicit legacy source selection uses only the caller's supplied map.
+Artifact contracts continue to omit authored types for every module.
+
+Astra finds diagnostic projection gaps in the first caller draft.
+The corrected draft normalizes typed diagnostic positions and keeps the first legacy parser batch.
+Human admission projection occurs before JSON conversion, preserving full guidance and unclamped coordinates.
+The runtime retains its terminal failure summary.
+The compilation payload cleanup starts before generation.
+
+The corrected tests observe actual terminal kinds before counting the seventeen-kind producer census.
+Nine graph controls retain measured reads, dependency order, profiles, and native errors.
+Successful controls compare complete serialized bytecode, constants, shapes, and actual atom contents.
+The tests assert nonempty results and stable borrowed pointers before comparing them.
+Separate allocation probes cover preparation, selected parsing, discovery tolerance, and ordered compilation progress.
+The frozen draft is `u15-callers/frozen-v3/` outside the repository.
+Production integration remains pending its final source review and execution.
+
+### U15 integrated compilation cutover
+
+Astra accepts the production changes and the final public allocation calibration.
+The final caller draft is `u15-callers/frozen-v6/` outside the repository.
+The delayed parser remains the accepted `u15-delayed-runtime/frozen-v1/` draft.
+The temporary v4 engine check passes 1,176 tests, with one skip.
+The temporary v5 precompile check passes all 254 tests.
+The receipts retain exact commands and direct exit 0.
+
+The v3 engine check exposes an impossible floor in its discovery probe.
+The persistent failing allocator also prevents the later topological sort from allocating.
+A single-failure allocator isolates the tolerated discovery error without changing any owner allocator.
+The corrected probe observes the missing dependency through public graph construction.
+
+The strict preparation probe calibrates identical owned input copies and the public admission parser.
+Its interval starts after initialization because IRStore capacity allocation permits failure.
+Every failure within the measured admission interval must propagate before a module enters the graph.
+The selected parser probe retains separate initializer and progressed parse failure floors.
+Ordered compilation requires an additional failure floor after an entry-only atom appears.
+That atom proves the dependency's completed owners already require cleanup.
+
+Main integrates the ten source files after source acceptance.
+The integrated source remains fixed during the named acceptance gates.
+
+| Source | SHA-256 |
+|---|---|
+| `packages/zts/src/modules/internal/module_graph.zig` | `da5138deda221acafe59b17d23a8574ba0cd6744ea80e065ad483c92bef28152` |
+| `packages/zts/src/modules/internal/compiler.zig` | `647d027054cc12b1e5c2cec417f98f0f5fbac1ef64268e7c1856d360b0a9a4a3` |
+| `packages/zts/src/pipeline.zig` | `a00c9390cf63332b1a44d1ebbc2515bb9517d73db6a67f14e44a044ce17d0d10` |
+| `packages/runtime/src/handler_instance.zig` | `7347fb6b9e4576ddda0aa0f9271e35d154e753608ff71e6bb6fe143bb2336e56` |
+| `packages/tools/src/precompile.zig` | `758c1a850525a60360f6fe42839b176f5f36c3c6977643f57877210ade62965a` |
+| `packages/tools/src/json_diagnostics.zig` | `16f0b3bedf5321f4a23042365b0269b539213d18e05b89986c38a67cb45a27ba` |
+| `packages/zts/src/parser/root.zig` | `3208c58b471493bb0b86368bbdfa97e5b0aadc7c4af1081aa141b5f697a36311` |
+| `packages/zts/src/parser/codegen.zig` | `503b07f05e10c19e12fb1130fe9af417c445e66536fc451b778d5623d64dd186` |
+| `packages/zts/src/source_frontend.zig` | `1577ef66736406c8de6f1d2e78ce2cb6089bbd07d5975f3b11a5f6ce5bb86b6d` |
+| `packages/zts/src/root.zig` | `0eff47f1fb2e4212533c6424651d6ed0f6511a6f0b496ea5fe711a9ba7cc11d3` |
+
+### U15 public compilation comparison
+
+The immutable legacy analyzer retains SHA-256 `5cb9af9ec1cd3ca86873327b4e2f503edf436d9d0e23a6dd8b04d04069400d16`.
+The integrated analyzer has SHA-256 `d9424aef5c9b7c9bf8fe4b277e1defca43bc586c5474a52cfad2d8be854bf6b5`.
+The same eighteen immutable producer inputs run through the integrated compiler.
+The one-case pilot passes before the scale changes to eighteen.
+Only the case limit changes between those invocations.
+
+Every case retains its exit status and native compilation error.
+Every structured case retains its complete human message and coordinates.
+The location-free comment retains its original failure summary.
+The comparison excludes implementation stack traces and generated output paths.
+The receipts are `u15-public-compile-census/pilot.log` and `full.log` outside the repository.
+Both direct exit statuses are 0, and the full comparison asserts eighteen cases.
+
+### U16 preparation corrections from source review
+
+The earlier claim that machine graph recording adds no imports after parse failure is incorrect.
+`module_graph_record.collectImports` suppresses the parse error and enumerates retained nodes.
+The legacy parser can retain imports before that failure.
+The replacement must preserve that exact boundary, including the retained prefix.
+Direct recovery must not publish later imports through this tolerant observation.
+
+The earlier benchmark statement also needs correction.
+`compileOnce` calls `Parser.parseWithCodegenAllocator`, which runs IR optimization.
+The benchmark excludes the separate runtime analysis and bytecode optimization passes.
+U16 must retain the actual parser and code generator allocator boundaries and the existing IR optimization.
+
+Inline source has two existing diagnostic identities.
+The server uses `<inline>`, while the shared loader uses `<eval>`.
+U16 must preserve both identities and the separate raw virtual profile.
+
+The integrated U15 frontend gate passes all forty-five steps.
+It records 3,951 passed tests and one skipped test, with direct exit 0.
+The receipt is `u15-frontend-v6.log` outside the repository.
+The final public preparation calibration and both additional progress floors run in this receipt.
+All 182 diagnostic cases and all eighteen CLI abuse controls also pass.
+The additional server, graph, proof, residual guard, and example gate runs next.
+
+The U15 additional gate passes all twenty-four steps.
+It records 647 passed tests and two skipped tests, with direct exit 0.
+The receipt is `u15-additional-v6.log` outside the repository.
+Standalone runtime execution runs separately after this gate.
+
+### U15 full-script cache failure
+
+The first U15 full script exits 1 during the aggregate.
+Its receipt is `u15-verify-final-v6.log` outside the repository.
+The aggregate completes 135 of 191 steps, with 3,318 passed tests and one skip.
+Twenty-six compilation steps stop because generated cache option files disappear.
+No completed test reports an assertion failure.
+The source remains unchanged.
+
+A filesystem check confirms that the shared Zig cache loses its complete `c` and `o` directories.
+The actor that removes those directories is unknown.
+This includes the earlier legacy analyzer executable stored in that cache.
+Its completed comparison receipts and exact input files remain intact.
+The eighteen-case public comparison finishes before the cache disappears.
+
+Main preserves the installed U15 binaries outside the cache for subsequent caller characterization.
+Their hashes reside in `retained-binaries/hashes.json` outside the repository.
+Main selects a project-local cache at `.zig-cache/reset-verification` for the unchanged script retry.
+The isolated runner preserves pipe capture, the toolchain, command arguments, and unset provider variables.
+The runner records the explicit cache environment in each request.
+The initial isolated spine check must pass before the full retry starts.
+
+### U16 measured source recognition gaps
+
+Main records two additional native measurements before any U16 source change.
+Each one-case pilot passes before the scale changes to eight.
+The programs, exact source bytes, JSON rows, and direct statuses remain outside the repository.
+Both full measurements exit 0 and assert eight available cases.
+These statuses establish successful observation, not frontend compatibility.
+
+The printer receipt is `u16-printer-recognition-baseline/full.log`.
+The legacy printer preserves raw type spacing after object destructuring and an uninitialized comma binding.
+The legacy printer formats the corresponding array destructuring and initialized comma binding as ordinary tokens.
+Definite assignment produces `unsupported_token`.
+A parenthesized typed header without an arrow still preserves both raw type interiors.
+A committed generic list remains opaque when the function header later fails.
+All these inputs except the malformed structural declaration have a runtime parser refusal.
+The malformed structural declaration still prints its complete original body.
+
+The admission receipt is `u16-admission-colon-baseline/full.log`.
+Four inputs expose missing admission observation in the direct parser.
+Object destructuring, an uninitialized later comma binding, definite assignment, and a parenthesized header without an arrow miss legacy `any` refusal.
+The legacy frontend returns `UnsupportedAnyType` with the `any_type` kind for each input.
+The direct frontend instead returns a parser refusal with no admission kind.
+Array destructuring and initialized comma controls have no legacy admission refusal.
+A destructured parameter already retains its legacy hard refusal.
+An object-value control remains accepted.
+
+The correction belongs to U16's shared source observation, before U17 removes reconstruction.
+The correction preserves existing admission precedence and does not add syntax acceptance.
+The shared colon producer will own type-start selection, tracked whitespace, endpoint classification, and its raw span.
+Normal parsing will publish that producer's result into syntax ownership.
+Source observation will retain the same span without publishing a runtime binding.
+The observer will retain legacy expression context, binding context, and ordinary brace context.
+A comma will not reset expression context.
+Object destructuring will restore its prior context; array closing brackets will not restore context.
+Label and match guards will inspect original bytes through committed erasures.
+These guards must preserve adjacency, comments, and LF behavior.
+
+Printer capture will remain separate from semantic Store rollback.
+A source-only operation must complete observation without runtime node, atom, or constant budgets.
+The printer will retain its CR and token checks before preparation.
+Preparation allocation failure will retain `strip_failed`; later allocation failure will still propagate.
+A partial runtime Store will not establish complete printer observation.
+The migration remains pending implementation, independent review, and exact differential execution.
+
+### U15 project-local cache result and external pilot
+
+The second full script exits 1 during the aggregate.
+Its receipt is `u15-verify-isolated-v6.log` outside the repository.
+The aggregate completes 189 of 191 steps, with 8,768 passed tests and six skipped tests.
+Only the CLI abuse step fails.
+All eighteen subprocesses report `FileNotFound` before an analyzer can run.
+Zig supplies a relative executable path inside the checkout, and that gate changes its working directory.
+This receipt does not establish full-script acceptance.
+
+The unchanged CLI abuse pilot uses the absolute external cache at `/tmp/zttp-reset-20261015/zig-cache`.
+All eighteen cases pass, and all five build steps pass.
+The direct exit status is 0 in `u15-stable-cache-cli-pilot.exit`.
+The source remains unchanged across the failed aggregate and passing pilot.
+The stable runner is `/tmp/zttp-reset-20261015/run-stable-captured.rb`.
+Its request records the cache environment, pinned toolchain, command, unset provider variables, and pipe capture.
+The next unchanged full script uses this external cache.
+
+The separate U15 runtime receipt passes all 226 tests and five build steps.
+The handler precompilation receipt passes all thirteen build steps.
+Their direct statuses are 0 in `u15-runtime-v6.exit` and `u15-handler-v6.exit`.
+
+### U16 complete refusal observation design
+
+Astra accepts complete source replay after a public parser refusal.
+The design acceptance does not establish source coverage or execution acceptance.
+Accepted runtime parses remain unchanged.
+Native errors, sticky parser allocation failure, and unknown internal errors return before replay.
+Replay applies only to the existing closed set of public refusal errors.
+
+The observer starts from offset zero with fresh admission state and source context.
+Fresh state prevents a later existing refusal from suppressing an earlier missed refusal.
+The observer retains source order and stops at the legacy terminal boundary.
+The observer shares the existing source producers with normal parsing and printer preparation.
+No legacy source fallback or second variable grammar enters this design.
+
+The observer preserves runtime nodes, constants, atoms, scopes, parser errors, and the first parser error batch.
+Its Store checkpoint starts at observer entry, after runtime parsing has unwound.
+The observer rolls back only its temporary Store records.
+Admission state changes ownership only after a valid domain outcome.
+Native failure releases temporary state and leaves the Parser safe to destroy.
+A clean replay retains the original parser refusal and projected errors.
+An original admission-only refusal with a clean replay exposes incomplete observation and blocks release.
+
+Both compile and collect comparisons remain required.
+Nested failures must retain their existing parser error batch when replay finds no admission refusal.
+Terminal history, module recovery, and native allocation controls must pass before integration.
+
+### U15 final execution result
+
+The unchanged full script passes with direct exit 0.
+Its receipt is `u15-verify-stable-v6.log` outside the repository.
+The matching request retains the exact command and environment.
+The script runs the aggregate, standalone runtime, release binaries, verified handler build, smoke flows, panic isolation, normalization, and remaining local checks.
+Its final message states that every CI test-job step passes.
+This receipt establishes the full local gate, without a release-readiness claim.
+
+The final documentation and spine receipt passes all eight build steps.
+It runs `zig build test-docs-drift test-doc-links check-spine -j1 --summary all`.
+Its direct status is 0 in `u15-final-docs-spine-v6.exit`.
+The separate formatting check includes `build.zig`, `build`, `packages`, and `tooling` and exits 0.
+All ten accepted source hashes still match their integrated values.
+The source remains unchanged across the complete acceptance run.
+
+The measured U16 recognition gaps remain explicit follow-up work within the approved reset.
+These bounded receipts do not establish compatibility for every unmeasured source shape.
+U17 removal remains blocked until U16 closes the gaps and reaches zero production legacy callers.
+
+### U16 first observer experiment
+
+The first temporary observer restores the four measured missing `any` refusals.
+The native eight-case experiment also retains both parser-refusal controls and the accepted object-value control.
+The receipts are `u16-work/colon-pilot-v2.log` and `u16-work/colon-full-v2.log` outside the repository.
+Both direct statuses are 0.
+These receipts observe compile outcomes; collect comparison and broader coverage remain pending.
+
+The frozen v3 source adds constructor storage and a source-only declaration branch.
+Its complete unfiltered engine root passes 1,176 tests, with one skipped test.
+The direct execution status is 0 in `u16-work/engine-run-v3.exit`.
+The build request uses `--test-no-exec`, followed by a separate unfiltered binary execution.
+The snapshot and its source hashes remain outside the repository.
+No U16 production source enters the repository.
+
+Independent controls expose two additional replay defects in that temporary source.
+A comment between assignment and a typed header wrongly permits the loose header heuristic.
+The experiment invents `UnsupportedAnyType`, while legacy preparation has no admission refusal.
+The receipt is `u16-work/header-comment-full-v3.log`.
+The two parameter-type controls with comment parentheses do not diverge in that receipt.
+
+A separate return-type control confirms the raw opening-parenthesis difference.
+`const f = (value /* ( */): any;` has no legacy admission refusal but gains an `any` refusal in v3.
+A keyword function name loses its legacy parameter refusal in v3.
+`function default(value: any): number { return 1; }` must retain legacy `UnsupportedAnyType` at 1:25.
+The ordinary name and ordinary comment controls retain their expected hard refusals.
+The complete five-case receipt is `u16-header-recognition-baseline/full-v3.log`.
+Its legacy source rows and the unchanged-source measurements remain alongside that receipt.
+
+Astra accepts the temporary ownership transfer and identifies these source-recognition blockers.
+The next draft must retain the raw assignment gap, quoted lookahead, raw parenthesis behavior, depth failure, and keyword-name observation.
+The implementation will reuse existing raw bracket and name helpers.
+The private strict runtime helper will retain its existing behavior.
+Main owns the corrections and renewed exact comparisons before integration.
+
+Astra accepts U15 for its isolated local commit after the final execution audit.
+The acceptance covers the ten source hashes and completed U15 receipts.
+The acceptance retains both failed cache receipts and the successful external-cache receipt.
+The acceptance does not establish U16 readiness or close its measured recognition gaps.
+Main owns the exact twelve-path commit and subsequent U16 work.

@@ -48,86 +48,58 @@ pub const ModuleCompiler = struct {
         self: *ModuleCompiler,
         graph: *module_graph.ModuleGraph,
     ) !CompileResult {
-        var compiled = std.ArrayList(CompiledModule).empty;
-        errdefer compiled.deinit(self.allocator);
-
-        // Keep parser/codegen state alive - bytecode slices borrow from these
-        var parsers = std.ArrayList(zts_parser.JsParser).empty;
+        const count = graph.execution_order.len;
+        const compiled = try self.allocator.alloc(CompiledModule, count);
+        errdefer self.allocator.free(compiled);
+        const parsers = try self.allocator.alloc(zts_parser.JsParser, count);
+        errdefer self.allocator.free(parsers);
+        const codegens = try self.allocator.alloc(zts_parser.CodeGen, count);
+        errdefer self.allocator.free(codegens);
+        var completed: usize = 0;
         errdefer {
-            for (parsers.items) |*p| p.deinit();
-            parsers.deinit(self.allocator);
+            for (codegens[0..completed]) |*cg| {
+                cg.freeOwnedConstantPayloads();
+                cg.deinit();
+            }
+            for (parsers[0..completed]) |*parser| parser.deinit();
         }
-        var codegens = std.ArrayList(zts_parser.CodeGen).empty;
-        errdefer {
-            for (codegens.items) |*cg| cg.deinit();
-            codegens.deinit(self.allocator);
-        }
-
-        for (graph.execution_order) |mod_idx| {
+        for (graph.execution_order, 0..) |mod_idx, index| {
             const module = &graph.module_list.items[mod_idx];
-            const source = module.parserInput();
-
-            // Parse with shared atom table
-            var js_parser = try zts_parser.JsParser.init(self.allocator, source);
-            js_parser.setAtomTable(self.atoms);
-
-            const root = js_parser.parse() catch |err| {
-                std.log.err("Parse error in module '{s}': {}", .{ module.path, err });
+            const parser = &parsers[index];
+            parser.* = try module.initParser(self.allocator);
+            errdefer parser.deinit();
+            parser.setAtomTable(self.atoms);
+            const root = module.parse(parser) catch |err| {
+                if (!@import("builtin").is_test) std.log.err("Parse error in module '{s}': {}", .{ module.path, err });
                 var err_buf: [1024]u8 = undefined;
-                const formatted = js_parser.errors.formatFirstError(&err_buf);
-                if (formatted.len > 0) {
-                    std.log.err("{s}", .{formatted});
-                }
-                js_parser.deinit();
+                const formatted = parser.errors.formatFirstError(&err_buf);
+                if (formatted.len > 0) if (!@import("builtin").is_test) std.log.err("{s}", .{formatted});
                 return err;
             };
-
-            // Optimize IR
-            _ = zts_parser.ir_opt.optimizeIR(
-                self.allocator,
-                &js_parser.nodes,
-                &js_parser.constants,
-                root,
-            ) catch {};
-
-            // Generate bytecode
-            var code_gen = zts_parser.CodeGen.initWithIRStore(
-                self.allocator,
-                &js_parser.nodes,
-                &js_parser.constants,
-                &js_parser.scopes,
-                self.strings,
-                self.atoms,
-            );
-
-            const func = code_gen.generate(root) catch |err| {
-                std.log.err("Codegen error in module '{s}': {}", .{ module.path, err });
-                code_gen.deinit();
-                js_parser.deinit();
+            _ = zts_parser.ir_opt.optimizeIR(self.allocator, &parser.nodes, &parser.constants, root) catch {};
+            if (module.source_profile == .direct) {
+                try parser.type_store.validateRuntimeOwners(self.allocator, zts_parser.IrView.fromIRStore(&parser.nodes, &parser.constants));
+            }
+            const cg = &codegens[index];
+            cg.* = zts_parser.CodeGen.initWithIRStore(self.allocator, &parser.nodes, &parser.constants, &parser.scopes, self.strings, self.atoms);
+            errdefer {
+                cg.freeOwnedConstantPayloads();
+                cg.deinit();
+            }
+            const func = cg.generate(root) catch |err| {
+                if (!@import("builtin").is_test) std.log.err("Codegen error in module '{s}': {}", .{ module.path, err });
                 return err;
             };
-
-            const shapes = code_gen.shapes.items;
-
-            try compiled.append(self.allocator, .{
+            compiled[index] = .{
                 .func = func,
-                .shapes = shapes,
+                .shapes = cg.shapes.items,
                 .local_count = @intCast(func.local_count),
                 .constants = func.constants,
                 .root = root,
-            });
-
-            // Keep parser and codegen alive (bytecode borrows from them)
-            try parsers.append(self.allocator, js_parser);
-            try codegens.append(self.allocator, code_gen);
+            };
+            completed += 1;
         }
-
-        return .{
-            .modules = try compiled.toOwnedSlice(self.allocator),
-            .parsers = try parsers.toOwnedSlice(self.allocator),
-            .codegens = try codegens.toOwnedSlice(self.allocator),
-            .allocator = self.allocator,
-        };
+        return .{ .modules = compiled, .parsers = parsers, .codegens = codegens, .allocator = self.allocator };
     }
 };
 
@@ -157,7 +129,7 @@ test "compileAll returns a clean error instead of panicking when parser-init all
     try graph.module_list.append(allocator, .{
         .path = try allocator.dupe(u8, "entry.ts"),
         .source = try allocator.dupe(u8, "const x = 1;"),
-        .prepared_source = null,
+        .source_profile = .raw,
         .dependencies = &.{},
         .state = .visited,
     });
@@ -168,13 +140,180 @@ test "compileAll returns a clean error instead of panicking when parser-init all
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    // Fail the very first allocation ModuleCompiler.compileAll makes on
-    // self.allocator: the ScopeAnalyzer.init call inside JsParser.init.
-    // Before this fix, compileAll went through a panicking JsParser.init
-    // wrapper, so this allocation failure aborted the process instead of
-    // returning an error.
-    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    // Three final slices precede parser initialization.
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 3 });
     var module_compiler = ModuleCompiler.init(failing.allocator(), &atoms, &strings);
 
     try std.testing.expectError(error.OutOfMemory, module_compiler.compileAll(&graph));
+}
+
+test "selected graph profiles preserve reads bytecode and complete atoms" {
+    const allocator = std.testing.allocator;
+    const Case = struct {
+        entry: []const u8,
+        dependency: ?[]const u8 = null,
+        entry_profile: module_graph.Module.SourceProfile,
+        dependency_profile: module_graph.Module.SourceProfile = .direct,
+        reads: usize,
+        parse_error: ?anyerror = null,
+    };
+    const cases = [_]Case{
+        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished\n", .dependency = "export const value = 1;\n", .entry_profile = .raw, .reads = 1 },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished\n", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1 },
+        .{ .entry = "import { value } from \"./dep.ts\"; /* closed */\n", .dependency = "export const value = 1; /* closed */\n", .entry_profile = .direct, .reads = 1 },
+        .{ .entry = "/*\n", .entry_profile = .raw, .reads = 0 },
+        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished", .dependency = "export const value = 1;\n", .entry_profile = .raw, .reads = 0, .parse_error = error.MissingSemicolon },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .parse_error = error.MissingSemicolon },
+        .{ .entry = "/*", .entry_profile = .raw, .reads = 0 },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value: number = 1; /* unfinished\n", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .parse_error = error.MissingSemicolon },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "const marker: \"open\n = \"open\"; export const value = 1;\n", .entry_profile = .direct, .reads = 1 },
+    };
+    const Reader = struct {
+        var source: ?[]const u8 = null;
+        var reads: usize = 0;
+        fn read(a: std.mem.Allocator, path: []const u8) module_graph.ReadFileError![]const u8 {
+            if (!std.mem.eql(u8, "/probe/dep.ts", path)) return error.FileNotFound;
+            reads += 1;
+            return a.dupe(u8, source orelse return error.FileNotFound);
+        }
+    };
+    try std.testing.expectEqual(@as(usize, 9), cases.len);
+    for (cases) |case| {
+        Reader.source = case.dependency;
+        Reader.reads = 0;
+        var graph = module_graph.ModuleGraph.init(allocator);
+        defer graph.deinit();
+        try graph.build("/probe/entry.ts", case.entry, Reader.read);
+        try std.testing.expectEqual(case.reads, Reader.reads);
+        try std.testing.expectEqual(case.entry_profile, graph.module_list.items[0].source_profile);
+        try std.testing.expectEqual(case.reads + 1, graph.module_list.items.len);
+        if (case.reads != 0) {
+            try std.testing.expectEqual(case.dependency_profile, graph.module_list.items[1].source_profile);
+            try std.testing.expectEqualSlices(module_graph.ModuleIndex, &.{ 1, 0 }, graph.execution_order);
+            try std.testing.expectEqualSlices(module_graph.ModuleIndex, &.{1}, graph.module_list.items[0].dependencies);
+        } else try std.testing.expectEqualSlices(module_graph.ModuleIndex, &.{0}, graph.execution_order);
+        if (case.parse_error) |expected| {
+            const failed_index: usize = if (case.reads != 0) 1 else 0;
+            const module = &graph.module_list.items[failed_index];
+            var parser = try module.initParser(allocator);
+            defer parser.deinit();
+            try std.testing.expectError(expected, module.parse(&parser));
+            var atoms = context.AtomTable.init(allocator);
+            defer atoms.deinit();
+            _ = try atoms.intern("existing_prefix");
+            var strings = string.StringTable.init(allocator);
+            defer strings.deinit();
+            var compiler = ModuleCompiler.init(allocator, &atoms, &strings);
+            try std.testing.expectError(expected, compiler.compileAll(&graph));
+            continue;
+        }
+        // The legacy oracle selects complete raw source after any preparation failure.
+        var oracle = module_graph.ModuleGraph.init(allocator);
+        defer oracle.deinit();
+        for (graph.module_list.items) |module| {
+            const prepared = @import("../../source_frontend.zig").PreparedSource.init(allocator, module.source, module.path, .{}) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => null,
+            };
+            var owned_prepared = prepared;
+            defer if (owned_prepared) |*owner| owner.deinit();
+            const source = if (owned_prepared) |*owner| owner.parserInput() else module.source;
+            const path = try allocator.dupe(u8, module.path);
+            errdefer allocator.free(path);
+            const copied = try allocator.dupe(u8, source);
+            errdefer allocator.free(copied);
+            try oracle.module_list.append(allocator, .{ .path = path, .source = copied, .source_profile = .raw, .dependencies = &.{}, .state = .visited });
+        }
+        oracle.execution_order = try allocator.dupe(module_graph.ModuleIndex, graph.execution_order);
+        var atoms = context.AtomTable.init(allocator);
+        defer atoms.deinit();
+        var old_atoms = context.AtomTable.init(allocator);
+        defer old_atoms.deinit();
+        _ = try atoms.intern("existing_prefix");
+        _ = try old_atoms.intern("existing_prefix");
+        var strings = string.StringTable.init(allocator);
+        defer strings.deinit();
+        var old_strings = string.StringTable.init(allocator);
+        defer old_strings.deinit();
+        var compiler = ModuleCompiler.init(allocator, &atoms, &strings);
+        var old_compiler = ModuleCompiler.init(allocator, &old_atoms, &old_strings);
+        Reader.source = "export const value = 999;\n";
+        var actual = try compiler.compileAll(&graph);
+        defer actual.deinit();
+        defer for (actual.codegens) |*cg| cg.freeOwnedConstantPayloads();
+        var expected = try old_compiler.compileAll(&oracle);
+        defer expected.deinit();
+        defer for (expected.codegens) |*cg| cg.freeOwnedConstantPayloads();
+        try std.testing.expectEqual(case.reads, Reader.reads);
+        try std.testing.expectEqual(old_atoms.next_id, atoms.next_id);
+        for (object.Atom.FIRST_DYNAMIC..atoms.next_id) |id| {
+            try std.testing.expectEqualStrings(old_atoms.getName(@enumFromInt(id)).?, atoms.getName(@enumFromInt(id)).?);
+        }
+        try std.testing.expect(graph.execution_order.len > 0);
+        try std.testing.expectEqual(graph.execution_order.len, actual.modules.len);
+        try std.testing.expectEqual(graph.execution_order.len, expected.modules.len);
+        for (actual.modules, expected.modules, actual.parsers, actual.codegens) |*module, *old_module, *parser, *cg| {
+            try std.testing.expect(cg.scopes == &parser.scopes);
+            try std.testing.expect(cg.ir.ir_constants == &parser.constants);
+            try std.testing.expect(cg.ir.impl.ir_store == &parser.nodes);
+            var actual_buffer: [4096]u8 = undefined;
+            var expected_buffer: [4096]u8 = undefined;
+            const cache = @import("../../bytecode_cache.zig");
+            var actual_writer = cache.SliceWriter{ .buffer = &actual_buffer };
+            var expected_writer = cache.SliceWriter{ .buffer = &expected_buffer };
+            try cache.serializeBytecodeWithAtomsAndShapes(&module.func, &atoms, module.shapes, &actual_writer, allocator);
+            try cache.serializeBytecodeWithAtomsAndShapes(&old_module.func, &old_atoms, old_module.shapes, &expected_writer, allocator);
+            try std.testing.expectEqualSlices(u8, expected_writer.getWritten(), actual_writer.getWritten());
+        }
+    }
+}
+
+test "ordered compilation allocation failures release completed owners" {
+    const allocator = std.testing.allocator;
+    const Reader = struct {
+        fn read(a: std.mem.Allocator, _: []const u8) module_graph.ReadFileError![]const u8 {
+            return a.dupe(u8, "export const helper = () => 1.25;\n");
+        }
+    };
+    var graph = module_graph.ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build("/probe/entry.ts", "import { helper } from \"./dep.ts\"; const result: number = helper(); const tail = 3.75;\n", Reader.read);
+    const Run = struct {
+        fn compile(graph_owner: *module_graph.ModuleGraph, failing: *std.testing.FailingAllocator, after_progress: *usize, after_dependency: *usize) !void {
+            var atoms = context.AtomTable.init(std.testing.allocator);
+            defer atoms.deinit();
+            _ = try atoms.intern("existing_prefix");
+            const prefix = atoms.next_id;
+            var strings = string.StringTable.init(std.testing.allocator);
+            defer strings.deinit();
+            var compiler = ModuleCompiler.init(failing.allocator(), &atoms, &strings);
+            var result = compiler.compileAll(graph_owner) catch |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expect(failing.has_induced_failure);
+                if (atoms.next_id > prefix) after_progress.* += 1;
+                if (atoms.strings.contains("tail")) after_dependency.* += 1;
+                return error.OutOfMemory;
+            };
+            defer result.deinit();
+            defer for (result.codegens) |*cg| cg.freeOwnedConstantPayloads();
+            try std.testing.expectEqual(@as(usize, 2), result.modules.len);
+            try std.testing.expect(atoms.next_id > prefix);
+        }
+    };
+    var progress: usize = 0;
+    var dependency_progress: usize = 0;
+    var calibration = std.testing.FailingAllocator.init(allocator, .{});
+    try Run.compile(&graph, &calibration, &progress, &dependency_progress);
+    try std.testing.expect(calibration.alloc_index > 0);
+    var failures: usize = 0;
+    for (0..calibration.alloc_index) |index| {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = index });
+        Run.compile(&graph, &failing, &progress, &dependency_progress) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        };
+    }
+    try std.testing.expect(failures > 0);
+    try std.testing.expect(progress > 0);
+    try std.testing.expect(dependency_progress > 0);
 }

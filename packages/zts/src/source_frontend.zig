@@ -31,6 +31,31 @@ pub fn classifyPath(path: []const u8) SourceKind {
 
 pub const PrepareError = stripper.StripError || error{UnsupportedSourceExtension};
 
+pub fn prepareErrorForAdmissionFailure(failure: parser.AdmissionFailure) PrepareError {
+    return switch (failure) {
+        .unterminated_comment => error.UnterminatedComment,
+        .diagnostic => |diagnostic| switch (diagnostic.kind) {
+            .any_type => error.UnsupportedAnyType,
+            .as_assertion => error.UnsupportedAsAssertion,
+            .satisfies_assertion => error.UnsupportedSatisfiesAssertion,
+            .unterminated_string => error.UnterminatedString,
+            .nominal_base_not_scalar => error.NominalBaseNotScalar,
+            .interface_declaration => error.InterfaceDeclaration,
+            .type_alias_declaration => error.TypeAliasDeclaration,
+            .distinct_type_declaration => error.DistinctTypeDeclaration,
+            .legacy_types_import => error.LegacyTypesImport,
+            .default_parameter => error.DefaultParameter,
+            .optional_parameter => error.OptionalParameter,
+            .default_export => error.DefaultExport,
+            .mutable_export => error.MutableExport,
+            .array_type_alias => error.ArrayTypeAlias,
+            .readonly_array_type_alias => error.ReadonlyArrayTypeAlias,
+            .void_type => error.VoidType,
+            .nesting_too_deep => error.NestingTooDeep,
+        },
+    };
+}
+
 pub const PreparedSource = struct {
     original_source: []const u8,
     path: []const u8,
@@ -860,4 +885,40 @@ test "PreparedSource leaves parser-owned syntax unchanged" {
     try std.testing.expectEqualStrings(source, prepared.parserInput());
     try std.testing.expectEqual(@as(usize, 0), prepared.typeMap().?.count());
     try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+}
+
+test "admission failures retain measured legacy preparation errors" {
+    const Kind = parser.type_syntax.AdmissionKind;
+    const cases = [_]struct { kind: Kind, expected: anyerror }{
+        .{ .kind = .any_type, .expected = error.UnsupportedAnyType },
+        .{ .kind = .as_assertion, .expected = error.UnsupportedAsAssertion },
+        .{ .kind = .satisfies_assertion, .expected = error.UnsupportedSatisfiesAssertion },
+        .{ .kind = .unterminated_string, .expected = error.UnterminatedString },
+        .{ .kind = .nominal_base_not_scalar, .expected = error.NominalBaseNotScalar },
+        .{ .kind = .interface_declaration, .expected = error.InterfaceDeclaration },
+        .{ .kind = .type_alias_declaration, .expected = error.TypeAliasDeclaration },
+        .{ .kind = .distinct_type_declaration, .expected = error.DistinctTypeDeclaration },
+        .{ .kind = .legacy_types_import, .expected = error.LegacyTypesImport },
+        .{ .kind = .default_parameter, .expected = error.DefaultParameter },
+        .{ .kind = .optional_parameter, .expected = error.OptionalParameter },
+        .{ .kind = .default_export, .expected = error.DefaultExport },
+        .{ .kind = .mutable_export, .expected = error.MutableExport },
+        .{ .kind = .array_type_alias, .expected = error.ArrayTypeAlias },
+        .{ .kind = .readonly_array_type_alias, .expected = error.ReadonlyArrayTypeAlias },
+        .{ .kind = .void_type, .expected = error.VoidType },
+        .{ .kind = .nesting_too_deep, .expected = error.NestingTooDeep },
+    };
+    try std.testing.expectEqual(std.meta.fields(Kind).len, cases.len);
+    var seen = std.EnumSet(Kind).initEmpty();
+    for (cases) |case| {
+        try std.testing.expect(!seen.contains(case.kind));
+        seen.insert(case.kind);
+        try std.testing.expectEqual(case.expected, @as(anyerror, prepareErrorForAdmissionFailure(.{
+            .diagnostic = .{ .kind = case.kind, .span = .{ .start = 0, .end = 1 } },
+        })));
+    }
+    inline for (std.meta.tags(Kind)) |kind| try std.testing.expect(seen.contains(kind));
+    try std.testing.expectEqual(error.UnterminatedComment, prepareErrorForAdmissionFailure(.{
+        .unterminated_comment = .{ .opener = 0, .@"resume" = 1 },
+    }));
 }
