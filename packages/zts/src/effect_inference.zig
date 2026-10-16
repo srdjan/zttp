@@ -1800,8 +1800,12 @@ pub const Analyzer = struct {
 
         var first: ?FunctionValueEscape = null;
         for (0..node_count) |index| {
-            if (closed[index]) continue;
             const node: NodeIndex = @intCast(index);
+            // A sibling's escaped function value comes back as a call result
+            // (`const v = make(); useIt(v)`), which no position here can see,
+            // so any reference to that sibling escapes, even a closed callee.
+            // A sibling with no known result fails closed the same way.
+            if (closed[index] and !self.referencesEscapingSibling(node)) continue;
             const tag = self.ir_view.getTag(node) orelse continue;
             const name: []const u8 = switch (tag) {
                 .function_expr, .arrow_function => blk: {
@@ -1830,6 +1834,22 @@ pub const Analyzer = struct {
             first = .{ .line = line, .column = column, .name = name };
         }
         self.function_value_escape = first;
+    }
+
+    /// Whether `node` names a relative import whose module lets a function value
+    /// escape, or whose result was not supplied. Only the `callable` row of an
+    /// escaping sibling carries the flag; a `data` export holds no function.
+    fn referencesEscapingSibling(self: *const Analyzer, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        const imported = self.importOf(binding) orelse return false;
+        if (!isRelativeModule(imported.module)) return false;
+        const supplied = self.importedEffect(imported.slot) orelse return true;
+        return switch (supplied) {
+            .callable => |row| row.function_value_escape,
+            .data => false,
+            .blocked => true,
+        };
     }
 
     fn isFunctionLiteral(self: *const Analyzer, node: NodeIndex) bool {
@@ -4928,7 +4948,9 @@ test "a call by name to a nested closure is a lower bound" {
     try testing.expect(row.lower_bound);
 }
 
-test "a sibling module's escaped function value reaches the importer" {
+test "a sibling module's escaped function value reaches every function of the importer" {
+    // `viaOther` never names `run`, but a value `run` returns can reach it as
+    // an argument (`const v = run(1); useIt(v)`), so the whole module escapes.
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4968,7 +4990,46 @@ test "a sibling module's escaped function value reaches the importer" {
     const via_other = analyzer.lookup("viaOther") orelse return error.FunctionNotFound;
     try testing.expect(via_run.function_value_escape);
     try testing.expect(!via_run.lower_bound);
+    try testing.expect(via_other.function_value_escape);
+    const site = analyzer.function_value_escape orelse return error.EscapeNotRecorded;
+    try testing.expectEqualStrings("run", site.name);
+}
+
+test "a clean sibling module leaves the importer's escape flag clear" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { other } from "./helper.ts";
+        \\function viaOther() { return other(1); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer facts.deinit();
+
+    var supplied: [1]ImportedEffect = undefined;
+    var count: usize = 0;
+    for (facts.imports.items) |rec| {
+        if (std.mem.eql(u8, rec.imported_name, "other")) {
+            supplied[count] = .{ .slot = rec.slot, .effect = .{ .callable = .{} } };
+            count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), count);
+
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    analyzer.facts = &facts;
+    analyzer.imported_effects = supplied[0..count];
+    try analyzer.analyze(root);
+
+    const via_other = analyzer.lookup("viaOther") orelse return error.FunctionNotFound;
     try testing.expect(!via_other.function_value_escape);
+    try testing.expect(analyzer.function_value_escape == null);
 }
 
 test "exports of a module with an escaped function value carry the flag" {

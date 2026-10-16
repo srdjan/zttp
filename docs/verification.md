@@ -414,7 +414,8 @@ array, returned, assigned to a `let`, bound to a second name, or passed to a
 user function or to an unlisted import - can be called with no edge in the
 call graph, so recursion through it is invisible. The module then proves no
 `total` capsule and no `cost_bounded`, and the diagnostic names the first such
-site. A function value is not an escape when it is declared once and called by
+site. A reference to a relative import counts as such a site when the
+imported module has one of its own, or when its result is unknown. A function value is not an escape when it is declared once and called by
 name, passed as the first argument of `map`, `filter`, `forEach`, `reduce`,
 `some`, `every`, `find`, `findIndex`, `flatMap`, or `sort`, passed to
 `mapResult`, `andThen`, `mapError`, or `orElse`, or held as a value of a route
