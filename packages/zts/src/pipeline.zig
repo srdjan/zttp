@@ -888,7 +888,11 @@ pub const ModuleAnalysisSession = struct {
             self.parsed.ir_view,
             self.parsed.atoms,
             self.parsed.root,
-            .{},
+            // Sibling results keep a handler that calls a clean helper from a
+            // relative import costed, and carry a sibling's recursion or escaped
+            // function value into the handler. Without them every such import
+            // is a blocked result, which is a lower bound.
+            .{ .imported_effects = self.contract_context.imported_effects },
         ) catch {
             self.path_effect_state = .unavailable;
             return .unavailable;

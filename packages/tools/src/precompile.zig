@@ -9538,7 +9538,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "shift_control", .source = "const value = 8 >> 1;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." }} },
         .{ .name = "comparison_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >> c;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." }} },
         .{ .name = "comparison_unsigned_shift_control", .source = "const a = 1;\nconst b = 2;\nconst c = 1;\nconst value = a < b >>> c;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 5, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." }} },
-        .{ .name = "method_call", .source = "const object = { id: <T>(value: T): T => value };\nconst probe: number = object.id<string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." }} },
+        .{ .name = "method_call", .source = "const object = { id: <T>(value: T): T => value };\nconst probe: number = object.id<string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`." }} },
         .{ .name = "triple_closer", .source = "structural Box<T> = { value: T };\nconst probe: Box<Box<Box<string>>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: { value: string } } }'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "application_missing_comma", .source = "structural Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string, number>'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "application_missing_close", .source = "structural Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS002", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
@@ -10047,6 +10047,9 @@ test "CHECK preserves typed parameter refusals across function header comments" 
 test "CHECK preserves typed arrow return forms and parameter refusals" {
     const FailureStage = enum { strip, parse, types, strict, contract };
     const proof_diagnostic: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
+    // A module whose function value sits in a record or is returned by another function
+    // proves no termination claim, so `cost_bounded` leaves the demanded profile.
+    const proof_diagnostic_without_cost: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`." };
     const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: LegacyCompoundDiagnostic }{
         .{ .source = "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strict, .diagnostic = .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 1, .column = 15, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" } },
         .{ .source = "const echo = (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
@@ -10057,9 +10060,9 @@ test "CHECK preserves typed arrow return forms and parameter refusals" {
         .{ .source = "const echo = (value: string = \"x\"): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 29, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
         .{ .source = "const echo = async (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS001", .message = "'async' functions are not supported", .line = 1, .column = 14, .suggestion = "handlers run synchronously - use 'fetch' from zttp:fetch for outbound I/O" } },
         .{ .source = "const result = [\"a\"].map((value: string): string => value);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "const object = { echo: (value: string): string => value };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const object = { echo: (value: string): string => value };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic_without_cost },
         .{ .source = "const echo = ((value: string): string => value);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "const make = (): (value: string) => string => (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const make = (): (value: string) => string => (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic_without_cost },
         .{ .source = "const guard = (value: unknown): missing is string => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const guard = (value: unknown): \"x is y\" => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const guard = (value: unknown): value\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
@@ -10495,12 +10498,12 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         "\"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
     const capture_contract_suggestion =
         "this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
-        "default profile, but it does not hold: fault_covered, idempotent, pure, read_only, " ++
-        "retry_safe, stateless. Return a narrow Proof capsule with only the properties it holds, " ++
-        "e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | " ++
-        "\"state_isolated\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | " ++
-        "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
-        "\"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
+        "default profile, but it does not hold: cost_bounded, fault_covered, idempotent, pure, " ++
+        "read_only, retry_safe, stateless. Return a narrow Proof capsule with only the " ++
+        "properties it holds, e.g. `function handler(req: Request): Proof<Response, " ++
+        "\"deterministic\" | \"state_isolated\" | \"result_safe\" | \"optional_safe\" | " ++
+        "\"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | " ++
+        "\"pii_contained\" | \"injection_safe\" | \"canonical\">`.";
     const cases = [_]struct {
         source: []const u8,
         type_errors: u32,
@@ -11827,4 +11830,309 @@ test "CHECK preserves raw recovery header comments" {
         try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expect(result.contract == null);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Termination claims over function values
+//
+// Each probe recurses without end through a function value: a returned value,
+// a stored value, a callback, a holder, or a binding with no initializer. Every
+// one of them passed `zts check` with `cost_bounded` proven, and the helper
+// capsules proved `total`. The assertions name the claim itself, never a
+// neighbouring property.
+// ---------------------------------------------------------------------------
+
+const TerminationProbe = struct {
+    name: []const u8,
+    source: []const u8,
+    /// The probe has a helper that declares `Proof<T, "total">`, so the
+    /// capsule must be refused.
+    total_refused: bool,
+};
+
+fn hasFailingSpecTotal(result: *const CheckResult) bool {
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.indexOf(u8, d.message, "failing spec: total") != null) return true;
+    }
+    return false;
+}
+
+fn terminationRefused(probe: TerminationProbe) !bool {
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, probe.source, "probe.ts", .{ .json_mode = true });
+    defer result.deinit(std.testing.allocator);
+    const props = result.properties orelse return error.MissingProperties;
+    var refused = true;
+    if (props.cost_bounded) {
+        std.debug.print("termination probe {s}: cost_bounded was proven\n", .{probe.name});
+        refused = false;
+    }
+    if (probe.total_refused and !hasFailingSpecTotal(&result)) {
+        std.debug.print("termination probe {s}: total was not refused\n", .{probe.name});
+        refused = false;
+    }
+    return refused;
+}
+
+fn expectTerminationKept(name: []const u8, source: []const u8) !void {
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "control.ts", .{ .json_mode = true });
+    defer result.deinit(std.testing.allocator);
+    const props = result.properties orelse return error.MissingProperties;
+    if (!props.cost_bounded) {
+        std.debug.print("termination control {s}: cost_bounded was refused\n", .{name});
+        return error.CostBoundedRefused;
+    }
+    if (hasFailingSpecTotal(&result)) {
+        std.debug.print("termination control {s}: total was refused\n", .{name});
+        return error.TotalRefused;
+    }
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+}
+
+test "CHECK refuses termination claims when a function value recurses without end" {
+    const probes = [_]TerminationProbe{
+        // A returned or stored value.
+        .{ .name = "p2g", .total_refused = true, .source =
+        \\structural Fn = (n: number) => number;
+        \\structural Ops = { a: Fn };
+        \\function wrap(o: Ops): Ops {
+        \\  return o;
+        \\}
+        \\function down(n: number): Proof<number, "total"> {
+        \\  const o: Ops = { a: down };
+        \\  return wrap(o).a(n);
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        .{ .name = "q1", .total_refused = true, .source =
+        \\function down(n: number): Proof<number, "total"> {
+        \\  return [down][0](n);
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        // A callback.
+        .{ .name = "r1", .total_refused = true, .source =
+        \\structural Fn = (n: number) => number;
+        \\function apply(f: Fn, n: number): number {
+        \\  return f(n);
+        \\}
+        \\function down(n: number): Proof<number, "total"> {
+        \\  return apply(down, n);
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        .{ .name = "r4", .total_refused = true, .source =
+        \\function down(n: number): Proof<number, "total"> {
+        \\  return [n].map(down)[0];
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        .{ .name = "r6", .total_refused = true, .source =
+        \\structural Step = (n: number, self: Step) => number;
+        \\function down(n: number, self: Step): Proof<number, "total"> {
+        \\  return self(n, self);
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ v: down(3, down) });
+        \\}
+        },
+        // A holder.
+        .{ .name = "p2c", .total_refused = true, .source =
+        \\structural Ops = { a: (n: number) => number };
+        \\function down(n: number): Proof<number, "total"> {
+        \\  const ops: Ops = { a: down };
+        \\  return ops.a(n);
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        .{ .name = "f6", .total_refused = false, .source =
+        \\structural Ops = { f: (n: number) => number };
+        \\const g: Ops = { f: (x: number): number => g.f(x) };
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: g.f(3) });
+        \\}
+        },
+        // A nested function that calls itself.
+        .{ .name = "f1b", .total_refused = false, .source =
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  function g(x: number): number {
+        \\    return g(x);
+        \\  }
+        \\  return Response.json({ v: g(3) });
+        \\}
+        },
+        // Local or module state.
+        .{ .name = "f3", .total_refused = false, .source =
+        \\structural Fn = (n: number) => number;
+        \\function inc(x: number): number {
+        \\  return x + 1;
+        \\}
+        \\let cb: Fn = inc;
+        \\function down(n: number): number {
+        \\  return cb(n);
+        \\}
+        \\function arm(): number {
+        \\  cb = down;
+        \\  return 0;
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  const a = arm();
+        \\  return Response.json({ v: down(3) + a });
+        \\}
+        },
+        .{ .name = "fc1", .total_refused = true, .source =
+        \\structural Fn = (n: number) => number;
+        \\let slot: Fn = (n: number): number => n;
+        \\function down(n: number): Proof<number, "total"> {
+        \\  return slot(n);
+        \\}
+        \\function arm(n: number): number {
+        \\  slot = down;
+        \\  return n;
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: arm(1) + down(3) });
+        \\}
+        },
+        .{ .name = "g1", .total_refused = true, .source =
+        \\structural Fn = (n: number) => number;
+        \\let slot: Fn = (n: number): number => n;
+        \\function down(items: number[], n: number): Proof<number, "total"> {
+        \\  return items.map(slot)[0] ?? n;
+        \\}
+        \\function arm(n: number): number {
+        \\  slot = (x: number): number => down([x], x);
+        \\  return n;
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: arm(1) + down([3], 3) });
+        \\}
+        },
+        // Bindings with no initializer to read.
+        .{ .name = "g2", .total_refused = false, .source =
+        \\structural Ops = { f: (n: number) => number };
+        \\function down(n: number): number {
+        \\  return down(n);
+        \\}
+        \\function compute(): Ops {
+        \\  return { f: down };
+        \\}
+        \\const cfg: Ops = compute();
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: cfg.f(3) });
+        \\}
+        },
+        .{ .name = "g3b", .total_refused = true, .source =
+        \\structural Fn = (n: number) => number;
+        \\function down(n: number): Proof<number, "total"> {
+        \\  const fs: Fn[] = [down];
+        \\  for (const f of fs) {
+        \\    return range(1).map(f)[0] ?? n;
+        \\  }
+        \\  return n;
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        .{ .name = "g3c", .total_refused = true, .source =
+        \\structural Fn = (n: number) => number;
+        \\structural Ops = { a: Fn };
+        \\function down(n: number): Proof<number, "total"> {
+        \\  const o: Ops = { a: down };
+        \\  return match (o) {
+        \\    when { a: g }: range(1).map(g)[0] ?? n
+        \\    default: n
+        \\  };
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        // A function value that is only the second argument of a builtin.
+        .{ .name = "h4", .total_refused = true, .source =
+        \\structural Fn = (n: number) => number;
+        \\function down(n: number): Proof<number, "total"> {
+        \\  const xs: number[] = [n];
+        \\  return xs.reduce((acc: Fn, x: number): Fn => acc, down)(n);
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+        // An inline arrow handed to a named helper.
+        .{ .name = "p4", .total_refused = false, .source =
+        \\structural Step = (g: Step) => number;
+        \\function loop(f: Step): number {
+        \\  return f(f);
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: loop((g: Step): number => loop(g)) });
+        \\}
+        },
+        // Direct self-recursion by name stays refused.
+        .{ .name = "p2r", .total_refused = true, .source =
+        \\function down(n: number): Proof<number, "total"> {
+        \\  return down(n);
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
+    };
+    var failures: usize = 0;
+    for (probes) |probe| {
+        if (!try terminationRefused(probe)) failures += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
+test "CHECK keeps termination claims when no function value escapes" {
+    // Builtins that call a named, non-recursive callback.
+    try expectTerminationKept("builtins",
+        \\function fmt(x: number): string {
+        \\  return String(x);
+        \\}
+        \\function norm(s: string): Proof<string, "total"> {
+        \\  return s.trim().toLowerCase();
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  const h = req.headers.get("x") ?? "";
+        \\  const items: number[] = [1, 2, 3];
+        \\  return Response.json({ a: norm(h), b: items.map(fmt) });
+        \\}
+    );
+    // Inline callbacks to the zttp:result combinators.
+    try expectTerminationKept("result-combinators",
+        \\import { andThen, mapResult, ok, unwrapOr } from "zttp:result";
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  const doubled = mapResult(ok(21), (n) => n * 2);
+        \\  const chained = andThen(doubled, (n) => ok(n + 1));
+        \\  return Response.json({ v: unwrapOr(chained, 0) });
+        \\}
+    );
+    // A routed handler: the table is the first argument of a stable routerMatch.
+    try expectTerminationKept("routed",
+        \\import { routerMatch } from "zttp:router";
+        \\function getHealth(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+        \\const routes = { "GET /health": getHealth };
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) {
+        \\    return found.handler(req);
+        \\  }
+        \\  return Response.text("404");
+        \\}
+    );
 }

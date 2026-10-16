@@ -8,7 +8,7 @@ Revisions 1 to 3 tried to find each call that goes through a function value. Thr
 
 A function that recurses through a function value proves `total`. A handler that reaches such a recursion proves `cost_bounded`. Both are false proofs. Twenty-five admitted probes show it. Probe files are in `/tmp/zttp-probes/` (p, q, r), `/tmp/zttp-fable/` (f, g), and `/tmp/zttp-factcheck/` (fc1 = `let-fn-capsule.ts`). Each probe passes `zts check` with no error, and `total` or `cost_bounded` is PROVEN, while the program recurses without end.
 
-- Through a returned or stored value: p2g, p2h, q1 to q9 (`wrap(o).a(n)`, `first([down])(n)`, `[down][0](n)`, `(c ? down : down)(n)`, `({ a: down }).a(n)`).
+- Through a returned or stored value: p2g, p2h, q1 to q9 (`wrap(o).a(n)`, `first([down])(n)`, `([down][0])(n)`, `(c ? down : down)(n)`, `({ a: down }).a(n)`).
 - Through a callback: r4 (`[n].map(down)` inside `down`), r1 (`apply(down, n)`), r6 (a parameter `self: Step`).
 - Through a holder: p2c, q7, q8, r8 (`ops.a(n)`), f6 (module `const g: Ops = { f: (x) => g.f(x) }`).
 - Through local or module state: f1b (a nested `function g` that calls itself), f3 and f9 (a module `let` reassigned to `down` or to a mutual partner), fc1 (`let slot: Fn = ...`, then `slot = down`), g1 (`items.map(slot)` with `slot` reassigned).
@@ -26,7 +26,7 @@ A function value is any of these:
 - the name of a function declared in a body, or of a body-local binding whose initializer is a function or arrow literal.
 
 The closed positions are:
-- P0. The declaration site of a function literal: the initializer of a `function` declaration, or of a module or body-local `const` or `let` whose initializer is a function or arrow literal. P0 covers literals only, so `const alias = down` is an escape. `VarDecl.kind` (`parser/ir.zig:390-392`) gives the `let` test.
+- P0. The declaration site of a function literal: the initializer of a `function` declaration, or of a module or body-local `const` or `let` whose initializer is a function or arrow literal. P0 covers literals only, so `const alias = down` is an escape. `VarDecl.kind` (`packages/zts/src/parser/ir.zig#Node`) gives the `let` test.
 - P1. The callee of a call by name, where the name is a `const` or `function` declaration or an import, not a `let`.
 - P2. The first argument of a member call `R.m(...)`, where `m` is one of `map`, `filter`, `forEach`, `reduce`, `some`, `every`, `find`, `findIndex`, `flatMap`, and `sort`. `R` must not be an identifier for a module binding with `holds` set, or a body-local binding in `holding_names`. The argument must not be a `let`-bound name (g1). These builtins call the first argument and do not return it. Any other argument is not P2: `reduce` returns its second argument, so `xs.reduce((a, x) => a, down)(n)` (h4) escapes.
 - P2b. A function argument of a call to an allowlisted virtual-module export that calls the argument during the call, and neither returns nor keeps it. The initial allowlist is `mapResult`, `andThen`, `mapError`, and `orElse` from `zttp:result` (`packages/zts/src/modules/data/result_mod.zig`). The implementer reads each native implementation and confirms this before adding it. A function value passed to any other import escapes. This keeps `examples/patterns/result-combinators.ts`, which passes inline arrows to these four exports.
@@ -44,12 +44,12 @@ The argument needs no claim about parameters, holders, returns, `let`, for-of, o
 - U2. Consumers. When `function_value_escapes` is set:
   - `CapsuleFacts.holds` refuses `total` for every function. The suggestion names the escaping site, and says that a function used as a value makes termination unprovable.
   - The cost envelope is unbounded, so `cost_bounded` is refused. The description names the escaping site.
-  The flag must reach both deciders. The `total` path is `function_specs.zig:124` through `spec_discharge.zig:512-526`. The `cost_bounded` path is `path_generator.zig:1020` through `pipeline.pathEffectFacts` (`pipeline.zig:886-892`). Expose the flag on `EffectFacts` beside `reachesRecursion`.
+  The flag must reach both deciders. The `total` path is `packages/zts/src/function_specs.zig#dischargeWithTypeSource` through `packages/zts/src/spec_discharge.zig#CapsuleFacts`. The `cost_bounded` path is `packages/zts/src/path_generator.zig#PathGenerator` through `pipeline.pathEffectFacts` (`packages/zts/src/pipeline.zig#ModuleAnalysisSession`). Expose the flag on `EffectFacts` beside `reachesRecursion`.
 - U3. Self callback. When `recordFunctionValueArg` sees `callee_idx == owner`, set the owner row's `recursive` flag. P2 then covers `[n].map(down)` inside `down` (r4).
 - U4. Lower bound refuses termination. `cost_bounded` also requires that the handler's propagated row has `lower_bound` false. This covers a call by name to a body-local closure or a nested function (f1b). Those names are P1 positions, but no collected function has their edge. A body-local closure that does not name itself keeps today's `lower_bound` verdict (f13 loses `cost_bounded`). Do not add a precision exemption for it in this change.
-- U5. Imports. A relative import whose module sets `function_value_escapes` refuses `total` and `cost_bounded` in the importer. Use the dedicated flag, not `lower_bound`, which would also refuse the importer's `Effects` ceiling (ZTS512). Carry the flag through `mergeImportedEffect` (`effect_inference.zig:1593`) or through the export rows at `:537` and `:569`.
+- U5. Imports. A relative import whose module sets `function_value_escapes` refuses `total` and `cost_bounded` in the importer. Use the dedicated flag, not `lower_bound`, which would also refuse the importer's `Effects` ceiling (ZTS512). Carry the flag through `mergeImportedEffect` (`packages/zts/src/effect_inference.zig#Analyzer`) or through the export rows in `exportEffectsWithReachability`.
 
-Existing tests at `effect_inference.zig:2716`, `:4166`, and `:4310` assert that value references are not recursion. Leave them unchanged. U1 to U5 do not change `recursive` for value references. Only the `total` and `cost_bounded` verdicts change.
+Existing tests in `effect_inference.zig` (the value-reference, route-table, and callback-recursion tests) assert that value references are not recursion. Leave them unchanged. U1 to U5 do not change `recursive` for value references. Only the `total` and `cost_bounded` verdicts change.
 
 ## Rejected alternative
 
@@ -75,7 +75,7 @@ Controls that must hold:
 - A handler that calls `Response.json({ ... })`, `req.headers.get(...)`, `s.trim().toLowerCase()`, and `items.map(fmt)` with a named, non-recursive `fmt` keeps `total` and `cost_bounded`.
 - `examples/patterns/result-combinators.ts` keeps `cost_bounded` (P2b).
 - The three routed examples (`examples/routing/router.ts`, `guard-flow.ts`, `api-surface.ts`) keep `cost_bounded`.
-- The tests at `effect_inference.zig:2716`, `:3081`, `:4166`, and `:4310` pass unchanged.
+- The existing value-reference and recursion tests in `effect_inference.zig` pass unchanged.
 
 ## Gates
 

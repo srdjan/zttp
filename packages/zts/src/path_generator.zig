@@ -301,6 +301,19 @@ pub const PathGenerator = struct {
     /// it is earned. Spec 5.6: no runtime stack cap may be presented as a
     /// termination proof.
     reaches_recursion: bool,
+    /// The first function value that sits outside the positions the call graph
+    /// covers, in the handler's module or in a sibling module it reaches. A
+    /// call through it has no edge, so recursion through it is invisible to
+    /// `reaches_recursion`, and no constant bound over the handler is earned.
+    /// Kept apart from `reaches_recursion` because `coverage()` reports the
+    /// latter as a summarized path set, and an escape does not change the paths.
+    function_value_escape: bool,
+    /// Where the escape sits in the handler's own module, when it does.
+    function_value_escape_site: ?effect_inference.FunctionValueEscape,
+    /// Set when the handler's propagated effect row is a lower bound: it calls
+    /// through a value this analysis could not resolve, so the module calls it
+    /// reaches are missing from the cost count.
+    handler_lower_bound: bool,
     /// Set when a `routerMatch` route table or dispatched handler cannot be
     /// resolved to a closed set of functions. Paths and cost facts are then
     /// incomplete, so consumers must not treat the emitted set as exhaustive.
@@ -505,6 +518,9 @@ pub const PathGenerator = struct {
             .walking_root_function = null_node,
             .summarized = false,
             .reaches_recursion = false,
+            .function_value_escape = false,
+            .function_value_escape_site = null,
+            .handler_lower_bound = false,
             .unresolved_route_dispatch = false,
             .route_dispatch_count = 0,
             .route_composition_unmodeled = false,
@@ -877,6 +893,24 @@ pub const PathGenerator = struct {
             .unavailable => true,
         };
         self.reaches_recursion = self.reaches_recursion or root_reaches_recursion;
+
+        // Two more reasons the call graph above is not the whole story. An
+        // escaped function value hides a call from it, and a lower-bound row
+        // (a call by name to a closure or a nested function, which no
+        // collected function has an edge for) hides a callee from it.
+        switch (self.effect_facts) {
+            .complete => |facts| {
+                if (facts.functionValueEscape()) |site| {
+                    self.function_value_escape = true;
+                    if (self.function_value_escape_site == null) self.function_value_escape_site = site;
+                }
+                if (facts.rowOfBody(handler_fn.body)) |row| {
+                    if (row.function_value_escape) self.function_value_escape = true;
+                    if (row.lower_bound) self.handler_lower_bound = true;
+                }
+            },
+            .unavailable => {},
+        }
     }
 
     fn findProgramRoot(self: *const PathGenerator) ?NodeIndex {
@@ -1028,6 +1062,40 @@ pub const PathGenerator = struct {
                 .line = 0,
                 .column = 0,
                 .desc = recursion_desc,
+            } };
+        } else if (self.function_value_escape) {
+            // A function value outside the positions the call graph covers
+            // can be called with no edge to show it. Spec 5.6, as above.
+            const site = self.function_value_escape_site;
+            const escape_desc = if (site) |found|
+                try std.fmt.allocPrint(
+                    allocator,
+                    "{s} at line {d}, column {d} is used as a value, so a call through it is not followed",
+                    .{ found.name, found.line, found.column },
+                )
+            else
+                try allocator.dupe(
+                    u8,
+                    "a function value escapes in a module the handler uses, so a call through it is not followed",
+                );
+            envelope.total.deinitOwned(allocator);
+            envelope.total = .{ .unbounded = .{
+                .line = if (site) |found| found.line else 0,
+                .column = if (site) |found| found.column else 0,
+                .desc = escape_desc,
+            } };
+        } else if (self.handler_lower_bound) {
+            // The handler calls through a value the analysis could not
+            // resolve, so the module calls that callee makes are not counted.
+            const lower_bound_desc = try allocator.dupe(
+                u8,
+                "the handler calls through a value the compiler cannot resolve, so its callee is not costed",
+            );
+            envelope.total.deinitOwned(allocator);
+            envelope.total = .{ .unbounded = .{
+                .line = 0,
+                .column = 0,
+                .desc = lower_bound_desc,
             } };
         }
 
@@ -5288,4 +5356,94 @@ test "two url tests keep the last url: req.url and req.path are distinct operand
         try std.testing.expectEqualStrings("/b", t.url);
     }
     try std.testing.expect(saw);
+}
+
+fn costClassOf(source: []const u8) !contract_types.BoundClass {
+    const allocator = std.testing.allocator;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+    return envelope.total.class();
+}
+
+test "cost is unbounded when the handler reaches a recursion through a function value" {
+    const cases = [_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "p2g", .source =
+        \\function wrap(o) { return o; }
+        \\function down(n) { const o = { a: down }; return wrap(o).a(n); }
+        \\export function handler(req) { return Response.json({ v: down(3) }); }
+        },
+        .{ .name = "r4", .source =
+        \\function down(n) { return [n].map(down)[0]; }
+        \\export function handler(req) { return Response.json({ v: down(3) }); }
+        },
+        .{ .name = "r1", .source =
+        \\function apply(f, n) { return f(n); }
+        \\function down(n) { return apply(down, n); }
+        \\export function handler(req) { return Response.json({ v: down(3) }); }
+        },
+        .{ .name = "f1b", .source =
+        \\export function handler(req) {
+        \\  function g(x) { return g(x); }
+        \\  return Response.json({ v: g(3) });
+        \\}
+        },
+        .{ .name = "f3", .source =
+        \\let cb = (x) => x + 1;
+        \\function down(n) { return cb(n); }
+        \\function arm() { cb = down; return 0; }
+        \\export function handler(req) { const a = arm(); return Response.json({ v: down(3) + a }); }
+        },
+        .{ .name = "g1", .source =
+        \\let slot = (n) => n;
+        \\function down(items, n) { return items.map(slot)[0] ?? n; }
+        \\function arm(n) { slot = (x) => down([x], x); return n; }
+        \\export function handler(req) { return Response.json({ v: arm(1) + down([3], 3) }); }
+        },
+        .{ .name = "h4", .source =
+        \\function down(n) { return [n].reduce((acc, x) => acc, down)(n); }
+        \\export function handler(req) { return Response.json({ v: down(3) }); }
+        },
+        .{ .name = "p4", .source =
+        \\function loop(f) { return f(f); }
+        \\export function handler(req) { return Response.json({ v: loop((g) => loop(g)) }); }
+        },
+    };
+    for (cases) |case| {
+        const class = try costClassOf(case.source);
+        if (class != .unbounded) std.debug.print("cost was bounded for {s}\n", .{case.name});
+        try std.testing.expectEqual(contract_types.BoundClass.unbounded, class);
+    }
+}
+
+test "cost stays bounded when no function value escapes" {
+    const bounded = [_][]const u8{
+        \\function fmt(x) { return String(x); }
+        \\export function handler(req) {
+        \\  const s = req.headers.get("x") ?? "";
+        \\  const items = [1, 2, 3];
+        \\  return Response.json({ a: s.trim().toLowerCase(), b: items.map(fmt) });
+        \\}
+        ,
+        \\import { routerMatch } from "zttp:router";
+        \\function getHealth(req) { return Response.text("ok"); }
+        \\const routes = { "GET /health": getHealth };
+        \\export function handler(req) {
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) { return found.handler(req); }
+        \\  return Response.text("404");
+        \\}
+        ,
+        \\import { andThen, mapResult, ok, unwrapOr } from "zttp:result";
+        \\export function handler(req) {
+        \\  const doubled = mapResult(ok(21), (n) => n * 2);
+        \\  const chained = andThen(doubled, (n) => ok(n + 1));
+        \\  return Response.json({ v: unwrapOr(chained, 0) });
+        \\}
+        ,
+    };
+    for (bounded) |source| {
+        try std.testing.expect((try costClassOf(source)) != .unbounded);
+    }
 }

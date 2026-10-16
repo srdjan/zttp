@@ -11,6 +11,7 @@
 const std = @import("std");
 const contract_types = @import("zts-contracts").contract_types;
 const module_binding = @import("zts-engine").module_binding;
+const effect_inference = @import("effect_inference.zig");
 
 const HandlerProperties = contract_types.HandlerProperties;
 const PropertyCause = contract_types.PropertyCause;
@@ -504,11 +505,22 @@ pub const CapsuleFacts = struct {
     /// then a claim about the part of the function that was analysed, not
     /// about the function, so no property is proven.
     lower_bound: bool = false,
+    /// A function value in this function's module, or in a sibling module it
+    /// reaches, sits outside the positions the call graph covers. A call
+    /// through it has no edge, so recursion through it leaves no cycle and the
+    /// `recursive` flag above is silent. `total` is refused; the effect row
+    /// still charges the value, so the other properties are unaffected.
+    function_value_escape: bool = false,
+    /// Where the escape sits in this function's own module. Null when the
+    /// escape comes from a sibling module. Borrowed from the effect facts.
+    escape_site: ?effect_inference.FunctionValueEscape = null,
 
     pub fn holds(self: CapsuleFacts, prop: CapsuleProperty) bool {
         // A lower-bound row under-reports every field it carries, so no
         // property may be read off it at all.
         if (self.lower_bound) return false;
+        // An escaped function value hides calls from the termination check.
+        if (self.function_value_escape and prop == .total) return false;
         // Recursion refuses `total` and nothing else. The deferral cited spec
         // 5.6, which is about totality and cost, but the guard was written
         // across every property. `pure`, `read_only` and `deterministic` need
@@ -543,6 +555,27 @@ const lower_bound_capsule_suggestion =
 const recursive_capsule_suggestion =
     "a recursive function has no termination proof, so its `total` property cannot be discharged; " ++
     "inline or remove the recursion, or drop `total` from the capsule.";
+
+/// The `total` refusal for an escaped function value. It names the first
+/// escaping site, so the author sees which value to remove. Caller frees.
+fn escapeSuggestion(
+    allocator: std.mem.Allocator,
+    site: ?effect_inference.FunctionValueEscape,
+) ![]const u8 {
+    const found = site orelse return allocator.dupe(
+        u8,
+        "a function value escapes in a module this function uses, so the compiler cannot follow " ++
+            "every call and `total` cannot be discharged; call helpers by name in that module, " ++
+            "or drop `total` from the capsule.",
+    );
+    return std.fmt.allocPrint(
+        allocator,
+        "{s} at line {d}, column {d} is used as a value, so the compiler cannot follow every " ++
+            "call in this module and `total` cannot be discharged for any function in it; " ++
+            "call helpers by name and pass no function as a value, or drop `total` from the capsule.",
+        .{ found.name, found.line, found.column },
+    );
+}
 
 /// ZTS502 suggestion for an unknown capsule property name. Caller frees.
 fn suggestionForUnknownCapsule(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
@@ -586,13 +619,17 @@ pub fn dischargeCapsule(
         // `pure` refusal would tell an author to remove recursion when the
         // real cause is a module call, which is a wrong repair, not just a
         // vague one.
-        const text = if (facts.recursive and prop == .total)
-            recursive_capsule_suggestion
-        else if (facts.lower_bound)
-            lower_bound_capsule_suggestion
-        else
-            capsuleSuggestionFor(prop);
-        const suggestion = try allocator.dupe(u8, text);
+        const suggestion = if (facts.function_value_escape and prop == .total and !facts.recursive)
+            try escapeSuggestion(allocator, facts.escape_site)
+        else blk: {
+            const text = if (facts.recursive and prop == .total)
+                recursive_capsule_suggestion
+            else if (facts.lower_bound)
+                lower_bound_capsule_suggestion
+            else
+                capsuleSuggestionFor(prop);
+            break :blk try allocator.dupe(u8, text);
+        };
         errdefer allocator.free(suggestion);
         try out.append(allocator, .{
             .kind = .not_discharged,

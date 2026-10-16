@@ -56,6 +56,14 @@ pub const EffectRow = struct {
     /// above. Nothing may read this row as an over-approximation, which is
     /// what a ceiling check, a budget check, and every capsule property need.
     lower_bound: bool = false,
+    /// True when a function value in this function's module, or in a sibling
+    /// module it reaches, sits outside the closed positions that
+    /// `scanFunctionValueEscapes` lists. The call graph is then not complete:
+    /// a call through that value has no edge, so a recursion through it leaves
+    /// no cycle for `detectRecursion`. This refuses `total` and `cost_bounded`
+    /// and nothing else. It is a field of its own and not `lower_bound`, which
+    /// would also refuse the `Effects` ceiling (ZTS512).
+    function_value_escape: bool = false,
 
     pub const empty: EffectRow = .{};
 
@@ -69,6 +77,7 @@ pub const EffectRow = struct {
             .cache_reads = a.cache_reads or b.cache_reads,
             .writes = a.writes or b.writes,
             .lower_bound = a.lower_bound or b.lower_bound,
+            .function_value_escape = a.function_value_escape or b.function_value_escape,
         };
     }
 
@@ -80,7 +89,8 @@ pub const EffectRow = struct {
             a.has_egress == b.has_egress and
             a.cache_reads == b.cache_reads and
             a.writes == b.writes and
-            a.lower_bound == b.lower_bound;
+            a.lower_bound == b.lower_bound and
+            a.function_value_escape == b.function_value_escape;
     }
 
     /// `read_only` capsule property: the function performs no external writes
@@ -89,6 +99,16 @@ pub const EffectRow = struct {
     pub fn readOnly(self: EffectRow) bool {
         return !self.writes and !self.has_egress;
     }
+};
+
+/// The first function value in a module that sits outside the closed
+/// positions `scanFunctionValueEscapes` accepts. `name` is borrowed from the
+/// atom table or a static string while an `Analyzer` holds it, and owned by an
+/// `EffectFacts` once projected.
+pub const FunctionValueEscape = struct {
+    line: u32,
+    column: u32,
+    name: []const u8,
 };
 
 /// A visible export's completed effect result.
@@ -240,6 +260,10 @@ pub const EffectFacts = struct {
     value_storage: []const usize = &.{},
     export_effects: ExportEffects = .{},
     reaches_recursion: []const bool = &.{},
+    /// The first function value of this module outside the closed positions,
+    /// or null. `name` is owned. Every function row carries the flag too; this
+    /// holds the site a diagnostic names.
+    function_value_escape: ?FunctionValueEscape = null,
     contract: ContractEffectProjection = .unrequested,
 
     pub fn deinit(self: *EffectFacts, allocator: std.mem.Allocator) void {
@@ -251,6 +275,7 @@ pub const EffectFacts = struct {
         if (self.value_storage.len > 0) allocator.free(self.value_storage);
         self.export_effects.deinit(allocator);
         if (self.reaches_recursion.len > 0) allocator.free(self.reaches_recursion);
+        if (self.function_value_escape) |site| allocator.free(site.name);
         switch (self.contract) {
             .unrequested => {},
             .complete => |*contract| contract.deinit(allocator),
@@ -287,6 +312,22 @@ pub const EffectFacts = struct {
             if (function.body_node == body_node) return self.reaches_recursion[index];
         }
         return false;
+    }
+
+    /// The propagated row of the function whose body is `body_node`, or null
+    /// when no projected function has that body.
+    pub fn rowOfBody(self: *const EffectFacts, body_node: NodeIndex) ?EffectRow {
+        for (self.functions) |function| {
+            if (function.body_node == body_node) return function.row;
+        }
+        return null;
+    }
+
+    /// The first function value of the module that escapes the closed
+    /// positions, or null. A termination claim over this module is unprovable
+    /// while it is set: a call through the value has no call-graph edge.
+    pub fn functionValueEscape(self: *const EffectFacts) ?FunctionValueEscape {
+        return self.function_value_escape;
     }
 
     pub fn requireContract(self: *const EffectFacts) !*const ContractEffectFacts {
@@ -432,6 +473,10 @@ pub const Analyzer = struct {
     /// Inline route functions currently being folded into an owner's row.
     /// Named routes use the ordinary call graph recursion machinery.
     inline_route_stack: std.AutoHashMapUnmanaged(NodeIndex, void),
+    /// The first function value outside the closed positions, set by
+    /// `scanFunctionValueEscapes`. Null when every function value in the
+    /// module is in a position the call graph already covers.
+    function_value_escape: ?FunctionValueEscape = null,
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*atom_table.AtomTable) Analyzer {
         return initWithManifestRegistry(allocator, ir_view, atoms, null);
@@ -486,6 +531,7 @@ pub const Analyzer = struct {
         _ = try self.resolveFacts();
         try self.collectFunctions(root);
         try self.computeModuleBindings(root);
+        try self.scanFunctionValueEscapes();
         try self.computeBaseEffects();
         try self.propagate();
         try self.detectRecursion();
@@ -535,6 +581,7 @@ pub const Analyzer = struct {
             if (!fe.exported) continue;
             var row = fe.row;
             row.recursive = reaches_recursion[function_index];
+            if (self.function_value_escape != null) row.function_value_escape = true;
             entries[filled] = .{
                 .name = try self.allocator.dupe(u8, fe.name),
                 .effect = .{ .callable = row },
@@ -568,6 +615,8 @@ pub const Analyzer = struct {
                 row = row.merge(user.row);
                 if (reaches_recursion[user_idx]) row.recursive = true;
             }
+            // A holder in an escaping module can be called through the escape.
+            if (self.function_value_escape != null) row.function_value_escape = true;
             return .{ .callable = row };
         }
         if (mb.safe_data) return .{ .data = mb.row };
@@ -938,6 +987,9 @@ pub const Analyzer = struct {
             if (std.mem.eql(u8, self.functions.items[i].name, "handler")) {
                 try self.contributeRouteRoots(i, &row, &seen_users);
             }
+            // A function value that escapes anywhere in the module reaches
+            // every function: any call may go through it.
+            if (self.function_value_escape != null) row.function_value_escape = true;
             self.functions.items[i].row = row;
             // Snapshot the direct capability set before propagation unions in
             // the rows of transitively-called user functions.
@@ -1093,7 +1145,7 @@ pub const Analyzer = struct {
                     // stay out of the caller's row entirely. This stays a call
                     // edge, not a value reference: recursion through a callback
                     // (`a` maps `b`, `b` calls `a`) is real recursion.
-                    try self.recordFunctionValueArg(arg, owner, seen_users);
+                    try self.recordFunctionValueArg(arg, owner, row, seen_users);
                     try self.walkBaseExpr(arg, owner, row, seen_users);
                 }
             },
@@ -1619,17 +1671,353 @@ pub const Analyzer = struct {
     /// ceiling - the caller's row gains capabilities it might not reach, which
     /// can only reject, never wrongly certify. Under-approximating is what the
     /// missing edge did.
+    ///
+    /// A function handed to a call inside its own body (`[n].map(down)` in
+    /// `down`) is a self-call, as `handleCall` treats a bare self-call: the
+    /// owner row is recursive and the edge is recorded. Skipping it left
+    /// `total` proven for a function that applies itself through a builtin.
     fn recordFunctionValueArg(
         self: *Analyzer,
         arg: NodeIndex,
         owner: usize,
+        row: *EffectRow,
         seen_users: *std.AutoHashMapUnmanaged(usize, void),
     ) WalkError!void {
         if (self.ir_view.getTag(arg) != .identifier) return;
         const binding = self.ir_view.getBinding(arg) orelse return;
         const callee_idx = self.userFnOf(binding) orelse return;
-        if (callee_idx == owner) return;
+        if (callee_idx == owner) row.recursive = true;
         try self.addCallEdge(callee_idx, seen_users);
+    }
+
+    /// Standard-library methods that call their first argument during the
+    /// call and neither return nor keep it (P2).
+    const callback_methods = [_][]const u8{
+        "map", "filter", "forEach", "reduce", "some", "every", "find", "findIndex", "flatMap", "sort",
+    };
+
+    const CallbackImport = struct { module: []const u8, name: []const u8 };
+
+    /// Virtual-module exports that call a function argument during the call
+    /// and neither return nor keep it (P2b). Each entry was checked against
+    /// its native implementation in `builtins/result.zig`: the callback is
+    /// invoked once through `invokeResultCallback`, and only its return value
+    /// reaches the result. Add an export only after the same reading.
+    const callback_imports = [_]CallbackImport{
+        .{ .module = "zttp:result", .name = "mapResult" },
+        .{ .module = "zttp:result", .name = "andThen" },
+        .{ .module = "zttp:result", .name = "mapError" },
+        .{ .module = "zttp:result", .name = "orElse" },
+    };
+
+    const FunctionValueRef = struct {
+        /// The name is a `let` (or `var`) binding. It can be assigned a
+        /// different function, so no position closes a reference to it.
+        reassignable: bool,
+    };
+
+    const DeclaredFunctions = std.AutoHashMapUnmanaged(u16, bool);
+
+    /// Find the first function value in the module that sits outside the
+    /// closed positions, and record it in `function_value_escape`.
+    ///
+    /// The call graph holds an edge for a call by name, for a function handed
+    /// to a builtin that calls it, and for a route function a stable
+    /// `routerMatch` dispatches. Every other way a function value can travel -
+    /// a property, an element, a return, a `let`, an argument to a user
+    /// function - hides a call from `detectRecursion`. This scan does not try
+    /// to follow those. It finds that a function value is in such a place, and
+    /// the module then proves no termination claim.
+    ///
+    /// The closed positions are:
+    /// - P0: the declaration of a function literal (`function f`, or `const`
+    ///   or `let` with an arrow or function initializer).
+    /// - P1: the callee of a call by name, when the name is not a `let`.
+    /// - P2: the first argument of `R.m(...)` with `m` in `callback_methods`,
+    ///   when `R` is not a module binding that holds functions.
+    /// - P2b: a function argument of an export in `callback_imports`.
+    /// - P3: a property value of a module `const` object literal whose every
+    ///   reference is the first argument of a `routerMatch` call, when every
+    ///   route dispatch in the module is stable.
+    ///
+    /// The scan reads every node, so a construct the walkers above never enter
+    /// (a `match` arm, a `for...of` body, a nested closure, a module
+    /// initializer) cannot hide a function value. A body-local holder
+    /// (`const o = { f: g }; o.map(h)`) needs no separate test for P2: its
+    /// initializer already holds a function value outside P0 to P3, which is
+    /// an escape of its own.
+    fn scanFunctionValueEscapes(self: *Analyzer) WalkError!void {
+        self.function_value_escape = null;
+        const node_count = self.ir_view.nodeCount();
+        if (node_count == 0) return;
+        const closed = try self.allocator.alloc(bool, node_count);
+        defer self.allocator.free(closed);
+        @memset(closed, false);
+
+        // P0, and the names declared with a function literal. The value is
+        // true when some declaration of the name is reassignable.
+        var declared: DeclaredFunctions = .empty;
+        defer declared.deinit(self.allocator);
+        for (0..node_count) |index| {
+            const node: NodeIndex = @intCast(index);
+            const tag = self.ir_view.getTag(node) orelse continue;
+            if (tag != .var_decl and tag != .function_decl) continue;
+            const decl = self.ir_view.getVarDecl(node) orelse continue;
+            if (decl.init == null_node or decl.init >= node_count) continue;
+            if (!self.isFunctionLiteral(decl.init)) continue;
+            closed[decl.init] = true;
+            const gop = try declared.getOrPut(self.allocator, decl.binding.name_atom);
+            if (!gop.found_existing) gop.value_ptr.* = false;
+            if (tag == .var_decl and decl.kind != .@"const") gop.value_ptr.* = true;
+        }
+
+        // P1, P2, and P2b.
+        for (0..node_count) |index| {
+            const node: NodeIndex = @intCast(index);
+            const tag = self.ir_view.getTag(node) orelse continue;
+            if (tag != .call and tag != .method_call) continue;
+            const call = self.ir_view.getCall(node) orelse continue;
+            const callee_tag = self.ir_view.getTag(call.callee) orelse continue;
+            if (callee_tag == .identifier) {
+                if (self.functionValueRef(call.callee, &declared)) |ref| {
+                    if (!ref.reassignable) closed[call.callee] = true;
+                }
+                if (self.isCallbackImport(call.callee)) {
+                    for (0..call.args_count) |i| {
+                        const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+                        self.closeFunctionArgument(arg, &declared, closed);
+                    }
+                }
+            } else if (callee_tag == .member_access and call.args_count > 0 and
+                self.isCallbackMethod(call.callee))
+            {
+                self.closeFunctionArgument(self.ir_view.getListIndex(call.args_start, 0), &declared, closed);
+            }
+        }
+
+        // P3.
+        try self.closeRouteTables(&declared, closed);
+
+        var first: ?FunctionValueEscape = null;
+        for (0..node_count) |index| {
+            if (closed[index]) continue;
+            const node: NodeIndex = @intCast(index);
+            const tag = self.ir_view.getTag(node) orelse continue;
+            const name: []const u8 = switch (tag) {
+                .function_expr, .arrow_function => blk: {
+                    const func = self.ir_view.getFunction(node) orelse break :blk "an anonymous function";
+                    if (func.name_atom == 0) break :blk "an anonymous function";
+                    break :blk self.resolveAtomName(func.name_atom) orelse "an anonymous function";
+                },
+                .object_method, .object_getter, .object_setter => "an object method",
+                .identifier => blk: {
+                    _ = self.functionValueRef(node, &declared) orelse continue;
+                    const binding = self.ir_view.getBinding(node) orelse continue;
+                    break :blk self.resolveAtomName(binding.name_atom) orelse "a function";
+                },
+                // exhaustive: only a function literal or a reference to a
+                // function value can escape. Other nodes hold no function.
+                else => continue,
+            };
+            // A node with no location still escapes. Report line 0 so the
+            // refusal stands without a place to point at.
+            const loc = self.ir_view.getLoc(node);
+            const line: u32 = if (loc) |l| l.line else 0;
+            const column: u32 = if (loc) |l| l.column else 0;
+            if (first) |current| {
+                if (line > current.line or (line == current.line and column >= current.column)) continue;
+            }
+            first = .{ .line = line, .column = column, .name = name };
+        }
+        self.function_value_escape = first;
+    }
+
+    fn isFunctionLiteral(self: *const Analyzer, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return tag == .function_expr or tag == .arrow_function;
+    }
+
+    /// Whether the identifier `node` names a function value: an import that is
+    /// not known to be data, a collected user function, or a name declared
+    /// with a function literal in some body. A parameter is not one, even
+    /// when it shares a name with a declared function: the value it holds came
+    /// from a call argument that was itself judged.
+    fn functionValueRef(self: *const Analyzer, node: NodeIndex, declared: *const DeclaredFunctions) ?FunctionValueRef {
+        if (self.ir_view.getTag(node) != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        if (self.importOf(binding)) |imported| {
+            if (isRelativeModule(imported.module)) {
+                const supplied = self.importedEffect(imported.slot) orelse return .{ .reassignable = false };
+                switch (supplied) {
+                    .data => return null,
+                    .callable, .blocked => {},
+                }
+            }
+            return .{ .reassignable = false };
+        }
+        const is_user_function = self.userFnOf(binding) != null;
+        if (!is_user_function and (binding.kind == .argument or !declared.contains(binding.name_atom))) {
+            return null;
+        }
+        return .{ .reassignable = declared.get(binding.name_atom) orelse false };
+    }
+
+    /// Close `arg` when it is a function literal or a reference to a function
+    /// value that no assignment can change.
+    fn closeFunctionArgument(
+        self: *const Analyzer,
+        arg: NodeIndex,
+        declared: *const DeclaredFunctions,
+        closed: []bool,
+    ) void {
+        if (arg >= closed.len) return;
+        const tag = self.ir_view.getTag(arg) orelse return;
+        switch (tag) {
+            .function_expr, .arrow_function => closed[arg] = true,
+            .identifier => {
+                const ref = self.functionValueRef(arg, declared) orelse return;
+                if (!ref.reassignable) closed[arg] = true;
+            },
+            // exhaustive: any other expression is not a function value, or
+            // holds one the final pass judges on its own.
+            else => {},
+        }
+    }
+
+    /// Whether `callee` is `R.m` with `m` a builtin that calls its first
+    /// argument (P2). A receiver that is a module binding holding functions
+    /// may define its own `m`, so it does not qualify.
+    fn isCallbackMethod(self: *const Analyzer, callee: NodeIndex) bool {
+        const member = self.ir_view.getMember(callee) orelse return false;
+        const method = self.resolveAtomName(member.property) orelse return false;
+        var listed = false;
+        for (callback_methods) |name| {
+            if (std.mem.eql(u8, name, method)) listed = true;
+        }
+        if (!listed) return false;
+
+        var receiver = member.object;
+        while (true) {
+            const tag = self.ir_view.getTag(receiver) orelse return true;
+            switch (tag) {
+                .member_access, .optional_chain, .computed_access => {
+                    receiver = (self.ir_view.getMember(receiver) orelse return true).object;
+                },
+                .identifier => break,
+                // exhaustive: a receiver rooted at a call or a literal names
+                // no module binding, so nothing can hold a user-defined `m`.
+                else => return true,
+            }
+        }
+        const binding = self.ir_view.getBinding(receiver) orelse return true;
+        const idx = self.moduleBindingOf(binding) orelse return true;
+        return !self.module_bindings.items[idx].holds;
+    }
+
+    fn isCallbackImport(self: *const Analyzer, callee: NodeIndex) bool {
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const imported = self.importOf(binding) orelse return false;
+        for (callback_imports) |entry| {
+            if (std.mem.eql(u8, entry.module, imported.module) and
+                std.mem.eql(u8, entry.name, imported.name)) return true;
+        }
+        return false;
+    }
+
+    fn isRouterMatchImport(self: *const Analyzer, callee: NodeIndex) bool {
+        if (self.ir_view.getTag(callee) != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const imported = self.importOf(binding) orelse return false;
+        return std.mem.eql(u8, imported.module, "zttp:router") and
+            std.mem.eql(u8, imported.name, "routerMatch");
+    }
+
+    /// P3. A module `const` object literal is a route table when every
+    /// reference to it is the first argument of a `routerMatch` call and every
+    /// route dispatch in the module is stable. Its property values are then
+    /// reached only through `contributeRouteDispatch`, which gives each one a
+    /// call-graph edge, and they are closed.
+    fn closeRouteTables(
+        self: *Analyzer,
+        declared: *const DeclaredFunctions,
+        closed: []bool,
+    ) WalkError!void {
+        const Candidate = struct { key: u32, table: NodeIndex, disqualified: bool = false };
+        var candidates: std.ArrayListUnmanaged(Candidate) = .empty;
+        defer candidates.deinit(self.allocator);
+        var table_args: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+        defer table_args.deinit(self.allocator);
+
+        for (0..closed.len) |index| {
+            const node: NodeIndex = @intCast(index);
+            const tag = self.ir_view.getTag(node) orelse continue;
+            switch (tag) {
+                .var_decl => {
+                    const decl = self.ir_view.getVarDecl(node) orelse continue;
+                    if (decl.kind != .@"const" or decl.init == null_node) continue;
+                    if (self.ir_view.getTag(decl.init) != .object_literal) continue;
+                    if (self.moduleBindingOf(decl.binding) == null) continue;
+                    try candidates.append(self.allocator, .{
+                        .key = bool_checker.packBindingKey(decl.binding.scope_id, decl.binding.slot),
+                        .table = decl.init,
+                    });
+                },
+                .call, .method_call => {
+                    const call = self.ir_view.getCall(node) orelse continue;
+                    if (call.args_count == 0 or !self.isRouterMatchImport(call.callee)) continue;
+                    try table_args.put(self.allocator, self.ir_view.getListIndex(call.args_start, 0), {});
+                },
+                // exhaustive: only a declaration or a call can start a table.
+                else => {},
+            }
+        }
+        if (candidates.items.len == 0 or table_args.count() == 0) return;
+        if (!try self.routeDispatchesStable()) return;
+
+        for (0..closed.len) |index| {
+            const node: NodeIndex = @intCast(index);
+            if (self.ir_view.getTag(node) != .identifier) continue;
+            const binding = self.ir_view.getBinding(node) orelse continue;
+            if (!slotIsAtom(binding)) continue;
+            const key = bool_checker.packBindingKey(binding.scope_id, binding.slot);
+            for (candidates.items) |*candidate| {
+                if (candidate.key == key and !table_args.contains(node)) candidate.disqualified = true;
+            }
+        }
+
+        for (candidates.items) |candidate| {
+            if (candidate.disqualified) continue;
+            const table = self.ir_view.getObject(candidate.table) orelse continue;
+            for (0..table.properties_count) |i| {
+                const property_node = self.ir_view.getListIndex(table.properties_start, @intCast(i));
+                if (self.ir_view.getTag(property_node) != .object_property) continue;
+                const property = self.ir_view.getProperty(property_node) orelse continue;
+                self.closeFunctionArgument(property.value, declared, closed);
+            }
+        }
+    }
+
+    /// Whether every `routerMatch` table and every dispatch through its result
+    /// resolves to a closed set of functions. This is the answer
+    /// `contributeRouteDispatch` and `contributeRouteRoots` act on: an
+    /// unresolved one marks the row a lower bound, so a route function is not
+    /// a reliable call-graph edge.
+    fn routeDispatchesStable(self: *Analyzer) WalkError!bool {
+        const facts = try self.resolveFacts();
+        const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        var roots = try resolver.routeRoots(self.allocator);
+        defer roots.deinit(self.allocator);
+        if (roots.unresolved) return false;
+        for (0..self.ir_view.nodeCount()) |index| {
+            const node: NodeIndex = @intCast(index);
+            const tag = self.ir_view.getTag(node) orelse continue;
+            if (tag != .call and tag != .method_call) continue;
+            const call = self.ir_view.getCall(node) orelse continue;
+            var targets = (try resolver.resolveDispatch(self.allocator, call.callee)) orelse continue;
+            defer targets.deinit(self.allocator);
+            if (targets.unresolved) return false;
+        }
+        return true;
     }
 
     /// Record a call edge from the function being walked. While the module
@@ -2315,6 +2703,13 @@ fn projectEffectFacts(
     result.value_storage = try allocator.dupe(usize, analyzer.value_storage.items);
     result.reaches_recursion = try analyzer.recursionReachability();
     result.export_effects = try analyzer.exportEffectsWithReachability(result.reaches_recursion);
+    if (analyzer.function_value_escape) |site| {
+        result.function_value_escape = .{
+            .line = site.line,
+            .column = site.column,
+            .name = try allocator.dupe(u8, site.name),
+        };
+    }
     switch (options.contract_projection) {
         .unrequested => {},
         .complete => |contract_options| {
@@ -4428,4 +4823,177 @@ test "a local colliding with a pure import keeps a pure closure read only" {
         \\}
     );
     try testing.expect(row.readOnly());
+}
+
+// ---------------------------------------------------------------------------
+// Function-value escape
+// ---------------------------------------------------------------------------
+
+/// Run the analyzer and return the module's escape site, copying nothing:
+/// the caller passes the assertion to run while the facts are alive.
+fn expectEscape(source: []const u8, expected_name: ?[]const u8) !void {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer facts.deinit(allocator);
+    const site = facts.functionValueEscape();
+    if (expected_name) |name| {
+        const found = site orelse {
+            std.debug.print("no escape found in:\n{s}\n", .{source});
+            return error.EscapeMissing;
+        };
+        try testing.expectEqualStrings(name, found.name);
+        for (facts.all()) |function| try testing.expect(function.row.function_value_escape);
+    } else {
+        if (site) |found| {
+            std.debug.print("unexpected escape {s} at line {d} in:\n{s}\n", .{ found.name, found.line, source });
+            return error.UnexpectedEscape;
+        }
+        for (facts.all()) |function| try testing.expect(!function.row.function_value_escape);
+    }
+}
+
+test "a function value outside the closed positions sets the escape flag" {
+    const cases = [_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "down", .source = "function down(n) { const alias = down; return alias(n); }" },
+        .{ .name = "down", .source = "function down(n) { const o = { a: down }; return o.a(n); }" },
+        .{ .name = "down", .source = "function down(n) { return [down][0](n); }" },
+        .{ .name = "down", .source = "function pick() { return down; }\nfunction down(n) { return pick()(n); }" },
+        .{ .name = "down", .source = "function apply(f, n) { return f(n); }\nfunction down(n) { return apply(down, n); }" },
+        .{ .name = "down", .source = "function down(n) { return [n].reduce((a, x) => a, down)(n); }" },
+        .{ .name = "slot", .source = "let slot = (n) => n;\nfunction down(n) { return slot(n); }" },
+        .{ .name = "an anonymous function", .source = "const ops = { a: (n) => n };\nfunction handler(k) { return k; }" },
+        .{ .name = "an anonymous function", .source = "function handler(k) { return ((n) => n)(k); }" },
+        .{ .name = "down", .source = "function down(n) { for (const f of [down]) { return f(n); } return n; }" },
+    };
+    for (cases) |case| try expectEscape(case.source, case.name);
+}
+
+test "function values in the closed positions leave the escape flag clear" {
+    const cases = [_][]const u8{
+        // P0 and P1: a literal bound once, and calls by name.
+        "function fmt(x) { return x + 1; }\nfunction handler(k) { return fmt(k); }",
+        "const fmt = (x) => x + 1;\nfunction handler(k) { return fmt(k); }",
+        "function handler(k) { function g(x) { return x; } return g(k); }",
+        // P2: a builtin that calls its first argument.
+        "function fmt(x) { return x + 1; }\nfunction handler(items) { return items.map(fmt); }",
+        "function handler(items) { return items.filter((x) => x > 1).map(String); }",
+        // Ordinary handler code.
+        "function handler(req, s) { return Response.json({ a: s.trim().toLowerCase(), h: req.headers.get(\"x\") }); }",
+        // P2b: the zttp:result combinators call an inline callback.
+        "import { mapResult, ok } from \"zttp:result\";\nfunction handler(k) { return mapResult(ok(k), (n) => n * 2); }",
+        // P3: a route table only routerMatch reads.
+        "import { routerMatch } from \"zttp:router\";\n" ++
+            "function getHealth(req) { return Response.text(\"ok\"); }\n" ++
+            "const routes = { \"GET /health\": getHealth };\n" ++
+            "function handler(req) { const found = routerMatch(routes, req); if (found !== undefined) { return found.handler(req); } return Response.text(\"404\"); }",
+    };
+    for (cases) |source| try expectEscape(source, null);
+}
+
+test "a route table that anything else reads is not a closed position" {
+    const shared = "import { routerMatch } from \"zttp:router\";\n" ++
+        "function getHealth(req) { return Response.text(\"ok\"); }\n" ++
+        "const routes = { \"GET /health\": getHealth };\n";
+    // The table is read by something other than routerMatch.
+    try expectEscape(shared ++
+        "function handler(req) { const n = Object.keys(routes); const found = routerMatch(routes, req); " ++
+        "if (found !== undefined) { return found.handler(req); } return Response.text(\"404\"); }", "getHealth");
+    // The dispatch is extracted from the match result, so it is unstable.
+    try expectEscape(shared ++
+        "function handler(req) { const found = routerMatch(routes, req); if (found !== undefined) { " ++
+        "const run = found.handler; return run(req); } return Response.text(\"404\"); }", "getHealth");
+}
+
+test "a function handed to a call inside its own body is recursive" {
+    const row = try analyzeNamedRow("function down(n) { return [n].map(down)[0]; }", "down");
+    try testing.expect(row.recursive);
+    const ok = try analyzeNamedRow("function fmt(x) { return x; }\nfunction all(xs) { return xs.map(fmt); }", "all");
+    try testing.expect(!ok.recursive);
+}
+
+test "a call by name to a nested closure is a lower bound" {
+    const row = try analyzeHandlerRow(
+        \\function handler(req) {
+        \\  function g(x) { return g(x); }
+        \\  return g(3);
+        \\}
+    );
+    try testing.expect(row.lower_bound);
+}
+
+test "a sibling module's escaped function value reaches the importer" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { run, other } from "./helper.ts";
+        \\function viaRun() { return run(1); }
+        \\function viaOther() { return other(1); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer facts.deinit();
+
+    var supplied: [2]ImportedEffect = undefined;
+    var count: usize = 0;
+    for (facts.imports.items) |rec| {
+        if (std.mem.eql(u8, rec.imported_name, "run")) {
+            supplied[count] = .{ .slot = rec.slot, .effect = .{ .callable = .{ .function_value_escape = true } } };
+            count += 1;
+        } else if (std.mem.eql(u8, rec.imported_name, "other")) {
+            supplied[count] = .{ .slot = rec.slot, .effect = .{ .callable = .{} } };
+            count += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), count);
+
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    analyzer.facts = &facts;
+    analyzer.imported_effects = supplied[0..count];
+    try analyzer.analyze(root);
+
+    const via_run = analyzer.lookup("viaRun") orelse return error.FunctionNotFound;
+    const via_other = analyzer.lookup("viaOther") orelse return error.FunctionNotFound;
+    try testing.expect(via_run.function_value_escape);
+    try testing.expect(!via_run.lower_bound);
+    try testing.expect(!via_other.function_value_escape);
+}
+
+test "exports of a module with an escaped function value carry the flag" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator,
+        \\export function plain(n) { return n; }
+        \\export const ops = { a: (n) => n };
+    );
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+    var exports = try analyzer.exportEffects();
+    defer exports.deinit(allocator);
+    switch (exports.lookup("plain")) {
+        .callable => |row| try testing.expect(row.function_value_escape),
+        .data, .blocked => return error.CallableExportExpected,
+    }
+    switch (exports.lookup("ops")) {
+        .callable => |row| try testing.expect(row.function_value_escape),
+        .data, .blocked => return error.CallableExportExpected,
+    }
 }

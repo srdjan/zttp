@@ -127,6 +127,8 @@ pub fn dischargeWithTypeSource(
             .deterministic = fe.row.deterministic,
             .recursive = fe.row.recursive,
             .lower_bound = fe.row.lower_bound,
+            .function_value_escape = fe.row.function_value_escape,
+            .escape_site = effects.functionValueEscape(),
         };
 
         var declared: std.ArrayList([]const u8) = .empty;
@@ -312,4 +314,70 @@ test "discharge records non-total facts for a helper that may not return" {
 
     const maybe = table.byName("maybe") orelse return error.MissingCapsule;
     try std.testing.expect(!maybe.proven.total);
+}
+
+fn totalHolds(source: []const u8, name: []const u8) !bool {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer effects.deinit(allocator);
+
+    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
+    defer table.deinit(allocator);
+    const capsule = table.byName(name) orelse return error.MissingCapsule;
+    return capsule.proven.holds(.total);
+}
+
+test "total is refused for a function that recurses through a function value" {
+    // Each source recurses without end through a value, and each one proved
+    // `total` before function values were tracked as a class. The first name
+    // in a pair is the helper whose capsule is read.
+    const cases = [_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "p2g", .source =
+        \\function wrap(o) { return o; }
+        \\function down(n) { const o = { a: down }; return wrap(o).a(n); }
+        },
+        .{ .name = "q1", .source = "function down(n) { return [down][0](n); }" },
+        .{ .name = "r1", .source =
+        \\function apply(f, n) { return f(n); }
+        \\function down(n) { return apply(down, n); }
+        },
+        .{ .name = "r4", .source = "function down(n) { return [n].map(down)[0]; }" },
+        .{ .name = "g1", .source =
+        \\let slot = (n) => n;
+        \\function down(items, n) { return items.map(slot)[0] ?? n; }
+        \\function arm(n) { slot = (x) => down([x], x); return n; }
+        },
+        .{ .name = "fc1", .source =
+        \\let slot = (n) => n;
+        \\function down(n) { return slot(n); }
+        \\function arm(n) { slot = down; return n; }
+        },
+        .{ .name = "h4", .source = "function down(n) { return [n].reduce((acc, x) => acc, down)(n); }" },
+        .{ .name = "p2r", .source = "function down(n) { return down(n); }" },
+    };
+    for (cases) |case| {
+        const holds = try totalHolds(case.source, "down");
+        if (holds) std.debug.print("total was proven for {s}\n", .{case.name});
+        try std.testing.expect(!holds);
+    }
+}
+
+test "total holds for helpers when no function value escapes" {
+    const source =
+        \\function fmt(x) { return String(x); }
+        \\function norm(s) { return s.trim().toLowerCase(); }
+        \\function all(items) { return items.map(fmt); }
+        \\function pick(items) { return items.filter((x) => x > 1); }
+    ;
+    try std.testing.expect(try totalHolds(source, "fmt"));
+    try std.testing.expect(try totalHolds(source, "norm"));
+    try std.testing.expect(try totalHolds(source, "all"));
+    try std.testing.expect(try totalHolds(source, "pick"));
 }

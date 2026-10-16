@@ -408,6 +408,20 @@ bound is constant or linear with exhaustive path enumeration, the
 otherwise the proof card's counterexample names the loop and the discharge
 lever.
 
+Two things make the total unbounded whatever the loops say. A function value
+that is used as a value anywhere in the module - stored in a record or an
+array, returned, assigned to a `let`, bound to a second name, or passed to a
+user function or to an unlisted import - can be called with no edge in the
+call graph, so recursion through it is invisible. The module then proves no
+`total` capsule and no `cost_bounded`, and the diagnostic names the first such
+site. A function value is not an escape when it is declared once and called by
+name, passed as the first argument of `map`, `filter`, `forEach`, `reduce`,
+`some`, `every`, `find`, `findIndex`, `flatMap`, or `sort`, passed to
+`mapResult`, `andThen`, `mapError`, or `orElse`, or held as a value of a route
+table that only `routerMatch` reads. The handler also loses `cost_bounded` when
+its effect row is a lower bound, for example when it calls a closure declared
+in its own body.
+
 Results appear in:
 - `contract.json` under `costEnvelope`, plus the honest `properties.maxIoDepth`
 - The `cost_bounded` proof chip and `Proof<Response, "cost_bounded">` discharge
