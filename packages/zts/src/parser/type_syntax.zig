@@ -24,6 +24,317 @@ pub const Span = struct {
     }
 };
 
+pub const AdmissionMode = enum {
+    compile,
+    collect,
+};
+
+pub const AdmissionKind = enum {
+    any_type,
+    as_assertion,
+    satisfies_assertion,
+    unterminated_string,
+    nominal_base_not_scalar,
+    interface_declaration,
+    type_alias_declaration,
+    distinct_type_declaration,
+    legacy_types_import,
+    default_parameter,
+    optional_parameter,
+    default_export,
+    mutable_export,
+    array_type_alias,
+    readonly_array_type_alias,
+    void_type,
+    nesting_too_deep,
+};
+
+pub const AdmissionPosition = struct {
+    line: u32 = 1,
+    column: u32 = 1,
+};
+
+pub const AdmissionPresentation = struct {
+    source: []const u8,
+    offset: u32 = 0,
+    position: AdmissionPosition = .{},
+
+    pub fn positionAt(self: AdmissionPresentation, offset: u32) !AdmissionPosition {
+        if (offset < self.offset or @as(usize, offset) > self.source.len) {
+            return error.InvalidAdmissionPosition;
+        }
+        var position = self.position;
+        for (self.source[self.offset..offset]) |byte| {
+            if (byte == '\n') {
+                position.line += 1;
+                position.column = 1;
+            } else {
+                position.column += 1;
+            }
+        }
+        return position;
+    }
+
+    pub fn declinedParameterColon(self: AdmissionPresentation, colon: u32) !AdmissionPresentation {
+        if (@as(usize, colon) >= self.source.len or self.source[colon] != ':') {
+            return error.InvalidAdmissionPosition;
+        }
+        var consumed = try self.trackedWhitespaceAt(colon + 1);
+        consumed.offset = colon;
+        return consumed;
+    }
+
+    pub fn trackedWhitespaceAt(self: AdmissionPresentation, start: u32) !AdmissionPresentation {
+        var position = try self.positionAt(start);
+        var offset: usize = start;
+        while (offset < self.source.len) : (offset += 1) {
+            switch (self.source[offset]) {
+                ' ', '\t' => position.column += 1,
+                '\n' => {
+                    position.line += 1;
+                    position.column = 1;
+                },
+                '\r' => {},
+                else => break,
+            }
+        }
+        return .{ .source = self.source, .offset = @intCast(offset), .position = position };
+    }
+};
+
+pub const AdmissionDiagnostic = struct {
+    kind: AdmissionKind,
+    span: Span,
+    presentation: ?AdmissionPosition = null,
+
+    pub fn positionIn(self: AdmissionDiagnostic, source: []const u8) AdmissionPosition {
+        if (self.presentation) |position| return position;
+        return (AdmissionPresentation{ .source = source }).positionAt(
+            @intCast(@min(@as(usize, self.span.start), source.len)),
+        ) catch |err| @panic(@errorName(err));
+    }
+};
+
+fn sameAdmissionPosition(
+    source: ?[]const u8,
+    first: AdmissionDiagnostic,
+    second: AdmissionDiagnostic,
+) bool {
+    if (source) |text| return std.meta.eql(first.positionIn(text), second.positionIn(text));
+    if (first.presentation) |position| {
+        if (second.presentation) |other| return std.meta.eql(position, other);
+        return false;
+    }
+    if (second.presentation != null) return false;
+    return first.span.start == second.span.start;
+}
+
+pub const AdmissionObservationHistory = struct {
+    allocator: std.mem.Allocator,
+    source: ?[]const u8 = null,
+    diagnostics: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) AdmissionObservationHistory {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *AdmissionObservationHistory) void {
+        self.diagnostics.deinit(self.allocator);
+    }
+
+    pub fn items(self: *const AdmissionObservationHistory) []const AdmissionDiagnostic {
+        return self.diagnostics.items;
+    }
+
+    pub fn last(self: *const AdmissionObservationHistory) ?AdmissionDiagnostic {
+        return if (self.diagnostics.items.len == 0)
+            null
+        else
+            self.diagnostics.items[self.diagnostics.items.len - 1];
+    }
+
+    pub fn checkpoint(self: *const AdmissionObservationHistory) usize {
+        return self.diagnostics.items.len;
+    }
+
+    pub fn rollbackUnconfirmed(
+        self: *AdmissionObservationHistory,
+        checkpoint_value: usize,
+    ) void {
+        std.debug.assert(checkpoint_value <= self.diagnostics.items.len);
+        self.diagnostics.items.len = checkpoint_value;
+    }
+
+    pub fn record(
+        self: *AdmissionObservationHistory,
+        diagnostic: AdmissionDiagnostic,
+    ) !void {
+        for (self.diagnostics.items) |existing| {
+            if (sameAdmissionPosition(self.source, existing, diagnostic)) return;
+        }
+        try self.diagnostics.append(self.allocator, diagnostic);
+    }
+};
+
+pub const AdmissionCollector = struct {
+    allocator: std.mem.Allocator,
+    source: ?[]const u8 = null,
+    mode: AdmissionMode,
+    diagnostics: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty,
+    encounter_generation: u64 = 0,
+    fatal: bool = false,
+
+    pub fn init(allocator: std.mem.Allocator, mode: AdmissionMode) AdmissionCollector {
+        return .{
+            .allocator = allocator,
+            .mode = mode,
+        };
+    }
+
+    pub fn deinit(self: *AdmissionCollector) void {
+        self.diagnostics.deinit(self.allocator);
+    }
+
+    pub fn items(self: *const AdmissionCollector) []const AdmissionDiagnostic {
+        return self.diagnostics.items;
+    }
+
+    pub fn generation(self: *const AdmissionCollector) u64 {
+        return self.encounter_generation;
+    }
+
+    pub fn hasFatal(self: *const AdmissionCollector) bool {
+        return self.fatal;
+    }
+
+    pub fn isCompile(self: *const AdmissionCollector) bool {
+        return self.mode == .compile;
+    }
+
+    pub fn shouldStop(self: *const AdmissionCollector) bool {
+        return self.fatal or
+            (self.mode == .compile and self.diagnostics.items.len != 0);
+    }
+
+    pub fn recordRecoverable(
+        self: *AdmissionCollector,
+        diagnostic: AdmissionDiagnostic,
+    ) !void {
+        self.noteEncounter();
+        if (self.shouldStop()) return;
+        for (self.diagnostics.items) |existing| {
+            if (sameAdmissionPosition(self.source, existing, diagnostic)) return;
+        }
+        try self.diagnostics.append(self.allocator, diagnostic);
+    }
+
+    pub fn recordCaught(
+        self: *AdmissionCollector,
+        diagnostic: AdmissionDiagnostic,
+    ) !void {
+        if (self.mode == .compile) return;
+        try self.recordRecoverable(diagnostic);
+    }
+
+    pub fn recordFatal(
+        self: *AdmissionCollector,
+        diagnostic: AdmissionDiagnostic,
+    ) !void {
+        self.noteEncounter();
+        if (self.fatal) return;
+        try self.diagnostics.ensureTotalCapacity(self.allocator, 1);
+        self.diagnostics.items.len = 0;
+        self.diagnostics.appendAssumeCapacity(diagnostic);
+        self.fatal = true;
+    }
+
+    fn noteEncounter(self: *AdmissionCollector) void {
+        self.encounter_generation = std.math.add(
+            u64,
+            self.encounter_generation,
+            1,
+        ) catch std.math.maxInt(u64);
+    }
+};
+
+pub const AdmissionSink = struct {
+    collector: *AdmissionCollector,
+    observations: ?*AdmissionObservationHistory,
+    presentation: ?AdmissionPresentation = null,
+
+    pub fn init(
+        collector: *AdmissionCollector,
+        observations: ?*AdmissionObservationHistory,
+    ) AdmissionSink {
+        return .{
+            .collector = collector,
+            .observations = observations,
+        };
+    }
+
+    pub fn recordCaught(self: AdmissionSink, diagnostic: AdmissionDiagnostic) !void {
+        const presented = try self.present(diagnostic);
+        try self.recordObservation(presented);
+        try self.collector.recordCaught(presented);
+    }
+
+    pub fn recordRecoverable(self: AdmissionSink, diagnostic: AdmissionDiagnostic) !void {
+        const presented = try self.present(diagnostic);
+        try self.recordObservation(presented);
+        try self.collector.recordRecoverable(presented);
+    }
+
+    pub fn recordFatal(self: AdmissionSink, diagnostic: AdmissionDiagnostic) !void {
+        const presented = try self.present(diagnostic);
+        try self.recordObservation(presented);
+        try self.collector.recordFatal(presented);
+    }
+
+    pub fn present(self: AdmissionSink, diagnostic: AdmissionDiagnostic) !AdmissionDiagnostic {
+        var presented = diagnostic;
+        if (presented.presentation == null) {
+            if (self.presentation) |context| {
+                presented.presentation = try context.positionAt(diagnostic.span.start);
+            }
+        }
+        return presented;
+    }
+
+    pub fn physicalPositions(self: AdmissionSink) AdmissionSink {
+        var physical = self;
+        if (self.presentation) |context| {
+            physical.presentation = .{ .source = context.source };
+        }
+        return physical;
+    }
+
+    pub fn shouldStop(self: AdmissionSink) bool {
+        return self.collector.shouldStop();
+    }
+
+    pub fn isCompile(self: AdmissionSink) bool {
+        return self.collector.isCompile();
+    }
+
+    fn recordObservation(self: AdmissionSink, diagnostic: AdmissionDiagnostic) !void {
+        if (self.observations) |observations| try observations.record(diagnostic);
+    }
+};
+
+pub const AdmissionTypePolicy = enum {
+    general_type,
+    parameter_type,
+    any_only,
+    removed_only,
+};
+
+pub const AdmissionTypeSpanOptions = struct {
+    span: Span,
+    policy: AdmissionTypePolicy,
+    caught_lexical: []const AdmissionDiagnostic = &.{},
+    removed_span: ?Span = null,
+};
+
 pub const NamedFunctionGap = enum {
     whitespace,
     block_comment,
@@ -291,6 +602,7 @@ pub const TypeOnlyModuleRefusalReason = enum {
 pub const TypeOnlyModuleRefusal = struct {
     reason: TypeOnlyModuleRefusalReason,
     original_location: token_mod.SourceLocation,
+    raw_span: Span,
 };
 
 pub const TypeOnlyModuleDiagnosticKind = enum {
@@ -1704,9 +2016,7 @@ pub const Store = struct {
             module.kind,
             &diagnostics,
         )) orelse return error.InvalidTypeOnlyModule;
-        if (scanned.refused or scanned.encountered_diagnostic or
-            !std.meta.eql(scanned.module, module))
-        {
+        if (scanned.refused or !std.meta.eql(scanned.module, module)) {
             return error.InvalidTypeOnlyModule;
         }
     }
@@ -2881,6 +3191,7 @@ pub fn scanTypeOnlyModule(
         return .{ .refused = .{
             .reason = .zttp_types,
             .original_location = options.keyword.location(),
+            .raw_span = scanned.module.raw_span,
         } };
     }
     if (scanned.encountered_diagnostic) return .{ .excluded = scanned.module };
@@ -3192,6 +3503,16 @@ pub const TypeValueOutcome = union(enum) {
     excluded: ExcludedType,
 };
 
+pub const AdmittedTypeInput = struct {
+    raw_span: Span,
+    admission_end: u32,
+};
+
+pub const AdmittedTypeValueOutcome = union(enum) {
+    parsed: TypeValue,
+    excluded: ExcludedType,
+};
+
 pub const ReturnSyntaxOutcome = union(enum) {
     parsed: ReturnSyntax,
     failure: Failure,
@@ -3359,7 +3680,10 @@ pub fn parseTypeValueAndStore(
 }
 
 pub fn parseAdmittedTypeValue(store: *Store, raw_span: Span) !TypeValue {
-    return switch (try parseAdmittedTypeValueOutcome(store, raw_span, raw_span.end)) {
+    return switch (try parseAdmittedTypeValueOutcome(store, .{
+        .raw_span = raw_span,
+        .admission_end = raw_span.end,
+    })) {
         .parsed => |value| value,
         .excluded => |excluded| switch (excluded.reason) {
             .implementation_budget => error.TypeSyntaxFrameBudgetExceeded,
@@ -3368,20 +3692,19 @@ pub fn parseAdmittedTypeValue(store: *Store, raw_span: Span) !TypeValue {
     };
 }
 
-const AdmittedTypeValueOutcome = union(enum) {
-    parsed: TypeValue,
-    excluded: ExcludedType,
-};
-
-fn parseAdmittedTypeValueOutcome(
+pub fn parseAdmittedTypeValueOutcome(
     store: *Store,
-    raw_span: Span,
-    admission_end: u32,
+    input: AdmittedTypeInput,
 ) !AdmittedTypeValueOutcome {
     const checkpoint = store.checkpoint();
     errdefer store.rollback(checkpoint);
-    try store.validateSpan(raw_span);
-    var parser = SyntaxParser.init(store, store.source, raw_span.start, raw_span.end);
+    try validateAdmittedTypeInput(store, input);
+    var parser = SyntaxParser.init(
+        store,
+        store.source,
+        input.raw_span.start,
+        input.raw_span.end,
+    );
     defer parser.deinit();
     const parsed = parser.parse() catch |err| switch (err) {
         error.TypeSyntaxFrameBudgetExceeded, error.UnsupportedTypeSyntax => {
@@ -3396,25 +3719,35 @@ fn parseAdmittedTypeValueOutcome(
                     error.UnsupportedTypeSyntax => .{ .unsupported_syntax = span },
                     else => unreachable,
                 },
-                .raw_span = raw_span,
-                .admission_end = admission_end,
+                .raw_span = input.raw_span,
+                .admission_end = input.admission_end,
             } };
         },
         else => return err,
     };
-    try store.validateParsed(parsed.child, raw_span);
+    try store.validateParsed(parsed.child, input.raw_span);
     const value: TypeValue = .{
         .root = parsed.child,
         .node_range = .{
             .start = @intCast(checkpoint.nodes),
             .count = @intCast(store.nodes.items.len - checkpoint.nodes),
         },
-        .raw_span = raw_span,
-        .admission_end = admission_end,
+        .raw_span = input.raw_span,
+        .admission_end = input.admission_end,
         .semantic_prefix_end = parsed.end,
     };
     try store.validateTypeValue(value);
     return .{ .parsed = value };
+}
+
+fn validateAdmittedTypeInput(store: *const Store, input: AdmittedTypeInput) !void {
+    try store.validateSpan(input.raw_span);
+    if (input.admission_end < input.raw_span.end or
+        @as(usize, input.admission_end) > store.source.len or
+        !containsOnlyTypeWhitespace(store.source, input.raw_span.end, input.admission_end))
+    {
+        return error.InvalidTypeSpan;
+    }
 }
 
 const PredicateHeader = struct {
@@ -3487,33 +3820,59 @@ pub fn parseFunctionReturnAndStore(
             .admission_end = offset,
         } },
     };
-    const raw_span: Span = .{ .start = raw_start, .end = admission_end };
     var local_cursor = cursor.*;
     advanceCursorTo(&local_cursor, admission_end);
-    const legacy_return_kind: LegacyReturnKind = if (hasLegacyGuardFacet(source, raw_span))
+    const outcome = try parseAdmittedFunctionReturnAndStore(store, .{
+        .raw_span = .{ .start = raw_start, .end = admission_end },
+        .admission_end = admission_end,
+    });
+    switch (outcome) {
+        .parsed => {
+            cursor.* = local_cursor;
+            success = true;
+        },
+        .failure, .excluded => {},
+    }
+    return outcome;
+}
+
+pub fn parseAdmittedFunctionReturnAndStore(
+    store: *Store,
+    input: AdmittedTypeInput,
+) !ReturnSyntaxOutcome {
+    const checkpoint = store.checkpoint();
+    var success = false;
+    defer if (!success) store.rollback(checkpoint);
+    try validateAdmittedTypeInput(store, input);
+    if (input.raw_span.end != input.admission_end) return error.InvalidTypeSpan;
+
+    const source = store.source;
+    const legacy_return_kind: LegacyReturnKind = if (hasLegacyGuardFacet(source, input.raw_span))
         .type_guard
     else
         .ordinary;
 
     var result: ReturnSyntax = undefined;
-    if (predicateHeader(source, raw_span)) |header| {
+    if (predicateHeader(source, input.raw_span)) |header| {
         const narrowed = switch (try parseAdmittedTypeValueOutcome(
             store,
-            header.narrowed_span,
-            admission_end,
+            .{
+                .raw_span = header.narrowed_span,
+                .admission_end = input.admission_end,
+            },
         )) {
             .parsed => |value| value,
             .excluded => |excluded| return .{ .excluded = excluded },
         };
         const compatibility: ?TypeValue = if (legacy_return_kind == .ordinary)
-            switch (try parseAdmittedTypeValueOutcome(store, raw_span, admission_end)) {
+            switch (try parseAdmittedTypeValueOutcome(store, input)) {
                 .parsed => |value| value,
                 .excluded => |excluded| return .{ .excluded = excluded },
             }
         else
             null;
         result = .{
-            .raw_span = raw_span,
+            .raw_span = input.raw_span,
             .legacy_return_kind = legacy_return_kind,
             .structure = .{ .predicate = .{
                 .target_span = header.target_span,
@@ -3523,19 +3882,18 @@ pub fn parseFunctionReturnAndStore(
             .legacy_ordinary_prefix = compatibility,
         };
     } else {
-        const value = switch (try parseAdmittedTypeValueOutcome(store, raw_span, admission_end)) {
+        const value = switch (try parseAdmittedTypeValueOutcome(store, input)) {
             .parsed => |parsed| parsed,
             .excluded => |excluded| return .{ .excluded = excluded },
         };
         result = .{
-            .raw_span = raw_span,
+            .raw_span = input.raw_span,
             .legacy_return_kind = legacy_return_kind,
             .structure = .{ .value = value },
             .legacy_ordinary_prefix = null,
         };
     }
     try store.validateReturnSyntax(result);
-    cursor.* = local_cursor;
     success = true;
     return .{ .parsed = result };
 }
@@ -3561,6 +3919,30 @@ pub fn parseAndStore(
         .failure => |failure| return .{ .failure = failure },
         .excluded => |excluded| return .{ .excluded = excluded },
     };
+    try appendAnnotationValue(store, binding, value);
+    cursor.* = local_cursor;
+    return .{ .parsed = parsedTypeFromValue(value) };
+}
+
+pub fn parseAdmittedAnnotationAndStore(
+    store: *Store,
+    binding: BindingRef,
+    input: AdmittedTypeInput,
+) !AdmittedTypeValueOutcome {
+    const checkpoint = store.checkpoint();
+    var published = false;
+    defer if (!published) store.rollback(checkpoint);
+    const outcome = try parseAdmittedTypeValueOutcome(store, input);
+    const value = switch (outcome) {
+        .parsed => |parsed| parsed,
+        .excluded => return outcome,
+    };
+    try appendAnnotationValue(store, binding, value);
+    published = true;
+    return .{ .parsed = value };
+}
+
+fn appendAnnotationValue(store: *Store, binding: BindingRef, value: TypeValue) !void {
     const annotation: Annotation = .{
         .binding = binding,
         .root = value.root,
@@ -3571,12 +3953,14 @@ pub fn parseAndStore(
     };
     try store.validateAnnotation(annotation);
     try store.appendAnnotation(annotation);
-    cursor.* = local_cursor;
-    return .{ .parsed = .{
+}
+
+fn parsedTypeFromValue(value: TypeValue) ParsedType {
+    return .{
         .root = value.root,
         .semantic_span = .{ .start = value.raw_span.start, .end = value.semantic_prefix_end },
         .raw_span = value.raw_span,
-    } };
+    };
 }
 
 /// Parse one already-admitted generic fragment without ordinary annotation
@@ -3615,9 +3999,42 @@ pub const DeclarationParseOutcome = union(enum) {
     not_declaration,
 };
 
+pub const AdmittedDeclarationOptions = struct {
+    keyword: Token,
+    export_span: ?Span,
+    kind: DeclarationKind,
+    authored_scope: u16,
+    generic_list: ?Span = null,
+    body: ?AdmittedTypeInput,
+    raw_header_end: ?u32 = null,
+};
+
 pub const GenericListScan = struct {
     span: Span,
     suppressed_diagnostic: bool,
+};
+
+pub const AdmissionGenericScan = union(enum) {
+    not_matched,
+    lexical_nonmatch,
+    scanned: GenericListScan,
+    nesting_too_deep: u32,
+};
+
+pub const AdmissionRawScanOptions = struct {
+    source: []const u8,
+    start: u32,
+    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+};
+
+pub const AdmissionQuotedScan = union(enum) {
+    complete: u32,
+    terminal: AdmissionDiagnostic,
+};
+
+pub const AdmissionBraceScan = union(enum) {
+    complete: u32,
+    nesting_too_deep: u32,
 };
 
 pub const ExplicitCallScan = union(enum) {
@@ -3629,6 +4046,16 @@ pub const ExplicitCallScan = union(enum) {
 const LegacyTemplateFrame = struct {
     interpolation_depth: u16 = 0,
     propagate_errors: bool,
+};
+
+const LegacyQuoteFailure = union(enum) {
+    unterminated_string: u32,
+    nesting_too_deep: u32,
+};
+
+const LegacyMatchingBracketScan = union(enum) {
+    complete: usize,
+    nesting_too_deep: u32,
 };
 
 fn scanLegacyPlainQuoted(source: []const u8, start: usize, quote: u8) struct {
@@ -3656,10 +4083,42 @@ fn scanLegacyGenericQuoted(
     propagate_errors: bool,
     suppressed_diagnostic: *bool,
 ) !?usize {
+    var failure: ?LegacyQuoteFailure = null;
+    return scanLegacyGenericQuotedCore(
+        allocator,
+        source,
+        start,
+        quote,
+        propagate_errors,
+        suppressed_diagnostic,
+        null,
+        &failure,
+    );
+}
+
+fn scanLegacyGenericQuotedCore(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    quote: u8,
+    propagate_errors: bool,
+    suppressed_diagnostic: *bool,
+    caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
+    failure: *?LegacyQuoteFailure,
+) !?usize {
     if (quote != '`') {
         const scanned = scanLegacyPlainQuoted(source, start, quote);
-        if (scanned.unterminated_line and propagate_errors) return null;
-        if (scanned.unterminated_line) suppressed_diagnostic.* = true;
+        if (scanned.unterminated_line and propagate_errors) {
+            failure.* = .{ .unterminated_string = @intCast(scanned.end) };
+            return null;
+        }
+        if (scanned.unterminated_line) {
+            suppressed_diagnostic.* = true;
+            if (caught) |items| try items.append(allocator, .{
+                .kind = .unterminated_string,
+                .span = .{ .start = @intCast(scanned.end), .end = @intCast(scanned.end + 1) },
+            });
+        }
         return scanned.end;
     }
 
@@ -3690,7 +4149,13 @@ fn scanLegacyGenericQuoted(
 
         if (source[pos] == '"' or source[pos] == '\'') {
             const nested = scanLegacyPlainQuoted(source, pos, source[pos]);
-            if (nested.unterminated_line) suppressed_diagnostic.* = true;
+            if (nested.unterminated_line) {
+                suppressed_diagnostic.* = true;
+                if (caught) |items| try items.append(allocator, .{
+                    .kind = .unterminated_string,
+                    .span = .{ .start = @intCast(nested.end), .end = @intCast(nested.end + 1) },
+                });
+            }
             pos = nested.end;
             continue;
         }
@@ -3705,8 +4170,16 @@ fn scanLegacyGenericQuoted(
         }
         if (source[pos] == '{') {
             if (frame.interpolation_depth >= max_type_depth) {
-                if (frame.propagate_errors) return null;
+                const offset: u32 = @intCast(pos);
+                if (frame.propagate_errors) {
+                    failure.* = .{ .nesting_too_deep = offset };
+                    return null;
+                }
                 suppressed_diagnostic.* = true;
+                if (caught) |items| try items.append(allocator, .{
+                    .kind = .nesting_too_deep,
+                    .span = .{ .start = offset, .end = offset + 1 },
+                });
                 _ = frames.pop();
                 continue;
             }
@@ -3719,6 +4192,115 @@ fn scanLegacyGenericQuoted(
     return pos;
 }
 
+pub fn scanAdmissionQuotedRegion(
+    allocator: std.mem.Allocator,
+    options: AdmissionRawScanOptions,
+) !AdmissionQuotedScan {
+    if (options.source.len > std.math.maxInt(u32)) return error.TypeSourceTooLarge;
+    if (@as(usize, options.start) >= options.source.len) return error.InvalidAdmissionSpan;
+    const quote = options.source[options.start];
+    if (quote != '\'' and quote != '"' and quote != '`') {
+        return error.InvalidAdmissionSpan;
+    }
+
+    const caught_checkpoint = options.caught.items.len;
+    errdefer options.caught.items.len = caught_checkpoint;
+    var suppressed_diagnostic = false;
+    var failure: ?LegacyQuoteFailure = null;
+    const end = try scanLegacyGenericQuotedCore(
+        allocator,
+        options.source,
+        options.start,
+        quote,
+        true,
+        &suppressed_diagnostic,
+        options.caught,
+        &failure,
+    );
+    if (end) |complete| return .{ .complete = @intCast(complete) };
+    const terminal: AdmissionDiagnostic = switch (failure orelse
+        return error.InvalidAdmissionQuoteResult) {
+        .unterminated_string => |offset| .{
+            .kind = .unterminated_string,
+            .span = .{ .start = offset, .end = offset + 1 },
+        },
+        .nesting_too_deep => |offset| .{
+            .kind = .nesting_too_deep,
+            .span = .{ .start = offset, .end = offset + 1 },
+        },
+    };
+    return .{ .terminal = terminal };
+}
+
+fn appendLegacyQuoteFailure(
+    allocator: std.mem.Allocator,
+    caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
+    failure: LegacyQuoteFailure,
+) !void {
+    const items = caught orelse return;
+    const diagnostic: AdmissionDiagnostic = switch (failure) {
+        .unterminated_string => |offset| .{
+            .kind = .unterminated_string,
+            .span = .{ .start = offset, .end = offset + 1 },
+        },
+        .nesting_too_deep => |offset| .{
+            .kind = .nesting_too_deep,
+            .span = .{ .start = offset, .end = offset + 1 },
+        },
+    };
+    try items.append(allocator, diagnostic);
+}
+
+fn scanLegacyMatchingBracketCore(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    open: u8,
+    suppressed_diagnostic: *bool,
+    caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
+) !LegacyMatchingBracketScan {
+    if (source.len > std.math.maxInt(u32)) return error.TypeSourceTooLarge;
+    const caught_checkpoint = if (caught) |items| items.items.len else 0;
+    errdefer {
+        if (caught) |items| items.items.len = caught_checkpoint;
+    }
+    const close: u8 = switch (open) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        else => return .{ .complete = start + 1 },
+    };
+    var depth: u16 = 1;
+    var pos = start + 1;
+    while (pos < source.len and depth > 0) {
+        const byte = source[pos];
+        if (byte == '"' or byte == '\'' or byte == '`') {
+            var failure: ?LegacyQuoteFailure = null;
+            pos = (try scanLegacyGenericQuotedCore(
+                allocator,
+                source,
+                pos,
+                byte,
+                false,
+                suppressed_diagnostic,
+                caught,
+                &failure,
+            )) orelse return error.InvalidAdmissionQuoteResult;
+            continue;
+        }
+        if (byte == open) {
+            if (depth >= max_type_depth) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            }
+            depth += 1;
+        } else if (byte == close) {
+            depth -= 1;
+        }
+        pos += 1;
+    }
+    return .{ .complete = pos };
+}
+
 fn skipLegacyMatchingBracket(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -3726,58 +4308,56 @@ fn skipLegacyMatchingBracket(
     open: u8,
     suppressed_diagnostic: *bool,
 ) !?usize {
-    const close: u8 = switch (open) {
-        '(' => ')',
-        '[' => ']',
-        '{' => '}',
-        else => return start + 1,
+    return switch (try scanLegacyMatchingBracketCore(
+        allocator,
+        source,
+        start,
+        open,
+        suppressed_diagnostic,
+        null,
+    )) {
+        .complete => |end| end,
+        .nesting_too_deep => null,
     };
-    var depth: u16 = 1;
-    var pos = start + 1;
-    while (pos < source.len and depth > 0) {
-        const byte = source[pos];
-        if (byte == '"' or byte == '\'' or byte == '`') {
-            pos = (try scanLegacyGenericQuoted(
-                allocator,
-                source,
-                pos,
-                byte,
-                false,
-                suppressed_diagnostic,
-            )) orelse pos + 1;
-            continue;
-        }
-        if (byte == open) {
-            if (depth >= max_type_depth) return null;
-            depth += 1;
-        } else if (byte == close) {
-            depth -= 1;
-        }
-        pos += 1;
-    }
-    return pos;
 }
 
-pub fn scanBalancedGenericList(
+fn scanBalancedGenericListCore(
     allocator: std.mem.Allocator,
     source: []const u8,
     start: u32,
-) !?GenericListScan {
-    if (@as(usize, start) >= source.len or source[start] != '<') return null;
+    caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
+) !AdmissionGenericScan {
+    if (source.len > std.math.maxInt(u32)) return error.TypeSourceTooLarge;
+    if (@as(usize, start) > source.len) return error.InvalidAdmissionSpan;
+    if (@as(usize, start) == source.len or source[start] != '<') return .not_matched;
+    const caught_checkpoint = if (caught) |items| items.items.len else 0;
+    errdefer {
+        if (caught) |items| items.items.len = caught_checkpoint;
+    }
     var angle_depth: u16 = 1;
     var suppressed_diagnostic = false;
     var pos: usize = start + 1;
     while (pos < source.len and angle_depth > 0) {
         const byte = source[pos];
         if (byte == '"' or byte == '\'' or byte == '`') {
-            pos = (try scanLegacyGenericQuoted(
+            var failure: ?LegacyQuoteFailure = null;
+            pos = (try scanLegacyGenericQuotedCore(
                 allocator,
                 source,
                 pos,
                 byte,
                 true,
                 &suppressed_diagnostic,
-            )) orelse return null;
+                caught,
+                &failure,
+            )) orelse {
+                try appendLegacyQuoteFailure(
+                    allocator,
+                    caught,
+                    failure orelse return error.InvalidAdmissionQuoteResult,
+                );
+                return .lexical_nonmatch;
+            };
             continue;
         }
         if (byte == '/' and pos + 1 < source.len) {
@@ -3788,37 +4368,69 @@ pub fn scanBalancedGenericList(
             if (source[pos + 1] == '*') {
                 pos += 2;
                 while (pos + 1 < source.len and !(source[pos] == '*' and source[pos + 1] == '/')) pos += 1;
-                if (pos + 1 >= source.len) return null;
+                if (pos + 1 >= source.len) return .lexical_nonmatch;
                 pos += 2;
                 continue;
             }
         }
         switch (byte) {
             '<' => {
-                if (angle_depth >= max_type_depth) return null;
+                if (angle_depth >= max_type_depth) {
+                    return .{ .nesting_too_deep = @intCast(pos) };
+                }
                 angle_depth += 1;
             },
             '>' => if (pos == 0 or source[pos - 1] != '=') {
                 angle_depth -= 1;
             },
             '(', '[', '{' => {
-                pos = (try skipLegacyMatchingBracket(
+                switch (try scanLegacyMatchingBracketCore(
                     allocator,
                     source,
                     pos,
                     byte,
                     &suppressed_diagnostic,
-                )) orelse return null;
+                    caught,
+                )) {
+                    .complete => |end| pos = end,
+                    .nesting_too_deep => |offset| {
+                        return .{ .nesting_too_deep = offset };
+                    },
+                }
                 continue;
             },
             else => {},
         }
         pos += 1;
     }
-    if (angle_depth != 0) return null;
-    return .{
+    if (angle_depth != 0) return .not_matched;
+    return .{ .scanned = .{
         .span = .{ .start = start, .end = @intCast(pos) },
         .suppressed_diagnostic = suppressed_diagnostic,
+    } };
+}
+
+pub fn scanAdmissionGenericList(
+    allocator: std.mem.Allocator,
+    options: AdmissionRawScanOptions,
+) !AdmissionGenericScan {
+    return scanBalancedGenericListCore(
+        allocator,
+        options.source,
+        options.start,
+        options.caught,
+    );
+}
+
+pub fn scanBalancedGenericList(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: u32,
+) !?GenericListScan {
+    if (@as(usize, start) >= source.len) return null;
+    return switch (try scanBalancedGenericListCore(allocator, source, start, null)) {
+        .scanned => |scan| scan,
+        .not_matched, .lexical_nonmatch, .nesting_too_deep => null,
     };
 }
 
@@ -3861,12 +4473,19 @@ pub fn isPrivateErasedPrefixListEligible(source: []const u8, scan: GenericListSc
     return isPrivateGenericListEligible(source, scan) and scan.span.end - scan.span.start >= 2;
 }
 
-pub fn scanExplicitCallTypeArguments(
+fn scanExplicitCallTypeArgumentsCore(
     allocator: std.mem.Allocator,
     source: []const u8,
     start: u32,
-) !ExplicitCallScan {
-    if (@as(usize, start) >= source.len or source[start] != '<') return .not_call;
+    caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
+) !AdmissionGenericScan {
+    if (source.len > std.math.maxInt(u32)) return error.TypeSourceTooLarge;
+    if (@as(usize, start) > source.len) return error.InvalidAdmissionSpan;
+    if (@as(usize, start) == source.len or source[start] != '<') return .not_matched;
+    const caught_checkpoint = if (caught) |items| items.items.len else 0;
+    errdefer {
+        if (caught) |items| items.items.len = caught_checkpoint;
+    }
     var angle_depth: u16 = 1;
     var paren_depth: u16 = 0;
     var bracket_depth: u16 = 0;
@@ -3876,14 +4495,24 @@ pub fn scanExplicitCallTypeArguments(
     while (pos < source.len) {
         const byte = source[pos];
         if (byte == '"' or byte == '\'' or byte == '`') {
-            pos = (try scanLegacyGenericQuoted(
+            var failure: ?LegacyQuoteFailure = null;
+            pos = (try scanLegacyGenericQuotedCore(
                 allocator,
                 source,
                 pos,
                 byte,
                 true,
                 &suppressed_diagnostic,
-            )) orelse return .excluded;
+                caught,
+                &failure,
+            )) orelse {
+                try appendLegacyQuoteFailure(
+                    allocator,
+                    caught,
+                    failure orelse return error.InvalidAdmissionQuoteResult,
+                );
+                return .lexical_nonmatch;
+            };
             continue;
         }
         if (byte == '/' and pos + 1 < source.len) {
@@ -3894,7 +4523,7 @@ pub fn scanExplicitCallTypeArguments(
             if (source[pos + 1] == '*') {
                 pos += 2;
                 while (pos + 1 < source.len and !(source[pos] == '*' and source[pos + 1] == '/')) pos += 1;
-                if (pos + 1 >= source.len) return .excluded;
+                if (pos + 1 >= source.len) return .lexical_nonmatch;
                 pos += 2;
                 continue;
             }
@@ -3906,7 +4535,7 @@ pub fn scanExplicitCallTypeArguments(
                     if (paren_depth != 0 or bracket_depth != 0 or brace_depth != 0 or
                         pos + 1 >= source.len or source[pos + 1] != '(')
                     {
-                        return .not_call;
+                        return .not_matched;
                     }
                     return .{ .scanned = .{
                         .span = .{ .start = start, .end = @intCast(pos + 1) },
@@ -3920,15 +4549,15 @@ pub fn scanExplicitCallTypeArguments(
                 paren_depth,
                 bracket_depth,
                 brace_depth,
-            )) return .excluded,
+            )) return .{ .nesting_too_deep = @intCast(pos) },
             '(' => if (!increaseCombinedGenericDepth(
                 &paren_depth,
                 angle_depth,
                 bracket_depth,
                 brace_depth,
-            )) return .excluded,
+            )) return .{ .nesting_too_deep = @intCast(pos) },
             ')' => {
-                if (paren_depth == 0) return .not_call;
+                if (paren_depth == 0) return .not_matched;
                 paren_depth -= 1;
             },
             '[' => if (!increaseCombinedGenericDepth(
@@ -3936,9 +4565,9 @@ pub fn scanExplicitCallTypeArguments(
                 angle_depth,
                 paren_depth,
                 brace_depth,
-            )) return .excluded,
+            )) return .{ .nesting_too_deep = @intCast(pos) },
             ']' => {
-                if (bracket_depth == 0) return .not_call;
+                if (bracket_depth == 0) return .not_matched;
                 bracket_depth -= 1;
             },
             '{' => if (!increaseCombinedGenericDepth(
@@ -3946,26 +4575,72 @@ pub fn scanExplicitCallTypeArguments(
                 angle_depth,
                 paren_depth,
                 bracket_depth,
-            )) return .excluded,
+            )) return .{ .nesting_too_deep = @intCast(pos) },
             '}' => {
-                if (brace_depth == 0) return .not_call;
+                if (brace_depth == 0) return .not_matched;
                 brace_depth -= 1;
             },
             '=' => {
-                if (pos + 1 >= source.len or source[pos + 1] != '>') return .not_call;
+                if (pos + 1 >= source.len or source[pos + 1] != '>') return .not_matched;
                 pos += 2;
                 continue;
             },
-            '|', '&' => if (pos + 1 < source.len and source[pos + 1] == byte) return .not_call,
-            '?', ':' => if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return .not_call,
-            ';' => if (brace_depth == 0) return .not_call,
-            '-' => if (pos + 1 >= source.len or !std.ascii.isDigit(source[pos + 1])) return .not_call,
+            '|', '&' => if (pos + 1 < source.len and source[pos + 1] == byte) return .not_matched,
+            '?', ':' => if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return .not_matched,
+            ';' => if (brace_depth == 0) return .not_matched,
+            '-' => if (pos + 1 >= source.len or !std.ascii.isDigit(source[pos + 1])) return .not_matched,
             ' ', '\t', '\n', '\r', ',', '.' => {},
-            else => if (!isIdentifierContinue(byte)) return .not_call,
+            else => if (!isIdentifierContinue(byte)) return .not_matched,
         }
         pos += 1;
     }
-    return .not_call;
+    return .not_matched;
+}
+
+pub fn scanAdmissionCallTypeArguments(
+    allocator: std.mem.Allocator,
+    options: AdmissionRawScanOptions,
+) !AdmissionGenericScan {
+    return scanExplicitCallTypeArgumentsCore(
+        allocator,
+        options.source,
+        options.start,
+        options.caught,
+    );
+}
+
+pub fn scanExplicitCallTypeArguments(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: u32,
+) !ExplicitCallScan {
+    if (@as(usize, start) >= source.len) return .not_call;
+    return switch (try scanExplicitCallTypeArgumentsCore(allocator, source, start, null)) {
+        .scanned => |scan| .{ .scanned = scan },
+        .not_matched => .not_call,
+        .lexical_nonmatch, .nesting_too_deep => .excluded,
+    };
+}
+
+pub fn scanAdmissionBraceBody(
+    allocator: std.mem.Allocator,
+    options: AdmissionRawScanOptions,
+) !AdmissionBraceScan {
+    if (@as(usize, options.start) >= options.source.len or options.source[options.start] != '{') {
+        return error.InvalidAdmissionSpan;
+    }
+    var suppressed_diagnostic = false;
+    return switch (try scanLegacyMatchingBracketCore(
+        allocator,
+        options.source,
+        options.start,
+        '{',
+        &suppressed_diagnostic,
+        options.caught,
+    )) {
+        .complete => |end| .{ .complete = @intCast(end) },
+        .nesting_too_deep => |offset| .{ .nesting_too_deep = offset },
+    };
 }
 
 fn increaseCombinedGenericDepth(
@@ -4425,12 +5100,182 @@ pub fn parseDeclarationAndStore(
     authored_scope: u16,
     cursor: *Cursor,
 ) !DeclarationParseOutcome {
+    return parseDeclarationAndStoreCore(
+        store,
+        source,
+        keyword,
+        export_span,
+        kind,
+        authored_scope,
+        cursor,
+        .strict,
+    );
+}
+
+pub fn parseAdmittedDeclarationAndStore(
+    store: *Store,
+    options: AdmittedDeclarationOptions,
+    cursor: *Cursor,
+) !DeclarationParseOutcome {
+    if (options.raw_header_end) |end| {
+        return parseAdmittedAbsentDeclarationAndStore(store, options, cursor, end);
+    }
+    return parseDeclarationAndStoreCore(
+        store,
+        store.source,
+        options.keyword,
+        options.export_span,
+        options.kind,
+        options.authored_scope,
+        cursor,
+        .{ .admitted = .{
+            .generic_list = options.generic_list,
+            .body = options.body,
+        } },
+    );
+}
+
+fn parseAdmittedAbsentDeclarationAndStore(
+    store: *Store,
+    options: AdmittedDeclarationOptions,
+    cursor: *Cursor,
+    raw_header_end: u32,
+) !DeclarationParseOutcome {
+    const source = store.source;
+    if (options.kind != .structural or options.body != null) return error.InvalidAdmissionSpan;
+    const keyword_end = std.math.add(u32, options.keyword.start, options.keyword.len) catch
+        return error.InvalidAdmissionSpan;
+    const name = cursor.current;
+    const name_end = std.math.add(u32, name.start, name.len) catch return error.InvalidAdmissionSpan;
+    if (@as(usize, keyword_end) > source.len or @as(usize, name_end) > source.len or
+        keyword_end > name.start or @as(usize, raw_header_end) > source.len or
+        name_end > raw_header_end)
+    {
+        return error.InvalidAdmissionSpan;
+    }
+    if (!std.mem.eql(u8, source[options.keyword.start..keyword_end], "structural") or
+        !tokenIsDeclarationName(name, source) or
+        !containsOnlyTypeWhitespace(source, keyword_end, name.start))
+    {
+        return error.InvalidAdmissionSpan;
+    }
+    if (options.export_span) |span| {
+        if (span.start > span.end or @as(usize, span.end) > source.len or
+            span.end > options.keyword.start or !std.mem.eql(u8, span.text(source), "export") or
+            !containsOnlyTypeWhitespace(source, span.end, options.keyword.start))
+        {
+            return error.InvalidAdmissionSpan;
+        }
+    }
+    var header_tail = name_end;
+    if (options.generic_list) |span| {
+        if (span.start > span.end or @as(usize, span.end) > source.len or
+            span.end - span.start < 2 or span.end > raw_header_end or
+            span.start != skipTypeWhitespace(source, name_end) or
+            source[span.start] != '<' or source[span.end - 1] != '>')
+        {
+            return error.InvalidAdmissionSpan;
+        }
+        header_tail = span.end;
+    }
+    if (raw_header_end != skipTypeWhitespace(source, header_tail) or
+        source.len < 2 or @as(usize, raw_header_end) > source.len - 2 or
+        source[raw_header_end] != '/' or
+        (source[raw_header_end + 1] != '/' and source[raw_header_end + 1] != '*'))
+    {
+        return error.InvalidAdmissionSpan;
+    }
+
+    const checkpoint = store.checkpoint();
+    var published = false;
+    defer if (!published) store.rollback(checkpoint);
+    const source_order = std.math.cast(u32, store.declarations.items.len) orelse
+        return error.TooManyTypeItems;
+    var pending_owner: ?PendingGenericOwner = if (options.generic_list) |span|
+        try reserveDeclarationGenericOwner(store, span, .structural)
+    else
+        null;
+    const declaration: Declaration = .{
+        .kind = .structural,
+        .export_span = options.export_span,
+        .keyword_span = .{ .start = options.keyword.start, .end = keyword_end },
+        .name_span = .{ .start = name.start, .end = name_end },
+        .equals_span = null,
+        .terminator_span = null,
+        .body = .absent,
+        .generic_owner = if (pending_owner) |owner| owner.owner_index else null,
+        .full_span = .{
+            .start = if (options.export_span) |span| span.start else options.keyword.start,
+            .end = raw_header_end,
+        },
+        .source_order = source_order,
+        .authored_scope = options.authored_scope,
+    };
+    const full_span = try publishDeclaration(store, declaration, if (pending_owner) |*owner| owner else null);
+    var resumed = cursor.tokenizer;
+    resumed.resumeAfterRawErasure(raw_header_end, name);
+    const consumed_before_erasure = cursor.consumed;
+    cursor.* = Cursor.afterCurrent(resumed);
+    cursor.consumed +|= consumed_before_erasure;
+    published = true;
+    return .{ .parsed = full_span };
+}
+
+fn publishDeclaration(store: *Store, declaration: Declaration, pending_owner: ?*PendingGenericOwner) !Span {
+    try store.declarations.append(store.allocator, declaration);
+    if (pending_owner) |owner| {
+        try store.finishGenericOwner(owner, .{ .declaration = .{
+            .kind = declaration.kind,
+            .index = declaration.source_order,
+        } });
+    }
+    try store.validateDeclaration(store.declarations.items[declaration.source_order]);
+    return declaration.full_span;
+}
+
+const DeclarationBodyInput = union(enum) {
+    strict,
+    admitted: struct {
+        generic_list: ?Span,
+        body: ?AdmittedTypeInput,
+    },
+};
+
+fn reserveDeclarationGenericOwner(
+    store: *Store,
+    list_span: Span,
+    kind: DeclarationKind,
+) !PendingGenericOwner {
+    return store.reserveGenericOwner(.{
+        .list_span = list_span,
+        .capture_spans = .{
+            .actual_erased_span = list_span,
+            .legacy_recorded_span = list_span,
+        },
+        .policy = switch (kind) {
+            .structural => .structural,
+            .nominal => .ignored,
+        },
+    });
+}
+
+fn parseDeclarationAndStoreCore(
+    store: *Store,
+    source: []const u8,
+    keyword: Token,
+    export_span: ?Span,
+    kind: DeclarationKind,
+    authored_scope: u16,
+    cursor: *Cursor,
+    body_input: DeclarationBodyInput,
+) !DeclarationParseOutcome {
     const checkpoint = store.checkpoint();
     var published = false;
     defer if (!published) store.rollback(checkpoint);
 
     var scanned = cursor.*;
     if (!tokenIsDeclarationName(scanned.current, source)) return .not_declaration;
+    const name_token = scanned.current;
     const name_span = tokenSpan(scanned.current);
     if (export_span) |span| {
         if (!containsOnlyTypeWhitespace(source, span.end, keyword.start)) return .not_declaration;
@@ -4444,38 +5289,87 @@ pub fn parseDeclarationAndStore(
         return .not_declaration;
     }
 
+    var admitted_generic_list: ?Span = null;
     var pending_owner: ?PendingGenericOwner = null;
     var generic_owner: ?u32 = null;
-    if (@as(usize, scanned.current.start) < source.len and source[scanned.current.start] == '<') {
-        const generic_list = (try scanBalancedGenericList(
-            store.allocator,
-            source,
-            scanned.current.start,
-        )) orelse
-            return .not_declaration;
-        if (!isPrivateGenericListEligible(source, generic_list)) {
-            return .{ .excluded = .{
-                .reason = .unsupported_syntax,
-                .raw_span = generic_list.span,
-                .admission_end = generic_list.span.end,
-            } };
-        }
-        pending_owner = try store.reserveGenericOwner(.{
-            .list_span = generic_list.span,
-            .capture_spans = .{
-                .actual_erased_span = generic_list.span,
-                .legacy_recorded_span = generic_list.span,
-            },
-            .policy = switch (kind) {
-                .structural => .structural,
-                .nominal => .ignored,
-            },
-        });
+    const header_has_generic = @as(usize, scanned.current.start) < source.len and
+        source[scanned.current.start] == '<';
+    switch (body_input) {
+        .strict => if (header_has_generic) {
+            const scanned_list = (try scanBalancedGenericList(
+                store.allocator,
+                source,
+                scanned.current.start,
+            )) orelse
+                return .not_declaration;
+            if (!isPrivateGenericListEligible(source, scanned_list)) {
+                return .{ .excluded = .{
+                    .reason = .unsupported_syntax,
+                    .raw_span = scanned_list.span,
+                    .admission_end = scanned_list.span.end,
+                } };
+            }
+            pending_owner = try reserveDeclarationGenericOwner(store, scanned_list.span, kind);
+            generic_owner = pending_owner.?.owner_index;
+            advanceCursorTo(&scanned, scanned_list.span.end);
+            if (!containsOnlyTypeWhitespace(source, scanned_list.span.end, scanned.current.start)) {
+                return .not_declaration;
+            }
+        },
+        .admitted => |admitted| {
+            if (header_has_generic != (admitted.generic_list != null)) {
+                return error.InvalidAdmissionSpan;
+            }
+            if (admitted.generic_list) |list_span| {
+                if (list_span.start != scanned.current.start or
+                    list_span.start >= list_span.end or
+                    @as(usize, list_span.end) > source.len or
+                    list_span.end - list_span.start < 2 or
+                    source[list_span.start] != '<' or
+                    source[list_span.end - 1] != '>')
+                {
+                    return error.InvalidAdmissionSpan;
+                }
+                admitted_generic_list = list_span;
+
+                const consumed_before_erasure = scanned.consumed;
+                var resumed = scanned.tokenizer;
+                resumed.resumeAfterRawErasure(list_span.end, name_token);
+                scanned = Cursor.afterCurrent(resumed);
+                scanned.consumed +|= consumed_before_erasure;
+                if (!containsOnlyTypeWhitespace(source, list_span.end, scanned.current.start)) {
+                    return error.InvalidAdmissionSpan;
+                }
+            }
+        },
+    }
+
+    switch (body_input) {
+        .strict => {},
+        .admitted => |admitted| {
+            const body_input_value = admitted.body;
+            const has_equals = scanned.current.type == .assign;
+            if (has_equals != (body_input_value != null)) return error.InvalidAdmissionSpan;
+            if (body_input_value) |input| {
+                try validateAdmittedTypeInput(store, input);
+                const after_equals = scanned.current.start + scanned.current.len;
+                const raw_start = skipTypeWhitespace(source, after_equals);
+                if (input.raw_span.start != raw_start or
+                    input.raw_span.end != trimWhitespaceEnd(
+                        source,
+                        raw_start,
+                        input.admission_end,
+                    ))
+                {
+                    return error.InvalidAdmissionSpan;
+                }
+            }
+        },
+    }
+
+    if (admitted_generic_list) |list_span| {
+        pending_owner = try reserveDeclarationGenericOwner(store, list_span, kind);
         generic_owner = pending_owner.?.owner_index;
-        advanceCursorTo(&scanned, generic_list.span.end);
-        if (!containsOnlyTypeWhitespace(source, generic_list.span.end, scanned.current.start)) {
-            return .not_declaration;
-        }
     }
 
     const generic_list_span: ?Span = if (pending_owner) |owner| owner.list_span else null;
@@ -4483,19 +5377,37 @@ pub fn parseDeclarationAndStore(
     var body: DeclarationBody = .absent;
     var erased_end = scanned.current.start;
     if (scanned.current.type == .assign) {
-        equals_span = tokenSpan(scanned.current);
-        const after_equals = scanned.current.start + scanned.current.len;
+        const assign_token = scanned.current;
+        const consumed_before_erasure = scanned.consumed;
+        equals_span = tokenSpan(assign_token);
+        const after_equals = assign_token.start + assign_token.len;
         erased_end = after_equals;
-        scanned.advance();
 
         const raw_start = skipTypeWhitespace(source, after_equals);
-        const admission_end = switch (scanDeclarationEnd(source, raw_start)) {
+        const admitted = switch (body_input) {
+            .strict => null,
+            .admitted => |input| input.body,
+        };
+        const admission_end = if (admitted) |input|
+            input.admission_end
+        else switch (scanDeclarationEnd(source, raw_start)) {
             .end => |end| end,
             else => return .not_declaration,
         };
         erased_end = skipTypeWhitespace(source, admission_end);
-        advanceCursorTo(&scanned, admission_end);
-        const raw_end = trimWhitespaceEnd(source, raw_start, admission_end);
+        if (admitted != null) {
+            var resumed = scanned.tokenizer;
+            resumed.resumeAfterRawErasure(admission_end, assign_token);
+            scanned = Cursor.afterCurrent(resumed);
+            scanned.consumed +|= consumed_before_erasure;
+        } else {
+            scanned.advance();
+            advanceCursorTo(&scanned, admission_end);
+        }
+        const raw_end = if (admitted) |input|
+            input.raw_span.end
+        else
+            trimWhitespaceEnd(source, raw_start, admission_end);
         if (raw_start == raw_end) {
             if (kind == .nominal) return .{ .excluded = .{
                 .reason = .nominal_base_not_scalar,
@@ -4574,17 +5486,10 @@ pub fn parseDeclarationAndStore(
         .source_order = source_order,
         .authored_scope = authored_scope,
     };
-    try store.declarations.append(store.allocator, declaration);
-    if (pending_owner) |*pending| {
-        try store.finishGenericOwner(
-            pending,
-            .{ .declaration = .{ .kind = kind, .index = source_order } },
-        );
-    }
-    try store.validateDeclaration(store.declarations.items[source_order]);
+    const full_span = try publishDeclaration(store, declaration, if (pending_owner) |*owner| owner else null);
     cursor.* = scanned;
     published = true;
-    return .{ .parsed = declaration.full_span };
+    return .{ .parsed = full_span };
 }
 
 const TestRuntime = struct {
@@ -4808,6 +5713,262 @@ fn scanDeclarationEnd(source: []const u8, raw_start: u32) AdmissionScan {
         return .{ .malformed = .{ .start = raw_start, .end = @intCast(source.len) } };
     }
     return .{ .end = @intCast(source.len) };
+}
+
+pub const GeneralAdmissionEndpoint = enum {
+    variable,
+    named_return,
+    arrow_return,
+    interface_extends,
+    assertion,
+};
+
+pub const AdmissionEndpointPolicy = union(enum) {
+    general: GeneralAdmissionEndpoint,
+    parameter,
+    declaration,
+};
+
+pub const AdmissionCommentFailure = struct {
+    opener: u32,
+    @"resume": u32,
+};
+
+pub const AdmissionEndpointResult = union(enum) {
+    complete: Span,
+    nesting_too_deep: u32,
+    unterminated_comment: AdmissionCommentFailure,
+};
+
+pub const AdmissionTemplateScan = union(enum) {
+    complete: u32,
+    nesting_too_deep: u32,
+};
+
+const AdmissionQuoteScan = union(enum) {
+    complete: usize,
+    nesting_too_deep: u32,
+};
+
+fn scanAdmissionQuoted(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    quote: u8,
+    root_template_failure_propagates: bool,
+    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+) !AdmissionQuoteScan {
+    var suppressed_diagnostic = false;
+    var failure: ?LegacyQuoteFailure = null;
+    const end = try scanLegacyGenericQuotedCore(
+        allocator,
+        source,
+        start,
+        quote,
+        root_template_failure_propagates,
+        &suppressed_diagnostic,
+        caught,
+        &failure,
+    );
+    if (end) |complete| return .{ .complete = complete };
+    return switch (failure orelse return error.InvalidAdmissionQuoteResult) {
+        .nesting_too_deep => |offset| .{ .nesting_too_deep = offset },
+        .unterminated_string => error.InvalidAdmissionQuoteResult,
+    };
+}
+
+pub fn scanAdmissionTemplate(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    opener: u32,
+    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+) !AdmissionTemplateScan {
+    if (@as(usize, opener) >= source.len or source[opener] != '`') {
+        return error.InvalidAdmissionSpan;
+    }
+    return switch (try scanAdmissionQuoted(
+        allocator,
+        source,
+        opener,
+        '`',
+        true,
+        caught,
+    )) {
+        .complete => |end| .{ .complete = @intCast(end) },
+        .nesting_too_deep => |offset| .{ .nesting_too_deep = offset },
+    };
+}
+
+pub const AdmissionEndpointProgress = struct {
+    sink: AdmissionSink,
+    policy: AdmissionTypePolicy,
+    classification_start: u32,
+};
+
+pub fn scanAdmissionEndpoint(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    raw_start: u32,
+    policy: AdmissionEndpointPolicy,
+    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+) !AdmissionEndpointResult {
+    return scanAdmissionEndpointCore(allocator, source, raw_start, policy, caught, null);
+}
+
+pub fn scanAdmissionEndpointWithPresentation(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    raw_start: u32,
+    policy: AdmissionEndpointPolicy,
+    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+    progress: *AdmissionEndpointProgress,
+) !AdmissionEndpointResult {
+    if (progress.classification_start != raw_start or progress.sink.presentation == null) {
+        return error.InvalidAdmissionPosition;
+    }
+    return scanAdmissionEndpointCore(allocator, source, raw_start, policy, caught, progress);
+}
+
+fn scanAdmissionEndpointCore(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    raw_start: u32,
+    policy: AdmissionEndpointPolicy,
+    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+    progress: ?*AdmissionEndpointProgress,
+) !AdmissionEndpointResult {
+    const caught_seed_count = caught.items.len;
+    if (@as(usize, raw_start) > source.len) return error.InvalidAdmissionSpan;
+    var pos: usize = raw_start;
+    var paren_depth: u16 = 0;
+    var bracket_depth: u16 = 0;
+    var angle_depth: u16 = 0;
+    var brace_depth: u16 = 0;
+
+    while (pos < source.len) {
+        const byte = source[pos];
+        if (byte == '"' or byte == '\'' or byte == '`') {
+            switch (try scanAdmissionQuoted(allocator, source, pos, byte, false, caught)) {
+                .complete => |end| pos = end,
+                .nesting_too_deep => |offset| return .{ .nesting_too_deep = offset },
+            }
+            continue;
+        }
+        if (byte == '/' and pos + 1 < source.len) {
+            if (source[pos + 1] == '/') {
+                pos += 2;
+                while (pos < source.len and source[pos] != '\n') pos += 1;
+                continue;
+            }
+            if (source[pos + 1] == '*') {
+                const comment_start = pos;
+                pos += 2;
+                while (pos + 1 < source.len and !(source[pos] == '*' and source[pos + 1] == '/')) pos += 1;
+                if (pos + 1 >= source.len) {
+                    return .{ .unterminated_comment = .{
+                        .opener = @intCast(comment_start),
+                        .@"resume" = @intCast(pos),
+                    } };
+                }
+                pos += 2;
+                continue;
+            }
+        }
+
+        const all_top = paren_depth == 0 and bracket_depth == 0 and
+            angle_depth == 0 and brace_depth == 0;
+        switch (policy) {
+            .general => |general| {
+                if (all_top and byte == '=' and pos + 1 < source.len and source[pos + 1] == '>' and
+                    isFunctionTypePrefix(source[@as(usize, raw_start)..pos]))
+                {
+                    pos += 2;
+                    const tracks_whitespace = switch (general) {
+                        .variable, .named_return, .arrow_return => true,
+                        .interface_extends, .assertion => false,
+                    };
+                    if (tracks_whitespace) if (progress) |current| {
+                        try classifyTypeSpanPrefix(source, .{
+                            .span = .{ .start = current.classification_start, .end = @intCast(pos) },
+                            .policy = current.policy,
+                            .caught_lexical = caught.items[caught_seed_count..],
+                        }, current.sink);
+                        caught.items.len = caught_seed_count;
+                        if (current.sink.shouldStop()) return error.AdmissionRefused;
+                        const context = try current.sink.presentation.?.trackedWhitespaceAt(@intCast(pos));
+                        current.sink.presentation = context;
+                        current.classification_start = context.offset;
+                        pos = context.offset;
+                    };
+                    continue;
+                }
+                if (all_top) {
+                    const stops = switch (general) {
+                        .variable => byte == ',' or byte == ')' or byte == ';' or
+                            byte == '=' or byte == '}',
+                        .named_return => byte == ';' or byte == '=',
+                        .arrow_return => byte == '=' and pos + 1 < source.len and
+                            source[pos + 1] == '>',
+                        .interface_extends => byte == ';',
+                        .assertion => byte == ';' or byte == ',' or byte == ')' or
+                            byte == ']' or byte == '}',
+                    };
+                    if (stops) return .{ .complete = .{ .start = raw_start, .end = @intCast(pos) } };
+                    if (byte == '{') {
+                        const object_context_start: u32 = if (general == .interface_extends) 0 else raw_start;
+                        if (general != .assertion and
+                            !isObjectTypeBraceStart(source, object_context_start, pos))
+                        {
+                            return .{ .complete = .{ .start = raw_start, .end = @intCast(pos) } };
+                        }
+                    }
+                }
+            },
+            .parameter => {
+                if (byte == ')' and paren_depth == 0) {
+                    return .{ .complete = .{ .start = raw_start, .end = @intCast(pos) } };
+                }
+                if (byte == ',' and all_top) {
+                    return .{ .complete = .{ .start = raw_start, .end = @intCast(pos) } };
+                }
+                if (byte == '=' and (pos + 1 >= source.len or source[pos + 1] != '>') and
+                    paren_depth == 0 and angle_depth == 0)
+                {
+                    return .{ .complete = .{ .start = raw_start, .end = @intCast(pos) } };
+                }
+            },
+            .declaration => {
+                if (all_top and byte == ';') {
+                    return .{ .complete = .{ .start = raw_start, .end = @intCast(pos) } };
+                }
+                if (all_top and byte == '\n' and !multilineTypeContinues(source, pos)) {
+                    return .{ .complete = .{ .start = raw_start, .end = @intCast(pos) } };
+                }
+            },
+        }
+
+        switch (byte) {
+            '(' => if (!increaseAdmissionDepth(&paren_depth, bracket_depth, angle_depth, brace_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            '[' => if (!increaseAdmissionDepth(&bracket_depth, paren_depth, angle_depth, brace_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            '<' => if (!increaseAdmissionDepth(&angle_depth, paren_depth, bracket_depth, brace_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            '{' => if (!increaseAdmissionDepth(&brace_depth, paren_depth, bracket_depth, angle_depth)) {
+                return .{ .nesting_too_deep = @intCast(pos) };
+            },
+            ')' => paren_depth -|= 1,
+            ']' => bracket_depth -|= 1,
+            '>' => angle_depth -|= 1,
+            '}' => brace_depth -|= 1,
+            else => {},
+        }
+        pos += 1;
+    }
+    return .{ .complete = .{ .start = raw_start, .end = @intCast(source.len) } };
 }
 
 fn multilineTypeContinues(source: []const u8, newline: usize) bool {
@@ -5059,7 +6220,7 @@ fn tokenSpan(token: Token) Span {
     return .{ .start = token.start, .end = token.start + token.len };
 }
 
-fn tokenIsDeclarationName(token: Token, source: []const u8) bool {
+pub fn tokenIsDeclarationName(token: Token, source: []const u8) bool {
     const text = token.text(source);
     if (text.len == 0 or !isIdentifierStart(text[0])) return false;
     for (text[1..]) |byte| if (!isIdentifierContinue(byte)) return false;
@@ -5083,6 +6244,378 @@ fn spanContainsOnlyTypeWhitespace(source: []const u8, span: Span) bool {
 
 fn isTypeWhitespace(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
+}
+
+pub fn classifyTypeSpan(
+    source: []const u8,
+    options: AdmissionTypeSpanOptions,
+    sink: AdmissionSink,
+) !void {
+    if (options.removed_span) |span| {
+        if (span.start > span.end or @as(usize, span.end) > source.len or
+            span.start > options.span.start or span.end != options.span.end)
+        {
+            return error.InvalidAdmissionSpan;
+        }
+    }
+    try classifyTypeSpanPrefix(source, options, sink);
+    if (sink.shouldStop()) return;
+
+    switch (options.policy) {
+        .general_type, .parameter_type, .removed_only => try classifyFirstRemovedTypeInSpan(
+            source,
+            options.removed_span orelse options.span,
+            sink.physicalPositions(),
+        ),
+        .any_only => {},
+    }
+}
+
+pub fn classifyTypeSpanPrefix(
+    source: []const u8,
+    options: AdmissionTypeSpanOptions,
+    sink: AdmissionSink,
+) !void {
+    const span = options.span;
+    if (span.start > span.end or @as(usize, span.end) > source.len) {
+        return error.InvalidAdmissionSpan;
+    }
+    try validateCaughtAdmissionDiagnostics(source, options);
+    if (sink.shouldStop()) return;
+
+    switch (options.policy) {
+        .general_type, .any_only => try classifyAnyInTypeSpan(
+            source,
+            span,
+            true,
+            options.caught_lexical,
+            sink,
+        ),
+        .parameter_type => try classifyAnyInTypeSpan(
+            source,
+            span,
+            false,
+            options.caught_lexical,
+            sink,
+        ),
+        .removed_only => for (options.caught_lexical) |diagnostic| {
+            try sink.recordCaught(diagnostic);
+            if (sink.shouldStop()) return;
+        },
+    }
+}
+
+fn validateCaughtAdmissionDiagnostics(
+    source: []const u8,
+    options: AdmissionTypeSpanOptions,
+) !void {
+    var previous_offset: ?u32 = null;
+    for (options.caught_lexical) |diagnostic| {
+        switch (diagnostic.kind) {
+            .unterminated_string, .nesting_too_deep => {},
+            else => return error.InvalidCaughtAdmissionDiagnostic,
+        }
+        if (diagnostic.span.start > diagnostic.span.end or
+            @as(usize, diagnostic.span.end) > source.len)
+        {
+            return error.InvalidCaughtAdmissionDiagnostic;
+        }
+        const inside = diagnostic.span.start >= options.span.start and
+            diagnostic.span.start < options.span.end and
+            diagnostic.span.end <= options.span.end;
+        const exact_end = diagnostic.span.start == options.span.end and
+            @as(usize, options.span.end) < source.len and
+            diagnostic.span.end == (std.math.add(u32, options.span.end, 1) catch 0) and
+            switch (diagnostic.kind) {
+                .unterminated_string => source[options.span.end] == '\n',
+                .nesting_too_deep => source[options.span.end] == '{',
+                else => false,
+            };
+        if (!inside and !exact_end) return error.InvalidCaughtAdmissionDiagnostic;
+        if (previous_offset) |previous| {
+            if (diagnostic.span.start < previous) {
+                return error.InvalidCaughtAdmissionDiagnostic;
+            }
+        }
+        previous_offset = diagnostic.span.start;
+    }
+}
+
+fn classifyAnyInTypeSpan(
+    source: []const u8,
+    span: Span,
+    exclude_object_keys: bool,
+    caught_lexical: []const AdmissionDiagnostic,
+    sink: AdmissionSink,
+) !void {
+    const end: usize = span.end;
+    var pos: usize = span.start;
+    var brace_depth: usize = 0;
+    var caught_index: usize = 0;
+    while (pos < end) {
+        try emitCaughtAdmissionThrough(
+            caught_lexical,
+            &caught_index,
+            @intCast(pos),
+            sink,
+        );
+        if (sink.shouldStop()) return;
+        const byte = source[pos];
+        if (byte == '\'' or byte == '"' or byte == '`') {
+            pos = try skipAdmissionAnyQuoted(
+                sink.collector.allocator,
+                source,
+                pos,
+                end,
+                byte,
+            );
+            continue;
+        }
+        if (byte == '/' and pos + 1 < end) {
+            if (source[pos + 1] == '/') {
+                pos += 2;
+                while (pos < end and source[pos] != '\n') pos += 1;
+                continue;
+            }
+            if (source[pos + 1] == '*') {
+                pos += 2;
+                while (pos + 1 < end and !(source[pos] == '*' and source[pos + 1] == '/')) {
+                    pos += 1;
+                }
+                pos = if (pos + 1 < end) pos + 2 else end;
+                continue;
+            }
+        }
+        if (byte == '{') {
+            brace_depth += 1;
+            pos += 1;
+            continue;
+        }
+        if (byte == '}') {
+            brace_depth -|= 1;
+            pos += 1;
+            continue;
+        }
+        if (pos + "any".len > end or
+            !std.mem.eql(u8, source[pos .. pos + "any".len], "any") or
+            (pos + "any".len < end and isIdentifierContinue(source[pos + "any".len])))
+        {
+            pos += 1;
+            continue;
+        }
+        const identifier_start = pos;
+        pos += "any".len;
+        if (exclude_object_keys and brace_depth > 0 and
+            isAdmissionObjectMemberKey(source, pos, end))
+        {
+            continue;
+        }
+        try sink.recordRecoverable(.{
+            .kind = .any_type,
+            .span = .{ .start = @intCast(identifier_start), .end = @intCast(pos) },
+        });
+        if (sink.shouldStop()) return;
+    }
+    try emitCaughtAdmissionThrough(
+        caught_lexical,
+        &caught_index,
+        span.end,
+        sink,
+    );
+}
+
+fn emitCaughtAdmissionThrough(
+    caught_lexical: []const AdmissionDiagnostic,
+    index: *usize,
+    offset: u32,
+    sink: AdmissionSink,
+) !void {
+    while (index.* < caught_lexical.len and caught_lexical[index.*].span.start <= offset) {
+        try sink.recordCaught(caught_lexical[index.*]);
+        index.* += 1;
+        if (sink.shouldStop()) return;
+    }
+}
+
+fn classifyFirstRemovedTypeInSpan(
+    source: []const u8,
+    span: Span,
+    sink: AdmissionSink,
+) !void {
+    const end: usize = span.end;
+    var pos: usize = span.start;
+    var paren_depth: usize = 0;
+    var brace_depth: usize = 0;
+    while (pos < end) {
+        const byte = source[pos];
+        if (byte == '\'' or byte == '"' or byte == '`') {
+            pos = skipAdmissionRemovedQuoted(source, pos, end, byte);
+            continue;
+        }
+        if (byte == '/' and pos + 1 < end) {
+            if (source[pos + 1] == '/') {
+                pos += 2;
+                while (pos < end and source[pos] != '\n') pos += 1;
+                continue;
+            }
+            if (source[pos + 1] == '*') {
+                pos += 2;
+                while (pos + 1 < end and !(source[pos] == '*' and source[pos + 1] == '/')) {
+                    pos += 1;
+                }
+                pos = if (pos + 1 < end) pos + 2 else end;
+                continue;
+            }
+        }
+        switch (byte) {
+            '(' => {
+                paren_depth += 1;
+                pos += 1;
+                continue;
+            },
+            ')' => {
+                paren_depth -|= 1;
+                pos += 1;
+                continue;
+            },
+            '{' => {
+                brace_depth += 1;
+                pos += 1;
+                continue;
+            },
+            '}' => {
+                brace_depth -|= 1;
+                pos += 1;
+                continue;
+            },
+            '?' => {
+                if (paren_depth > 0 and brace_depth == 0 and
+                    isAdmissionOptionalParameter(source, span.start, pos, end))
+                {
+                    try sink.recordRecoverable(.{
+                        .kind = .optional_parameter,
+                        .span = .{ .start = @intCast(pos), .end = @intCast(pos + 1) },
+                    });
+                    return;
+                }
+                pos += 1;
+                continue;
+            },
+            else => {},
+        }
+        if (!isIdentifierStart(byte)) {
+            pos += 1;
+            continue;
+        }
+
+        const identifier_start = pos;
+        pos += 1;
+        while (pos < end and isIdentifierContinue(source[pos])) pos += 1;
+        const identifier = source[identifier_start..pos];
+        var kind: ?AdmissionKind = null;
+        if (std.mem.eql(u8, identifier, "void")) {
+            kind = .void_type;
+        } else if (std.mem.eql(u8, identifier, "Array") or
+            std.mem.eql(u8, identifier, "ReadonlyArray"))
+        {
+            const after = skipAdmissionTypeTrivia(source, pos, end);
+            if (after < end and source[after] == '<') {
+                kind = if (identifier.len == "Array".len)
+                    .array_type_alias
+                else
+                    .readonly_array_type_alias;
+            }
+        }
+        if (kind) |diagnostic_kind| {
+            try sink.recordRecoverable(.{
+                .kind = diagnostic_kind,
+                .span = .{ .start = @intCast(identifier_start), .end = @intCast(pos) },
+            });
+            return;
+        }
+    }
+}
+
+fn isAdmissionOptionalParameter(
+    source: []const u8,
+    span_start: u32,
+    question: usize,
+    end: usize,
+) bool {
+    var before = question;
+    while (before > span_start and std.ascii.isWhitespace(source[before - 1])) before -= 1;
+    if (before == span_start or !isIdentifierContinue(source[before - 1])) return false;
+    var after = question + 1;
+    while (after < end and std.ascii.isWhitespace(source[after])) after += 1;
+    return after < end and source[after] == ':';
+}
+
+fn skipAdmissionAnyQuoted(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    end: usize,
+    quote: u8,
+) !usize {
+    const bounded = source[0..end];
+    if (quote != '`') return scanLegacyPlainQuoted(bounded, start, quote).end;
+    var suppressed_diagnostic = false;
+    return (try scanLegacyGenericQuoted(
+        allocator,
+        bounded,
+        start,
+        quote,
+        false,
+        &suppressed_diagnostic,
+    )) orelse end;
+}
+
+fn skipAdmissionRemovedQuoted(source: []const u8, start: usize, end: usize, quote: u8) usize {
+    var pos = start + 1;
+    while (pos < end) {
+        if (source[pos] == '\\' and pos + 1 < end) {
+            pos += 2;
+            continue;
+        }
+        if (source[pos] == quote) return pos + 1;
+        pos += 1;
+    }
+    return end;
+}
+
+fn skipAdmissionTypeTrivia(source: []const u8, start: usize, end: usize) usize {
+    var pos = start;
+    while (pos < end) {
+        if (std.ascii.isWhitespace(source[pos])) {
+            pos += 1;
+            continue;
+        }
+        if (source[pos] == '/' and pos + 1 < end and source[pos + 1] == '/') {
+            pos += 2;
+            while (pos < end and source[pos] != '\n') pos += 1;
+            continue;
+        }
+        if (source[pos] == '/' and pos + 1 < end and source[pos + 1] == '*') {
+            pos += 2;
+            while (pos + 1 < end and !(source[pos] == '*' and source[pos + 1] == '/')) {
+                pos += 1;
+            }
+            pos = if (pos + 1 < end) pos + 2 else end;
+            continue;
+        }
+        break;
+    }
+    return pos;
+}
+
+fn isAdmissionObjectMemberKey(source: []const u8, identifier_end: usize, end: usize) bool {
+    var pos = identifier_end;
+    while (pos < end and (source[pos] == ' ' or source[pos] == '\t')) pos += 1;
+    if (pos < end and source[pos] == '?') {
+        pos += 1;
+        while (pos < end and (source[pos] == ' ' or source[pos] == '\t')) pos += 1;
+    }
+    return pos < end and (source[pos] == ':' or source[pos] == '(');
 }
 
 fn isScalarNominalBase(text: []const u8) bool {
@@ -7309,6 +8842,430 @@ test "explicit call scanner separates its depth exclusion from comparisons" {
     }
 }
 
+test "admission generic scanner separates lexical nonmatches from shape nonmatches" {
+    const quoted_source = "function f<\"open\n>(x: number): number { return x; }\n";
+    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '<').?);
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = quoted_source,
+        .start = list_start,
+        .caught = &caught,
+    })) {
+        .lexical_nonmatch => {},
+        .not_matched, .scanned, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+    try std.testing.expectEqual(Span{ .start = 16, .end = 17 }, caught.items[0].span);
+    try std.testing.expect((try scanBalancedGenericList(
+        std.testing.allocator,
+        quoted_source,
+        list_start,
+    )) == null);
+
+    caught.clearRetainingCapacity();
+    const comment_source = "function f<T /* unfinished\n";
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = comment_source,
+        .start = @intCast(std.mem.indexOfScalar(u8, comment_source, '<').?),
+        .caught = &caught,
+    })) {
+        .lexical_nonmatch => {},
+        .not_matched, .scanned, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), caught.items.len);
+
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = "value",
+        .start = 5,
+        .caught = &caught,
+    })) {
+        .not_matched => {},
+        .lexical_nonmatch, .scanned, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectError(
+        error.InvalidAdmissionSpan,
+        scanAdmissionGenericList(std.testing.allocator, .{
+            .source = "value",
+            .start = 6,
+            .caught = &caught,
+        }),
+    );
+    try std.testing.expect((try scanBalancedGenericList(
+        std.testing.allocator,
+        "value",
+        6,
+    )) == null);
+    try std.testing.expectError(
+        error.InvalidAdmissionSpan,
+        scanAdmissionCallTypeArguments(std.testing.allocator, .{
+            .source = "value",
+            .start = 6,
+            .caught = &caught,
+        }),
+    );
+    switch (try scanExplicitCallTypeArguments(std.testing.allocator, "value", 6)) {
+        .not_call => {},
+        .excluded, .scanned => return error.TestUnexpectedResult,
+    }
+}
+
+test "admission generic scanner reports raw angle and bracket depth" {
+    var angle_limit: std.ArrayListUnmanaged(u8) = .empty;
+    defer angle_limit.deinit(std.testing.allocator);
+    try angle_limit.appendNTimes(std.testing.allocator, '<', max_type_depth);
+    try angle_limit.append(std.testing.allocator, 'T');
+    try angle_limit.appendNTimes(std.testing.allocator, '>', max_type_depth);
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = angle_limit.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .scanned => |scan| try std.testing.expectEqual(
+            @as(u32, @intCast(angle_limit.items.len)),
+            scan.span.end,
+        ),
+        .not_matched, .lexical_nonmatch, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+
+    var angle_overflow: std.ArrayListUnmanaged(u8) = .empty;
+    defer angle_overflow.deinit(std.testing.allocator);
+    try angle_overflow.appendNTimes(std.testing.allocator, '<', max_type_depth + 1);
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = angle_overflow.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .nesting_too_deep => |offset| try std.testing.expectEqual(
+            @as(u32, max_type_depth),
+            offset,
+        ),
+        .not_matched, .lexical_nonmatch, .scanned => return error.TestUnexpectedResult,
+    }
+
+    var bracket_limit: std.ArrayListUnmanaged(u8) = .empty;
+    defer bracket_limit.deinit(std.testing.allocator);
+    try bracket_limit.append(std.testing.allocator, '<');
+    try bracket_limit.appendNTimes(std.testing.allocator, '(', max_type_depth);
+    try bracket_limit.append(std.testing.allocator, 'T');
+    try bracket_limit.appendNTimes(std.testing.allocator, ')', max_type_depth);
+    try bracket_limit.append(std.testing.allocator, '>');
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = bracket_limit.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .scanned => {},
+        .not_matched, .lexical_nonmatch, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+
+    var bracket_overflow: std.ArrayListUnmanaged(u8) = .empty;
+    defer bracket_overflow.deinit(std.testing.allocator);
+    try bracket_overflow.append(std.testing.allocator, '<');
+    try bracket_overflow.appendNTimes(std.testing.allocator, '(', max_type_depth + 1);
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = bracket_overflow.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .nesting_too_deep => |offset| try std.testing.expectEqual(
+            @as(u32, max_type_depth) + 1,
+            offset,
+        ),
+        .not_matched, .lexical_nonmatch, .scanned => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect((try scanBalancedGenericList(
+        std.testing.allocator,
+        bracket_overflow.items,
+        0,
+    )) == null);
+
+    var template_overflow: std.ArrayListUnmanaged(u8) = .empty;
+    defer template_overflow.deinit(std.testing.allocator);
+    try template_overflow.appendSlice(std.testing.allocator, "<`x${");
+    try template_overflow.appendNTimes(
+        std.testing.allocator,
+        '{',
+        max_type_depth - 1,
+    );
+    const template_failure_offset: u32 = @intCast(template_overflow.items.len);
+    try template_overflow.append(std.testing.allocator, '{');
+    switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = template_overflow.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .lexical_nonmatch => {},
+        .not_matched, .scanned, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.nesting_too_deep, caught.items[0].kind);
+    try std.testing.expectEqual(
+        Span{ .start = template_failure_offset, .end = template_failure_offset + 1 },
+        caught.items[0].span,
+    );
+}
+
+test "admission call scanner retains caught rows before a grammar nonmatch" {
+    const source = "const value = f<`a${\"open\n 1}tail` || T>(x);\n";
+    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    switch (try scanAdmissionCallTypeArguments(std.testing.allocator, .{
+        .source = source,
+        .start = list_start,
+        .caught = &caught,
+    })) {
+        .not_matched => {},
+        .lexical_nonmatch, .scanned, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+    try std.testing.expectEqual(Span{ .start = 25, .end = 26 }, caught.items[0].span);
+    switch (try scanExplicitCallTypeArguments(std.testing.allocator, source, list_start)) {
+        .not_call => {},
+        .excluded, .scanned => return error.TestUnexpectedResult,
+    }
+
+    caught.clearRetainingCapacity();
+    const lexical_source = "id<\"open\n>(value)";
+    switch (try scanAdmissionCallTypeArguments(std.testing.allocator, .{
+        .source = lexical_source,
+        .start = 2,
+        .caught = &caught,
+    })) {
+        .lexical_nonmatch => {},
+        .not_matched, .scanned, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+    try std.testing.expectEqual(Span{ .start = 8, .end = 9 }, caught.items[0].span);
+    switch (try scanExplicitCallTypeArguments(std.testing.allocator, lexical_source, 2)) {
+        .excluded => {},
+        .not_call, .scanned => return error.TestUnexpectedResult,
+    }
+
+    caught.clearRetainingCapacity();
+    var depth_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer depth_source.deinit(std.testing.allocator);
+    try depth_source.append(std.testing.allocator, '<');
+    try depth_source.appendNTimes(std.testing.allocator, '(', max_type_depth);
+    switch (try scanAdmissionCallTypeArguments(std.testing.allocator, .{
+        .source = depth_source.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .nesting_too_deep => |offset| try std.testing.expectEqual(
+            @as(u32, max_type_depth),
+            offset,
+        ),
+        .not_matched, .lexical_nonmatch, .scanned => return error.TestUnexpectedResult,
+    }
+    switch (try scanExplicitCallTypeArguments(std.testing.allocator, depth_source.items, 0)) {
+        .excluded => {},
+        .not_call, .scanned => return error.TestUnexpectedResult,
+    }
+
+    caught.clearRetainingCapacity();
+    const accepted = "id<(value: string) => number>(value)";
+    switch (try scanAdmissionCallTypeArguments(std.testing.allocator, .{
+        .source = accepted,
+        .start = 2,
+        .caught = &caught,
+    })) {
+        .scanned => |scan| try std.testing.expectEqualStrings(
+            "<(value: string) => number>",
+            scan.span.text(accepted),
+        ),
+        .not_matched, .lexical_nonmatch, .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+}
+
+test "admission interface brace scanner preserves raw legacy boundaries" {
+    const quoted_source = "interface X extends { field: \"open\n next: any } trailing";
+    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '{').?);
+    const body_end: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '}').? + 1);
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    switch (try scanAdmissionBraceBody(std.testing.allocator, .{
+        .source = quoted_source,
+        .start = body_start,
+        .caught = &caught,
+    })) {
+        .complete => |end| try std.testing.expectEqual(body_end, end),
+        .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOfScalar(u8, quoted_source, '\n').?)),
+        caught.items[0].span.start,
+    );
+
+    caught.clearRetainingCapacity();
+    const comment_source = "interface X extends { /* } */ field: any } trailing";
+    const comment_body: u32 = @intCast(std.mem.indexOfScalar(u8, comment_source, '{').?);
+    const comment_close: u32 = @intCast(std.mem.indexOfScalar(u8, comment_source, '}').? + 1);
+    switch (try scanAdmissionBraceBody(std.testing.allocator, .{
+        .source = comment_source,
+        .start = comment_body,
+        .caught = &caught,
+    })) {
+        .complete => |end| try std.testing.expectEqual(comment_close, end),
+        .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), caught.items.len);
+
+    const eof_source = "{ field: number";
+    switch (try scanAdmissionBraceBody(std.testing.allocator, .{
+        .source = eof_source,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .complete => |end| try std.testing.expectEqual(@as(u32, eof_source.len), end),
+        .nesting_too_deep => return error.TestUnexpectedResult,
+    }
+
+    var overflow: std.ArrayListUnmanaged(u8) = .empty;
+    defer overflow.deinit(std.testing.allocator);
+    try overflow.appendNTimes(std.testing.allocator, '{', max_type_depth + 1);
+    switch (try scanAdmissionBraceBody(std.testing.allocator, .{
+        .source = overflow.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .nesting_too_deep => |offset| try std.testing.expectEqual(
+            @as(u32, max_type_depth),
+            offset,
+        ),
+        .complete => return error.TestUnexpectedResult,
+    }
+}
+
+test "admission raw scanners restore caught rows on allocation failure" {
+    const Scanner = enum { balanced, call, brace };
+    const Case = struct {
+        scanner: Scanner,
+        source: []const u8,
+    };
+    const cases = [_]Case{
+        .{
+            .scanner = .balanced,
+            .source = "<`a${\"open\n 1}tail`, `second${value}`>",
+        },
+        .{
+            .scanner = .call,
+            .source = "<`a${\"open\n 1}tail`, `second${value}`>(value)",
+        },
+        .{
+            .scanner = .brace,
+            .source = "{ `a${\"open\n 1}tail`, `second${value}` }",
+        },
+    };
+    const Context = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            case: Case,
+            observed_failures: *usize,
+        ) !void {
+            var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+            defer caught.deinit(std.testing.allocator);
+            try caught.ensureTotalCapacity(std.testing.allocator, 4);
+            const seed: AdmissionDiagnostic = .{
+                .kind = .nesting_too_deep,
+                .span = .{ .start = 0, .end = 1 },
+            };
+            caught.appendAssumeCapacity(seed);
+            const entry_len = caught.items.len;
+
+            switch (case.scanner) {
+                .balanced => switch (scanAdmissionGenericList(allocator, .{
+                    .source = case.source,
+                    .start = 0,
+                    .caught = &caught,
+                }) catch |err| return observeRawScanFailure(
+                    err,
+                    observed_failures,
+                    entry_len,
+                    seed,
+                    &caught,
+                )) {
+                    .scanned => {},
+                    .not_matched, .lexical_nonmatch, .nesting_too_deep => {
+                        return error.TestUnexpectedResult;
+                    },
+                },
+                .call => switch (scanAdmissionCallTypeArguments(allocator, .{
+                    .source = case.source,
+                    .start = 0,
+                    .caught = &caught,
+                }) catch |err| return observeRawScanFailure(
+                    err,
+                    observed_failures,
+                    entry_len,
+                    seed,
+                    &caught,
+                )) {
+                    .scanned => {},
+                    .not_matched, .lexical_nonmatch, .nesting_too_deep => {
+                        return error.TestUnexpectedResult;
+                    },
+                },
+                .brace => switch (scanAdmissionBraceBody(allocator, .{
+                    .source = case.source,
+                    .start = 0,
+                    .caught = &caught,
+                }) catch |err| return observeRawScanFailure(
+                    err,
+                    observed_failures,
+                    entry_len,
+                    seed,
+                    &caught,
+                )) {
+                    .complete => {},
+                    .nesting_too_deep => return error.TestUnexpectedResult,
+                },
+            }
+            try std.testing.expectEqual(entry_len + 1, caught.items.len);
+            try std.testing.expectEqual(
+                AdmissionKind.unterminated_string,
+                caught.items[entry_len].kind,
+            );
+        }
+
+        fn observeRawScanFailure(
+            err: anyerror,
+            observed_failures: *usize,
+            entry_len: usize,
+            seed: AdmissionDiagnostic,
+            caught: *const std.ArrayListUnmanaged(AdmissionDiagnostic),
+        ) !void {
+            switch (err) {
+                error.OutOfMemory => observed_failures.* += 1,
+                else => return err,
+            }
+            try std.testing.expectEqual(entry_len, caught.items.len);
+            try std.testing.expectEqualDeep(seed, caught.items[0]);
+            return error.OutOfMemory;
+        }
+    };
+    var observed_failures = [_]usize{0} ** cases.len;
+    for (cases, 0..) |case, index| {
+        try std.testing.checkAllAllocationFailures(
+            std.testing.allocator,
+            Context.run,
+            .{ case, &observed_failures[index] },
+        );
+        try std.testing.expect(observed_failures[index] > 0);
+    }
+}
+
 test "generic application admission rejects a missing closing angle before syntax parsing" {
     const source = "Outer<string = value;";
     var store = Store.init(std.testing.allocator, source);
@@ -8026,6 +9983,764 @@ test "group metadata allocation failure restores every store array" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
+test "admitted annotation publishes a confirmed caught prefix once" {
+    const source = "\"open\n";
+    const admitted_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '\n').?);
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    const binding = BindingRef.global(300);
+
+    const value = switch (try parseAdmittedAnnotationAndStore(&store, binding, .{
+        .raw_span = .{ .start = 0, .end = admitted_end },
+        .admission_end = admitted_end,
+    })) {
+        .parsed => |parsed| parsed,
+        .excluded => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), store.annotations.items.len);
+    const annotation = store.annotations.items[0];
+    try std.testing.expect(std.meta.eql(binding, annotation.binding));
+    try std.testing.expect(std.meta.eql(value.root, annotation.root));
+    try std.testing.expect(std.meta.eql(value.node_range, annotation.node_range));
+    try std.testing.expectEqualStrings("\"open", annotation.raw_span.text(source));
+    const root = switch (annotation.root) {
+        .absent => return error.TestUnexpectedResult,
+        .present => |index| store.node(index) orelse return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(NodeTag.literal_string, root.tag);
+    try store.validate();
+
+    var strict_store = Store.init(std.testing.allocator, source);
+    defer strict_store.deinit();
+    var cursor = Cursor.init(source);
+    switch (try parseAndStore(&strict_store, binding, source, 0, &cursor)) {
+        .excluded => |excluded| switch (excluded.reason) {
+            .malformed_syntax => {},
+            else => return error.TestUnexpectedResult,
+        },
+        .parsed, .failure => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), strict_store.annotations.items.len);
+}
+
+test "admitted type bounds reject inconsistent trailing bytes atomically" {
+    const source = "number \tX";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    switch (try parseAdmittedAnnotationAndStore(&store, .global(300), .{
+        .raw_span = .{ .start = 0, .end = 6 },
+        .admission_end = 8,
+    })) {
+        .parsed => {},
+        .excluded => return error.TestUnexpectedResult,
+    }
+    const prior = store.checkpoint();
+    try std.testing.expect(prior.annotations > 0);
+
+    const invalid = [_]AdmittedTypeInput{
+        .{ .raw_span = .{ .start = 0, .end = 6 }, .admission_end = 9 },
+        .{ .raw_span = .{ .start = 0, .end = 6 }, .admission_end = 5 },
+        .{ .raw_span = .{ .start = 0, .end = 10 }, .admission_end = 10 },
+    };
+    for (invalid) |input| {
+        try std.testing.expectError(
+            error.InvalidTypeSpan,
+            parseAdmittedAnnotationAndStore(&store, .global(301), input),
+        );
+        try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+    }
+    try store.validate();
+}
+
+test "admitted annotation reuses strict semantic assembly" {
+    const source = "number   ;";
+    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    var strict_store = Store.init(std.testing.allocator, source);
+    defer strict_store.deinit();
+    var strict_cursor = Cursor.init(source);
+    switch (try parseAndStore(&strict_store, .global(300), source, 0, &strict_cursor)) {
+        .parsed => {},
+        .failure, .excluded => return error.TestUnexpectedResult,
+    }
+
+    var admitted_store = Store.init(std.testing.allocator, source);
+    defer admitted_store.deinit();
+    switch (try parseAdmittedAnnotationAndStore(&admitted_store, .global(300), .{
+        .raw_span = .{ .start = 0, .end = 6 },
+        .admission_end = admission_end,
+    })) {
+        .parsed => {},
+        .excluded => return error.TestUnexpectedResult,
+    }
+
+    try std.testing.expect(std.meta.eql(
+        strict_store.checkpoint(),
+        admitted_store.checkpoint(),
+    ));
+    try std.testing.expect(std.meta.eql(
+        strict_store.annotations.items[0],
+        admitted_store.annotations.items[0],
+    ));
+    for (strict_store.nodes.items, admitted_store.nodes.items) |strict, admitted| {
+        try std.testing.expect(std.meta.eql(strict, admitted));
+    }
+}
+
+test "admitted return preserves spelling and disjoint compatibility roots" {
+    const source = "value\tis\tstring   {";
+    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+
+    const value = switch (try parseAdmittedFunctionReturnAndStore(&store, .{
+        .raw_span = .{ .start = 0, .end = admission_end },
+        .admission_end = admission_end,
+    })) {
+        .parsed => |parsed| parsed,
+        .failure, .excluded => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("value\tis\tstring   ", value.raw_span.text(source));
+    try std.testing.expectEqual(LegacyReturnKind.ordinary, value.legacy_return_kind);
+    const predicate = switch (value.structure) {
+        .predicate => |predicate| predicate,
+        .value => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("value", predicate.target_span.text(source));
+    switch (predicate.target) {
+        .unresolved => {},
+        .resolved => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqualStrings("string", predicate.narrowed.raw_span.text(source));
+    const compatibility = value.legacy_ordinary_prefix orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(std.meta.eql(value.raw_span, compatibility.raw_span));
+    try std.testing.expect(!rangesOverlap(
+        predicate.narrowed.node_range,
+        compatibility.node_range,
+    ));
+    try store.validateReturnSyntax(value);
+}
+
+test "admitted return rejects a trimmed spelling without changing prior syntax" {
+    const source = "number; value is string   {";
+    const return_start: u32 = @intCast(std.mem.indexOf(u8, source, "value").?);
+    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    const raw_end: u32 = @intCast(std.mem.indexOf(u8, source, "   {").?);
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    try store.add(.global(300), .{
+        .primitive = .number,
+        .semantic_span = .{ .start = 0, .end = 6 },
+        .raw_span = .{ .start = 0, .end = 6 },
+    });
+    const prior = store.checkpoint();
+    try std.testing.expect(prior.annotations > 0);
+
+    try std.testing.expectError(
+        error.InvalidTypeSpan,
+        parseAdmittedFunctionReturnAndStore(&store, .{
+            .raw_span = .{ .start = return_start, .end = raw_end },
+            .admission_end = admission_end,
+        }),
+    );
+    try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+    try store.validate();
+}
+
+test "admitted declaration preserves body endpoint and generic backlink" {
+    const source = "structural Box<T> = { value: T }   ;";
+    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    const body_end: u32 = @intCast(std.mem.indexOf(u8, source, "   ;").?);
+    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    const keyword = cursor.current;
+    cursor.advance();
+
+    const full_span = switch (try parseAdmittedDeclarationAndStore(&store, .{
+        .keyword = keyword,
+        .export_span = null,
+        .kind = .structural,
+        .authored_scope = 7,
+        .generic_list = .{ .start = generic_start, .end = generic_end },
+        .body = .{
+            .raw_span = .{ .start = body_start, .end = body_end },
+            .admission_end = admission_end,
+        },
+    }, &cursor)) {
+        .parsed => |span| span,
+        .excluded, .not_declaration => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(source, full_span.text(source));
+    try std.testing.expectEqual(token_mod.TokenType.eof, cursor.current.type);
+    try std.testing.expectEqual(@as(usize, 1), store.declarations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), store.generic_owners.items.len);
+    const declaration = store.declarations.items[0];
+    try std.testing.expectEqual(@as(?u32, 0), declaration.generic_owner);
+    try std.testing.expectEqual(@as(u16, 7), declaration.authored_scope);
+    const body = switch (declaration.body) {
+        .present => |present| present,
+        .absent => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("{ value: T }", body.raw_span.text(source));
+    try std.testing.expectEqual(admission_end, body.admission_end);
+    switch (store.generic_owners.items[0].identity) {
+        .structural_declaration => |index| try std.testing.expectEqual(@as(u32, 0), index),
+        else => return error.TestUnexpectedResult,
+    }
+    try store.validate();
+}
+
+test "admitted declaration publishes a confirmed caught generic list" {
+    const source =
+        "structural Box<T = (\"open\n" ++
+        ")> = number; const live = 1;";
+    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+    const generic_scan = switch (try scanAdmissionGenericList(std.testing.allocator, .{
+        .source = source,
+        .start = generic_start,
+        .caught = &caught,
+    })) {
+        .scanned => |scanned| scanned,
+        .not_matched, .lexical_nonmatch, .nesting_too_deep => return error.TestUnexpectedResult,
+    };
+    try std.testing.expect(generic_scan.suppressed_diagnostic);
+    try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+
+    const body_start: u32 = @intCast(std.mem.indexOf(u8, source, "number").?);
+    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    const keyword = cursor.current;
+    cursor.advance();
+    const full_span = switch (try parseAdmittedDeclarationAndStore(&store, .{
+        .keyword = keyword,
+        .export_span = null,
+        .kind = .structural,
+        .authored_scope = 11,
+        .generic_list = generic_scan.span,
+        .body = .{
+            .raw_span = .{ .start = body_start, .end = admission_end },
+            .admission_end = admission_end,
+        },
+    }, &cursor)) {
+        .parsed => |span| span,
+        .excluded, .not_declaration => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings(source[0 .. admission_end + 1], full_span.text(source));
+    try std.testing.expectEqual(token_mod.TokenType.kw_const, cursor.current.type);
+    try std.testing.expectEqual(@as(usize, 1), store.generic_owners.items.len);
+    const owner = store.generic_owners.items[0];
+    try std.testing.expect(std.meta.eql(generic_scan.span, owner.list_span));
+    try std.testing.expect(std.meta.eql(generic_scan.span, owner.capture_spans.actual_erased_span));
+    switch (owner.identity) {
+        .structural_declaration => |index| try std.testing.expectEqual(@as(u32, 0), index),
+        else => return error.TestUnexpectedResult,
+    }
+    const declaration = store.declarations.items[0];
+    try std.testing.expectEqual(@as(?u32, 0), declaration.generic_owner);
+    try std.testing.expectEqual(@as(u16, 11), declaration.authored_scope);
+    const body = switch (declaration.body) {
+        .present => |present| present,
+        .absent => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("number", body.raw_span.text(source));
+    try store.validate();
+
+    var strict_store = Store.init(std.testing.allocator, source);
+    defer strict_store.deinit();
+    var strict_cursor = Cursor.init(source);
+    const strict_keyword = strict_cursor.current;
+    strict_cursor.advance();
+    const strict_before = strict_cursor;
+    switch (try parseDeclarationAndStore(
+        &strict_store,
+        source,
+        strict_keyword,
+        null,
+        .structural,
+        11,
+        &strict_cursor,
+    )) {
+        .excluded => |excluded| try std.testing.expectEqual(
+            @TypeOf(excluded.reason).unsupported_syntax,
+            excluded.reason,
+        ),
+        .parsed, .not_declaration => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(std.meta.eql(strict_before, strict_cursor));
+    try std.testing.expect(std.meta.eql(
+        std.mem.zeroes(Store.Checkpoint),
+        strict_store.checkpoint(),
+    ));
+}
+
+test "admitted declaration raw resume preserves caught body endpoints" {
+    const Case = enum { quoted, template, strict };
+    for (std.meta.tags(Case)) |case| {
+        const source = switch (case) {
+            .quoted => "structural Value = \"open\n" ++
+                "; const live = 1;",
+            .template => "structural Value = `x${\"open\n" ++
+                "}`; const live = 1;",
+            .strict => "structural Value = number; const live = 1;",
+        };
+        var store = Store.init(std.testing.allocator, source);
+        defer store.deinit();
+        var cursor = Cursor.init(source);
+        const keyword = cursor.current;
+        cursor.advance();
+        const terminator_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+        const expected_const: u32 = @intCast(std.mem.indexOf(u8, source, "const").?);
+        const expected_line: u32 = if (case == .strict) 1 else 2;
+        const expected_line_start: u32 = if (case == .strict)
+            0
+        else
+            @intCast(std.mem.indexOfScalar(u8, source, '\n').? + 1);
+        const expected_admission_end: u32 = if (case == .quoted)
+            expected_line_start - 1
+        else
+            terminator_start;
+
+        if (case == .strict) {
+            switch (try parseDeclarationAndStore(
+                &store,
+                source,
+                keyword,
+                null,
+                .structural,
+                0,
+                &cursor,
+            )) {
+                .parsed => {},
+                .excluded, .not_declaration => return error.TestUnexpectedResult,
+            }
+        } else {
+            const assign: u32 = @intCast(std.mem.indexOfScalar(u8, source, '=').?);
+            const body_start = skipTypeWhitespace(source, assign + 1);
+            var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+            defer caught.deinit(std.testing.allocator);
+            const admitted_span = switch (try scanAdmissionEndpoint(
+                std.testing.allocator,
+                source,
+                body_start,
+                .declaration,
+                &caught,
+            )) {
+                .complete => |span| span,
+                .nesting_too_deep, .unterminated_comment => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+            try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+            const raw_span = trimSpan(source, admitted_span);
+            switch (try parseAdmittedDeclarationAndStore(&store, .{
+                .keyword = keyword,
+                .export_span = null,
+                .kind = .structural,
+                .authored_scope = 0,
+                .body = .{
+                    .raw_span = raw_span,
+                    .admission_end = admitted_span.end,
+                },
+            }, &cursor)) {
+                .parsed => {},
+                .excluded, .not_declaration => return error.TestUnexpectedResult,
+            }
+        }
+
+        try std.testing.expectEqual(token_mod.TokenType.kw_const, cursor.current.type);
+        try std.testing.expectEqual(expected_const, cursor.current.start);
+        try std.testing.expectEqual(expected_line, cursor.current.line);
+        try std.testing.expectEqual(expected_const - expected_line_start + 1, cursor.current.column);
+        try std.testing.expectEqual(@as(usize, 1), store.declarations.items.len);
+        const declaration = store.declarations.items[0];
+        try std.testing.expectEqual(
+            @as(?Span, .{ .start = terminator_start, .end = terminator_start + 1 }),
+            declaration.terminator_span,
+        );
+        try std.testing.expectEqual(
+            Span{ .start = 0, .end = terminator_start + 1 },
+            declaration.full_span,
+        );
+        const body = switch (declaration.body) {
+            .present => |present| present,
+            .absent => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(expected_admission_end, body.admission_end);
+        try store.validate();
+    }
+}
+
+test "admitted declaration rejects inconsistent confirmed generic spans" {
+    const source = "structural Box<T> = number;";
+    const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    const list_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.indexOf(u8, source, "number").?);
+    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    const Case = enum { missing, wrong_start, wrong_angle, out_of_range };
+    for (std.meta.tags(Case)) |case| {
+        var store = Store.init(std.testing.allocator, source);
+        defer store.deinit();
+        var cursor = Cursor.init(source);
+        const keyword = cursor.current;
+        cursor.advance();
+        const before_cursor = cursor;
+        const prior = store.checkpoint();
+        const generic_list: ?Span = switch (case) {
+            .missing => null,
+            .wrong_start => .{ .start = list_start + 1, .end = list_end },
+            .wrong_angle => .{ .start = list_start, .end = list_end - 1 },
+            .out_of_range => .{ .start = list_start, .end = @intCast(source.len + 1) },
+        };
+        try std.testing.expectError(
+            error.InvalidAdmissionSpan,
+            parseAdmittedDeclarationAndStore(&store, .{
+                .keyword = keyword,
+                .export_span = null,
+                .kind = .structural,
+                .authored_scope = 0,
+                .generic_list = generic_list,
+                .body = .{
+                    .raw_span = .{ .start = body_start, .end = admission_end },
+                    .admission_end = admission_end,
+                },
+            }, &cursor),
+        );
+        try std.testing.expect(std.meta.eql(before_cursor, cursor));
+        try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+    }
+
+    const plain_source = "structural Plain = number;";
+    var plain_store = Store.init(std.testing.allocator, plain_source);
+    defer plain_store.deinit();
+    var plain_cursor = Cursor.init(plain_source);
+    const plain_keyword = plain_cursor.current;
+    plain_cursor.advance();
+    const plain_before = plain_cursor;
+    const plain_body_start: u32 = @intCast(std.mem.indexOf(u8, plain_source, "number").?);
+    const plain_end: u32 = @intCast(std.mem.indexOfScalar(u8, plain_source, ';').?);
+    try std.testing.expectError(
+        error.InvalidAdmissionSpan,
+        parseAdmittedDeclarationAndStore(&plain_store, .{
+            .keyword = plain_keyword,
+            .export_span = null,
+            .kind = .structural,
+            .authored_scope = 0,
+            .generic_list = .{ .start = plain_body_start, .end = plain_end },
+            .body = .{
+                .raw_span = .{ .start = plain_body_start, .end = plain_end },
+                .admission_end = plain_end,
+            },
+        }, &plain_cursor),
+    );
+    try std.testing.expect(std.meta.eql(plain_before, plain_cursor));
+    try std.testing.expect(std.meta.eql(
+        std.mem.zeroes(Store.Checkpoint),
+        plain_store.checkpoint(),
+    ));
+}
+
+test "admitted declaration body presence matches the equals token" {
+    const Case = enum { absent, empty, unexpected_body, missing_body };
+    for (std.meta.tags(Case)) |case| {
+        const source = switch (case) {
+            .absent, .unexpected_body => "structural Empty;",
+            .empty, .missing_body => "structural Empty =   ;",
+        };
+        const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+        var store = Store.init(std.testing.allocator, source);
+        defer store.deinit();
+        var cursor = Cursor.init(source);
+        const keyword = cursor.current;
+        cursor.advance();
+        const before_cursor = cursor;
+        const prior = store.checkpoint();
+        const body: ?AdmittedTypeInput = switch (case) {
+            .absent, .missing_body => null,
+            .empty, .unexpected_body => .{
+                .raw_span = .{ .start = semicolon, .end = semicolon },
+                .admission_end = semicolon,
+            },
+        };
+        const outcome = parseAdmittedDeclarationAndStore(&store, .{
+            .keyword = keyword,
+            .export_span = null,
+            .kind = .structural,
+            .authored_scope = 0,
+            .body = body,
+        }, &cursor);
+        switch (case) {
+            .absent, .empty => switch (try outcome) {
+                .parsed => {},
+                .excluded, .not_declaration => return error.TestUnexpectedResult,
+            },
+            .unexpected_body, .missing_body => {
+                try std.testing.expectError(error.InvalidAdmissionSpan, outcome);
+                try std.testing.expect(std.meta.eql(before_cursor, cursor));
+                try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+                continue;
+            },
+        }
+        const declaration = store.declarations.items[0];
+        try std.testing.expectEqual(case == .empty, declaration.equals_span != null);
+        switch (declaration.body) {
+            .absent => {},
+            .present => return error.TestUnexpectedResult,
+        }
+        try store.validate();
+    }
+}
+
+test "admitted nominal missing body retains its exclusion and rollback" {
+    const source = "nominal Empty;";
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    const keyword = cursor.current;
+    cursor.advance();
+    const before_cursor = cursor;
+    const prior = store.checkpoint();
+
+    switch (try parseAdmittedDeclarationAndStore(&store, .{
+        .keyword = keyword,
+        .export_span = null,
+        .kind = .nominal,
+        .authored_scope = 0,
+        .body = null,
+    }, &cursor)) {
+        .excluded => |excluded| {
+            try std.testing.expectEqual(
+                @TypeOf(excluded.reason).nominal_base_not_scalar,
+                excluded.reason,
+            );
+            try std.testing.expectEqualStrings("", excluded.raw_span.text(source));
+        },
+        .parsed, .not_declaration => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(std.meta.eql(before_cursor, cursor));
+    try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+}
+
+test "admitted nominal exclusion rolls back its generic projection" {
+    const source = "nominal Box<T> = T;";
+    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, 'T').?);
+    const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').?);
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    var cursor = Cursor.init(source);
+    const keyword = cursor.current;
+    cursor.advance();
+    const before_cursor = cursor;
+    const prior = store.checkpoint();
+
+    switch (try parseAdmittedDeclarationAndStore(&store, .{
+        .keyword = keyword,
+        .export_span = null,
+        .kind = .nominal,
+        .authored_scope = 0,
+        .generic_list = .{ .start = generic_start, .end = generic_end },
+        .body = .{
+            .raw_span = .{ .start = body_start, .end = body_start + 1 },
+            .admission_end = admission_end,
+        },
+    }, &cursor)) {
+        .excluded => |excluded| {
+            try std.testing.expectEqual(
+                @TypeOf(excluded.reason).nominal_base_not_scalar,
+                excluded.reason,
+            );
+            try std.testing.expectEqualStrings("T", excluded.raw_span.text(source));
+            try std.testing.expectEqualStrings(
+                "<T>",
+                (excluded.generic_list_span orelse return error.TestUnexpectedResult).text(source),
+            );
+        },
+        .parsed, .not_declaration => return error.TestUnexpectedResult,
+    }
+    try std.testing.expect(std.meta.eql(before_cursor, cursor));
+    try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+}
+
+test "admitted semantic publication restores its entry checkpoint on allocation failure" {
+    const Case = enum { annotation, function_return, declaration };
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator, case: Case, failures: *usize) !void {
+            const source = switch (case) {
+                .annotation => "{ field: number | string; cb: (pair: [number, string]) => `x${boolean}` }",
+                .function_return => "value\tis\t{ field: number | string }   ",
+                .declaration => "structural Shape<T> = { field: number | string; cb: (pair: [number, string]) => `x${boolean}` };",
+            };
+            var store = Store.init(allocator, source);
+            defer store.deinit();
+            const prior = store.checkpoint();
+            switch (case) {
+                .annotation => {
+                    const outcome = parseAdmittedAnnotationAndStore(&store, .global(300), .{
+                        .raw_span = .{ .start = 0, .end = @intCast(source.len) },
+                        .admission_end = @intCast(source.len),
+                    }) catch |err| {
+                        try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+                        failures.* += 1;
+                        return err;
+                    };
+                    switch (outcome) {
+                        .parsed => {},
+                        .excluded => return error.TestUnexpectedResult,
+                    }
+                },
+                .function_return => {
+                    const outcome = parseAdmittedFunctionReturnAndStore(&store, .{
+                        .raw_span = .{ .start = 0, .end = @intCast(source.len) },
+                        .admission_end = @intCast(source.len),
+                    }) catch |err| {
+                        try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+                        failures.* += 1;
+                        return err;
+                    };
+                    switch (outcome) {
+                        .parsed => {},
+                        .failure, .excluded => return error.TestUnexpectedResult,
+                    }
+                },
+                .declaration => {
+                    var cursor = Cursor.init(source);
+                    const keyword = cursor.current;
+                    cursor.advance();
+                    const before_cursor = cursor;
+                    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+                    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
+                    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+                    const admission_end: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, ';').?);
+                    const outcome = parseAdmittedDeclarationAndStore(&store, .{
+                        .keyword = keyword,
+                        .export_span = null,
+                        .kind = .structural,
+                        .authored_scope = 0,
+                        .generic_list = .{ .start = generic_start, .end = generic_end },
+                        .body = .{
+                            .raw_span = .{ .start = body_start, .end = admission_end },
+                            .admission_end = admission_end,
+                        },
+                    }, &cursor) catch |err| {
+                        try std.testing.expect(std.meta.eql(before_cursor, cursor));
+                        try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+                        failures.* += 1;
+                        return err;
+                    };
+                    switch (outcome) {
+                        .parsed => {},
+                        .excluded, .not_declaration => return error.TestUnexpectedResult,
+                    }
+                },
+            }
+            try std.testing.expect(!std.meta.eql(prior, store.checkpoint()));
+        }
+    };
+
+    inline for (std.meta.tags(Case)) |case| {
+        var failures: usize = 0;
+        try std.testing.checkAllAllocationFailures(
+            std.testing.allocator,
+            Context.run,
+            .{ case, &failures },
+        );
+        try std.testing.expect(failures > 0);
+    }
+}
+
+test "admitted generic declaration failure preserves a published seed" {
+    const source = "number; structural Shape<T> = { field: number };";
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = std.math.maxInt(usize),
+    });
+    var store = Store.init(failing.allocator(), source);
+    defer store.deinit();
+    try store.add(.global(300), .{
+        .primitive = .number,
+        .semantic_span = .{ .start = 0, .end = 6 },
+        .raw_span = .{ .start = 0, .end = 6 },
+    });
+    const prior = store.checkpoint();
+    try std.testing.expect(prior.nodes > 0);
+    try std.testing.expect(prior.annotations > 0);
+
+    const declaration_start: u32 = @intCast(std.mem.indexOf(u8, source, "structural").?);
+    var cursor = Cursor.init(source);
+    advanceCursorTo(&cursor, declaration_start);
+    const keyword = cursor.current;
+    cursor.advance();
+    const before_cursor = cursor;
+    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
+    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    const admission_end: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, ';').?);
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parseAdmittedDeclarationAndStore(&store, .{
+            .keyword = keyword,
+            .export_span = null,
+            .kind = .structural,
+            .authored_scope = 0,
+            .generic_list = .{ .start = generic_start, .end = generic_end },
+            .body = .{
+                .raw_span = .{ .start = body_start, .end = admission_end },
+                .admission_end = admission_end,
+            },
+        }, &cursor),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(std.meta.eql(before_cursor, cursor));
+    try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try store.validate();
+}
+
+test "admitted annotation failure preserves a published seed" {
+    const source = "number; { field: number | string; cb: (pair: [number, string]) => `x${boolean}` }";
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = std.math.maxInt(usize),
+    });
+    var store = Store.init(failing.allocator(), source);
+    defer store.deinit();
+    try store.add(.global(300), .{
+        .primitive = .number,
+        .semantic_span = .{ .start = 0, .end = 6 },
+        .raw_span = .{ .start = 0, .end = 6 },
+    });
+    const prior = store.checkpoint();
+    try std.testing.expect(prior.nodes > 0);
+    try std.testing.expect(prior.annotations > 0);
+    const target_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parseAdmittedAnnotationAndStore(&store, .global(301), .{
+            .raw_span = .{ .start = target_start, .end = @intCast(source.len) },
+            .admission_end = @intCast(source.len),
+        }),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+    try store.validate();
+}
+
 fn parseReturnForTest(store: *Store) !ReturnSyntax {
     var cursor = Cursor.init(store.source);
     return switch (try parseFunctionReturnAndStore(store, 0, &cursor)) {
@@ -8189,6 +10904,669 @@ test "return validation enforces empty predicate and compatibility facets" {
     }
 }
 
+test "admission vocabulary retains seventeen ordered kinds" {
+    const expected = [_]AdmissionKind{
+        .any_type,
+        .as_assertion,
+        .satisfies_assertion,
+        .unterminated_string,
+        .nominal_base_not_scalar,
+        .interface_declaration,
+        .type_alias_declaration,
+        .distinct_type_declaration,
+        .legacy_types_import,
+        .default_parameter,
+        .optional_parameter,
+        .default_export,
+        .mutable_export,
+        .array_type_alias,
+        .readonly_array_type_alias,
+        .void_type,
+        .nesting_too_deep,
+    };
+    try std.testing.expectEqual(@as(usize, 17), std.meta.fields(AdmissionKind).len);
+    for (expected, 0..) |kind, index| {
+        try std.testing.expectEqual(index, @intFromEnum(kind));
+    }
+}
+
+test "admission collector preserves mode order deduplication and fatal selection" {
+    var collected = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collected.deinit();
+    try collected.recordRecoverable(.{
+        .kind = .any_type,
+        .span = .{ .start = 4, .end = 7 },
+    });
+    try collected.recordRecoverable(.{
+        .kind = .void_type,
+        .span = .{ .start = 4, .end = 8 },
+    });
+    try collected.recordRecoverable(.{
+        .kind = .array_type_alias,
+        .span = .{ .start = 9, .end = 14 },
+    });
+    try std.testing.expectEqual(@as(u64, 3), collected.generation());
+    try std.testing.expectEqual(@as(usize, 2), collected.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, collected.items()[0].kind);
+    try std.testing.expectEqual(AdmissionKind.array_type_alias, collected.items()[1].kind);
+
+    try collected.recordFatal(.{
+        .kind = .unterminated_string,
+        .span = .{ .start = 20, .end = 20 },
+    });
+    try std.testing.expect(collected.hasFatal());
+    try std.testing.expect(collected.shouldStop());
+    try std.testing.expectEqual(@as(u64, 4), collected.generation());
+    try std.testing.expectEqual(@as(usize, 1), collected.items().len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, collected.items()[0].kind);
+    try std.testing.expectEqual(@as(u32, 20), collected.items()[0].span.start);
+
+    var compiled = AdmissionCollector.init(std.testing.allocator, .compile);
+    defer compiled.deinit();
+    try compiled.recordCaught(.{
+        .kind = .unterminated_string,
+        .span = .{ .start = 0, .end = 1 },
+    });
+    try std.testing.expectEqual(@as(u64, 0), compiled.generation());
+    try std.testing.expectEqual(@as(usize, 0), compiled.items().len);
+    try std.testing.expect(!compiled.hasFatal());
+    try std.testing.expect(!compiled.shouldStop());
+    try compiled.recordRecoverable(.{
+        .kind = .any_type,
+        .span = .{ .start = 1, .end = 4 },
+    });
+    try compiled.recordRecoverable(.{
+        .kind = .void_type,
+        .span = .{ .start = 8, .end = 12 },
+    });
+    try std.testing.expect(compiled.isCompile());
+    try std.testing.expect(compiled.shouldStop());
+    try std.testing.expectEqual(@as(u64, 2), compiled.generation());
+    try std.testing.expectEqual(@as(usize, 1), compiled.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, compiled.items()[0].kind);
+}
+
+test "admission observation history preserves first kind and staged rollback" {
+    var history = AdmissionObservationHistory.init(std.testing.allocator);
+    defer history.deinit();
+
+    try history.record(.{
+        .kind = .any_type,
+        .span = .{ .start = 4, .end = 7 },
+    });
+    try history.record(.{
+        .kind = .void_type,
+        .span = .{ .start = 9, .end = 13 },
+    });
+    try history.record(.{
+        .kind = .array_type_alias,
+        .span = .{ .start = 4, .end = 9 },
+    });
+
+    try std.testing.expectEqual(@as(usize, 2), history.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, history.items()[0].kind);
+    try std.testing.expectEqual(AdmissionKind.void_type, history.last().?.kind);
+
+    const checkpoint_value = history.checkpoint();
+    try history.record(.{
+        .kind = .optional_parameter,
+        .span = .{ .start = 20, .end = 21 },
+    });
+    history.rollbackUnconfirmed(checkpoint_value);
+    try std.testing.expectEqual(@as(usize, 2), history.items().len);
+    try std.testing.expectEqual(AdmissionKind.void_type, history.last().?.kind);
+}
+
+test "admission sink retains merged emission order and collector encounters" {
+    const source = "any void \"open\n";
+    const caught: AdmissionDiagnostic = .{
+        .kind = .unterminated_string,
+        .span = .{ .start = 14, .end = 15 },
+    };
+    var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collector.deinit();
+    var history = AdmissionObservationHistory.init(std.testing.allocator);
+    defer history.deinit();
+    const sink = AdmissionSink.init(&collector, &history);
+
+    try classifyTypeSpan(source, .{
+        .span = .{ .start = 0, .end = @intCast(source.len) },
+        .policy = .general_type,
+        .caught_lexical = &.{caught},
+    }, sink);
+
+    const expected = [_]AdmissionDiagnostic{
+        .{ .kind = .any_type, .span = .{ .start = 0, .end = 3 } },
+        caught,
+        .{ .kind = .void_type, .span = .{ .start = 4, .end = 8 } },
+    };
+    try std.testing.expectEqual(expected.len, history.items().len);
+    try std.testing.expectEqual(expected.len, collector.items().len);
+    for (expected, history.items(), collector.items()) |expected_diagnostic, observed, selected| {
+        try std.testing.expectEqual(expected_diagnostic.kind, observed.kind);
+        try std.testing.expectEqual(expected_diagnostic.span, observed.span);
+        try std.testing.expectEqual(expected_diagnostic.kind, selected.kind);
+        try std.testing.expectEqual(expected_diagnostic.span, selected.span);
+    }
+
+    try sink.recordRecoverable(.{
+        .kind = .array_type_alias,
+        .span = .{ .start = 4, .end = 9 },
+    });
+    try std.testing.expectEqual(@as(usize, 3), history.items().len);
+    try std.testing.expectEqual(@as(u64, 4), collector.generation());
+    try std.testing.expectEqual(@as(usize, 3), collector.items().len);
+}
+
+test "admission sink keeps presentation history across fatal replay" {
+    const first: AdmissionDiagnostic = .{
+        .kind = .any_type,
+        .span = .{ .start = 1, .end = 4 },
+    };
+    const second: AdmissionDiagnostic = .{
+        .kind = .void_type,
+        .span = .{ .start = 8, .end = 12 },
+    };
+    var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collector.deinit();
+    var history = AdmissionObservationHistory.init(std.testing.allocator);
+    defer history.deinit();
+    const sink = AdmissionSink.init(&collector, &history);
+
+    try sink.recordRecoverable(first);
+    try sink.recordRecoverable(second);
+    try sink.recordFatal(first);
+
+    try std.testing.expect(collector.hasFatal());
+    try std.testing.expectEqual(@as(u64, 3), collector.generation());
+    try std.testing.expectEqual(@as(usize, 1), collector.items().len);
+    try std.testing.expectEqual(first.kind, collector.items()[0].kind);
+    try std.testing.expectEqual(first.span, collector.items()[0].span);
+    try std.testing.expectEqual(@as(usize, 2), history.items().len);
+    try std.testing.expectEqual(first.kind, history.items()[0].kind);
+    try std.testing.expectEqual(second.kind, history.last().?.kind);
+    try std.testing.expectEqual(second.span, history.last().?.span);
+}
+
+test "compile caught observations preserve later hard selection" {
+    const any_source = "\"open\nany void";
+    var any_collector = AdmissionCollector.init(std.testing.allocator, .compile);
+    defer any_collector.deinit();
+    var any_history = AdmissionObservationHistory.init(std.testing.allocator);
+    defer any_history.deinit();
+    try classifyTypeSpan(any_source, .{
+        .span = .{ .start = 0, .end = @intCast(any_source.len) },
+        .policy = .general_type,
+        .caught_lexical = &.{.{
+            .kind = .unterminated_string,
+            .span = .{ .start = 5, .end = 6 },
+        }},
+    }, AdmissionSink.init(&any_collector, &any_history));
+    try std.testing.expectEqual(@as(u64, 1), any_collector.generation());
+    try std.testing.expectEqual(@as(usize, 1), any_collector.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, any_collector.items()[0].kind);
+    try std.testing.expectEqual(@as(usize, 2), any_history.items().len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, any_history.items()[0].kind);
+    try std.testing.expectEqual(AdmissionKind.any_type, any_history.items()[1].kind);
+
+    const removed_source = "void \"open\n";
+    var removed_collector = AdmissionCollector.init(std.testing.allocator, .compile);
+    defer removed_collector.deinit();
+    var removed_history = AdmissionObservationHistory.init(std.testing.allocator);
+    defer removed_history.deinit();
+    try classifyTypeSpan(removed_source, .{
+        .span = .{ .start = 0, .end = @intCast(removed_source.len) },
+        .policy = .removed_only,
+        .caught_lexical = &.{.{
+            .kind = .unterminated_string,
+            .span = .{ .start = 10, .end = 11 },
+        }},
+    }, AdmissionSink.init(&removed_collector, &removed_history));
+    try std.testing.expectEqual(@as(u64, 1), removed_collector.generation());
+    try std.testing.expectEqual(@as(usize, 1), removed_collector.items().len);
+    try std.testing.expectEqual(AdmissionKind.void_type, removed_collector.items()[0].kind);
+    try std.testing.expectEqual(@as(usize, 2), removed_history.items().len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, removed_history.items()[0].kind);
+    try std.testing.expectEqual(AdmissionKind.void_type, removed_history.items()[1].kind);
+}
+
+fn exerciseAdmissionHistoryAllocation(allocator: std.mem.Allocator) !void {
+    var history = AdmissionObservationHistory.init(allocator);
+    defer history.deinit();
+    try history.record(.{
+        .kind = .any_type,
+        .span = .{ .start = 1, .end = 4 },
+    });
+    try history.record(.{
+        .kind = .void_type,
+        .span = .{ .start = 8, .end = 12 },
+    });
+}
+
+test "admission history propagates allocation failure before collector mutation" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseAdmissionHistoryAllocation,
+        .{},
+    );
+
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var history = AdmissionObservationHistory.init(failing.allocator());
+    defer history.deinit();
+    var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collector.deinit();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        AdmissionSink.init(&collector, &history).recordRecoverable(.{
+            .kind = .any_type,
+            .span = .{ .start = 1, .end = 4 },
+        }),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), history.items().len);
+    try std.testing.expectEqual(@as(u64, 0), collector.generation());
+    try std.testing.expectEqual(@as(usize, 0), collector.items().len);
+}
+
+fn expectTypeSpanDiagnostics(
+    source: []const u8,
+    options: AdmissionTypeSpanOptions,
+    expected: []const AdmissionDiagnostic,
+) !void {
+    var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collector.deinit();
+    try classifyTypeSpan(source, options, AdmissionSink.init(&collector, null));
+    try std.testing.expectEqual(expected.len, collector.items().len);
+    for (expected, collector.items()) |expected_diagnostic, actual| {
+        try std.testing.expectEqual(expected_diagnostic.kind, actual.kind);
+        try std.testing.expectEqual(expected_diagnostic.span, actual.span);
+    }
+}
+
+test "bounded admission policies preserve legacy any and removed spelling order" {
+    const source = "{ any: string; value: many; alias: Array<string>; later: Many }";
+    const span: Span = .{ .start = 0, .end = @intCast(source.len) };
+
+    const Case = struct {
+        policy: AdmissionTypePolicy,
+        expected: []const AdmissionDiagnostic,
+    };
+    const cases = [_]Case{
+        .{
+            .policy = .general_type,
+            .expected = &.{
+                .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 } },
+                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 } },
+                .{ .kind = .array_type_alias, .span = .{ .start = 35, .end = 40 } },
+            },
+        },
+        .{
+            .policy = .parameter_type,
+            .expected = &.{
+                .{ .kind = .any_type, .span = .{ .start = 2, .end = 5 } },
+                .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 } },
+                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 } },
+                .{ .kind = .array_type_alias, .span = .{ .start = 35, .end = 40 } },
+            },
+        },
+        .{
+            .policy = .any_only,
+            .expected = &.{
+                .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 } },
+                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 } },
+            },
+        },
+        .{
+            .policy = .removed_only,
+            .expected = &.{.{
+                .kind = .array_type_alias,
+                .span = .{ .start = 35, .end = 40 },
+            }},
+        },
+    };
+    for (cases) |case| {
+        try expectTypeSpanDiagnostics(source, .{
+            .span = span,
+            .policy = case.policy,
+        }, case.expected);
+    }
+
+    var compiled = AdmissionCollector.init(std.testing.allocator, .compile);
+    defer compiled.deinit();
+    try classifyTypeSpan(source, .{
+        .span = span,
+        .policy = .general_type,
+    }, AdmissionSink.init(&compiled, null));
+    try std.testing.expectEqual(@as(usize, 1), compiled.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, compiled.items()[0].kind);
+    try std.testing.expectEqual(@as(u32, 23), compiled.items()[0].span.start);
+
+    const prefix_source = "any void";
+    var prefix_collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer prefix_collector.deinit();
+    try classifyTypeSpanPrefix(prefix_source, .{
+        .span = .{ .start = 0, .end = @intCast(prefix_source.len) },
+        .policy = .general_type,
+    }, AdmissionSink.init(&prefix_collector, null));
+    try std.testing.expectEqual(@as(usize, 1), prefix_collector.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, prefix_collector.items()[0].kind);
+
+    const suffix_source = "const value: number many = 1;";
+    try expectTypeSpanDiagnostics(
+        suffix_source,
+        .{ .span = .{ .start = 13, .end = 24 }, .policy = .general_type },
+        &.{.{ .kind = .any_type, .span = .{ .start = 21, .end = 24 } }},
+    );
+
+    const nominal_body = "void | many";
+    try expectTypeSpanDiagnostics(
+        nominal_body,
+        .{
+            .span = .{ .start = 0, .end = @intCast(nominal_body.len) },
+            .policy = .any_only,
+        },
+        &.{.{ .kind = .any_type, .span = .{ .start = 8, .end = 11 } }},
+    );
+
+    const optional_function = "(value?: string) => number";
+    try expectTypeSpanDiagnostics(optional_function, .{
+        .span = .{ .start = 0, .end = @intCast(optional_function.len) },
+        .policy = .removed_only,
+    }, &.{.{ .kind = .optional_parameter, .span = .{ .start = 6, .end = 7 } }});
+
+    const optional_record = "{ value?: string }";
+    try expectTypeSpanDiagnostics(optional_record, .{
+        .span = .{ .start = 0, .end = @intCast(optional_record.len) },
+        .policy = .removed_only,
+    }, &.{});
+
+    const control_whitespace = [_][]const u8{
+        "Array\x0b<number>",
+        "ReadonlyArray\x0c<number>",
+    };
+    const control_kinds = [_]AdmissionKind{ .array_type_alias, .readonly_array_type_alias };
+    for (control_whitespace, control_kinds) |control, expected_kind| {
+        const name_end: u32 = if (expected_kind == .array_type_alias) 5 else 13;
+        try expectTypeSpanDiagnostics(control, .{
+            .span = .{ .start = 0, .end = @intCast(control.len) },
+            .policy = .removed_only,
+        }, &.{.{ .kind = expected_kind, .span = .{ .start = 0, .end = name_end } }});
+    }
+}
+
+test "bounded admission classifier keeps strings comments and templates opaque" {
+    const source = "\"any\" | `Array<void>` | /* any */ ReadonlyArray<string>";
+    try expectTypeSpanDiagnostics(source, .{
+        .span = .{ .start = 0, .end = @intCast(source.len) },
+        .policy = .general_type,
+    }, &.{.{
+        .kind = .readonly_array_type_alias,
+        .span = .{ .start = 34, .end = 47 },
+    }});
+
+    const line_comment_source = "// any Array<void>\nvoid";
+    try expectTypeSpanDiagnostics(line_comment_source, .{
+        .span = .{ .start = 0, .end = @intCast(line_comment_source.len) },
+        .policy = .general_type,
+    }, &.{.{ .kind = .void_type, .span = .{ .start = 19, .end = 23 } }});
+
+    const malformed_before = "any \"open\n void";
+    try expectTypeSpanDiagnostics(malformed_before, .{
+        .span = .{ .start = 0, .end = @intCast(malformed_before.len) },
+        .policy = .general_type,
+        .caught_lexical = &.{.{
+            .kind = .unterminated_string,
+            .span = .{ .start = 9, .end = 10 },
+        }},
+    }, &.{
+        .{ .kind = .any_type, .span = .{ .start = 0, .end = 3 } },
+        .{ .kind = .unterminated_string, .span = .{ .start = 9, .end = 10 } },
+    });
+
+    const malformed_after = "\"open\nany void";
+    try expectTypeSpanDiagnostics(malformed_after, .{
+        .span = .{ .start = 0, .end = @intCast(malformed_after.len) },
+        .policy = .general_type,
+        .caught_lexical = &.{.{
+            .kind = .unterminated_string,
+            .span = .{ .start = 5, .end = 6 },
+        }},
+    }, &.{
+        .{ .kind = .unterminated_string, .span = .{ .start = 5, .end = 6 } },
+        .{ .kind = .any_type, .span = .{ .start = 6, .end = 9 } },
+    });
+    var malformed_compile = AdmissionCollector.init(std.testing.allocator, .compile);
+    defer malformed_compile.deinit();
+    try classifyTypeSpan(malformed_after, .{
+        .span = .{ .start = 0, .end = @intCast(malformed_after.len) },
+        .policy = .general_type,
+        .caught_lexical = &.{.{
+            .kind = .unterminated_string,
+            .span = .{ .start = 5, .end = 6 },
+        }},
+    }, AdmissionSink.init(&malformed_compile, null));
+    try std.testing.expectEqual(@as(u64, 1), malformed_compile.generation());
+    try std.testing.expectEqual(@as(usize, 1), malformed_compile.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, malformed_compile.items()[0].kind);
+    try std.testing.expectEqual(Span{ .start = 6, .end = 9 }, malformed_compile.items()[0].span);
+
+    const removed_after = "void \"open\n";
+    const removed_options: AdmissionTypeSpanOptions = .{
+        .span = .{ .start = 0, .end = @intCast(removed_after.len) },
+        .policy = .removed_only,
+        .caught_lexical = &.{.{
+            .kind = .unterminated_string,
+            .span = .{ .start = 10, .end = 11 },
+        }},
+    };
+    try expectTypeSpanDiagnostics(removed_after, removed_options, &.{
+        .{ .kind = .unterminated_string, .span = .{ .start = 10, .end = 11 } },
+        .{ .kind = .void_type, .span = .{ .start = 0, .end = 4 } },
+    });
+    var removed_compile = AdmissionCollector.init(std.testing.allocator, .compile);
+    defer removed_compile.deinit();
+    try classifyTypeSpan(
+        removed_after,
+        removed_options,
+        AdmissionSink.init(&removed_compile, null),
+    );
+    try std.testing.expectEqual(@as(u64, 1), removed_compile.generation());
+    try std.testing.expectEqual(@as(usize, 1), removed_compile.items().len);
+    try std.testing.expectEqual(AdmissionKind.void_type, removed_compile.items()[0].kind);
+    try std.testing.expectEqual(Span{ .start = 0, .end = 4 }, removed_compile.items()[0].span);
+
+    var invalid_collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer invalid_collector.deinit();
+    try std.testing.expectError(
+        error.InvalidAdmissionSpan,
+        classifyTypeSpan(
+            source,
+            .{
+                .span = .{ .start = 0, .end = @intCast(source.len + 1) },
+                .policy = .general_type,
+            },
+            AdmissionSink.init(&invalid_collector, null),
+        ),
+    );
+}
+
+test "bounded admission classifier accepts exact lexical endpoints and unwinds templates" {
+    var boundary_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer boundary_source.deinit(std.testing.allocator);
+    try boundary_source.appendSlice(std.testing.allocator, "function f(): `${");
+    try boundary_source.appendNTimes(std.testing.allocator, '{', max_type_depth);
+    try boundary_source.appendSlice(std.testing.allocator, " return 1; }\n");
+    var boundary_collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer boundary_collector.deinit();
+    try classifyTypeSpan(boundary_source.items, .{
+        .span = .{ .start = 14, .end = 528 },
+        .policy = .any_only,
+        .caught_lexical = &.{.{
+            .kind = .nesting_too_deep,
+            .span = .{ .start = 528, .end = 529 },
+        }},
+    }, AdmissionSink.init(&boundary_collector, null));
+    try std.testing.expectEqual(@as(usize, 1), boundary_collector.items().len);
+    try std.testing.expectEqual(AdmissionKind.nesting_too_deep, boundary_collector.items()[0].kind);
+    try std.testing.expectEqual(Span{ .start = 528, .end = 529 }, boundary_collector.items()[0].span);
+
+    var nested_source: std.ArrayListUnmanaged(u8) = .empty;
+    defer nested_source.deinit(std.testing.allocator);
+    try nested_source.appendSlice(std.testing.allocator, "function f(): `${`${");
+    try nested_source.appendNTimes(std.testing.allocator, '{', max_type_depth);
+    try nested_source.appendSlice(std.testing.allocator, "}}` | any { return 1; }\n");
+    var nested_collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer nested_collector.deinit();
+    try classifyTypeSpan(nested_source.items, .{
+        .span = .{ .start = 14, .end = 542 },
+        .policy = .any_only,
+        .caught_lexical = &.{.{
+            .kind = .nesting_too_deep,
+            .span = .{ .start = 531, .end = 532 },
+        }},
+    }, AdmissionSink.init(&nested_collector, null));
+    try std.testing.expectEqual(@as(usize, 2), nested_collector.items().len);
+    try std.testing.expectEqual(AdmissionKind.nesting_too_deep, nested_collector.items()[0].kind);
+    try std.testing.expectEqual(@as(u32, 531), nested_collector.items()[0].span.start);
+    try std.testing.expectEqual(AdmissionKind.any_type, nested_collector.items()[1].kind);
+    try std.testing.expectEqual(Span{ .start = 538, .end = 541 }, nested_collector.items()[1].span);
+
+    const lf_source = "number\n";
+    var lf_collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer lf_collector.deinit();
+    try classifyTypeSpan(lf_source, .{
+        .span = .{ .start = 0, .end = 6 },
+        .policy = .any_only,
+        .caught_lexical = &.{.{
+            .kind = .unterminated_string,
+            .span = .{ .start = 6, .end = 7 },
+        }},
+    }, AdmissionSink.init(&lf_collector, null));
+    try std.testing.expectEqual(@as(usize, 1), lf_collector.items().len);
+    try std.testing.expectEqual(Span{ .start = 6, .end = 7 }, lf_collector.items()[0].span);
+
+    const equal_source = "{}";
+    var equal_collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer equal_collector.deinit();
+    try classifyTypeSpanPrefix(equal_source, .{
+        .span = .{ .start = 0, .end = 2 },
+        .policy = .removed_only,
+        .caught_lexical = &.{
+            .{ .kind = .nesting_too_deep, .span = .{ .start = 1, .end = 2 } },
+            .{ .kind = .unterminated_string, .span = .{ .start = 1, .end = 2 } },
+        },
+    }, AdmissionSink.init(&equal_collector, null));
+    try std.testing.expectEqual(@as(u64, 2), equal_collector.generation());
+    try std.testing.expectEqual(@as(usize, 1), equal_collector.items().len);
+    try std.testing.expectEqual(AdmissionKind.nesting_too_deep, equal_collector.items()[0].kind);
+
+    try std.testing.expectError(
+        error.InvalidCaughtAdmissionDiagnostic,
+        classifyTypeSpan(lf_source, .{
+            .span = .{ .start = 0, .end = 6 },
+            .policy = .any_only,
+            .caught_lexical = &.{.{
+                .kind = .nesting_too_deep,
+                .span = .{ .start = 6, .end = 7 },
+            }},
+        }, AdmissionSink.init(&lf_collector, null)),
+    );
+    try std.testing.expectError(
+        error.InvalidCaughtAdmissionDiagnostic,
+        classifyTypeSpan(lf_source, .{
+            .span = .{ .start = 0, .end = 6 },
+            .policy = .any_only,
+            .caught_lexical = &.{.{
+                .kind = .unterminated_string,
+                .span = .{ .start = 6, .end = 6 },
+            }},
+        }, AdmissionSink.init(&lf_collector, null)),
+    );
+}
+
+fn exerciseAdmissionCollectorAllocation(allocator: std.mem.Allocator) !void {
+    var collector = AdmissionCollector.init(allocator, .collect);
+    defer collector.deinit();
+    try collector.recordRecoverable(.{
+        .kind = .any_type,
+        .span = .{ .start = 1, .end = 4 },
+    });
+    try collector.recordRecoverable(.{
+        .kind = .void_type,
+        .span = .{ .start = 8, .end = 12 },
+    });
+
+    var fatal = AdmissionCollector.init(allocator, .collect);
+    defer fatal.deinit();
+    try fatal.recordFatal(.{
+        .kind = .unterminated_string,
+        .span = .{ .start = 20, .end = 20 },
+    });
+
+    const nested_template = "`head ${`inner ${value}`}`";
+    try classifyTypeSpan(nested_template, .{
+        .span = .{ .start = 0, .end = @intCast(nested_template.len) },
+        .policy = .any_only,
+    }, AdmissionSink.init(&collector, null));
+}
+
+test "admission collector closes every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        exerciseAdmissionCollectorAllocation,
+        .{},
+    );
+
+    var failing_recoverable = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var recoverable = AdmissionCollector.init(failing_recoverable.allocator(), .collect);
+    defer recoverable.deinit();
+    try std.testing.expectError(error.OutOfMemory, recoverable.recordRecoverable(.{
+        .kind = .any_type,
+        .span = .{ .start = 1, .end = 4 },
+    }));
+    try std.testing.expectEqual(@as(u64, 1), recoverable.generation());
+    try std.testing.expect(!recoverable.hasFatal());
+    try std.testing.expectEqual(@as(usize, 0), recoverable.items().len);
+
+    var failing_fatal = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var fatal = AdmissionCollector.init(failing_fatal.allocator(), .collect);
+    defer fatal.deinit();
+    try std.testing.expectError(error.OutOfMemory, fatal.recordFatal(.{
+        .kind = .unterminated_string,
+        .span = .{ .start = 5, .end = 6 },
+    }));
+    try std.testing.expectEqual(@as(u64, 1), fatal.generation());
+    try std.testing.expect(!fatal.hasFatal());
+    try std.testing.expectEqual(@as(usize, 0), fatal.items().len);
+}
+
+test "type-only module refusal retains its computed raw span" {
+    const source = "import type { Spec } from \"" ++ retired_types_module ++ "\";\nconst live = 1;";
+    var diagnostics: std.ArrayListUnmanaged(TypeOnlyModuleDiagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    const refusal = switch (try scanTypeOnlyModule(std.testing.allocator, .{
+        .source = source,
+        .keyword = Cursor.init(source).current,
+        .diagnostics = &diagnostics,
+    })) {
+        .refused => |refusal| refusal,
+        .not_type_only, .excluded, .scanned => return error.TestExpectedTypeOnlyModule,
+    };
+    try std.testing.expectEqual(TypeOnlyModuleRefusalReason.zttp_types, refusal.reason);
+    try std.testing.expectEqual(@as(u32, 0), refusal.original_location.offset);
+    try std.testing.expectEqual(Span{ .start = 0, .end = 39 }, refusal.raw_span);
+    try std.testing.expectEqual(@as(usize, 0), diagnostics.items.len);
+}
+
 test "type-only module records require the exact raw scanner result" {
     const source = "import type { A } from \"./a\";\nconst live = 1;";
     const cursor = Cursor.init(source);
@@ -8240,6 +11618,86 @@ test "type-only module records require the exact raw scanner result" {
     store.type_only_modules.items[0] = module;
     store.type_only_modules.items[0].raw_span.end -= 1;
     try std.testing.expectError(error.InvalidTypeOnlyModule, store.validate());
+}
+
+test "recovered type-only module validates its exact diagnostic-bearing record" {
+    const source = "import type \"open\nconst live = 1;";
+    var diagnostics: std.ArrayListUnmanaged(TypeOnlyModuleDiagnostic) = .empty;
+    defer diagnostics.deinit(std.testing.allocator);
+    const module = switch (try scanTypeOnlyModule(std.testing.allocator, .{
+        .source = source,
+        .keyword = Cursor.init(source).current,
+        .diagnostics = &diagnostics,
+    })) {
+        .excluded => |excluded| excluded,
+        .not_type_only, .refused, .scanned => return error.TestExpectedTypeOnlyModule,
+    };
+    const newline: u32 = @intCast(std.mem.indexOfScalar(u8, source, '\n').?);
+    try std.testing.expectEqual(
+        TypeOnlyModule{ .kind = .import_type, .raw_span = .{ .start = 0, .end = newline } },
+        module,
+    );
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    try std.testing.expectEqual(TypeOnlyModuleDiagnosticKind.unterminated_string, diagnostics.items[0].kind);
+
+    var store = Store.init(std.testing.allocator, source);
+    defer store.deinit();
+    try store.appendTypeOnlyModule(module);
+    try store.validate();
+    try std.testing.expectEqual(@as(usize, 1), store.type_only_modules.items.len);
+    try std.testing.expectEqual(module, store.type_only_modules.items[0]);
+
+    var forged_store = Store.init(std.testing.allocator, source);
+    defer forged_store.deinit();
+    var wrong_kind = module;
+    wrong_kind.kind = .export_type;
+    try std.testing.expectError(
+        error.InvalidTypeOnlyModule,
+        forged_store.appendTypeOnlyModule(wrong_kind),
+    );
+    var changed_endpoint = module;
+    changed_endpoint.raw_span.end -= 1;
+    try std.testing.expectError(
+        error.InvalidTypeOnlyModule,
+        forged_store.appendTypeOnlyModule(changed_endpoint),
+    );
+    try std.testing.expectEqual(@as(usize, 0), forged_store.type_only_modules.items.len);
+
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var failing_store = Store.init(failing.allocator(), source);
+    defer failing_store.deinit();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        failing_store.appendTypeOnlyModule(module),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), failing_store.type_only_modules.items.len);
+
+    const refused_source =
+        "import type { Spec } from \"" ++ retired_types_module ++ "\";";
+    var refused_diagnostics: std.ArrayListUnmanaged(TypeOnlyModuleDiagnostic) = .empty;
+    defer refused_diagnostics.deinit(std.testing.allocator);
+    const refusal = switch (try scanTypeOnlyModule(std.testing.allocator, .{
+        .source = refused_source,
+        .keyword = Cursor.init(refused_source).current,
+        .diagnostics = &refused_diagnostics,
+    })) {
+        .refused => |refused| refused,
+        .not_type_only, .excluded, .scanned => return error.TestExpectedTypeOnlyModule,
+    };
+    var refused_store = Store.init(std.testing.allocator, refused_source);
+    defer refused_store.deinit();
+    try std.testing.expectError(
+        error.InvalidTypeOnlyModule,
+        refused_store.appendTypeOnlyModule(.{
+            .kind = .import_type,
+            .raw_span = refusal.raw_span,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 0), refused_store.type_only_modules.items.len);
 }
 
 test "erased prefix operand scanner is local and preserves lexical delimiters" {
@@ -8544,4 +12002,794 @@ test "type-only module spill failure removes a diagnostic appended in the same s
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expectEqual(@as(usize, 1), diagnostics.items.len);
     try std.testing.expect(std.meta.eql(prior, diagnostics.items[0]));
+}
+
+test "admission endpoints retain producer specific delimiters" {
+    const source = "number, (value: string) => string { body }; next\n";
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    const variable = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        source,
+        0,
+        .{ .general = .variable },
+        &caught,
+    );
+    try std.testing.expectEqual(@as(u32, 6), variable.complete.end);
+
+    const function_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '(').?);
+    const named = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        source,
+        function_start,
+        .{ .general = .named_return },
+        &caught,
+    );
+    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
+    try std.testing.expectEqual(body_start, named.complete.end);
+
+    const arrow_start: u32 = @intCast(std.mem.indexOf(u8, source, "string { body }").?);
+    const arrow = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        source,
+        arrow_start,
+        .{ .general = .arrow_return },
+        &caught,
+    );
+    try std.testing.expectEqual(body_start, arrow.complete.end);
+
+    const unmatched = "(string; any), next";
+    const continued = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        unmatched,
+        0,
+        .{ .general = .variable },
+        &caught,
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOfScalar(u8, unmatched, ',').?)),
+        continued.complete.end,
+    );
+}
+
+test "admission endpoint reports only committed unfinished comments" {
+    const source = "number /* unfinished";
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+    const result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        source,
+        0,
+        .{ .general = .variable },
+        &caught,
+    );
+    const failure = switch (result) {
+        .unterminated_comment => |failure| failure,
+        else => return error.TestExpectedUnterminatedComment,
+    };
+    try std.testing.expectEqual(@as(u32, 7), failure.opener);
+    try std.testing.expectEqual(@as(u32, @intCast(source.len - 1)), failure.@"resume");
+    try std.testing.expectEqual(@as(usize, 0), caught.items.len);
+
+    const bare = "/*";
+    const bare_result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        bare,
+        0,
+        .{ .general = .variable },
+        &caught,
+    );
+    const bare_failure = switch (bare_result) {
+        .unterminated_comment => |bare_comment| bare_comment,
+        else => return error.TestExpectedUnterminatedComment,
+    };
+    try std.testing.expectEqual(@as(u32, 0), bare_failure.opener);
+    try std.testing.expectEqual(@as(u32, @intCast(bare.len)), bare_failure.@"resume");
+
+    const interface_body = "interface X extends { field: /* unfinished";
+    const extends_end: u32 = @intCast(std.mem.indexOf(u8, interface_body, "extends").? + "extends".len);
+    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, interface_body, '{').?);
+    const interface_result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        interface_body,
+        extends_end,
+        .{ .general = .interface_extends },
+        &caught,
+    );
+    try std.testing.expectEqual(
+        Span{ .start = extends_end, .end = body_start },
+        interface_result.complete,
+    );
+
+    const quoted = "\"/* unfinished\";";
+    const quoted_result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        quoted,
+        0,
+        .{ .general = .variable },
+        &caught,
+    );
+    const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, quoted, ';').?);
+    try std.testing.expectEqual(Span{ .start = 0, .end = semicolon }, quoted_result.complete);
+
+    const template = "`/* unfinished`;";
+    const template_result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        template,
+        0,
+        .{ .general = .variable },
+        &caught,
+    );
+    const template_semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, template, ';').?);
+    try std.testing.expectEqual(
+        Span{ .start = 0, .end = template_semicolon },
+        template_result.complete,
+    );
+}
+
+test "parameter endpoint follows legacy delimiter depth rules" {
+    const source = "{ value: string; nested: number } = fallback, next)";
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    const result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        source,
+        0,
+        .parameter,
+        &caught,
+    );
+    const equals: u32 = @intCast(std.mem.indexOfScalar(u8, source, '=').?);
+    try std.testing.expectEqual(equals, result.complete.end);
+
+    const inside_brace = "{ value = fallback }, next)";
+    const nested_result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        inside_brace,
+        0,
+        .parameter,
+        &caught,
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOfScalar(u8, inside_brace, '=').?)),
+        nested_result.complete.end,
+    );
+}
+
+test "return endpoints preserve semicolon and unmatched brace distinctions" {
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    const arrow_source = "string; any => value";
+    const arrow = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        arrow_source,
+        0,
+        .{ .general = .arrow_return },
+        &caught,
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOf(u8, arrow_source, "=>").?)),
+        arrow.complete.end,
+    );
+
+    const unmatched = "string } ; body";
+    const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, unmatched, ';').?);
+    const named = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        unmatched,
+        0,
+        .{ .general = .named_return },
+        &caught,
+    );
+    try std.testing.expectEqual(semicolon, named.complete.end);
+    const interface = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        unmatched,
+        0,
+        .{ .general = .interface_extends },
+        &caught,
+    );
+    try std.testing.expectEqual(semicolon, interface.complete.end);
+
+    const full_interface = "interface X extends { field: any }";
+    const extends_end: u32 = @intCast(std.mem.indexOf(u8, full_interface, "extends").? + "extends".len);
+    const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, full_interface, '{').?);
+    const full_result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        full_interface,
+        extends_end,
+        .{ .general = .interface_extends },
+        &caught,
+    );
+    try std.testing.expectEqual(body_start, full_result.complete.end);
+}
+
+test "assertion endpoint keeps object braces and stops at expression delimiters" {
+    const source = "{ field: string }, after";
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+    const result = try scanAdmissionEndpoint(
+        std.testing.allocator,
+        source,
+        0,
+        .{ .general = .assertion },
+        &caught,
+    );
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOfScalar(u8, source, ',').?)),
+        result.complete.end,
+    );
+}
+
+test "admission quoted region preserves complete and terminal boundaries" {
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    const closed = "\"closed\" tail";
+    switch (try scanAdmissionQuotedRegion(std.testing.allocator, .{
+        .source = closed,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .complete => |end| try std.testing.expectEqual(@as(u32, 8), end),
+        .terminal => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), caught.items.len);
+
+    const eof = "\"open";
+    switch (try scanAdmissionQuotedRegion(std.testing.allocator, .{
+        .source = eof,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .complete => |end| try std.testing.expectEqual(@as(u32, eof.len), end),
+        .terminal => return error.TestUnexpectedResult,
+    }
+
+    const line = "\"open\nrest";
+    switch (try scanAdmissionQuotedRegion(std.testing.allocator, .{
+        .source = line,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .terminal => |diagnostic| {
+            try std.testing.expectEqual(AdmissionKind.unterminated_string, diagnostic.kind);
+            try std.testing.expectEqual(Span{ .start = 5, .end = 6 }, diagnostic.span);
+        },
+        .complete => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), caught.items.len);
+    try std.testing.expectError(
+        error.InvalidAdmissionSpan,
+        scanAdmissionQuotedRegion(std.testing.allocator, .{
+            .source = "value",
+            .start = 0,
+            .caught = &caught,
+        }),
+    );
+    try std.testing.expectError(
+        error.InvalidAdmissionSpan,
+        scanAdmissionQuotedRegion(std.testing.allocator, .{
+            .source = "\"value\"",
+            .start = 7,
+            .caught = &caught,
+        }),
+    );
+}
+
+test "admission quoted region retains nested rows before a root terminal" {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "`outer${\"first\n\"second\n");
+    try source.appendNTimes(std.testing.allocator, '{', max_type_depth - 1);
+    const terminal_offset: u32 = @intCast(source.items.len);
+    try source.append(std.testing.allocator, '{');
+
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+    switch (try scanAdmissionQuotedRegion(std.testing.allocator, .{
+        .source = source.items,
+        .start = 0,
+        .caught = &caught,
+    })) {
+        .terminal => |diagnostic| {
+            try std.testing.expectEqual(AdmissionKind.nesting_too_deep, diagnostic.kind);
+            try std.testing.expectEqual(
+                Span{ .start = terminal_offset, .end = terminal_offset + 1 },
+                diagnostic.span,
+            );
+        },
+        .complete => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[1].kind);
+    try std.testing.expect(caught.items[0].span.start < caught.items[1].span.start);
+    try std.testing.expect(caught.items[1].span.start < terminal_offset);
+}
+
+test "admission quoted region restores caught rows on allocation failure" {
+    const prefix = "`outer${\"first\n";
+    const nested_count = comptime std.ArrayListUnmanaged(LegacyTemplateFrame).growCapacity(1);
+    const source = prefix ++ ("`nested${" ** nested_count) ++ "value" ++ ("}`" ** nested_count) ++ "}`";
+    var observed_failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        struct {
+            fn run(
+                allocator: std.mem.Allocator,
+                text: []const u8,
+                failures: *usize,
+            ) !void {
+                var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+                defer caught.deinit(allocator);
+                const seed: AdmissionDiagnostic = .{
+                    .kind = .nesting_too_deep,
+                    .span = .{ .start = 0, .end = 1 },
+                };
+                try caught.append(allocator, seed);
+                const entry_len = caught.items.len;
+                _ = scanAdmissionQuotedRegion(allocator, .{
+                    .source = text,
+                    .start = 0,
+                    .caught = &caught,
+                }) catch |err| switch (err) {
+                    error.OutOfMemory => {
+                        failures.* += 1;
+                        try std.testing.expectEqual(entry_len, caught.items.len);
+                        try std.testing.expectEqualDeep(seed, caught.items[0]);
+                        return err;
+                    },
+                    else => return err,
+                };
+                try std.testing.expect(caught.items.len > entry_len);
+            }
+        }.run,
+        .{ source, &observed_failures },
+    );
+    try std.testing.expect(observed_failures > 0);
+
+    const seed: AdmissionDiagnostic = .{
+        .kind = .nesting_too_deep,
+        .span = .{ .start = 0, .end = 1 },
+    };
+    var calibration = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = std.math.maxInt(usize),
+    });
+    var prefix_caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer prefix_caught.deinit(calibration.allocator());
+    try prefix_caught.append(calibration.allocator(), seed);
+    switch (try scanAdmissionQuotedRegion(calibration.allocator(), .{
+        .source = prefix,
+        .start = 0,
+        .caught = &prefix_caught,
+    })) {
+        .complete => |end| try std.testing.expectEqual(@as(u32, prefix.len), end),
+        .terminal => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 2), prefix_caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, prefix_caught.items[1].kind);
+
+    var post_caught_failure = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = calibration.alloc_index,
+        .resize_fail_index = calibration.resize_index,
+    });
+    var full_caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer full_caught.deinit(post_caught_failure.allocator());
+    try full_caught.append(post_caught_failure.allocator(), seed);
+    try std.testing.expectError(
+        error.OutOfMemory,
+        scanAdmissionQuotedRegion(post_caught_failure.allocator(), .{
+            .source = source,
+            .start = 0,
+            .caught = &full_caught,
+        }),
+    );
+    try std.testing.expect(post_caught_failure.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), full_caught.items.len);
+    try std.testing.expectEqualDeep(seed, full_caught.items[0]);
+}
+
+test "admission quoted core preserves caught events" {
+    const source = "`outer${\"open\n${value}} tail`";
+    var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+    defer caught.deinit(std.testing.allocator);
+
+    const result = try scanAdmissionTemplate(std.testing.allocator, source, 0, &caught);
+    try std.testing.expectEqual(@as(u32, source.len), result.complete);
+    try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+    try std.testing.expectEqual(AdmissionKind.unterminated_string, caught.items[0].kind);
+    try std.testing.expectEqual(@as(u8, '\n'), source[@as(usize, caught.items[0].span.start)]);
+}
+
+test "admission template scanner reports allocator failure" {
+    const source = "`outer${\"open\n`nested${value}`}`";
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        struct {
+            fn run(allocator: std.mem.Allocator, text: []const u8) !void {
+                var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+                defer caught.deinit(allocator);
+                _ = try scanAdmissionTemplate(allocator, text, 0, &caught);
+            }
+        }.run,
+        .{source},
+    );
+}
+
+test "admission presentation composes tracked prefixes and parameter rewinds" {
+    const source = ":\r \t/*x*/ :\n /*y*/ : number\nany";
+    const initial: AdmissionPresentation = .{ .source = source };
+    const first = try initial.declinedParameterColon(0);
+    try std.testing.expectEqual(@as(u32, 0), first.offset);
+    try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 4 }, first.position);
+    try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 8 }, try first.positionAt(4));
+    const second_colon: u32 = @intCast(std.mem.indexOfPos(u8, source, 1, ":").?);
+    const second = try first.declinedParameterColon(second_colon);
+    try std.testing.expectEqualDeep(AdmissionPosition{ .line = 2, .column = 2 }, second.position);
+    const third_colon: u32 = @intCast(std.mem.indexOfPos(u8, source, second_colon + 1, ":").?);
+    const third = try second.trackedWhitespaceAt(third_colon + 1);
+    try std.testing.expectEqualDeep(AdmissionPosition{ .line = 3, .column = 10 }, third.position);
+    try std.testing.expectEqualDeep(AdmissionPosition{ .line = 4, .column = 1 }, try third.positionAt(@intCast(source.len - 3)));
+    try std.testing.expectError(error.InvalidAdmissionPosition, third.positionAt(0));
+    try std.testing.expectError(error.InvalidAdmissionPosition, initial.positionAt(@intCast(source.len + 1)));
+    try std.testing.expectError(error.InvalidAdmissionPosition, initial.declinedParameterColon(1));
+}
+
+test "admission deduplicates raw positions before conversion" {
+    const source = "abc\ndef";
+    var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collector.deinit();
+    collector.source = source;
+    var history = AdmissionObservationHistory.init(std.testing.allocator);
+    defer history.deinit();
+    history.source = source;
+    const sink = AdmissionSink.init(&collector, &history);
+    const physical: AdmissionDiagnostic = .{ .kind = .any_type, .span = .{ .start = 4, .end = 7 } };
+    try sink.recordRecoverable(physical);
+    try sink.recordRecoverable(.{
+        .kind = .void_type,
+        .span = .{ .start = 0, .end = 1 },
+        .presentation = .{ .line = 2, .column = 1 },
+    });
+    const shifted: AdmissionDiagnostic = .{
+        .kind = .default_parameter,
+        .span = physical.span,
+        .presentation = .{ .line = 3, .column = 1 },
+    };
+    try sink.recordRecoverable(shifted);
+    try std.testing.expectEqual(@as(usize, 2), collector.items().len);
+    try std.testing.expectEqual(@as(usize, 2), history.items().len);
+    try std.testing.expectEqualDeep(physical, collector.items()[0]);
+    try std.testing.expectEqualDeep(shifted, history.last().?);
+    try std.testing.expectEqual(@as(u64, 3), collector.generation());
+}
+
+test "removed types retain physical positions after parameter presentation changes" {
+    const source = ": /*x*/ any, y: void";
+    var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collector.deinit();
+    collector.source = source;
+    var history = AdmissionObservationHistory.init(std.testing.allocator);
+    defer history.deinit();
+    history.source = source;
+    var sink = AdmissionSink.init(&collector, &history);
+    sink.presentation = try (AdmissionPresentation{ .source = source }).declinedParameterColon(0);
+    try classifyTypeSpan(source, .{
+        .span = .{ .start = 15, .end = @intCast(source.len) },
+        .policy = .parameter_type,
+    }, sink);
+    try std.testing.expectEqual(@as(usize, 1), collector.items().len);
+    const diagnostic = collector.items()[0];
+    try std.testing.expectEqual(AdmissionKind.void_type, diagnostic.kind);
+    try std.testing.expectEqualDeep(Span{ .start = 16, .end = 20 }, diagnostic.span);
+    try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 17 }, diagnostic.presentation.?);
+    try std.testing.expectEqualDeep(diagnostic, history.last().?);
+}
+
+test "function type presentation preserves caller seeds and stops compile selection" {
+    const source = "(x: any) =>\r any";
+    const seed: AdmissionDiagnostic = .{
+        .kind = .unterminated_string,
+        .span = .{ .start = 0, .end = 1 },
+    };
+    for ([_]AdmissionMode{ .collect, .compile }) |mode| {
+        var collector = AdmissionCollector.init(std.testing.allocator, mode);
+        defer collector.deinit();
+        collector.source = source;
+        var history = AdmissionObservationHistory.init(std.testing.allocator);
+        defer history.deinit();
+        history.source = source;
+        var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+        defer caught.deinit(std.testing.allocator);
+        try caught.append(std.testing.allocator, seed);
+        var sink = AdmissionSink.init(&collector, &history);
+        sink.presentation = .{ .source = source };
+        var progress: AdmissionEndpointProgress = .{
+            .sink = sink,
+            .policy = .general_type,
+            .classification_start = 0,
+        };
+        if (mode == .compile) {
+            try std.testing.expectError(error.AdmissionRefused, scanAdmissionEndpointWithPresentation(
+                std.testing.allocator,
+                source,
+                0,
+                .{ .general = .variable },
+                &caught,
+                &progress,
+            ));
+            try std.testing.expectEqual(@as(u32, 0), progress.classification_start);
+            try std.testing.expectEqual(@as(usize, 1), collector.items().len);
+        } else {
+            const span = switch (try scanAdmissionEndpointWithPresentation(
+                std.testing.allocator,
+                source,
+                0,
+                .{ .general = .variable },
+                &caught,
+                &progress,
+            )) {
+                .complete => |span| span,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqualDeep(Span{ .start = 0, .end = source.len }, span);
+            try std.testing.expectEqual(@as(u32, 13), progress.classification_start);
+            try classifyTypeSpan(source, .{
+                .span = .{ .start = progress.classification_start, .end = span.end },
+                .policy = .general_type,
+                .caught_lexical = caught.items[1..],
+                .removed_span = span,
+            }, progress.sink);
+            try std.testing.expectEqual(@as(usize, 2), collector.items().len);
+            try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 13 }, collector.items()[1].presentation.?);
+        }
+        try std.testing.expectEqual(@as(usize, 1), caught.items.len);
+        try std.testing.expectEqualDeep(seed, caught.items[0]);
+        try std.testing.expectEqual(collector.items().len, history.items().len);
+        try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 5 }, collector.items()[0].presentation.?);
+    }
+}
+
+test "function type presentation propagates allocation failure after chunk publication" {
+    const first_capacity = comptime std.ArrayListUnmanaged(AdmissionDiagnostic).growCapacity(1);
+    const source = "(x: any) =>\r " ++ ("any | " ** first_capacity) ++ "any";
+    var observed_post_publication_failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, text: []const u8, failure_count: *usize) !void {
+            var collector = AdmissionCollector.init(allocator, .collect);
+            defer collector.deinit();
+            collector.source = text;
+            var history = AdmissionObservationHistory.init(allocator);
+            defer history.deinit();
+            history.source = text;
+            var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
+            defer caught.deinit(allocator);
+            var sink = AdmissionSink.init(&collector, &history);
+            sink.presentation = .{ .source = text };
+            var progress: AdmissionEndpointProgress = .{
+                .sink = sink,
+                .policy = .general_type,
+                .classification_start = 0,
+            };
+            const span = switch (try scanAdmissionEndpointWithPresentation(
+                allocator,
+                text,
+                0,
+                .{ .general = .variable },
+                &caught,
+                &progress,
+            )) {
+                .complete => |span| span,
+                else => return error.TestUnexpectedResult,
+            };
+            classifyTypeSpan(text, .{
+                .span = .{ .start = progress.classification_start, .end = span.end },
+                .policy = .general_type,
+                .caught_lexical = caught.items,
+                .removed_span = span,
+            }, progress.sink) catch |err| {
+                switch (err) {
+                    error.OutOfMemory => {
+                        if (progress.classification_start == 13 and collector.items().len > 0 and history.items().len > 0) {
+                            try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 5 }, collector.items()[0].presentation.?);
+                            try std.testing.expectEqualDeep(collector.items()[0], history.items()[0]);
+                            failure_count.* += 1;
+                        }
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            const capacity = comptime std.ArrayListUnmanaged(AdmissionDiagnostic).growCapacity(1);
+            try std.testing.expectEqual(capacity + 2, collector.items().len);
+            try std.testing.expectEqual(capacity + 2, history.items().len);
+            try std.testing.expectEqualDeep(AdmissionPosition{ .line = 1, .column = 13 + 6 * capacity }, history.last().?.presentation.?);
+        }
+    }.run, .{ source, &observed_post_publication_failures });
+    try std.testing.expect(observed_post_publication_failures > 0);
+}
+
+test "classification rejects invalid removed spans before publishing the tail" {
+    const source = "void any";
+    const invalid = [_]Span{
+        .{ .start = 4, .end = 3 },
+        .{ .start = 0, .end = 9 },
+        .{ .start = 6, .end = 8 },
+        .{ .start = 0, .end = 7 },
+    };
+    for (invalid) |span| {
+        var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+        defer collector.deinit();
+        var history = AdmissionObservationHistory.init(std.testing.allocator);
+        defer history.deinit();
+        try std.testing.expectError(error.InvalidAdmissionSpan, classifyTypeSpan(source, .{
+            .span = .{ .start = 5, .end = 8 },
+            .policy = .general_type,
+            .removed_span = span,
+        }, AdmissionSink.init(&collector, &history)));
+        try std.testing.expectEqual(@as(usize, 0), collector.items().len);
+        try std.testing.expectEqual(@as(usize, 0), history.items().len);
+        try std.testing.expectEqual(@as(u64, 0), collector.generation());
+    }
+    try std.testing.expectEqual(@as(usize, 4), invalid.len);
+    var collector = AdmissionCollector.init(std.testing.allocator, .collect);
+    defer collector.deinit();
+    try classifyTypeSpan(source, .{
+        .span = .{ .start = 5, .end = 8 },
+        .policy = .general_type,
+        .removed_span = .{ .start = 0, .end = 8 },
+    }, AdmissionSink.init(&collector, null));
+    try std.testing.expectEqual(@as(usize, 2), collector.items().len);
+    try std.testing.expectEqual(AdmissionKind.any_type, collector.items()[0].kind);
+    try std.testing.expectEqual(AdmissionKind.void_type, collector.items()[1].kind);
+}
+
+test "admitted absent declarations preserve comment boundaries and cursor accounting" {
+    const cases = [_][]const u8{
+        "structural Shape/* gap */ const live = 1;",
+        "structural Shape\r // gap\n const live = 1;",
+        "export structural Shape<T>\r /* gap */ const live = 1;",
+    };
+    try std.testing.expectEqual(@as(usize, 3), cases.len);
+    for (cases) |source| {
+        var store = Store.init(std.testing.allocator, source);
+        defer store.deinit();
+        var cursor = Cursor.init(source);
+        const exported = cursor.current.type == .kw_export;
+        const export_span: ?Span = if (exported) .{ .start = 0, .end = 6 } else null;
+        if (exported) cursor.advance();
+        const keyword = cursor.current;
+        cursor.advance();
+        const consumed_before = cursor.consumed;
+        const generic_list: ?Span = if (std.mem.indexOfScalar(u8, source, '<')) |start| .{
+            .start = @intCast(start),
+            .end = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1),
+        } else null;
+        const comment: u32 = @intCast(std.mem.indexOfScalar(u8, source, '/').?);
+        const span = switch (try parseAdmittedDeclarationAndStore(&store, .{
+            .keyword = keyword,
+            .export_span = export_span,
+            .kind = .structural,
+            .authored_scope = 7,
+            .generic_list = generic_list,
+            .body = null,
+            .raw_header_end = comment,
+        }, &cursor)) {
+            .parsed => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(comment, span.end);
+        try std.testing.expectEqual(@as(u32, 0), span.start);
+        try std.testing.expectEqual(consumed_before + 1, cursor.consumed);
+        try std.testing.expectEqual(token_mod.TokenType.kw_const, cursor.current.type);
+        try std.testing.expectEqual(@as(usize, 1), store.declarations.items.len);
+        const declaration = store.declarations.items[0];
+        try std.testing.expectEqual(@as(u16, 7), declaration.authored_scope);
+        try std.testing.expectEqualDeep(export_span, declaration.export_span);
+        try std.testing.expectEqualStrings("Shape", declaration.name_span.text(source));
+        try std.testing.expect(declaration.equals_span == null);
+        try std.testing.expect(declaration.terminator_span == null);
+        switch (declaration.body) {
+            .absent => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, if (generic_list != null) 1 else 0), store.generic_owners.items.len);
+        if (generic_list != null) {
+            try std.testing.expectEqual(@as(?u32, 0), declaration.generic_owner);
+            switch (store.generic_owners.items[0].identity) {
+                .structural_declaration => |index| try std.testing.expectEqual(@as(u32, 0), index),
+                else => return error.TestUnexpectedResult,
+            }
+        } else try std.testing.expect(declaration.generic_owner == null);
+        try store.validate();
+    }
+}
+
+test "admitted absent declarations validate boundaries before allocation" {
+    const source = "structural Shape<T> /* gap */ const live = 1;";
+    const generic_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<').?);
+    const generic_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1);
+    const comment: u32 = @intCast(std.mem.indexOfScalar(u8, source, '/').?);
+    const Case = enum { nominal, body, keyword, name, export_span, generic_span, missing_generic, early, late, outside };
+    inline for (std.meta.tags(Case)) |case| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var store = Store.init(failing.allocator(), source);
+        defer store.deinit();
+        var cursor = Cursor.init(source);
+        const keyword = cursor.current;
+        cursor.advance();
+        var options: AdmittedDeclarationOptions = .{
+            .keyword = keyword,
+            .export_span = null,
+            .kind = .structural,
+            .authored_scope = 0,
+            .generic_list = .{ .start = generic_start, .end = generic_end },
+            .body = null,
+            .raw_header_end = comment,
+        };
+        switch (case) {
+            .nominal => options.kind = .nominal,
+            .body => options.body = .{ .raw_span = .{ .start = 0, .end = 1 }, .admission_end = 1 },
+            .keyword => options.keyword.start = std.math.maxInt(u32),
+            .name => cursor.current.start = std.math.maxInt(u32),
+            .export_span => options.export_span = .{ .start = 0, .end = 6 },
+            .generic_span => options.generic_list.?.end -= 1,
+            .missing_generic => options.generic_list = null,
+            .early => options.raw_header_end = comment - 1,
+            .late => options.raw_header_end = comment + 1,
+            .outside => options.raw_header_end = std.math.maxInt(u32),
+        }
+        const prior_cursor = cursor;
+        const prior = store.checkpoint();
+        try std.testing.expectError(error.InvalidAdmissionSpan, parseAdmittedDeclarationAndStore(&store, options, &cursor));
+        try std.testing.expectEqualDeep(prior_cursor, cursor);
+        try std.testing.expectEqualDeep(prior, store.checkpoint());
+        try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
+        try std.testing.expect(!failing.has_induced_failure);
+    }
+}
+
+test "admitted absent declaration allocation failures restore syntax and cursor" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator, failures: *usize) !void {
+            const source = "structural Shape<T>/* gap */ const live = 1;";
+            var store = Store.init(allocator, source);
+            defer store.deinit();
+            var cursor = Cursor.init(source);
+            const keyword = cursor.current;
+            cursor.advance();
+            const prior = store.checkpoint();
+            const prior_cursor = cursor;
+            const outcome = parseAdmittedDeclarationAndStore(&store, .{
+                .keyword = keyword,
+                .export_span = null,
+                .kind = .structural,
+                .authored_scope = 0,
+                .generic_list = .{
+                    .start = @intCast(std.mem.indexOfScalar(u8, source, '<').?),
+                    .end = @intCast(std.mem.indexOfScalar(u8, source, '>').? + 1),
+                },
+                .body = null,
+                .raw_header_end = @intCast(std.mem.indexOfScalar(u8, source, '/').?),
+            }, &cursor) catch |err| {
+                try std.testing.expectEqualDeep(prior, store.checkpoint());
+                try std.testing.expectEqualDeep(prior_cursor, cursor);
+                failures.* += 1;
+                return err;
+            };
+            switch (outcome) {
+                .parsed => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try store.validate();
+            try std.testing.expectEqual(@as(usize, 1), store.declarations.items.len);
+        }
+    };
+    var failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{&failures});
+    try std.testing.expect(failures > 0);
 }

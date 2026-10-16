@@ -3981,6 +3981,96 @@ test "check on a clean handler succeeds with no diagnostics" {
     try testing.expectEqual(@as(i64, 2), contract_version.integer);
 }
 
+const captured_refusal_source =
+    "const value: any = 1;\n" ++
+    "function handler(req: Request): Response { return Response.text(\"captured\"); }\n";
+const captured_refusal_digest = "c8b4df16533c13f0566e41167dfd71099034d0660147424605c41ab19be39989";
+
+test "check ignores content override and retains one captured refusal" {
+    const allocator = testing.allocator;
+    const replacement_source =
+        "function handler(req: Request): Response { return Response.text(\"replacement\"); }\n";
+    const override_source =
+        "function handler(req: Request): Response { return Response.text(\"override\"); }\n";
+
+    const captured_digest = agent_identity.sourceDigest(captured_refusal_source);
+    try testing.expectEqualStrings(captured_refusal_digest, &captured_digest);
+    const replacement_digest = agent_identity.sourceDigest(replacement_source);
+    const override_digest = agent_identity.sourceDigest(override_source);
+    try testing.expect(!std.mem.eql(u8, &captured_digest, &replacement_digest));
+    try testing.expect(!std.mem.eql(u8, &captured_digest, &override_digest));
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "h.ts",
+        .data = captured_refusal_source,
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts","content":{f}}}}}
+    , .{ root, std.json.fmt(override_source, .{}) });
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = replacement_source,
+    };
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        changing_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var expected_graph = try module_graph_record.buildWithEntrySource(
+        allocator,
+        testing.io,
+        root,
+        "h.ts",
+        captured_refusal_source,
+    );
+    defer expected_graph.deinit(allocator);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const envelope = response.value.object;
+    try testing.expect(envelope.get("error") == null);
+    try testing.expect(!envelope.get("success").?.bool);
+    try testing.expectEqualStrings(
+        &expected_graph.hash,
+        envelope.get("module_graph_hash").?.string,
+    );
+
+    const payload = envelope.get("payload").?.object;
+    try testing.expectEqualStrings(
+        captured_refusal_digest,
+        payload.get("source_digest").?.string,
+    );
+    try testing.expectEqual(@as(i64, 1), payload.get("counts").?.object.get("errors").?.integer);
+    try testing.expect(!payload.get("contract_available").?.bool);
+    try testing.expect(payload.get("contract_body").? == .null);
+
+    const diagnostics = envelope.get("diagnostics").?.array;
+    try testing.expectEqual(@as(usize, 1), diagnostics.items.len);
+    const diagnostic = diagnostics.items[0].object;
+    try testing.expectEqualStrings("ZTS041", diagnostic.get("code").?.string);
+    try testing.expectEqual(@as(i64, 1), diagnostic.get("line").?.integer);
+    try testing.expectEqual(@as(i64, 14), diagnostic.get("column").?.integer);
+    try testing.expectEqualStrings(
+        captured_refusal_digest,
+        diagnostic.get("source_digest").?.string,
+    );
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(replacement_source, on_disk);
+}
+
 test "check binds graph digest diagnostics and contract to one captured root source" {
     const allocator = testing.allocator;
     const source_a =
@@ -4243,6 +4333,78 @@ test "verify derives its verdict from one captured source" {
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
     defer allocator.free(on_disk);
     try testing.expectEqualStrings(source_b, on_disk);
+}
+
+test "verify uses a refusal override after one captured root read" {
+    const allocator = testing.allocator;
+    const disk_source =
+        "function handler(req: Request): Response { return Response.text(\"disk\"); }\n";
+    const replacement_source =
+        "function handler(req: Request): Response { return Response.text(\"replacement\"); }\n";
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = disk_source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","content":{f}}}}}
+    , .{ root, std.json.fmt(captured_refusal_source, .{}) });
+    defer allocator.free(request);
+
+    var changing_reader = ChangingRootReader{
+        .directory = tmp.dir,
+        .path = "h.ts",
+        .replacement = replacement_source,
+    };
+    const raw = try respondWithRootSourceReader(
+        allocator,
+        request,
+        changing_reader.rootSourceReader(),
+    );
+    defer allocator.free(raw);
+    try testing.expectEqual(@as(u32, 1), changing_reader.read_count);
+
+    var expected_graph = try module_graph_record.buildWithEntrySource(
+        allocator,
+        testing.io,
+        root,
+        "h.ts",
+        captured_refusal_source,
+    );
+    defer expected_graph.deinit(allocator);
+
+    var response = try parse(allocator, raw);
+    defer response.deinit();
+    const envelope = response.value.object;
+    try testing.expect(envelope.get("error") == null);
+    try testing.expect(!envelope.get("success").?.bool);
+    try testing.expectEqualStrings(
+        &expected_graph.hash,
+        envelope.get("module_graph_hash").?.string,
+    );
+    try testing.expectEqual(@as(usize, 0), envelope.get("diagnostics").?.array.items.len);
+
+    const payload = envelope.get("payload").?.object;
+    try testing.expectEqualStrings(
+        captured_refusal_digest,
+        payload.get("source_digest").?.string,
+    );
+    const results = payload.get("results").?.array;
+    try testing.expectEqual(@as(usize, 19), results.items.len);
+    try testing.expectEqual(@as(usize, 19), zts.proof_trace.verifiers.len);
+    for (results.items, zts.proof_trace.verifiers) |result, verifier| {
+        try testing.expectEqualStrings(
+            verifier.id,
+            result.object.get("property").?.string,
+        );
+        try testing.expectEqualStrings("not_decided", result.object.get("grade").?.string);
+    }
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", allocator, .limited(4096));
+    defer allocator.free(on_disk);
+    try testing.expectEqualStrings(replacement_source, on_disk);
 }
 
 test "check payload reports guarded categories separately from properties" {

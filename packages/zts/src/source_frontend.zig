@@ -4,6 +4,8 @@
 //! input, and the source-position view.
 
 const std = @import("std");
+const atom_table = @import("atom_table.zig");
+const parser = @import("parser/root.zig");
 const stripper = @import("stripper.zig");
 const TypeMap = @import("zts-base").type_map.TypeMap;
 
@@ -79,6 +81,162 @@ pub const PreparedSource = struct {
             stripper.SourceView.of(self.original_source);
         view.name = self.path;
         return view;
+    }
+};
+
+pub const DirectCheckOutcome = parser.AdmissionParseOutcome;
+
+pub const AcceptedDirectCapabilities = struct {
+    ir_view: parser.IrView,
+    root: parser.NodeIndex,
+    atoms: *atom_table.AtomTable,
+    type_store: *const parser.type_syntax.Store,
+};
+
+/// Owns one direct TypeScript parse and its atom table.
+/// Initialize the owner in final storage. The parser borrows `atoms`, so an
+/// initialized owner cannot move. The source and path remain borrowed and must
+/// outlive the owner. A failed initializer cleans all state, so the caller must
+/// not call an accessor or `deinit`. Returned capabilities borrow this owner.
+pub const DirectCheckSource = struct {
+    source: []const u8,
+    path: []const u8,
+    atoms: atom_table.AtomTable,
+    parser: parser.JsParser,
+    parse_outcome: DirectCheckOutcome,
+
+    pub fn initInPlace(
+        self: *DirectCheckSource,
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+        path: []const u8,
+    ) anyerror!void {
+        try self.initWithModeInPlace(
+            allocator,
+            type_allocator,
+            source,
+            path,
+            .collect,
+        );
+    }
+
+    pub fn initCompileInPlace(
+        self: *DirectCheckSource,
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+        path: []const u8,
+    ) anyerror!void {
+        try self.initWithModeInPlace(
+            allocator,
+            type_allocator,
+            source,
+            path,
+            .compile,
+        );
+    }
+
+    fn initWithModeInPlace(
+        self: *DirectCheckSource,
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+        path: []const u8,
+        mode: parser.type_syntax.AdmissionMode,
+    ) anyerror!void {
+        switch (classifyPath(path)) {
+            .typescript => {},
+            .virtual_javascript, .unsupported => return error.UnsupportedSourceExtension,
+        }
+
+        self.source = source;
+        self.path = path;
+        self.atoms = atom_table.AtomTable.init(allocator);
+        errdefer self.atoms.deinit();
+
+        self.parser = try parser.JsParser.initAdmission(
+            allocator,
+            type_allocator,
+            source,
+            mode,
+        );
+        errdefer self.parser.deinit();
+        self.parser.setAtomTable(&self.atoms);
+
+        const parse_outcome = try self.parser.parseAdmission();
+        switch (parse_outcome) {
+            .accepted => |root| {
+                const view = parser.IrView.fromIRStore(
+                    &self.parser.nodes,
+                    &self.parser.constants,
+                );
+                if (view.getTag(root) != .program) return error.InvalidDirectSourceRoot;
+                try self.parser.type_store.validateRuntimeOwners(type_allocator, view);
+            },
+            .recovered_admission_refused,
+            .parser_refused,
+            .terminal_admission_refused,
+            => {},
+        }
+        self.parse_outcome = parse_outcome;
+    }
+
+    pub fn deinit(self: *DirectCheckSource) void {
+        self.parser.deinit();
+        self.atoms.deinit();
+        self.* = undefined;
+    }
+
+    pub fn sourceView(self: *const DirectCheckSource) stripper.SourceView {
+        var view = stripper.SourceView.of(self.source);
+        view.name = self.path;
+        return view;
+    }
+
+    pub fn outcome(self: *const DirectCheckSource) *const DirectCheckOutcome {
+        return &self.parse_outcome;
+    }
+
+    pub fn acceptedCapabilities(self: *DirectCheckSource) ?AcceptedDirectCapabilities {
+        const root = switch (self.parse_outcome) {
+            .accepted => |root| root,
+            else => return null,
+        };
+        return .{
+            .ir_view = parser.IrView.fromIRStore(
+                &self.parser.nodes,
+                &self.parser.constants,
+            ),
+            .root = root,
+            .atoms = &self.atoms,
+            .type_store = &self.parser.type_store,
+        };
+    }
+
+    pub fn selectedAdmissionDiagnostics(
+        self: *const DirectCheckSource,
+    ) []const parser.type_syntax.AdmissionDiagnostic {
+        return switch (self.parse_outcome) {
+            .recovered_admission_refused => self.parser.getAdmissionDiagnostics(),
+            else => &.{},
+        };
+    }
+
+    pub fn terminalAdmissionDiagnostic(
+        self: *const DirectCheckSource,
+    ) ?parser.type_syntax.AdmissionDiagnostic {
+        return switch (self.parse_outcome) {
+            .terminal_admission_refused => self.parser.getLastAdmissionObservation(),
+            else => null,
+        };
+    }
+
+    pub fn parserErrors(self: *const DirectCheckSource) []const parser.ParseError {
+        return switch (self.parse_outcome) {
+            .parser_refused => self.parser.getProjectedErrors(),
+            else => &.{},
+        };
     }
 };
 
@@ -263,6 +421,353 @@ test "PreparedSource characterizes every type map kind" {
     try std.testing.expectEqualStrings(source, prepared.sourceView().text);
     try std.testing.expectEqualStrings("types.ts", prepared.sourceView().name.?);
     try std.testing.expect(prepared.sourceView().normalize_positions);
+}
+
+test "DirectCheckSource publishes one validated capability set" {
+    const source =
+        "import type { Shape } from \"./types\";\n" ++
+        "function directOwnerFixture(value: number): number { return value; }\n";
+    var owner: DirectCheckSource = undefined;
+    try owner.initInPlace(
+        std.testing.allocator,
+        std.testing.allocator,
+        source,
+        "handler.ts",
+    );
+    defer owner.deinit();
+
+    const capabilities = owner.acceptedCapabilities() orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(parser.NodeTag.program, capabilities.ir_view.getTag(capabilities.root).?);
+    try std.testing.expect(capabilities.atoms == &owner.atoms);
+    try std.testing.expect(capabilities.type_store == &owner.parser.type_store);
+
+    const view = owner.sourceView();
+    try std.testing.expectEqualStrings(source, view.text);
+    try std.testing.expectEqualStrings("handler.ts", view.name.?);
+    try std.testing.expect(!view.normalize_positions);
+
+    const store = capabilities.type_store;
+    try std.testing.expectEqual(@as(usize, 1), store.type_only_modules.items.len);
+    try std.testing.expectEqualStrings(
+        "import type { Shape } from \"./types\";",
+        store.type_only_modules.items[0].raw_span.text(source),
+    );
+    try std.testing.expectEqual(@as(usize, 1), store.function_signatures.items.len);
+    try std.testing.expectEqual(@as(usize, 1), store.parameter_annotations.items.len);
+
+    const signature = store.function_signatures.items[0];
+    try std.testing.expectEqual(parser.NodeTag.function_expr, capabilities.ir_view.getTag(signature.owner).?);
+    const function = capabilities.ir_view.getFunction(signature.owner) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "directOwnerFixture",
+        capabilities.atoms.getName(@enumFromInt(function.name_atom)).?,
+    );
+
+    var wrapper: ?parser.NodeIndex = null;
+    for (0..capabilities.ir_view.nodeCount()) |index| {
+        const node: parser.NodeIndex = @intCast(index);
+        if (capabilities.ir_view.getTag(node) == .function_decl) {
+            wrapper = node;
+            break;
+        }
+    }
+    try store.validateFunctionDeclarationWrapper(
+        signature.owner,
+        wrapper orelse return error.TestUnexpectedResult,
+        capabilities.ir_view,
+    );
+}
+
+test "DirectCheckSource projects each tagged admission outcome" {
+    {
+        const source =
+            "const first: any = 1;\n" ++
+            "const second: void = undefined;\n";
+        var owner: DirectCheckSource = undefined;
+        try owner.initInPlace(
+            std.testing.allocator,
+            std.testing.allocator,
+            source,
+            "handler.ts",
+        );
+        defer owner.deinit();
+        switch (owner.outcome().*) {
+            .recovered_admission_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        const diagnostics = owner.selectedAdmissionDiagnostics();
+        try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+        try std.testing.expectEqual(parser.type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
+        try std.testing.expectEqual(parser.type_syntax.AdmissionKind.void_type, diagnostics[1].kind);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOf(u8, source, "any").?)),
+            diagnostics[0].span.start,
+        );
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOf(u8, source, "void").?)),
+            diagnostics[1].span.start,
+        );
+        try std.testing.expect(owner.acceptedCapabilities() == null);
+        try std.testing.expect(owner.terminalAdmissionDiagnostic() == null);
+        try std.testing.expectEqual(@as(usize, 0), owner.parserErrors().len);
+    }
+
+    {
+        const source =
+            "const value: \"open\n" ++
+            " = \"open\";\n" ++
+            "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+        var owner: DirectCheckSource = undefined;
+        try owner.initCompileInPlace(
+            std.testing.allocator,
+            std.testing.allocator,
+            source,
+            "handler.ts",
+        );
+        defer owner.deinit();
+        switch (owner.outcome().*) {
+            .accepted => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expect(owner.acceptedCapabilities() != null);
+        const last_observation = owner.parser.getLastAdmissionObservation() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(
+            parser.type_syntax.AdmissionKind.unterminated_string,
+            last_observation.kind,
+        );
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOfScalar(u8, source, '\n').?)),
+            last_observation.span.start,
+        );
+        try std.testing.expectEqual(@as(usize, 0), owner.selectedAdmissionDiagnostics().len);
+        try std.testing.expect(owner.terminalAdmissionDiagnostic() == null);
+        try std.testing.expectEqual(@as(usize, 0), owner.parserErrors().len);
+    }
+
+    {
+        const source =
+            "const broken = ;\n" ++
+            "const later = ;\n";
+        var owner: DirectCheckSource = undefined;
+        try owner.initInPlace(
+            std.testing.allocator,
+            std.testing.allocator,
+            source,
+            "handler.ts",
+        );
+        defer owner.deinit();
+        switch (owner.outcome().*) {
+            .parser_refused => |refusal| {
+                try std.testing.expectEqual(@as(usize, 1), refusal.projected_error_count);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 1), owner.parserErrors().len);
+        try std.testing.expect(owner.parser.getErrors().len > owner.parserErrors().len);
+        try std.testing.expect(owner.acceptedCapabilities() == null);
+        try std.testing.expectEqual(@as(usize, 0), owner.selectedAdmissionDiagnostics().len);
+        try std.testing.expect(owner.terminalAdmissionDiagnostic() == null);
+    }
+
+    {
+        var owner: DirectCheckSource = undefined;
+        try owner.initInPlace(
+            std.testing.allocator,
+            std.testing.allocator,
+            "/* unfinished",
+            "handler.ts",
+        );
+        defer owner.deinit();
+        switch (owner.outcome().*) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .unterminated_comment => {},
+                .diagnostic => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expect(owner.terminalAdmissionDiagnostic() == null);
+        try std.testing.expectEqual(@as(usize, 0), owner.selectedAdmissionDiagnostics().len);
+        try std.testing.expectEqual(@as(usize, 0), owner.parserErrors().len);
+        try std.testing.expect(owner.acceptedCapabilities() == null);
+    }
+
+    {
+        const source =
+            "const value: \"open\n" ++
+            " = \"open\";\n" ++
+            "/* unfinished";
+        var owner: DirectCheckSource = undefined;
+        try owner.initInPlace(
+            std.testing.allocator,
+            std.testing.allocator,
+            source,
+            "handler.ts",
+        );
+        defer owner.deinit();
+        switch (owner.outcome().*) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .unterminated_comment => {},
+                .diagnostic => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        const terminal = owner.terminalAdmissionDiagnostic() orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(parser.type_syntax.AdmissionKind.unterminated_string, terminal.kind);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOfScalar(u8, source, '\n').?)),
+            terminal.span.start,
+        );
+        try std.testing.expectEqual(@as(usize, 0), owner.selectedAdmissionDiagnostics().len);
+        try std.testing.expectEqual(@as(usize, 0), owner.parserErrors().len);
+        try std.testing.expect(owner.acceptedCapabilities() == null);
+    }
+}
+
+test "DirectCheckSource accepts only TypeScript paths" {
+    const paths = [_][]const u8{ "<eval>", "handler.js", "handler.tsx" };
+    for (paths) |path| {
+        var owner: DirectCheckSource = undefined;
+        try std.testing.expectError(
+            error.UnsupportedSourceExtension,
+            owner.initInPlace(
+                std.testing.allocator,
+                std.testing.allocator,
+                "const value = 1;",
+                path,
+            ),
+        );
+    }
+}
+
+test "DirectCheckSource cleans runtime parser and Store allocation failures" {
+    const Context = struct {
+        const source = "const value: number = 1;\n";
+
+        fn runRuntime(allocator: std.mem.Allocator, failures: *usize) !void {
+            var owner: DirectCheckSource = undefined;
+            owner.initInPlace(
+                allocator,
+                std.testing.allocator,
+                source,
+                "handler.ts",
+            ) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    failures.* += 1;
+                    return err;
+                },
+                else => return err,
+            };
+            defer owner.deinit();
+            if (owner.acceptedCapabilities() == null) return error.TestUnexpectedResult;
+        }
+
+        fn runStore(allocator: std.mem.Allocator, failures: *usize) !void {
+            var owner: DirectCheckSource = undefined;
+            owner.initInPlace(
+                std.testing.allocator,
+                allocator,
+                source,
+                "handler.ts",
+            ) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    failures.* += 1;
+                    return err;
+                },
+                else => return err,
+            };
+            defer owner.deinit();
+            if (owner.acceptedCapabilities() == null) return error.TestUnexpectedResult;
+        }
+    };
+
+    var runtime_failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Context.runRuntime,
+        .{&runtime_failures},
+    );
+    try std.testing.expect(runtime_failures > 0);
+
+    var store_failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Context.runStore,
+        .{&store_failures},
+    );
+    try std.testing.expect(store_failures > 0);
+}
+
+test "DirectCheckSource validates runtime owners before publication" {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "import type ");
+    for (0..513) |_| try source.appendSlice(std.testing.allocator, "`${");
+    try source.appendSlice(std.testing.allocator, "value");
+    for (0..513) |_| try source.appendSlice(std.testing.allocator, "}`");
+    try source.appendSlice(std.testing.allocator, ";\n");
+
+    var calibration_runtime = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = std.math.maxInt(usize),
+    });
+    var calibration_types = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = std.math.maxInt(usize),
+    });
+    var atoms = atom_table.AtomTable.init(calibration_runtime.allocator());
+    defer atoms.deinit();
+    var admitted = try parser.JsParser.initAdmission(
+        calibration_runtime.allocator(),
+        calibration_types.allocator(),
+        source.items,
+        .collect,
+    );
+    defer admitted.deinit();
+    admitted.setAtomTable(&atoms);
+    const root = switch (try admitted.parseAdmission()) {
+        .accepted => |root| root,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), admitted.type_store.type_only_modules.items.len);
+    const accepted_view = parser.IrView.fromIRStore(&admitted.nodes, &admitted.constants);
+    try std.testing.expectEqual(parser.NodeTag.program, accepted_view.getTag(root).?);
+
+    const validation_alloc_index = calibration_types.alloc_index;
+    const validation_resize_index = calibration_types.resize_index;
+    calibration_types.fail_index = validation_alloc_index;
+    calibration_types.resize_fail_index = validation_resize_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        admitted.type_store.validateRuntimeOwners(
+            calibration_types.allocator(),
+            accepted_view,
+        ),
+    );
+    try std.testing.expect(calibration_types.has_induced_failure);
+
+    var owner_runtime = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = std.math.maxInt(usize),
+    });
+    var owner_types = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = validation_alloc_index,
+        .resize_fail_index = validation_resize_index,
+    });
+    var owner: DirectCheckSource = undefined;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        owner.initInPlace(
+            owner_runtime.allocator(),
+            owner_types.allocator(),
+            source.items,
+            "handler.ts",
+        ),
+    );
+    try std.testing.expect(owner_types.has_induced_failure);
 }
 
 test "PreparedSource distinguishes signatures and shadowed bindings" {

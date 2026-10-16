@@ -226,7 +226,23 @@ pub const strip = stripper.strip;
 pub const SourceKind = engine.source_frontend.SourceKind;
 pub const PrepareSourceError = engine.source_frontend.PrepareError;
 pub const PreparedSource = engine.source_frontend.PreparedSource;
+pub const DirectCheckSource = engine.source_frontend.DirectCheckSource;
+pub const DirectCheckOutcome = engine.source_frontend.DirectCheckOutcome;
 pub const classifySourcePath = engine.source_frontend.classifyPath;
+
+/// Returns one accepted capability set. The module borrows `source_owner` and
+/// must stop use before the owner is destroyed.
+pub fn parsedModuleFromDirectCheck(
+    source_owner: *DirectCheckSource,
+) ?compiler.pipeline.ParsedModule {
+    const capabilities = source_owner.acceptedCapabilities() orelse return null;
+    return compiler.pipeline.ParsedModule.fromTypedExisting(
+        capabilities.ir_view,
+        capabilities.root,
+        capabilities.atoms,
+        capabilities.type_store,
+    );
+}
 
 /// Return the borrowed contents of a 1-based source line without its newline.
 /// Empty input and the empty line after a trailing newline are not lines.
@@ -246,6 +262,76 @@ test "stable sourceLine preserves source line boundaries" {
 
     try std.testing.expectEqualStrings("", sourceLine("\ncontent", 1).?);
     try std.testing.expect(sourceLine("content\n", 2) == null);
+}
+
+test "direct check bridge returns one owner's accepted capabilities" {
+    const source = "function directBridge(value: number): number { return value; }\n";
+    var owner: DirectCheckSource = undefined;
+    try owner.initInPlace(
+        std.testing.allocator,
+        std.testing.allocator,
+        source,
+        "handler.ts",
+    );
+    defer owner.deinit();
+
+    const capabilities = owner.acceptedCapabilities() orelse
+        return error.TestUnexpectedResult;
+    const parsed = parsedModuleFromDirectCheck(&owner) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(capabilities.root, parsed.root);
+    try std.testing.expect(std.meta.eql(capabilities.ir_view, parsed.ir_view));
+    try std.testing.expect(parsed.atoms.? == capabilities.atoms);
+    try std.testing.expect(parsed.type_store.? == capabilities.type_store);
+    try std.testing.expectEqual(parser.NodeTag.program, parsed.ir_view.getTag(parsed.root).?);
+
+    const Refusal = enum {
+        recovered_admission_refused,
+        parser_refused,
+        terminal_admission_refused,
+    };
+    const cases = [_]struct {
+        source: []const u8,
+        expected: Refusal,
+    }{
+        .{
+            .source = "const value: any = 1;\n",
+            .expected = .recovered_admission_refused,
+        },
+        .{
+            .source = "const broken = ;\n",
+            .expected = .parser_refused,
+        },
+        .{
+            .source = "/* unfinished",
+            .expected = .terminal_admission_refused,
+        },
+    };
+    for (cases) |case| {
+        var refused: DirectCheckSource = undefined;
+        try refused.initInPlace(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            "handler.ts",
+        );
+        defer refused.deinit();
+        switch (case.expected) {
+            .recovered_admission_refused => switch (refused.outcome().*) {
+                .recovered_admission_refused => {},
+                else => return error.TestUnexpectedResult,
+            },
+            .parser_refused => switch (refused.outcome().*) {
+                .parser_refused => {},
+                else => return error.TestUnexpectedResult,
+            },
+            .terminal_admission_refused => switch (refused.outcome().*) {
+                .terminal_admission_refused => {},
+                else => return error.TestUnexpectedResult,
+            },
+        }
+        try std.testing.expect(parsedModuleFromDirectCheck(&refused) == null);
+    }
 }
 
 pub const BytecodeCache = bytecode_cache.BytecodeCache;

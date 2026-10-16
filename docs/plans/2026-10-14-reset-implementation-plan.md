@@ -4388,7 +4388,8 @@ A dedicated admission initializer leaves ordinary `init` and private comparison 
 Original source bytes provide runtime locations, diagnostics, and identities.
 The Store retains seventeen arrays.
 A separate collector retains diagnostic order, offset deduplication, generation, and caller-specific fatal selection.
-Each reached diagnostic changes generation even when deduplication prevents an appended row.
+Each selected diagnostic changes generation even when deduplication prevents an appended row.
+Caught observations remain unselected in compile mode.
 Native allocation failures remain distinct from semantic and diagnostic refusals.
 
 The complete admission vocabulary remains fixed:
@@ -4462,7 +4463,7 @@ The implementation uses six sequential review slices:
 | Slice | Owned files | Exact bounded verification |
 |---|---|---|
 | Admission records and local policies | `packages/zts/src/parser/type_syntax.zig` | `zig build test-zts -j1`; exhaustive seventeen-kind census, exact policy order, allocation cleanup. |
-| Parser producers and recovery | `packages/zts/src/parser/parse.zig` | `zig build test-zts test-zts-layering -j1`; all retained lexical controls, recovery, owner identities, and rollback. |
+| Parser producers and recovery | `packages/zts/src/parser/parse.zig`, `packages/zts/src/parser/tokenizer.zig`, `packages/zts/src/parser/type_syntax.zig` | `zig build test-zts test-zts-layering -j1`; all retained lexical controls, recovery, owner identities, and rollback. |
 | Stable direct owner | `packages/zts/src/source_frontend.zig`, `packages/zts/src/root.zig` | `zig build test-zts test-module-boundary test-zts-layering -j1`; lifetime, root publication, and validation allocation failures. |
 | TypeScript CHECK root | `packages/tools/src/precompile.zig`, `packages/tools/src/json_diagnostics.zig` | `zig build test-precompile test-zts-cli test-agent-protocol -j1`; reader characterization first, then all seventeen public results and exact stages. |
 | Imported TypeScript consumers | `packages/tools/src/precompile.zig` | `zig build test-precompile -j1`; separate traversal revisions, three-read observation, and failed-type early stop. |
@@ -4494,3 +4495,1833 @@ Final documentation drift, link, and spine checks pass all eight steps.
 Astra accepts U13 against the final source and execution receipts without a remaining requirement blocker.
 U13 is ready for its exact-path local commit.
 The next phase starts with native CHECK and VERIFY reader characterization before any production cutover.
+
+### U14 characterization start
+
+U13 is committed locally as `43beacd7` after all required checks and Astra acceptance.
+Main reviews and integrates the two native reader tests after separate Astra source acceptance.
+The tests distinguish captured CHECK disk bytes from request overrides and later disk replacement.
+VERIFY retains its separate override and nineteen-property projection.
+The unfiltered `test-agent-protocol` step establishes their legacy baseline before production changes.
+No production CHECK frontend changes occur in this characterization slice.
+
+The native characterization baseline passes all four steps and all 455 protocol tests.
+The CHECK test retains its captured digest and ZTS041 at 1:14 while ignoring a distinct valid override and later disk replacement.
+The VERIFY test retains the override digest, nineteen ordered undecided results, and no diagnostics after one root read.
+These tests establish reader timing and override behavior; the existing immutable CLI receipt supplies process-exit evidence.
+This baseline precedes production admission changes.
+
+### U14 bounded classifier review
+
+Astra accepts four caller-selected policies: `general_type`, `parameter_type`, `any_only`, and `removed_only`.
+General and parameter policies emit all eligible `any` diagnostics before the first removed-form diagnostic.
+General scanning excludes object member keys; parameter scanning includes those keys.
+The `any_only` policy also serves refused type and distinct bodies, and interface extends spans.
+Generic, explicit-call, and erased-prefix producers select `removed_only`.
+
+Legacy `any` detection advances bytewise and checks only the trailing identifier boundary.
+The suffix in `many` and `Many<...>` therefore remains a refusal.
+Removed-form detection uses complete identifiers instead.
+The bounded classifier validates its supplied span and remains independent of private preflight.
+Compile mode stops after its first selected admission refusal.
+Caught lexical observations do not select a compile refusal or change publication health.
+
+Caught lexical diagnostics occur during the legacy `any` scan.
+The parser integration must preserve that event order before removed-form detection.
+A separate lexical list cannot simply precede or follow every `any` diagnostic.
+The parser retains responsibility for lexical continuation, propagated failures, and raw resume positions.
+The accepted composition takes a confirmed span, its policy, and borrowed ordered caught lexical diagnostics.
+The classifier merges caught diagnostics with `any` events by source offset before the removed-form pass.
+Equal-offset caught diagnostics keep their encounter order before collector deduplication.
+Validation permits only the two lexical kinds, ordered offsets, and contained spans.
+Validation also permits the exact endpoint diagnostic `[end,end+1)` for a terminating LF or a caught template-depth opener.
+The lexical kind must match the source byte: `unterminated_string` at LF, or `nesting_too_deep` at `{`.
+The caller retains the actual endpoint; the caller does not enlarge the span to contain that diagnostic.
+The `any` pass resumes an ordinary quote at its unescaped LF and preserves template frame unwinding.
+The removed-form pass retains its separate quote-to-end behavior.
+Endpoint discovery can reach a propagated depth failure after an earlier eligible `any`.
+Compile mode retains the earlier `any`; collect mode reaches and selects the fatal depth failure.
+The parser must apply that distinction before selecting a propagated fatal diagnostic.
+The local classifier's first-emission rule alone does not establish caller-level compile parity.
+The accepted `classifyTypeSpanPrefix` entry shares the any and lexical pass with complete classification.
+The prefix entry preserves the selected producer policy and omits only post-completion removed-form detection.
+Parameter prefixes retain object-key diagnostics; general prefixes retain their object-key exclusion.
+The `removed_only` prefix emits caught lexical diagnostics without adding `any` diagnostics.
+No extra phase selector or invalid policy combination is required.
+
+Four immutable CLI cases establish the mixed order in `u14-mixed-type-lexical-baseline/all.jsonl`.
+The same measurement runs one case first, then four cases; both measurement commands exit zero.
+Each CLI exits one because the source contains a refusal.
+General scans retain ZTS041 at 1:14 before ZTS008 at 1:25, or ZTS008 at 1:19 before ZTS041 at 2:4.
+Parameter scans retain ZTS041 at 1:19 before ZTS008 at 1:30, or ZTS008 at 1:24 before ZTS041 at 2:4.
+These cases contain trailing `void`, but the separate removed-form scan emits no diagnostic after the malformed quote.
+
+Five depth controls remain in `u14-template-depth-boundary-baseline/controls-all.jsonl` after a one-case pilot.
+Both measurement commands exit zero; every CLI refusal exits one.
+The outer template overflow reports ZTS044 at 1:529 with 512 or 513 repeated braces.
+The unclosed 511-brace control reports only ZTS003 at 2:1.
+The closed 511-brace control reaches type analysis and reports only ZTS204 at 1:1045.
+The nested template control reports ZTS044 at 1:532, then ZTS041 at 1:539.
+That nested result establishes caught inner-frame unwinding before the later `any` event.
+
+Template recovery must finish the owned template before returning an inner statement boundary.
+Parser brace depth alone does not represent `${` ownership.
+The tokenizer's sixteen template slots do not establish equivalence with the legacy bounded template scanner.
+The recovery design must use the existing bounded scanner from the known template opener or prove equivalent continuation.
+Two immutable controls remain in `u14-template-recovery-baseline/all.jsonl` after a one-case pilot.
+Both report only ZTS001 at 1:14 for unsupported interpolation, without the `any` hidden inside that interpolation.
+One control contains a function parameter; the other contains a variable declaration in an arrow body.
+Both measurement commands exit zero, and both CLI refusals exit one.
+
+### U14 correction of compile observation policy
+
+The earlier first-emitted-diagnostic assumption is incorrect for caller-caught lexical events.
+Legacy compilation can continue after those observations and can publish a valid type projection.
+CHECK still collects those same observations as admission diagnostics.
+The two operations retain distinct caller policies.
+
+The immutable compile measurements remain in `u14-compile-caught-baseline/typed-all.jsonl`.
+The program runs one case first, then all four cases; both measurement commands exit zero.
+A caught string error followed by `any` selects `UnsupportedAnyType` at 2:4.
+An earlier `any` selects `UnsupportedAnyType` at 1:14 before the malformed quote.
+A caught-only annotation with numeric value reaches ZTS200 and returns `SoundModeViolation`.
+The same annotation with the matching string value compiles successfully and emits 164 bytes of bytecode.
+These last two cases use an explicitly typed handler.
+
+The collector adds the accepted `recordCaught` operation for caller-classified caught rows.
+Compile mode leaves diagnostic items, generation, fatal state, and stop state unchanged for that operation.
+Collect mode delegates that operation to ordinary recoverable recording.
+Propagated failures retain fatal selection, and hard admission refusals retain the compile-first rule.
+Compile publication health therefore depends on selected admission events, not raw caught-row counts.
+
+The existing `SyntaxParser` already parses the confirmed trimmed span `"open` as the literal `open`.
+The admission-aware producer can use `parseAdmittedTypeValue` after the compatible endpoint scan.
+This case needs no new type node, legacy retry, or reconstruction fallback.
+
+### U14 recovery boundary refinements
+
+Slice 2 needs the three parser files named in its amended ownership row.
+The tokenizer supplies bounded allocation-free resume operations.
+Type syntax supplies shared bounded scanning from the existing legacy quote scanner.
+The raw module scanner and private strict quote scanner keep their current behavior unless a necessary defect requires a change.
+
+The shared endpoint retains each producer's exact delimiter set and arrow rule.
+Variable annotations, named returns, arrow returns, and interface extends do not use one fixed general delimiter set.
+Parameter scanning retains `skipParamType` rules, including its distinct comma, parenthesis, default, and brace behavior.
+Declaration scanning retains its semicolon and multiline-newline rules.
+Quoted-root propagation remains caller-selected: ordinary runtime templates propagate; general and parameter type scanners catch.
+Admission scanning does not inherit the private scanner's early unmatched-parenthesis rejection.
+For example, legacy general scanning reaches `any` in `(string; any)` rather than stopping at the inner semicolon.
+The private wrappers retain their existing strict checks.
+Compile mode ignores caught observations before propagated depth; an earlier hard `any` still wins through prefix selection.
+
+Both ordinary template parsing and synchronization must finish an encountered template from its known opener.
+A completed runtime template restores the regex state of `template_tail`, because the template is an operand.
+It does not restore the state before the template.
+The raw resume preserves enclosing tokenizer frames.
+
+The parser records the public error prefix at the first failed top-level dispatch that makes the legacy parser return.
+The parser captures that length after it records the unreported statement error.
+An error inside a recovered block does not alone establish that boundary.
+The full live error list and retained allocation state still govern recovery and local publication health.
+When no admission diagnostic wins, the public result exposes only the captured prefix and the first returned parser error.
+A later allocation failure retains higher priority.
+
+Four recovery controls remain in `u14-recovery-projection-baseline/boundary-all.jsonl` after a one-case pilot.
+Both measurement commands exit zero; each CLI refuses its source with exit one.
+The spaced slash control reports only ZTS001 at 1:14.
+Removing the space before its import puts that import at the legacy raw boundary and selects ZTS053 at 1:25.
+Two failing top-level declarations report only the first ZTS002 at 1:16.
+A first parser error followed by a template with a hidden typed function also reports only ZTS002 at 1:16.
+
+Compile producer integration retains two further obligations.
+Confirmed compatible raw spans use `parseAdmittedTypeValue` without a private strict endpoint rescan.
+Caught module observations do not trigger private lexical exclusion or change compile publication health.
+Ordinary `init` and private `initTyped` keep their existing behavior.
+
+### U14 location-free failures
+
+Admission diagnostics and admission failure are separate concepts.
+A location-free failure rejects the root even when the projected diagnostic slice is empty.
+The returned error remains separate from the last observed diagnostic, which supplies presentation only.
+This distinction adds no admission kind and does not change compile publication generation for caught observations.
+
+The immutable controls remain in `u14-location-free-baseline/all.jsonl` after a one-case pilot.
+Both measurement commands exit zero; CHECK and compile each exit one for both controls.
+A bare unfinished block comment makes CHECK return false success with no diagnostic rows.
+A caught string observation before that comment supplies only ZTS008 at 1:19.
+The returned compile error remains `UnterminatedComment`, while its presentation retains that earlier ZTS008 location.
+The direct frontend must retain the same failure, stage, error count, and optional presentation behavior.
+
+Slice 1 finishes with accepted source and an unfiltered `test-zts test-docs-drift` pass.
+All fifteen steps pass, with 2,729 tests and one skip.
+The final classifier source SHA-256 is `474fcec813cb28a7b9d6d02bb2c724bcff852df2d9b06d22fb655ebc22d5d83a`.
+Astra accepts the bounded Slice 2 design after the exact endpoint, template, error-prefix, and caught-observation corrections.
+Its accepted temporary design SHA-256 is `8576b036b995039e355d350edc9c18c18d12cc1a2bb955961400057e398ec107`.
+The parser core proceeds outside the repository while the separate location-free producer review completes.
+
+The source census finds only one live semantic location-free error: `UnterminatedComment`.
+`UnsupportedAngleBracketAssertion`, `UnclosedTypeAnnotation`, and `UnclosedGeneric` have no producer.
+Operational allocation failure remains separate.
+Ordinary tokens, parameter types, and general type scans propagate unfinished block-comment errors.
+Speculative call and generic scans can decline instead; later committed scanning can still reach the comment.
+Interface bodies and template bytes retain their distinct legacy policies.
+
+Seven further contexts remain in `u14-location-free-context-baseline/all.jsonl` after a one-case pilot.
+Both measurement commands exit zero.
+The complete observed results follow:
+
+| Context | CHECK result | Compile result |
+|---|---|---|
+| Earlier `any` and `void`, then unfinished comment | Only ZTS060 at 2:15. | `UnsupportedAnyType` at 1:14, before the comment. |
+| Earlier parser error, then unfinished comment | No diagnostic rows. | `UnterminatedComment`. |
+| Unfinished comment inside a parameter type | No diagnostic rows. | `UnterminatedComment`. |
+| Unfinished comment inside a general annotation | No diagnostic rows. | `UnterminatedComment`. |
+| Unfinished comment inside a refused interface body | ZTS049 at 1:1. | `InterfaceDeclaration`. |
+| Comment bytes inside template text | Analysis reports only ZTS500 at 1:1. | Exit zero after successful compilation. |
+| Comment bytes inside template interpolation | Parser reports ZTS001 at 1:14. | Parser refusal after successful source preparation. |
+
+Every CHECK command exits one; compilation exits zero only for the template-text control.
+The observation design must distinguish committed events from declined speculation.
+Committed Store rollback retains confirmed diagnostic observations and their generation.
+Only unconfirmed staged observations can be restored.
+Diagnostic commitment can precede complete owner recognition.
+Legacy generic scanning reports removed forms before testing the following owner opener.
+The diagnostic remains when that later owner test returns a nonmatch.
+
+The one-case receipt `u14-location-free-context-baseline/generic-control.jsonl` confirms that boundary.
+For `const x = <void> + 1; /* unfinished`, CHECK reports only ZTS060 at 1:12 after the terminal comment failure.
+Compilation stops at `VoidType` at 1:12 before the comment.
+Both CLI commands exit one, and the measurement exits zero.
+
+### U14 observation history and assertion recovery
+
+The accepted observation design keeps failure, selected diagnostics, and presentation history separate.
+`AdmissionObservationHistory` owns an allocator and one unmanaged list of admission diagnostics.
+Its `record` operation deduplicates the complete history by source offset and preserves the first kind at each position.
+Its `last` operation derives presentation from the final row; no separate cached last-row field is required.
+History allocation failures propagate as native allocation failures.
+
+An ephemeral `AdmissionSink` borrows the collector and an optional observation history.
+The sink owns nothing and stores no parser pointer.
+The classifier receives that sink by value and emits through it at the existing merged emission points.
+Each emitted event records history, then calls the collector's caught, recoverable, or fatal operation.
+A duplicate history position still reaches the collector, which retains its generation and selection rules.
+Collector-only calls pass null history explicitly.
+
+The parser's one-off producers use the same sink.
+Raw scanners do not preload caught arrays into history before classification.
+Compile caught rows can enter history without changing collector generation, selected diagnostics, or publication health.
+Only unconfirmed speculation can restore a history length checkpoint.
+An owner nonmatch cannot remove a diagnostic already committed by legacy generic scanning.
+
+Committed tokenizer observation uses an allocation-free observed-token entry that shares the existing trivia scanner.
+Plain token requests and speculative lookahead retain their current behavior.
+A pending unfinished-comment observation is read-ahead evidence until the admission parser reaches its committed boundary.
+An earlier hard refusal can therefore stop compile mode before that pending comment becomes terminal.
+Initial EOF still observes a leading unfinished comment before root publication.
+
+A terminal comment inside a type interrupts the endpoint before removed-form detection.
+The producer runs only its owning any and caught prefix before selecting the terminal failure.
+Assertion recovery catches semantic endpoint outcomes and retains its prior assertion refusal.
+Scanner and observation allocation failures propagate as native OOM.
+It uses the separate assertion delimiter preset and any-only classification.
+That preset stops at `; , ) ] }`, keeps object braces, and does not impose an outer-arrow stop.
+
+Four assertion controls remain in `u14-assertion-endpoint-baseline/all.jsonl` after a one-case pilot.
+Both measurement commands exit zero; every CHECK and compile command exits one.
+
+| Source shape | CHECK diagnostics | Compile result |
+|---|---|---|
+| `as number` before an unfinished comment | Only ZTS042 at 1:16. | `UnsupportedAsAssertion` at 1:16. |
+| `void` annotation interrupted by an unfinished comment | No rows. | `UnterminatedComment`, without `VoidType`. |
+| `as number \| void` | Only ZTS042 at 1:16. | `UnsupportedAsAssertion` at 1:16. |
+| `as number \| any` before an unfinished comment | ZTS042 at 1:16, then ZTS041 at 1:25. | `UnsupportedAsAssertion` at 1:16. |
+
+Bounded history tests cover A/B/A deduplication, merged emission order, compile generation neutrality, and history allocation failure.
+The tokenizer observation remains allocation-free even though history can allocate.
+
+Terminal semantic admission failures project zero or one diagnostic from the final retained observation.
+Successful recovered admission exposes the complete selected diagnostic list.
+The returned failure remains independent of that presentation row.
+For example, replayed fatal A can select failure A while retained history A/B supplies presentation B.
+Unsupported source extensions keep their separate mapping, and native OOM retains priority.
+
+### U14 first helper review
+
+The first shared-helper draft remains outside the repository and receives no execution claim.
+Main rejects its extra public depth limit, incorrect caught-frame advance, and changed return-type delimiters.
+The draft also duplicates the existing quote scanner instead of sharing its core.
+Its missing bounded tests prevent integration.
+Sol corrects the helper before main starts dependent parser integration.
+
+### U14 tokenizer and observation review
+
+Astra accepts the allocation-free tokenizer observation amendment after source review.
+Plain token requests retain the legacy cursor behavior for an unfinished comment.
+Observed requests return synthetic EOF and report the actual failure cursor.
+The amendment adds no stored tokenizer state, so existing saved state remains complete.
+Parser integration still owns commitment of read-ahead evidence.
+
+The first observation helper draft remains outside the repository after two review findings.
+Its comment endpoint reports the source length instead of the actual legacy failure cursor.
+Its interface-body control lacks the full interface context and therefore tests an object type instead.
+Sol corrects both findings before integration.
+
+The corrected helper uses the scanner's actual cursor, including the bare `/*` boundary case.
+Its interface control includes the full declaration and starts at the actual extends boundary.
+Its fatal replay control keeps failure selection independent of retained presentation history.
+Astra accepts those corrections, and main integrates the exact reviewed source.
+The helper source SHA-256 is `0157802224c049e783f04760c200383ff6e8b86b64fa8b574a9e931e73e1535a`.
+
+The tokenizer observation gate passes all sixteen steps, with 2,740 tests passed and one skipped.
+This receipt covers ordinary token compatibility, observed terminal trivia, and layering.
+Production CHECK still uses the legacy frontend at this point.
+
+The first helper gate exits one because a test capture shadows an outer constant.
+Only the base and contracts roots execute, with 94 tests passed; dependent roots do not compile.
+Main renames that capture to `bare_comment` and restarts the same unfiltered gate.
+This correction changes no production behavior.
+
+### U14 admission result boundary
+
+The dedicated parser operation returns a tagged outcome for accepted parsing, recovered admission refusal, parser refusal, or terminal admission failure.
+Operational failures and internal errors propagate through its native error union.
+The owner switches on the outcome instead of inferring a failure from diagnostic presence.
+
+`AdmissionFailure` retains either the selected diagnostic with its exact span or the unfinished-comment payload with its exact cursor.
+The presentation history remains independent of that failure.
+A hard compile-mode stop retains its diagnostic identity even when the event uses recoverable recording.
+That early stop is a propagated semantic failure, not successful recovery.
+
+Parser refusal retains the saved first failed dispatch and its diagnostic prefix.
+Unknown admission helper errors bypass the legacy fallback that creates a generic statement diagnostic.
+Ordinary parser initialization and private typed initialization retain their existing behavior.
+
+The corrected observation helper gate passes all sixteen steps, with 2,746 tests passed and one skipped.
+Formatting and whitespace checks pass for all three parser files.
+The final helper source SHA-256 is `c842dd8871aba5c12643c6bec928a783d729cffccb1b0c177de3cf62c96e27d2`.
+No production CHECK caller has switched yet.
+
+### U15 compilation API refresh
+
+Sol refreshes the compilation caller census while U14 remains in progress.
+Main reads the complete refreshed packet and the exact source at each changed boundary.
+Precompile and graph compilation already own parsers with caller-owned shared atoms.
+Those callers need direct compile admission without another owner or parser wrapper.
+Only the runtime compatibility parser requires separate parsing and delayed code generation.
+The CHECK owner retains its existing API and atom ownership.
+
+Caller order differs and must remain explicit.
+Precompile validates virtual imports and detects file imports before optimization.
+Graph compilation reparses execution order with the existing shared atom prefix.
+Source-authority extraction instead optimizes before detecting file imports.
+The refreshed packet must retain each actual order, including graph branches.
+
+Native compilation failures must retain existing preparation error names.
+The parser's generic `AdmissionRefused` mapping alone does not establish that compatibility.
+The compilation packet needs an exhaustive shared projection from admission failure to the existing preparation error set.
+Concrete runtime state errors and this projection remain under Main and Astra review before implementation release.
+No U15 production file changes during this preparation.
+
+The final quote-wrapper gate exits zero in `u14-quoted-region-comptime.log`.
+All sixteen steps succeed; 2,770 tests pass and one skips.
+The derived-capacity probe now observes the required post-caught allocation failure and exact rollback.
+The production wrapper and all three focused tests pass with the existing parser suites.
+Main also confirms that the final owner test source retains the accepted owner production block exactly.
+
+### U14 final header correction
+
+Main reads all source changes in the first header recovery draft.
+Astra and Main identify four defects before integration.
+The draft bypasses the parameter endpoint after a rejected pattern.
+The draft omits optional markers and repeated default markers during raw recovery.
+The draft excludes the enclosing parenthesis from its nesting count.
+The draft can change error mapping for non-admission parsers.
+
+Eight immutable controls run after a one-case pilot.
+Both scripts exit zero; all eight CHECK operations exit one.
+The complete sources and responses remain in `u14-header-recovery-detail-baseline/` outside the repository.
+
+| Control | CHECK diagnostics in order |
+| --- | --- |
+| Pattern with a default, then `any` | ZTS054 at 1:18, ZTS041 at 1:27 |
+| Pattern with `any`, a default, then `any` | ZTS041 at 1:19, ZTS054 at 1:23, ZTS041 at 1:32 |
+| Pattern type begins with a comment | Only ZTS041 at 1:42 for the later parameter |
+| Pattern type contains a generic comma | Only ZTS041 at 1:43 for the later parameter |
+| Pattern type contains a quoted LF | ZTS008 at 1:24, ZTS041 at 2:6 |
+| Default tail contains an arrow | ZTS054 at 1:14, ZTS054 at 1:18, ZTS041 at 1:27 |
+| Default tail contains equality | ZTS054 at 1:14, ZTS054 at 1:18, ZTS054 at 1:19, ZTS041 at 1:27 |
+| Rejected pattern has an optional marker | ZTS055 at 1:17, ZTS041 at 1:31 |
+
+The legacy raw header records every top-level equals byte, including arrow and equality bytes.
+That rule differs from the parameter type endpoint and remains explicit.
+Main replaces the duplicate type scan with the accepted parameter endpoint and classifier.
+The raw synchronizer retains only runtime delimiter and marker handling.
+Its nesting sum includes the enclosing parameter parenthesis.
+Non-admission parsers return their original errors before admission-specific handling.
+Astra accepts this corrected production source before integration.
+Its temporary source SHA-256 is `2d791eb04f6a98969e241c11d1480852fbd8a11c53cf9b23f71fb93fcdb858f1`.
+
+The two Sol workers reach their usage limit during preparation.
+Main takes ownership of their remaining temporary source, tests, and measurement work.
+Astra remains the independent validator.
+The user directs Main to continue.
+
+The first attempt to extend public characterization fails in its temporary Ruby generator before any source write.
+The shell then runs the unchanged suite, which passes all 245 tests.
+That run supplies no evidence for the missing extension.
+Main corrects the generator to use the installed Ruby version.
+The actual extension passes all four steps and all 245 tests in `u14-header-detail-characterization-v2.log`.
+
+Three nested-block controls run after a separate one-case pilot.
+The first preserves the pattern refusal at 1:43 and the later while refusal at 1:64.
+The comment variant preserves the pattern refusal at 1:43 and the later while refusal at 1:82.
+The later-any variant selects only ZTS041 at 1:77.
+Both scripts exit zero; all three CHECK operations exit one.
+These controls distinguish local header recovery from an incorrect file-wide error cutoff.
+
+Main retains the earlier parser tests and corrects their remaining witnesses.
+The binding allocation test checks retained function scopes, including scopes already popped after failure.
+A failure after successful binding creation cannot satisfy the missing-binding witness.
+Each binding category must observe a qualifying native allocation failure.
+The five retired module fixtures use the existing shared module constant.
+The additional header tests check exact ordered diagnostics, compile stopping, depth boundaries, nested errors, and Store rollback.
+The temporary parser with tests has SHA-256 `d2c44dfd49db4c50d50fcfbd962fd730aaa0f27b7c8f15a58cd6846c9e32bbf2`.
+Its source review and unfiltered execution remain separate acceptance steps.
+
+### U15 measured graph preparation failures
+
+Main reviews the complete temporary graph probe before compilation.
+The probe calls the existing `ModuleGraph` and `ModuleCompiler` APIs with owned fixture sources.
+A one-case pilot and seven-case run use the same binary and change only the case limit.
+Compilation, both runs, and the allocator leak check succeed.
+Receipts remain in `u15-module-comment-probe/` outside the repository.
+
+| Existing graph source | Reads and compilation |
+| --- | --- |
+| Entry import, unfinished trailing comment, final LF | One dependency read; two modules compile with bytecode lengths five and seven. |
+| Dependency export, unfinished trailing comment, final LF | One dependency read; two modules compile with bytecode lengths five and thirteen. |
+| Closed-comment control with final LF | One dependency read; two modules compile with bytecode lengths five and seven. |
+| Bare unfinished comment with LF | No read; one module compiles to one byte. |
+| Entry import and unfinished comment without LF | No dependency read; compilation returns `MissingSemicolon`. |
+| Dependency export and unfinished comment without LF | One dependency read; compilation returns `MissingSemicolon`. |
+| Bare unfinished comment without LF | No read; one module compiles to one byte. |
+
+These measurements confirm that graph preparation failure selects raw source for the complete module.
+A direct graph policy must preserve that selection before ordered compilation and shared atom allocation.
+Ignoring only the trailing comment does not preserve earlier unstripped annotations.
+The refreshed packet's unconditional admission refusal is therefore incomplete.
+Astra prepares a bounded graph profile design before U15 implementation release.
+Graph discovery also distinguishes initializer allocation failure from errors returned by parsing.
+The current initializer propagates allocation failure; the current discovery parse suppresses returned failures.
+The replacement must not describe universal allocation propagation as unchanged behavior.
+
+Astra accepts one optional runtime parser phase instead of independent mode and phase fields.
+Null selects the existing raw mode; typed phases are ready, attempted, and IR-ready.
+Each fallible typed operation consumes its entry phase before work starts.
+Existing code-generation outputs identify successful generation.
+`InvalidParserPhase` remains the only new state error.
+No U15 implementation starts before U14 completes and the graph design receives acceptance.
+
+The final nested-block characterization passes all four steps and all 245 tests in `u14-header-nested-characterization.log`.
+The complete public recovery table contains forty controls.
+These results precede the production parser cutover.
+
+Main extends the graph probe with two whole-source contrasts.
+The new one-case pilot and nine-case run use one binary and change only the case limit.
+Compilation, both runs, and the leak check exit zero.
+Receipts remain in `u15-module-comment-probe-v2/` outside the repository.
+
+An exported typed variable before an unfinished comment with LF selects raw source for the dependency.
+The graph reads the dependency once and retains two modules in dependency-first order.
+Compilation returns `MissingSemicolon`; the parser reports the absent initializer at 1:19.
+The earlier annotation therefore cannot remain erased after preparation fails.
+
+A compile-caught quoted annotation instead retains successful preparation.
+The graph reads the dependency once and compiles both modules with bytecode lengths eleven and thirteen.
+This control distinguishes caught observations from a preparation failure.
+Neither measurement claims complete bytecode parity; the implementation tests must compare the complete outputs independently.
+
+Astra identifies two stale parser test expectations before integration.
+The malformed named generic quote produces terminal `UnterminatedString`, including the seeded allocation sweep.
+The rejected call remains a recovered admission refusal.
+Main corrects both expectations and adds explicit floors for the eight-case and two-case tables.
+Astra accepts the exact correction before integration.
+The final parser source with tests has SHA-256 `774ec470a6ca6d5469bebab5eb71707f6876f8ca63d5b5c199ee120595702205`.
+
+Main integrates that exact source and exports the two admission result types from the parser root.
+Formatting and whitespace checks pass before execution.
+The unfiltered parser and layering gate runs as `u14-parser-integrated-v9.log`.
+Production CHECK still uses the legacy frontend during this parser gate.
+
+The first integrated parser gate exits one before behavior tests can run in three roots.
+Nine of sixteen steps succeed and all 94 executed tests pass.
+The compiler reports constant bindings, two conditional assignment arms, a discarded capture, and a missing test qualifier.
+The compiler also rejects direct coercion from `!noreturn` into other error-union payloads.
+Main unwraps those nine calls with `try` before their outer returns.
+Native allocation errors and admission errors retain their existing propagation.
+
+One temporary text replacement also changes already-qualified test names and fails formatting immediately.
+Main reconstructs the exact preceding source and applies a narrower replacement before restarting the gate.
+Existing tests retain their previous qualified names.
+Astra accepts the complete mechanical correction.
+The corrected parser SHA-256 is `4fc9dd00d66222e88896c8c90099f23275471f95d361936108b90f89aff9901b`.
+The same unfiltered gate runs as `u14-parser-compile-corrected.log`.
+
+That gate exits one after all roots execute.
+Fourteen of sixteen steps succeed; 2,792 tests pass, one skips, and two new tests fail.
+The first failure distinguishes a physical source offset from a legacy display column.
+The later parameter's `any` starts at byte 39, while legacy CHECK reports column 42.
+The parameter scanner rewinds its source position without restoring coordinates when a colon has no recognized type start.
+Main keeps the original span at byte 39 and retains column 42 in the public characterization.
+The direct frontend needs a separate compatibility rule for presentation.
+
+The other failing test places a comment after the function name.
+The intended generic path instead examines the comment between the function keyword and name.
+Main corrects that fixture to match the intended producer.
+An immutable one-case pilot and two-case run confirm the corrected producer.
+At combined depth overflow, CHECK reports only ZTS044 at 1:533.
+The adjacent limit control reaches the later quote and reports only ZTS008 at 1:1054.
+Both scripts exit zero; both CHECK operations exit one.
+The complete sources and results remain in `u14-generic-scanner-order-baseline/` outside the repository.
+
+The test-only corrections retain production behavior and public expected output.
+The parser source SHA-256 becomes `ed08897a0c8e24b7772d30601f3af5e56e4f2e4d6ef10e0a834da6df07870961`.
+The unfiltered gate runs as `u14-parser-fixtures-corrected.log`.
+
+### U14 parameter presentation compatibility
+
+Five additional immutable controls run after a one-case pilot.
+The scripts exit zero and every CHECK operation exits one.
+The complete sources and responses remain in `u14-header-coordinate-baseline/` outside the repository.
+
+| Parameter control | Exact CHECK selection |
+| --- | --- |
+| Ordinary parameter with an unrecognized comment type, then `any` | Only ZTS041 at 1:38 |
+| Rejected pattern, colon LF and comment, then `any` | Only ZTS041 at 3:1 |
+| Rejected pattern with a comment type, then `void` | Only ZTS060 at physical position 1:40 |
+| Rejected pattern, colon LF and comment, another LF, then `any` | Only ZTS041 at 4:1 |
+| Ordinary parameter with a comment type, then a default | Only ZTS054 at 1:37 |
+
+Astra confirms that the parameter colon nonmatch restores position but not line or column.
+The variable colon guard restores all three values.
+Return guards keep the consumed source and coordinates.
+Those producers must not acquire the parameter rewind rule.
+A constant column adjustment cannot preserve LF cases.
+Removed-type diagnostics calculate their positions directly and must bypass cursor drift.
+
+Ordinary parameter nonmatches also need local recovery to the later parameter.
+The current draft can fail at the declined colon before it reaches the later `any`.
+The bounded correction must retain the original expected-parenthesis failure when no admission diagnostic survives.
+Original spans and legacy presentation remain separate concepts.
+Astra prepares the minimum producer-local representation before implementation.
+
+The corrected parser gate exits zero in `u14-parser-fixtures-corrected.log`.
+All sixteen steps succeed; 2,794 tests pass and one skips.
+This result establishes original-span behavior and the accepted recovery rules.
+The separate public presentation amendment remains necessary before CHECK cutover.
+
+Main integrates the exact reviewed direct owner and bridge with their final tests.
+The accepted source retains the compile-history assertion and calibrated validation allocation control.
+Formatting and whitespace checks pass before execution.
+The owner gate runs unfiltered parser, module-boundary, and layering steps as `u14-direct-owner-integrated.log`.
+Production CHECK still uses the legacy frontend during this gate.
+
+Astra accepts the direct owner design subject to the final tagged parser API.
+Failed owner initialization leaves no valid owner for accessors or cleanup.
+Allocation tests must assert failed initialization and publication without inspecting cleaned storage.
+Validation allocation calibration uses the same parser profile and allocator setup.
+The owner handles the parser outcomes with an exhaustive switch, not diagnostic-presence precedence.
+
+Source review finds no producer for the new endpoint tags `malformed` and `implementation_budget` after the comment outcome becomes explicit.
+Astra accepts deletion of those two impossible tags.
+Main removes them from `AdmissionEndpointResult` while preserving every private endpoint and quote union.
+The next parser integration gate covers this bounded API deletion.
+
+Final program rejection can occur without a failed top-level dispatch.
+For example, block recovery can retain parser errors while the enclosing function dispatch succeeds.
+The final `ParseError` then exposes the full applicable error list without creating a fictitious earlier cutoff.
+Only an actual failed top-level dispatch establishes the saved diagnostic prefix.
+
+### U14 first parser integration review
+
+The first production parser draft remains outside the repository after main reads every changed line.
+Its optional-marker guard requires a nonempty gap and therefore misses adjacent `name?: T`.
+Legacy recognition permits an empty whitespace gap before the colon.
+
+Its interface body uses ordinary declaration classification and propagates unfinished comments.
+That policy exposes body `any` and comment failures that legacy interface recognition keeps opaque.
+The measured body controls retain only ZTS049.
+
+Its annotation hooks classify a compatible span, then call unchanged private parsers that rescan strict endpoints.
+That second scan violates the accepted confirmed-span boundary and the measured caught-literal compile behavior.
+The direct producer must retain the confirmed span and use admitted type parsing.
+
+Main's initial module-continuation claim is incorrect.
+Retired imports terminate stripping in both modes because the legacy producer returns `LegacyTypesImport` unconditionally.
+The measured continuation concerns caught lexical diagnostics inside module scans, not a retired-import refusal.
+The direct producer must retain that caught continuation and record retired imports as terminal failures.
+The draft's result selection places the module field before the explicit terminal failure and therefore loses the terminal result category.
+
+Main requests a bounded correction design before another parser rewrite.
+No parser production draft receives an execution claim or enters production CHECK at this point.
+
+### U14 public allocation projection
+
+Astra distinguishes native owner allocation failure from the existing public CHECK projection.
+The parser and direct owner propagate native OOM and complete cleanup.
+The current CHECK preparation boundary maps that failure to a strip-only result with one parse error.
+The reset preserves that public projection.
+Later-stage allocation failures retain their existing boundaries instead of entering a new catch-all.
+
+### U14 complete parser review findings
+
+Astra confirms further blockers in the frozen parser draft.
+These findings remain design requirements; no rejected parser source enters the repository.
+
+| Boundary | Observed draft failure | Required behavior |
+|---|---|---|
+| Private nominal exclusion | Recovery also runs when admission is absent and can erase invalid nominal syntax. | New recovery applies only to the admission initializer. |
+| Declaration rollback | History allocation can fail after declaration publication without restoring its Store checkpoint. | Every operational failure restores all seventeen Store arrays. |
+| Generic scanning | Private wrappers retain only null or suppression state and lose lexical failure identity. | Admission wrappers share the scanner cores and retain actual observations and propagated failures. |
+| Compatibility calls | Removed-form classification precedes the legacy call-grammar decision. | Rejected call grammar produces no new removed-form refusal. |
+| Compile stopping | A selected hard event can still scan later types or bodies. | Each producer stops immediately before later work can replace the selected failure. |
+| Pending trivia | Read-ahead comment evidence immediately changes publication health. | Cursor state retains pending evidence separately until control reaches that boundary. |
+| Raw cursor adoption | Plain token requests can lose a trailing unfinished comment. | Committed adoption fetches the surviving token through the observed entry. |
+| Internal errors | Generic statement recovery can convert unknown helper errors into syntax diagnostics. | Explicit error routing propagates operational and internal failures before diagnostic selection. |
+| Declaration gaps | Token cursors skip comments that legacy raw recognition does not permit. | Raw whitespace guards establish each recognition boundary. |
+| Missing equals | Unconditional alias scanning can treat trailing text as a type body. | Body scanning begins only after an actual equals token. |
+| Nominal order | Scalar exclusion omits prior generic and body classification. | Generic removed forms precede body `any`, then scalar refusal, with existing deduplication. |
+| Validation ownership | Parser and direct owner both call final runtime-owner validation. | The direct owner validates once before accepted publication. |
+| Block recovery progress | A post-failure progress snapshot can skip a later eligible declaration after template recovery. | Admission recovery checks progress against the failed statement's original start. |
+
+The current global module refusal and exclusion fields also need an admission-aware publication policy.
+An earlier observation must not poison a later independent valid producer.
+Caught compile observations must not become private lexical exclusions or alter selected generation.
+Plain and private typed initialization retain their existing policy.
+
+### U14 interface body measurements
+
+The immutable program runs one case first, then three cases, in `u14-interface-body-baseline/`.
+Both measurement commands exit zero; all six CHECK and compile commands exit one.
+
+| Body control | CHECK result | Compile result |
+|---|---|---|
+| Malformed quoted string | ZTS008 at 1:31, then ZTS049 at 1:1. | `InterfaceDeclaration` at 1:1. |
+| 512 additional raw braces | Only ZTS044 at 1:529. | `NestingTooDeep` at 1:529. |
+| Comment text contains a closing brace | ZTS049 at 1:1, then ZTS041 at 1:36 outside the ended body. | `InterfaceDeclaration` at 1:1. |
+
+Legacy body scanning catches quoted-string failures but propagates raw brace overflow.
+It does not recognize comments; braces inside comment text still affect the endpoint.
+It does not classify body `any` or create an unfinished-comment failure.
+
+### U14 declaration guard measurements
+
+The immutable program runs one case first, then five cases, in `u14-declaration-guard-baseline/`.
+Both measurement commands exit zero; all ten CHECK and compile commands exit one.
+Comment gaps after `type`, `distinct`, or `interface` retain only parser ZTS047 at 1:1.
+A comment gap after `export` retains only parser ZTS002 at 1:1.
+`type Alias any;` retains only ZTS050 at 1:1 because no equals token starts a body.
+These controls establish recognition limits instead of treating skipped trivia as raw whitespace.
+
+### U14 declaration recovery measurements
+
+The immutable program runs one case first, then three cases, in `u14-var-admission-baseline/`.
+Both measurement commands exit zero; all six CHECK and compile commands exit one.
+`var x: any = 1;` retains only ZTS041 at 1:8 before runtime rejection can win.
+`var x: number = 1;` retains only parser ZTS001 at 1:1.
+A plain `var` followed by a later typed `const` retains only ZTS041 at 1:21.
+Admission recovery must retain the already owned declaration's type span without adding a whole-program scanner.
+
+### U14 CHECK characterization execution
+
+Astra accepts characterization v3 after the handler-free stage correction and the compatible public allocation assertion.
+Main integrates the test-only source and runs unfiltered `test-precompile` against unchanged production CHECK.
+The first run exits one: 241 tests pass, and one routing expectation fails.
+Its untyped named handler reaches strict checking and lacks the required explicit signature.
+Main corrects only that expectation: six stages for TypeScript, five for virtual JavaScript, and one ZTS601 error.
+The corrected routing test requires no verifier execution and no contract.
+The template control and existing typed contract fixtures retain complete contract coverage.
+Main restarts the same unfiltered gate after the test correction.
+
+The rerun passes all four steps and all 242 precompile tests.
+Astra accepts the corrected routing assertions after checking the strict signature requirement.
+The final precompile source SHA-256 is `b24d812aa962743f8b62f4e047bcf6bb403b27c7d29284234cc387297d233270`.
+Formatting and whitespace checks pass for the touched parser and precompile files.
+This receipt still tests the unchanged legacy production CHECK path.
+
+The parser correction design permits two separate temporary scopes after Astra review.
+One Sol agent owns admitted-span semantic helpers and later generic scanner observation helpers.
+The other Sol agent owns parser integration and producer recovery.
+Each corrected source amendment still requires independent review and its bounded gate before dependent integration.
+
+The admitted semantic helper API uses one `AdmittedTypeInput` with a raw span and its admission endpoint.
+The helpers read `Store.source`, validate bounds, and share existing annotation, return, and declaration construction.
+They do not repeat strict endpoint discovery.
+Native failures and excluded outcomes restore all seventeen Store arrays.
+Declaration cursor publication occurs only after complete success.
+The return helper preserves the complete untrimmed interval and rejects a shorter raw span.
+
+The existing declaration generic scan remains a temporary limitation until the observation-aware core amendment completes.
+Generic observations retain each legacy caller's catch policy and commitment boundary.
+A failed call probe can retain observations from that actual probe even when its cursor restores.
+An unrelated balanced probe cannot publish observations from work the legacy caller never performs.
+Removed-form classification still requires the applicable call-grammar acceptance.
+
+All eight interim documentation drift, link, and spine checks pass after the recorded findings and test corrections.
+
+### U14 confirmed-span source review
+
+Main reads every production and test line of the admitted-span helper amendment.
+Astra accepts production v2 and all eleven tests before integration.
+The tests cover bounds, caught literal prefixes, full return spelling, declaration publication, exclusions, and native allocation rollback.
+The seeded allocation test confirms published nodes and annotations before it enables the failing allocator.
+Main integrates source SHA-256 `62100782aef25959392a7e763e90eee62676d5342b072206200bafdd3ff42ead` and starts the unfiltered behavior and layering gate.
+Strict TypeValue assembly still has its existing implementation; the source shares annotation, return, and declaration construction where stated.
+No claim of complete shared semantic assembly replaces that measured source boundary.
+
+The generic observation packet also receives main review and Astra acceptance before temporary implementation.
+Its matching-bracket core supplies the interface body entry without a duplicate scanner loop.
+The production parser remains outside the repository until every required helper and corrected producer passes review.
+
+### U14 additional var owner controls
+
+The immutable program runs one case first, then four cases, in `u14-var-owner-boundary-baseline/`.
+Both measurement commands exit zero; all eight CHECK and compile commands exit one.
+Comment gaps after `var` or after its binding name retain ZTS041 at 1:19.
+Those gaps therefore differ from the raw whitespace requirements for type declaration keywords.
+`var a = 1, b: any = 2;` retains only parser ZTS001 at 1:1.
+The reset does not add a declaration-list grammar to change that result.
+`var x = value as any;` retains only ZTS042 at 1:18.
+Recovery reaches the existing assertion producer, and same-offset deduplication retains that assertion diagnostic.
+
+### U14 generic-specific measurements
+
+The immutable program runs one case first, then seven cases, in `u14-generic-observation-baseline/`.
+Both measurement commands exit zero.
+Every CHECK command exits one; compilation exits zero only for the two maximum-depth controls.
+
+| Control | CHECK result | Compile result |
+|---|---|---|
+| Named generic with quoted LF before nonmatch | Only ZTS008 at 1:17. | `UnterminatedString` at 1:17. |
+| Call probe with caught LF before a logical operator | Only ZTS008 at 1:26. | Stripping succeeds; parser ZTS001 occurs at 1:17. |
+| Named raw angle overflow | Only ZTS044 at 1:523. | `NestingTooDeep` at 1:523. |
+| Named angle maximum | Only ZTS500 at 1:1. | Exit zero, with seven bytes of bytecode. |
+| Named raw bracket overflow | Only ZTS044 at 1:524. | `NestingTooDeep` at 1:524. |
+| Named bracket maximum | Only ZTS500 at 1:1. | Exit zero, with seven bytes of bytecode. |
+| Unfinished comment in named generic | No diagnostic rows. | `UnterminatedComment`. |
+
+The quote controls distinguish actual probe observations from later committed traversal.
+The depth controls distinguish matching-bracket counters from combined counters in call grammar.
+Return-type depth receipts alone do not establish these generic outcomes.
+
+The first admitted-helper gate exits one because a test combines compile-time iteration with runtime continuation.
+Thirteen of sixteen steps succeed, with 1,660 tests passed; the engine test root does not compile.
+Main changes only that test loop to ordinary runtime iteration and restarts the same unfiltered gate.
+
+Main and Astra review every line of the generic scanner production draft.
+The draft preserves valid-input private behavior, quote recovery, caught-row transactions, and shared interface brace scanning.
+Its two private wrappers need their original out-of-range guards before the stricter new cores.
+Sol corrects that bounded compatibility issue before integration.
+Admission entries keep native validation errors for invalid source positions.
+
+### U14 final capture amendments
+
+Astra accepts a confirmed `generic_list: ?Span` input for admitted declarations.
+The helper validates header presence, exact start, bounds, and angle spelling before generic reservation.
+It resumes its copied cursor at the confirmed endpoint without tokenizing the opaque list.
+The strict declaration path retains its existing scanner and eligibility policy.
+No suppression flag moves into the stored declaration input; the parser owns admission selection.
+
+Type-only module validation remains structural rather than a second admission decision.
+A matching recovered module record can retain caught lexical observations.
+The amendment removes only the `encountered_diagnostic` rejection.
+It retains retired refusal, exact record equality, and native allocation failure propagation.
+Private typed initialization still rejects lexical exclusions through its existing parser policy.
+Neither amendment adds a Store array or a frontend mode field.
+
+Pending trivia also retains operational error priority.
+Statement recovery propagates its caught native or internal error before committing later read-ahead trivia.
+Every observed token fetch replaces pending evidence, including clearing an earlier staged observation.
+Raw survivor adoption stages evidence until the enclosing producer finishes publication.
+These conditions keep a later comment from replacing OOM or invalidating an earlier valid producer prematurely.
+
+The corrected admitted-span helper gate passes all sixteen steps, with 2,757 tests passed and one skipped.
+Its final source SHA-256 is `34d0725116f46cfa4ab6407a9db255ea833fdb157b3073bb88f91bd4f82e88cc`.
+This receipt covers the eleven new helper tests and unchanged tier behavior.
+The production parser and CHECK caller cutover remain pending.
+
+Astra accepts scanner tests v3 after the missing outcome contrasts and allocation floors are added.
+Balanced, call, and brace scans now require observed allocation failures and restore prior caught rows.
+The root-template control distinguishes a caught depth failure from terminal raw depth failure.
+The call controls distinguish lexical nonmatch, grammar nonmatch, and terminal combined depth.
+The tests exercise public scanner entries; private-wrapper controls retain their separate exclusion policy.
+
+Main integrates frozen scanner source `4cbf6e5ecaef504403345cb8936ac2f151e28d79b7a5e124a27fb30ab011c74f` after complete line review.
+The first unfiltered gate fails compilation at three rollback statements.
+Main adds braces around each conditional `errdefer` without changing rollback behavior.
+The same unfiltered behavior and layering gate runs again.
+
+| Scanner receipt | Actual result and scope |
+| --- | --- |
+| `u14-generic-observation-v3.log` | Exit 1; nine of sixteen steps succeed, and 94 tests pass. Three syntax errors prevent the parser roots from compiling. |
+| `u14-generic-observation-braces.log` | Exit 0; all sixteen steps succeed, 2,762 tests pass, and one skips. The corrected scanner and layering checks pass. |
+
+The integrated scanner source SHA-256 is `826ae9fb64951f4df914e2a05a3ca275c5f747221c6eb7b114e16d5d7e022efd`.
+Main reads the complete declaration capture production amendment before test review.
+The amendment retains the strict scanner path and validates confirmed generic spans before reservation.
+
+Astra clarifies the public CHECK allocation boundary for the direct owner.
+CHECK catches only `error.OutOfMemory` from `DirectCheckSource.initInPlace` and returns the existing strip-only failure with one parse error.
+The direct owner still returns native errors and cleans every failed initialization.
+CHECK propagates internal errors and handles semantic refusals through the tagged outcomes.
+Later analysis retains its existing allocation boundaries.
+The preparation boundary now includes parser and final validation allocations because the owner performs those operations during initialization.
+The existing characterization does not establish allocation-site parity with the earlier parser boundary.
+Calibrated owner failures need separate CHECK projection controls before cutover acceptance.
+
+The declaration capture review finds another raw cursor boundary in the admitted body path.
+The tokenizer can scan across a caught string newline and consume the declaration terminator.
+A later `advanceCursorTo` call cannot restore a cursor that already passed the confirmed endpoint.
+The admitted body therefore resumes a tokenizer copy directly at `admission_end` after the equals token.
+The strict body path retains its existing token walk.
+Exact quoted-body and template-body cursor controls must cover the terminator, line state, and rollback before acceptance.
+
+Astra finds two imported-file requirements during CHECK packet review.
+Legacy dependency preparation uses compile admission, while CHECK root preparation uses collect admission.
+The direct owner therefore needs explicit operation initializers over one initialization core.
+Imported files retain caught compile observations without retry or a second frontend.
+Healthy imported effects must receive `type_source = .direct` with the direct environment.
+Failed imported typing must receive `.omitted`.
+Passing a direct environment through the old `type_env` field invokes legacy normalization and can leave a valid imported effect blocked.
+The existing separate traversal and failed-type early-stop requirements remain unchanged.
+
+Astra accepts declaration capture production v2 after the raw body resumption correction.
+Tests remain a separate acceptance boundary before integration.
+Astra also accepts the tools-local admission JSON adapter.
+The adapter maps all seventeen kinds exhaustively through the existing catalog.
+It preserves LF-only byte coordinates, the column clamp, static text ownership, and absent offset fields.
+Main integrates that adapter and starts unfiltered `test-precompile` before any CHECK caller changes.
+
+The human output boundary uses projected diagnostics and the exact terminal error identity.
+The existing human failure summary and test-mode suppression remain required.
+The authority does not require byte-identical incidental producer logging or duplicate `std.log` events.
+No logging provenance mechanism will be added for that history.
+A location-free failure can have no JSON diagnostic while human output retains its terminal error name.
+This evidence limit does not establish complete stderr parity.
+
+| JSON adapter receipt | Actual result and scope |
+| --- | --- |
+| `u14-admission-json.log` | Exit 0; all four steps and all 244 precompile tests pass before CHECK production changes. |
+
+Astra accepts declaration test source v3 after exact endpoint assertions are added.
+The tests distinguish a quoted body's LF admission endpoint from its later semicolon terminator.
+They assert survivor byte positions, lines, columns, declaration spans, generic backlinks, strict exclusions, and seeded allocation rollback.
+Main integrates source SHA-256 `a08370c72707c67934253fd79c041589825c0d0402ded83a34292915961d99ee` after complete line review.
+The unfiltered parser and layering gate runs as `u14-declaration-capture-v3.log`.
+
+| Declaration capture receipt | Actual result and scope |
+| --- | --- |
+| `u14-declaration-capture-v3.log` | Exit 0; all sixteen steps succeed, 2,766 tests pass, and one skips. Exact capture, rollback, strict contrast, and layering checks pass. |
+
+Astra accepts the separate recovered-module source amendment and tests.
+The amendment removes only the rejection of a structurally matching record with caught diagnostics.
+The tests retain exact-record equality, retired refusal, wrong-kind rejection, wrong-endpoint rejection, and native OOM before append.
+Main integrates source SHA-256 `d2800ba17072c380fbe7fa07812311f93bbe1f7b726966bf55148702890ec4cf` after complete line review.
+The same unfiltered parser and layering gate runs as `u14-recovered-module-validation.log`.
+
+| Recovered module receipt | Actual result and scope |
+| --- | --- |
+| `u14-recovered-module-validation.log` | Exit 0; all sixteen steps succeed, 2,767 tests pass, and one skips. Structural recovery, refusal, OOM, and layering checks pass. |
+
+### U14 final parser baseline review
+
+Astra finds two further blockers in the frozen parser predecessor before final integration.
+Assertion recovery saves its tokenizer after consuming the asserted type's first token.
+A malformed quoted type can move that tokenizer beyond the confirmed LF endpoint.
+The correction saves the tokenizer immediately after the assertion keyword and resumes that copy.
+It retains the existing type-start guard, committed observations, and compile-mode immediate refusal.
+
+The normal variable, parameter, and return call sites also need their legacy raw type-start guards.
+The admission path must not erase a colon followed by a comment or an empty type.
+Without that guard, classification can expose an `any` that legacy preparation leaves to runtime parser refusal.
+The call-site correction applies only when admission is present.
+Plain initialization and private typed initialization retain their existing behavior.
+
+Main measures assertion recovery through the immutable legacy analyzer after a one-case pilot.
+Both measurement scripts exit zero; all six CHECK and compile operations exit one.
+The sources, requests, output, stderr, and process exits remain in `u14-assertion-recovery-baseline/`.
+
+| Assertion control | CHECK diagnostics in order | Compile failure |
+| --- | --- | --- |
+| Quoted `as` | ZTS042 at 1:20, ZTS008 at 1:25, ZTS041 at 2:16 | `UnsupportedAsAssertion` at 1:20 |
+| Quoted `satisfies` | ZTS043 at 1:27, ZTS008 at 1:32, ZTS041 at 2:16 | `UnsupportedSatisfiesAssertion` at 1:27 |
+| Template `as` with a caught string | ZTS042 at 1:20, ZTS008 at 1:29, ZTS041 at 2:18 | `UnsupportedAsAssertion` at 1:20 |
+
+Seven further CHECK controls run after a one-case pilot through the same immutable binary.
+Both scripts exit zero, and all seven CHECK processes exit one.
+The sources and exact responses remain in `u14-type-start-recovery-baseline/`.
+
+| Raw recognition control | CHECK diagnostics |
+| --- | --- |
+| `while (true) { const x: any = 1; }` | Only ZTS041 at 1:25 |
+| Variable colon followed by a closed comment and `any` | ZTS002 at 1:8, then ZTS047 at 1:7 |
+| Parameter colon followed by a closed comment and `any` | ZTS003 at 1:13, expected `')'` |
+| Return colon followed by a closed comment and `any` | ZTS003 at 1:13, expected `'{'` |
+| Variable colon followed by equals | ZTS002 at 1:8, then ZTS047 at 1:7 |
+| Parameter colon followed by closing parenthesis | ZTS003 at 1:13, expected `')'` |
+| Return colon followed by `{ return 1; }` | ZTS003 at 2:1, expected `'{'` |
+
+The last fixture is an object-shaped return tail, despite its historical `return-empty` filename.
+It is not evidence for a raw type-start guard rejecting an empty return type.
+
+Astra identifies a recovery gap inside skipped runtime braces.
+The predecessor's depth filter can skip a supported declaration without dispatching its admission producer.
+The measured `while` control confirms that its hidden `any` must still take priority over the runtime parser refusal.
+The correction must reuse existing producer dispatch and retain the saved first parser batch.
+It must not add a second runtime grammar.
+
+Three binding catches also replace `ScopeAnalyzer.declareBinding` OOM with `TooManyLocals`.
+An error list with available capacity can then conceal native OOM from `parseAdmission`.
+The admission path must propagate captured OOM before recording the legacy local-limit diagnostic.
+The ordinary and private typed paths retain their existing mapping.
+A calibrated public parser test must establish diagnostic capacity before inducing the binding allocation failure.
+
+Default and mutable export producers need raw statement-boundary and whitespace-only gap guards.
+An indented export or a comment between export keywords must retain the runtime parser path when raw recognition fails.
+The admission correction uses the existing boundary helpers and leaves other initialization profiles unchanged.
+
+Two immutable export controls confirm that boundary after a one-case pilot.
+Both scripts exit zero, and both CHECK operations exit one.
+The indented default export reports parser ZTS001 at 1:9.
+The mutable export with a comment between keywords reports parser ZTS001 at 1:12.
+Exact sources and responses remain in `u14-export-guard-baseline/`.
+
+Import recovery also needs the legacy alias context.
+Only committed normal token consumption changes `admission_in_import`.
+Consuming `kw_import` sets the flag; consuming a normal semicolon clears the flag.
+The flag suppresses `as` assertions but does not suppress `satisfies`.
+Raw adoption preserves the flag, including semicolons inside erased type-only modules.
+Strings, templates, newlines, and speculative lookahead do not change it.
+`ParserCursorCheckpoint` restores the flag when speculation declines.
+Astra accepts this bounded context design.
+
+Nested recovery returns at supported restart heads and uses the existing statement dispatch.
+Admission block recovery consumes deeper recovery braces before it accepts its own closing brace.
+Ordinary and private typed block behavior remains unchanged.
+Astra accepts this mechanism without a second grammar or recursion from synchronization into parser dispatch.
+
+Four immutable context controls run after a one-case pilot.
+Both scripts exit zero, and all four CHECK processes exit one.
+Exact sources and responses remain in `u14-recovery-context-baseline/`.
+
+| Recovery context | CHECK diagnostics |
+| --- | --- |
+| Refused namespace import | Only ZTS002 at 1:1 |
+| Namespace import with semicolon, then assertion | Only ZTS042 at 2:20 |
+| Namespace import without semicolon, then assertion | Only ZTS002 at 1:1 |
+| Function with unsupported while, healthy typed const, and later return | Only ZTS001 at 2:3 |
+
+### U14 direct owner API binding
+
+Main accepts the exact owner API binding before temporary implementation starts.
+The owner reuses `AdmissionParseOutcome` rather than defining another outcome union.
+`initInPlace` uses collect admission; `initCompileInPlace` uses compile admission through the same initialization core.
+`acceptedCapabilities` returns one borrowed bundle for the root bridge.
+The bundle contains the matching root, IR view, atom pointer, and Store pointer from that owner.
+This bridge guarantee does not prevent arbitrary field mutation elsewhere in Zig.
+The owner stores no duplicate allocator, root, or IR view.
+Main supplies the two parser-root aliases after final parser integration.
+The public API contract is fixed while the six remaining parser corrections change internal behavior.
+Sol prepares the owner outside the repository; source acceptance and execution remain separate requirements.
+
+Astra accepts the exact owner binding and its production logic separately.
+The owner cleans parser state before atoms and publishes acceptance after the complete final validation.
+Main reads every production line and the later lifetime comment delta.
+The lifetime comment records final storage, borrowed bytes, nonmovable initialized owners, and failed-initialization cleanup.
+Tests, validation allocation calibration, and final parser integration remain pending.
+
+Main prepares the CHECK root and imported-file cutover outside the repository.
+The frozen production v2 patch SHA-256 is `3bde51eda56bc0159d765260dc01895fdae6efbe1a0f13e74467f51d21830d66`.
+It retains the existing characterization tests unchanged.
+Root CHECK uses collect admission and maps each explicit owner outcome to its existing stage profile.
+Only initialization OOM enters the existing failed preparation projection; internal errors propagate.
+Virtual JavaScript retains its untyped legacy preparation until its scheduled cutover.
+Accepted TypeScript analysis receives the matching direct Store, including when that Store has no entries.
+Imported files use compile admission and release facts before the owner and owned source bytes.
+Imported type and effect analysis receive direct input explicitly; failed typing retains omitted effects and blocked nested imports.
+The patch preserves separate import traversals and reader calls.
+Astra reviews this source before any caller integration or execution.
+
+Astra accepts CHECK production v2 as source, including root projection, imported ownership, and direct type and effect input.
+The caller patch remains temporary until parser and owner integration pass their gates.
+
+Main adds eleven public CHECK characterization cases after independent Sol review.
+The cases retain exact immutable source bytes, diagnostic text, suggestions, order, positions, and stage profiles.
+The new cases pass against the unchanged legacy CHECK implementation.
+
+| Further CHECK characterization receipt | Actual result and scope |
+| --- | --- |
+| `u14-recovery-characterization.log` | Exit 0; all four steps and all 245 precompile tests pass before caller cutover. The eleven added cases exercise recovery and raw guards. |
+
+### U14 frozen parser correction review
+
+Main reads all 731 lines of the final parser production delta and all 599 lines of its test delta.
+Astra independently reviews the same immutable patches.
+The initial full source snapshots change during worker correction, so Main reconstructs separate review copies from the immutable patches.
+The reconstructed production SHA-256 is `9c5b5c840a8dfb8a3b1b230dd8cfcf43454958e9d3b1cb98e445fbf724df648c`.
+The reconstructed test SHA-256 is `e25aee20d5a235a57c8fdb47d7c4823fa6df508accadd73562566313a63952a8`.
+Later corrections use new versioned paths and retain all prior review targets.
+No rejected parser production snapshot enters the repository.
+
+The source review finds additional bounded corrections.
+Rejected aliases must retain their refusal when equals is absent; only an actual equals token starts body scanning.
+Interfaces must retain their refusal after a recognized name even when the body is absent.
+Post-name comments do not cancel an already recognized refusal or create a body assignment.
+Present body observations retain their original order before the declaration refusal.
+Five new retired-module fixtures must use the existing constant without changing bytes or widening an allowlist.
+
+The generic compatibility paths must choose their actual legacy scanner before committing observations.
+A balanced probe can reach a caught quote after the call grammar already exceeds its earlier combined-depth limit.
+Committing that probe adds an observation that legacy execution never reaches.
+Named comment compatibility and comparison arrows therefore use the call scanner first.
+Dedicated assignment arrows retain their earlier precedence.
+Other eligible producers use the balanced scanner, and every producer commits only its selected scanner's rows.
+Admission cursor adoption resumes at the confirmed endpoint without tokenizing opaque generic contents.
+Private scanner and token-walk behavior remains unchanged.
+Astra accepts this bounded correction design.
+
+Nominal scalar refusal must preserve its complete erased interval and raw boundary state.
+Legacy preparation skips whitespace before an optional semicolon.
+Leaving that semicolon visible can create a new adjacent declaration boundary.
+The corrected source must update `last_erased_type_span` after the full interval is known.
+
+Three immutable nominal controls run after a one-case pilot.
+Both scripts exit zero, and all three CHECK operations exit one.
+The exact sources and responses remain in `u14-nominal-erasure-baseline/`.
+
+| Nominal boundary control | CHECK diagnostics |
+| --- | --- |
+| Refused nominal followed immediately by `type` | Only ZTS048 at 1:15 |
+| Refused nominal followed by newline and `type` | ZTS048 at 1:15, then ZTS050 at 2:1 |
+| Healthy nominal followed immediately by `type` | Only parser ZTS047 at 1:23 |
+
+The parameter binding OOM witness also needs a retained-scope check.
+Function cleanup can pop the current scope after a later node allocation fails.
+A lookup from that scope can falsely claim the parameter binding never existed.
+The witness must inspect retained function bindings or establish the exact allocation boundary.
+Unrelated OOM at the same cursor must not count as binding failure.
+
+### U14 parameter recovery review
+
+Three immutable header controls run after a one-case pilot.
+Both scripts exit zero, and all three CHECK operations exit one.
+The sources and exact responses remain in `u14-parameter-recovery-baseline/`.
+
+| Header control | CHECK diagnostics in order |
+| --- | --- |
+| Unsupported function-expression default, then `y: any` | ZTS054 at 1:14, then ZTS041 at 1:35 |
+| Unsupported destructured pattern, then `y: any` | Only ZTS041 at 1:22 |
+| Ordinary default, then `y: any` | ZTS054 at 1:14, then ZTS041 at 1:22 |
+
+The draft can leave the header after unsupported runtime syntax and miss later admission events.
+Recovery stays in the existing header loop and uses a small raw delimiter synchronizer.
+It starts at a saved default tail or rejected pattern boundary, with exact consumed delimiter state.
+The synchronizer retains the legacy combined-depth rule for parentheses, braces, and brackets.
+It has no angle counter, comment skipping, or regular-expression recognition.
+It leaves the next comma or outer closing parenthesis for the existing loop.
+Before a default, recovery retains top-level annotation dispatch after a rejected pattern.
+Shared quote handling preserves propagated root failure and caught nested-template observations.
+Compile hard refusal stops before recovery.
+Native and internal errors propagate immediately.
+The failed header retains its first applicable parser-error batch and committed admission history.
+The complete failed header Store transaction rolls back.
+The measured controls must establish ordered diagnostics and absence of completed signature and parameter publication.
+Astra accepts these constraints; implementation remains a separate source review.
+
+Main reviews all owner tests and the bridge correction for three actual refusal tags.
+Astra accepts the refusal bridge and the calibrated validation allocation probe.
+The compile-caught literal test still needs an assertion that the first LF remains in observation history.
+Its empty public owner projections then establish suppression rather than loss of evidence.
+
+### U14 declaration gaps and quote reuse
+
+Seven immutable controls run after a one-case pilot.
+Both measurement scripts exit zero; every CHECK operation exits one.
+Complete sources and responses remain in `u14-declaration-gap-baseline/` outside the repository.
+
+| Source condition | Exact CHECK selection |
+| --- | --- |
+| Comment after alias name, before `= any` | Only ZTS050 at 1:1 |
+| Comment after alias generics, before `= any` | Only ZTS050 at 1:1 |
+| Interface name followed by a semicolon | Only ZTS049 at 1:1 |
+| Comment after interface name, before a semicolon | Only ZTS049 at 1:1 |
+| Invalid nominal base, LF, then `;type` | Only ZTS048 at 1:15 |
+| Unfinished comment after alias name | Only ZTS050 at 1:1 |
+| Unfinished comment after alias generics | Only ZTS050 at 1:1 |
+
+The parser must not classify a hidden declaration body after a comment gap.
+The parser must skip raw whitespace before an optional declaration semicolon.
+The nominal correction alone does not cover the shared refused-declaration tail.
+Astra identifies that separate omission during source review.
+
+Three further controls run after a separate one-case pilot.
+An interface body followed by ` ;type` reports only ZTS049 at 1:1.
+An alias body followed by LF and `;type` reports only ZTS050 at 1:1.
+An interface body followed by ` ;`, LF, then `type` reports ZTS049 at 1:1 and ZTS050 at 2:1.
+Both scripts exit zero; every CHECK operation exits one.
+The same receipt directory retains these exact sources and responses.
+
+Astra accepts the thin `scanAdmissionQuotedRegion` design over the existing quote core.
+The wrapper preserves exact endpoints and completed scans at EOF.
+The wrapper retains nested caught observations before a separate root terminal diagnostic.
+Native errors restore the caller's caught-list length.
+The wrapper adds no Store, cursor, collector, or frame-budget state.
+Source review and execution remain separate acceptance steps.
+
+Astra accepts the corrected compile-history owner assertion and the two public CHECK tests as source changes.
+Those CHECK tests cover calibrated validation OOM and compile-caught imported effects with three exact reads.
+The owner and CHECK production cutovers remain outside the repository pending parser integration.
+
+Five additional nominal controls run after a one-case pilot.
+Comments after a nominal name select only ZTS048 at 1:11.
+That result also holds when the comment hides `= any` or has no closing delimiter.
+A comment after nominal generics selects only ZTS048 at 1:14.
+A comment between the nominal keyword and name instead selects parser ZTS047 at 1:1.
+The scripts exit zero; every CHECK operation exits one.
+The receipt directory retains the exact sources and responses.
+
+The public recovery table now includes all eighteen additional declaration and header controls.
+The three successive characterization runs each pass four steps and all 245 precompile tests.
+Their receipts are `u14-declaration-gap-characterization.log`, `u14-declaration-tail-characterization.log`, and `u14-header-nominal-characterization.log`.
+The original eleven controls remain unchanged.
+
+Astra accepts quote-wrapper production and the corrected allocation test.
+The first test draft can fail before a caught observation changes the list.
+The corrected test first completes a prefix and proves its caught observation exists.
+The same prefix then precedes nested templates that require later frame growth.
+A fresh allocator fails at that calibrated allocation boundary and must restore the seeded list exactly.
+The complete allocation sweep remains in place.
+The integrated source SHA-256 is `fa53461d30b97a3d8db2d29243724fd2ad85619eea5009e5b914ab73d259f6ca`.
+The unfiltered parser and layering gate runs as `u14-quoted-region-v2.log`.
+
+Header recovery must not set a file-wide error cutoff inside a nested function.
+Legacy block recovery can collect further applicable errors before the top-level statement returns.
+Astra rejects that proposed global cutoff before implementation.
+The bounded correction keeps the original header failure local and returns it through the existing outer recovery boundary.
+The top-level dispatch retains ownership of its saved applicable error batch.
+
+Astra accepts that local header design and rejects panic-mode suppression.
+Nested synchronization can clear panic mode, so suppression would require unrelated recovery changes.
+Native errors and diagnostic OOM must propagate before local error-list restoration.
+Owned diagnostic messages retain their existing cleanup owner.
+A nested-block contrast must prove that later applicable block errors remain visible.
+Astra also accepts the nominal raw-header design and the shared declaration-tail correction.
+
+The first quote-wrapper execution exits one in `u14-quoted-region-v2.log`.
+Fourteen of sixteen steps succeed; 2,769 tests pass, one skips, and one fails.
+The production wrapper tests pass except for the calibrated post-caught allocation expectation.
+The test uses thirty-two nested frames, which fit the actual initial capacity on this host.
+The expected allocation therefore never occurs.
+The correction derives nesting from `ArrayListUnmanaged(LegacyTemplateFrame).growCapacity(1)` instead of a guessed count.
+The prefix and exact seeded-list restoration assertions remain unchanged.
+
+The next quote test run exits one in `u14-quoted-region-capacity.log`.
+Thirteen of sixteen steps succeed and all 1,660 executed tests pass.
+The engine root cannot compile because string repetition requires an explicitly compile-time nesting count.
+Main adds `comptime` to the growth calculation and repeats the same unfiltered gate.
+The complete source SHA-256 is `00b8f339686b2b8f8fe1f8701740063dc46db5a7a09b0efca58c838ba2559754`.
+The receipt is `u14-quoted-region-comptime.log`.
+
+Main rebases the accepted CHECK production patch and two accepted tests onto the current characterization source.
+The complete recovery table remains byte-identical after that temporary rebase.
+The rebased temporary source SHA-256 is `569aade599f827e3b0908beb8c08a8b70fcdbe81856a95cb68083b7dd2efcb80`.
+No production CHECK caller has switched yet.
+
+### U14 parameter presentation measurements and direct owner gate
+
+The integrated direct source owner passes the unfiltered owner gate.
+`u14-direct-owner-integrated.log` exits 0 across eighteen steps, with 2,800 tests passed and one skipped.
+The gate includes ZTS, module boundaries, and ZTS layering.
+Production CHECK still uses the legacy frontend.
+
+Main measures six additional controls before changing presentation coordinates.
+The exact sources, requests, standard output, standard error, and statuses remain under `u14-presentation-extra-baseline/` outside the repository.
+The one-case pilot initially uses an invalid compile command.
+That receipt remains as `pilot-invalid-compile-argv.jsonl`; it supplies no compile evidence.
+Main corrects the command to `zts compile <source> <output>`.
+The corrected one-case pilot and six-case run use the same script, with only the case limit changed.
+Both scripts exit 0; all twelve CHECK and compile operations exit 1 with the measured refusals.
+
+| Control | CHECK observation | Compile observation |
+|---|---|---|
+| Parameter tab before a comment | ZTS041 at 1:38 | UnsupportedAnyType at 1:38 |
+| Parameter CR before a comment | ZTS041 at 1:39 | UnsupportedAnyType at 1:39 |
+| Two declined parameter guards | ZTS041 at 1:61 | UnsupportedAnyType at 1:61 |
+| Declined parameter with number types | ZTS003 at 1:13, expecting `')'` | The same parser diagnostic |
+| Declined variable guard across LF | ZTS041 at 2:36 | UnsupportedAnyType at 2:36 |
+| Declined return guard across LF | ZTS041 at 2:45 | UnsupportedAnyType at 2:45 |
+
+Astra identifies another committed cursor operation.
+`skipWhitespaceTracked` consumes CR without increasing the column.
+Ordinary byte processing increases the column for CR.
+A parameter rewind adjustment alone cannot preserve successful prefix positions.
+
+Main measures seven corresponding controls under `u14-tracked-prefix-baseline/` outside the repository.
+The one-case pilot and seven-case run use the same script, with only the case limit changed.
+Both scripts exit 0; all fourteen CHECK and compile operations exit 1 with the measured refusals.
+
+| Control | CHECK observation | Compile observation |
+|---|---|---|
+| Parameter CR before any | ZTS041 at 1:15 | UnsupportedAnyType at 1:15 |
+| Variable CR before any | ZTS041 at 1:10 | UnsupportedAnyType at 1:10 |
+| Return CR before any | ZTS041 at 1:15 | UnsupportedAnyType at 1:15 |
+| Optional marker followed by CR | ZTS055 at 1:13, then ZTS041 at 1:16 | OptionalParameter at 1:13 |
+| Accepted parameter CR before a later any | ZTS041 at 1:26 | UnsupportedAnyType at 1:26 |
+| Declined variable CR before a later any | ZTS041 at 1:45 | UnsupportedAnyType at 1:45 |
+| Declined return CR before a later any | ZTS041 at 1:58 | UnsupportedAnyType at 1:58 |
+
+The public characterization table now contains fifty-eight exact controls.
+The table includes the previous forty controls, five coordinate controls, and these thirteen additional controls.
+`u14-presentation-characterization.log` exits 0 across four steps, with all 245 precompile tests passed against legacy CHECK.
+The test asserts its fifty-eight-case floor.
+
+Main prepares a bounded presentation amendment outside the repository.
+The amendment separates original spans from optional presentation positions.
+The amendment deduplicates raw positions before JSON column clamping and recovered CHECK normalization.
+Removed-type producers retain physical positions.
+Terminal admission payloads retain the finalized presentation position.
+Ordinary declined parameter guards retain the existing expected-`)` error and use the existing local header recovery.
+
+The current amendment covers parameter rewinds, annotation prefixes, and accepted optional-marker prefixes.
+Astra identifies more tracked prefixes in existing producers.
+The remaining census includes function gaps, assertions, declarations, modules, generic continuations, and runtime assignment preludes.
+Each prefix requires the corresponding producer's actual commit or restore rule.
+The pending amendment does not authorize CHECK cutover before those requirements and the required gates pass.
+
+### U14 presentation amendment: bounded source and execution acceptance
+
+Astra accepts the bounded presentation amendment by source review.
+The accepted frozen source remains under `u14-presentation-candidate/frozen-v2/` outside the repository.
+The parser SHA-256 is `4c5ffd3b44dea7ef381d9b417c80c05aced15900d0fced9367442073f34358f9`.
+The type-syntax SHA-256 is `75b0183e209c5abb68f46eaa600b1e77bd012afe6647a79b98053b0505695fc9`.
+The JSON adapter SHA-256 is `b07dfd5ba4ddb855c33b26449cdfe0b954691d19b998bc9eb85eff473aa6bab8`.
+
+Main integrates that exact source.
+`u14-presentation-v2.log` exits 0 across nineteen steps, with 3,049 tests passed and one skipped.
+The unfiltered gate covers ZTS, precompile, and layering.
+The eighteen parser controls compare physical spans and presentation positions in collect and compile modes.
+The helper tests cover composed rewinds, tracked CR handling, mixed-record deduplication, and physical removed-type positions.
+Production CHECK remains on the legacy frontend.
+
+Main measures twenty-nine further producer controls under `u14-tracked-producer-baseline/` outside the repository.
+The pilot uses one case; the full run changes only the limit to twenty-nine.
+Both scripts exit 0, and all fifty-eight CHECK and compile operations return their measured refusals.
+The measurements distinguish runtime assignment preludes, function gaps, generic commitments, declaration gaps, module gaps, assertions, and function-type arrows.
+Main also measures nine function-type controls under `u14-function-continuation-baseline/` outside the repository.
+The pilot uses one case; the full run changes only the limit to nine.
+Both scripts exit 0, and all eighteen CHECK and compile operations return their measured refusals.
+The complete sources, requests, outputs, and direct statuses remain in those directories.
+
+The public characterization table now contains ninety-four controls.
+The extension adds thirty-six distinct controls and removes two exact duplicates within the measurement set.
+The first extended gate fails one fixture because the generator loses a literal backslash in an expected suggestion.
+`u14-tracked-producer-characterization.log` exits 1, with 244 tests passed and one failed.
+This failure changes no production conclusion.
+Main restores the exact measured suggestion and starts `u14-tracked-producer-characterization-escaped.log`.
+Its verdict remains pending when this record is written.
+
+### U14 remaining presentation design: existing producer boundaries
+
+Astra accepts bounded classification between existing function-type continuation boundaries.
+The existing endpoint scanner already recognizes the relevant `=>` boundary.
+Before the tracked prefix, the classifier processes the completed source interval with its current presentation context.
+The scanner then advances the context across the confirmed whitespace interval.
+The final classifier processes the remaining interval.
+The removed-type pass processes the full original span once, with physical coordinates.
+Depth and comment failures process the remaining prefix without the removed-type pass.
+This design adds no event array, scanner, grammar, or callback.
+
+Only variable, named-return, and arrow-return continuations use this tracked whitespace operation.
+Interface-extends and assertion continuations retain ordinary advancement.
+The implementation must retain caller-owned caught rows and publish each new row once.
+Compile mode must stop when the collector selects its first hard refusal.
+Semantic failure and native failure must retain committed presentation changes.
+
+Astra also accepts the runtime assignment hook in committed `advance()`.
+The hook applies to punctuation tokens whose final source byte is `=`.
+The hook excludes `=>` and does not run during tokenizer lookahead or raw erasure.
+A header suppresses this hook only when the legacy parameter producer owns that header.
+Runtime-only named-comment headers retain the runtime operation.
+The header flag requires `defer` restoration and the applicable cursor checkpoint behavior.
+
+The presentation context must follow each producer's actual commitment.
+A named-function generic list can commit erasure before runtime owner publication succeeds.
+A general generic probe restores its context when its operand check declines.
+A runtime cursor restore cannot automatically undo every committed presentation effect.
+Saved declaration, module, and nominal-body positions require finalization before a later prefix advances the context.
+
+The two optional source slices on the collector and history remain justified.
+They support comparison between explicit positions and physical records without changing the independent helper contract.
+Both slices borrow the original source and bind before the first parser row.
+The common comparison uses effective raw positions before JSON conversion.
+The sink's presentation conversion remains idempotent.
+
+Main prepares the function-type amendment under `u14-presentation-chunks/frozen-v1/` outside the repository.
+Astra reviews that source independently.
+The amendment and its tests remain temporary until Main integrates them and obtains the required unfiltered verdict.
+Remaining producer amendments and the corrected CHECK rebase remain pending.
+
+### U14 function-type amendment: final bounded acceptance
+
+The corrected ninety-four-control legacy baseline passes.
+`u14-tracked-producer-characterization-escaped.log` exits 0 across four steps, with all 245 precompile tests passed.
+The correction restores the measured suggestion text; it changes no production source.
+
+Astra finds two defects in the first function-type draft.
+An optional removed span lacks validation before source indexing.
+The allocation test uses only two diagnostics, which fit the initial allocation and cannot establish later failure.
+Main corrects both defects before source acceptance.
+Four rejection controls require valid bounds, an enclosing start, and the same endpoint before any publication.
+A successful wider span confirms that the removed-type pass can inspect an earlier interval.
+The allocation test derives the initial list capacity and creates enough distinct diagnostics to exceed it.
+The test requires an observed allocation failure after the first interval remains in both retained lists.
+
+Astra accepts the exact corrected source under `u14-presentation-chunks/frozen-v2/` outside the repository.
+The parser SHA-256 is `03754b129a3d60849a1e317e9380acfdb0b4f093679590da1a28c81b25961ad3`.
+The type-syntax SHA-256 is `346e69bbd861ad7433edb6b895a9b986fa1d897986fbceca0e48a4ee9019b617`.
+Main integrates those files.
+`u14-presentation-chunks-v2.log` exits 0 across nineteen steps, with 3,053 tests passed and one skipped.
+The unfiltered gate covers ZTS, precompile, and layering.
+Eight parser controls retain measured positions, diagnostic order, compile skipping of caught rows, and physical removed-type positions.
+The helper tests establish retained caller seeds, compile stopping, malformed-span rejection, and allocation failure after publication.
+
+### U14 runtime-only parameter headers
+
+Astra identifies another producer distinction during the runtime prefix review.
+The shared header uses `pending_signature` to distinguish typed headers from runtime-only headers.
+Its optional, default, and pattern recovery branches do not consistently use that distinction.
+A runtime-only header therefore receives diagnostics from a legacy parameter producer that never owned those bytes.
+
+Main measures six controls under `u14-runtime-header-baseline/` outside the repository.
+Main measures four additional nongeneric controls under `u14-runtime-header-extra-baseline/` outside the repository.
+Each directory retains a one-case pilot and a full run with only the case limit changed.
+Both pilots and both full scripts exit 0.
+The twenty CHECK and compile operations return the measured refusals.
+
+The nine commented-header controls produce parser diagnostics without admission diagnostics.
+Commented default headers produce ParseError.
+Commented optional and annotation headers produce UnexpectedToken.
+The commented pattern header produces ParseError.
+The ordinary typed default control retains ZTS054 followed by ZTS041 in CHECK.
+Compile stops at DefaultParameter for that typed control.
+
+The public table now contains 103 distinct controls.
+The extension adds nine controls; the ordinary typed default control already exists in the table.
+Astra requires admission-only nongeneric header selection from the two original whitespace gaps.
+Private `initTyped` behavior remains unchanged.
+The existing generic reservation policies retain their own header selection.
+Optional and default admission events require a pending signature.
+Pattern recovery also requires a pending signature.
+Runtime-only headers retain ordinary parser failures and ordinary outer recovery.
+
+Main prepares and integrates a bounded runtime presentation draft for unfiltered validation.
+The temporary frozen source is `u14-runtime-presentation/frozen-v1/parse.zig` outside the repository.
+Its SHA-256 is `40ea613b56ae7ab92cfe9adfaf077a46845ed9b7f51eb96e6e3e27eb46814ea8`.
+The draft also handles runtime assignment prefixes, function gaps, selected generic gaps, return gaps, and assertion prefixes.
+Astra reviews the exact source and twenty-two controls in both admission modes.
+`u14-runtime-presentation-v1.log` runs the unfiltered ZTS, precompile, and layering gate.
+Source acceptance and the gate verdict remain pending when this record is written.
+Declaration, module, and other selected generic operand prefixes remain pending.
+Production CHECK still uses the legacy frontend.
+
+### U14 runtime presentation corrections and further controls
+
+The first runtime gate confirms the missing function-expression producer.
+`u14-runtime-presentation-v1.log` exits 1 across seventeen successful steps.
+It reports 3,053 tests passed, one skipped, and one failed.
+The failing control retains the measured anonymous function annotation; Main changes no expected public diagnostic.
+
+Astra finds a second defect before that gate completes.
+A completed named generic can advance the presentation context and then restore the runtime cursor inside the erased list.
+Recovery can then request a position before the context and panic.
+Recovery can also dispatch an assertion producer inside that erased list.
+A token guard alone cannot establish the correct erased boundary.
+
+The corrected named producer preserves committed erasure independently of runtime owner publication.
+The selected whitespace-named scan resumes through the observation-aware raw helper from the exact generic endpoint.
+The parser retains the runtime previous token and staged survivor trivia.
+A failed owner reservation rolls back Store while preserving the committed cursor and presentation context.
+Private parsing and uncommitted compatibility call probes retain their existing restoration rules.
+The final accepted cursor uses one token-count increment.
+
+The corrected function-expression path retains the original unsupported diagnostic and its exact error count.
+The admission-only helper requires raw whitespace at the applicable legacy header boundaries.
+The helper uses the existing generic and header scanners.
+A temporary function scope and pending signature support the existing parameter parser.
+The helper never parses the body or finishes a function owner.
+Cleanup cancels pending signature and generic records before the complete outer Store rollback.
+The existing failure selector retains native, internal, and terminal failure priority.
+
+Astra accepts both correction designs.
+Main measures four additional controls under `u14-generic-recovery-position-baseline/` outside the repository.
+The controls cover generic defaults without an opener, later assignments, function bodies, and recovery after a failed header.
+Main measures nine controls under `u14-function-expression-recovery-baseline/` outside the repository.
+Those controls cover function-expression admission, ordinary unsupported errors, committed generic erasure, and unfinished survivor comments.
+Each directory retains the exact one-case pilot, full run, source, request, output, and direct status.
+Both pilots and both full scripts exit 0; all twenty-six CHECK and compile operations return their measured refusals.
+
+The public characterization table now contains 116 distinct controls.
+One terminal comment control produces no JSON row and retains one parse error.
+The common expected error count preserves all earlier positive counts and fixes that explicit zero-row case at one.
+The runtime parser table now contains thirty-four controls, each checked in collect and compile modes.
+A separate test requires terminal comment failure after committed erasure, with no fabricated last diagnostic.
+A two-mode allocation sweep exercises a function-expression header with an earlier typed parameter and a later rejected parameter.
+The sweep requires complete Store cleanup and the global scope after allocation failure and semantic refusal.
+
+The second runtime gate finds a compile error in pending-owner cleanup.
+The new optional capture supplies a value where `cancelGenericOwner` requires a pointer.
+`u14-runtime-presentation-v2.log` exits 1 across nine successful steps, with 94 tests passed.
+Four artifacts fail compilation at that same call; the new behavior tests do not run.
+Astra also identifies one erroneous physical span in the new function-expression default fixture.
+The fixture selects the initializer assignment instead of the parameter assignment.
+Main changes its physical span from `[8,9)` to `[21,22)` and preserves the measured presentation column 22.
+
+Main corrects the pointer capture and freezes the revised source under `u14-runtime-presentation/frozen-v3/` outside the repository.
+The parser SHA-256 is `fdf49ba7c2d775a7db7c8b0d47712bc7e24fe48f6d3d2f91b08e6a6582240d87`.
+`u14-runtime-presentation-v3.log` runs the unfiltered ZTS, precompile, and layering gate.
+Its execution verdict and Astra's final source verdict remain pending when this record is written.
+No production CHECK cutover starts during this correction.
+
+### U14 runtime acceptance and declaration follow-up
+
+The runtime presentation amendment passes its unfiltered gate after the two recorded corrections.
+`u14-runtime-presentation-v3.log` records exit 0, nineteen steps, 3,056 passed tests, and one skipped test.
+Astra xhigh accepts the exact source recorded above.
+The public table retains 116 measured controls against production CHECK's legacy path.
+
+Main measures four absent-alias controls against the immutable legacy analyzer.
+The receipts reside in `u14-absent-declaration-comment-baseline-v2/` outside the repository.
+A one-case pilot precedes the four-case run; both scripts exit 0.
+Unused aliases before comments pass CHECK and compile.
+Used aliases, including generic aliases, retain ZTS200 at line 2, column 59.
+Those failures concern type compatibility, rather than parser recognition.
+The fixture handler declares `Proof<Response, "pure">`; broader declarations produce unrelated default-profile failures.
+
+Main also measures thirteen module, export, and generic-operand controls.
+The receipts reside in `u14-module-presentation-baseline/` outside the repository.
+The pilot and complete scripts exit 0; each recorded CHECK or compile command exits 1.
+The controls retain exact input bytes, requests, outputs, and direct process statuses.
+The generic list followed by `extends` retains a tracked prefix before the later any diagnostic at column 49.
+The caught-plus-retired import selects ZTS053 alone, so parser history needs a separate caught-observation assertion.
+
+The declaration draft retains absent structural aliases before comments and preserves selected declaration prefixes.
+Astra finds one draft defect: replacing the copied cursor loses its existing consumption count.
+Main preserves that count before adding the survivor token.
+Astra finds no Store ownership defect in the production draft.
+Final source review and execution remain pending the new boundary, coordinate, and allocation tests.
+
+The first declaration test gate stops at three missing required option fields.
+`u14-declaration-presentation-v2.log` records exit 1, sixteen successful steps, and 1,907 passed tests.
+The affected engine artifact does not compile, so the new declaration behavior lacks an execution verdict.
+Main supplies explicit absent bodies and adds fixed floors for both success tables.
+Main also asserts the exact surviving variable declaration and its integer initializer.
+Astra accepts `u14-declaration-presentation/frozen-v3b/` as the bounded final source.
+Its parser SHA-256 is `9b5d93547b5a10420fc20d1fcbbb898daaaed8bf05f86629e74a01dd0bf5e5bd`.
+Its type syntax SHA-256 is `458925c9aa9baaee4182f82122d467f4492a9c26b90f6ab116bb094b2b7a8084`.
+The unfiltered replacement gate is `u14-declaration-presentation-v3b.log`.
+Its execution remains active when this record is written.
+
+The module draft follows the existing scanner's selected result before committing presentation.
+Retired-module and export refusals retain positions from the saved incoming context.
+Accepted grouped or brace prefixes commit before fallible owner reservation or operand parsing.
+The existing `extends` survivor commits raw erasure without creating a semantic owner.
+Astra accepts that bounded insertion design after the thirteen-case measurement.
+The selected scanner and whitespace gap remain its recognition authority.
+Private typed parsing and explicit-call probes retain their existing behavior.
+
+The module draft contains seventeen two-mode parser controls and a separate caught-history control.
+The public recovery table expands from 116 controls to 129 controls.
+Astra identifies three parser fixtures that violate the existing retired-module spelling rule.
+Main composes those exact source bytes with the existing `retired_types_module` constant.
+The draft remains outside the repository until the declaration gate closes.
+
+The corrected declaration gate finds an invalid compatibility-node read in its survivor assertion.
+`u14-declaration-presentation-v3b.log` records exit 1, seventeen successful steps, 3,061 passed tests, one skip, and one crash.
+The compatibility `IRStore.get` method returns incomplete payloads for complex nodes.
+The test reads a variable payload from that incomplete node and aborts.
+Main retains the index and reads the payload through `IrView.getVarDecl` instead.
+The declaration production source remains unchanged after the earlier cursor correction.
+The combined module gate includes this test correction.
+
+The first module gate stops during compilation because one length expression infers `usize` instead of `u32`.
+`u14-module-presentation-v3.log` records exit 1, nine successful steps, and 94 passed tests.
+Four artifacts fail compilation at the same expression, so the new behavior tests do not run.
+Main supplies the explicit `u32` conversion.
+The final draft resides in `u14-module-presentation/frozen-v4/` outside the repository.
+Its parser SHA-256 is `fd76660cedf7a27c3c4f81b905270cd10b0db305ed97d49008ff8b3cb88a9e04`.
+Its precompile SHA-256 is `829b82eb2bfe3c6f6483ce5fd660d29bec7ec8f0fac0ca5ff3be0a7dd5b655a1`.
+`u14-module-presentation-v4.log` runs the unfiltered ZTS, precompile, and layering checks.
+The receipt includes the corrected declaration survivor test and all 129 public recovery controls.
+Production CHECK still uses the legacy frontend during this gate.
+
+Astra accepts the final module source and the corrected declaration assertion.
+Astra also accepts the exact CHECK rebase under `u14-check-cutover-candidate/main-rebased-v5/` outside the repository.
+Its precompile SHA-256 is `34709408db979bfefbbee48dcbf14a8e168893ee66aaae442b90e8d57452cbda`.
+Its JSON adapter SHA-256 is `1938215b9232fd49be010ac1d6f6ef7f06d1637b1049e5025c06311fbb4970d6`.
+The rebase retains all 129 distinct recovery sources and all four absent-alias controls.
+Main checks the recovery table's source count and uniqueness mechanically.
+Astra confirms that the rebase retains every earlier test and adds only the two accepted ownership or import tests.
+
+The recovered CHECK branch finalizes raw positions and deduplicates before JSON conversion.
+JSON conversion applies the existing column clamp before recovered-only source normalization.
+Terminal CHECK projection remains unnormalized.
+The new JSON test distinguishes explicit presentation from physical coordinates and preserves the adapter's independent column clamp.
+No cutover execution verdict exists when Astra supplies this source acceptance.
+
+The combined declaration and module amendment passes its unfiltered gate.
+`u14-module-presentation-v4.log` records exit 0 and nineteen successful steps.
+The gate passes 3,064 tests and skips one test.
+The corrected declaration survivor assertion passes through `IrView.getVarDecl`.
+All seventeen module controls and the caught-history control pass in both modes.
+All 129 public recovery controls and all four absent-alias controls pass against legacy production CHECK.
+
+Main then integrates the source-accepted CHECK rebase without changing those expectations.
+Production CHECK now uses direct collect admission for TypeScript roots and compile admission for imported TypeScript.
+The original reader traversals remain separate.
+`u14-check-cutover-v5.log` runs the first unfiltered precompile gate against that production switch.
+Its execution remains active when this record is written.
+
+### U14 first CHECK execution and bounded corrections
+
+`u14-check-cutover-v5.log` records exit 1 and 241 passed tests from 249 tests.
+Eight tests fail after the first production CHECK switch.
+Three compatibility tests expose unnormalized zero positions after parsing.
+The mutation suite reports 48 diagnostics outside source bounds for the same missing normalization boundary.
+Main restores source normalization after typed parsing and analysis, while preserving strip-only terminal projection.
+
+The keyword-alias test exposes an identifier-token guard that excludes names already accepted by the semantic declaration parser.
+Main reuses the existing lexical predicate for admitted and refused declaration names.
+The generic test exposes premature rejection of a whitespace gap before a named function's generic list.
+Astra identifies the legacy call scanner as that list's existing owner.
+The correction retains a runtime-only header and the measured colon refusal at column 18.
+A typed named-header path would change that public behavior.
+
+The type-only module test exposes a false string observation during runtime recovery.
+A raw module endpoint stops at a semicolon inside a comment, leaving a surviving star and slash.
+The runtime tokenizer then forms a regex token that crosses the real opening quote.
+The real closing quote becomes a false opening quote during later runtime tokenization.
+An admission observation at that false opener incorrectly selects ZTS008 instead of the saved parser diagnostic.
+
+Main measures four exact recovery contrasts against the immutable analyzer.
+`u14-module-recovery-baseline/` retains their sources, requests, outputs, and direct statuses outside the repository.
+Its one-case pilot and four-case run complete successfully.
+The clean survivor reports ZTS002 at 1:24.
+A real later malformed quote reports ZTS008 at 2:20.
+A later typed any reports ZTS041 at 2:14.
+The nested survivor reports both ZTS002 at 2:24 and ZTS003 at 5:1, with the expected closing brace.
+The complete nested parser batch must remain intact.
+
+The added imported-source test also contains incorrect new expectations.
+Independent native legacy and direct runs each perform two reads and refuse the original `pure` capsule.
+Changing the helper to a pass-through retains that refusal in both runs.
+A measured narrow `read_only` capsule succeeds in both runs with two reads and no diagnostic.
+Both successful contracts retain complete effects, `pure=false`, and `read_only=true`.
+The native source, exact compiler requests, complete logs, and statuses reside in `u14-imported-caught-trace/` outside the repository.
+The `original/` and `pass-through/` subdirectories retain both earlier measurement sources and outputs.
+Main changes only this newly added test to the measured narrow capsule and two-read trace.
+Existing reader characterization remains unchanged.
+
+Main also measures three spaced-function controls against the immutable analyzer.
+`u14-spaced-function-baseline/` retains their exact receipts outside the repository.
+Its pilot and complete run use the same script, with only the case limit changed.
+An unannotated spaced function reaches strict ZTS601 at 1:16.
+A gap between the generic list and opener declines at 1:13.
+A typed spaced function retains the existing refusal at 1:18.
+The direct parser test additionally requires an actual function-expression owner, call arguments, and no typed header signature.
+
+Astra corrects two facts in that new parser test before execution.
+The declaration wrapper points to the function-expression initializer that owns the generic list.
+The Store retains one authored and one projected parameter before selecting call-argument compatibility.
+Main corrects the assertions without changing production.
+
+The next focused CHECK gate records exit 1, with 250 of 251 tests passed.
+`u14-check-corrections-v6.log` fails only the new complete nested parser batch.
+The proposed admission-only slash traversal avoids the false string but changes runtime recovery.
+It allows the nested parser to find the closing brace and removes the required second diagnostic.
+Astra withdraws that recovery direction for this complete compatibility boundary.
+Main retains the measured two-diagnostic expectation.
+The remaining correction must preserve runtime recovery while aligning admission observations separately.
+
+Astra also bounds the new generic allocation test to type allocations.
+Runtime allocation can fail after a function owner publishes, so universal rollback is not the transaction's contract.
+The revised test keeps runtime allocation healthy and derives the complete seed checkpoint from actual declaration progress.
+It compares all seventeen Store arrays after a later type allocation failure.
+A positive post-seed failure floor prevents an empty sweep from passing.
+The revised parser test remains outside the repository pending the final recovery correction.
+
+Astra accepts the corrected normalization, keyword-name, spaced-list, and measured imported-effect scopes.
+Astra confirms that all new public expectations match the retained immutable receipts.
+The revised generic allocation sweep also receives source acceptance.
+Its runtime allocator stays healthy, and the test independently derives the complete seed checkpoint and function boundary.
+
+The remaining module correction cannot replay full statement parsing under a cursor-only checkpoint.
+Statement parsing also changes scope bindings, atoms, constants, and runtime nodes.
+A cursor restoration would not undo those changes.
+The recovery design must preserve those ownership boundaries and the complete applicable runtime error batch.
+No production CHECK expectation changes during this review.
+
+Main measures the complete closed admission vocabulary behind the same lexical divergence.
+`u14-recovery-producer-census-baseline/` retains eighteen exact CHECK and compile pairs outside the repository.
+The one-case pilot precedes the eighteen-case run; both scripts complete successfully.
+The first seventeen controls reach each published admission kind after the failed runtime statement.
+The final control retains the location-free unfinished-comment failure with no JSON diagnostic.
+The depth control derives its boundary from the current named constant before creating its source.
+These measurements rule out a recovery correction that observes only later variables and quotes.
+Header, declaration, export, assertion, generic, module, and depth producers need an explicit route through the recovered interval.
+The census bounds this closed diagnostic vocabulary, rather than every possible source context.
+
+Astra identifies another requirement for the recovery cursor.
+One raw quoted region can overlap two runtime tokens after the lexer diverges.
+A recovery observer must retain its progress through that overlap.
+Restarting the observer at each runtime token can treat another closing quote as an opening quote.
+A producer that starts inside the selected interval must finish through its own existing endpoint.
+No new arbitrary scan budget is justified.
+
+Main measures two further nested controls with accepted quoted types after the divergence.
+`u14-recovery-erased-quotes-baseline/` retains both exact CHECK and compile pairs outside the repository.
+The pilot and complete measurement scripts exit zero.
+Both `const live: "const" = 1;` and `const live: "return" = 1;` retain the complete earlier nested parser batch.
+Their diagnostics remain ZTS002 at 2:24 and ZTS003 at 5:1.
+Legacy admission erases these type quotes before runtime recovery tokenizes the remaining source.
+Observing raw admission separately does not itself preserve that erasure effect on runtime token boundaries.
+The final recovery design must account for those accepted erasures as well as diagnostic reach.
+An observation-only correction therefore remains insufficient for the measured compatibility boundary.
+
+Astra recommends shared producer-only factoring before another implementation attempt.
+The observer can reuse binding annotations, assertions, declarations, and modules without full statement dispatch.
+Export recognition must precede runtime dispatch in a shared helper.
+Raw parameter recovery can share the existing item scanner without creating scopes, bindings, signatures, or runtime nodes.
+Return observation can share its endpoint and classification prelude.
+Generic observation must share the selected scanner before owner reservation.
+These directions remain design work, rather than source or execution acceptance for the final recovery amendment.
+
+### U14 accepted recovery amendment
+
+Astra accepts the following design for the confirmed regex and string divergence.
+Normal runtime regex lexing remains unchanged.
+Recovery first proves that a runtime string starts at a closing quote of an overlapping raw quoted region.
+The proof uses the existing quoted-region scanner.
+A preceding regex token alone does not justify suppression.
+
+The admission cursor advances monotonically through the affected interval.
+It retains progress when a raw quote or producer crosses a runtime token endpoint.
+The runtime cursor retains ordinary recovery behavior independently.
+Recovery state persists across a synchronization return until both cursors rejoin.
+The observer does not replay statements.
+It creates no runtime bindings, nodes, scopes, signatures, or atoms.
+
+Both normal producers and recovery share source-only operations.
+Binding annotations reuse their existing collector for all three binding keywords.
+Assertions, declarations, modules, and generic selection retain their existing scanner choices.
+Export recognition and emission precede runtime dispatch in a shared operation.
+Raw parameter observation reuses the existing item recovery scanner without header publication.
+Return observation shares its endpoint and classification before semantic construction.
+
+The observer emits exact erased intervals from each owning producer.
+Those intervals include markers, accepted generic lists, declarations, and other selected erasures.
+The intervals remain ordered and nonoverlapping.
+Recovery owns their temporary storage, and synchronous scanner calls borrow it.
+Rejoin or parser cleanup frees that storage.
+Allocation failures remain native errors.
+
+The runtime string scanner reads erased bytes as spaces and preserves LF bytes.
+Ordinary strings use the same scanner core without erased intervals.
+Recovery rescans only a proven misaligned string.
+If masking extends its endpoint, observation continues before another rescan.
+The admission walk never restarts.
+
+Runtime recovery cannot repeat observation for bytes already owned by the admission cursor.
+Position deduplication alone cannot prevent an incorrect prefix operation.
+The observer retains its presentation context and committed history.
+Observer calls restore the real runtime cursor and all seventeen Store arrays.
+The observer does not change scopes or parser errors.
+A rescan updates the token and tokenizer position without producing IR.
+Pending trivia remains provisional until its corrected boundary is reached.
+
+Acceptance requires the closed seventeen-kind census, its location-free comment, and all six module controls.
+The complete nested ZTS002 and ZTS003 batch remains fixed.
+Allocation tests must observe failures after observation and interval publication.
+This design acceptance bounds the confirmed divergence, rather than every possible regex context.
+No final recovery implementation or execution acceptance exists yet.
+
+Main starts the accepted recovery amendment outside the repository.
+`u14-recovery-erasure-bridge/` retains its exact working source and component receipts.
+The temporary tokenizer shares the ordinary string loop with a borrowed erasure view.
+The view preserves LF bytes and replaces other erased bytes logically with spaces.
+A rescan validates every interval before changing tokenizer state.
+The caller must separately prove the misaligned recovery opener.
+
+The first component probe stops because its parameter name shadows the token module.
+The corrected probe then stops at one missing explicit integer conversion in a test.
+Main corrects both local compile errors before execution.
+`tokenizer-pilot-v3.log` records exit 0 and all twenty-two unfiltered component tests passed.
+The tests cover quote extension, escaped bytes, LF positions, and validation before mutation.
+The component source SHA-256 is `c6f1247a89f4233987577528cb9a491e8ff1d33535501e1a5be1d019f26d811a`.
+The source remains outside the repository for Astra review and later parser integration.
+This component result does not establish the recovery bridge or U14 acceptance.
+
+Astra accepts the tokenizer component as source only.
+Main prepares shared source operations and the recovery owner outside the repository.
+Generic candidates carry copied cursors, while normal callers reserve Store records before cursor adoption.
+Named early commitment and the general extends case retain their existing ordering.
+The observer reuses the parameter item scanner and the shared return collector without runtime publication.
+
+The first temporary unfiltered CHECK run compiles and reaches test 197 before an assertion stops execution.
+The recovery seed calls a forward-only tokenizer method from a position beyond its target.
+`precompile-temp-v1.log` and its direct exit status retain this failed component integration.
+Main corrects the seed with a fresh tokenizer that borrows the same source.
+The second temporary CHECK run uses a separate frozen source overlay.
+No final recovery acceptance or repository integration exists at this point.
+
+### U14 recovery review and component execution
+
+The corrected temporary CHECK run passes all 252 unfiltered tests in `precompile-temp-v2.log`.
+That run includes the closed admission census, location-free comment, and six module controls.
+The temporary engine root initially stops at an unnecessary optional unwrap in a newly added alias test.
+Main corrects that test expression without changing its expectation.
+`engine-temp-v3.log` then records exit 0, with 1,164 passed tests and one skipped test.
+Both allocation sweeps pass, including the recovery observation and erasure floors.
+
+Astra finds a separate raw header gap before repository integration.
+Tokenizer read-ahead can skip a comment before the raw item scanner runs.
+That skip loses a default diagnostic or places the forward-only cursor beyond a raw closing parenthesis.
+Main measures four controls through the immutable analyzer after a one-case pilot.
+`u14-recovery-header-baseline/` retains exact sources, requests, outputs, and direct statuses.
+A default inside the first comment reports ZTS054 at 2:17.
+A default inside a later comment reports ZTS054 at 2:28.
+A closing parenthesis inside a comment retains ZTS002 at 1:24.
+An unfinished comment inside the raw header retains that same parser diagnostic without a comment failure.
+
+The new four-case public test fails against the earlier temporary source.
+`precompile-header-red.log` records exit 1, with 252 passed tests and one failed test.
+The first case incorrectly reaches parsing instead of selecting the measured strip-only refusal.
+Main preserves the measured expectations.
+The correction saves each item tokenizer immediately after its opening parenthesis or comma.
+The existing raw item scanner runs before a tokenized EOF or closing parenthesis can stop the observer.
+Its final resume replaces provisional read-ahead trivia.
+Named generic erasure also uses the exact scanned list, separate from tracked presentation whitespace.
+
+Astra accepts those bounded source corrections and all four public expectations.
+The frozen parser SHA-256 is `021194f34b50cb5e647d4148eb6eb194d8f1aa9c000474af15211e095c613f86`.
+The frozen CHECK source SHA-256 is `138342c374208b331588c2fa3a3717212934dd027e53387dff9ca5dab7636006`.
+The tokenizer retains its accepted component hash.
+The corrected temporary engine and CHECK gates run sequentially against that frozen source.
+Repository integration and final execution acceptance remain pending.
+
+The corrected temporary engine root passes 1,164 tests and skips one in `engine-temp-v4.log`.
+The corrected temporary CHECK root passes all 253 tests in `precompile-temp-v4.log`.
+Both direct statuses are zero.
+The new header test now passes without changed expectations.
+The complete nested batch, eighteen-case census, six module controls, and allocation floors also pass.
+
+Main moves two early commitment flags before interval allocation after final line review.
+That ordering preserves committed erasure if allocation fails.
+Astra accepts this final source correction for integration.
+The final parser SHA-256 is `a9274a1dd4f903ba777b98a90a9d334a4c03e0072f5abddb60b6ac514bfd5d63`.
+The CHECK and tokenizer hashes remain the frozen hashes above.
+Main integrates exactly those three files and starts `u14-frontend-final.log`.
+This gate uses the complete unfiltered frontend command from the verification contract.
+
+The integrated frontend gate passes all forty-five steps.
+`u14-frontend-final.log` records exit 0, with 3,935 passed tests and one skipped test.
+The 182 diagnostic corpus cases also pass.
+`u14-extras-docs-final.log` passes all sixty steps, with 1,427 passed tests and one skipped test.
+Its scope includes protocol, offline expert, documentation, and spine checks.
+Formatting and whitespace checks both record exit 0.
+
+Main removes redundant Store checkpoints from the three source-only generic selectors.
+Those selectors no longer publish Store records after the accepted factoring.
+Cursor rollback, early commitment, and the observer's complete Store rollback remain intact.
+Three duplicate cursor adoption blocks now use the existing helper.
+The proof tests remain unchanged.
+Astra accepts this bounded simplification before integration.
+The final parser SHA-256 becomes `6aec9afad38318bb1d50da3040ed55172a9daadc0692cc0e0708a9128382dd0b`.
+The full local script runs against that final source as `u14-verify-final.log`.
+
+The first final script stops during the aggregate because the filesystem has no free space.
+`u14-verify-final.log` records exit 1 and explicit LLVM and temporary-file `NoSpaceLeft` errors.
+The aggregate reports 93 of 191 steps succeeded, with 3,684 passed tests and one skipped test.
+That incomplete run supplies no full-gate acceptance.
+Main removes 520 old generated cache directories referenced by this reset task.
+The cleanup excludes analyzer executables and retains every source and evidence receipt.
+The filesystem then reports 25 GiB available.
+The immutable legacy analyzer retains SHA-256 `5cb9af9ec1cd3ca86873327b4e2f503edf436d9d0e23a6dd8b04d04069400d16`.
+Main retries the unchanged full script as `u14-verify-final-v2.log`.
+
+The immediate retry stops before the aggregate starts.
+Its retained cache manifest points to the removed generated build runner.
+`u14-verify-final-v2.log` records `FileNotFound` and exit 1.
+Main clears generated cache manifests and retains analyzer binaries, source files, and baseline receipts.
+The next unchanged full attempt runs as `u14-verify-final-v3.log`.
+
+### U15 bounded preparation review during final U14 checks
+
+Main prepares the shared failure mapper and delayed runtime generation outside the repository.
+Astra accepts the optional phase model and the unchanged seventeen-kind failure mapping.
+The original raw API remains separate, and invalid phase calls fail before mutation.
+A permitted typed operation consumes its phase before fallible work.
+Successful parsing optimizes and validates the matching Store before publishing its root.
+
+Astra finds three existing CodeGen ownership gaps that affect generation failure cleanup.
+A float can lose its owner if constant insertion fails.
+A nested function can release its constants buffer without releasing completed child payloads.
+Local cleanup can remain active after the parent constant list takes ownership.
+A later emission failure can then leave a dangling parent entry.
+Completed pattern dispatch also needs cleanup with its owning function payload.
+
+The bounded amendment gives each unpublished payload a local owner.
+Successful constant insertion transfers ownership exactly once, before later emission.
+Failed generation releases the abandoned published tree before clearing CodeGen.
+Successful runtime ownership remains unchanged.
+The amendment does not change HandlerAnalyzer's existing nonfatal analysis policy.
+
+Temporary public tests compare legacy-prepared and direct bytecode, serialized constants, dynamic atoms, and original type spans.
+Allocation probes distinguish parsing, validation, float publication, function publication, and completed dispatch publication.
+Independent counters establish validation failure and runtime parsing progress separately.
+Source cursor progress remains observable in ReleaseFast.
+The mapper expectations come from the retained immutable compiler outputs for all seventeen kinds.
+The location-free comment has its own expected error.
+Astra accepts the production source and the corrected independent failure counters as source only.
+These files remain outside the repository and have no execution acceptance before U14 commits.
+
+Main observes overwritten headers in the third full log before completion.
+Two native tools use positional stdout writers, which can overwrite earlier output in a shared regular file.
+A bounded native pilot confirms that both plain and append capture lose an earlier sentinel.
+The same native command preserves the sentinel when stdout and stderr use a pipe.
+`u14-log-capture-pilot/` retains all three logs and direct statuses.
+Main stops the incomplete third capture; the process returns 143.
+That run supplies no final acceptance.
+The fourth full attempt uses pipe capture and the same source, commands, and environment.
+Its parent records the script's direct process status separately from the capture operation.
+No production source changes for this capture correction.
+
+### U14 final full receipt
+
+`u14-verify-final-v4.log` records the complete pipe-captured script and direct exit 0.
+The script ends with `verify.sh: all CI test-job steps passed`.
+The aggregate, standalone runtime, ReleaseFast builds, verified handler compilation, smoke workflows, panic isolation, and remaining offline gates pass.
+The final formatting step also passes.
+The source retains the accepted parser, tokenizer, and CHECK hashes above.
+Main runs final documentation, spine, formatting, and whitespace checks before the local commit.
+Astra performs the final independent execution audit.
+
+### U14 acceptance and commit readiness
+
+Astra accepts the final U14 execution evidence after reading the complete unfiltered script receipt.
+The final documentation and spine gate passes all eight steps in `u14-docs-final.log`.
+`u14-fmt-status-final.log` and `u14-diff-status-final.log` both record exit 0.
+The final status contains only the eleven owned modified files and the untouched untracked Claude plan.
+U14 is complete before its exact-path local commit.
+U15 production integration starts only after that commit.

@@ -44,6 +44,21 @@ pub const ExpressionProfile = enum {
     kernel_expression,
 };
 
+pub const AdmissionFailure = union(enum) {
+    diagnostic: type_syntax.AdmissionDiagnostic,
+    unterminated_comment: type_syntax.AdmissionCommentFailure,
+};
+
+pub const AdmissionParseOutcome = union(enum) {
+    accepted: NodeIndex,
+    recovered_admission_refused,
+    parser_refused: struct {
+        first_error: anyerror,
+        projected_error_count: usize,
+    },
+    terminal_admission_refused: AdmissionFailure,
+};
+
 /// Operator precedence levels (higher = binds tighter)
 const Precedence = enum(u8) {
     none = 0,
@@ -142,6 +157,17 @@ const ParserCursorCheckpoint = struct {
     brace_depth: u32,
     primed: bool,
     last_erased_type_span: ?type_syntax.Span,
+    pending_admission_trivia: ?type_syntax.AdmissionCommentFailure,
+    admission_in_import: bool,
+    admission_parameter_header: bool,
+};
+
+const AdmissionRecovery = struct {
+    cursor: ParserCursorCheckpoint,
+    presentation: type_syntax.AdmissionPresentation,
+    erasures: std.ArrayListUnmanaged(tokenizer_mod.RecoveryErasure) = .empty,
+    covered_until: u32,
+    quoted_region: type_syntax.Span,
 };
 
 const ParsedFunctionBody = struct {
@@ -152,6 +178,11 @@ const ParsedFunctionBody = struct {
 const HeaderKind = enum {
     named,
     arrow,
+};
+
+const AdmissionHeaderFailure = struct {
+    first_error: anyerror,
+    error_count: usize,
 };
 
 pub const Parser = struct {
@@ -170,6 +201,17 @@ pub const Parser = struct {
     type_only_module_refusal: ?type_syntax.TypeOnlyModuleRefusal,
     type_only_module_exclusion: ?type_syntax.TypeOnlyModule,
     type_only_module_diagnostics: std.ArrayListUnmanaged(type_syntax.TypeOnlyModuleDiagnostic),
+    admission: ?type_syntax.AdmissionCollector,
+    admission_observations: ?type_syntax.AdmissionObservationHistory,
+    admission_failure: ?AdmissionFailure,
+    pending_admission_trivia: ?type_syntax.AdmissionCommentFailure,
+    admission_error_prefix: ?usize,
+    admission_first_error: ?anyerror,
+    admission_in_import: bool,
+    admission_presentation: type_syntax.AdmissionPresentation,
+    admission_parameter_header: bool,
+    admission_recovery: ?AdmissionRecovery = null,
+    admission_recovery_observing: bool = false,
 
     // Current state
     current: Token,
@@ -256,7 +298,7 @@ pub const Parser = struct {
     const temp_list_stack_bytes: usize = if (@import("builtin").target.cpu.arch.isWasm()) 32 else 256;
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
-        return initWithProfile(allocator, allocator, source, null, false);
+        return initWithProfile(allocator, allocator, source, null, false, null);
     }
 
     /// Private migration initializer. Production callers remain on `init`.
@@ -265,11 +307,22 @@ pub const Parser = struct {
         type_allocator: std.mem.Allocator,
         source: []const u8,
     ) !Parser {
-        return initWithProfile(allocator, type_allocator, source, null, true);
+        return initWithProfile(allocator, type_allocator, source, null, true, null);
     }
 
     pub fn initExpression(allocator: std.mem.Allocator, source: []const u8, profile: ExpressionProfile) !Parser {
-        return initWithProfile(allocator, allocator, source, profile, false);
+        return initWithProfile(allocator, allocator, source, profile, false, null);
+    }
+
+    /// Private direct-source admission parser. It owns the syntax collector and
+    /// never changes the behavior of `init` or `initTyped`.
+    pub fn initAdmission(
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+        mode: type_syntax.AdmissionMode,
+    ) !Parser {
+        return initWithProfile(allocator, type_allocator, source, null, true, mode);
     }
 
     fn initWithProfile(
@@ -278,6 +331,7 @@ pub const Parser = struct {
         source: []const u8,
         profile: ?ExpressionProfile,
         parse_type_syntax: bool,
+        admission_mode: ?type_syntax.AdmissionMode,
     ) !Parser {
         var nodes = IRStore.initCapacity(allocator, source.len);
         errdefer nodes.deinit();
@@ -302,6 +356,21 @@ pub const Parser = struct {
             .type_only_module_refusal = null,
             .type_only_module_exclusion = null,
             .type_only_module_diagnostics = .empty,
+            .admission = if (admission_mode) |mode|
+                type_syntax.AdmissionCollector.init(type_allocator, mode)
+            else
+                null,
+            .admission_observations = if (admission_mode != null)
+                type_syntax.AdmissionObservationHistory.init(type_allocator)
+            else
+                null,
+            .admission_failure = null,
+            .pending_admission_trivia = null,
+            .admission_error_prefix = null,
+            .admission_first_error = null,
+            .admission_in_import = false,
+            .admission_presentation = .{ .source = source },
+            .admission_parameter_header = false,
             .current = no_token,
             .previous = no_token,
             .atoms = null,
@@ -309,6 +378,8 @@ pub const Parser = struct {
             .in_function = false,
             .expression_profile = profile,
         };
+        if (parser.admission) |*collector| collector.source = source;
+        if (parser.admission_observations) |*history| history.source = source;
         // Prime the parser with first token
         parser.advance();
         return parser;
@@ -320,6 +391,9 @@ pub const Parser = struct {
         self.scopes.deinit();
         self.errors.deinit();
         self.type_only_module_diagnostics.deinit(self.type_store.allocator);
+        if (self.admission) |*collector| collector.deinit();
+        if (self.admission_observations) |*observations| observations.deinit();
+        if (self.admission_recovery) |*recovery| recovery.erasures.deinit(self.type_store.allocator);
         self.type_store.deinit();
     }
 
@@ -329,6 +403,17 @@ pub const Parser = struct {
 
     /// Parse the entire program
     pub fn parse(self: *Parser) anyerror!NodeIndex {
+        if (self.admission != null) {
+            return switch (try self.parseAdmission()) {
+                .accepted => |root| root,
+                .recovered_admission_refused => error.AdmissionRefused,
+                .parser_refused => |refusal| refusal.first_error,
+                .terminal_admission_refused => |failure| switch (failure) {
+                    .diagnostic => error.AdmissionRefused,
+                    .unterminated_comment => error.UnterminatedComment,
+                },
+            };
+        }
         if (!self.parse_type_syntax) return self.parseProgram();
         return self.parseProgram() catch |err| {
             switch (err) {
@@ -344,19 +429,73 @@ pub const Parser = struct {
         };
     }
 
+    pub fn parseAdmission(self: *Parser) anyerror!AdmissionParseOutcome {
+        if (self.admission == null) return error.InvalidParserMode;
+        const root = self.parseProgram() catch |err| {
+            if (self.errors.outOfMemory()) return error.OutOfMemory;
+            switch (err) {
+                error.OutOfMemory => return err,
+                error.AdmissionRefused,
+                error.TypeOnlyModuleRefused,
+                error.UnterminatedComment,
+                => {
+                    if (self.terminalAdmissionFailure()) |failure| {
+                        return .{ .terminal_admission_refused = failure };
+                    }
+                    if (self.admissionSelected()) return .recovered_admission_refused;
+                    return err;
+                },
+                error.InvalidEscapeSequence,
+                error.InvalidNumber,
+                error.MissingSemicolon,
+                error.ParseError,
+                error.StringLineContinuation,
+                error.TooManyConstants,
+                error.TooManyLocals,
+                error.TypeOnlyModuleLexicallyExcluded,
+                error.UnexpectedToken,
+                => {
+                    if (self.terminalAdmissionFailure()) |failure| {
+                        return .{ .terminal_admission_refused = failure };
+                    }
+                    if (self.admissionSelected()) return .recovered_admission_refused;
+                    const first_error = self.admission_first_error orelse err;
+                    return .{ .parser_refused = .{
+                        .first_error = first_error,
+                        .projected_error_count = self.getProjectedErrors().len,
+                    } };
+                },
+                else => return err,
+            }
+        };
+        return .{ .accepted = root };
+    }
+
     fn parseProgram(self: *Parser) anyerror!NodeIndex {
         var stmts: std.ArrayList(NodeIndex) = .empty;
         defer stmts.deinit(self.allocator);
 
         var progress: ProgressGuard = .{};
-        while (!self.check(.eof)) {
+        while (true) {
+            try self.reachAdmissionBoundary();
+            if (self.check(.eof)) break;
             progress.iteration(self);
+            if (self.admission) |collector| {
+                if (collector.shouldStop()) return error.AdmissionRefused;
+            }
             if (try self.tryConsumeTypeOnlyModule()) continue;
+            if (try self.tryConsumeAdmissionDeclaration()) continue;
             if (try self.tryConsumeTypeDeclaration()) continue;
+            const statement_start = self.current.start;
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
             } else |err| {
+                if (self.shouldPropagateAdmissionError(err)) return err;
+                try self.reachAdmissionBoundary();
                 try self.recordUnreportedStatementError(err);
+                if (self.admission) |collector| if (collector.hasFatal()) {
+                    return error.AdmissionRefused;
+                };
                 // An error the list could not record is an out-of-memory, not a
                 // syntax error. Report it as one: `hasErrors` counts it, so the
                 // loop stops, but `err` would name the wrong cause. Without this
@@ -364,19 +503,28 @@ pub const Parser = struct {
                 // left `hasErrors` false and `synchronize` returns without
                 // advancing when the current token starts a statement.
                 if (self.errors.outOfMemory()) return error.OutOfMemory;
-                // If there are recorded errors, fail immediately
+                // Plain parsers preserve the immediate failure. The admission
+                // parser continues only to find a higher-priority refusal.
                 if (self.errors.hasErrors()) {
-                    return err;
+                    if (self.admission == null) return err;
+                    if (self.admission_error_prefix == null) {
+                        self.admission_error_prefix = self.errors.getErrors().len;
+                        self.admission_first_error = err;
+                    }
                 }
-                // Otherwise try to recover for better error messages
-                self.synchronize(0);
+                try self.synchronize(0);
+                if (self.current.start == statement_start and !self.check(.eof)) self.advance();
             }
         }
 
+        if (self.admissionFailureResult()) |failure| return failure;
         if (self.type_only_module_refusal != null) return error.TypeOnlyModuleRefused;
         if (self.type_only_module_exclusion != null) {
             return error.TypeOnlyModuleLexicallyExcluded;
         }
+
+        if (self.admissionSelected()) return error.AdmissionRefused;
+        if (self.admission_first_error) |first| return first;
 
         // If any errors were recorded during parsing, fail
         if (self.errors.hasErrors()) {
@@ -395,6 +543,423 @@ pub const Parser = struct {
                 .scope_id = 0,
             } },
         });
+    }
+
+    fn admissionSelected(self: *const Parser) bool {
+        return if (self.admission) |collector| collector.items().len != 0 else false;
+    }
+
+    fn terminalAdmissionFailure(self: *const Parser) ?AdmissionFailure {
+        if (self.admission) |collector| {
+            if (collector.isCompile() and collector.items().len != 0) {
+                return .{ .diagnostic = collector.items()[0] };
+            }
+        }
+        return self.admission_failure;
+    }
+
+    fn admissionFailureResult(self: *const Parser) ?anyerror {
+        if (self.admission_failure == null) return null;
+        if (self.admission) |collector| {
+            if (collector.hasFatal() or
+                (collector.isCompile() and collector.items().len != 0))
+            {
+                return error.AdmissionRefused;
+            }
+        }
+        return switch (self.admission_failure.?) {
+            .diagnostic => error.AdmissionRefused,
+            .unterminated_comment => error.UnterminatedComment,
+        };
+    }
+
+    fn shouldPropagateAdmissionError(self: *const Parser, err: anyerror) bool {
+        if (self.admission == null) return false;
+        return switch (err) {
+            error.AdmissionRefused,
+            error.InvalidEscapeSequence,
+            error.InvalidNumber,
+            error.MissingSemicolon,
+            error.ParseError,
+            error.StringLineContinuation,
+            error.TooManyConstants,
+            error.TooManyLocals,
+            error.TypeOnlyModuleLexicallyExcluded,
+            error.TypeOnlyModuleRefused,
+            error.UnexpectedToken,
+            error.UnterminatedComment,
+            => false,
+            else => true,
+        };
+    }
+
+    fn admissionSink(self: *Parser) ?type_syntax.AdmissionSink {
+        const collector = if (self.admission) |*active| active else return null;
+        const observations = if (self.admission_observations) |*active| active else null;
+        var sink = type_syntax.AdmissionSink.init(collector, observations);
+        sink.presentation = self.admission_presentation;
+        return sink;
+    }
+
+    fn recordAdmission(
+        self: *Parser,
+        kind: type_syntax.AdmissionKind,
+        span: type_syntax.Span,
+        fatal: bool,
+    ) !void {
+        if (self.admissionSink()) |sink| {
+            const diagnostic: type_syntax.AdmissionDiagnostic = .{ .kind = kind, .span = span };
+            if (fatal) {
+                try self.recordFatalAdmission(diagnostic);
+            } else {
+                try sink.recordRecoverable(diagnostic);
+            }
+            if (sink.shouldStop()) return error.AdmissionRefused;
+        }
+    }
+
+    fn recordFatalAdmission(
+        self: *Parser,
+        diagnostic: type_syntax.AdmissionDiagnostic,
+    ) !void {
+        const sink = self.admissionSink() orelse return;
+        const presented = try sink.present(diagnostic);
+        try sink.recordFatal(presented);
+        self.admission_failure = .{ .diagnostic = presented };
+    }
+
+    fn recordRecoveryErasure(self: *Parser, span: type_syntax.Span) !void {
+        if (!self.admission_recovery_observing or span.start == span.end) return;
+        if (span.start > span.end or @as(usize, span.end) > self.source.len) {
+            return error.InvalidAdmissionSpan;
+        }
+        const recovery = if (self.admission_recovery) |*active| active else return error.InvalidAdmissionRecovery;
+        var merged = tokenizer_mod.RecoveryErasure{ .start = span.start, .end = span.end };
+        while (recovery.erasures.items.len > 0) {
+            const last = recovery.erasures.items[recovery.erasures.items.len - 1];
+            if (last.end < merged.start) break;
+            if (last.start > merged.end) return error.InvalidAdmissionRecovery;
+            merged.start = @min(last.start, merged.start);
+            merged.end = @max(last.end, merged.end);
+            recovery.erasures.items.len -= 1;
+        }
+        try recovery.erasures.append(self.type_store.allocator, merged);
+    }
+
+    fn collectTypeAdmission(
+        self: *Parser,
+        raw_start: u32,
+        endpoint_policy: type_syntax.AdmissionEndpointPolicy,
+        type_policy: type_syntax.AdmissionTypePolicy,
+        failure_policy: enum { propagate, recover },
+        raw_end_out: ?*u32,
+    ) !void {
+        if (self.admission == null) return;
+        var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+        defer caught.deinit(self.type_store.allocator);
+        var progress: type_syntax.AdmissionEndpointProgress = .{
+            .sink = self.admissionSink().?,
+            .policy = type_policy,
+            .classification_start = raw_start,
+        };
+        defer self.admission_presentation = progress.sink.presentation.?;
+        const endpoint = try type_syntax.scanAdmissionEndpointWithPresentation(
+            self.type_store.allocator,
+            self.source,
+            raw_start,
+            endpoint_policy,
+            &caught,
+            &progress,
+        );
+        self.admission_presentation = progress.sink.presentation.?;
+        const sink = progress.sink;
+        switch (endpoint) {
+            .complete => |span| {
+                try self.recordRecoveryErasure(span);
+                if (raw_end_out) |out| out.* = span.end;
+                try type_syntax.classifyTypeSpan(
+                    self.source,
+                    .{
+                        .span = .{ .start = progress.classification_start, .end = span.end },
+                        .policy = type_policy,
+                        .caught_lexical = caught.items,
+                        .removed_span = span,
+                    },
+                    sink,
+                );
+                if (sink.shouldStop()) return error.AdmissionRefused;
+            },
+            .nesting_too_deep => |offset| {
+                if (raw_end_out) |out| out.* = offset;
+                try type_syntax.classifyTypeSpanPrefix(
+                    self.source,
+                    .{
+                        .span = .{ .start = progress.classification_start, .end = offset },
+                        .policy = type_policy,
+                        .caught_lexical = caught.items,
+                    },
+                    sink,
+                );
+                if (sink.shouldStop()) return error.AdmissionRefused;
+                if (failure_policy == .propagate) {
+                    try self.recordFatalAdmission(.{
+                        .kind = .nesting_too_deep,
+                        .span = .{ .start = offset, .end = offset +| 1 },
+                    });
+                    return error.AdmissionRefused;
+                }
+            },
+            .unterminated_comment => |failure| {
+                if (raw_end_out) |out| out.* = failure.@"resume";
+                try type_syntax.classifyTypeSpanPrefix(
+                    self.source,
+                    .{
+                        .span = .{ .start = progress.classification_start, .end = failure.opener },
+                        .policy = type_policy,
+                        .caught_lexical = caught.items,
+                    },
+                    sink,
+                );
+                if (sink.shouldStop()) return error.AdmissionRefused;
+                if (failure_policy == .propagate) {
+                    if (self.admission_failure == null) {
+                        self.admission_failure = .{ .unterminated_comment = failure };
+                    }
+                    return error.UnterminatedComment;
+                }
+            },
+        }
+    }
+
+    fn classifyAdmissionSpan(
+        self: *Parser,
+        span: type_syntax.Span,
+        policy: type_syntax.AdmissionTypePolicy,
+    ) !void {
+        if (self.admissionSink()) |sink| {
+            try type_syntax.classifyTypeSpan(
+                self.source,
+                .{ .span = span, .policy = policy },
+                sink,
+            );
+            if (sink.shouldStop()) return error.AdmissionRefused;
+        }
+    }
+
+    fn classifyAdmissionGenericList(self: *Parser, span: type_syntax.Span) !void {
+        if (self.admission == null) return;
+        if (span.start >= span.end or
+            @as(usize, span.end) > self.source.len or
+            span.end - span.start < 2 or
+            self.source[span.start] != '<' or
+            self.source[span.end - 1] != '>')
+        {
+            return error.InvalidAdmissionSpan;
+        }
+        try self.classifyAdmissionSpan(.{
+            .start = span.start + 1,
+            .end = span.end - 1,
+        }, .removed_only);
+    }
+
+    fn commitAdmissionCaught(
+        self: *Parser,
+        caught: []const type_syntax.AdmissionDiagnostic,
+    ) !void {
+        const sink = self.admissionSink() orelse return;
+        for (caught) |diagnostic| try sink.recordCaught(diagnostic);
+    }
+
+    fn scanAdmissionGenericListStaged(
+        self: *Parser,
+        start: u32,
+        caught: *std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic),
+    ) !type_syntax.AdmissionGenericScan {
+        return type_syntax.scanAdmissionGenericList(
+            self.type_store.allocator,
+            .{ .source = self.source, .start = start, .caught = caught },
+        );
+    }
+
+    fn scanAdmissionCallTypeArgumentsStaged(
+        self: *Parser,
+        start: u32,
+        caught: *std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic),
+    ) !type_syntax.AdmissionGenericScan {
+        return type_syntax.scanAdmissionCallTypeArguments(
+            self.type_store.allocator,
+            .{ .source = self.source, .start = start, .caught = caught },
+        );
+    }
+
+    fn scanObservedGenericList(
+        self: *Parser,
+        start: u32,
+    ) !type_syntax.AdmissionGenericScan {
+        var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+        defer caught.deinit(self.type_store.allocator);
+        const result = try self.scanAdmissionGenericListStaged(start, &caught);
+        try self.commitAdmissionCaught(caught.items);
+        return result;
+    }
+
+    fn scanObservedCallTypeArguments(
+        self: *Parser,
+        start: u32,
+    ) !type_syntax.AdmissionGenericScan {
+        var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+        defer caught.deinit(self.type_store.allocator);
+        const result = try self.scanAdmissionCallTypeArgumentsStaged(start, &caught);
+        try self.commitAdmissionCaught(caught.items);
+        return result;
+    }
+
+    fn cursorAfterAdmittedGeneric(
+        self: *const Parser,
+        list_end: u32,
+        runtime_previous: Token,
+    ) type_syntax.Cursor {
+        var tokenizer = self.tokenizer;
+        tokenizer.resumeAfterRawErasure(list_end, runtime_previous);
+        return type_syntax.Cursor.afterCurrent(tokenizer);
+    }
+
+    fn scanObservedBraceBody(
+        self: *Parser,
+        start: u32,
+    ) !type_syntax.AdmissionBraceScan {
+        var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+        defer caught.deinit(self.type_store.allocator);
+        const result = try type_syntax.scanAdmissionBraceBody(
+            self.type_store.allocator,
+            .{ .source = self.source, .start = start, .caught = &caught },
+        );
+        try self.commitAdmissionCaught(caught.items);
+        return result;
+    }
+
+    fn refuseAdmissionNesting(self: *Parser, offset: u32) !noreturn {
+        try self.recordFatalAdmission(.{
+            .kind = .nesting_too_deep,
+            .span = .{ .start = offset, .end = offset +| 1 },
+        });
+        return error.AdmissionRefused;
+    }
+
+    fn tryConsumeAdmissionAssertion(self: *Parser) !bool {
+        if (self.admissionCoveredByRecovery(self.current.start)) return false;
+        if (self.admission == null) return false;
+        const kind: type_syntax.AdmissionKind = if (self.current.type == .kw_as)
+            .as_assertion
+        else if (self.current.type == .identifier and
+            std.mem.eql(u8, self.current.text(self.source), "satisfies"))
+            .satisfies_assertion
+        else
+            return false;
+        if (kind == .as_assertion and self.admission_in_import) return false;
+        if (!self.admissionAssertionHasTypeStart(self.current)) return false;
+        const marker_start = self.current.start;
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(self.current.start + self.current.len);
+        const runtime_previous = self.previous;
+        var survivor_tokenizer = self.tokenizer;
+        self.advance();
+        const raw_start = self.current.start;
+        try self.recordAdmission(kind, .{
+            .start = raw_start,
+            .end = @min(raw_start +| self.current.len, @as(u32, @intCast(self.source.len))),
+        }, false);
+        var raw_end = raw_start;
+        try self.collectTypeAdmission(
+            raw_start,
+            .{ .general = .assertion },
+            .any_only,
+            .recover,
+            &raw_end,
+        );
+        try self.recordRecoveryErasure(.{ .start = marker_start, .end = raw_end });
+        survivor_tokenizer.resumeAfterRawErasure(raw_end, runtime_previous);
+        self.tokenizer = survivor_tokenizer;
+        self.previous = runtime_previous;
+        self.current = self.nextTokenStagingAdmissionTrivia();
+        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        self.reportNonAscii();
+        return true;
+    }
+
+    fn admissionAssertionHasTypeStart(self: *const Parser, keyword: Token) bool {
+        return self.hasAdmissionTypeStart(keyword.start + keyword.len);
+    }
+
+    fn hasAdmissionTypeStart(self: *const Parser, after_marker: u32) bool {
+        if (self.admissionCoveredByRecovery(after_marker -| 1)) return false;
+        var pos: usize = after_marker;
+        while (pos < self.source.len and switch (self.source[pos]) {
+            ' ', '\t', '\r', '\n' => true,
+            else => false,
+        }) pos += 1;
+        if (pos == self.source.len) return false;
+        const byte = self.source[pos];
+        return isAsciiIdentifierStart(byte) or switch (byte) {
+            '{', '(', '[', '<', '\'', '"', '`' => true,
+            else => false,
+        };
+    }
+
+    fn malformedStringLf(self: *const Parser, token_value: Token) ?u32 {
+        if (token_value.type != .string_literal) return null;
+        const text = token_value.text(self.source);
+        var pos: usize = 1;
+        while (pos < text.len) {
+            if (text[pos] == '\\' and pos + 1 < text.len) {
+                pos += 2;
+                continue;
+            }
+            if (text[pos] == '\n') return token_value.start + @as(u32, @intCast(pos));
+            pos += 1;
+        }
+        return null;
+    }
+
+    fn observeCommittedString(self: *Parser, token_value: Token) !bool {
+        if (self.admission == null or self.admissionCoveredByRecovery(token_value.start)) return false;
+        const lf = self.malformedStringLf(token_value) orelse return false;
+        try self.recordAdmission(.unterminated_string, .{ .start = lf, .end = lf + 1 }, true);
+        const runtime_previous = self.previous;
+        self.tokenizer.resumeMalformedStringAt(token_value, lf, runtime_previous);
+        self.previous = runtime_previous;
+        self.current = self.nextTokenStagingAdmissionTrivia();
+        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        self.reportNonAscii();
+        return true;
+    }
+
+    fn skipAdmissionTemplateCurrent(self: *Parser) !void {
+        if (self.admission == null or self.current.type != .template_head) return;
+        const head = self.current;
+        var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+        defer caught.deinit(self.type_store.allocator);
+        const scan = try type_syntax.scanAdmissionTemplate(
+            self.type_store.allocator,
+            self.source,
+            head.start,
+            &caught,
+        );
+        const sink = self.admissionSink().?;
+        for (caught.items) |diagnostic| try sink.recordCaught(diagnostic);
+        const raw_end = switch (scan) {
+            .complete => |end| end,
+            .nesting_too_deep => |offset| {
+                try self.recordFatalAdmission(.{
+                    .kind = .nesting_too_deep,
+                    .span = .{ .start = offset, .end = offset +| 1 },
+                });
+                return error.AdmissionRefused;
+            },
+        };
+        self.tokenizer.resumeAfterRawTemplate(head, raw_end);
+        self.current = self.nextTokenStagingAdmissionTrivia();
+        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        self.reportNonAscii();
     }
 
     /// Parse exactly one expression with the profile selected by
@@ -436,30 +1001,68 @@ pub const Parser = struct {
     }
 
     fn tryConsumeTypeOnlyModule(self: *Parser) !bool {
+        if (self.admissionCoveredByRecovery(self.current.start)) return false;
         if (!self.parse_type_syntax or !self.isTypeDeclarationBoundary()) return false;
         if (self.current.type != .kw_import and self.current.type != .kw_export) return false;
 
         const cursor_checkpoint = self.cursorCheckpoint();
         const store_checkpoint = self.type_store.checkpoint();
+        const diagnostic_start = self.type_only_module_diagnostics.items.len;
         errdefer {
             self.restoreCursorCheckpoint(cursor_checkpoint);
             self.type_store.rollback(store_checkpoint);
         }
 
+        const presentation_origin = self.admission_presentation;
+        const keyword = self.current;
         const scan = try type_syntax.scanTypeOnlyModule(self.type_store.allocator, .{
             .source = self.source,
             .keyword = self.current,
             .diagnostics = &self.type_only_module_diagnostics,
         });
+        switch (scan) {
+            .not_type_only => return false,
+            else => {},
+        }
+        if (self.admission != null) {
+            var selected = try presentation_origin.trackedWhitespaceAt(keyword.start + keyword.len);
+            if (keyword.type == .kw_export) {
+                selected = try selected.trackedWhitespaceAt(selected.offset + @as(u32, "type".len));
+            }
+            self.admission_presentation = selected;
+        }
+        if (self.admissionSink()) |sink| {
+            for (self.type_only_module_diagnostics.items[diagnostic_start..]) |diagnostic| {
+                try sink.recordCaught(.{
+                    .kind = switch (diagnostic.kind) {
+                        .unterminated_string => .unterminated_string,
+                        .nesting_too_deep => .nesting_too_deep,
+                    },
+                    .span = .{ .start = diagnostic.offset, .end = diagnostic.offset +| 1 },
+                });
+            }
+        }
         const module, const publish_record = switch (scan) {
             .not_type_only => return false,
             .refused => |refusal| {
+                var origin_sink = self.admissionSink();
+                if (origin_sink) |*sink| sink.presentation = presentation_origin;
+                const raw_diagnostic: type_syntax.AdmissionDiagnostic = .{
+                    .kind = .legacy_types_import,
+                    .span = .{
+                        .start = refusal.original_location.offset,
+                        .end = refusal.original_location.end_offset,
+                    },
+                };
                 if (self.type_only_module_refusal == null) {
                     self.type_only_module_refusal = refusal;
                 }
+                const diagnostic = if (origin_sink) |sink| try sink.present(raw_diagnostic) else raw_diagnostic;
+                try self.recordFatalAdmission(diagnostic);
                 return error.TypeOnlyModuleRefused;
             },
             .excluded => |module| blk: {
+                if (self.admission != null) break :blk .{ module, true };
                 if (self.type_only_module_exclusion == null) {
                     self.type_only_module_exclusion = module;
                 }
@@ -468,22 +1071,24 @@ pub const Parser = struct {
             .scanned => |module| .{ module, true },
         };
 
-        var candidate = self.tokenizer;
-        candidate.resumeAfterRawErasure(module.raw_span.end, self.previous);
-        const cursor = type_syntax.Cursor.afterCurrent(candidate);
         if (publish_record) try self.type_store.appendTypeOnlyModule(module);
 
-        self.tokenizer = cursor.tokenizer;
-        self.current = cursor.current;
-        self.previous = cursor_checkpoint.previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        try self.resumeAfterRawErasureObserved(
+            module.raw_span.end,
+            cursor_checkpoint.previous,
+        );
         self.last_erased_type_span = module.raw_span;
         return true;
     }
 
     fn tryConsumeTypeDeclaration(self: *Parser) !bool {
+        if (self.admissionCoveredByRecovery(self.current.start)) return false;
         if (!self.parse_type_syntax or !self.isTypeDeclarationBoundary()) return false;
+        if (self.admission != null) return self.tryConsumeAdmittedTypeDeclaration();
 
+        const publication_checkpoint = self.typePublicationCheckpoint();
+        const store_checkpoint = self.type_store.checkpoint();
+        errdefer self.type_store.rollback(store_checkpoint);
         const saved_previous = self.previous;
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
         var keyword = self.current;
@@ -514,19 +1119,424 @@ pub const Parser = struct {
             &cursor,
         );
         const erased = switch (outcome) {
-            .not_declaration, .excluded => return false,
+            .not_declaration => return false,
+            .excluded => |excluded| {
+                if (excluded.reason == .nominal_base_not_scalar) {
+                    if (self.admission == null) return false;
+                    if (excluded.generic_list_span) |span| {
+                        try self.classifyAdmissionSpan(span, .removed_only);
+                    }
+                    try self.classifyAdmissionSpan(excluded.raw_span, .any_only);
+                    try self.recordAdmission(.nominal_base_not_scalar, excluded.raw_span, false);
+                    try self.resumeAfterRawErasureObserved(
+                        excluded.admission_end,
+                        saved_previous,
+                    );
+                    self.type_store.rollback(store_checkpoint);
+                    return true;
+                }
+                return false;
+            },
+            .parsed => |span| blk: {
+                for (self.type_store.generic_owners.items[store_checkpoint.generic_owners..]) |owner| {
+                    try self.classifyAdmissionSpan(owner.list_span, .removed_only);
+                }
+                for (self.type_store.declarations.items[store_checkpoint.declarations..]) |declaration| {
+                    switch (declaration.body) {
+                        .absent => {},
+                        .present => |body| try self.classifyAdmissionSpan(body.raw_span, .general_type),
+                    }
+                }
+                break :blk span;
+            },
+        };
+        try self.resumeAfterRawErasureObserved(erased.end, saved_previous);
+        self.last_erased_type_span = erased;
+        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
+            self.type_store.rollback(store_checkpoint);
+        }
+        return true;
+    }
+
+    fn tryConsumeAdmittedTypeDeclaration(self: *Parser) !bool {
+        const publication_checkpoint = self.typePublicationCheckpoint();
+        const store_checkpoint = self.type_store.checkpoint();
+        errdefer self.type_store.rollback(store_checkpoint);
+        const saved_previous = self.previous;
+        const presentation_checkpoint = self.admission_presentation;
+        var presentation_committed = false;
+        defer if (!presentation_committed) {
+            self.admission_presentation = presentation_checkpoint;
+        };
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var keyword = self.current;
+        var export_span: ?type_syntax.Span = null;
+        if (self.current.type == .kw_export) {
+            export_span = .{
+                .start = self.current.start,
+                .end = self.current.start + self.current.len,
+            };
+            keyword = cursor.current;
+            if (!containsOnlyAdmissionWhitespace(
+                self.source,
+                export_span.?.end,
+                keyword.start,
+            )) return false;
+            cursor.advance();
+        }
+        if (keyword.type != .identifier) return false;
+        const kind: type_syntax.DeclarationKind = if (std.mem.eql(u8, keyword.text(self.source), "structural"))
+            .structural
+        else if (std.mem.eql(u8, keyword.text(self.source), "nominal"))
+            .nominal
+        else
+            return false;
+
+        const name = cursor.current;
+        if (!type_syntax.tokenIsDeclarationName(name, self.source) or
+            !containsOnlyAdmissionWhitespace(
+                self.source,
+                keyword.start + keyword.len,
+                name.start,
+            )) return false;
+        if (export_span) |span| {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(span.end);
+        }
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(keyword.start + keyword.len);
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(name.start + name.len);
+        var raw_header_end: ?u32 = null;
+        var body_cursor = cursor;
+        body_cursor.advance();
+        if (!containsOnlyAdmissionWhitespace(
+            self.source,
+            name.start + name.len,
+            body_cursor.current.start,
+        )) {
+            if (kind == .nominal) {
+                presentation_committed = true;
+                try self.consumeAdmissionNominalAbsentBody(
+                    keyword,
+                    export_span,
+                    name.start + name.len,
+                    saved_previous,
+                    store_checkpoint,
+                );
+                return true;
+            }
+            if (!self.admissionCommentAt(self.admission_presentation.offset)) return false;
+            raw_header_end = self.admission_presentation.offset;
+        }
+
+        var generic_list: ?type_syntax.Span = null;
+        if (raw_header_end == null and type_syntax.tokenStartsGenericList(self.source, body_cursor.current)) {
+            const scanned = switch (try self.scanObservedGenericList(body_cursor.current.start)) {
+                .scanned => |value| value,
+                .not_matched, .lexical_nonmatch => return false,
+                .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+            };
+            generic_list = scanned.span;
+            presentation_committed = true;
+            try self.classifyAdmissionGenericList(scanned.span);
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+            var tokenizer = body_cursor.tokenizer;
+            tokenizer.resumeAfterRawErasure(scanned.span.end, name);
+            body_cursor = type_syntax.Cursor.afterCurrent(tokenizer);
+            if (!containsOnlyAdmissionWhitespace(
+                self.source,
+                scanned.span.end,
+                body_cursor.current.start,
+            )) {
+                if (kind == .nominal) {
+                    try self.consumeAdmissionNominalAbsentBody(
+                        keyword,
+                        export_span,
+                        scanned.span.end,
+                        saved_previous,
+                        store_checkpoint,
+                    );
+                    return true;
+                }
+                if (!self.admissionCommentAt(self.admission_presentation.offset)) {
+                    presentation_committed = false;
+                    return false;
+                }
+                raw_header_end = self.admission_presentation.offset;
+            }
+        }
+
+        presentation_committed = true;
+        var body: ?type_syntax.AdmittedTypeInput = null;
+        if (raw_header_end == null and body_cursor.current.type == .assign) {
+            const after_equals = body_cursor.current.start + body_cursor.current.len;
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(after_equals);
+            var admission_end = after_equals;
+            try self.collectTypeAdmission(
+                after_equals,
+                .declaration,
+                if (kind == .nominal) .any_only else .general_type,
+                .propagate,
+                &admission_end,
+            );
+            body = try self.admittedTypeInput(after_equals, admission_end, true);
+        }
+
+        const outcome = try type_syntax.parseAdmittedDeclarationAndStore(
+            &self.type_store,
+            .{
+                .keyword = keyword,
+                .export_span = export_span,
+                .kind = kind,
+                .authored_scope = self.scopes.getCurrentScope().id,
+                .generic_list = generic_list,
+                .body = body,
+                .raw_header_end = raw_header_end,
+            },
+            &cursor,
+        );
+        const erased = switch (outcome) {
+            .not_declaration => {
+                presentation_committed = false;
+                return false;
+            },
+            .excluded => |excluded| {
+                if (excluded.reason != .nominal_base_not_scalar) {
+                    presentation_committed = false;
+                    return false;
+                }
+                try self.recordAdmission(.nominal_base_not_scalar, excluded.raw_span, false);
+                if (self.admission.?.shouldStop()) return error.AdmissionRefused;
+                self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(excluded.admission_end);
+                var erased_end = excluded.admission_end;
+                while (@as(usize, erased_end) < self.source.len and switch (self.source[erased_end]) {
+                    ' ', '\t', '\r', '\n' => true,
+                    else => false,
+                }) erased_end += 1;
+                if (@as(usize, erased_end) < self.source.len and
+                    self.source[erased_end] == ';')
+                {
+                    erased_end += 1;
+                }
+                while (@as(usize, erased_end) < self.source.len and switch (self.source[erased_end]) {
+                    ' ', '\t', '\r', '\n' => true,
+                    else => false,
+                }) erased_end += 1;
+                try self.resumeAfterRawErasureObserved(erased_end, saved_previous);
+                self.last_erased_type_span = .{
+                    .start = if (export_span) |span| span.start else keyword.start,
+                    .end = erased_end,
+                };
+                self.type_store.rollback(store_checkpoint);
+                return true;
+            },
             .parsed => |span| span,
         };
-        self.tokenizer = cursor.tokenizer;
-        self.current = cursor.current;
-        self.previous = saved_previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        if (body) |input| {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(input.admission_end);
+        }
+        try self.resumeAfterRawErasureObserved(erased.end, saved_previous);
         self.last_erased_type_span = erased;
+        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
+            self.type_store.rollback(store_checkpoint);
+        }
+        return true;
+    }
+
+    fn admissionCommentAt(self: *const Parser, offset: u32) bool {
+        return self.source.len >= 2 and @as(usize, offset) <= self.source.len - 2 and
+            self.source[offset] == '/' and
+            (self.source[offset + 1] == '/' or self.source[offset + 1] == '*');
+    }
+
+    fn consumeAdmissionNominalAbsentBody(
+        self: *Parser,
+        keyword: Token,
+        export_span: ?type_syntax.Span,
+        raw_header_end: u32,
+        runtime_previous: Token,
+        store_checkpoint: type_syntax.Store.Checkpoint,
+    ) !void {
+        var erased_end = raw_header_end;
+        while (@as(usize, erased_end) < self.source.len and switch (self.source[erased_end]) {
+            ' ', '\t', '\r', '\n' => true,
+            else => false,
+        }) erased_end += 1;
+        try self.recordAdmission(.nominal_base_not_scalar, .{
+            .start = erased_end,
+            .end = @min(erased_end +| 1, @as(u32, @intCast(self.source.len))),
+        }, false);
+        if (@as(usize, erased_end) < self.source.len and self.source[erased_end] == ';') {
+            erased_end += 1;
+        }
+        while (@as(usize, erased_end) < self.source.len and switch (self.source[erased_end]) {
+            ' ', '\t', '\r', '\n' => true,
+            else => false,
+        }) erased_end += 1;
+        try self.resumeAfterRawErasureObserved(erased_end, runtime_previous);
+        self.last_erased_type_span = .{
+            .start = if (export_span) |span| span.start else keyword.start,
+            .end = erased_end,
+        };
+        self.type_store.rollback(store_checkpoint);
+    }
+
+    fn tryConsumeAdmissionDeclaration(self: *Parser) !bool {
+        if (self.admissionCoveredByRecovery(self.current.start)) return false;
+        if (self.admission == null or !self.isTypeDeclarationBoundary()) return false;
+        const outer_start = self.current.start;
+        const presentation_checkpoint = self.admission_presentation;
+        var presentation_committed = false;
+        defer if (!presentation_committed) {
+            self.admission_presentation = presentation_checkpoint;
+        };
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var keyword = self.current;
+        if (keyword.type == .kw_export) {
+            const export_keyword = keyword;
+            keyword = cursor.current;
+            if (!containsOnlyAdmissionWhitespace(
+                self.source,
+                export_keyword.start + export_keyword.len,
+                keyword.start,
+            )) return false;
+            cursor.advance();
+        }
+        if (keyword.type != .identifier) return false;
+
+        const keyword_text = keyword.text(self.source);
+        var kind: type_syntax.AdmissionKind = undefined;
+        var distinct_keyword: ?Token = null;
+        if (std.mem.eql(u8, keyword_text, "interface")) {
+            kind = .interface_declaration;
+        } else if (std.mem.eql(u8, keyword_text, "type")) {
+            kind = .type_alias_declaration;
+        } else if (std.mem.eql(u8, keyword_text, "distinct")) {
+            distinct_keyword = keyword;
+            const type_keyword = cursor.current;
+            if (type_keyword.type != .identifier or
+                !std.mem.eql(u8, type_keyword.text(self.source), "type") or
+                !containsOnlyAdmissionWhitespace(
+                    self.source,
+                    keyword.start + keyword.len,
+                    type_keyword.start,
+                )) return false;
+            cursor.advance();
+            keyword = type_keyword;
+            kind = .distinct_type_declaration;
+        } else return false;
+        const refusal = try self.admissionSink().?.present(.{
+            .kind = kind,
+            .span = .{ .start = outer_start, .end = keyword.start + keyword.len },
+        });
+
+        if (!type_syntax.tokenIsDeclarationName(cursor.current, self.source) or
+            !containsOnlyAdmissionWhitespace(
+                self.source,
+                keyword.start + keyword.len,
+                cursor.current.start,
+            )) return false;
+        const name = cursor.current;
+        cursor.advance();
+        if (self.current.type == .kw_export) {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(self.current.start + self.current.len);
+        }
+        if (distinct_keyword) |token| {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(token.start + token.len);
+        }
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(keyword.start + keyword.len);
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(name.start + name.len);
+        var body_header_start = name.start + name.len;
+        var body_header_is_whitespace = containsOnlyAdmissionWhitespace(
+            self.source,
+            body_header_start,
+            cursor.current.start,
+        );
+        if (body_header_is_whitespace and
+            type_syntax.tokenStartsGenericList(self.source, cursor.current))
+        {
+            const generic = switch (try self.scanObservedGenericList(cursor.current.start)) {
+                .scanned => |value| value,
+                .not_matched, .lexical_nonmatch => return false,
+                .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+            };
+            presentation_committed = true;
+            try self.classifyAdmissionGenericList(generic.span);
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(generic.span.end);
+            var tokenizer = cursor.tokenizer;
+            tokenizer.resumeAfterRawErasure(generic.span.end, name);
+            cursor = type_syntax.Cursor.afterCurrent(tokenizer);
+            body_header_start = generic.span.end;
+            body_header_is_whitespace = containsOnlyAdmissionWhitespace(
+                self.source,
+                body_header_start,
+                cursor.current.start,
+            );
+        }
+
+        presentation_committed = true;
+        var raw_end = cursor.current.start;
+        if (!body_header_is_whitespace) {
+            raw_end = body_header_start;
+            while (@as(usize, raw_end) < self.source.len and switch (self.source[raw_end]) {
+                ' ', '\t', '\r', '\n' => true,
+                else => false,
+            }) raw_end += 1;
+        } else if (kind == .interface_declaration) {
+            var body_cursor = cursor;
+            if (cursor.current.type == .kw_extends) {
+                const extends_start = cursor.current.start + cursor.current.len;
+                self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(extends_start);
+                try self.collectTypeAdmission(
+                    extends_start,
+                    .{ .general = .interface_extends },
+                    .any_only,
+                    .propagate,
+                    &raw_end,
+                );
+                var candidate = body_cursor.tokenizer;
+                candidate.resumeAfterRawErasure(raw_end, name);
+                body_cursor = type_syntax.Cursor.afterCurrent(candidate);
+            }
+            if (body_cursor.current.type == .lbrace) {
+                raw_end = switch (try self.scanObservedBraceBody(body_cursor.current.start)) {
+                    .complete => |end| end,
+                    .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+                };
+            }
+        } else {
+            if (cursor.current.type == .assign) {
+                const body_start = cursor.current.start + cursor.current.len;
+                self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(body_start);
+                try self.collectTypeAdmission(
+                    body_start,
+                    .declaration,
+                    .any_only,
+                    .propagate,
+                    &raw_end,
+                );
+            }
+        }
+        const sink = self.admissionSink().?;
+        try sink.recordRecoverable(refusal);
+        if (sink.shouldStop()) return error.AdmissionRefused;
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(raw_end);
+
+        while (@as(usize, raw_end) < self.source.len and switch (self.source[raw_end]) {
+            ' ', '\t', '\r', '\n' => true,
+            else => false,
+        }) raw_end += 1;
+        if (@as(usize, raw_end) < self.source.len and self.source[raw_end] == ';') raw_end += 1;
+        const runtime_previous = self.previous;
+        try self.resumeAfterRawErasureObserved(raw_end, runtime_previous);
+        self.last_erased_type_span = .{ .start = outer_start, .end = raw_end };
         return true;
     }
 
     fn isTypeDeclarationBoundary(self: *const Parser) bool {
-        const start: usize = self.current.start;
+        return self.isAdmissionStatementBoundaryAt(self.current.start);
+    }
+
+    fn isAdmissionStatementBoundaryAt(self: *const Parser, offset: u32) bool {
+        const start: usize = offset;
         if (start == 0) return true;
         const previous_offset = start - 1;
         const previous_byte = if (self.last_erased_type_span) |span|
@@ -540,20 +1550,47 @@ pub const Parser = struct {
             previous_byte == '\n';
     }
 
-    fn typeSyntaxPublicationHealthy(self: *const Parser, original_error_count: usize) bool {
-        return self.errors.getErrors().len == original_error_count and
+    const TypePublicationCheckpoint = struct {
+        error_count: usize,
+        module_diagnostic_count: usize,
+        admission_generation: ?u64,
+        admission_failure: ?AdmissionFailure,
+    };
+
+    fn typePublicationCheckpoint(self: *const Parser) TypePublicationCheckpoint {
+        return .{
+            .error_count = self.errors.getErrors().len,
+            .module_diagnostic_count = self.type_only_module_diagnostics.items.len,
+            .admission_generation = if (self.admission) |collector| collector.generation() else null,
+            .admission_failure = self.admission_failure,
+        };
+    }
+
+    fn typeSyntaxPublicationHealthy(self: *const Parser, checkpoint: TypePublicationCheckpoint) bool {
+        const admission_unchanged = if (checkpoint.admission_generation) |generation|
+            self.admission.?.generation() == generation
+        else
+            true;
+        const module_state_healthy = if (self.admission != null)
+            true
+        else
+            self.type_only_module_diagnostics.items.len == checkpoint.module_diagnostic_count and
+                self.type_only_module_refusal == null and
+                self.type_only_module_exclusion == null;
+        return self.errors.getErrors().len == checkpoint.error_count and
             !self.errors.outOfMemory() and
-            self.type_only_module_refusal == null and
-            self.type_only_module_exclusion == null;
+            module_state_healthy and
+            admission_unchanged and
+            std.meta.eql(self.admission_failure, checkpoint.admission_failure);
     }
 
     // ============ Statement Parsing ============
 
     fn parseStatement(self: *Parser) anyerror!NodeIndex {
         const type_checkpoint = self.type_store.checkpoint();
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         errdefer self.type_store.rollback(type_checkpoint);
-        defer if (!self.typeSyntaxPublicationHealthy(error_count)) {
+        defer if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             self.type_store.rollback(type_checkpoint);
         };
         self.recursion_depth += 1;
@@ -654,14 +1691,17 @@ pub const Parser = struct {
 
     fn parseVarDeclaration(self: *Parser) anyerror!NodeIndex {
         const type_checkpoint = self.type_store.checkpoint();
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         var retain_type_records = false;
         defer if (!retain_type_records) self.type_store.rollback(type_checkpoint);
 
         // Reject 'var' - only 'let' and 'const' are supported
         if (self.current.type == .kw_var) {
-            self.errors.addErrorAt(.unsupported_feature, self.current, "'var' is not supported; use 'let' or 'const' instead");
-            self.advance(); // consume 'var' so synchronize() doesn't loop on it
+            const var_keyword = self.current;
+            self.errors.addErrorAt(.unsupported_feature, var_keyword, "'var' is not supported; use 'let' or 'const' instead");
+            if (!try self.collectVarDeclarationAdmission(var_keyword)) {
+                self.advance(); // consume 'var' so synchronize() doesn't loop on it
+            }
             return error.ParseError;
         }
 
@@ -703,12 +1743,18 @@ pub const Parser = struct {
             name_atom,
             .variable,
             kind == .@"const",
-        ) catch {
+        ) catch |err| {
+            if (self.admission != null) switch (err) {
+                error.OutOfMemory => return err,
+                else => {},
+            };
             self.errorAtCurrent("too many local variables");
             return error.TooManyLocals;
         };
 
-        const annotation_index = if (self.parse_type_syntax and self.check(.colon))
+        const annotation_index = if (self.parse_type_syntax and self.check(.colon) and
+            (self.admission == null or
+                self.hasAdmissionTypeStart(self.current.start + self.current.len)))
             try self.parseVariableType(binding, name)
         else
             null;
@@ -732,7 +1778,7 @@ pub const Parser = struct {
                 .kind = kind,
             } },
         });
-        if (!self.typeSyntaxPublicationHealthy(error_count)) return declaration;
+        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) return declaration;
         if (annotation_index) |index| {
             try self.type_store.finishAnnotationOwner(index, .{
                 .declaration = declaration,
@@ -743,9 +1789,43 @@ pub const Parser = struct {
         return declaration;
     }
 
+    fn collectVarDeclarationAdmission(self: *Parser, var_keyword: Token) !bool {
+        if (self.admission == null) return false;
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        const name = cursor.current;
+        if (name.type != .identifier) return false;
+        cursor.advance();
+        const colon = cursor.current;
+        if (colon.type != .colon or
+            !self.hasAdmissionTypeStart(colon.start + colon.len)) return false;
+
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(colon.start + colon.len);
+        var raw_end = colon.start + colon.len;
+        try self.collectTypeAdmission(
+            colon.start + colon.len,
+            .{ .general = .variable },
+            .general_type,
+            .propagate,
+            &raw_end,
+        );
+        try self.recordRecoveryErasure(.{ .start = colon.start, .end = raw_end });
+        try self.resumeAfterRawErasureObserved(raw_end, var_keyword);
+        return true;
+    }
+
     fn parseVariableType(self: *Parser, binding: BindingRef, binding_token: Token) !u32 {
+        if (self.admission != null) {
+            return self.parseAdmittedVariableType(binding, binding_token);
+        }
         const annotation_index = std.math.cast(u32, self.type_store.annotations.items.len) orelse
             return error.TooManyTypeItems;
+        try self.collectTypeAdmission(
+            self.current.start + self.current.len,
+            .{ .general = .variable },
+            .general_type,
+            .propagate,
+            null,
+        );
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
         const outcome = try type_syntax.parseAndStore(
             &self.type_store,
@@ -796,8 +1876,61 @@ pub const Parser = struct {
         return annotation_index;
     }
 
+    fn parseAdmittedVariableType(self: *Parser, binding: BindingRef, binding_token: Token) !u32 {
+        const annotation_index = std.math.cast(u32, self.type_store.annotations.items.len) orelse
+            return error.TooManyTypeItems;
+        const after_colon = self.current.start + self.current.len;
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(after_colon);
+        var admission_end = after_colon;
+        try self.collectTypeAdmission(
+            after_colon,
+            .{ .general = .variable },
+            .general_type,
+            .propagate,
+            &admission_end,
+        );
+        const input = try self.admittedTypeInput(after_colon, admission_end, true);
+        if (input.raw_span.start == input.raw_span.end) {
+            const cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+            self.errors.addExpectedError(cursor.current, "type annotation");
+            if (self.errors.outOfMemory()) return error.OutOfMemory;
+            return error.ParseError;
+        }
+        switch (try type_syntax.parseAdmittedAnnotationAndStore(
+            &self.type_store,
+            binding,
+            input,
+        )) {
+            .parsed => if (self.type_store.annotations.items.len !=
+                @as(usize, annotation_index) + 1)
+            {
+                return error.InvalidTypeRange;
+            },
+            .excluded => |exclusion| {
+                switch (exclusion.reason) {
+                    .implementation_budget => self.errorAtCurrent("type syntax exceeds the private parser budget"),
+                    .unsupported_syntax, .malformed_syntax => self.errorAtCurrent("type syntax is outside private parser comparison"),
+                }
+                return error.ParseError;
+            },
+        }
+
+        try self.resumeAfterRawErasureObserved(admission_end, binding_token);
+        return annotation_index;
+    }
+
     fn parseFunctionTypeValue(self: *Parser, previous_token: Token) !type_syntax.TypeValue {
+        if (self.admission != null) {
+            return self.parseAdmittedFunctionTypeValue(previous_token);
+        }
         const colon = self.current;
+        try self.collectTypeAdmission(
+            colon.start + colon.len,
+            .parameter,
+            .parameter_type,
+            .propagate,
+            null,
+        );
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
         const outcome = try type_syntax.parseTypeValueAndStore(
             &self.type_store,
@@ -842,9 +1975,46 @@ pub const Parser = struct {
         return value;
     }
 
+    fn parseAdmittedFunctionTypeValue(self: *Parser, previous_token: Token) !type_syntax.TypeValue {
+        const colon = self.current;
+        const after_colon = colon.start + colon.len;
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(after_colon);
+        var admission_end = after_colon;
+        try self.collectTypeAdmission(
+            after_colon,
+            .parameter,
+            .parameter_type,
+            .propagate,
+            &admission_end,
+        );
+        const input = try self.admittedTypeInput(after_colon, admission_end, true);
+        if (input.raw_span.start == input.raw_span.end) {
+            const cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+            self.errors.addExpectedError(cursor.current, "type annotation");
+            if (self.errors.outOfMemory()) return error.OutOfMemory;
+            return error.ParseError;
+        }
+        const value = switch (try type_syntax.parseAdmittedTypeValueOutcome(
+            &self.type_store,
+            input,
+        )) {
+            .parsed => |parsed| parsed,
+            .excluded => |exclusion| {
+                switch (exclusion.reason) {
+                    .implementation_budget => self.errorAtCurrent("type syntax exceeds the private parser budget"),
+                    .unsupported_syntax, .malformed_syntax => self.errorAtCurrent("type syntax is outside private parser comparison"),
+                }
+                return error.ParseError;
+            },
+        };
+
+        try self.resumeAfterRawErasureObserved(admission_end, previous_token);
+        return value;
+    }
+
     fn parseFunctionDeclaration(self: *Parser) anyerror!NodeIndex {
         const type_checkpoint = self.type_store.checkpoint();
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         var retain_type_records = false;
         defer if (!retain_type_records) self.type_store.rollback(type_checkpoint);
 
@@ -876,7 +2046,11 @@ pub const Parser = struct {
             name_atom,
             .function,
             false,
-        ) catch {
+        ) catch |err| {
+            if (self.admission != null) switch (err) {
+                error.OutOfMemory => return err,
+                else => {},
+            };
             self.errorAtCurrent("too many local variables");
             return error.TooManyLocals;
         };
@@ -915,7 +2089,7 @@ pub const Parser = struct {
                 .kind = .let,
             } },
         });
-        if (!self.typeSyntaxPublicationHealthy(error_count)) {
+        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             if (pending_owner) |*pending| self.type_store.cancelGenericOwner(pending);
             return declaration;
         }
@@ -950,14 +2124,50 @@ pub const Parser = struct {
         header_admission: FunctionHeaderAdmission = .typed,
     };
 
+    const FunctionGenericSelection = struct {
+        options: ?type_syntax.GenericOwnerOptions = null,
+        header_admission: FunctionHeaderAdmission = .typed,
+        cursor: ?type_syntax.Cursor = null,
+        previous: ?Token = null,
+    };
+
+    fn adoptAdmissionCursor(self: *Parser, cursor: type_syntax.Cursor, previous: Token) void {
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = previous;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+    }
+
     fn tryReserveFunctionGenericOwner(
         self: *Parser,
         name: Token,
         keyword_end: u32,
     ) !FunctionGenericOwnerReservation {
+        const selected = try self.selectFunctionGeneric(name, keyword_end);
+        const pending = if (selected.options) |options| try self.type_store.reserveGenericOwner(options) else null;
+        if (selected.cursor) |cursor| self.adoptAdmissionCursor(cursor, selected.previous.?);
+        return .{ .pending_owner = pending, .header_admission = selected.header_admission };
+    }
+
+    fn selectFunctionGeneric(
+        self: *Parser,
+        name: Token,
+        keyword_end: u32,
+    ) !FunctionGenericSelection {
+        if (self.admissionCoveredByRecovery(name.start)) return .{ .header_admission = .runtime_only };
+        const spaced_call_list = self.admission != null and
+            type_syntax.tokenStartsGenericList(self.source, self.current) and
+            name.start + name.len < self.current.start and
+            containsOnlyAdmissionWhitespace(self.source, name.start + name.len, self.current.start);
         if (!self.parse_type_syntax or !type_syntax.tokenStartsGenericList(self.source, self.current) or
-            name.start + name.len != self.current.start)
+            (name.start + name.len != self.current.start and !spaced_call_list))
         {
+            if (self.admission != null) {
+                const typed_header = self.current.type == .lparen and
+                    containsOnlyAdmissionWhitespace(self.source, keyword_end, name.start) and
+                    containsOnlyAdmissionWhitespace(self.source, name.start + name.len, self.current.start);
+                return .{ .header_admission = if (typed_header) .typed else .runtime_only };
+            }
             return .{};
         }
         const name_gap = type_syntax.classifyNamedFunctionGap(self.source, .{
@@ -965,28 +2175,71 @@ pub const Parser = struct {
             .end = name.start,
         });
         if (name_gap == .forbidden) return .{};
+        const named_header = name_gap == .whitespace and !spaced_call_list;
 
         const cursor_checkpoint = self.cursorCheckpoint();
-        const store_checkpoint = self.type_store.checkpoint();
         var accepted = false;
+        var cursor_committed = false;
         defer if (!accepted) {
-            self.restoreCursorCheckpoint(cursor_checkpoint);
-            self.type_store.rollback(store_checkpoint);
+            if (!cursor_committed) self.restoreCursorCheckpoint(cursor_checkpoint);
         };
 
-        const scanned = (try type_syntax.scanBalancedGenericList(
+        const scanned = if (self.admission != null) blk: {
+            var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+            defer caught.deinit(self.type_store.allocator);
+            const result = if (spaced_call_list)
+                try self.scanAdmissionCallTypeArgumentsStaged(self.current.start, &caught)
+            else switch (name_gap) {
+                .whitespace => try self.scanAdmissionGenericListStaged(
+                    self.current.start,
+                    &caught,
+                ),
+                .block_comment, .line_comment => try self.scanAdmissionCallTypeArgumentsStaged(
+                    self.current.start,
+                    &caught,
+                ),
+                .forbidden => unreachable,
+            };
+            try self.commitAdmissionCaught(caught.items);
+            break :blk switch (result) {
+                .scanned => |value| value,
+                .not_matched, .lexical_nonmatch => return .{},
+                .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+            };
+        } else (try type_syntax.scanBalancedGenericList(
             self.type_store.allocator,
             self.source,
             self.current.start,
         )) orelse return .{};
-        if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) return .{};
+        if (self.admission == null and
+            !type_syntax.isPrivateGenericListEligible(self.source, scanned)) return .{};
+        if (self.admission != null and named_header) {
+            try self.classifyAdmissionGenericList(scanned.span);
+        }
 
-        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = self.current;
-        while (cursor.current.type != .eof and cursor.current.start < scanned.span.end) {
+        if (self.admission != null and named_header) {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+        }
+        var cursor = if (self.admission != null) committed: {
+            if (named_header) {
+                try self.resumeAfterRawErasureObserved(scanned.span.end, name);
+                cursor_committed = true;
+                try self.recordRecoveryErasure(scanned.span);
+                break :committed type_syntax.Cursor{
+                    .tokenizer = self.tokenizer,
+                    .current = self.current,
+                    .consumed = 0,
+                };
+            }
+            break :committed self.cursorAfterAdmittedGeneric(scanned.span.end, name);
+        } else type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var previous = if (self.admission != null) name else self.current;
+        if (self.admission == null) while (cursor.current.type != .eof and
+            cursor.current.start < scanned.span.end)
+        {
             previous = cursor.current;
             cursor.advance();
-        }
+        };
         if (cursor.current.type != .lparen) return .{};
         const opener_gap = type_syntax.classifyNamedFunctionGap(self.source, .{
             .start = scanned.span.end,
@@ -999,7 +2252,14 @@ pub const Parser = struct {
             capture_spans: type_syntax.GenericCaptureSpans,
             header_admission: FunctionHeaderAdmission,
         };
-        const reservation: OwnerReservation = switch (name_gap) {
+        const reservation: OwnerReservation = if (spaced_call_list) .{
+            .policy = .legacy_call,
+            .capture_spans = .{
+                .actual_erased_span = scanned.span,
+                .legacy_recorded_span = .{ .start = scanned.span.start + 1, .end = scanned.span.end - 1 },
+            },
+            .header_admission = .runtime_only,
+        } else switch (name_gap) {
             .whitespace => switch (opener_gap) {
                 .whitespace => .{
                     .policy = .callable,
@@ -1046,8 +2306,12 @@ pub const Parser = struct {
             .forbidden => unreachable,
         };
 
+        if (spaced_call_list and scanned.span.end != cursor.current.start) return .{ .header_admission = .runtime_only };
+
         if (reservation.policy == .legacy_call) {
-            const call_scan = switch (try type_syntax.scanExplicitCallTypeArguments(
+            const call_scan = if (self.admission != null)
+                scanned
+            else switch (try type_syntax.scanExplicitCallTypeArguments(
                 self.type_store.allocator,
                 self.source,
                 scanned.span.start,
@@ -1056,23 +2320,24 @@ pub const Parser = struct {
                 .scanned => |value| value,
             };
             if (!std.meta.eql(call_scan.span, scanned.span) or
-                !type_syntax.isPrivateGenericListEligible(self.source, call_scan))
+                (self.admission == null and
+                    !type_syntax.isPrivateGenericListEligible(self.source, call_scan)))
             {
                 return .{};
             }
+            if (self.admission != null) try self.classifyAdmissionGenericList(scanned.span);
         }
-        const pending = try self.type_store.reserveGenericOwner(.{
+        const options: type_syntax.GenericOwnerOptions = .{
             .list_span = scanned.span,
             .capture_spans = reservation.capture_spans,
             .policy = reservation.policy,
-        });
-        self.tokenizer = cursor.tokenizer;
-        self.current = cursor.current;
-        self.previous = previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        };
+        try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
         accepted = true;
         return .{
-            .pending_owner = pending,
+            .options = options,
+            .cursor = cursor,
+            .previous = previous,
             .header_admission = reservation.header_admission,
         };
     }
@@ -1083,32 +2348,106 @@ pub const Parser = struct {
         reserved: type_syntax.PendingGenericOwner,
     };
 
+    const GenericSourceSelection = struct {
+        options: type_syntax.GenericOwnerOptions,
+        cursor: type_syntax.Cursor,
+        previous: Token,
+    };
+
+    const ArrowGenericSelection = union(enum) {
+        not_generic,
+        rejected_call_grammar,
+        selected: GenericSourceSelection,
+    };
+
     fn tryReserveArrowGenericOwner(self: *Parser) !ArrowGenericOwnerProbe {
+        return switch (try self.selectArrowGeneric()) {
+            .not_generic => .not_generic,
+            .rejected_call_grammar => .rejected_call_grammar,
+            .selected => |selected| blk: {
+                const pending = try self.type_store.reserveGenericOwner(selected.options);
+                self.adoptAdmissionCursor(selected.cursor, selected.previous);
+                break :blk .{ .reserved = pending };
+            },
+        };
+    }
+
+    fn selectArrowGeneric(self: *Parser) !ArrowGenericSelection {
+        if (self.admissionCoveredByRecovery(self.current.start)) return .not_generic;
         if (!self.parse_type_syntax or
             !type_syntax.tokenStartsGenericList(self.source, self.current)) return .not_generic;
 
         const cursor_checkpoint = self.cursorCheckpoint();
-        const store_checkpoint = self.type_store.checkpoint();
         var accepted = false;
+        var cursor_committed = false;
         defer if (!accepted) {
-            self.restoreCursorCheckpoint(cursor_checkpoint);
-            self.type_store.rollback(store_checkpoint);
+            if (!cursor_committed) self.restoreCursorCheckpoint(cursor_checkpoint);
         };
 
-        const scanned = (try type_syntax.scanBalancedGenericList(
+        const runtime_previous = self.previous;
+        const has_dedicated_window = type_syntax.hasDedicatedAssignmentArrowWindow(
+            self.source,
+            runtime_previous,
+            self.current.start,
+        );
+        const looks_like_comparison = type_syntax.rawLooksLikeComparison(
+            self.source,
+            self.current.start,
+        );
+        const use_call_scanner = !has_dedicated_window and looks_like_comparison;
+        const scanned = if (self.admission != null) blk: {
+            var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+            defer caught.deinit(self.type_store.allocator);
+            const result = if (use_call_scanner)
+                try self.scanAdmissionCallTypeArgumentsStaged(self.current.start, &caught)
+            else
+                try self.scanAdmissionGenericListStaged(self.current.start, &caught);
+            try self.commitAdmissionCaught(caught.items);
+            break :blk switch (result) {
+                .scanned => |value| value,
+                .not_matched, .lexical_nonmatch => if (use_call_scanner)
+                    return .rejected_call_grammar
+                else
+                    return .not_generic,
+                .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+            };
+        } else (try type_syntax.scanBalancedGenericList(
             self.type_store.allocator,
             self.source,
             self.current.start,
         )) orelse return .not_generic;
-        if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) return .not_generic;
+        if (self.admission == null) {
+            try self.classifyAdmissionGenericList(scanned.span);
+            if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) {
+                return .not_generic;
+            }
+        } else {
+            try self.classifyAdmissionGenericList(scanned.span);
+        }
 
-        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = self.current;
-        while (cursor.current.type != .eof and cursor.current.start < scanned.span.end) {
+        var cursor = if (self.admission != null)
+            self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous)
+        else
+            type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var previous = if (self.admission != null) runtime_previous else self.current;
+        if (self.admission == null) while (cursor.current.type != .eof and
+            cursor.current.start < scanned.span.end)
+        {
             previous = cursor.current;
             cursor.advance();
+        };
+        if (self.admission != null and !use_call_scanner and cursor.current.type == .kw_extends and
+            containsOnlyAdmissionWhitespace(self.source, scanned.span.end, cursor.current.start))
+        {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+            try self.resumeAfterRawErasureObserved(scanned.span.end, runtime_previous);
+            self.last_erased_type_span = .{ .start = scanned.span.start, .end = self.current.start };
+            cursor_committed = true;
+            try self.recordRecoveryErasure(self.last_erased_type_span.?);
+            return .not_generic;
         }
         if (cursor.current.type != .lparen) return .not_generic;
+
         const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
         if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return .not_generic;
         var after_opener = cursor;
@@ -1119,11 +2458,6 @@ pub const Parser = struct {
             after_opener,
         ) == null) return .not_generic;
 
-        const has_dedicated_window = type_syntax.hasDedicatedAssignmentArrowWindow(
-            self.source,
-            self.previous,
-            scanned.span.start,
-        );
         const OwnerReservation = struct {
             policy: type_syntax.GenericOwnerPolicy,
             capture_spans: type_syntax.GenericCaptureSpans,
@@ -1136,8 +2470,10 @@ pub const Parser = struct {
                     .end = scanned.span.end - 1,
                 },
             } }
-        else if (type_syntax.rawLooksLikeComparison(self.source, scanned.span.start)) blk: {
-            const call_scan = switch (try type_syntax.scanExplicitCallTypeArguments(
+        else if (looks_like_comparison) blk: {
+            const call_scan = if (self.admission != null)
+                scanned
+            else switch (try type_syntax.scanExplicitCallTypeArguments(
                 self.type_store.allocator,
                 self.source,
                 scanned.span.start,
@@ -1145,7 +2481,8 @@ pub const Parser = struct {
                 .not_call, .excluded => return .rejected_call_grammar,
                 .scanned => |value| value,
             };
-            if (!type_syntax.isPrivateGenericListEligible(self.source, call_scan) or
+            if ((self.admission == null and
+                !type_syntax.isPrivateGenericListEligible(self.source, call_scan)) or
                 !std.meta.eql(call_scan.span, scanned.span) or
                 call_scan.span.end != cursor.current.start)
             {
@@ -1168,20 +2505,27 @@ pub const Parser = struct {
                 .end = cursor.current.start - 1,
             },
         } };
-        const pending = try self.type_store.reserveGenericOwner(.{
+        if (self.admission != null and reservation.policy != .legacy_call) {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+        }
+        const options: type_syntax.GenericOwnerOptions = .{
             .list_span = scanned.span,
             .capture_spans = reservation.capture_spans,
             .policy = reservation.policy,
-        });
-        self.tokenizer = cursor.tokenizer;
-        self.current = cursor.current;
-        self.previous = previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        };
+        try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
         accepted = true;
-        return .{ .reserved = pending };
+        return .{ .selected = .{ .options = options, .cursor = cursor, .previous = previous } };
     }
 
-    fn tryParseErasedExpressionPrefix(self: *Parser) !?NodeIndex {
+    const ErasedPrefixSelection = struct {
+        options: type_syntax.ErasedTypePrefixOptions,
+        cursor: type_syntax.Cursor,
+        previous: Token,
+    };
+
+    fn selectErasedTypePrefix(self: *Parser, context: enum { expression, block }) !?ErasedPrefixSelection {
+        if (self.admissionCoveredByRecovery(self.current.start)) return null;
         if (!self.parse_type_syntax or
             !type_syntax.tokenStartsGenericList(self.source, self.current) or
             type_syntax.rawLooksLikeComparison(self.source, self.current.start))
@@ -1189,20 +2533,34 @@ pub const Parser = struct {
             return null;
         }
 
-        const scanned = (try type_syntax.scanBalancedGenericList(
+        const scanned = if (self.admission != null) switch (try self.scanObservedGenericList(
+            self.current.start,
+        )) {
+            .scanned => |value| value,
+            .not_matched, .lexical_nonmatch => return null,
+            .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+        } else (try type_syntax.scanBalancedGenericList(
             self.type_store.allocator,
             self.source,
             self.current.start,
         )) orelse return null;
-        if (!type_syntax.isPrivateErasedPrefixListEligible(self.source, scanned)) return null;
+        try self.classifyAdmissionGenericList(scanned.span);
+        if (self.admission == null and
+            !type_syntax.isPrivateErasedPrefixListEligible(self.source, scanned)) return null;
 
-        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = self.current;
-        while (cursor.current.type != .eof and cursor.current.start < scanned.span.end) {
+        const runtime_previous = self.previous;
+        var cursor = if (self.admission != null)
+            self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous)
+        else
+            type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var previous = if (self.admission != null) runtime_previous else self.current;
+        if (self.admission == null) while (cursor.current.type != .eof and
+            cursor.current.start < scanned.span.end)
+        {
             previous = cursor.current;
             cursor.advance();
-        }
-        if (cursor.current.type != .lbrace and cursor.current.type != .lparen) {
+        };
+        if (cursor.current.type != .lbrace and (context == .block or cursor.current.type != .lparen)) {
             return null;
         }
         const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
@@ -1238,26 +2596,35 @@ pub const Parser = struct {
         else
             .ignored_parameters;
 
-        var pending = try self.type_store.reserveErasedTypePrefix(.{
+        if (self.admission != null) {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+        }
+        const options: type_syntax.ErasedTypePrefixOptions = .{
             .list_span = scanned.span,
             .capture_spans = capture_spans,
             .policy = policy,
-        });
+        };
+        try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
+        return .{ .options = options, .cursor = cursor, .previous = previous };
+    }
+
+    fn tryParseErasedExpressionPrefix(self: *Parser) !?NodeIndex {
+        const selected = try self.selectErasedTypePrefix(.expression) orelse return null;
+        const cursor = selected.cursor;
+        const previous = selected.previous;
+        var pending = try self.type_store.reserveErasedTypePrefix(selected.options);
         errdefer self.type_store.cancelErasedTypePrefix(&pending);
 
-        self.tokenizer = cursor.tokenizer;
-        self.current = cursor.current;
-        self.previous = previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        self.adoptAdmissionCursor(cursor, previous);
 
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         const operand_start = self.current.start;
         const expression_node = switch (self.current.type) {
             .lbrace => try self.parseObjectLiteral(),
             .lparen => try self.parseGroupedOrArrowParams(),
             else => unreachable,
         };
-        if (!self.typeSyntaxPublicationHealthy(error_count)) {
+        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             self.type_store.cancelErasedTypePrefix(&pending);
             return expression_node;
         }
@@ -1274,54 +2641,18 @@ pub const Parser = struct {
     }
 
     fn tryParseErasedBlockPrefix(self: *Parser) !?NodeIndex {
-        if (!self.parse_type_syntax or
-            !type_syntax.tokenStartsGenericList(self.source, self.current) or
-            type_syntax.rawLooksLikeComparison(self.source, self.current.start))
-        {
-            return null;
-        }
-        const scanned = (try type_syntax.scanBalancedGenericList(
-            self.type_store.allocator,
-            self.source,
-            self.current.start,
-        )) orelse return null;
-        if (!type_syntax.isPrivateErasedPrefixListEligible(self.source, scanned)) return null;
-
-        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = self.current;
-        while (cursor.current.type != .eof and cursor.current.start < scanned.span.end) {
-            previous = cursor.current;
-            cursor.advance();
-        }
-        if (cursor.current.type != .lbrace) return null;
-        const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
-        if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return null;
-
-        var pending = try self.type_store.reserveErasedTypePrefix(.{
-            .list_span = scanned.span,
-            .capture_spans = .{
-                .actual_erased_span = .{
-                    .start = scanned.span.start,
-                    .end = cursor.current.start,
-                },
-                .legacy_recorded_span = .{
-                    .start = scanned.span.start + 1,
-                    .end = cursor.current.start - 1,
-                },
-            },
-            .policy = .ignored_parameters,
-        });
+        const selected = try self.selectErasedTypePrefix(.block) orelse return null;
+        const cursor = selected.cursor;
+        const previous = selected.previous;
+        var pending = try self.type_store.reserveErasedTypePrefix(selected.options);
         errdefer self.type_store.cancelErasedTypePrefix(&pending);
 
-        self.tokenizer = cursor.tokenizer;
-        self.current = cursor.current;
-        self.previous = previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        self.adoptAdmissionCursor(cursor, previous);
 
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         const operand_start = self.current.start;
         const block_node = try self.parseBlock();
-        if (!self.typeSyntaxPublicationHealthy(error_count)) {
+        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             self.type_store.cancelErasedTypePrefix(&pending);
             return block_node;
         }
@@ -1336,14 +2667,34 @@ pub const Parser = struct {
         return block_node;
     }
 
+    const ExplicitCallSelection = struct {
+        options: type_syntax.ExplicitCallOptions,
+        cursor: type_syntax.Cursor,
+        previous: Token,
+    };
+
     fn tryReserveExplicitCall(self: *Parser) !?type_syntax.PendingExplicitCall {
+        const selected = try self.selectExplicitCall() orelse return null;
+        const pending = try self.type_store.reserveExplicitCall(selected.options);
+        self.adoptAdmissionCursor(selected.cursor, selected.previous);
+        return pending;
+    }
+
+    fn selectExplicitCall(self: *Parser) !?ExplicitCallSelection {
+        if (self.admissionCoveredByRecovery(self.current.start)) return null;
         if (!self.parse_type_syntax or
             !type_syntax.tokenStartsGenericList(self.source, self.current) or
             !type_syntax.rawLooksLikeComparison(self.source, self.current.start))
         {
             return null;
         }
-        const scanned = switch (try type_syntax.scanExplicitCallTypeArguments(
+        const scanned = if (self.admission != null) switch (try self.scanObservedCallTypeArguments(
+            self.current.start,
+        )) {
+            .scanned => |value| value,
+            .not_matched, .lexical_nonmatch => return null,
+            .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+        } else switch (try type_syntax.scanExplicitCallTypeArguments(
             self.type_store.allocator,
             self.source,
             self.current.start,
@@ -1351,24 +2702,30 @@ pub const Parser = struct {
             .not_call, .excluded => return null,
             .scanned => |value| value,
         };
-        if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) return null;
+        try self.classifyAdmissionGenericList(scanned.span);
+        if (self.admission == null and
+            !type_syntax.isPrivateGenericListEligible(self.source, scanned)) return null;
 
         const cursor_checkpoint = self.cursorCheckpoint();
-        const store_checkpoint = self.type_store.checkpoint();
         var accepted = false;
         defer if (!accepted) {
             self.restoreCursorCheckpoint(cursor_checkpoint);
-            self.type_store.rollback(store_checkpoint);
         };
 
-        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = self.current;
-        while (cursor.current.type != .eof and cursor.current.start < scanned.span.end) {
+        const runtime_previous = self.previous;
+        var cursor = if (self.admission != null)
+            self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous)
+        else
+            type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var previous = if (self.admission != null) runtime_previous else self.current;
+        if (self.admission == null) while (cursor.current.type != .eof and
+            cursor.current.start < scanned.span.end)
+        {
             previous = cursor.current;
             cursor.advance();
-        }
+        };
         if (cursor.current.type != .lparen or cursor.current.start != scanned.span.end) return null;
-        const pending = try self.type_store.reserveExplicitCall(.{
+        const options: type_syntax.ExplicitCallOptions = .{
             .list_span = scanned.span,
             .capture_spans = .{
                 .actual_erased_span = scanned.span,
@@ -1377,13 +2734,10 @@ pub const Parser = struct {
                     .end = scanned.span.end - 1,
                 },
             },
-        });
-        self.tokenizer = cursor.tokenizer;
-        self.current = cursor.current;
-        self.previous = previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        };
+        try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
         accepted = true;
-        return pending;
+        return .{ .options = options, .cursor = cursor, .previous = previous };
     }
 
     fn cursorCheckpoint(self: *const Parser) ParserCursorCheckpoint {
@@ -1395,6 +2749,9 @@ pub const Parser = struct {
             .brace_depth = self.brace_depth,
             .primed = self.primed,
             .last_erased_type_span = self.last_erased_type_span,
+            .pending_admission_trivia = self.pending_admission_trivia,
+            .admission_in_import = self.admission_in_import,
+            .admission_parameter_header = self.admission_parameter_header,
         };
     }
 
@@ -1406,14 +2763,31 @@ pub const Parser = struct {
         self.brace_depth = checkpoint.brace_depth;
         self.primed = checkpoint.primed;
         self.last_erased_type_span = checkpoint.last_erased_type_span;
+        self.pending_admission_trivia = checkpoint.pending_admission_trivia;
+        self.admission_in_import = checkpoint.admission_in_import;
+        self.admission_parameter_header = checkpoint.admission_parameter_header;
     }
 
     fn parseFunctionReturnSyntax(
         self: *Parser,
+        kind: HeaderKind,
         previous_token: Token,
         params: []const NodeIndex,
     ) !type_syntax.ReturnSyntax {
+        if (self.admission != null) {
+            return self.parseAdmittedFunctionReturnSyntax(kind, previous_token, params);
+        }
         const colon = self.current;
+        try self.collectTypeAdmission(
+            colon.start + colon.len,
+            .{ .general = switch (kind) {
+                .named => .named_return,
+                .arrow => .arrow_return,
+            } },
+            .general_type,
+            .propagate,
+            null,
+        );
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
         const outcome = try type_syntax.parseFunctionReturnAndStore(
             &self.type_store,
@@ -1484,6 +2858,326 @@ pub const Parser = struct {
         return value;
     }
 
+    fn collectAdmissionFunctionReturn(self: *Parser, kind: HeaderKind) !type_syntax.AdmittedTypeInput {
+        const colon = self.current;
+        const after_colon = colon.start + colon.len;
+        var admission_end = after_colon;
+        try self.collectTypeAdmission(
+            after_colon,
+            .{ .general = switch (kind) {
+                .named => .named_return,
+                .arrow => .arrow_return,
+            } },
+            .general_type,
+            .propagate,
+            &admission_end,
+        );
+        try self.recordRecoveryErasure(.{ .start = colon.start, .end = admission_end });
+        return self.admittedTypeInput(after_colon, admission_end, false);
+    }
+
+    fn parseAdmittedFunctionReturnSyntax(
+        self: *Parser,
+        kind: HeaderKind,
+        previous_token: Token,
+        params: []const NodeIndex,
+    ) !type_syntax.ReturnSyntax {
+        const input = try self.collectAdmissionFunctionReturn(kind);
+        if (input.raw_span.start == input.raw_span.end) {
+            const cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+            self.errors.addExpectedError(cursor.current, "type annotation");
+            if (self.errors.outOfMemory()) return error.OutOfMemory;
+            return error.ParseError;
+        }
+        var value = switch (try type_syntax.parseAdmittedFunctionReturnAndStore(
+            &self.type_store,
+            input,
+        )) {
+            .parsed => |parsed| parsed,
+            .excluded => |exclusion| {
+                switch (exclusion.reason) {
+                    .implementation_budget => self.errorAtCurrent("type syntax exceeds the private parser budget"),
+                    .unsupported_syntax, .malformed_syntax => self.errorAtCurrent("type syntax is outside private parser comparison"),
+                }
+                return error.ParseError;
+            },
+            .failure => |failure| {
+                const tok = switch (failure) {
+                    .missing_type => |at| at,
+                    .unmatched_parenthesis => |at| at,
+                    .nesting_too_deep => |at| at,
+                    .unsupported_suffix => |at| at,
+                };
+                switch (failure) {
+                    .nesting_too_deep => self.errors.addErrorAt(
+                        .nesting_too_deep,
+                        tok,
+                        "type syntax nests too deeply; simplify or split it (nesting limit is 512)",
+                    ),
+                    .unmatched_parenthesis => self.errors.addExpectedError(tok, "')' to close type annotation"),
+                    .missing_type => self.errors.addExpectedError(tok, "type annotation"),
+                    .unsupported_suffix => self.errors.addExpectedError(tok, "end of type annotation"),
+                }
+                if (self.errors.outOfMemory()) return error.OutOfMemory;
+                return error.ParseError;
+            },
+        };
+        try self.resolveAdmittedPredicateTarget(&value, params);
+        try self.resumeAfterRawErasureObserved(input.admission_end, previous_token);
+        return value;
+    }
+
+    fn resolveAdmittedPredicateTarget(
+        self: *Parser,
+        value: *type_syntax.ReturnSyntax,
+        params: []const NodeIndex,
+    ) !void {
+        switch (value.structure) {
+            .value => {},
+            .predicate => |*predicate| {
+                const target_text = predicate.target_span.text(self.source);
+                const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
+                for (params) |pattern| {
+                    const tag = view.getTag(pattern) orelse return error.InvalidPredicateTarget;
+                    if (tag != .pattern_element) return error.InvalidPredicateTarget;
+                    const location = view.getLoc(pattern) orelse return error.InvalidPredicateTarget;
+                    const start: usize = location.offset;
+                    if (start >= self.source.len or !isAsciiIdentifierStart(self.source[start])) {
+                        return error.InvalidPredicateTarget;
+                    }
+                    var end = start + 1;
+                    while (end < self.source.len and isAsciiIdentifierContinue(self.source[end])) end += 1;
+                    if (!std.mem.eql(u8, self.source[start..end], target_text)) continue;
+                    const binding = view.paramBinding(pattern) orelse return error.InvalidPredicateTarget;
+                    predicate.target = .{ .resolved = .{
+                        .pattern = pattern,
+                        .binding = binding,
+                    } };
+                    break;
+                }
+            },
+        }
+    }
+
+    fn recoverAdmissionFunctionExpression(self: *Parser, keyword: Token) !void {
+        const checkpoint = self.type_store.checkpoint();
+        defer self.type_store.rollback(checkpoint);
+        var pending_owner: ?type_syntax.PendingGenericOwner = null;
+        defer if (pending_owner) |*owner| self.type_store.cancelGenericOwner(owner);
+
+        const keyword_end = keyword.start + keyword.len;
+        if (!containsOnlyAdmissionWhitespace(self.source, keyword_end, self.current.start)) return;
+        if (self.current.type == .identifier) {
+            const name = self.current;
+            self.advance();
+            const reservation = try self.tryReserveFunctionGenericOwner(name, keyword_end);
+            pending_owner = reservation.pending_owner;
+            if (reservation.header_admission != .typed) return;
+        } else if (type_syntax.tokenStartsGenericList(self.source, self.current)) {
+            const scanned = switch (try self.scanObservedGenericList(self.current.start)) {
+                .scanned => |value| value,
+                .not_matched, .lexical_nonmatch => return,
+                .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+            };
+            try self.classifyAdmissionGenericList(scanned.span);
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+            const previous = self.previous;
+            try self.resumeAfterRawErasureObserved(scanned.span.end, previous);
+            if (!containsOnlyAdmissionWhitespace(self.source, scanned.span.end, self.current.start)) return;
+        }
+        if (self.current.type != .lparen) return;
+
+        _ = try self.scopes.pushScope(.function);
+        defer self.scopes.popScope();
+        var params_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
+        const params_allocator = params_sfa.get();
+        var params = std.ArrayList(NodeIndex).empty;
+        defer params.deinit(params_allocator);
+        var signature = self.type_store.beginFunctionSignature();
+        defer self.type_store.cancelFunctionSignature(&signature);
+        var flags: FunctionFlags = .{};
+        try self.parseParenthesizedFunctionHeader(.named, &flags, &params, params_allocator, &signature);
+    }
+
+    fn retainAdmissionHeaderFailure(
+        self: *Parser,
+        err: anyerror,
+        errors_before: usize,
+        saved: *?AdmissionHeaderFailure,
+    ) !void {
+        switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        }
+        if (self.errors.outOfMemory()) return error.OutOfMemory;
+        if (self.terminalAdmissionFailure() != null) return err;
+        if (self.admission) |collector| if (collector.shouldStop()) return err;
+        if (self.shouldPropagateAdmissionError(err)) return err;
+
+        const error_count = self.errors.errorCount();
+        if (saved.*) |retained| {
+            if (error_count < retained.error_count) {
+                return error.InvalidAdmissionErrorCheckpoint;
+            }
+            self.errors.errors.items.len = retained.error_count;
+            return;
+        }
+        if (error_count <= errors_before) return err;
+        saved.* = .{ .first_error = err, .error_count = error_count };
+    }
+
+    fn selectAdmissionHeaderFailure(
+        self: *Parser,
+        err: anyerror,
+        saved: ?AdmissionHeaderFailure,
+    ) anyerror {
+        if (self.admission == null) return err;
+        switch (err) {
+            error.OutOfMemory => return err,
+            else => {},
+        }
+        if (self.errors.outOfMemory()) return error.OutOfMemory;
+        if (self.terminalAdmissionFailure() != null) return err;
+        if (self.admission) |collector| if (collector.shouldStop()) return err;
+        if (self.shouldPropagateAdmissionError(err)) return err;
+        const retained = saved orelse return err;
+        if (self.errors.errorCount() < retained.error_count) {
+            return error.InvalidAdmissionErrorCheckpoint;
+        }
+        self.errors.errors.items.len = retained.error_count;
+        return retained.first_error;
+    }
+
+    fn recoverAdmissionHeaderItem(
+        self: *Parser,
+        raw_start: u32,
+        saved_tokenizer: Tokenizer,
+        runtime_previous: Token,
+        allow_annotation: bool,
+    ) !void {
+        var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+        defer caught.deinit(self.type_store.allocator);
+        var pos: usize = raw_start;
+        var paren_depth: u16 = 0;
+        var brace_depth: u16 = 0;
+        var bracket_depth: u16 = 0;
+        var can_start_annotation = allow_annotation;
+
+        while (pos < self.source.len) {
+            const byte = self.source[pos];
+            if (byte == '\'' or byte == '"' or byte == '`') {
+                switch (try type_syntax.scanAdmissionQuotedRegion(
+                    self.type_store.allocator,
+                    .{
+                        .source = self.source,
+                        .start = @intCast(pos),
+                        .caught = &caught,
+                    },
+                )) {
+                    .complete => |end| {
+                        pos = end;
+                        continue;
+                    },
+                    .terminal => |diagnostic| {
+                        try self.commitAdmissionCaught(caught.items);
+                        try self.recordFatalAdmission(diagnostic);
+                        return error.AdmissionRefused;
+                    },
+                }
+            }
+
+            // The enclosing parameter parenthesis contributes one depth level.
+            const total_depth = 1 + @as(u32, paren_depth) +
+                @as(u32, brace_depth) + @as(u32, bracket_depth);
+            switch (byte) {
+                '(', '{', '[' => {
+                    if (total_depth >= type_syntax.max_type_depth) {
+                        try self.commitAdmissionCaught(caught.items);
+                        return try self.refuseAdmissionNesting(@intCast(pos));
+                    }
+                    switch (byte) {
+                        '(' => paren_depth += 1,
+                        '{' => brace_depth += 1,
+                        '[' => bracket_depth += 1,
+                        else => unreachable,
+                    }
+                },
+                ')' => if (paren_depth > 0) {
+                    paren_depth -= 1;
+                } else {
+                    break;
+                },
+                '}' => if (brace_depth > 0) {
+                    brace_depth -= 1;
+                },
+                ']' => if (bracket_depth > 0) {
+                    bracket_depth -= 1;
+                },
+                '?' => if (can_start_annotation and total_depth == 1) {
+                    var colon = pos + 1;
+                    while (colon < self.source.len and switch (self.source[colon]) {
+                        ' ', '\t', '\r', '\n' => true,
+                        else => false,
+                    }) colon += 1;
+                    if (colon < self.source.len and self.source[colon] == ':') {
+                        try self.commitAdmissionCaught(caught.items);
+                        caught.clearRetainingCapacity();
+                        try self.recordAdmission(.optional_parameter, .{
+                            .start = @intCast(pos),
+                            .end = @intCast(pos + 1),
+                        }, false);
+                        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(@intCast(pos + 1));
+                        pos = colon;
+                        continue;
+                    }
+                },
+                ':' => if (can_start_annotation and total_depth == 1) {
+                    try self.commitAdmissionCaught(caught.items);
+                    caught.clearRetainingCapacity();
+                    if (self.hasAdmissionTypeStart(@intCast(pos + 1))) {
+                        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(@intCast(pos + 1));
+                        var end: u32 = @intCast(pos + 1);
+                        try self.collectTypeAdmission(
+                            @intCast(pos + 1),
+                            .parameter,
+                            .parameter_type,
+                            .propagate,
+                            &end,
+                        );
+                        try self.recordRecoveryErasure(.{ .start = @intCast(pos), .end = end });
+                        pos = end;
+                        continue;
+                    }
+                    self.admission_presentation = try self.admission_presentation.declinedParameterColon(@intCast(pos));
+                },
+                '=' => if (total_depth == 1) {
+                    try self.commitAdmissionCaught(caught.items);
+                    caught.clearRetainingCapacity();
+                    try self.recordAdmission(.default_parameter, .{
+                        .start = @intCast(pos),
+                        .end = @intCast(pos + 1),
+                    }, false);
+                    can_start_annotation = false;
+                },
+                ',' => if (total_depth == 1) break,
+                else => {},
+            }
+            pos += 1;
+        }
+
+        try self.commitAdmissionCaught(caught.items);
+        self.tokenizer = saved_tokenizer;
+        try self.resumeAfterRawErasureObserved(@intCast(pos), runtime_previous);
+    }
+
+    fn trackAdmissionReturnPrefix(self: *Parser, enabled: bool) !void {
+        if (!enabled or self.admission == null or self.admissionCoveredByRecovery(self.previous.start)) return;
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(self.previous.start + self.previous.len);
+        if (self.current.type == .colon) {
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(self.current.start + self.current.len);
+        }
+    }
+
     fn parseParenthesizedFunctionHeader(
         self: *Parser,
         kind: HeaderKind,
@@ -1492,21 +3186,52 @@ pub const Parser = struct {
         params_alloc: std.mem.Allocator,
         pending_signature: ?*type_syntax.PendingFunctionSignature,
     ) !void {
+        const saved_parameter_header = self.admission_parameter_header;
+        self.admission_parameter_header = self.admission != null and pending_signature != null;
+        defer self.admission_parameter_header = saved_parameter_header;
         try self.expect(.lparen, "'('");
+        var saved_failure: ?AdmissionHeaderFailure = null;
         if (!self.check(.rparen)) {
             var progress: ProgressGuard = .{};
             while (true) {
                 progress.iteration(self);
+                const item_checkpoint = self.type_store.checkpoint();
+                const errors_before = self.errors.errorCount();
+                const flags_before = flags.*;
                 if (self.match(.spread)) {
                     self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
                     flags.has_rest_param = true;
                 }
                 if (self.check(.lbrace) or self.check(.lbracket)) {
+                    if (self.admission == null or pending_signature == null) {
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; bind one parameter, then read its members explicitly in the body");
+                        return error.ParseError;
+                    }
+                    const raw_start = self.current.start;
+                    const saved_tokenizer = self.tokenizer;
+                    const runtime_previous = self.previous;
                     self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; bind one parameter, then read its members explicitly in the body");
-                    return error.ParseError;
+                    try self.retainAdmissionHeaderFailure(
+                        error.ParseError,
+                        errors_before,
+                        &saved_failure,
+                    );
+                    try self.recoverAdmissionHeaderItem(
+                        raw_start,
+                        saved_tokenizer,
+                        runtime_previous,
+                        true,
+                    );
+                    self.type_store.rollback(item_checkpoint);
+                    flags.* = flags_before;
+                    if (!self.match(.comma)) break;
+                    if (self.check(.rparen)) break;
+                    continue;
                 }
 
-                const param_name = try self.expectIdentifier("parameter name");
+                const param_name = self.expectIdentifier("parameter name") catch |err| {
+                    return self.selectAdmissionHeaderFailure(err, saved_failure);
+                };
                 const param_atom = try self.addAtom(param_name.text(self.source));
                 const param_binding = self.scopes.declareBinding(
                     param_name.text(self.source),
@@ -1515,18 +3240,98 @@ pub const Parser = struct {
                     false,
                 ) catch |err| switch (kind) {
                     .named => {
+                        if (self.admission != null) switch (err) {
+                            error.OutOfMemory => return err,
+                            else => {},
+                        };
                         self.errorAtCurrent("too many parameters");
-                        return error.TooManyLocals;
+                        return self.selectAdmissionHeaderFailure(
+                            error.TooManyLocals,
+                            saved_failure,
+                        );
                     },
-                    .arrow => return self.bindingFailure(err),
+                    .arrow => return self.selectAdmissionHeaderFailure(
+                        self.bindingFailure(err),
+                        saved_failure,
+                    ),
                 };
-                const parameter_type = if (pending_signature != null and self.check(.colon))
-                    try self.parseFunctionTypeValue(param_name)
+                if (self.admission != null and pending_signature != null and self.check(.question)) {
+                    const question = self.current;
+                    var candidate = self.tokenizer;
+                    const colon = candidate.next();
+                    const gap = self.source[question.start + question.len .. colon.start];
+                    if (colon.type == .colon and
+                        std.mem.trim(u8, gap, " \t\r\n").len == 0)
+                    {
+                        try self.recordAdmission(.optional_parameter, .{
+                            .start = question.start,
+                            .end = question.start + question.len,
+                        }, false);
+                        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(question.start + question.len);
+                        self.advance();
+                    }
+                }
+                if (self.admission != null and pending_signature != null and
+                    self.check(.colon) and
+                    !self.hasAdmissionTypeStart(self.current.start + self.current.len))
+                {
+                    const colon = self.current;
+                    const saved_tokenizer = self.tokenizer;
+                    const runtime_previous = self.previous;
+                    self.expect(.rparen, "')'") catch |err| {
+                        try self.retainAdmissionHeaderFailure(err, errors_before, &saved_failure);
+                    };
+                    try self.recoverAdmissionHeaderItem(
+                        colon.start,
+                        saved_tokenizer,
+                        runtime_previous,
+                        true,
+                    );
+                    self.type_store.rollback(item_checkpoint);
+                    flags.* = flags_before;
+                    if (!self.match(.comma)) break;
+                    if (self.check(.rparen)) break;
+                    continue;
+                }
+                const parameter_type = if (pending_signature != null and self.check(.colon) and
+                    (self.admission == null or
+                        self.hasAdmissionTypeStart(self.current.start + self.current.len)))
+                    self.parseFunctionTypeValue(param_name) catch |err| {
+                        return self.selectAdmissionHeaderFailure(err, saved_failure);
+                    }
                 else
                     null;
-                if (self.match(.assign)) {
-                    self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
-                    return error.ParseError;
+                if (self.check(.assign)) {
+                    if (self.admission != null and pending_signature != null) {
+                        const assign = self.current;
+                        const saved_tokenizer = self.tokenizer;
+                        self.advance();
+                        try self.recordAdmission(.default_parameter, .{
+                            .start = assign.start,
+                            .end = assign.start + assign.len,
+                        }, false);
+                        self.errors.addErrorAt(.unsupported_feature, assign, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
+                        try self.retainAdmissionHeaderFailure(
+                            error.ParseError,
+                            errors_before,
+                            &saved_failure,
+                        );
+                        try self.recoverAdmissionHeaderItem(
+                            assign.start + assign.len,
+                            saved_tokenizer,
+                            assign,
+                            false,
+                        );
+                        self.type_store.rollback(item_checkpoint);
+                        flags.* = flags_before;
+                        if (!self.match(.comma)) break;
+                        if (self.check(.rparen)) break;
+                        continue;
+                    } else {
+                        self.advance();
+                        self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
+                        return error.ParseError;
+                    }
                 }
                 const param_node = try self.nodes.add(.{
                     .tag = .pattern_element,
@@ -1551,10 +3356,26 @@ pub const Parser = struct {
                 if (self.check(.rparen)) break;
             }
         }
-        try self.expect(.rparen, "')'");
-        if (pending_signature != null and self.check(.colon)) {
-            const value = try self.parseFunctionReturnSyntax(self.previous, params.items);
+        self.expect(.rparen, "')'") catch |err| {
+            return self.selectAdmissionHeaderFailure(err, saved_failure);
+        };
+        try self.trackAdmissionReturnPrefix(pending_signature != null);
+        if (pending_signature != null and self.check(.colon) and
+            (self.admission == null or
+                self.hasAdmissionTypeStart(self.current.start + self.current.len)))
+        {
+            const value = self.parseFunctionReturnSyntax(kind, self.previous, params.items) catch |err| {
+                return self.selectAdmissionHeaderFailure(err, saved_failure);
+            };
             try self.type_store.setFunctionReturn(pending_signature.?, value);
+        }
+        if (saved_failure) |retained| {
+            if (self.errors.outOfMemory()) return error.OutOfMemory;
+            if (self.errors.errorCount() < retained.error_count) {
+                return error.InvalidAdmissionErrorCheckpoint;
+            }
+            self.errors.errors.items.len = retained.error_count;
+            return retained.first_error;
         }
     }
 
@@ -1582,9 +3403,9 @@ pub const Parser = struct {
     ) anyerror!ParsedFunctionBody {
         const loc = self.current.location();
         const parameter_opener = self.current.start;
-        const signature_error_count = self.errors.getErrors().len;
+        const signature_publication_checkpoint = self.typePublicationCheckpoint();
         var pending_signature: ?type_syntax.PendingFunctionSignature = if (self.parse_type_syntax and
-            header_admission == .typed)
+            !self.admissionCoveredByRecovery(self.current.start) and header_admission == .typed)
             self.type_store.beginFunctionSignature()
         else
             null;
@@ -1630,7 +3451,7 @@ pub const Parser = struct {
 
         // Parse body
         const body = try self.parseBlock();
-        if (!self.typeSyntaxPublicationHealthy(signature_error_count)) {
+        if (!self.typeSyntaxPublicationHealthy(signature_publication_checkpoint)) {
             if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
             pending_signature = null;
         }
@@ -2362,16 +4183,35 @@ pub const Parser = struct {
         defer stmts.deinit(stmts_alloc);
 
         var progress: ProgressGuard = .{};
-        while (!self.check(.rbrace) and !self.check(.eof)) {
+        while (true) {
+            try self.reachAdmissionBoundary();
+            if (self.check(.rbrace)) {
+                if (self.admission != null and self.brace_depth > block_depth) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            if (self.check(.eof)) break;
             progress.iteration(self);
             if (try self.tryConsumeTypeOnlyModule()) continue;
+            if (try self.tryConsumeAdmissionDeclaration()) continue;
             if (try self.tryConsumeTypeDeclaration()) continue;
+            const failed_statement_start = self.current.location().offset;
             if (self.parseStatement()) |stmt| {
                 try stmts.append(stmts_alloc, stmt);
             } else |err| {
+                if (self.shouldPropagateAdmissionError(err)) return err;
+                try self.reachAdmissionBoundary();
                 try self.recordUnreportedStatementError(err);
-                const before = self.current.location().offset;
-                self.synchronize(block_depth);
+                if (self.admission) |collector| if (collector.hasFatal()) {
+                    return error.AdmissionRefused;
+                };
+                const recovery_progress_start = if (self.admission == null)
+                    self.current.location().offset
+                else
+                    failed_statement_start;
+                try self.synchronize(block_depth);
                 // `synchronize` returns without consuming anything when
                 // `previous` is a semicolon or `current` starts a statement, so
                 // an error raised at such a token would leave this loop
@@ -2383,7 +4223,10 @@ pub const Parser = struct {
                 // Not when the token is this block's own `}`: the loop ends on
                 // it and `expect` consumes it, and skipping it here would end
                 // the enclosing block early.
-                if (!self.check(.eof) and !self.check(.rbrace) and self.current.location().offset == before) {
+                if (!self.check(.eof) and
+                    !self.check(.rbrace) and
+                    self.current.location().offset == recovery_progress_start)
+                {
                     self.advance();
                 }
             }
@@ -2426,6 +4269,7 @@ pub const Parser = struct {
         if (!self.check(.lbrace)) {
             // Check for `import "module"` (side-effect import) or `import X from`
             if (self.check(.string_literal)) {
+                if (try self.observeCommittedString(self.current)) return error.AdmissionRefused;
                 self.errorAt(loc, "'import \"module\"' side-effect imports are not supported; use named imports: import { x } from \"module\"");
                 return error.ParseError;
             }
@@ -2504,6 +4348,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
         const module_token = self.current;
+        if (try self.observeCommittedString(module_token)) return error.AdmissionRefused;
         self.advance();
 
         // Get the string content without quotes
@@ -2530,18 +4375,60 @@ pub const Parser = struct {
         });
     }
 
+    fn collectAdmissionExport(
+        self: *Parser,
+        keyword: Token,
+        origin: type_syntax.AdmissionPresentation,
+    ) !?type_syntax.AdmissionKind {
+        if (self.admission == null or self.admissionCoveredByRecovery(keyword.start) or
+            !self.isAdmissionStatementBoundaryAt(keyword.start) or
+            !containsOnlyAdmissionWhitespace(self.source, keyword.start + keyword.len, self.current.start)) return null;
+        const kind: type_syntax.AdmissionKind = switch (self.current.type) {
+            .kw_default => .default_export,
+            .kw_let => .mutable_export,
+            else => return null,
+        };
+        var origin_sink = self.admissionSink().?;
+        origin_sink.presentation = origin;
+        const diagnostic = try origin_sink.present(.{
+            .kind = kind,
+            .span = .{ .start = keyword.start, .end = keyword.start + keyword.len },
+        });
+        var selected = try origin.trackedWhitespaceAt(keyword.start + keyword.len);
+        if (kind == .default_export) {
+            selected = try selected.trackedWhitespaceAt(self.current.start + self.current.len);
+        }
+        self.admission_presentation = selected;
+        const sink = self.admissionSink().?;
+        try sink.recordRecoverable(diagnostic);
+        if (sink.shouldStop()) return error.AdmissionRefused;
+        try self.recordRecoveryErasure(.{ .start = keyword.start, .end = selected.offset });
+        return kind;
+    }
+
     /// Parse export declaration: export function X() {} or export const X = ...
     fn parseExportDeclaration(self: *Parser) anyerror!NodeIndex {
         const type_checkpoint = self.type_store.checkpoint();
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         var retain_type_records = false;
         defer if (!retain_type_records) self.type_store.rollback(type_checkpoint);
 
-        const loc = self.current.location();
+        const keyword = self.current;
+        const loc = keyword.location();
+        const presentation_origin = self.admission_presentation;
         self.advance(); // consume 'export'
+        const admission_export = try self.collectAdmissionExport(keyword, presentation_origin);
 
         // A public declaration has one spelling and one stable imported name.
         if (self.check(.kw_default)) {
+            if (admission_export == .default_export) {
+                self.advance();
+                return switch (self.current.type) {
+                    .kw_function => self.parseFunctionDeclaration(),
+                    .kw_const, .kw_let => self.parseVarDeclaration(),
+                    else => self.parseExpressionStatement(),
+                };
+            }
             self.errors.addErrorAt(.unsupported_feature, self.current, "default exports are not supported; write a named export, for example `export function handler(...) { ... }`");
             self.advance();
             return error.ParseError;
@@ -2590,11 +4477,12 @@ pub const Parser = struct {
                     .from_module_idx = 0,
                 } },
             });
-            retain_type_records = self.typeSyntaxPublicationHealthy(error_count);
+            retain_type_records = self.typeSyntaxPublicationHealthy(publication_checkpoint);
             return export_node;
         }
 
         if (self.check(.kw_let)) {
+            if (admission_export == .mutable_export) return self.parseVarDeclaration();
             self.errors.addErrorAt(.unsupported_feature, self.current, "mutable exports are not supported; use `export const` for module values and keep reassignment inside a function activation");
             self.advance();
             return error.ParseError;
@@ -2614,7 +4502,7 @@ pub const Parser = struct {
                     .from_module_idx = 0,
                 } },
             });
-            retain_type_records = self.typeSyntaxPublicationHealthy(error_count);
+            retain_type_records = self.typeSyntaxPublicationHealthy(publication_checkpoint);
             return export_node;
         }
 
@@ -2651,9 +4539,9 @@ pub const Parser = struct {
     ///   1 + 2 * 3 parses as 1 + (2 * 3) because * has higher precedence than +
     fn parseExpression(self: *Parser, min_prec: Precedence) anyerror!NodeIndex {
         const type_checkpoint = self.type_store.checkpoint();
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         errdefer self.type_store.rollback(type_checkpoint);
-        defer if (!self.typeSyntaxPublicationHealthy(error_count)) {
+        defer if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             self.type_store.rollback(type_checkpoint);
         };
         self.recursion_depth += 1;
@@ -2701,6 +4589,7 @@ pub const Parser = struct {
         var progress: ProgressGuard = .{};
         while (true) {
             progress.iteration(self);
+            if (try self.tryConsumeAdmissionAssertion()) continue;
             var pending_call: ?type_syntax.PendingExplicitCall = null;
             var prec = self.getInfixPrecedence(self.current.type);
             if (type_syntax.tokenStartsGenericList(self.source, self.current) and
@@ -2767,8 +4656,19 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             .kw_function => {
+                const keyword = self.current;
                 self.errors.addErrorAt(.unsupported_feature, self.current, "function expressions are not supported; use arrow functions '(x) => x * 2' or function declarations 'function name() { }' instead");
+                const retained: AdmissionHeaderFailure = .{
+                    .first_error = error.ParseError,
+                    .error_count = self.errors.errorCount(),
+                };
                 self.advance();
+                if (self.admission != null) {
+                    self.recoverAdmissionFunctionExpression(keyword) catch |err| {
+                        return self.selectAdmissionHeaderFailure(err, retained);
+                    };
+                    return self.selectAdmissionHeaderFailure(error.ParseError, retained);
+                }
                 return error.ParseError;
             },
             // class keyword in expression context: const X = class { }
@@ -3103,7 +5003,7 @@ pub const Parser = struct {
         loc: SourceLocation,
         pending_call: ?*type_syntax.PendingExplicitCall,
     ) anyerror!NodeIndex {
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         errdefer if (pending_call) |pending| self.type_store.cancelExplicitCall(pending);
         // Argument lists are almost always tiny, so a small stack buffer keeps
         // them off the heap entirely; longer lists fall back to the parser
@@ -3152,7 +5052,7 @@ pub const Parser = struct {
             } },
         });
         if (pending_call) |pending| {
-            if (!self.typeSyntaxPublicationHealthy(error_count)) {
+            if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
                 self.type_store.cancelExplicitCall(pending);
             } else {
                 try self.type_store.finishExplicitCall(
@@ -3289,6 +5189,7 @@ pub const Parser = struct {
 
     fn parseString(self: *Parser) anyerror!NodeIndex {
         const token = self.current;
+        if (try self.observeCommittedString(token)) return error.AdmissionRefused;
         self.advance();
 
         if (self.expression_profile != null) return self.addExpressionStringNode(token);
@@ -3336,6 +5237,7 @@ pub const Parser = struct {
 
         if (self.current.type == .template_head) {
             self.errors.addErrorAt(.unsupported_feature, self.current, "template interpolation is not supported; build a string array with explicit `String(...)` conversions and call `.join(\"\")`");
+            try self.skipAdmissionTemplateCurrent();
             return error.ParseError;
         }
 
@@ -3563,6 +5465,7 @@ pub const Parser = struct {
                         return error.ParseError;
                     } else if (self.check(.string_literal)) {
                         const key = self.current;
+                        if (try self.observeCommittedString(key)) return error.AdmissionRefused;
                         self.advance();
                         if (self.expression_profile != null) {
                             key_node = try self.addExpressionStringNode(key);
@@ -3685,12 +5588,12 @@ pub const Parser = struct {
         self: *Parser,
         pending_owner: ?*type_syntax.PendingGenericOwner,
     ) anyerror!NodeIndex {
-        const error_count = self.errors.getErrors().len;
+        const publication_checkpoint = self.typePublicationCheckpoint();
         errdefer if (pending_owner) |pending| self.type_store.cancelGenericOwner(pending);
         const loc = self.current.location();
         var flags = FunctionFlags{ .is_arrow = true };
         const parameter_opener: ?u32 = if (self.check(.lparen)) self.current.start else null;
-        var pending_signature: ?type_syntax.PendingFunctionSignature = if (self.parse_type_syntax and parameter_opener != null) self.type_store.beginFunctionSignature() else null;
+        var pending_signature: ?type_syntax.PendingFunctionSignature = if (self.parse_type_syntax and !self.admissionCoveredByRecovery(self.current.start) and parameter_opener != null) self.type_store.beginFunctionSignature() else null;
         errdefer if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
 
         // Enter function scope
@@ -3768,7 +5671,7 @@ pub const Parser = struct {
                 .data = .{ .opt_value = expr },
             });
         }
-        if (!self.typeSyntaxPublicationHealthy(error_count)) {
+        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
             pending_signature = null;
         }
@@ -3803,7 +5706,7 @@ pub const Parser = struct {
             );
         }
         if (pending_owner) |pending| {
-            if (!self.typeSyntaxPublicationHealthy(error_count)) {
+            if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
                 self.type_store.cancelGenericOwner(pending);
             } else {
                 try self.type_store.finishGenericOwner(
@@ -3820,16 +5723,120 @@ pub const Parser = struct {
 
     // ============ Utility Functions ============
 
-    fn advance(self: *Parser) void {
+    fn nextTokenStagingAdmissionTrivia(self: *Parser) Token {
+        if (self.admission_recovery_observing) self.tokenizer.can_be_regex = false;
+        if (self.admission == null) return self.tokenizer.next();
+        self.pending_admission_trivia = null;
+        var observation: ?tokenizer_mod.TriviaObservation = null;
+        const token_value = self.tokenizer.nextObserved(&observation);
+        if (observation) |event| switch (event) {
+            .unterminated_comment => |failure| {
+                self.pending_admission_trivia = .{
+                    .opener = failure.opener,
+                    .@"resume" = failure.@"resume",
+                };
+            },
+        };
+        return token_value;
+    }
+
+    fn commitPendingAdmissionTrivia(self: *Parser) void {
+        const failure = self.pending_admission_trivia orelse return;
+        self.pending_admission_trivia = null;
+        if (self.admission_failure != null) return;
+        if (self.admission) |collector| {
+            if (collector.shouldStop()) return;
+        }
+        self.admission_failure = .{ .unterminated_comment = failure };
+    }
+
+    fn reachAdmissionBoundary(self: *Parser) !void {
+        self.commitPendingAdmissionTrivia();
+        if (self.admission_failure) |failure| return switch (failure) {
+            .diagnostic => error.AdmissionRefused,
+            .unterminated_comment => error.UnterminatedComment,
+        };
+        if (self.admission) |collector| {
+            if (collector.shouldStop()) return error.AdmissionRefused;
+        }
+    }
+
+    fn resumeAfterRawErasureObserved(
+        self: *Parser,
+        raw_end: u32,
+        runtime_previous: Token,
+    ) !void {
+        self.tokenizer.resumeAfterRawErasure(raw_end, runtime_previous);
+        self.previous = runtime_previous;
+        self.current = self.nextTokenStagingAdmissionTrivia();
         if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        self.reportNonAscii();
+    }
+
+    fn advanceAdmissionPresentation(self: *Parser) void {
+        if (self.admission == null or !self.primed or self.admission_parameter_header or
+            self.admissionCoveredByRecovery(self.current.start)) return;
+        const token = self.current;
+        const end = token.start + token.len;
+        if (end <= self.admission_presentation.offset) return;
+        const tracks_whitespace = switch (token.type) {
+            .kw_function => true,
+            .identifier => self.previous.type == .kw_function and containsOnlyAdmissionWhitespace(
+                self.source,
+                self.previous.start + self.previous.len,
+                token.start,
+            ),
+            .assign,
+            .plus_assign,
+            .minus_assign,
+            .star_assign,
+            .slash_assign,
+            .percent_assign,
+            .ampersand_assign,
+            .pipe_assign,
+            .caret_assign,
+            .lt_lt_assign,
+            .gt_gt_assign,
+            .gt_gt_gt_assign,
+            .star_star_assign,
+            .ampersand_ampersand_assign,
+            .pipe_pipe_assign,
+            .question_question_assign,
+            .eq,
+            .eq_eq,
+            .ne,
+            .ne_ne,
+            .le,
+            .ge,
+            => true,
+            else => false,
+        };
+        if (tracks_whitespace) {
+            self.admission_presentation = self.admission_presentation.trackedWhitespaceAt(end) catch |err|
+                @panic(@errorName(err));
+        }
+    }
+
+    fn advance(self: *Parser) void {
+        self.advanceAdmissionPresentation();
+        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        if (self.admission != null and !self.admissionCoveredByRecovery(self.current.start)) switch (self.current.type) {
+            .kw_import => self.admission_in_import = true,
+            .semicolon => if (self.admission_in_import) {
+                self.admission_in_import = false;
+            },
+            else => {},
+        };
         if (self.primed) switch (self.current.type) {
             .lbrace => self.brace_depth +|= 1,
             .rbrace => self.brace_depth -|= 1,
             else => {},
         };
+        self.commitPendingAdmissionTrivia();
         self.primed = true;
         self.previous = self.current;
-        self.current = self.tokenizer.next();
+        self.current = self.nextTokenStagingAdmissionTrivia();
+        self.finishAdmissionRecoveryIfRejoined();
         self.reportNonAscii();
     }
 
@@ -3865,6 +5872,47 @@ pub const Parser = struct {
         return isAsciiIdentifierStart(byte) or std.ascii.isDigit(byte);
     }
 
+    fn containsOnlyAdmissionWhitespace(
+        source: []const u8,
+        start_offset: u32,
+        end_offset: u32,
+    ) bool {
+        const start: usize = start_offset;
+        const end: usize = end_offset;
+        if (start > end or end > source.len) return false;
+        for (source[start..end]) |byte| switch (byte) {
+            ' ', '\t', '\r', '\n' => {},
+            else => return false,
+        };
+        return true;
+    }
+
+    fn admittedTypeInput(
+        self: *const Parser,
+        start_offset: u32,
+        admission_end: u32,
+        trim_trailing: bool,
+    ) !type_syntax.AdmittedTypeInput {
+        if (start_offset > admission_end or @as(usize, admission_end) > self.source.len) {
+            return error.InvalidTypeSpan;
+        }
+        var raw_start: usize = start_offset;
+        const end: usize = admission_end;
+        while (raw_start < end) switch (self.source[raw_start]) {
+            ' ', '\t', '\r', '\n' => raw_start += 1,
+            else => break,
+        };
+        var raw_end = end;
+        if (trim_trailing) while (raw_end > raw_start) switch (self.source[raw_end - 1]) {
+            ' ', '\t', '\r', '\n' => raw_end -= 1,
+            else => break,
+        };
+        return .{
+            .raw_span = .{ .start = @intCast(raw_start), .end = @intCast(raw_end) },
+            .admission_end = admission_end,
+        };
+    }
+
     /// Report the first character above ASCII in an `invalid` token, once.
     ///
     /// The tokenizer hands back one `invalid` token for a whole run of such
@@ -3881,6 +5929,7 @@ pub const Parser = struct {
     /// about identifiers. A character that is not in an identifier (`a − 1`,
     /// a no-break space, a curly quote) must not be described as one.
     fn reportNonAscii(self: *Parser) void {
+        if (self.admission_recovery_observing) return;
         if (self.current.type != .invalid) return;
         const text = self.current.text(self.source);
         const first = for (text, 0..) |byte, index| {
@@ -4203,6 +6252,245 @@ pub const Parser = struct {
         return @intCast(count);
     }
 
+    fn finishAdmissionRecoveryIfRejoined(self: *Parser) void {
+        if (self.admission_recovery_observing) return;
+        const recovery = if (self.admission_recovery) |*active| active else return;
+        if (self.current.start != recovery.cursor.current.start or
+            self.current.start < recovery.covered_until) return;
+        self.admission_presentation = recovery.presentation;
+        self.admission_in_import = recovery.cursor.admission_in_import;
+        self.admission_parameter_header = recovery.cursor.admission_parameter_header;
+        self.last_erased_type_span = recovery.cursor.last_erased_type_span;
+        recovery.erasures.deinit(self.type_store.allocator);
+        self.admission_recovery = null;
+    }
+
+    fn admissionCoveredByRecovery(self: *const Parser, offset: u32) bool {
+        const recovery = self.admission_recovery orelse return false;
+        return !self.admission_recovery_observing and offset < recovery.covered_until;
+    }
+
+    fn beginAdmissionRecovery(self: *Parser) !bool {
+        if (self.admission == null or self.current.type != .string_literal or
+            self.previous.type != .regex_literal) return false;
+        const regex_end = self.previous.start + self.previous.len;
+        if (regex_end > self.current.start) return false;
+        var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
+        defer caught.deinit(self.type_store.allocator);
+        var pos = self.previous.start;
+        while (pos < regex_end) : (pos += 1) {
+            if (self.source[pos] != '\'' and self.source[pos] != '"' and
+                self.source[pos] != '`') continue;
+            const opener = pos;
+            switch (try type_syntax.scanAdmissionQuotedRegion(self.type_store.allocator, .{
+                .source = self.source,
+                .start = opener,
+                .caught = &caught,
+            })) {
+                .terminal => return false,
+                .complete => |end| {
+                    if (end != self.current.start + 1) {
+                        pos = end - 1;
+                        continue;
+                    }
+                    if (self.source[opener] != self.source[self.current.start]) return false;
+                    const runtime_cursor = self.cursorCheckpoint();
+                    defer self.restoreCursorCheckpoint(runtime_cursor);
+                    self.tokenizer = Tokenizer.init(self.source);
+                    self.tokenizer.resumeAfterRawErasure(opener, self.previous);
+                    self.tokenizer.can_be_regex = false;
+                    self.current = self.nextTokenStagingAdmissionTrivia();
+                    self.admission_recovery = .{
+                        .cursor = self.cursorCheckpoint(),
+                        .presentation = self.admission_presentation,
+                        .covered_until = opener,
+                        .quoted_region = .{ .start = opener, .end = end },
+                    };
+                    return true;
+                },
+            }
+        }
+        return false;
+    }
+
+    fn observeAdmissionRecoveryThrough(self: *Parser, boundary: u32) !void {
+        const runtime_cursor = self.cursorCheckpoint();
+        const runtime_presentation = self.admission_presentation;
+        const store_checkpoint = self.type_store.checkpoint();
+        const module_diagnostic_count = self.type_only_module_diagnostics.items.len;
+        const module_refusal = self.type_only_module_refusal;
+        const module_exclusion = self.type_only_module_exclusion;
+        defer {
+            self.type_store.rollback(store_checkpoint);
+            self.type_only_module_diagnostics.items.len = module_diagnostic_count;
+            self.type_only_module_refusal = module_refusal;
+            self.type_only_module_exclusion = module_exclusion;
+            self.restoreCursorCheckpoint(runtime_cursor);
+            self.admission_presentation = runtime_presentation;
+            self.admission_recovery_observing = false;
+        }
+        const saved = self.admission_recovery orelse return error.InvalidAdmissionRecovery;
+        self.restoreCursorCheckpoint(saved.cursor);
+        self.admission_presentation = saved.presentation;
+        self.admission_recovery_observing = true;
+        var progress: ProgressGuard = .{};
+        while (self.current.start < boundary) {
+            try self.reachAdmissionBoundary();
+            if (self.current.type == .eof) break;
+            progress.iteration(self);
+            if (self.current.type == .string_literal) {
+                self.admission_recovery.?.quoted_region = .{
+                    .start = self.current.start,
+                    .end = self.current.start + self.current.len,
+                };
+                if (try self.observeCommittedString(self.current)) continue;
+            }
+            if (self.current.type == .template_head) {
+                try self.skipAdmissionTemplateCurrent();
+                continue;
+            }
+            if (try self.tryConsumeTypeOnlyModule() or
+                try self.tryConsumeTypeDeclaration() or
+                try self.tryConsumeAdmissionDeclaration())
+            {
+                if (self.last_erased_type_span) |span| try self.recordRecoveryErasure(span);
+                continue;
+            }
+            if (try self.tryConsumeAdmissionAssertion()) continue;
+            if (self.current.type == .kw_const or self.current.type == .kw_let or
+                self.current.type == .kw_var)
+            {
+                if (try self.collectVarDeclarationAdmission(self.current)) continue;
+            }
+            if (try self.observeRecoveryExport()) continue;
+            if (try self.observeRecoveryFunction()) continue;
+            if (try self.observeRecoveryGeneric()) continue;
+            self.advance();
+        }
+        if (self.pending_admission_trivia) |failure| {
+            if (failure.opener < boundary) try self.reachAdmissionBoundary();
+        }
+        const recovery = &self.admission_recovery.?;
+        recovery.cursor = self.cursorCheckpoint();
+        recovery.presentation = self.admission_presentation;
+        recovery.covered_until = if (self.pending_admission_trivia) |failure|
+            @min(self.current.start, failure.opener)
+        else
+            self.current.start;
+    }
+
+    fn alignAdmissionRecoveryString(self: *Parser) !bool {
+        if (self.admission == null or self.current.type != .string_literal) return false;
+        if (self.admission_recovery == null and !try self.beginAdmissionRecovery()) return false;
+        var recovery = &self.admission_recovery.?;
+        const quoted = recovery.quoted_region;
+        if (quoted.end != self.current.start + 1 or quoted.start >= self.current.start) return false;
+        while (true) {
+            const prior_end = self.current.start + self.current.len;
+            try self.observeAdmissionRecoveryThrough(prior_end);
+            recovery = &self.admission_recovery.?;
+            var first: usize = 0;
+            while (first < recovery.erasures.items.len and
+                recovery.erasures.items[first].end <= self.current.start) first += 1;
+            self.current = try self.tokenizer.rescanRecoveryString(self.current, recovery.erasures.items[first..]);
+            self.pending_admission_trivia = null;
+            if (self.current.start + self.current.len <= prior_end) break;
+        }
+        return true;
+    }
+
+    fn observeRecoveryExport(self: *Parser) !bool {
+        if (self.current.type != .kw_export) return false;
+        const keyword = self.current;
+        const origin = self.admission_presentation;
+        self.advance();
+        _ = try self.collectAdmissionExport(keyword, origin);
+        if (self.current.type == .kw_default) self.advance();
+        return true;
+    }
+
+    fn observeRecoveryHeader(self: *Parser, kind: HeaderKind) !void {
+        if (self.current.type != .lparen) return error.InvalidAdmissionRecovery;
+        const saved_header = self.admission_parameter_header;
+        self.admission_parameter_header = true;
+        defer self.admission_parameter_header = saved_header;
+        var raw_start = self.current.start + self.current.len;
+        var item_tokenizer = self.tokenizer;
+        self.advance();
+        while (true) {
+            try self.recoverAdmissionHeaderItem(raw_start, item_tokenizer, self.previous, true);
+            if (self.current.type != .comma) break;
+            raw_start = self.current.start + self.current.len;
+            item_tokenizer = self.tokenizer;
+            self.advance();
+        }
+        if (self.current.type != .rparen) return;
+        self.advance();
+        try self.trackAdmissionReturnPrefix(true);
+        if (self.current.type == .colon and self.hasAdmissionTypeStart(self.current.start + self.current.len)) {
+            const input = try self.collectAdmissionFunctionReturn(kind);
+            try self.resumeAfterRawErasureObserved(input.admission_end, self.previous);
+        }
+    }
+
+    fn observeRecoveryFunction(self: *Parser) !bool {
+        if (self.current.type == .lparen) {
+            const after_opener = type_syntax.Cursor.afterCurrent(self.tokenizer);
+            if (type_syntax.scanParenthesizedArrowHeader(self.source, self.current.start, after_opener) == null) return false;
+            try self.observeRecoveryHeader(.arrow);
+            return true;
+        }
+        if (self.current.type != .kw_function) return false;
+        const keyword = self.current;
+        const keyword_end = keyword.start + keyword.len;
+        self.advance();
+        if (!containsOnlyAdmissionWhitespace(self.source, keyword_end, self.current.start)) return true;
+        if (self.current.type == .identifier) {
+            const name = self.current;
+            self.advance();
+            const selected = try self.selectFunctionGeneric(name, keyword_end);
+            if (selected.cursor) |cursor| self.adoptAdmissionCursor(cursor, selected.previous.?);
+            if (selected.header_admission != .typed) return true;
+        } else if (type_syntax.tokenStartsGenericList(self.source, self.current)) {
+            const scanned = switch (try self.scanObservedGenericList(self.current.start)) {
+                .scanned => |value| value,
+                .not_matched, .lexical_nonmatch => return true,
+                .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
+            };
+            try self.classifyAdmissionGenericList(scanned.span);
+            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+            try self.recordRecoveryErasure(scanned.span);
+            const previous = self.previous;
+            try self.resumeAfterRawErasureObserved(scanned.span.end, previous);
+            if (!containsOnlyAdmissionWhitespace(self.source, scanned.span.end, self.current.start)) return true;
+        }
+        if (self.current.type == .lparen) try self.observeRecoveryHeader(.named);
+        return true;
+    }
+
+    fn observeRecoveryGeneric(self: *Parser) !bool {
+        if (!type_syntax.tokenStartsGenericList(self.source, self.current)) return false;
+        const start = self.current.start;
+        switch (try self.selectArrowGeneric()) {
+            .selected => |selected| {
+                self.adoptAdmissionCursor(selected.cursor, selected.previous);
+                try self.observeRecoveryHeader(.arrow);
+                return true;
+            },
+            .rejected_call_grammar => return false,
+            .not_generic => if (self.current.start != start) return true,
+        }
+        if (try self.selectErasedTypePrefix(.expression)) |selected| {
+            self.adoptAdmissionCursor(selected.cursor, selected.previous);
+            return true;
+        }
+        if (try self.selectExplicitCall()) |selected| {
+            self.adoptAdmissionCursor(selected.cursor, selected.previous);
+            return true;
+        }
+        return false;
+    }
+
     /// Skip to the next point where parsing can safely resume, recording no
     /// error on the way. `block_depth` is the brace level of the block whose
     /// statement failed (0 at the top level). A synchronization point is a `;`
@@ -4215,35 +6503,69 @@ pub const Parser = struct {
     /// a `switch`) and reported the rest of it as new faults: a `return`
     /// "outside of function", an expression "expected" at a `}`. Those follow
     /// from the first fault and name nothing the author can fix separately.
-    fn synchronize(self: *Parser, block_depth: u32) void {
+    fn synchronize(self: *Parser, block_depth: u32) !void {
         self.errors.enterPanicMode();
+        defer self.errors.exitPanicMode();
 
         var progress: ProgressGuard = .{};
-        while (!self.check(.eof)) {
+        while (true) {
+            _ = try self.alignAdmissionRecoveryString();
+            try self.reachAdmissionBoundary();
+            if (self.check(.eof)) break;
             progress.iteration(self);
             const at_level = self.brace_depth <= block_depth;
+            if (self.admission != null and self.current.type == .string_literal and
+                try self.observeCommittedString(self.current)) return;
+            if (self.admission != null and !self.admissionCoveredByRecovery(self.current.start) and self.current.type == .template_head) {
+                try self.skipAdmissionTemplateCurrent();
+                continue;
+            }
+            if (try self.tryConsumeAdmissionAssertion()) continue;
             if (at_level and self.previous.type == .semicolon) {
-                self.errors.exitPanicMode();
                 return;
             }
+            if (!at_level and self.admission != null and
+                self.isAdmissionRecoveryRestart()) return;
 
             switch (self.current.type) {
                 // At the failed block's level this `}` closes that block.
                 // Above it, the `}` closes a brace the failed statement opened.
                 .rbrace => if (at_level) {
-                    self.errors.exitPanicMode();
                     return;
                 },
                 .kw_class, .kw_function, .kw_var, .kw_let, .kw_const, .kw_for, .kw_if, .kw_while, .kw_return, .kw_try, .kw_enum => if (at_level) {
-                    self.errors.exitPanicMode();
                     return;
                 },
+                .kw_import, .kw_export => if (at_level and self.admission != null and
+                    self.isTypeDeclarationBoundary()) return,
+                .identifier => if (at_level and self.admission != null and
+                    self.isAdmissionDeclarationStart()) return,
                 else => {},
             }
 
             self.advance();
         }
-        self.errors.exitPanicMode();
+    }
+
+    fn isAdmissionDeclarationStart(self: *const Parser) bool {
+        if (!self.isTypeDeclarationBoundary() or self.current.type != .identifier) return false;
+        const text = self.current.text(self.source);
+        if (std.mem.eql(u8, text, "structural") or
+            std.mem.eql(u8, text, "nominal") or
+            std.mem.eql(u8, text, "interface") or
+            std.mem.eql(u8, text, "type")) return true;
+        if (!std.mem.eql(u8, text, "distinct")) return false;
+        var candidate = self.tokenizer;
+        const next = candidate.next();
+        return next.type == .identifier and std.mem.eql(u8, next.text(self.source), "type");
+    }
+
+    fn isAdmissionRecoveryRestart(self: *const Parser) bool {
+        return switch (self.current.type) {
+            .kw_var, .kw_let, .kw_const, .kw_function, .kw_import, .kw_export => true,
+            .identifier => self.isAdmissionDeclarationStart(),
+            else => false,
+        };
     }
 
     // ============ Node List Helpers ============
@@ -4444,6 +6766,24 @@ pub const Parser = struct {
     pub fn getErrors(self: *const Parser) []const error_mod.ParseError {
         return self.errors.getErrors();
     }
+
+    pub fn getAdmissionDiagnostics(self: *const Parser) []const type_syntax.AdmissionDiagnostic {
+        return if (self.admission) |collector| collector.items() else &.{};
+    }
+
+    pub fn getAdmissionFailure(self: *const Parser) ?AdmissionFailure {
+        return self.terminalAdmissionFailure();
+    }
+
+    pub fn getLastAdmissionObservation(self: *const Parser) ?type_syntax.AdmissionDiagnostic {
+        return if (self.admission_observations) |observations| observations.last() else null;
+    }
+
+    pub fn getProjectedErrors(self: *const Parser) []const error_mod.ParseError {
+        const errors = self.errors.getErrors();
+        const count = self.admission_error_prefix orelse errors.len;
+        return errors[0..@min(count, errors.len)];
+    }
 };
 
 // ============ Tests ============
@@ -4467,6 +6807,1028 @@ test "typed block consumes a declaration without a runtime node" {
         try std.testing.expect(parser.nodes.getLoc(@intCast(index)).offset != declaration_offset);
     }
     try std.testing.expectEqual(@as(usize, 1), variable_count);
+}
+
+fn expectAdmissionKindFromSource(
+    source: []const u8,
+    expected: type_syntax.AdmissionKind,
+    seen: *std.EnumSet(type_syntax.AdmissionKind),
+) !void {
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        source,
+        .collect,
+    );
+    defer parser.deinit();
+    switch (try parser.parseAdmission()) {
+        .recovered_admission_refused => {},
+        .terminal_admission_refused => |failure| switch (failure) {
+            .diagnostic => {},
+            .unterminated_comment => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    for (parser.getAdmissionDiagnostics()) |diagnostic| {
+        seen.insert(diagnostic.kind);
+        if (diagnostic.kind == expected) return;
+    }
+    return error.TestExpectedAdmissionKind;
+}
+
+test "admission parser reaches each syntax-owned refusal producer" {
+    const cases = [_]struct {
+        source: []const u8,
+        kind: type_syntax.AdmissionKind,
+    }{
+        .{ .source = "const value: any = 1;\n", .kind = .any_type },
+        .{ .source = "const value = source as string;\n", .kind = .as_assertion },
+        .{ .source = "const value = source satisfies string;\n", .kind = .satisfies_assertion },
+        .{ .source = "const value = \"open\nconst after = 1;\n", .kind = .unterminated_string },
+        .{ .source = "nominal Box = T;\n", .kind = .nominal_base_not_scalar },
+        .{ .source = "interface Box { value: string }\n", .kind = .interface_declaration },
+        .{ .source = "type Box = string;\n", .kind = .type_alias_declaration },
+        .{ .source = "distinct type Box = string;\n", .kind = .distinct_type_declaration },
+        .{ .source = "import type { Value } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import },
+        .{ .source = "function f(value = 1) { return value; }\n", .kind = .default_parameter },
+        .{ .source = "function f(value?: string) { return value; }\n", .kind = .optional_parameter },
+        .{ .source = "export default 1;\n", .kind = .default_export },
+        .{ .source = "export let value = 1;\n", .kind = .mutable_export },
+        .{ .source = "structural Box = Array<string>;\n", .kind = .array_type_alias },
+        .{ .source = "structural Box = ReadonlyArray<string>;\n", .kind = .readonly_array_type_alias },
+        .{ .source = "structural Box = void;\n", .kind = .void_type },
+    };
+    try std.testing.expectEqual(@as(usize, 16), cases.len);
+    var seen = std.EnumSet(type_syntax.AdmissionKind).initEmpty();
+    for (cases) |case| try expectAdmissionKindFromSource(case.source, case.kind, &seen);
+
+    var deep: std.ArrayList(u8) = .empty;
+    defer deep.deinit(std.testing.allocator);
+    try deep.appendSlice(std.testing.allocator, "const value: ");
+    try deep.appendNTimes(std.testing.allocator, '{', type_syntax.max_type_depth + 1);
+    try deep.appendSlice(std.testing.allocator, " string;\n");
+    try expectAdmissionKindFromSource(deep.items, .nesting_too_deep, &seen);
+    inline for (@typeInfo(type_syntax.AdmissionKind).@"enum".fields) |field| {
+        const kind: type_syntax.AdmissionKind = @enumFromInt(field.value);
+        try std.testing.expect(seen.contains(kind));
+    }
+}
+
+test "plain typed parser does not enable admission collection" {
+    const source = "const value: any = 1;\n";
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+}
+
+test "plain typed parser does not recover an invalid nominal declaration" {
+    const source = "nominal Box = T;\n";
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    try std.testing.expectError(error.MissingSemicolon, parser.parse());
+    try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
+}
+
+test "admission parser recovers var annotations without hiding ordinary var errors" {
+    const Case = struct {
+        source: []const u8,
+        expected: enum { admission, parser },
+        expected_kind: ?type_syntax.AdmissionKind,
+        expected_marker: ?[]const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "var x: any = 1;\n", .expected = .admission, .expected_kind = .any_type, .expected_marker = "any" },
+        .{ .source = "var x: number = 1;\n", .expected = .parser, .expected_kind = null, .expected_marker = null },
+        .{ .source = "var x: number = 1;\nconst later: any = 2;\n", .expected = .admission, .expected_kind = .any_type, .expected_marker = "any" },
+        .{ .source = "var/*comment*/ x: any = 1;\n", .expected = .admission, .expected_kind = .any_type, .expected_marker = "any" },
+        .{ .source = "var x/*comment*/: any = 1;\n", .expected = .admission, .expected_kind = .any_type, .expected_marker = "any" },
+        .{ .source = "var a = 1, b: any = 2;\n", .expected = .parser, .expected_kind = null, .expected_marker = null },
+        .{ .source = "var x = value as any;\n", .expected = .admission, .expected_kind = .as_assertion, .expected_marker = "any" },
+    };
+    try std.testing.expectEqual(@as(usize, 7), cases.len);
+    for (cases) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        const outcome = try parser.parseAdmission();
+        switch (case.expected) {
+            .admission => {
+                switch (outcome) {
+                    .recovered_admission_refused => {},
+                    else => return error.TestUnexpectedResult,
+                }
+                const diagnostics = parser.getAdmissionDiagnostics();
+                try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+                try std.testing.expectEqual(case.expected_kind.?, diagnostics[0].kind);
+                try std.testing.expectEqual(
+                    @as(u32, @intCast(std.mem.indexOf(u8, case.source, case.expected_marker.?).?)),
+                    diagnostics[0].span.start,
+                );
+            },
+            .parser => switch (outcome) {
+                .parser_refused => |refusal| try std.testing.expectEqual(error.ParseError, refusal.first_error),
+                else => return error.TestUnexpectedResult,
+            },
+        }
+    }
+}
+
+test "admission declaration recognition rejects comment gaps and still refuses a missing equals" {
+    const comment_gaps = [_][]const u8{
+        "type/*comment*/ Alias = any;\n",
+        "export/*comment*/ type Alias = any;\n",
+        "distinct/*comment*/ type Alias = any;\n",
+        "interface/*comment*/ Shape { value: any };\n",
+    };
+    for (comment_gaps) |source| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            source,
+            .collect,
+        );
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .parser_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+    }
+
+    var missing_equals = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        "type Alias any;\n",
+        .collect,
+    );
+    defer missing_equals.deinit();
+    switch (try missing_equals.parseAdmission()) {
+        .recovered_admission_refused => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const diagnostics = missing_equals.getAdmissionDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqual(type_syntax.AdmissionKind.type_alias_declaration, diagnostics[0].kind);
+}
+
+test "admission block recovery preserves a later typed declaration after a template failure" {
+    const source =
+        "function handler() {\n" ++
+        "  const broken = `${function nested() {}}`;\n" ++
+        "  const after: any = 1;\n" ++
+        "}\n";
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        source,
+        .collect,
+    );
+    defer parser.deinit();
+    switch (try parser.parseAdmission()) {
+        .recovered_admission_refused => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const diagnostics = parser.getAdmissionDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOf(u8, source, "any").?)),
+        diagnostics[0].span.start,
+    );
+}
+
+test "admission parser commits an initial unfinished comment at EOF" {
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        "/* unfinished",
+        .collect,
+    );
+    defer parser.deinit();
+    switch (try parser.parseAdmission()) {
+        .terminal_admission_refused => |failure| switch (failure) {
+            .unterminated_comment => |comment| {
+                try std.testing.expectEqual(@as(u32, 0), comment.opener);
+                try std.testing.expect(comment.@"resume" > comment.opener);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "admission parser preserves seven measured string and recovery boundaries" {
+    const cases = [_]struct {
+        source: []const u8,
+        kind: type_syntax.AdmissionKind,
+        marker: []const u8,
+    }{
+        .{ .source = "const value = \"open\n\";\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .unterminated_string, .marker = "\n" },
+        .{ .source = "const value = { \"open\nkey\": 1 };\n", .kind = .unterminated_string, .marker = "\n" },
+        .{ .source = "import { value } from \"open\npath\";\n", .kind = .unterminated_string, .marker = "\n" },
+        .{ .source = "const value = `${\"open\n}`;\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import, .marker = "import type" },
+        .{ .source = "const value: \"open\n = 1;\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import, .marker = "import type" },
+        .{ .source = "const broken = ;\n\"open\n\";\n", .kind = .unterminated_string, .marker = "\n\"open\n" },
+        .{ .source = "const broken =\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import, .marker = "import type" },
+    };
+    try std.testing.expectEqual(@as(usize, 7), cases.len);
+    for (cases) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .recovered_admission_refused => {},
+            .terminal_admission_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        const expected_offset: u32 = @intCast(std.mem.indexOf(u8, case.source, case.marker).? +
+            if (std.mem.eql(u8, case.marker, "\n\"open\n")) case.marker.len - 1 else 0);
+        var found = false;
+        for (parser.getAdmissionDiagnostics()) |diagnostic| {
+            if (diagnostic.kind != case.kind) continue;
+            if (diagnostic.span.start == expected_offset) found = true;
+        }
+        try std.testing.expect(found);
+        if (case.kind == .legacy_types_import) {
+            try std.testing.expect(parser.type_only_module_refusal != null);
+        }
+    }
+}
+
+test "admission parser merges type any and caught string in source order" {
+    const cases = [_]struct {
+        source: []const u8,
+        first: type_syntax.AdmissionKind,
+        second: type_syntax.AdmissionKind,
+    }{
+        .{ .source = "const value: any | \"open\n | void = 1;\n", .first = .any_type, .second = .unterminated_string },
+        .{ .source = "const value: \"open\n | any | void = 1;\n", .first = .unterminated_string, .second = .any_type },
+        .{ .source = "function f(value: any | \"open\n | void) { return 1; }\n", .first = .any_type, .second = .unterminated_string },
+        .{ .source = "function f(value: \"open\n | any | void) { return 1; }\n", .first = .unterminated_string, .second = .any_type },
+    };
+    try std.testing.expectEqual(@as(usize, 4), cases.len);
+    for (cases) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .recovered_admission_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        const diagnostics = parser.getAdmissionDiagnostics();
+        try std.testing.expect(diagnostics.len >= 2);
+        try std.testing.expectEqual(case.first, diagnostics[0].kind);
+        try std.testing.expectEqual(case.second, diagnostics[1].kind);
+        try std.testing.expect(diagnostics[0].span.start < diagnostics[1].span.start);
+    }
+}
+
+test "admission parser preserves observed generic probe outcomes" {
+    const Cases = enum { named_quote, rejected_call, unfinished_comment };
+    const cases = [_]struct {
+        case: Cases,
+        source: []const u8,
+    }{
+        .{ .case = .named_quote, .source = "function f<\"open\n>(x: number): number { return x; }\n" },
+        .{ .case = .rejected_call, .source = "const value = f<`a${\"open\n 1}tail` || T>(x);\n" },
+        .{ .case = .unfinished_comment, .source = "function f<T /* unfinished\n" },
+    };
+    var seen = std.EnumSet(Cases).initEmpty();
+    for (cases) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        const outcome = try parser.parseAdmission();
+        switch (case.case) {
+            .named_quote, .rejected_call => {
+                if (case.case == .named_quote) {
+                    switch (outcome) {
+                        .terminal_admission_refused => |failure| switch (failure) {
+                            .diagnostic => |diagnostic| {
+                                try std.testing.expectEqual(type_syntax.AdmissionKind.unterminated_string, diagnostic.kind);
+                                try std.testing.expectEqual(
+                                    @as(u32, @intCast(std.mem.indexOfScalar(u8, case.source, '\n').?)),
+                                    diagnostic.span.start,
+                                );
+                            },
+                            else => return error.TestUnexpectedResult,
+                        },
+                        else => return error.TestUnexpectedResult,
+                    }
+                } else {
+                    switch (outcome) {
+                        .recovered_admission_refused => {},
+                        else => return error.TestUnexpectedResult,
+                    }
+                }
+                const diagnostics = parser.getAdmissionDiagnostics();
+                try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+                try std.testing.expectEqual(
+                    type_syntax.AdmissionKind.unterminated_string,
+                    diagnostics[0].kind,
+                );
+                try std.testing.expectEqual(
+                    @as(u32, @intCast(std.mem.indexOfScalar(u8, case.source, '\n').?)),
+                    diagnostics[0].span.start,
+                );
+            },
+            .unfinished_comment => switch (outcome) {
+                .terminal_admission_refused => |failure| switch (failure) {
+                    .unterminated_comment => |comment| {
+                        try std.testing.expectEqual(
+                            @as(u32, @intCast(std.mem.indexOf(u8, case.source, "/*").?)),
+                            comment.opener,
+                        );
+                        try std.testing.expect(comment.@"resume" > comment.opener);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            },
+        }
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(Cases).len, seen.count());
+}
+
+test "admission parser preserves interface body observation order" {
+    const cases = [_]struct {
+        source: []const u8,
+        first: type_syntax.AdmissionKind,
+        second: type_syntax.AdmissionKind,
+        second_marker: []const u8,
+    }{
+        .{
+            .source = "interface Shape { value: \"open\n any };\n",
+            .first = .unterminated_string,
+            .second = .interface_declaration,
+            .second_marker = "interface",
+        },
+        .{
+            .source = "interface Shape { /* } */ const x: any = 1;\n",
+            .first = .interface_declaration,
+            .second = .any_type,
+            .second_marker = "any",
+        },
+    };
+    for (cases) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .recovered_admission_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        const diagnostics = parser.getAdmissionDiagnostics();
+        try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+        try std.testing.expectEqual(case.first, diagnostics[0].kind);
+        try std.testing.expectEqual(case.second, diagnostics[1].kind);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOf(u8, case.source, case.second_marker).?)),
+            diagnostics[1].span.start,
+        );
+    }
+}
+
+test "admission assertion recovery resumes from the keyword boundary" {
+    const cases = [_]struct {
+        source: []const u8,
+        kind: type_syntax.AdmissionKind,
+        raw_marker: []const u8,
+    }{
+        .{
+            .source = "const x = value as \"open\n; const later: any = 1;\n",
+            .kind = .as_assertion,
+            .raw_marker = "\"open",
+        },
+        .{
+            .source = "const x = value satisfies \"open\n; const later: any = 1;\n",
+            .kind = .satisfies_assertion,
+            .raw_marker = "\"open",
+        },
+        .{
+            .source = "const x = value as `x${\"open\n}`; const later: any = 1;\n",
+            .kind = .as_assertion,
+            .raw_marker = "`x${",
+        },
+    };
+    for (cases) |case| {
+        var collect = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer collect.deinit();
+        switch (try collect.parseAdmission()) {
+            .recovered_admission_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        const diagnostics = collect.getAdmissionDiagnostics();
+        try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+        try std.testing.expectEqual(case.kind, diagnostics[0].kind);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.unterminated_string, diagnostics[1].kind);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[2].kind);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOf(u8, case.source, case.raw_marker).?)),
+            diagnostics[0].span.start,
+        );
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOfScalar(u8, case.source, '\n').?)),
+            diagnostics[1].span.start,
+        );
+        try std.testing.expectEqual(
+            @as(u32, @intCast(std.mem.indexOf(u8, case.source, "any").?)),
+            diagnostics[2].span.start,
+        );
+
+        var compile = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .compile,
+        );
+        defer compile.deinit();
+        switch (try compile.parseAdmission()) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .diagnostic => |diagnostic| {
+                    try std.testing.expectEqual(case.kind, diagnostic.kind);
+                    try std.testing.expectEqual(diagnostics[0].span, diagnostic.span);
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 1), compile.getAdmissionDiagnostics().len);
+    }
+}
+
+test "admission type call sites preserve comment and empty colon errors" {
+    const refused = [_]struct {
+        source: []const u8,
+        projected_errors: usize,
+    }{
+        .{ .source = "const x: /* closed */ any = 1;\n", .projected_errors = 2 },
+        .{ .source = "function f(x: /* closed */ any) { return x; }\n", .projected_errors = 1 },
+        .{ .source = "function f(): /* closed */ any { return 1; }\n", .projected_errors = 1 },
+        .{ .source = "const x: = 1;\n", .projected_errors = 2 },
+        .{ .source = "function f(x:) { return 1; }\n", .projected_errors = 1 },
+    };
+    for (refused) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .parser_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+        try std.testing.expectEqual(case.projected_errors, parser.getProjectedErrors().len);
+    }
+
+    const recovered_source =
+        "const x: /* closed */ any = 1;\n" ++
+        "const later: any = 2;\n";
+    var recovered = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        recovered_source,
+        .collect,
+    );
+    defer recovered.deinit();
+    switch (try recovered.parseAdmission()) {
+        .recovered_admission_refused => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const diagnostics = recovered.getAdmissionDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.lastIndexOf(u8, recovered_source, "any").?)),
+        diagnostics[0].span.start,
+    );
+}
+
+test "admission export recognition keeps raw statement and gap guards" {
+    const sources = [_][]const u8{
+        " export default 1;\n",
+        "export/*c*/let x = 1;\n",
+    };
+    for (sources) |source| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            source,
+            .collect,
+        );
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .parser_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+        try std.testing.expectEqual(@as(usize, 1), parser.getProjectedErrors().len);
+    }
+}
+
+test "admission recovery preserves import context until a committed semicolon" {
+    const cases = [_]struct {
+        source: []const u8,
+        admission: bool,
+    }{
+        .{ .source = "import * as ns from \"./dep.ts\";\n", .admission = false },
+        .{ .source = "import * as ns from \"./dep.ts\";\nconst x = value as number;\n", .admission = true },
+        .{ .source = "import * as ns from \"./dep.ts\"\nconst x = value as number;\n", .admission = false },
+    };
+    for (cases) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        const outcome = try parser.parseAdmission();
+        const diagnostics = parser.getAdmissionDiagnostics();
+        if (case.admission) {
+            switch (outcome) {
+                .recovered_admission_refused => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try std.testing.expectEqual(type_syntax.AdmissionKind.as_assertion, diagnostics[0].kind);
+        } else {
+            switch (outcome) {
+                .parser_refused => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+        }
+        try std.testing.expectEqual(@as(usize, 1), parser.getProjectedErrors().len);
+    }
+}
+
+test "admission recovery restarts typed producers below failed statement depth" {
+    const admitted_source = "while (true) { const x: any = 1; }\n";
+    var admitted = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        admitted_source,
+        .collect,
+    );
+    defer admitted.deinit();
+    switch (try admitted.parseAdmission()) {
+        .recovered_admission_refused => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const diagnostics = admitted.getAdmissionDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostics[0].kind);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOf(u8, admitted_source, "any").?)),
+        diagnostics[0].span.start,
+    );
+
+    const healthy_type_source =
+        "function f(): number {\n" ++
+        "  while (true) { const x: number = 1; }\n" ++
+        "  return 1;\n" ++
+        "}\n";
+    var healthy_type = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        healthy_type_source,
+        .collect,
+    );
+    defer healthy_type.deinit();
+    switch (try healthy_type.parseAdmission()) {
+        .parser_refused => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 0), healthy_type.getAdmissionDiagnostics().len);
+    const projected = healthy_type.getProjectedErrors();
+    try std.testing.expectEqual(@as(usize, 1), projected.len);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(std.mem.indexOf(u8, healthy_type_source, "while").?)),
+        projected[0].location.offset,
+    );
+}
+
+test "admission binding allocation failures retain native out of memory" {
+    const BindingCase = enum { variable, function, parameter };
+    const cases = [_]struct {
+        case: BindingCase,
+        source: []const u8,
+        name: []const u8,
+        witness: []const u8,
+    }{
+        .{
+            .case = .variable,
+            .source = "var seed = 1;\nconst Response = 2;\n",
+            .name = "Response",
+            .witness = "= 2",
+        },
+        .{
+            .case = .function,
+            .source = "var seed = 1;\nfunction handler() { return 1; }\n",
+            .name = "handler",
+            .witness = "()",
+        },
+        .{
+            .case = .parameter,
+            .source = "var seed = 1;\nfunction handler(Response) { return Response; }\n",
+            .name = "Response",
+            .witness = ")",
+        },
+    };
+    const Sweep = struct {
+        fn run(
+            allocator: std.mem.Allocator,
+            case: BindingCase,
+            source: []const u8,
+            name: []const u8,
+            witness_offset: u32,
+            witnessed: *std.EnumSet(BindingCase),
+        ) !void {
+            var parser = try Parser.initAdmission(allocator, allocator, source, .collect);
+            defer parser.deinit();
+            const outcome = parser.parseAdmission() catch |err| switch (err) {
+                error.OutOfMemory => {
+                    if (parser.current.start == witness_offset and parser.getErrors().len > 0) {
+                        var target_scope_seen = false;
+                        var binding_present = false;
+                        for (parser.scopes.scopes.items) |scope| {
+                            const target_scope = switch (case) {
+                                .variable, .function => scope.kind == .global,
+                                .parameter => scope.kind == .function,
+                            };
+                            if (!target_scope) continue;
+                            target_scope_seen = true;
+                            for (scope.bindings.items) |binding| {
+                                if (std.mem.eql(u8, name, binding.name)) binding_present = true;
+                            }
+                        }
+                        if (target_scope_seen and !binding_present and
+                            !parser.errors.outOfMemory()) witnessed.insert(case);
+                    }
+                    return err;
+                },
+                else => return err,
+            };
+            switch (outcome) {
+                .parser_refused => {},
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    };
+    var witnessed = std.EnumSet(BindingCase).initEmpty();
+    for (cases) |case| {
+        const marker = std.mem.indexOf(u8, case.source, case.witness) orelse
+            return error.TestUnexpectedResult;
+        const witness_offset: u32 = @intCast(marker);
+        try std.testing.checkAllAllocationFailures(
+            std.testing.allocator,
+            Sweep.run,
+            .{ case.case, case.source, case.name, witness_offset, &witnessed },
+        );
+    }
+    inline for (@typeInfo(BindingCase).@"enum".fields) |field| {
+        try std.testing.expect(witnessed.contains(@enumFromInt(field.value)));
+    }
+}
+
+test "admission declaration failure preserves the prior Store checkpoint" {
+    const seed_source = "const seed: number = 1;\n";
+    var seed = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        seed_source,
+        .collect,
+    );
+    defer seed.deinit();
+    switch (try seed.parseAdmission()) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const expected = seed.type_store.checkpoint();
+
+    const source = seed_source ++ "nominal Box<T> = T;\n";
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        source,
+        .collect,
+    );
+    defer parser.deinit();
+    switch (try parser.parseAdmission()) {
+        .recovered_admission_refused => {},
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(
+        type_syntax.AdmissionKind.nominal_base_not_scalar,
+        parser.getAdmissionDiagnostics()[0].kind,
+    );
+    try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
+}
+
+test "admission type allocation failures preserve a published seed" {
+    const source =
+        "const seed: number = 1;\n" ++
+        "function f<\"open\n>(value: number): number { return value; }\n";
+    const Sweep = struct {
+        fn run(type_allocator: std.mem.Allocator, post_seed_failures: *usize) !void {
+            var parser = try Parser.initAdmission(
+                std.testing.allocator,
+                type_allocator,
+                source,
+                .collect,
+            );
+            defer parser.deinit();
+            const outcome = parser.parseAdmission() catch |err| switch (err) {
+                error.OutOfMemory => {
+                    var seed_published = false;
+                    for (parser.nodes.tags.items, 0..) |tag, index| {
+                        if (tag == .var_decl and parser.nodes.getLoc(@intCast(index)).offset == 0) {
+                            seed_published = true;
+                            break;
+                        }
+                    }
+                    if (seed_published) {
+                        post_seed_failures.* += 1;
+                        var expected = std.mem.zeroes(type_syntax.Store.Checkpoint);
+                        expected.nodes = 1;
+                        expected.annotations = 1;
+                        try std.testing.expect(std.meta.eql(
+                            expected,
+                            parser.type_store.checkpoint(),
+                        ));
+                    }
+                    return err;
+                },
+                else => return err,
+            };
+            switch (outcome) {
+                .terminal_admission_refused => |failure| switch (failure) {
+                    .diagnostic => |diagnostic| {
+                        try std.testing.expectEqual(type_syntax.AdmissionKind.unterminated_string, diagnostic.kind);
+                        try std.testing.expectEqual(
+                            @as(u32, @intCast(std.mem.indexOfScalarPos(u8, source, "const seed: number = 1;\n".len, '\n').?)),
+                            diagnostic.span.start,
+                        );
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+            const diagnostics = parser.getAdmissionDiagnostics();
+            try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try std.testing.expectEqual(
+                type_syntax.AdmissionKind.unterminated_string,
+                diagnostics[0].kind,
+            );
+            var expected = std.mem.zeroes(type_syntax.Store.Checkpoint);
+            expected.nodes = 1;
+            expected.annotations = 1;
+            try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
+        }
+    };
+    var post_seed_failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Sweep.run,
+        .{&post_seed_failures},
+    );
+    try std.testing.expect(post_seed_failures > 0);
+}
+
+test "admission header recovery preserves ordered legacy events without owners" {
+    const Expected = struct { kind: type_syntax.AdmissionKind, offset: u32 };
+    const cases = [_]struct {
+        source: []const u8,
+        expected: []const Expected,
+        compile_first: usize,
+    }{
+        .{ .source = "function f({ x } = {}, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .default_parameter, .offset = 17 }, .{ .kind = .any_type, .offset = 26 } }, .compile_first = 0 },
+        .{ .source = "function f({ x }: any = {}, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .any_type, .offset = 18 }, .{ .kind = .default_parameter, .offset = 22 }, .{ .kind = .any_type, .offset = 31 } }, .compile_first = 0 },
+        .{ .source = "function f({ x }: /* closed */ any, y: any) { return 1; }\n", .expected = &.{.{ .kind = .any_type, .offset = 39 }}, .compile_first = 0 },
+        .{ .source = "function f({ x }: Box<number, string>, y: any) { return 1; }\n", .expected = &.{.{ .kind = .any_type, .offset = 42 }}, .compile_first = 0 },
+        .{ .source = "function f({ x }: \"open\n, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .unterminated_string, .offset = 23 }, .{ .kind = .any_type, .offset = 29 } }, .compile_first = 1 },
+        .{ .source = "function f(x = y => y, z: any) { return 1; }\n", .expected = &.{ .{ .kind = .default_parameter, .offset = 13 }, .{ .kind = .default_parameter, .offset = 17 }, .{ .kind = .any_type, .offset = 26 } }, .compile_first = 0 },
+        .{ .source = "function f(x = a == b, z: any) { return 1; }\n", .expected = &.{ .{ .kind = .default_parameter, .offset = 13 }, .{ .kind = .default_parameter, .offset = 17 }, .{ .kind = .default_parameter, .offset = 18 }, .{ .kind = .any_type, .offset = 26 } }, .compile_first = 0 },
+        .{ .source = "function f({ x }?: number, y: any) { return 1; }\n", .expected = &.{ .{ .kind = .optional_parameter, .offset = 16 }, .{ .kind = .any_type, .offset = 30 } }, .compile_first = 0 },
+    };
+    try std.testing.expectEqual(@as(usize, 8), cases.len);
+    for (cases) |case| {
+        var collect = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer collect.deinit();
+        switch (try collect.parseAdmission()) {
+            .recovered_admission_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        const diagnostics = collect.getAdmissionDiagnostics();
+        try std.testing.expectEqual(case.expected.len, diagnostics.len);
+        for (diagnostics, case.expected) |actual, expected| {
+            try std.testing.expectEqual(expected.kind, actual.kind);
+            try std.testing.expectEqual(expected.offset, actual.span.start);
+        }
+        try std.testing.expectEqual(@as(usize, 0), collect.type_store.function_signatures.items.len);
+        try std.testing.expectEqual(@as(usize, 0), collect.type_store.parameter_annotations.items.len);
+
+        var compile = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .compile,
+        );
+        defer compile.deinit();
+        switch (try compile.parseAdmission()) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .diagnostic => |diagnostic| {
+                    try std.testing.expectEqual(case.expected[case.compile_first].kind, diagnostic.kind);
+                    try std.testing.expectEqual(case.expected[case.compile_first].offset, diagnostic.span.start);
+                },
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqual(@as(usize, 1), compile.getAdmissionDiagnostics().len);
+    }
+}
+
+test "admission header depth includes the enclosing parameter parenthesis" {
+    const prefix = "function f({ x: ";
+    const admitted_nesting = type_syntax.max_type_depth - 2;
+    for ([_]usize{ admitted_nesting, admitted_nesting + 1 }) |count| {
+        var source: std.ArrayListUnmanaged(u8) = .empty;
+        defer source.deinit(std.testing.allocator);
+        try source.appendSlice(std.testing.allocator, prefix);
+        try source.appendNTimes(std.testing.allocator, '(', count);
+        try source.appendSlice(std.testing.allocator, "x");
+        try source.appendNTimes(std.testing.allocator, ')', count);
+        try source.appendSlice(std.testing.allocator, "}, y: any) { return 1; }\n");
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            source.items,
+            .collect,
+        );
+        defer parser.deinit();
+        const outcome = try parser.parseAdmission();
+        if (count == admitted_nesting) {
+            switch (outcome) {
+                .recovered_admission_refused => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, parser.getAdmissionDiagnostics()[0].kind);
+        } else {
+            switch (outcome) {
+                .terminal_admission_refused => |failure| switch (failure) {
+                    .diagnostic => |diagnostic| {
+                        try std.testing.expectEqual(type_syntax.AdmissionKind.nesting_too_deep, diagnostic.kind);
+                        try std.testing.expectEqual(@as(u32, @intCast(prefix.len + count - 1)), diagnostic.span.start);
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 1), parser.getAdmissionDiagnostics().len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
+    }
+}
+
+test "admission generic scanner stops before an unreachable later quote" {
+    const prefix = "function /* gap */ f<";
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, prefix);
+    try source.appendNTimes(std.testing.allocator, '(', type_syntax.max_type_depth);
+    try source.appendSlice(std.testing.allocator, "T");
+    try source.appendNTimes(std.testing.allocator, ')', type_syntax.max_type_depth);
+    try source.appendSlice(std.testing.allocator, "`a${\"open\n}`>(x: number): number { return x; }\n");
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
+        source.items,
+        .collect,
+    );
+    defer parser.deinit();
+    switch (try parser.parseAdmission()) {
+        .terminal_admission_refused => |failure| switch (failure) {
+            .diagnostic => |diagnostic| {
+                try std.testing.expectEqual(type_syntax.AdmissionKind.nesting_too_deep, diagnostic.kind);
+                try std.testing.expectEqual(@as(u32, @intCast(prefix.len + type_syntax.max_type_depth - 1)), diagnostic.span.start);
+            },
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try std.testing.expectEqual(@as(usize, 1), parser.getAdmissionDiagnostics().len);
+    const last = parser.getLastAdmissionObservation() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(type_syntax.AdmissionKind.nesting_too_deep, last.kind);
+}
+
+test "admission header recovery retains later nested block errors" {
+    const cases = [_]struct { source: []const u8, while_offset: u32 }{
+        .{ .source = "function outer(): number { function inner({ x }) { return 1; } while (true) {} return 1; }\n", .while_offset = 63 },
+        .{ .source = "function outer(): number { function inner({ x }: /* gap */ number) { return 1; } while (true) {} return 1; }\n", .while_offset = 81 },
+    };
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+    for (cases) |case| {
+        var parser = try Parser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            case.source,
+            .collect,
+        );
+        defer parser.deinit();
+        switch (try parser.parseAdmission()) {
+            .parser_refused => {},
+            else => return error.TestUnexpectedResult,
+        }
+        const errors = parser.getProjectedErrors();
+        try std.testing.expectEqual(@as(usize, 2), errors.len);
+        try std.testing.expectEqual(@as(u32, 42), errors[0].location.offset);
+        try std.testing.expectEqual(case.while_offset, errors[1].location.offset);
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[1].kind);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
+    }
+}
+
+test "admission header recovery propagates allocation failures after refusal" {
+    const frame_count = type_syntax.max_type_depth + 1;
+    const source = "function f({ x } = `outer${\"open\n" ++
+        ("`nested${" ** frame_count) ++ "value" ++ ("}`" ** frame_count) ++
+        "}`, y: any) { return 1; }\n";
+    const Sweep = struct {
+        fn run(allocator: std.mem.Allocator, post_refusal_failures: *usize) !void {
+            var parser = try Parser.initAdmission(allocator, allocator, source, .collect);
+            defer parser.deinit();
+            const outcome = parser.parseAdmission() catch |err| switch (err) {
+                error.OutOfMemory => {
+                    const diagnostics = parser.getAdmissionDiagnostics();
+                    if (diagnostics.len > 0 and diagnostics[0].kind == .default_parameter) {
+                        post_refusal_failures.* += 1;
+                        try std.testing.expect(std.meta.eql(
+                            std.mem.zeroes(type_syntax.Store.Checkpoint),
+                            parser.type_store.checkpoint(),
+                        ));
+                    }
+                    return err;
+                },
+                else => return err,
+            };
+            switch (outcome) {
+                .recovered_admission_refused => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(type_syntax.AdmissionKind.default_parameter, parser.getAdmissionDiagnostics()[0].kind);
+            try std.testing.expect(std.meta.eql(
+                std.mem.zeroes(type_syntax.Store.Checkpoint),
+                parser.type_store.checkpoint(),
+            ));
+        }
+    };
+    var post_refusal_failures: usize = 0;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Sweep.run,
+        .{&post_refusal_failures},
+    );
+    try std.testing.expect(post_refusal_failures > 0);
 }
 
 test "a newline after return no longer swallows the value" {
@@ -7127,6 +10489,7 @@ test "retained type-only module refusal outranks a later ordinary error" {
     defer parser.deinit();
     parser.type_only_module_refusal = .{
         .reason = .zttp_types,
+        .raw_span = .{ .start = 0, .end = 6 },
         .original_location = .{
             .line = 1,
             .column = 1,
@@ -7147,6 +10510,7 @@ test "native allocation failure outranks a retained type-only module refusal" {
             defer parser.deinit();
             parser.type_only_module_refusal = .{
                 .reason = .zttp_types,
+                .raw_span = .{ .start = 0, .end = 6 },
                 .original_location = .{
                     .line = 1,
                     .column = 1,
@@ -7180,6 +10544,7 @@ test "error-list allocation failure outranks a retained type-only module refusal
     defer parser.deinit();
     parser.type_only_module_refusal = .{
         .reason = .zttp_types,
+        .raw_span = .{ .start = 0, .end = 6 },
         .original_location = .{
             .line = 1,
             .column = 1,
@@ -7316,4 +10681,863 @@ test "later wrapper failures remove nested type-only module records" {
         try parser.type_store.validate();
     }
     try std.testing.expectEqual(@as(usize, 3), cases.len);
+}
+
+test "admission keeps original spans and measured parameter presentation" {
+    const cases = [_]struct {
+        source: []const u8,
+        diagnostics: []const type_syntax.AdmissionDiagnostic,
+    }{
+        .{
+            .source = "function f(x: /* closed */ any, y: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 35, .end = 38 }, .presentation = .{ .line = 1, .column = 38 } },
+            },
+        },
+        .{
+            .source = "function f({ x }:\n /* closed */ any, y: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 40, .end = 43 }, .presentation = .{ .line = 3, .column = 23 } },
+            },
+        },
+        .{
+            .source = "function f({ x }: /* closed */ any, y: void) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .void_type, .span = .{ .start = 39, .end = 43 }, .presentation = .{ .line = 1, .column = 40 } },
+            },
+        },
+        .{
+            .source = "function f({ x }:\n /* closed */ any,\n y: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 41, .end = 44 }, .presentation = .{ .line = 4, .column = 5 } },
+            },
+        },
+        .{
+            .source = "function f(x: /* closed */ any, y = 1) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .default_parameter, .span = .{ .start = 34, .end = 35 }, .presentation = .{ .line = 1, .column = 37 } },
+            },
+        },
+        .{
+            .source = "function f(x:\t/* closed */ any, y: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 35, .end = 38 }, .presentation = .{ .line = 1, .column = 38 } },
+            },
+        },
+        .{
+            .source = "function f(x:\r /* closed */ any, y: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 36, .end = 39 }, .presentation = .{ .line = 1, .column = 39 } },
+            },
+        },
+        .{
+            .source = "function f(x: /* closed */ any, y: /* closed */ any, z: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 56, .end = 59 }, .presentation = .{ .line = 1, .column = 61 } },
+            },
+        },
+        .{ .source = "function f(x: /* closed */ number, y: number) { return 1; }\n", .diagnostics = &.{} },
+        .{
+            .source = "const x:\n /* closed */ number = 1; const y: any = 1;\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 44, .end = 47 }, .presentation = .{ .line = 2, .column = 36 } },
+            },
+        },
+        .{
+            .source = "function f():\n /* closed */ number { return 1; } const y: any = 1;\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 }, .presentation = .{ .line = 2, .column = 45 } },
+            },
+        },
+        .{
+            .source = "function f(x:\r any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 15, .end = 18 }, .presentation = .{ .line = 1, .column = 15 } },
+            },
+        },
+        .{
+            .source = "const x:\r any = 1;\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 10, .end = 13 }, .presentation = .{ .line = 1, .column = 10 } },
+            },
+        },
+        .{
+            .source = "function f():\r any { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 15, .end = 18 }, .presentation = .{ .line = 1, .column = 15 } },
+            },
+        },
+        .{
+            .source = "function f(x?\r: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .optional_parameter, .span = .{ .start = 12, .end = 13 }, .presentation = .{ .line = 1, .column = 13 } },
+                .{ .kind = .any_type, .span = .{ .start = 16, .end = 19 }, .presentation = .{ .line = 1, .column = 16 } },
+            },
+        },
+        .{
+            .source = "function f(x:\r number, y: any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 26, .end = 29 }, .presentation = .{ .line = 1, .column = 26 } },
+            },
+        },
+        .{
+            .source = "const x:\r /* closed */ number = 1; const y: any = 1;\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 44, .end = 47 }, .presentation = .{ .line = 1, .column = 45 } },
+            },
+        },
+        .{
+            .source = "function f():\r /* closed */ number { return 1; } const y: any = 1;\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 58, .end = 61 }, .presentation = .{ .line = 1, .column = 58 } },
+            },
+        },
+    };
+    try std.testing.expectEqual(@as(usize, 18), cases.len);
+    for (cases) |case| {
+        errdefer std.debug.print("admission presentation failed: {s}\n", .{case.source});
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, mode);
+            defer parser.deinit();
+            const outcome = try parser.parseAdmission();
+            if (case.diagnostics.len == 0) {
+                const refused = switch (outcome) {
+                    .parser_refused => |refusal| refusal,
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectEqual(error.UnexpectedToken, refused.first_error);
+                const errors = parser.getProjectedErrors();
+                try std.testing.expectEqual(@as(usize, 1), errors.len);
+                try std.testing.expectEqual(error_mod.ErrorKind.expected_token, errors[0].kind);
+                try std.testing.expectEqualStrings("')'", errors[0].expected orelse return error.TestUnexpectedResult);
+                try std.testing.expectEqual(@as(u32, 12), errors[0].location.offset);
+                try std.testing.expectEqual(@as(u32, 13), errors[0].location.column);
+            } else if (mode == .collect) {
+                switch (outcome) {
+                    .recovered_admission_refused => {},
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expectEqualDeep(case.diagnostics, parser.getAdmissionDiagnostics());
+            } else {
+                const terminal = switch (outcome) {
+                    .terminal_admission_refused => |failure| switch (failure) {
+                        .diagnostic => |diagnostic| diagnostic,
+                        else => return error.TestUnexpectedResult,
+                    },
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectEqualDeep(case.diagnostics[0], terminal);
+                try std.testing.expectEqualDeep(case.diagnostics[0], parser.getLastAdmissionObservation().?);
+            }
+            try parser.type_store.validate();
+        }
+    }
+}
+
+test "admission preserves cursor operations at function type continuations" {
+    const cases = [_]struct {
+        source: []const u8,
+        diagnostics: []const type_syntax.AdmissionDiagnostic,
+    }{
+        .{
+            .source = "const f: (x: any) =>\r any = value;\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 13, .end = 16 }, .presentation = .{ .line = 1, .column = 14 } },
+                .{ .kind = .any_type, .span = .{ .start = 22, .end = 25 }, .presentation = .{ .line = 1, .column = 22 } },
+            },
+        },
+        .{
+            .source = "const f: (x: void) =>\r number = value;\n",
+            .diagnostics = &.{
+                .{ .kind = .void_type, .span = .{ .start = 13, .end = 17 }, .presentation = .{ .line = 1, .column = 14 } },
+            },
+        },
+        .{
+            .source = "const f: (x: void) =>\r any = value;\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 }, .presentation = .{ .line = 1, .column = 23 } },
+                .{ .kind = .void_type, .span = .{ .start = 13, .end = 17 }, .presentation = .{ .line = 1, .column = 14 } },
+            },
+        },
+        .{
+            .source = "const f: (x: \"open\n) =>\r any = value;\n",
+            .diagnostics = &.{
+                .{ .kind = .unterminated_string, .span = .{ .start = 18, .end = 19 }, .presentation = .{ .line = 1, .column = 19 } },
+                .{ .kind = .any_type, .span = .{ .start = 25, .end = 28 }, .presentation = .{ .line = 2, .column = 6 } },
+            },
+        },
+        .{
+            .source = "interface X extends () =>\r any {};\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 27, .end = 30 }, .presentation = .{ .line = 1, .column = 28 } },
+                .{ .kind = .interface_declaration, .span = .{ .start = 0, .end = 9 }, .presentation = .{ .line = 1, .column = 1 } },
+            },
+        },
+        .{
+            .source = "const f = value as () =>\r any;\n",
+            .diagnostics = &.{
+                .{ .kind = .as_assertion, .span = .{ .start = 19, .end = 20 }, .presentation = .{ .line = 1, .column = 20 } },
+                .{ .kind = .any_type, .span = .{ .start = 26, .end = 29 }, .presentation = .{ .line = 1, .column = 27 } },
+            },
+        },
+        .{
+            .source = "function f(x: () =>\r any) { return 1; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 21, .end = 24 }, .presentation = .{ .line = 1, .column = 22 } },
+            },
+        },
+        .{
+            .source = "function f(): () =>\r any { return value; }\n",
+            .diagnostics = &.{
+                .{ .kind = .any_type, .span = .{ .start = 21, .end = 24 }, .presentation = .{ .line = 1, .column = 21 } },
+            },
+        },
+    };
+    try std.testing.expectEqual(@as(usize, 8), cases.len);
+    for (cases) |case| {
+        errdefer std.debug.print("function type presentation failed: {s}\n", .{case.source});
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, mode);
+            defer parser.deinit();
+            const outcome = try parser.parseAdmission();
+            if (mode == .collect) {
+                switch (outcome) {
+                    .recovered_admission_refused => {},
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expectEqualDeep(case.diagnostics, parser.getAdmissionDiagnostics());
+            } else {
+                const terminal = switch (outcome) {
+                    .terminal_admission_refused => |failure| switch (failure) {
+                        .diagnostic => |diagnostic| diagnostic,
+                        else => return error.TestUnexpectedResult,
+                    },
+                    else => return error.TestUnexpectedResult,
+                };
+                var selected: ?type_syntax.AdmissionDiagnostic = null;
+                for (case.diagnostics) |diagnostic| {
+                    if (diagnostic.kind == .unterminated_string) continue;
+                    selected = diagnostic;
+                    break;
+                }
+                try std.testing.expectEqualDeep(selected orelse return error.TestUnexpectedResult, terminal);
+                try std.testing.expectEqualDeep(terminal, parser.getLastAdmissionObservation().?);
+            }
+            try parser.type_store.validate();
+        }
+    }
+}
+
+test "admission preserves runtime prefixes and excludes commented parameter producers" {
+    const cases = [_]struct {
+        source: []const u8,
+        parser_error: ?anyerror = null,
+        parser_kind: ?error_mod.ErrorKind = null,
+        parser_column: u32 = 0,
+        diagnostics: []const type_syntax.AdmissionDiagnostic,
+    }{
+        .{ .source = "const seed =\r 1; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 30, .end = 33 }, .presentation = .{ .line = 1, .column = 30 } },
+        } },
+        .{ .source = "const seed = 1 ===\r 1; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 36, .end = 39 }, .presentation = .{ .line = 1, .column = 36 } },
+        } },
+        .{ .source = "function f(x =\r 1, y: any) { return 1; }\n", .diagnostics = &.{
+            .{ .kind = .default_parameter, .span = .{ .start = 13, .end = 14 }, .presentation = .{ .line = 1, .column = 14 } },
+            .{ .kind = .any_type, .span = .{ .start = 22, .end = 25 }, .presentation = .{ .line = 1, .column = 23 } },
+        } },
+        .{ .source = "function\r f(x: any) { return 1; }\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 15, .end = 18 }, .presentation = .{ .line = 1, .column = 15 } },
+        } },
+        .{ .source = "function f\r(x: any) { return 1; }\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 15, .end = 18 }, .presentation = .{ .line = 1, .column = 15 } },
+        } },
+        .{ .source = "const f = function\r (x: any) { return 1; };\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 24, .end = 27 }, .presentation = .{ .line = 1, .column = 24 } },
+        } },
+        .{ .source = "function f<T>\r(x: any) { return 1; }\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 18, .end = 21 }, .presentation = .{ .line = 1, .column = 18 } },
+        } },
+        .{ .source = "function f<T>\r; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 29, .end = 32 }, .presentation = .{ .line = 1, .column = 29 } },
+        } },
+        .{ .source = "const f = <T>\r(x: any) => x;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 18, .end = 21 }, .presentation = .{ .line = 1, .column = 18 } },
+        } },
+        .{ .source = "const f = <T>\r value; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 35, .end = 38 }, .presentation = .{ .line = 1, .column = 36 } },
+        } },
+        .{ .source = "const f = id<T>\r(1); const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 34, .end = 37 }, .presentation = .{ .line = 1, .column = 35 } },
+        } },
+        .{ .source = "const seed = value as\r any;\n", .diagnostics = &.{
+            .{ .kind = .as_assertion, .span = .{ .start = 23, .end = 26 }, .presentation = .{ .line = 1, .column = 23 } },
+        } },
+        .{ .source = "const seed = value satisfies\r any;\n", .diagnostics = &.{
+            .{ .kind = .satisfies_assertion, .span = .{ .start = 30, .end = 33 }, .presentation = .{ .line = 1, .column = 30 } },
+        } },
+        .{ .source = "function/* gap */f<T>(x =\r 1, y: any) { return 1; }\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 25, .diagnostics = &.{} },
+        .{ .source = "function/* gap */f<T>(x?\r: any) { return 1; }\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 24, .diagnostics = &.{} },
+        .{ .source = "function/* gap */f(x =\r 1, y: any) { return 1; }\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 22, .diagnostics = &.{} },
+        .{ .source = "function f<T>/* gap */(x =\r 1, y: any) { return 1; }\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 26, .diagnostics = &.{} },
+        .{ .source = "function/* gap */f<T>({x}: /* gap */ number, y: any) { return 1; }\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 23, .diagnostics = &.{} },
+        .{ .source = "function/* gap */f(x: any) { return 1; }\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 21, .diagnostics = &.{} },
+        .{ .source = "function f/* gap */(x: any) { return 1; }\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 22, .diagnostics = &.{} },
+        .{ .source = "function f/* gap */(x?: any) { return 1; }\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 22, .diagnostics = &.{} },
+        .{ .source = "function f/* gap */(x =\r 1, y: any) { return 1; }\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 23, .diagnostics = &.{} },
+        .{ .source = "function f<T = string>\r; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 38, .end = 41 }, .presentation = .{ .line = 1, .column = 38 } },
+        } },
+        .{ .source = "function f<T = string>\r; const seed =\r1; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 54, .end = 57 }, .presentation = .{ .line = 1, .column = 53 } },
+        } },
+        .{ .source = "function f(x: number) { const seed =\r1; const later: any = 1; }\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 53, .end = 56 }, .presentation = .{ .line = 1, .column = 53 } },
+        } },
+        .{ .source = "function f(x: /* gap */ number) {} const seed =\r1; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 64, .end = 67 }, .presentation = .{ .line = 1, .column = 66 } },
+        } },
+        .{ .source = "const f = function(x: number) { return 1; };\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 11, .diagnostics = &.{} },
+        .{ .source = "const f = function(x?: any) { return 1; };\n", .diagnostics = &.{
+            .{ .kind = .optional_parameter, .span = .{ .start = 20, .end = 21 }, .presentation = .{ .line = 1, .column = 21 } },
+            .{ .kind = .any_type, .span = .{ .start = 23, .end = 26 }, .presentation = .{ .line = 1, .column = 24 } },
+        } },
+        .{ .source = "const f = function(x = 1, y: any) { return 1; };\n", .diagnostics = &.{
+            .{ .kind = .default_parameter, .span = .{ .start = 21, .end = 22 }, .presentation = .{ .line = 1, .column = 22 } },
+            .{ .kind = .any_type, .span = .{ .start = 29, .end = 32 }, .presentation = .{ .line = 1, .column = 30 } },
+        } },
+        .{ .source = "const f = function<T>\r(x: any) { return 1; };\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 26, .end = 29 }, .presentation = .{ .line = 1, .column = 26 } },
+        } },
+        .{ .source = "const f = function g<T>\r(x: any) { return 1; };\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 28, .end = 31 }, .presentation = .{ .line = 1, .column = 28 } },
+        } },
+        .{ .source = "const f = function/* gap */(x: any) { return 1; };\n", .parser_error = error.ParseError, .parser_kind = .unsupported_feature, .parser_column = 11, .diagnostics = &.{} },
+        .{ .source = "function f<T as number>\r; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 39, .end = 42 }, .presentation = .{ .line = 1, .column = 39 } },
+        } },
+        .{ .source = "function f<T = string>\r;\n", .parser_error = error.UnexpectedToken, .parser_kind = .expected_token, .parser_column = 24, .diagnostics = &.{} },
+    };
+    try std.testing.expectEqual(@as(usize, 34), cases.len);
+    for (cases) |case| {
+        errdefer std.debug.print("runtime presentation failed: {s}\n", .{case.source});
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, mode);
+            defer parser.deinit();
+            const outcome = try parser.parseAdmission();
+            if (case.parser_error) |expected_error| {
+                const refused = switch (outcome) {
+                    .parser_refused => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectEqual(expected_error, refused.first_error);
+                const errors = parser.getProjectedErrors();
+                try std.testing.expectEqual(@as(usize, 1), errors.len);
+                try std.testing.expectEqual(case.parser_kind.?, errors[0].kind);
+                try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+                try std.testing.expectEqual(case.parser_column, errors[0].location.column);
+                try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+                try std.testing.expect(parser.getLastAdmissionObservation() == null);
+            } else if (mode == .collect) {
+                switch (outcome) {
+                    .recovered_admission_refused => {},
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expectEqualDeep(case.diagnostics, parser.getAdmissionDiagnostics());
+            } else {
+                const diagnostic = switch (outcome) {
+                    .terminal_admission_refused => |failure| switch (failure) {
+                        .diagnostic => |value| value,
+                        else => return error.TestUnexpectedResult,
+                    },
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectEqualDeep(case.diagnostics[0], diagnostic);
+                try std.testing.expectEqualDeep(diagnostic, parser.getLastAdmissionObservation().?);
+            }
+            try parser.type_store.validate();
+        }
+    }
+}
+
+test "committed named generics retain unfinished survivor comments" {
+    const source = "function f<T> /* unfinished\n";
+    for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
+        defer parser.deinit();
+        const failure = switch (try parser.parseAdmission()) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .unterminated_comment => |comment| comment,
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, source, "/*").?)), failure.opener);
+        try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+        try std.testing.expect(parser.getLastAdmissionObservation() == null);
+        try std.testing.expectEqualDeep(std.mem.zeroes(type_syntax.Store.Checkpoint), parser.type_store.checkpoint());
+    }
+}
+
+test "function expression recovery cleans pending syntax through allocation failures" {
+    for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+            fn run(allocator: std.mem.Allocator, admission_mode: type_syntax.AdmissionMode) !void {
+                const source = "const f = function<T>(x: T, y: any): T { return x; };\n";
+                var parser = try Parser.initAdmission(allocator, allocator, source, admission_mode);
+                defer parser.deinit();
+                const outcome = parser.parseAdmission() catch |err| {
+                    switch (err) {
+                        error.OutOfMemory => {
+                            try std.testing.expectEqual(scope_mod.ScopeKind.global, parser.scopes.getCurrentScope().kind);
+                            try std.testing.expectEqualDeep(std.mem.zeroes(type_syntax.Store.Checkpoint), parser.type_store.checkpoint());
+                        },
+                        else => {},
+                    }
+                    return err;
+                };
+                switch (outcome) {
+                    .recovered_admission_refused => {
+                        try std.testing.expectEqual(type_syntax.AdmissionMode.collect, admission_mode);
+                        try std.testing.expectEqual(@as(usize, 1), parser.getAdmissionDiagnostics().len);
+                        try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, parser.getAdmissionDiagnostics()[0].kind);
+                    },
+                    .terminal_admission_refused => |failure| {
+                        try std.testing.expectEqual(type_syntax.AdmissionMode.compile, admission_mode);
+                        switch (failure) {
+                            .diagnostic => |diagnostic| try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostic.kind),
+                            else => return error.TestUnexpectedResult,
+                        }
+                    },
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expectEqual(scope_mod.ScopeKind.global, parser.scopes.getCurrentScope().kind);
+                try std.testing.expectEqualDeep(std.mem.zeroes(type_syntax.Store.Checkpoint), parser.type_store.checkpoint());
+                try parser.type_store.validate();
+            }
+        }.run, .{mode});
+    }
+}
+
+test "admission captures absent structural aliases before comments" {
+    const cases = [_][]const u8{
+        "structural X/* c */\nconst live = 1;\n",
+        "structural X<T>/* c */\nconst live = 1;\n",
+        "structural X\r /* c */\nconst live = 1;\n",
+        "export structural X<T> // c\nconst live = 1;\n",
+    };
+    try std.testing.expectEqual(@as(usize, 4), cases.len);
+    for (cases) |source| {
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
+            defer parser.deinit();
+            const root = switch (try parser.parseAdmission()) {
+                .accepted => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            const program = parser.nodes.get(root).?;
+            try std.testing.expectEqual(NodeTag.program, program.tag);
+            try std.testing.expectEqual(@as(u16, 1), program.data.block.stmts_count);
+            const surviving_index = parser.nodes.getListIndex(program.data.block.stmts_start, 0);
+            const surviving = parser.nodes.get(surviving_index).?;
+            try std.testing.expectEqual(NodeTag.var_decl, surviving.tag);
+            try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, source, "const live").?)), surviving.loc.offset);
+            const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+            const initializer = parser.nodes.get(view.getVarDecl(surviving_index).?.init).?;
+            try std.testing.expectEqual(NodeTag.lit_int, initializer.tag);
+            try std.testing.expectEqual(@as(i32, 1), initializer.data.int_value);
+
+            try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+            try std.testing.expect(parser.getLastAdmissionObservation() == null);
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+            const declaration = parser.type_store.declarations.items[0];
+            switch (declaration.body) {
+                .absent => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOfScalar(u8, source, '/').?)), declaration.full_span.end);
+            const generic = std.mem.indexOfScalar(u8, source, '<') != null;
+            try std.testing.expectEqual(generic, declaration.generic_owner != null);
+            try parser.type_store.validate();
+        }
+    }
+}
+
+test "admission preserves measured declaration prefixes and saved origins" {
+    const cases = [_]struct {
+        source: []const u8,
+        parser_error: ?anyerror = null,
+        parser_kind: ?error_mod.ErrorKind = null,
+        parser_column: u32 = 0,
+        diagnostics: []const type_syntax.AdmissionDiagnostic,
+    }{
+        .{ .source = "structural\r X = number; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 37, .end = 40 }, .presentation = .{ .line = 1, .column = 37 } },
+        } },
+        .{ .source = "structural X\r = number; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 37, .end = 40 }, .presentation = .{ .line = 1, .column = 37 } },
+        } },
+        .{ .source = "structural X<T>\r = number; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 40, .end = 43 }, .presentation = .{ .line = 1, .column = 40 } },
+        } },
+        .{ .source = "structural X =\r number; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 37, .end = 40 }, .presentation = .{ .line = 1, .column = 37 } },
+        } },
+        .{ .source = "structural X = number\n\r; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 38, .end = 41 }, .presentation = .{ .line = 2, .column = 16 } },
+        } },
+        .{ .source = "nominal N =\r any;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 13, .end = 16 }, .presentation = .{ .line = 1, .column = 13 } },
+        } },
+        .{ .source = "interface X extends\r any {};\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 21, .end = 24 }, .presentation = .{ .line = 1, .column = 21 } },
+            .{ .kind = .interface_declaration, .span = .{ .start = 0, .end = 9 }, .presentation = .{ .line = 1, .column = 1 } },
+        } },
+        .{ .source = "export\r structural X = number; const later: any = 1;\n", .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 44, .end = 47 }, .presentation = .{ .line = 1, .column = 44 } },
+        } },
+    };
+    try std.testing.expectEqual(@as(usize, 8), cases.len);
+    for (cases) |case| {
+        errdefer std.debug.print("declaration presentation failed: {s}\n", .{case.source});
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, mode);
+            defer parser.deinit();
+            const outcome = try parser.parseAdmission();
+            if (case.parser_error) |expected_error| {
+                const refused = switch (outcome) {
+                    .parser_refused => |value| value,
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectEqual(expected_error, refused.first_error);
+                const errors = parser.getProjectedErrors();
+                try std.testing.expectEqual(@as(usize, 1), errors.len);
+                try std.testing.expectEqual(case.parser_kind.?, errors[0].kind);
+                try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+                try std.testing.expectEqual(case.parser_column, errors[0].location.column);
+                try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+                try std.testing.expect(parser.getLastAdmissionObservation() == null);
+            } else if (mode == .collect) {
+                switch (outcome) {
+                    .recovered_admission_refused => {},
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expectEqualDeep(case.diagnostics, parser.getAdmissionDiagnostics());
+            } else {
+                const diagnostic = switch (outcome) {
+                    .terminal_admission_refused => |failure| switch (failure) {
+                        .diagnostic => |value| value,
+                        else => return error.TestUnexpectedResult,
+                    },
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectEqualDeep(case.diagnostics[0], diagnostic);
+                try std.testing.expectEqualDeep(diagnostic, parser.getLastAdmissionObservation().?);
+            }
+            try parser.type_store.validate();
+        }
+    }
+}
+
+test "admission preserves measured module export and operand prefixes" {
+    const cases = [_]struct {
+        source: []const u8,
+        fatal: bool,
+        diagnostics: []const type_syntax.AdmissionDiagnostic,
+    }{
+        .{ .source = "import\r { value } from './x.ts'; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 46, .end = 49 }, .presentation = .{ .line = 1, .column = 47 } },
+        } },
+        .{ .source = "export type\r { X }; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 33, .end = 36 }, .presentation = .{ .line = 1, .column = 34 } },
+        } },
+        .{ .source = "import\r type { X } from \"open\nconst later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .unterminated_string, .span = .{ .start = 29, .end = 30 }, .presentation = .{ .line = 1, .column = 29 } },
+            .{ .kind = .any_type, .span = .{ .start = 43, .end = 46 }, .presentation = .{ .line = 2, .column = 14 } },
+        } },
+        .{ .source = "const seed =\r1;import\r type { X } from '" ++ retired_types_module ++ "';\n", .fatal = true, .diagnostics = &.{
+            .{ .kind = .legacy_types_import, .span = .{ .start = 15, .end = 21 }, .presentation = .{ .line = 1, .column = 15 } },
+        } },
+        .{ .source = "import\r type `${\"open\n}` from '" ++ retired_types_module ++ "';\n", .fatal = true, .diagnostics = &.{
+            .{ .kind = .legacy_types_import, .span = .{ .start = 0, .end = 6 }, .presentation = .{ .line = 1, .column = 1 } },
+        } },
+        .{ .source = "const seed =\r1;export\r default\r 1; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .default_export, .span = .{ .start = 15, .end = 21 }, .presentation = .{ .line = 1, .column = 15 } },
+            .{ .kind = .any_type, .span = .{ .start = 48, .end = 51 }, .presentation = .{ .line = 1, .column = 46 } },
+        } },
+        .{ .source = "export\r const seed = 1; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 37, .end = 40 }, .presentation = .{ .line = 1, .column = 38 } },
+        } },
+        .{ .source = "const value = <T>\r(1); const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 36, .end = 39 }, .presentation = .{ .line = 1, .column = 36 } },
+        } },
+        .{ .source = "const value = <T>\r{ ok: 1 }; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 42, .end = 45 }, .presentation = .{ .line = 1, .column = 42 } },
+        } },
+        .{ .source = "<T>\r{ const later: any = 1; }\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 19, .end = 22 }, .presentation = .{ .line = 1, .column = 19 } },
+        } },
+        .{ .source = "const value = <T>\r(1 + ); const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 39, .end = 42 }, .presentation = .{ .line = 1, .column = 39 } },
+        } },
+        .{ .source = "const value = <T>\r/* gap */(1); const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 45, .end = 48 }, .presentation = .{ .line = 1, .column = 46 } },
+        } },
+        .{ .source = "const value = <T>\r extends Missing; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 49, .end = 52 }, .presentation = .{ .line = 1, .column = 49 } },
+        } },
+        .{ .source = "import\r type { X } from './x.ts'; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 47, .end = 50 }, .presentation = .{ .line = 1, .column = 47 } },
+        } },
+        .{ .source = "export\r type { X } from './x.ts'; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .any_type, .span = .{ .start = 47, .end = 50 }, .presentation = .{ .line = 1, .column = 47 } },
+        } },
+        .{ .source = "export\r default\r 1; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .default_export, .span = .{ .start = 0, .end = 6 }, .presentation = .{ .line = 1, .column = 1 } },
+            .{ .kind = .any_type, .span = .{ .start = 33, .end = 36 }, .presentation = .{ .line = 1, .column = 32 } },
+        } },
+        .{ .source = "export\r let value: any = 1;\n", .fatal = false, .diagnostics = &.{
+            .{ .kind = .mutable_export, .span = .{ .start = 0, .end = 6 }, .presentation = .{ .line = 1, .column = 1 } },
+            .{ .kind = .any_type, .span = .{ .start = 19, .end = 22 }, .presentation = .{ .line = 1, .column = 19 } },
+        } },
+    };
+    try std.testing.expectEqual(@as(usize, 17), cases.len);
+    for (cases) |case| {
+        errdefer std.debug.print("module presentation failed: {s}\n", .{case.source});
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, mode);
+            defer parser.deinit();
+            const outcome = try parser.parseAdmission();
+            if (mode == .collect and !case.fatal) {
+                switch (outcome) {
+                    .recovered_admission_refused => {},
+                    else => return error.TestUnexpectedResult,
+                }
+                try std.testing.expectEqualDeep(case.diagnostics, parser.getAdmissionDiagnostics());
+            } else {
+                const diagnostic = switch (outcome) {
+                    .terminal_admission_refused => |failure| switch (failure) {
+                        .diagnostic => |value| value,
+                        else => return error.TestUnexpectedResult,
+                    },
+                    else => return error.TestUnexpectedResult,
+                };
+                const expected = for (case.diagnostics) |item| {
+                    if (item.kind != .unterminated_string) break item;
+                } else return error.TestUnexpectedResult;
+                try std.testing.expectEqualDeep(expected, diagnostic);
+            }
+            try parser.type_store.validate();
+        }
+    }
+}
+
+test "retired module refusal retains caught history under its selected prefix" {
+    const source = "import\r type `${\"open\n}` from '" ++ retired_types_module ++ "';\n";
+    for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
+        defer parser.deinit();
+        const diagnostic = switch (try parser.parseAdmission()) {
+            .terminal_admission_refused => |failure| switch (failure) {
+                .diagnostic => |value| value,
+                else => return error.TestUnexpectedResult,
+            },
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, diagnostic.kind);
+        const history = parser.admission_observations.?.items();
+        try std.testing.expectEqual(@as(usize, 2), history.len);
+        try std.testing.expectEqualDeep(type_syntax.AdmissionDiagnostic{
+            .kind = .unterminated_string,
+            .span = .{ .start = 21, .end = 22 },
+            .presentation = .{ .line = 1, .column = 21 },
+        }, history[0]);
+        try std.testing.expectEqualDeep(diagnostic, history[1]);
+        try std.testing.expectEqual(@as(usize, 1), parser.getAdmissionDiagnostics().len);
+        try std.testing.expectEqualDeep(diagnostic, parser.getAdmissionDiagnostics()[0]);
+        try std.testing.expectEqual(@as(u32, 1), diagnostic.positionIn(source).column);
+    }
+}
+
+test "admission spaced function lists retain call arguments and runtime headers" {
+    const source = "function id <T>(x) { return x; }\n";
+    for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
+        defer parser.deinit();
+        const root = switch (try parser.parseAdmission()) {
+            .accepted => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+        const program = parser.nodes.get(root).?;
+        try std.testing.expectEqual(@as(u16, 1), program.data.block.stmts_count);
+        const wrapper = parser.nodes.getListIndex(program.data.block.stmts_start, 0);
+        try std.testing.expectEqual(NodeTag.function_decl, view.getTag(wrapper).?);
+        const function = view.getVarDecl(wrapper).?.init;
+
+        try std.testing.expectEqual(NodeTag.function_expr, view.getTag(function).?);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
+        const owner = parser.type_store.generic_owners.items[0];
+        switch (owner.identity) {
+            .function => |node| try std.testing.expectEqual(function, node),
+            else => return error.TestUnexpectedResult,
+        }
+        try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
+        try std.testing.expectEqualStrings("T", owner.capture_spans.legacy_recorded_span.text(source));
+        try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
+        try std.testing.expectEqual(@as(u32, 1), owner.projected_parameters.count);
+        const arguments = switch (owner.compatibility) {
+            .legacy_call_arguments => |value| value,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expectEqual(@as(u32, 1), arguments.authored_arguments.count);
+        try std.testing.expectEqual(@as(u32, 1), arguments.semantic_fragments.count);
+        try std.testing.expectEqualStrings("T", parser.type_store.authored_call_arguments.items[arguments.authored_arguments.start].full_span.text(source));
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
+        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
+    }
+    const refused_cases = [_]struct { source: []const u8, column: u32 }{
+        .{ .source = "function id <T>(x: T): T { return x; }\n", .column = 18 },
+        .{ .source = "function id <T> (x) { return x; }\n", .column = 13 },
+    };
+    try std.testing.expectEqual(@as(usize, 2), refused_cases.len);
+    for (refused_cases) |case| {
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, mode);
+            defer parser.deinit();
+            const refusal = switch (try parser.parseAdmission()) {
+                .parser_refused => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(error.UnexpectedToken, refusal.first_error);
+            const errors = parser.getProjectedErrors();
+            try std.testing.expectEqual(@as(usize, 1), errors.len);
+            try std.testing.expectEqual(error_mod.ErrorKind.expected_token, errors[0].kind);
+            try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+            try std.testing.expectEqual(case.column, errors[0].location.column);
+            try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
+            try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
+            try parser.type_store.validate();
+        }
+    }
+}
+
+test "admission declaration names retain the existing keyword vocabulary" {
+    const names = [_][]const u8{ "true", "null", "undefined", "function" };
+    try std.testing.expectEqual(@as(usize, 4), names.len);
+    for (names) |name| {
+        const source = try std.fmt.allocPrint(std.testing.allocator, "structural {s} = number;\nconst live = 1;\n", .{name});
+        defer std.testing.allocator.free(source);
+        for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+            var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
+            defer parser.deinit();
+            const root = switch (try parser.parseAdmission()) {
+                .accepted => |value| value,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+            try std.testing.expectEqualStrings(name, parser.type_store.declarations.items[0].name_span.text(source));
+            const program = parser.nodes.get(root).?;
+            try std.testing.expectEqual(@as(u16, 1), program.data.block.stmts_count);
+            try std.testing.expectEqual(NodeTag.var_decl, parser.nodes.getTag(parser.nodes.getListIndex(program.data.block.stmts_start, 0)));
+            try parser.type_store.validateRuntimeOwners(std.testing.allocator, ir.IrView.fromIRStore(&parser.nodes, &parser.constants));
+        }
+    }
+}
+
+test "spaced function allocation failures preserve the prior declaration" {
+    const source = "structural Seed = number;\nfunction id <T>(x) { return x; }\n";
+    const Context = struct {
+        fn run(type_allocator: std.mem.Allocator, mode: type_syntax.AdmissionMode, seed: type_syntax.Store.Checkpoint, function_start: u32, later_failures: *usize) !void {
+            var parser = try Parser.initAdmission(std.testing.allocator, type_allocator, source, mode);
+            defer parser.deinit();
+            const outcome = parser.parseAdmission() catch |err| {
+                switch (err) {
+                    error.OutOfMemory => if (parser.current.start >= function_start) {
+                        later_failures.* += 1;
+                        try std.testing.expectEqual(scope_mod.ScopeKind.global, parser.scopes.getCurrentScope().kind);
+                        try std.testing.expectEqualDeep(seed, parser.type_store.checkpoint());
+                        try parser.type_store.validate();
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            switch (outcome) {
+                .accepted => {},
+                else => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
+            try parser.type_store.validateRuntimeOwners(std.testing.allocator, ir.IrView.fromIRStore(&parser.nodes, &parser.constants));
+        }
+    };
+    for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+        var baseline = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
+        defer baseline.deinit();
+        try std.testing.expect(try baseline.tryConsumeTypeDeclaration());
+        const seed = baseline.type_store.checkpoint();
+        try std.testing.expect(seed.declarations > 0);
+        try std.testing.expect(seed.nodes > 0);
+        try std.testing.expectEqualStrings("function", baseline.current.text(source));
+        var later_failures: usize = 0;
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{ mode, seed, baseline.current.start, &later_failures });
+        try std.testing.expect(later_failures > 0);
+    }
+}
+
+test "recovery allocation failures retain native errors after observation and erasure" {
+    const source =
+        "function f() {\n" ++
+        "import type { A } /* ; */ from \"./a\";\n" ++
+        "const live: \"const\" = 1;\n" ++
+        "const later: any = 1;\n" ++
+        "structural Box = string;\n" ++
+        "}\n";
+    const Floors = struct { after_observation: usize = 0, after_erasure: usize = 0 };
+    const Context = struct {
+        fn run(type_allocator: std.mem.Allocator, mode: type_syntax.AdmissionMode, floors: *Floors) !void {
+            var parser = try Parser.initAdmission(std.testing.allocator, type_allocator, source, mode);
+            defer parser.deinit();
+            const outcome = parser.parseAdmission() catch |err| {
+                switch (err) {
+                    error.OutOfMemory => {
+                        if (parser.admission_recovery) |recovery| {
+                            if (parser.admission_observations.?.items().len > 0) floors.after_observation += 1;
+                            if (recovery.erasures.items.len > 0) floors.after_erasure += 1;
+                        }
+                        try std.testing.expectEqual(scope_mod.ScopeKind.global, parser.scopes.getCurrentScope().kind);
+                        try std.testing.expectEqualDeep(std.mem.zeroes(type_syntax.Store.Checkpoint), parser.type_store.checkpoint());
+                        try parser.type_store.validate();
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            switch (mode) {
+                .collect => switch (outcome) {
+                    .recovered_admission_refused => {},
+                    else => return error.TestUnexpectedResult,
+                },
+                .compile => switch (outcome) {
+                    .terminal_admission_refused => |failure| switch (failure) {
+                        .diagnostic => |diagnostic| try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, diagnostic.kind),
+                        else => return error.TestUnexpectedResult,
+                    },
+                    else => return error.TestUnexpectedResult,
+                },
+            }
+            try std.testing.expectEqual(@as(usize, 1), parser.getAdmissionDiagnostics().len);
+            try std.testing.expectEqual(type_syntax.AdmissionKind.any_type, parser.getAdmissionDiagnostics()[0].kind);
+            try std.testing.expectEqual(scope_mod.ScopeKind.global, parser.scopes.getCurrentScope().kind);
+            try std.testing.expectEqualDeep(std.mem.zeroes(type_syntax.Store.Checkpoint), parser.type_store.checkpoint());
+        }
+    };
+    for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
+        var floors: Floors = .{};
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{ mode, &floors });
+        try std.testing.expect(floors.after_observation > 0);
+        try std.testing.expect(floors.after_erasure > 0);
+    }
 }

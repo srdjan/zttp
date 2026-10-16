@@ -161,6 +161,38 @@ pub fn fromStripError(diag: zts.StripDiagnostic, file: []const u8) JsonDiagnosti
     };
 }
 
+pub fn fromAdmissionError(
+    source: []const u8,
+    diag: parser.type_syntax.AdmissionDiagnostic,
+    file: []const u8,
+) JsonDiagnostic {
+    const kind: zts.StripDiagnosticKind = switch (diag.kind) {
+        .any_type => .any_type,
+        .as_assertion => .as_assertion,
+        .satisfies_assertion => .satisfies_assertion,
+        .unterminated_string => .unterminated_string,
+        .nominal_base_not_scalar => .nominal_base_not_scalar,
+        .interface_declaration => .interface_declaration,
+        .type_alias_declaration => .type_alias_declaration,
+        .distinct_type_declaration => .distinct_type_declaration,
+        .legacy_types_import => .legacy_types_import,
+        .default_parameter => .default_parameter,
+        .optional_parameter => .optional_parameter,
+        .default_export => .default_export,
+        .mutable_export => .mutable_export,
+        .array_type_alias => .array_type_alias,
+        .readonly_array_type_alias => .readonly_array_type_alias,
+        .void_type => .void_type,
+        .nesting_too_deep => .nesting_too_deep,
+    };
+    const position = diag.positionIn(source);
+    return fromStripError(.{
+        .kind = kind,
+        .line = position.line,
+        .column = position.column,
+    }, file);
+}
+
 pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
     return .{
         .code = diagnostic_catalog.driverCode(.unsupported_source_extension),
@@ -1270,6 +1302,50 @@ test "fromStripError maps as and satisfies to distinct codes" {
     try std.testing.expectEqualStrings("ZTS043", sat_jd.code);
 }
 
+test "admission diagnostics preserve byte coordinates and static text" {
+    const source = "é\r\n  any";
+    const diagnostic = fromAdmissionError(source, .{
+        .kind = .any_type,
+        .span = .{ .start = 6, .end = 9 },
+    }, "handler.ts");
+    try std.testing.expectEqualStrings("ZTS041", diagnostic.code);
+    try std.testing.expectEqualStrings("error", diagnostic.severity);
+    try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
+    try std.testing.expectEqual(@as(u32, 2), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 3), diagnostic.column);
+    try std.testing.expectEqualStrings("'any' type is not supported", diagnostic.message);
+    try std.testing.expectEqualStrings(
+        "use specific types (string, number, object) or union types instead",
+        diagnostic.suggestion.?,
+    );
+    try std.testing.expectEqual(@as(u32, 0), diagnostic.start_offset);
+    try std.testing.expectEqual(@as(u32, 0), diagnostic.end_offset);
+    try std.testing.expect(!diagnostic.message_owned);
+    try std.testing.expect(!diagnostic.suggestion_owned);
+    try std.testing.expect(diagnostic.repair_intent == null);
+
+    const first_line = fromAdmissionError("é\r any", .{
+        .kind = .any_type,
+        .span = .{ .start = 4, .end = 7 },
+    }, "handler.ts");
+    try std.testing.expectEqual(@as(u32, 1), first_line.line);
+    try std.testing.expectEqual(@as(u32, 5), first_line.column);
+}
+
+test "admission diagnostics retain the legacy column clamp" {
+    const offset = @as(usize, std.math.maxInt(u16)) + 1;
+    const source = try std.testing.allocator.alloc(u8, offset + 3);
+    defer std.testing.allocator.free(source);
+    @memset(source[0..offset], ' ');
+    @memcpy(source[offset..], "any");
+    const diagnostic = fromAdmissionError(source, .{
+        .kind = .any_type,
+        .span = .{ .start = @intCast(offset), .end = @intCast(source.len) },
+    }, "handler.ts");
+    try std.testing.expectEqual(@as(u32, 1), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u16)), diagnostic.column);
+}
+
 test "unsupported source extensions have one exact repair" {
     const diagnostic = fromUnsupportedSourceExtension("handler.js");
     try std.testing.expectEqualStrings("ZTS052", diagnostic.code);
@@ -1278,4 +1354,24 @@ test "unsupported source extensions have one exact repair" {
         "rename the handler to .ts",
         diagnostic.suggestion.?,
     );
+}
+
+test "admission diagnostics preserve explicit presentation before legacy clamping" {
+    const source = "é\r any";
+    const explicit = fromAdmissionError(source, .{
+        .kind = .any_type,
+        .span = .{ .start = 4, .end = 7 },
+        .presentation = .{ .line = 1, .column = 3 },
+    }, "handler.ts");
+    try std.testing.expectEqual(@as(u32, 1), explicit.line);
+    try std.testing.expectEqual(@as(u32, 3), explicit.column);
+    const outside = fromAdmissionError(source, .{
+        .kind = .any_type,
+        .span = .{ .start = 4, .end = 7 },
+        .presentation = .{ .line = 7, .column = std.math.maxInt(u32) },
+    }, "handler.ts");
+    try std.testing.expectEqual(@as(u32, 7), outside.line);
+    try std.testing.expectEqual(@as(u32, std.math.maxInt(u16)), outside.column);
+    try std.testing.expectEqual(@as(u32, 0), outside.start_offset);
+    try std.testing.expectEqual(@as(u32, 0), outside.end_offset);
 }

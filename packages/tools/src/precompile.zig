@@ -210,16 +210,14 @@ pub const ImportReader = struct {
 const ImportedFile = struct {
     allocator: std.mem.Allocator,
     source: []u8,
-    prepared: zts.PreparedSource,
-    atoms: zts.AtomTable,
-    parser: zts.parser.JsParser,
+    source_owner: zts.DirectCheckSource,
     root: ir.NodeIndex,
     view: zts.IrView,
     module_facts: zts.pipeline.ModuleFacts,
 
-    /// Every failure (read, strip, parse, facts) is `Unreadable`: neither
-    /// caller tells them apart, and an out-of-memory failure has always read as
-    /// an unreadable file here. On failure nothing is left to `deinit`.
+    /// Every read, admission, parse, validation, or facts failure is `Unreadable`.
+    /// Neither caller distinguishes these failures. Allocation failure retains
+    /// this projection. Failed loading leaves no valid object for `deinit`.
     fn load(
         self: *ImportedFile,
         allocator: std.mem.Allocator,
@@ -233,29 +231,21 @@ const ImportedFile = struct {
             readFilePosix(allocator, path, 10 * 1024 * 1024)) catch return error.Unreadable;
         errdefer allocator.free(self.source);
 
-        self.prepared = zts.PreparedSource.init(allocator, self.source, path, .{}) catch return error.Unreadable;
-        errdefer self.prepared.deinit();
-
-        self.atoms = zts.AtomTable.init(allocator);
-        errdefer self.atoms.deinit();
-        self.parser = zts.parser.JsParser.init(allocator, self.prepared.parserInput()) catch return error.Unreadable;
-        errdefer self.parser.deinit();
-        self.parser.setAtomTable(&self.atoms);
-        self.root = self.parser.parse() catch return error.Unreadable;
-
-        self.view = zts.IrView.fromIRStore(&self.parser.nodes, &self.parser.constants);
+        self.source_owner.initCompileInPlace(allocator, allocator, self.source, path) catch return error.Unreadable;
+        errdefer self.source_owner.deinit();
+        const parsed = zts.parsedModuleFromDirectCheck(&self.source_owner) orelse return error.Unreadable;
+        self.root = parsed.root;
+        self.view = parsed.ir_view;
         self.module_facts = zts.pipeline.buildModuleFacts(
             allocator,
-            zts.pipeline.ParsedModule.fromExisting(self.view, self.root, &self.atoms),
+            parsed,
             null,
         ) catch return error.Unreadable;
     }
 
     fn deinit(self: *ImportedFile) void {
         self.module_facts.deinit();
-        self.parser.deinit();
-        self.atoms.deinit();
-        self.prepared.deinit();
+        self.source_owner.deinit();
         self.allocator.free(self.source);
     }
 };
@@ -546,16 +536,19 @@ fn importedFunctionSummary(
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
     var type_check_clean = true;
-    if (file.prepared.typeMap()) |type_map| {
-        type_env_storage.init(allocator, type_map) catch {
-            type_check_clean = false;
-        };
-    }
+    const capabilities = file.source_owner.acceptedCapabilities() orelse return result;
+    type_env_storage.initWithSource(allocator, .{ .direct = .{
+        .store = capabilities.type_store,
+        .ir_view = capabilities.ir_view,
+        .atoms = capabilities.atoms,
+    } }) catch {
+        type_check_clean = false;
+    };
     var type_checker: ?zts.TypeChecker = null;
     defer if (type_checker) |*checker| checker.deinit();
     if (type_check_clean) {
         if (type_env_storage.envPtr()) |type_env| {
-            type_checker = zts.TypeChecker.init(allocator, view, &file.atoms, type_env);
+            type_checker = zts.TypeChecker.init(allocator, view, capabilities.atoms, type_env);
             const type_errors = type_checker.?.check(file.root) catch blk: {
                 type_check_clean = false;
                 break :blk 0;
@@ -586,7 +579,7 @@ fn importedFunctionSummary(
     }
 
     if (type_check_clean) {
-        var flow = zts.FlowChecker.init(allocator, view, &file.atoms);
+        var flow = zts.FlowChecker.init(allocator, view, capabilities.atoms);
         defer flow.deinit();
         flow.facts = module_facts;
         if (type_checker) |*checker| flow.setTypeChecker(checker);
@@ -602,10 +595,13 @@ fn importedFunctionSummary(
         }
     }
 
-    var effects = zts.EffectAnalyzer.init(allocator, view, &file.atoms);
+    var effects = zts.EffectAnalyzer.init(allocator, view, capabilities.atoms);
     defer effects.deinit();
     effects.facts = module_facts;
-    effects.type_env = if (type_check_clean) type_env_storage.envPtr() else null;
+    effects.type_source = if (type_check_clean)
+        .{ .direct = type_env_storage.envPtr().? }
+    else
+        .omitted;
     effects.imported_effects = nested.effects.items;
     effects.analyze(file.root) catch return result;
     var exported = effects.exportEffects() catch return result;
@@ -1130,8 +1126,8 @@ pub fn runCheckOnlyFromSourceWithOptions(
     );
 }
 
-/// Every stage below the strip reports positions in stripped coordinates.
-/// This exit maps each position to the source before clients receive it.
+/// Direct TypeScript diagnostics use original source coordinates.
+/// The legacy virtual path retains its source-view mapping.
 fn runCheckOnlyFromSourceWithPathAllocator(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
@@ -1141,9 +1137,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
 ) !CheckResult {
     var prepared_source: ?zts.PreparedSource = null;
     defer if (prepared_source) |*prepared| prepared.deinit();
-    // Diagnostics the strip stage raises carry source coordinates already;
-    // only what the parse of the stripped code produced needs mapping. The
-    // inner call reports where that boundary falls.
+    // The legacy path reports the boundary before source-view mapping.
     var already_mapped: usize = 0;
 
     var result = try runCheckOnPreparedSource(
@@ -1156,14 +1150,16 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         &already_mapped,
     );
     errdefer result.deinit(allocator);
-    if (prepared_source) |*prepared| remapDiagnosticsToSource(&result, prepared.sourceView(), already_mapped);
+    if (prepared_source) |*prepared| {
+        remapDiagnosticsToSource(&result, prepared.sourceView(), already_mapped);
+    } else if (result.is_typescript and result.stages_run.contains(.parse)) {
+        remapDiagnosticsToSource(&result, .{ .text = source, .normalize_positions = true }, already_mapped);
+    }
+
     return result;
 }
 
-/// Undo the stripper's span shifts on every diagnostic the stripped parse
-/// produced. A no-op for a handler whose folds all fit, which is nearly all of
-/// them - and exactly at the handlers where it is not, an unmapped column sends
-/// a repair at the wrong byte of the file it is rewriting.
+/// Apply source-view coordinates after the recorded diagnostic boundary.
 fn remapDiagnosticsToSource(
     result: *CheckResult,
     source_view: zts.SourceView,
@@ -1175,6 +1171,52 @@ fn remapDiagnosticsToSource(
         diagnostic.line = mapped.line;
         diagnostic.column = mapped.column;
     }
+}
+
+fn appendCheckAdmissionDiagnostic(
+    allocator: std.mem.Allocator,
+    result: *CheckResult,
+    source: []const u8,
+    diagnostic: zts.parser.type_syntax.AdmissionDiagnostic,
+    handler_path: []const u8,
+) void {
+    const projected = json_diag.fromAdmissionError(source, diagnostic, handler_path);
+    result.json_diagnostics.append(allocator, projected) catch {};
+    if (!builtin.is_test) {
+        debugPrint("{s}:{d}:{d}: {s}{s}{s}\n", .{
+            handler_path,
+            projected.line,
+            projected.column,
+            projected.message,
+            if (projected.suggestion != null) "; " else "",
+            projected.suggestion orelse "",
+        });
+    }
+}
+
+fn checkAdmissionFailureError(failure: zts.parser.AdmissionFailure) zts.PrepareSourceError {
+    return switch (failure) {
+        .unterminated_comment => error.UnterminatedComment,
+        .diagnostic => |diagnostic| switch (diagnostic.kind) {
+            .any_type => error.UnsupportedAnyType,
+            .as_assertion => error.UnsupportedAsAssertion,
+            .satisfies_assertion => error.UnsupportedSatisfiesAssertion,
+            .unterminated_string => error.UnterminatedString,
+            .nominal_base_not_scalar => error.NominalBaseNotScalar,
+            .interface_declaration => error.InterfaceDeclaration,
+            .type_alias_declaration => error.TypeAliasDeclaration,
+            .distinct_type_declaration => error.DistinctTypeDeclaration,
+            .legacy_types_import => error.LegacyTypesImport,
+            .default_parameter => error.DefaultParameter,
+            .optional_parameter => error.OptionalParameter,
+            .default_export => error.DefaultExport,
+            .mutable_export => error.MutableExport,
+            .array_type_alias => error.ArrayTypeAlias,
+            .readonly_array_type_alias => error.ReadonlyArrayTypeAlias,
+            .void_type => error.VoidType,
+            .nesting_too_deep => error.NestingTooDeep,
+        },
+    };
 }
 
 fn runCheckOnPreparedSource(
@@ -1196,88 +1238,125 @@ fn runCheckOnPreparedSource(
     const source_kind = zts.classifySourcePath(handler_path);
     result.is_typescript = source_kind.isTyped();
 
-    // Stage 1: source preparation and TypeScript stripping.
-    var strip_diag: ?zts.StripDiagnostic = null;
-    prepared_out.* = zts.PreparedSource.init(
-        allocator,
-        source,
-        handler_path,
-        .{
-            .diagnostic_out = &strip_diag,
-            // Report EVERY `as`/`satisfies`/`any` site in one pass instead of
-            // aborting at the first, so an agent (or `check`) fixes them all in
-            // a single round-trip rather than one per round-trip.
-            .collect_all_diagnostics = true,
-        },
-    ) catch |err| {
-        result.stages_run.insert(.strip);
-        if (!builtin.is_test) {
-            if (err == error.UnsupportedSourceExtension) {
+    result.stages_run.insert(.strip);
+    var source_owner: zts.DirectCheckSource = undefined;
+    var source_owner_initialized = false;
+    defer if (source_owner_initialized) source_owner.deinit();
+
+    var legacy_atoms = zts.AtomTable.init(allocator);
+    defer legacy_atoms.deinit();
+    var legacy_parser: ?zts.parser.JsParser = null;
+    defer if (legacy_parser) |*parser| parser.deinit();
+
+    const parsed_input: struct {
+        parser: *zts.parser.JsParser,
+        atoms: *zts.AtomTable,
+        root: ir.NodeIndex,
+    } = switch (source_kind) {
+        .unsupported => {
+            if (!builtin.is_test) {
                 debugPrint("{s}: ZTS052 source files must use the .ts extension. Rename the handler to .ts.\n", .{handler_path});
-            } else {
-                debugPrint("TypeScript strip error: {}\n", .{err});
             }
-        }
-        if (err == error.UnsupportedSourceExtension) {
             result.json_diagnostics.append(
                 allocator,
                 json_diag.fromUnsupportedSourceExtension(handler_path),
             ) catch {};
-        } else if (strip_diag) |d| {
-            result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
-        }
-        result.parse_errors = 1;
-        return result;
-    };
-    result.stages_run.insert(.strip);
-    const prepared = &prepared_out.*.?;
-    // Recovered type-assertion diagnostics: surface them all and stop before
-    // parse. The recovered code has the assertions dropped, so parsing it
-    // would analyze a different program than the author wrote.
-    if (prepared.stripDiagnostics().len > 0) {
-        for (prepared.stripDiagnostics()) |d| {
-            result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
-        }
-        result.parse_errors = @intCast(prepared.stripDiagnostics().len);
-        return result;
-    }
-    // Everything appended so far came from the stripper and is already in the
-    // author's coordinates; everything appended below is not.
-    already_mapped.* = result.json_diagnostics.items.len;
-
-    // Diagnostics are rendered against the file the author wrote, not the
-    // stripped text that was parsed, and the view carries what it takes to move
-    // a reported position between the two.
-    const diag_view = prepared.sourceView();
-
-    // Stage 2: Parse
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-
-    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-    result.stages_run.insert(.parse);
-    const root = js_parser.parse() catch {
-        const errors = js_parser.errors.getErrors();
-        if (json_mode) {
-            for (errors) |parse_error| {
-                var parse_diag = json_diag.fromParseErrorOwned(allocator, parse_error, handler_path);
-                result.json_diagnostics.append(allocator, parse_diag) catch parse_diag.deinit(allocator);
+            result.parse_errors = 1;
+            return result;
+        },
+        .typescript => typed: {
+            source_owner.initInPlace(allocator, allocator, source, handler_path) catch |err| switch (err) {
+                error.OutOfMemory => {
+                    if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
+                    result.parse_errors = 1;
+                    return result;
+                },
+                else => return err,
+            };
+            source_owner_initialized = true;
+            switch (source_owner.outcome().*) {
+                .recovered_admission_refused => {
+                    const diagnostics = source_owner.selectedAdmissionDiagnostics();
+                    for (diagnostics) |diagnostic| {
+                        appendCheckAdmissionDiagnostic(allocator, &result, source, diagnostic, handler_path);
+                    }
+                    remapDiagnosticsToSource(&result, .{ .text = source, .normalize_positions = true }, 0);
+                    result.parse_errors = @intCast(diagnostics.len);
+                    return result;
+                },
+                .terminal_admission_refused => |failure| {
+                    if (source_owner.terminalAdmissionDiagnostic()) |diagnostic| {
+                        appendCheckAdmissionDiagnostic(allocator, &result, source, diagnostic, handler_path);
+                    }
+                    if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{checkAdmissionFailureError(failure)});
+                    result.parse_errors = 1;
+                    return result;
+                },
+                .parser_refused => {
+                    result.stages_run.insert(.parse);
+                    const errors = source_owner.parserErrors();
+                    if (json_mode) {
+                        for (errors) |parse_error| {
+                            var diagnostic = json_diag.fromParseErrorOwned(allocator, parse_error, handler_path);
+                            result.json_diagnostics.append(allocator, diagnostic) catch diagnostic.deinit(allocator);
+                        }
+                    } else if (!builtin.is_test) {
+                        printParseErrors(allocator, source_owner.sourceView(), errors);
+                    }
+                    result.parse_errors = @intCast(errors.len);
+                    return result;
+                },
+                .accepted => {
+                    result.stages_run.insert(.parse);
+                    const capabilities = source_owner.acceptedCapabilities() orelse return error.DirectTypeSyntaxUnavailable;
+                    break :typed .{
+                        .parser = &source_owner.parser,
+                        .atoms = capabilities.atoms,
+                        .root = capabilities.root,
+                    };
+                },
             }
-        } else if (!builtin.is_test) {
-            printParseErrors(allocator, diag_view, errors);
-        }
-        result.parse_errors = @intCast(errors.len);
-        return result;
+        },
+        .virtual_javascript => virtual: {
+            prepared_out.* = try zts.PreparedSource.init(allocator, source, handler_path, .{});
+            const prepared = &prepared_out.*.?;
+            legacy_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
+            const parser = &legacy_parser.?;
+            parser.setAtomTable(&legacy_atoms);
+            result.stages_run.insert(.parse);
+            const root = parser.parse() catch {
+                const errors = parser.errors.getErrors();
+                if (json_mode) {
+                    for (errors) |parse_error| {
+                        var diagnostic = json_diag.fromParseErrorOwned(allocator, parse_error, handler_path);
+                        result.json_diagnostics.append(allocator, diagnostic) catch diagnostic.deinit(allocator);
+                    }
+                } else if (!builtin.is_test) {
+                    printParseErrors(allocator, prepared.sourceView(), errors);
+                }
+                result.parse_errors = @intCast(errors.len);
+                return result;
+            };
+            break :virtual .{
+                .parser = parser,
+                .atoms = &legacy_atoms,
+                .root = root,
+            };
+        },
     };
+    already_mapped.* = result.json_diagnostics.items.len;
+    var diag_view = zts.SourceView.of(source);
+    diag_view.name = handler_path;
+    const js_parser = parsed_input.parser;
+    const atoms = parsed_input.atoms;
+    const root = parsed_input.root;
 
     // Stage 3: Import validation
     result.stages_run.insert(.imports);
     var import_diagnostic: ?VirtualImportDiagnostic = null;
     validateVirtualModuleImports(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
-        &atoms,
+        atoms,
         handler_path,
         &import_diagnostic,
     ) catch {
@@ -1325,14 +1404,17 @@ fn runCheckOnPreparedSource(
     ) catch {};
 
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
+    const parsed = if (source_kind.isTyped())
+        zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.DirectTypeSyntaxUnavailable
+    else
+        zts.pipeline.ParsedModule.fromExisting(ir_view, root, atoms);
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
         allocator,
         parsed,
         .{
-            .type_map = prepared.typeMap(),
+            .source_types = if (source_kind.isTyped()) .direct else .omitted,
             .strict = true,
             .manifest_registry = null,
             // Which sections the project's policy declares, so a computed
@@ -1384,7 +1466,7 @@ fn runCheckOnPreparedSource(
         }
     }
 
-    if (prepared.typeMap() != null) {
+    if (source_kind.isTyped()) {
         result.stages_run.insert(.types);
         const tc_diags = resolved.typeDiagnostics();
         result.type_errors = @intCast(resolved.typeErrorCount());
@@ -1617,7 +1699,7 @@ fn runCheckOnPreparedSource(
                 path_allocator,
                 allocator,
                 ir_view,
-                &atoms,
+                atoms,
                 try analysis.facts(),
                 &analysis,
                 hf,
@@ -8018,6 +8100,51 @@ test "CHECK keeps the reader trace for two names imported from one file" {
     }, contract.fault_coverage orelse return error.TestUnexpectedResult);
 }
 
+test "CHECK accepts a compile-caught imported type and retains measured direct effects" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { clean } from "./lib.ts";
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(clean("x"));
+        \\}
+        \\
+    ;
+    const dependency =
+        "const marker: \"open\n" ++
+        " = \"open\";\n" ++
+        "export function clean(value: string): string { return value.toUpperCase(); }\n";
+    const reader_sources = [_][]const u8{ dependency, dependency };
+    var tracing_reader: TracingImportReader = .{ .sources = &reader_sources };
+    defer tracing_reader.deinit(allocator);
+
+    var result = try runCheckOnlyFromSourceWithOptions(
+        allocator,
+        handler_source,
+        "/virtual/handler.ts",
+        .{
+            .json_mode = true,
+            .import_reader = tracing_reader.reader(),
+        },
+    );
+    defer result.deinit(allocator);
+
+    const expected_paths = [_][]const u8{
+        "/virtual/lib.ts",
+        "/virtual/lib.ts",
+    };
+    try std.testing.expectEqual(expected_paths.len, tracing_reader.paths.items.len);
+    for (expected_paths, tracing_reader.paths.items) |expected, actual| {
+        try std.testing.expectEqualStrings(expected, actual);
+    }
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(contract.effect_analysis_complete);
+    try std.testing.expect(!properties.pure);
+    try std.testing.expect(properties.read_only);
+}
+
 test "CHECK stops nested effect reads after an imported type failure" {
     const allocator = std.testing.allocator;
     const handler_source =
@@ -8561,7 +8688,7 @@ test "CHECK preserves legacy compound unclosed syntax diagnostics" {
     try std.testing.expectEqual(annotations.len, observed);
 }
 
-test "CHECK preserves legacy compound preparation diagnostics" {
+test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
     const allocator = std.testing.allocator;
     const any_suggestion = "use specific types (string, number, object) or union types instead";
     const cases = [_]struct {
@@ -8673,6 +8800,412 @@ test "CHECK preserves legacy compound preparation diagnostics" {
     }
     try std.testing.expectEqual(@as(usize, 7), cases.len);
     try std.testing.expectEqual(cases.len, observed);
+
+    const CompatibilityStage = enum { strip, parse, contract_without_handler, contract };
+    const proof_suggestion =
+        "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
+        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe. " ++
+        "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
+        "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
+        "\"state_isolated\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
+        "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
+        "\"injection_safe\" | \"canonical\">`.";
+    const compatibility_cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        stage: CompatibilityStage,
+        parse_errors: u32,
+        diagnostics: []const LegacyCompoundDiagnostic,
+    }{
+        .{
+            .name = "caught_then_comment",
+            .source = "const value: \"open\n = \"open\";\n/* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS008",
+                .message = "unterminated string literal",
+                .line = 1,
+                .column = 19,
+                .suggestion = "close the quote, or write the newline as \\n",
+            }},
+        },
+        .{
+            .name = "comment_only",
+            .source = "/* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{},
+        },
+        .{
+            .name = "prior_hard_rows",
+            .source = "const first: any = 1;\nconst second: void = undefined;\n/* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS060",
+                .message = "`void` is not a type spelling in this profile",
+                .line = 2,
+                .column = 15,
+                .suggestion = "write `undefined`",
+            }},
+        },
+        .{
+            .name = "prior_parser_error",
+            .source = "const broken = ;\n/* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{},
+        },
+        .{
+            .name = "parameter_type_comment",
+            .source = "function f(value: string /* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{},
+        },
+        .{
+            .name = "general_type_comment",
+            .source = "const value: string /* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{},
+        },
+        .{
+            .name = "interface_body_comment",
+            .source = "interface Shape { /* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS049",
+                .message = "`interface` is not a declaration form in this profile",
+                .line = 1,
+                .column = 1,
+                .suggestion = "write `structural Name = { ... };`",
+            }},
+        },
+        .{
+            .name = "template_text_control",
+            .source = "const value = `/* unfinished`;\n",
+            .stage = .contract_without_handler,
+            .parse_errors = 0,
+            .diagnostics = &.{.{
+                .code = "ZTS500",
+                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                .line = 1,
+                .column = 1,
+                .suggestion = proof_suggestion,
+            }},
+        },
+        .{
+            .name = "template_interpolation_control",
+            .source = "const text = `${/* unfinished}`;\n",
+            .stage = .parse,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS001",
+                .message = "template interpolation is not supported",
+                .line = 1,
+                .column = 14,
+                .suggestion = "build a string array with explicit `String(...)` conversions and call `.join(\"\")`",
+            }},
+        },
+        .{
+            .name = "generic_owner_nonmatch",
+            .source = "const x = <void> + 1; /* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS060",
+                .message = "`void` is not a type spelling in this profile",
+                .line = 1,
+                .column = 12,
+                .suggestion = "write `undefined`",
+            }},
+        },
+        .{
+            .name = "assertion_comment",
+            .source = "const x = y as number /* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS042",
+                .message = "'as' type assertion is not supported",
+                .line = 1,
+                .column = 16,
+                .suggestion = "use type-safe patterns instead",
+            }},
+        },
+        .{
+            .name = "annotation_void_comment",
+            .source = "const x: void /* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{},
+        },
+        .{
+            .name = "assertion_later_void",
+            .source = "const x = y as number | void;\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS042",
+                .message = "'as' type assertion is not supported",
+                .line = 1,
+                .column = 16,
+                .suggestion = "use type-safe patterns instead",
+            }},
+        },
+        .{
+            .name = "assertion_any_comment",
+            .source = "const x = y as number | any /* unfinished\n",
+            .stage = .strip,
+            .parse_errors = 2,
+            .diagnostics = &.{
+                .{
+                    .code = "ZTS042",
+                    .message = "'as' type assertion is not supported",
+                    .line = 1,
+                    .column = 16,
+                    .suggestion = "use type-safe patterns instead",
+                },
+                .{
+                    .code = "ZTS041",
+                    .message = "'any' type is not supported",
+                    .line = 1,
+                    .column = 25,
+                    .suggestion = any_suggestion,
+                },
+            },
+        },
+        .{
+            .name = "terminal_template_depth",
+            .source = "function f(): `${" ++ "{" ** 512 ++ " return 1; }\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS044",
+                .message = "type syntax nests too deeply",
+                .line = 1,
+                .column = 529,
+                .suggestion = "simplify or split it (nesting limit is 512)",
+            }},
+        },
+        .{
+            .name = "template_tail_slash",
+            .source = "const text = `${1}` / 2; import type { Spec } from \"zttp:types\"; / 3;\n",
+            .stage = .parse,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS001",
+                .message = "template interpolation is not supported",
+                .line = 1,
+                .column = 14,
+                .suggestion = "build a string array with explicit `String(...)` conversions and call `.join(\"\")`",
+            }},
+        },
+        .{
+            .name = "later_parser_error",
+            .source = "const broken = ;\nconst later = ;\n",
+            .stage = .parse,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS002",
+                .message = "expected expression",
+                .line = 1,
+                .column = 16,
+            }},
+        },
+        .{
+            .name = "recovery_first_template_head",
+            .source = "const broken = ; `${function f(x: any) {}}`;\n",
+            .stage = .parse,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS002",
+                .message = "expected expression",
+                .line = 1,
+                .column = 16,
+            }},
+        },
+        .{
+            .name = "template_tail_slash_boundary",
+            .source = "const text = `${1}` / 2;import type { Spec } from \"zttp:types\"; / 3;\n",
+            .stage = .strip,
+            .parse_errors = 1,
+            .diagnostics = &.{.{
+                .code = "ZTS053",
+                .message = "`zttp:types` is not a module in this profile",
+                .line = 1,
+                .column = 25,
+                .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
+            }},
+        },
+    };
+    const full_stages = StageSet.initMany(&.{
+        .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
+        .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
+    });
+    const handler_free_contract_stages = StageSet.initMany(&.{
+        .strip,  .parse,    .imports, .boolean, .types,
+        .strict, .contract, .trace,   .spec,    .canonical,
+    });
+    var compatibility_observed: usize = 0;
+    for (compatibility_cases) |case| {
+        errdefer std.debug.print("CHECK compatibility baseline failed: {s}\n", .{case.name});
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(allocator);
+
+        const expected_stages = switch (case.stage) {
+            .strip => StageSet.initMany(&.{.strip}),
+            .parse => StageSet.initMany(&.{ .strip, .parse }),
+            .contract_without_handler => handler_free_contract_stages,
+            .contract => full_stages,
+        };
+        const has_contract = switch (case.stage) {
+            .strip, .parse => false,
+            .contract_without_handler, .contract => true,
+        };
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(case.parse_errors, result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+        try std.testing.expectEqual(has_contract, result.contract != null);
+        const expected_errors: u32 = if (has_contract)
+            @intCast(case.diagnostics.len)
+        else
+            case.parse_errors;
+        try std.testing.expectEqual(expected_errors, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        compatibility_observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 19), compatibility_cases.len);
+    try std.testing.expectEqual(compatibility_cases.len, compatibility_observed);
+}
+
+test "CHECK keeps TypeScript and virtual JavaScript routing distinct" {
+    const source =
+        \\function handler(req) {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    const typed_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    const virtual_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .strict });
+    const cases = [_]struct {
+        path: []const u8,
+        is_typescript: bool,
+    }{
+        .{ .path = "routing.ts", .is_typescript = true },
+        .{ .path = "<routing>", .is_typescript = false },
+    };
+
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            std.testing.allocator,
+            source,
+            case.path,
+            .{ .json_mode = true },
+        );
+        defer result.deinit(std.testing.allocator);
+
+        try std.testing.expectEqual(case.is_typescript, result.is_typescript);
+        try std.testing.expectEqual(if (case.is_typescript) typed_stages else virtual_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.strict_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings("ZTS601", result.json_diagnostics.items[0].code);
+        try std.testing.expect(!result.verify_ran);
+        try std.testing.expect(result.contract == null);
+    }
+}
+
+test "CHECK preserves source preparation allocation failure projection" {
+    const source = "const value: string = \"ok\";\n";
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var result = try runCheckOnlyFromSourceWithOptions(
+        failing.allocator(),
+        source,
+        "allocation.ts",
+        .{ .json_mode = true },
+    );
+    defer result.deinit(failing.allocator());
+
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    try std.testing.expect(result.contract == null);
+}
+
+test "CHECK preserves validation allocation failure projection" {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "import type ");
+    for (0..513) |_| try source.appendSlice(std.testing.allocator, "`${");
+    try source.appendSlice(std.testing.allocator, "value");
+    for (0..513) |_| try source.appendSlice(std.testing.allocator, "}`");
+    try source.appendSlice(std.testing.allocator, ";\n");
+
+    var calibration = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = std.math.maxInt(usize),
+        .resize_fail_index = std.math.maxInt(usize),
+    });
+    var atoms = zts.AtomTable.init(calibration.allocator());
+    defer atoms.deinit();
+    var parser = try zts.parser.JsParser.initAdmission(
+        calibration.allocator(),
+        calibration.allocator(),
+        source.items,
+        .collect,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = switch (try parser.parseAdmission()) {
+        .accepted => |accepted| accepted,
+        else => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.type_only_modules.items.len);
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    try std.testing.expectEqual(zts.parser.NodeTag.program, view.getTag(root).?);
+
+    const validation_alloc_index = calibration.alloc_index;
+    const validation_resize_index = calibration.resize_index;
+    calibration.fail_index = validation_alloc_index;
+    calibration.resize_fail_index = validation_resize_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        parser.type_store.validateRuntimeOwners(calibration.allocator(), view),
+    );
+    try std.testing.expect(calibration.has_induced_failure);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = validation_alloc_index,
+        .resize_fail_index = validation_resize_index,
+    });
+    var result = try runCheckOnlyFromSourceWithOptions(
+        failing.allocator(),
+        source.items,
+        "validation-allocation.ts",
+        .{ .json_mode = true },
+    );
+    defer result.deinit(failing.allocator());
+
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    try std.testing.expect(result.contract == null);
 }
 
 test "CHECK preserves legacy absent compound propagated errors" {
@@ -10217,4 +10750,1085 @@ test "CHECK preserves measured lookup winners shadows and captures" {
     }
     try std.testing.expectEqual(@as(usize, 7), cases.len);
     try std.testing.expectEqual(cases.len, observed);
+}
+test "CHECK preserves measured recovery contexts and raw recognition guards" {
+    const allocator = std.testing.allocator;
+    const any_message = "'any' type is not supported";
+    const any_suggestion = "use specific types (string, number, object) or union types instead";
+    const namespace_message = "'import * as X' namespace imports are not supported; use named imports: import { x } from \"module\"";
+    const type_diagnostic: LegacyCompoundDiagnostic = .{
+        .code = "ZTS050",
+        .message = "`type` is not a declaration form in this profile",
+        .line = 1,
+        .column = 1,
+        .suggestion = "write `structural Name = ...;`",
+    };
+    const interface_diagnostic: LegacyCompoundDiagnostic = .{
+        .code = "ZTS049",
+        .message = "`interface` is not a declaration form in this profile",
+        .line = 1,
+        .column = 1,
+        .suggestion = "write `structural Name = { ... };`",
+    };
+    const default_diagnostic: LegacyCompoundDiagnostic = .{
+        .code = "ZTS054",
+        .message = "default parameters are not part of this profile",
+        .line = 1,
+        .column = 14,
+        .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
+    };
+    const nominal_diagnostic: LegacyCompoundDiagnostic = .{
+        .code = "ZTS048",
+        .message = "a nominal declaration carries scalar identity only",
+        .line = 1,
+        .column = 11,
+        .suggestion = "its base must be `string`, `number`, or `boolean`",
+    };
+    const cases = [_]struct {
+        source: []const u8,
+        parser_stage: bool,
+        diagnostics: []const LegacyCompoundDiagnostic,
+    }{
+        .{
+            .source = "while (true) { const x: any = 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{.{ .code = "ZTS041", .message = any_message, .line = 1, .column = 25, .suggestion = any_suggestion }},
+        },
+        .{
+            .source = "const x: /* closed */ any = 1;\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS002", .message = "const declarations must have an initializer", .line = 1, .column = 8 },
+                .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 7 },
+            },
+        },
+        .{
+            .source = "function f(x: /* closed */ any) { return x; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 13, .suggestion = "')'" }},
+        },
+        .{
+            .source = "function f(): /* closed */ any { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 13, .suggestion = "'{'" }},
+        },
+        .{
+            .source = "const x = value as \"open\n; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS042", .message = "'as' type assertion is not supported", .line = 1, .column = 20, .suggestion = "use type-safe patterns instead" },
+                .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 25, .suggestion = "close the quote, or write the newline as \\n" },
+                .{ .code = "ZTS041", .message = any_message, .line = 2, .column = 16, .suggestion = any_suggestion },
+            },
+        },
+        .{
+            .source = "import * as ns from \"./dep.ts\";\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS002", .message = namespace_message, .line = 1, .column = 1 }},
+        },
+        .{
+            .source = "import * as ns from \"./dep.ts\";\nconst x = value as number;\n",
+            .parser_stage = false,
+            .diagnostics = &.{.{ .code = "ZTS042", .message = "'as' type assertion is not supported", .line = 2, .column = 20, .suggestion = "use type-safe patterns instead" }},
+        },
+        .{
+            .source = "import * as ns from \"./dep.ts\"\nconst x = value as number;\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS002", .message = namespace_message, .line = 1, .column = 1 }},
+        },
+        .{
+            .source = "function f(): number {\n  while (true) { const x: number = 1; }\n  return 1;\n}\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS001", .message = "'while' is not supported", .line = 2, .column = 3, .suggestion = "use 'for-of' with a finite collection instead" }},
+        },
+        .{
+            .source = " export default 1;\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS001", .message = "default exports are not supported", .line = 1, .column = 9, .suggestion = "write a named export, for example `export function handler(...) { ... }`" }},
+        },
+        .{
+            .source = "export/*c*/let x = 1;\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS001", .message = "mutable exports are not supported", .line = 1, .column = 12, .suggestion = "use `export const` for module values and keep reassignment inside a function activation" }},
+        },
+        .{
+            .source = "type Alias/* c */ = any;\n",
+            .parser_stage = false,
+            .diagnostics = &.{type_diagnostic},
+        },
+        .{
+            .source = "type Alias<T>/* c */ = any;\n",
+            .parser_stage = false,
+            .diagnostics = &.{type_diagnostic},
+        },
+        .{
+            .source = "interface Shape;\n",
+            .parser_stage = false,
+            .diagnostics = &.{interface_diagnostic},
+        },
+        .{
+            .source = "interface Shape/*c*/;\n",
+            .parser_stage = false,
+            .diagnostics = &.{interface_diagnostic},
+        },
+        .{
+            .source = "nominal Bad = T\n;type Alias = number;\n",
+            .parser_stage = false,
+            .diagnostics = &.{.{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" }},
+        },
+        .{
+            .source = "type Alias /* open",
+            .parser_stage = false,
+            .diagnostics = &.{type_diagnostic},
+        },
+        .{
+            .source = "type Alias<T> /* open",
+            .parser_stage = false,
+            .diagnostics = &.{type_diagnostic},
+        },
+        .{
+            .source = "interface A {} ;type B = number;\n",
+            .parser_stage = false,
+            .diagnostics = &.{interface_diagnostic},
+        },
+        .{
+            .source = "type A = number\n;type B = number;\n",
+            .parser_stage = false,
+            .diagnostics = &.{type_diagnostic},
+        },
+        .{
+            .source = "interface A {} ;\ntype B = number;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                interface_diagnostic,
+                .{ .code = "ZTS050", .message = "`type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `structural Name = ...;`" },
+            },
+        },
+        .{
+            .source = "function f(x = function () {}, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{ default_diagnostic, .{ .code = "ZTS041", .message = any_message, .line = 1, .column = 35, .suggestion = any_suggestion } },
+        },
+        .{
+            .source = "function f({ x }, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{.{ .code = "ZTS041", .message = any_message, .line = 1, .column = 22, .suggestion = any_suggestion }},
+        },
+        .{
+            .source = "function f(x = 1, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{ default_diagnostic, .{ .code = "ZTS041", .message = any_message, .line = 1, .column = 22, .suggestion = any_suggestion } },
+        },
+        .{
+            .source = "nominal N /* gap */ = string;\n",
+            .parser_stage = false,
+            .diagnostics = &.{nominal_diagnostic},
+        },
+        .{
+            .source = "nominal N /* gap */ = any;\n",
+            .parser_stage = false,
+            .diagnostics = &.{nominal_diagnostic},
+        },
+        .{
+            .source = "nominal N<T> /* gap */ = string;\n",
+            .parser_stage = false,
+            .diagnostics = &.{.{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 14, .suggestion = "its base must be `string`, `number`, or `boolean`" }},
+        },
+        .{
+            .source = "nominal N /* open",
+            .parser_stage = false,
+            .diagnostics = &.{nominal_diagnostic},
+        },
+        .{
+            .source = "nominal /* gap */ N = string;\n",
+            .parser_stage = true,
+            .diagnostics = &.{.{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 1 }},
+        },
+        .{
+            .source = "function f({ x } = {}, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 18, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f({ x }: any = {}, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 23, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 32, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f({ x }: /* closed */ any, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 42, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f({ x }: Box<number, string>, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 43, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f({ x }: \"open\n, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 24, .suggestion = "close the quote, or write the newline as \\n" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 6, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x = y => y, z: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 14, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 18, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x = a == b, z: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 14, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 18, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 19, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f({ x }?: number, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 17, .suggestion = "replace `name?: T` with `name: T | undefined`" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 31, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function outer(): number { function inner({ x }) { return 1; } while (true) {} return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "destructured parameters are not supported", .line = 1, .column = 43, .suggestion = "bind one parameter, then read its members explicitly in the body" },
+                .{ .code = "ZTS001", .message = "'while' is not supported", .line = 1, .column = 64, .suggestion = "use 'for-of' with a finite collection instead" },
+            },
+        },
+        .{
+            .source = "function outer(): number { function inner({ x }: /* gap */ number) { return 1; } while (true) {} return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "destructured parameters are not supported", .line = 1, .column = 43, .suggestion = "bind one parameter, then read its members explicitly in the body" },
+                .{ .code = "ZTS001", .message = "'while' is not supported", .line = 1, .column = 82, .suggestion = "use 'for-of' with a finite collection instead" },
+            },
+        },
+        .{
+            .source = "function outer(): number { function inner({ x }) { return 1; } const later: any = 1; return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 77, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x: /* closed */ any, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f({ x }:\n /* closed */ any, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 3, .column = 1, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f({ x }: /* closed */ any, y: void) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 40, .suggestion = "write `undefined`" },
+            },
+        },
+        .{
+            .source = "function f({ x }:\n /* closed */ any,\n y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 4, .column = 1, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x: /* closed */ any, y = 1) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 37, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+            },
+        },
+        .{
+            .source = "function f(x:\t/* closed */ any, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x:\r /* closed */ any, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x: /* closed */ any, y: /* closed */ any, z: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 61, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x: /* closed */ number, y: number) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 13, .suggestion = "')'" },
+            },
+        },
+        .{
+            .source = "const x:\n /* closed */ number = 1; const y: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f():\n /* closed */ number { return 1; } const y: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 45, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x:\r any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const x:\r any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 10, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f():\r any { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x?\r: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 13, .suggestion = "replace `name?: T` with `name: T | undefined`" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 16, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x:\r number, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 26, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const x:\r /* closed */ number = 1; const y: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 45, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f():\r /* closed */ number { return 1; } const y: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 58, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const seed =\r 1; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const seed = 1 ===\r 1; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x =\r 1, y: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 14, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 23, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function\r f(x: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f\r(x: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = function\r (x: any) { return 1; };\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 24, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f<T>\r(x: any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 18, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f<T>\r; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 29, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = <T>\r(x: any) => x;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 18, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = <T>\r value; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = id<T>\r(1); const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 35, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "structural\r X = number; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "structural X\r = number; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "structural X<T>\r = number; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 40, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "structural X =\r number; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "structural X = number\n\r; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 16, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const seed =\r1; type\r X = any;\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 17 },
+            },
+        },
+        .{
+            .source = "nominal N =\r any;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 13, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "interface X extends\r any {};\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `structural Name = { ... };`" },
+            },
+        },
+        .{
+            .source = "import\r type { X } from './x.ts'; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "export\r type { X } from './x.ts'; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "export\r structural X = number; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 44, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "export\r default\r 1; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS056", .message = "default exports are not part of this profile", .line = 1, .column = 1, .suggestion = "write a named export, for example `export function handler(...) { ... }`" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 32, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "export\r let value: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS057", .message = "mutable exports are not part of this profile", .line = 1, .column = 1, .suggestion = "use `export const` for module values and keep reassignment inside a function activation" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const seed = value as\r any;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS042", .message = "'as' type assertion is not supported", .line = 1, .column = 23, .suggestion = "use type-safe patterns instead" },
+            },
+        },
+        .{
+            .source = "const seed = value satisfies\r any;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS043", .message = "'satisfies' type assertion is not supported", .line = 1, .column = 30, .suggestion = "use type-safe patterns instead" },
+            },
+        },
+        .{
+            .source = "const seed: () =>\r any = value;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(): () =>\r any { return value; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x: () =>\r any) { return 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 22, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f: (x: any) =>\r any = value;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 22, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f: (x: void) =>\r number = value;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 14, .suggestion = "write `undefined`" },
+            },
+        },
+        .{
+            .source = "const f: (x: void) =>\r any = value;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 23, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 14, .suggestion = "write `undefined`" },
+            },
+        },
+        .{
+            .source = "const f: (x: \"open\n) =>\r any = value;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 19, .suggestion = "close the quote, or write the newline as \\n" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 6, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f: () =>\r () =>\r any = value;\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS002", .message = "const declarations must have an initializer", .line = 1, .column = 20 },
+                .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 7 },
+            },
+        },
+        .{
+            .source = "interface X extends () =>\r any {};\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 28, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `structural Name = { ... };`" },
+            },
+        },
+        .{
+            .source = "const f = value as () =>\r any;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS042", .message = "'as' type assertion is not supported", .line = 1, .column = 20, .suggestion = "use type-safe patterns instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function/* gap */f<T>(x =\r 1, y: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "default parameters are not supported", .line = 1, .column = 25, .suggestion = "accept `T | undefined` and resolve the default at the start of the body" },
+            },
+        },
+        .{
+            .source = "function/* gap */f<T>(x?\r: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 24, .suggestion = "')'" },
+            },
+        },
+        .{
+            .source = "function/* gap */f(x =\r 1, y: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "default parameters are not supported", .line = 1, .column = 22, .suggestion = "accept `T | undefined` and resolve the default at the start of the body" },
+            },
+        },
+        .{
+            .source = "function f<T>/* gap */(x =\r 1, y: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "default parameters are not supported", .line = 1, .column = 26, .suggestion = "accept `T | undefined` and resolve the default at the start of the body" },
+            },
+        },
+        .{
+            .source = "function/* gap */f<T>({x}: /* gap */ number, y: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "destructured parameters are not supported", .line = 1, .column = 23, .suggestion = "bind one parameter, then read its members explicitly in the body" },
+            },
+        },
+        .{
+            .source = "function/* gap */f(x: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 21, .suggestion = "')'" },
+            },
+        },
+        .{
+            .source = "function f/* gap */(x: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 22, .suggestion = "')'" },
+            },
+        },
+        .{
+            .source = "function f/* gap */(x?: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 22, .suggestion = "')'" },
+            },
+        },
+        .{
+            .source = "function f/* gap */(x =\r 1, y: any) { return 1; }\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "default parameters are not supported", .line = 1, .column = 23, .suggestion = "accept `T | undefined` and resolve the default at the start of the body" },
+            },
+        },
+        .{
+            .source = "function f<T = string>\r; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f<T = string>\r; const seed =\r1; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 53, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x: number) { const seed =\r1; const later: any = 1; }\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 53, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f(x: /* gap */ number) {} const seed =\r1; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 66, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = function(x: number) { return 1; };\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "function expressions are not supported", .line = 1, .column = 11, .suggestion = "use arrow functions '(x) => x * 2' or function declarations 'function name() { }' instead" },
+            },
+        },
+        .{
+            .source = "const f = function(x?: any) { return 1; };\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 21, .suggestion = "replace `name?: T` with `name: T | undefined`" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 24, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = function(x = 1, y: any) { return 1; };\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 22, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = function<T>\r(x: any) { return 1; };\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 26, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = function g<T>\r(x: any) { return 1; };\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 28, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "const f = function/* gap */(x: any) { return 1; };\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS001", .message = "function expressions are not supported", .line = 1, .column = 11, .suggestion = "use arrow functions '(x) => x * 2' or function declarations 'function name() { }' instead" },
+            },
+        },
+        .{
+            .source = "function f<T as number>\r; const later: any = 1;\n",
+            .parser_stage = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, object) or union types instead" },
+            },
+        },
+        .{
+            .source = "function f<T = string>\r;\n",
+            .parser_stage = true,
+            .diagnostics = &.{
+                .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 24, .suggestion = "'('" },
+            },
+        },
+        .{
+            .source = "function f<T> /* unfinished\n",
+            .parser_stage = false,
+            .diagnostics = &.{},
+        },
+        .{ .source = "import\r { value } from './x.ts'; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "export type\r { X }; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 34, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "import\r type { X } from \"open\nconst later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 29, .suggestion = "close the quote, or write the newline as \\n" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "const seed =\r1;import\r type { X } from 'zttp:types';\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 15, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
+        } },
+        .{ .source = "import\r type `${\"open\n}` from 'zttp:types';\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
+        } },
+        .{ .source = "const seed =\r1;export\r default\r 1; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS056", .message = "default exports are not part of this profile", .line = 1, .column = 15, .suggestion = "write a named export, for example `export function handler(...) { ... }`" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 46, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "export\r const seed = 1; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "const value = <T>\r(1); const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "const value = <T>\r{ ok: 1 }; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 42, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "<T>\r{ const later: any = 1; }\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "const value = <T>\r(1 + ); const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "const value = <T>\r/* gap */(1); const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 46, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "const value = <T>\r extends Missing; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 49, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+    };
+    try std.testing.expectEqual(@as(usize, 129), cases.len);
+    for (cases) |case| {
+        errdefer std.debug.print("CHECK recovery context failed: {s}\n", .{case.source});
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(allocator);
+        const stages = if (case.parser_stage)
+            StageSet.initMany(&.{ .strip, .parse })
+        else
+            StageSet.initMany(&.{.strip});
+        try std.testing.expectEqual(stages, result.stages_run);
+        const expected_errors: u32 = @intCast(@max(1, case.diagnostics.len));
+        try std.testing.expectEqual(expected_errors, result.parse_errors);
+        try std.testing.expectEqual(expected_errors, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        try std.testing.expect(result.is_typescript);
+        try std.testing.expect(!result.verify_ran);
+        try std.testing.expect(result.contract == null);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+    }
+}
+
+test "CHECK preserves absent structural aliases at comment boundaries" {
+    const cases = [_]struct {
+        source: []const u8,
+        diagnostics: []const LegacyCompoundDiagnostic,
+    }{
+        .{ .source = "structural X/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .diagnostics = &.{} },
+        .{ .source = "structural X/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { const x: X = 1; return Response.text(\"ok\"); }\n", .diagnostics = &.{
+            .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'X'", .line = 2, .column = 59 },
+        } },
+        .{ .source = "structural X<T>/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { const x: X<number> = 1; return Response.text(\"ok\"); }\n", .diagnostics = &.{
+            .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'X<number>'", .line = 2, .column = 59 },
+        } },
+        .{ .source = "structural X\r /* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .diagnostics = &.{} },
+    };
+    try std.testing.expectEqual(@as(usize, 4), cases.len);
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expect(result.stages_run.contains(.types));
+        try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.type_errors);
+        try std.testing.expectEqual(result.type_errors, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        try std.testing.expectEqual(case.diagnostics.len == 0, result.contract != null);
+    }
+}
+
+test "CHECK preserves raw module recovery and the complete nested parser batch" {
+    const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostics: []const LegacyCompoundDiagnostic }{
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .parser_stage = true, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst later = \"open\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS008", .message = "unterminated string literal", .line = 2, .column = 20, .suggestion = "close the quote, or write the newline as \\n" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
+            .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
+        } },
+        .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live: \"const\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
+            .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
+        } },
+        .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live: \"return\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
+            .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
+        } },
+    };
+    try std.testing.expectEqual(@as(usize, 6), cases.len);
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(if (case.parser_stage) StageSet.initMany(&.{ .strip, .parse }) else StageSet.initMany(&.{.strip}), result.stages_run);
+        try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.parse_errors);
+        try std.testing.expectEqual(result.parse_errors, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| try expectLegacyCompoundDiagnostic(actual, expected);
+        try std.testing.expect(result.contract == null);
+    }
+}
+
+test "CHECK preserves spaced function call-list selection and strict refusal" {
+    const cases = [_]struct { source: []const u8, strict: bool, diagnostic: LegacyCompoundDiagnostic }{
+        .{ .source = "function id <T>(x) { return x; }\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .strict = true, .diagnostic = .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 1, .column = 16, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" } },
+        .{ .source = "function id <T> (x) { return x; }\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .strict = false, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 13, .suggestion = "'('" } },
+    };
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        const stages = if (case.strict) StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }) else StageSet.initMany(&.{ .strip, .parse });
+        try std.testing.expectEqual(stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, if (case.strict) 0 else 1), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, if (case.strict) 1 else 0), result.strict_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expect(result.contract == null);
+    }
+}
+
+test "CHECK observes every admission kind after the measured recovery divergence" {
+    const Kind = zts.parser.type_syntax.AdmissionKind;
+    const cases = [_]struct { source: []const u8, kind: ?Kind, diagnostics: []const LegacyCompoundDiagnostic }{
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value: any = 1;\n", .kind = .any_type, .diagnostics = &.{
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value = source as string;\n", .kind = .as_assertion, .diagnostics = &.{
+            .{ .code = "ZTS042", .message = "'as' type assertion is not supported", .line = 2, .column = 25, .suggestion = "use type-safe patterns instead" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value = source satisfies string;\n", .kind = .satisfies_assertion, .diagnostics = &.{
+            .{ .code = "ZTS043", .message = "'satisfies' type assertion is not supported", .line = 2, .column = 32, .suggestion = "use type-safe patterns instead" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value = \"open\nconst after = 1;\n", .kind = .unterminated_string, .diagnostics = &.{
+            .{ .code = "ZTS008", .message = "unterminated string literal", .line = 2, .column = 20, .suggestion = "close the quote, or write the newline as \\n" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nnominal Box = T;\n", .kind = .nominal_base_not_scalar, .diagnostics = &.{
+            .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 2, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n", .kind = .interface_declaration, .diagnostics = &.{
+            .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `structural Name = { ... };`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\ntype Box = string;\n", .kind = .type_alias_declaration, .diagnostics = &.{
+            .{ .code = "ZTS050", .message = "`type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `structural Name = ...;`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n", .kind = .distinct_type_declaration, .diagnostics = &.{
+            .{ .code = "ZTS051", .message = "`distinct type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `nominal Name = string;`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from 'zttp:types';\n", .kind = .legacy_types_import, .diagnostics = &.{
+            .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 2, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value = 1) { return value; }\n", .kind = .default_parameter, .diagnostics = &.{
+            .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 18, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value?: string) { return value; }\n", .kind = .optional_parameter, .diagnostics = &.{
+            .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 2, .column = 17, .suggestion = "replace `name?: T` with `name: T | undefined`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nexport default 1;\n", .kind = .default_export, .diagnostics = &.{
+            .{ .code = "ZTS056", .message = "default exports are not part of this profile", .line = 2, .column = 1, .suggestion = "write a named export, for example `export function handler(...) { ... }`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nexport let value = 1;\n", .kind = .mutable_export, .diagnostics = &.{
+            .{ .code = "ZTS057", .message = "mutable exports are not part of this profile", .line = 2, .column = 1, .suggestion = "use `export const` for module values and keep reassignment inside a function activation" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = Array<string>;\n", .kind = .array_type_alias, .diagnostics = &.{
+            .{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 2, .column = 18, .suggestion = "write `T[]`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = ReadonlyArray<string>;\n", .kind = .readonly_array_type_alias, .diagnostics = &.{
+            .{ .code = "ZTS059", .message = "`ReadonlyArray<T>` is not a type spelling in this profile", .line = 2, .column = 18, .suggestion = "write `readonly T[]`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = void;\n", .kind = .void_type, .diagnostics = &.{
+            .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 2, .column = 18, .suggestion = "write `undefined`" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{ string;\n", .kind = .nesting_too_deep, .diagnostics = &.{
+            .{ .code = "ZTS044", .message = "type syntax nests too deeply", .line = 2, .column = 526, .suggestion = "simplify or split it (nesting limit is 512)" },
+        } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\n/* unfinished\n", .kind = null, .diagnostics = &.{} },
+    };
+    try std.testing.expectEqual(@as(usize, 18), cases.len);
+    try std.testing.expectEqual(std.meta.fields(Kind).len + 1, cases.len);
+    var seen = std.EnumSet(Kind).initEmpty();
+    var location_free: usize = 0;
+    for (cases) |case| {
+        errdefer std.debug.print("recovery producer failed: {any}\n", .{case.kind});
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| try expectLegacyCompoundDiagnostic(actual, expected);
+        try std.testing.expect(result.contract == null);
+        if (case.kind) |kind| {
+            try std.testing.expect(!seen.contains(kind));
+            try std.testing.expectEqual(@as(usize, 1), case.diagnostics.len);
+            seen.insert(kind);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), case.diagnostics.len);
+            location_free += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 1), location_free);
+    inline for (std.meta.tags(Kind)) |kind| try std.testing.expect(seen.contains(kind));
+}
+
+test "CHECK preserves raw recovery header comments" {
+    const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostic: LegacyCompoundDiagnostic }{
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* x = 1 */) { return 1; }\n", .parser_stage = false, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 17, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* ) */) { return 1; }\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* unfinished\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(x: number, /* x = 1 */) { return 1; }\n", .parser_stage = false, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 28, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
+    };
+    try std.testing.expectEqual(@as(usize, 4), cases.len);
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(if (case.parser_stage) StageSet.initMany(&.{ .strip, .parse }) else StageSet.initMany(&.{.strip}), result.stages_run);
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expect(result.contract == null);
+    }
 }
