@@ -104,6 +104,3 @@ pi flow_checker
 pi guard_catalog
 pi parser
 pi repair_plan
-
-# proof-review
-proof-review file_io

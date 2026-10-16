@@ -320,10 +320,8 @@ pub const ReviewFacts = struct {
         try json.endObject();
     }
 
-    /// Backward-compatible parser: missing arrays default to empty, missing
-    /// strings default to "none"/"" so older deploy-state.json entries still
-    /// load. Per the v1 plan, an entry without `lastReviewFacts` is treated
-    /// by the caller as "no baseline" rather than parsed via this function.
+    /// Backward-compatible parser: missing arrays default to empty and missing
+    /// strings default to "none"/"" so older persisted proof facts still load.
     pub fn parseJson(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !ReviewFacts {
         const sha_value: []const u8 = json_util.getString(obj, "contractSha") orelse "";
         const sha = try allocator.dupe(u8, sha_value);
@@ -357,8 +355,8 @@ pub const ReviewFacts = struct {
         const declared_specs = try parseSpecArray(allocator, obj);
         errdefer freeSpecList(allocator, declared_specs);
 
-        // Read back the intent-summary fields writeJson emits; without this they
-        // silently reset to 0/false on every round-trip through deploy-state.json.
+        // Read back the intent-summary fields writeJson emits so a JSON
+        // round-trip preserves their values.
         const intent_assertion_count: usize = @intCast(@max(0, json_util.getI64(obj, "intentAssertionCount") orelse 0));
         const behavior_path_count: usize = @intCast(@max(0, json_util.getI64(obj, "behaviorPathCount") orelse 0));
         const failure_path_count: usize = @intCast(@max(0, json_util.getI64(obj, "failurePathCount") orelse 0));

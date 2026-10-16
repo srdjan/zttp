@@ -12,7 +12,6 @@
 const std = @import("std");
 const zts = @import("zts");
 const review = @import("zttp_proof_review").review;
-const state = @import("zttp_proof_review").state;
 const json_util = @import("zttp_proof_review").json_util;
 
 pub const EventKind = enum {
@@ -131,6 +130,12 @@ pub fn ledgerPath() []const u8 {
     return ".zttp/proofs.jsonl";
 }
 
+fn ensureLedgerDir() !void {
+    var io_backend = std.Io.Threaded.init(std.heap.smp_allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), ".zttp");
+}
+
 pub const AppendParams = struct {
     kind: EventKind,
     facts: *const review.ReviewFacts,
@@ -145,7 +150,7 @@ pub const AppendParams = struct {
 };
 
 pub fn appendEvent(allocator: std.mem.Allocator, params: AppendParams) !void {
-    try state.ensureStateDir();
+    try ensureLedgerDir();
 
     const ts = params.now_unix_ms orelse defaultNowMs();
 
@@ -534,6 +539,59 @@ test "appendEvent then readEvents round trips" {
     try testing.expect(events[0].facts.properties.read_only);
 }
 
+test "appendEvent preserves existing hosted state bytes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try ensureLedgerDir();
+    const hosted_state = "{\"schemaVersion\":1,\"sentinel\":\"keep exactly\"}\n";
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = ".zttp/deploy-state.json",
+        .data = hosted_state,
+    });
+
+    var facts = try buildFactsForTest(testing.allocator, "sha-sentinel", false);
+    defer facts.deinit(testing.allocator);
+    try appendEvent(testing.allocator, .{
+        .kind = .deploy,
+        .facts = &facts,
+        .handler_path = "src/handler.ts",
+        .now_unix_ms = 1,
+    });
+
+    const after = try tmp.dir.readFileAlloc(
+        testing.io,
+        ".zttp/deploy-state.json",
+        testing.allocator,
+        .limited(1024),
+    );
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(hosted_state, after);
+
+    const proof_row = try tmp.dir.readFileAlloc(
+        testing.io,
+        ledgerPath(),
+        testing.allocator,
+        .limited(4096),
+    );
+    defer testing.allocator.free(proof_row);
+    try testing.expectEqualStrings(
+        "{\"ts\":1,\"kind\":\"deploy\",\"handlerPath\":\"src/handler.ts\",\"facts\":{" ++
+            "\"contractSha\":\"sha-sentinel\",\"proofLevel\":\"complete\",\"envKeys\":[\"PORT\"]," ++
+            "\"egressEndpoints\":[],\"cacheNamespaces\":[],\"capabilities\":[],\"routes\":[]," ++
+            "\"properties\":{\"retrySafe\":false,\"readOnly\":true,\"deterministic\":true," ++
+            "\"injectionSafe\":true,\"idempotent\":false,\"stateIsolated\":true," ++
+            "\"noSecretLeakage\":true,\"noCredentialLeakage\":true,\"inputValidated\":true," ++
+            "\"piiContained\":true,\"resultsSafe\":true,\"faultCovered\":false}," ++
+            "\"declaredSpecs\":[],\"intentAssertionCount\":0,\"intentDynamic\":false," ++
+            "\"behaviorPathCount\":0,\"failurePathCount\":0}}\n",
+        proof_row,
+    );
+}
+
 test "readEvents returns empty when ledger is missing" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -643,7 +701,7 @@ test "readEvents rejects malformed lines" {
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try state.ensureStateDir();
+    try ensureLedgerDir();
 
     const cases = [_][]const u8{
         "[1,2,3]\n", // root is array, not object
@@ -716,7 +774,7 @@ test "a legacy kind=perf row written by the removed probe still loads" {
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try state.ensureStateDir();
+    try ensureLedgerDir();
     try zts.file_io.writeFile(testing.allocator, ledgerPath(), legacy_perf_row ++ "\n");
 
     const events = try readEvents(testing.allocator);
@@ -747,7 +805,7 @@ test "a legacy kind=equivalence row written by the removed probe still loads" {
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try state.ensureStateDir();
+    try ensureLedgerDir();
     try zts.file_io.writeFile(testing.allocator, ledgerPath(), legacy_equivalence_row ++ "\n");
 
     const events = try readEvents(testing.allocator);
@@ -787,7 +845,7 @@ test "a raw kind=equivalence row decodes fired laws and counts" {
     defer testing.allocator.free(old_cwd);
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
-    try state.ensureStateDir();
+    try ensureLedgerDir();
     try zts.file_io.writeFile(testing.allocator, ledgerPath(), raw_equivalence_row ++ "\n");
 
     const events = try readEvents(testing.allocator);

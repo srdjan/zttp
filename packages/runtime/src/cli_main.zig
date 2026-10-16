@@ -24,7 +24,6 @@ test {
     const proof_review = @import("zttp_proof_review");
     _ = proof_review.printer;
     _ = proof_review.review;
-    _ = proof_review.state;
 
     _ = @import("proof_ledger.zig");
     _ = @import("proofs_cli.zig");

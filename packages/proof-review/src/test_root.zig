@@ -6,11 +6,8 @@ const std = @import("std");
 // the test compiler when every declaration is touched at compile time. Listing
 // each file by hand keeps the test surface explicit.
 comptime {
-    _ = @import("io_util.zig");
     _ = @import("json_util.zig");
     _ = @import("printer.zig");
     _ = @import("review.zig");
     _ = @import("spec_diagnostic.zig");
-    _ = @import("state.zig");
-    _ = @import("types.zig");
 }
