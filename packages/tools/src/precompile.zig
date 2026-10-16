@@ -9143,3 +9143,502 @@ test "CHECK preserves arrow capture after line comment text" {
     try std.testing.expectEqual(@as(usize, 3), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
+
+test "CHECK preserves legacy predicate target and return classification" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        type_failure: bool,
+        diagnostic: LegacyCompoundDiagnostic,
+    }{
+        .{ .source = "function guard(value: unknown): missing is string { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = false, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .source = "function guard(value: unknown): \"x is y\" { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = false, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
+        .{ .source = "function guard(value: unknown): value\tis\tstring { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = true, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 51, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+    };
+    const typed_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    const full_stages = StageSet.initMany(&.{
+        .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
+        .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
+    });
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        if (case.type_failure) {
+            try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+            try std.testing.expectEqual(typed_stages, result.stages_run);
+            try std.testing.expect(result.contract == null);
+        } else {
+            try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+            try std.testing.expectEqual(full_stages, result.stages_run);
+            try std.testing.expect(result.contract != null);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 3), cases.len);
+}
+
+test "CHECK preserves nominal declarations with ignored generic lists" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        strip_refusal: bool,
+        diagnostic: LegacyCompoundDiagnostic,
+    }{
+        .{ .source = "nominal Id<T> = string;\nconst value: Id = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Id'", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "nominal Id<T> = T;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 17, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expect(result.contract == null);
+        if (case.strip_refusal) {
+            try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+            try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+            try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+        } else {
+            try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+            try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+            try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), result.stages_run);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+}
+
+test "CHECK preserves orphan generic prefix refusal positions" {
+    const cases = [_]struct { source: []const u8, column: u32 }{
+        .{ .source = "const value = <T> extends string;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .column = 19 },
+        .{ .source = "const value = (<T> extends string);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .column = 20 },
+        .{ .source = "<T> extends string;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .column = 5 },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expect(result.contract == null);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS002",
+            .message = "expected expression",
+            .line = 1,
+            .column = case.column,
+            .suggestion = null,
+        });
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves admitted generic prefixes without function owners" {
+    const cases = [_][]const u8{
+        "const value = <T>{ id: 1 };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = (<T>{ id: 1 });\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = <T>(1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "<T>{ const value = 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = <>{ id: 1 };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = <>(1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = (<> (1));\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = <T>(<U>(1));\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = <T>{ id: <U>(1) };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+        "const value = <T>((x) => x);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+    };
+    const stages = StageSet.initMany(&.{
+        .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
+        .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
+    });
+    const diagnostic: LegacyCompoundDiagnostic = .{
+        .code = "ZTS500",
+        .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+        .line = 2,
+        .column = 17,
+        .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.",
+    };
+    var observed: usize = 0;
+    for (cases) |source| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expect(result.contract != null);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], diagnostic);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves adjacent generic prefix refusals" {
+    const cases = [_]struct { prefix: []const u8, column: u32 }{
+        .{ .prefix = "const value = <T><U>{ id: 1 };", .column = 15 },
+        .{ .prefix = "const value = <T><U>(1);", .column = 15 },
+        .{ .prefix = "const value = (<T><U>{ id: 1 });", .column = 16 },
+        .{ .prefix = "const value = (<T><U>(1));", .column = 16 },
+        .{ .prefix = "<T><U>{ const value = 1; }", .column = 1 },
+    };
+    inline for (cases) |case| {
+        const source = case.prefix ++ "\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expect(result.contract == null);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            .code = "ZTS002",
+            .message = "raw JSX is not supported; use ordinary TypeScript expressions",
+            .line = 1,
+            .column = case.column,
+            .suggestion = null,
+        });
+    }
+    try std.testing.expectEqual(@as(usize, 5), cases.len);
+}
+
+test "CHECK preserves typed parameter refusals across function header comments" {
+    const cases = [_]struct {
+        source: []const u8,
+        parameter_column: ?u32,
+    }{
+        .{
+            .source = "function /* gap */ identity<T>(value: T): T { return value; }\n" ++
+                "const probe: number = identity(\"x\");\n" ++
+                "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+            .parameter_column = 37,
+        },
+        .{
+            .source = "function identity<T>/* gap */(value: T): T { return value; }\n" ++
+                "const probe: number = identity(\"x\");\n" ++
+                "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+            .parameter_column = 36,
+        },
+        .{
+            .source = "function identity<T>(value: T): T { return value; }\n" ++
+                "const probe: number = identity(\"x\");\n" ++
+                "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
+            .parameter_column = null,
+        },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expect(result.contract == null);
+        if (case.parameter_column) |column| {
+            try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
+            try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+            try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+            try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+                .code = "ZTS003",
+                .message = "unexpected token",
+                .line = 1,
+                .column = column,
+                .suggestion = "')'",
+            });
+        } else {
+            try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), result.stages_run);
+            try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+            try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+            try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+                .code = "ZTS200",
+                .message = "type 'string' is not assignable to type 'number'",
+                .line = 2,
+                .column = 1,
+                .suggestion = null,
+            });
+        }
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves typed arrow return forms and parameter refusals" {
+    const FailureStage = enum { strip, parse, types, strict, contract };
+    const proof_diagnostic: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
+    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: LegacyCompoundDiagnostic }{
+        .{ .source = "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strict, .diagnostic = .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 1, .column = 15, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" } },
+        .{ .source = "const echo = (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const echo = (value?: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 20, .suggestion = "replace `name?: T` with `name: T | undefined`" } },
+        .{ .source = "const echo = (value?) => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 20, .suggestion = "')'" } },
+        .{ .source = "function echo(value?: string): string { return value; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 20, .suggestion = "replace `name?: T` with `name: T | undefined`" } },
+        .{ .source = "function echo(value?) { return value; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 20, .suggestion = "')'" } },
+        .{ .source = "const echo = (value: string = \"x\"): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 29, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
+        .{ .source = "const echo = async (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS001", .message = "'async' functions are not supported", .line = 1, .column = 14, .suggestion = "handlers run synchronously - use 'fetch' from zttp:fetch for outbound I/O" } },
+        .{ .source = "const result = [\"a\"].map((value: string): string => value);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const object = { echo: (value: string): string => value };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const echo = ((value: string): string => value);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const make = (): (value: string) => string => (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const guard = (value: unknown): missing is string => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const guard = (value: unknown): \"x is y\" => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const guard = (value: unknown): value\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "const guard = (readonly: unknown): readonly\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "const echo = value: string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 14, .suggestion = null } },
+        .{ .source = "const choice = true ? \"a\" : \"b\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const choice = true ? (1) : (2);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const make = (): (value: string) => string;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "unexpected ')'", .line = 1, .column = 16, .suggestion = null } },
+        .{ .source = "function guard(value: unknown): value is { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const guard = (value: unknown): value is => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "function guard(value: unknown): value\tis { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 44, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "const guard = (value: unknown): value\tis => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "function guard(value: unknown): value is string   { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS211", .message = "type predicate 'guard' is not verified by its body", .line = 1, .column = 1, .suggestion = "Return one admitted narrowing test over the named parameter, combined with &&, || or !." } },
+        .{ .source = "const guard = (value: unknown): value is string   => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        errdefer std.debug.print("arrow baseline failed for source:\n{s}\n", .{case.source});
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        const expected_stages = switch (case.stage) {
+            .strip => StageSet.initMany(&.{.strip}),
+            .parse => StageSet.initMany(&.{ .strip, .parse }),
+            .types, .strict => StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }),
+            .contract => StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict, .verifier, .flow, .contract, .paths, .trace, .spec, .canonical }),
+        };
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .strip or case.stage == .parse) 1 else 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .types) 1 else 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .strict) 1 else 0), result.strict_errors);
+        try std.testing.expectEqual(case.stage == .contract, result.contract != null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 26), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves type-only module admission and refusal diagnostics" {
+    const FailureStage = enum { strip, parse, contract };
+    const proof_diagnostic: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
+    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: LegacyCompoundDiagnostic }{
+        .{ .source = "import type { A } from \"./a\";\nexport type { B }\nexport structural Shape = { value: string };\nexport nominal Id = string;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 6, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "function helper(): number { import type { A } from \"./a\"; return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 29, .suggestion = null } },
+        .{ .source = "function helper(): number { export type { A }; return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 1, .column = 29, .suggestion = null } },
+        .{ .source = "{ import type { A } from \"./a\"; const live = 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 3, .suggestion = null } },
+        .{ .source = "import type { A } from \"./a;b\";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 3, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
+        .{ .source = "import /* gap */ type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 1, .suggestion = null } },
+        .{ .source = "import type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" } },
+        .{ .source = "import type { A } /* \"zttp:types\" */ from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" } },
+        .{ .source = "export type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "export type { A }   \nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 3, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "export type\n{ A };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 1, .column = 1, .suggestion = null } },
+        .{ .source = "import\ntype { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 3, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "import type nonsense;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "export type { broken nonsense };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "function helper(): number {\n  import type { A } from \"./a\";\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 2, .column = 3, .suggestion = null } },
+        .{ .source = "function helper(): number {\n  export type { A };\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 2, .column = 3, .suggestion = null } },
+        .{ .source = "{\n  import type { A } from \"./a\";\n  const live = 1;\n}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 2, .column = 3, .suggestion = null } },
+        .{ .source = "{import type { A } from \"./a\";}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "function helper(): number {import type { A } from \"./a\";return 1;}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "function helper(): number {export type { A };return 1;}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "{\nimport type { A } from \"./a\";\n}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 4, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "function helper(): number {\nimport type { A } from \"./a\";\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 5, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "function helper(): number {\nexport type { A };\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 5, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = " import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 2, .suggestion = null } },
+        .{ .source = "const live: number = 1;import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
+        .{ .source = "const live: number = 1; import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 25, .suggestion = null } },
+        .{ .source = "import type { A } from \"./a\";export type { B };\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 1, .column = 30, .suggestion = null } },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        errdefer std.debug.print("module baseline failed for source:\n{s}\n", .{case.source});
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        const expected_stages = switch (case.stage) {
+            .strip => StageSet.initMany(&.{.strip}),
+            .parse => StageSet.initMany(&.{ .strip, .parse }),
+            .contract => StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict, .verifier, .flow, .contract, .paths, .trace, .spec, .canonical }),
+        };
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .contract) 0 else 1), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+        try std.testing.expectEqual(case.stage == .contract, result.contract != null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 28), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves lexical diagnostics inside type-only modules" {
+    const cases = [_]struct { source: []const u8, contract: bool, diagnostics: []const LegacyCompoundDiagnostic }{
+        .{ .source = "import type \"open\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+            .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 18, .suggestion = "close the quote, or write the newline as \\n" },
+        } },
+        .{ .source = "import type \"open\\\nclosed\";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
+            .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 4, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
+        } },
+        .{ .source = "import type `${" ++ ("{" ** 511) ++ "1" ++ ("}" ** 512) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
+            .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
+        } },
+        .{ .source = "import type `${" ++ ("{" ** 512) ++ ";" ++ ("}" ** 513) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+            .{ .code = "ZTS044", .message = "type syntax nests too deeply", .line = 1, .column = 527, .suggestion = "simplify or split it (nesting limit is 512)" },
+        } },
+        .{ .source = "import type " ++ ("`${" ** 511) ++ "1" ++ ("}`" ** 511) ++ ";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
+            .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
+        } },
+        .{ .source = "import type " ++ ("`${" ** 513) ++ "1" ++ ("}`" ** 513) ++ ";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
+            .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
+        } },
+        .{ .source = "import type \"open\nimport type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+            .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 2, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
+        } },
+        .{ .source = "import type `${\"open\n\"}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+            .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 21, .suggestion = "close the quote, or write the newline as \\n" },
+            .{ .code = "ZTS008", .message = "unterminated string literal", .line = 2, .column = 5, .suggestion = "close the quote, or write the newline as \\n" },
+        } },
+        .{ .source = "import type \"open\nconst broken = ;\nimport type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+            .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 3, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
+        } },
+        .{ .source = "import type `${" ++ ("{" ** 511) ++ "`${" ++ ("{" ** 512) ++ ";" ++ ("}" ** 513) ++ "}`" ++ ("}" ** 512) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+            .{ .code = "ZTS044", .message = "type syntax nests too deeply", .line = 1, .column = 1041, .suggestion = "simplify or split it (nesting limit is 512)" },
+        } },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        errdefer std.debug.print("module lexical baseline failed for source:\n{s}\n", .{case.source});
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        const expected_stages = if (case.contract)
+            StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict, .verifier, .flow, .contract, .paths, .trace, .spec, .canonical })
+        else
+            StageSet.initMany(&.{.strip});
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, if (case.contract) 0 else @intCast(case.diagnostics.len)), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+        try std.testing.expectEqual(case.contract, result.contract != null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 10), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves typed generic arrows and comment classification" {
+    const FailureStage = enum { parse, types, strict };
+    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostics: []const LegacyCompoundDiagnostic }{
+        .{ .source = "const id=<T>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
+            .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null },
+        } },
+        .{ .source = "const id=(<T> (value: T): T => value);\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
+            .{ .code = "ZTS208", .message = "no argument determines type parameter 'T>'", .line = 2, .column = 25, .suggestion = "Name the type argument at the call site." },
+            .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null },
+        } },
+        .{ .source = "const id = // note\n<T = string>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 2, .column = 1, .suggestion = null },
+        } },
+        .{ .source = "const id = // note=\n<T = string> (value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
+            .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },
+        } },
+        .{ .source = "function // note\nidentity<T>(value) { return value; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strict, .diagnostics = &.{
+            .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 2, .column = 12, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" },
+        } },
+        .{ .source = "function identity<T>// note\n(value) { return value; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strict, .diagnostics = &.{
+            .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 2, .column = 1, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" },
+        } },
+        .{ .source = "function /* before */ identity<T>/* after */(value) { return value; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{
+            .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 31, .suggestion = "'('" },
+        } },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        errdefer std.debug.print("generic header baseline failed for source:\n{s}\n", .{case.source});
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        const expected_count: u32 = @intCast(case.diagnostics.len);
+        try std.testing.expectEqual(expected_count, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        const expected_stages = if (case.stage == .parse)
+            StageSet.initMany(&.{ .strip, .parse })
+        else
+            StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .parse) expected_count else 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .types) expected_count else 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .strict) expected_count else 0), result.strict_errors);
+        try std.testing.expect(result.contract == null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 7), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
+    const cases = [_]struct { source: []const u8, diagnostics: []const LegacyCompoundDiagnostic }{
+        .{ .source = "nominal Id<T extends void> = T;", .diagnostics = &.{
+            .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" },
+            .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 30, .suggestion = "its base must be `string`, `number`, or `boolean`" },
+        } },
+        .{ .source = "nominal Id<T extends void>;", .diagnostics = &.{
+            .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" },
+            .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 27, .suggestion = "its base must be `string`, `number`, or `boolean`" },
+        } },
+        .{ .source = "nominal Id<T extends void> = ;", .diagnostics = &.{
+            .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" },
+            .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 30, .suggestion = "its base must be `string`, `number`, or `boolean`" },
+        } },
+        .{ .source = "nominal Id<T extends any> = T;", .diagnostics = &.{
+            .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 29, .suggestion = "its base must be `string`, `number`, or `boolean`" },
+        } },
+        .{ .source = "nominal Id<T extends void> = any;", .diagnostics = &.{
+            .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, object) or union types instead" },
+        } },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(std.testing.allocator);
+        const expected_count: u32 = @intCast(case.diagnostics.len);
+        try std.testing.expectEqual(expected_count, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
+        try std.testing.expectEqual(expected_count, result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+        try std.testing.expect(result.contract == null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}

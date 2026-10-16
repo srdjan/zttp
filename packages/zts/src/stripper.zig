@@ -22,6 +22,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const type_map_mod = @import("zts-base").type_map;
+const retired_types_module = @import("zts-base").module_specifier.retired_types_module;
 pub const TypeMap = type_map_mod.TypeMap;
 pub const TypeMapEntry = type_map_mod.TypeMapEntry;
 pub const TypeMapKind = type_map_mod.TypeMapKind;
@@ -1707,8 +1708,8 @@ const Stripper = struct {
         // the stale spelling had disappeared.
         self.skipToStatementEnd();
         const statement = self.source[saved_pos..self.pos];
-        if (std.mem.indexOf(u8, statement, "\"zttp:types\"") != null or
-            std.mem.indexOf(u8, statement, "'zttp:types'") != null)
+        if (std.mem.indexOf(u8, statement, "\"" ++ retired_types_module ++ "\"") != null or
+            std.mem.indexOf(u8, statement, "'" ++ retired_types_module ++ "'") != null)
         {
             if (self.report_errors) {
                 std.log.err("{}:{}: {s}", .{ saved_line, saved_col, StripDiagnosticKind.legacy_types_import.message() });

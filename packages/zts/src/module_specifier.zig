@@ -16,10 +16,13 @@ const std = @import("std");
 /// as in `zttp:crypto#sha256`. Chosen because `#` cannot appear in either half.
 pub const namespaced_export_separator = "#";
 
+pub const builtin_prefix = "zttp:";
+pub const retired_types_module = builtin_prefix ++ "types";
+
 /// Whether a string is a virtual module specifier this runtime resolves.
 /// `zttp:` is a built-in module; `zttp-ext:` is an installed extension.
 pub fn validSpecifier(specifier: []const u8) bool {
-    return std.mem.startsWith(u8, specifier, "zttp:") or
+    return std.mem.startsWith(u8, specifier, builtin_prefix) or
         std.mem.startsWith(u8, specifier, "zttp-ext:");
 }
 

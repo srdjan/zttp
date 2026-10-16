@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const retired_types_module = @import("zts-base").module_specifier.retired_types_module;
 const tokenizer_mod = @import("tokenizer.zig");
 const ir = @import("ir.zig");
 const scope_mod = @import("scope.zig");
@@ -140,6 +141,17 @@ const ParserCursorCheckpoint = struct {
     tokens_advanced: u32,
     brace_depth: u32,
     primed: bool,
+    last_erased_type_span: ?type_syntax.Span,
+};
+
+const ParsedFunctionBody = struct {
+    function_node: NodeIndex,
+    pending_signature: ?type_syntax.PendingFunctionSignature,
+};
+
+const HeaderKind = enum {
+    named,
+    arrow,
 };
 
 pub const Parser = struct {
@@ -155,6 +167,9 @@ pub const Parser = struct {
     type_store: type_syntax.Store,
     parse_type_syntax: bool,
     last_erased_type_span: ?type_syntax.Span,
+    type_only_module_refusal: ?type_syntax.TypeOnlyModuleRefusal,
+    type_only_module_exclusion: ?type_syntax.TypeOnlyModule,
+    type_only_module_diagnostics: std.ArrayListUnmanaged(type_syntax.TypeOnlyModuleDiagnostic),
 
     // Current state
     current: Token,
@@ -284,6 +299,9 @@ pub const Parser = struct {
             .type_store = type_syntax.Store.init(type_allocator, source),
             .parse_type_syntax = parse_type_syntax,
             .last_erased_type_span = null,
+            .type_only_module_refusal = null,
+            .type_only_module_exclusion = null,
+            .type_only_module_diagnostics = .empty,
             .current = no_token,
             .previous = no_token,
             .atoms = null,
@@ -301,6 +319,7 @@ pub const Parser = struct {
         self.constants.deinit();
         self.scopes.deinit();
         self.errors.deinit();
+        self.type_only_module_diagnostics.deinit(self.type_store.allocator);
         self.type_store.deinit();
     }
 
@@ -310,12 +329,29 @@ pub const Parser = struct {
 
     /// Parse the entire program
     pub fn parse(self: *Parser) anyerror!NodeIndex {
+        if (!self.parse_type_syntax) return self.parseProgram();
+        return self.parseProgram() catch |err| {
+            switch (err) {
+                error.OutOfMemory => return err,
+                else => {},
+            }
+            if (self.errors.outOfMemory()) return error.OutOfMemory;
+            if (self.type_only_module_refusal != null) return error.TypeOnlyModuleRefused;
+            if (self.type_only_module_exclusion != null) {
+                return error.TypeOnlyModuleLexicallyExcluded;
+            }
+            return err;
+        };
+    }
+
+    fn parseProgram(self: *Parser) anyerror!NodeIndex {
         var stmts: std.ArrayList(NodeIndex) = .empty;
         defer stmts.deinit(self.allocator);
 
         var progress: ProgressGuard = .{};
         while (!self.check(.eof)) {
             progress.iteration(self);
+            if (try self.tryConsumeTypeOnlyModule()) continue;
             if (try self.tryConsumeTypeDeclaration()) continue;
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
@@ -335,6 +371,11 @@ pub const Parser = struct {
                 // Otherwise try to recover for better error messages
                 self.synchronize(0);
             }
+        }
+
+        if (self.type_only_module_refusal != null) return error.TypeOnlyModuleRefused;
+        if (self.type_only_module_exclusion != null) {
+            return error.TypeOnlyModuleLexicallyExcluded;
         }
 
         // If any errors were recorded during parsing, fail
@@ -392,6 +433,52 @@ pub const Parser = struct {
 
     fn recursionLimit(self: *const Parser) u32 {
         return if (self.expression_profile != null) 64 else max_recursion_depth;
+    }
+
+    fn tryConsumeTypeOnlyModule(self: *Parser) !bool {
+        if (!self.parse_type_syntax or !self.isTypeDeclarationBoundary()) return false;
+        if (self.current.type != .kw_import and self.current.type != .kw_export) return false;
+
+        const cursor_checkpoint = self.cursorCheckpoint();
+        const store_checkpoint = self.type_store.checkpoint();
+        errdefer {
+            self.restoreCursorCheckpoint(cursor_checkpoint);
+            self.type_store.rollback(store_checkpoint);
+        }
+
+        const scan = try type_syntax.scanTypeOnlyModule(self.type_store.allocator, .{
+            .source = self.source,
+            .keyword = self.current,
+            .diagnostics = &self.type_only_module_diagnostics,
+        });
+        const module, const publish_record = switch (scan) {
+            .not_type_only => return false,
+            .refused => |refusal| {
+                if (self.type_only_module_refusal == null) {
+                    self.type_only_module_refusal = refusal;
+                }
+                return error.TypeOnlyModuleRefused;
+            },
+            .excluded => |module| blk: {
+                if (self.type_only_module_exclusion == null) {
+                    self.type_only_module_exclusion = module;
+                }
+                break :blk .{ module, false };
+            },
+            .scanned => |module| .{ module, true },
+        };
+
+        var candidate = self.tokenizer;
+        candidate.resumeAfterRawErasure(module.raw_span.end, self.previous);
+        const cursor = type_syntax.Cursor.afterCurrent(candidate);
+        if (publish_record) try self.type_store.appendTypeOnlyModule(module);
+
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = cursor_checkpoint.previous;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        self.last_erased_type_span = module.raw_span;
+        return true;
     }
 
     fn tryConsumeTypeDeclaration(self: *Parser) !bool {
@@ -453,13 +540,20 @@ pub const Parser = struct {
             previous_byte == '\n';
     }
 
+    fn typeSyntaxPublicationHealthy(self: *const Parser, original_error_count: usize) bool {
+        return self.errors.getErrors().len == original_error_count and
+            !self.errors.outOfMemory() and
+            self.type_only_module_refusal == null and
+            self.type_only_module_exclusion == null;
+    }
+
     // ============ Statement Parsing ============
 
     fn parseStatement(self: *Parser) anyerror!NodeIndex {
         const type_checkpoint = self.type_store.checkpoint();
         const error_count = self.errors.getErrors().len;
         errdefer self.type_store.rollback(type_checkpoint);
-        defer if (self.errors.getErrors().len != error_count or self.errors.outOfMemory()) {
+        defer if (!self.typeSyntaxPublicationHealthy(error_count)) {
             self.type_store.rollback(type_checkpoint);
         };
         self.recursion_depth += 1;
@@ -468,6 +562,7 @@ pub const Parser = struct {
             self.errors.addErrorAt(.nesting_too_deep, self.current, "statements nest too deeply; simplify or split (nesting limit is 512)");
             return error.ParseError;
         }
+        if (try self.tryParseErasedBlockPrefix()) |block_node| return block_node;
         return switch (self.current.type) {
             .kw_var, .kw_let, .kw_const => self.parseVarDeclaration(),
             .kw_function => self.parseFunctionDeclaration(),
@@ -613,9 +708,10 @@ pub const Parser = struct {
             return error.TooManyLocals;
         };
 
-        if (self.parse_type_syntax and self.check(.colon)) {
-            try self.parseVariableType(binding, name);
-        }
+        const annotation_index = if (self.parse_type_syntax and self.check(.colon))
+            try self.parseVariableType(binding, name)
+        else
+            null;
 
         // Parse initializer
         var init_node: NodeIndex = null_node;
@@ -636,12 +732,20 @@ pub const Parser = struct {
                 .kind = kind,
             } },
         });
-        retain_type_records = self.errors.getErrors().len == error_count and
-            !self.errors.outOfMemory();
+        if (!self.typeSyntaxPublicationHealthy(error_count)) return declaration;
+        if (annotation_index) |index| {
+            try self.type_store.finishAnnotationOwner(index, .{
+                .declaration = declaration,
+                .declaration_start = loc.offset,
+            }, ir.IrView.fromIRStore(&self.nodes, &self.constants));
+        }
+        retain_type_records = true;
         return declaration;
     }
 
-    fn parseVariableType(self: *Parser, binding: BindingRef, binding_token: Token) !void {
+    fn parseVariableType(self: *Parser, binding: BindingRef, binding_token: Token) !u32 {
+        const annotation_index = std.math.cast(u32, self.type_store.annotations.items.len) orelse
+            return error.TooManyTypeItems;
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
         const outcome = try type_syntax.parseAndStore(
             &self.type_store,
@@ -651,7 +755,11 @@ pub const Parser = struct {
             &cursor,
         );
         switch (outcome) {
-            .parsed => {},
+            .parsed => if (self.type_store.annotations.items.len !=
+                @as(usize, annotation_index) + 1)
+            {
+                return error.InvalidTypeRange;
+            },
             .excluded => |exclusion| {
                 switch (exclusion.reason) {
                     .implementation_budget => self.errorAtCurrent("type syntax exceeds the private parser budget"),
@@ -685,6 +793,53 @@ pub const Parser = struct {
         self.current = cursor.current;
         self.previous = binding_token;
         if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        return annotation_index;
+    }
+
+    fn parseFunctionTypeValue(self: *Parser, previous_token: Token) !type_syntax.TypeValue {
+        const colon = self.current;
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        const outcome = try type_syntax.parseTypeValueAndStore(
+            &self.type_store,
+            colon.start + colon.len,
+            &cursor,
+        );
+        const value = switch (outcome) {
+            .parsed => |parsed| parsed,
+            .excluded => |exclusion| {
+                switch (exclusion.reason) {
+                    .implementation_budget => self.errorAtCurrent("type syntax exceeds the private parser budget"),
+                    .unsupported_syntax, .malformed_syntax => self.errorAtCurrent("type syntax is outside private parser comparison"),
+                }
+                return error.ParseError;
+            },
+            .failure => |failure| {
+                const tok = switch (failure) {
+                    .missing_type => |at| at,
+                    .unmatched_parenthesis => |at| at,
+                    .nesting_too_deep => |at| at,
+                    .unsupported_suffix => |at| at,
+                };
+                switch (failure) {
+                    .nesting_too_deep => self.errors.addErrorAt(
+                        .nesting_too_deep,
+                        tok,
+                        "type syntax nests too deeply; simplify or split it (nesting limit is 512)",
+                    ),
+                    .unmatched_parenthesis => self.errors.addExpectedError(tok, "')' to close type annotation"),
+                    .missing_type => self.errors.addExpectedError(tok, "type annotation"),
+                    .unsupported_suffix => self.errors.addExpectedError(tok, "end of type annotation"),
+                }
+                if (self.errors.outOfMemory()) return error.OutOfMemory;
+                return error.ParseError;
+            },
+        };
+
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = previous_token;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        return value;
     }
 
     fn parseFunctionDeclaration(self: *Parser) anyerror!NodeIndex {
@@ -709,10 +864,11 @@ pub const Parser = struct {
         // Function name
         const name = try self.expectIdentifier("function name");
         const name_atom = try self.addAtom(name.text(self.source));
-        var pending_owner = try self.tryReserveFunctionGenericOwner(
+        const generic_reservation = try self.tryReserveFunctionGenericOwner(
             name,
             loc.offset + @as(u32, "function".len),
         );
+        var pending_owner = generic_reservation.pending_owner;
 
         // Declare function in current scope (hoisted)
         const binding = self.scopes.declareBinding(
@@ -739,7 +895,14 @@ pub const Parser = struct {
         }
 
         // Parse function body
-        const func_node = try self.parseFunctionBody(name_atom, flags);
+        const parsed_body = try self.parseFunctionBody(
+            name_atom,
+            flags,
+            generic_reservation.header_admission,
+        );
+        const func_node = parsed_body.function_node;
+        var pending_signature = parsed_body.pending_signature;
+        defer if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
 
         // Create function declaration node
         // Note: function declarations use .let for binding (no var support)
@@ -752,27 +915,56 @@ pub const Parser = struct {
                 .kind = .let,
             } },
         });
-        if (self.errors.getErrors().len != error_count or self.errors.outOfMemory()) {
+        if (!self.typeSyntaxPublicationHealthy(error_count)) {
             if (pending_owner) |*pending| self.type_store.cancelGenericOwner(pending);
             return declaration;
         }
-        if (pending_owner) |*pending| try self.type_store.finishGenericOwner(pending);
+        const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
+        if (pending_signature != null or pending_owner != null) {
+            try self.type_store.validateFunctionDeclarationWrapper(
+                func_node,
+                declaration,
+                view,
+            );
+        }
+        if (pending_signature) |*pending| {
+            try self.type_store.finishFunctionSignature(pending, func_node, view);
+        }
+        if (pending_owner) |*pending| {
+            try self.type_store.finishGenericOwner(pending, .{ .runtime = .{
+                .owner = func_node,
+                .view = view,
+            } });
+        }
         retain_type_records = true;
         return declaration;
     }
+
+    const FunctionHeaderAdmission = enum {
+        typed,
+        runtime_only,
+    };
+
+    const FunctionGenericOwnerReservation = struct {
+        pending_owner: ?type_syntax.PendingGenericOwner = null,
+        header_admission: FunctionHeaderAdmission = .typed,
+    };
 
     fn tryReserveFunctionGenericOwner(
         self: *Parser,
         name: Token,
         keyword_end: u32,
-    ) !?type_syntax.PendingGenericOwner {
+    ) !FunctionGenericOwnerReservation {
         if (!self.parse_type_syntax or !type_syntax.tokenStartsGenericList(self.source, self.current) or
             name.start + name.len != self.current.start)
         {
-            return null;
+            return .{};
         }
-        const name_gap = self.source[@as(usize, keyword_end)..@as(usize, name.start)];
-        if (std.mem.trim(u8, name_gap, " \t\r\n").len != 0) return null;
+        const name_gap = type_syntax.classifyNamedFunctionGap(self.source, .{
+            .start = keyword_end,
+            .end = name.start,
+        });
+        if (name_gap == .forbidden) return .{};
 
         const cursor_checkpoint = self.cursorCheckpoint();
         const store_checkpoint = self.type_store.checkpoint();
@@ -786,8 +978,8 @@ pub const Parser = struct {
             self.type_store.allocator,
             self.source,
             self.current.start,
-        )) orelse return null;
-        if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) return null;
+        )) orelse return .{};
+        if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) return .{};
 
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
         var previous = self.current;
@@ -795,34 +987,105 @@ pub const Parser = struct {
             previous = cursor.current;
             cursor.advance();
         }
-        if (cursor.current.type != .lparen) return null;
-        const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
-        if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return null;
+        if (cursor.current.type != .lparen) return .{};
+        const opener_gap = type_syntax.classifyNamedFunctionGap(self.source, .{
+            .start = scanned.span.end,
+            .end = cursor.current.start,
+        });
+        if (opener_gap == .forbidden) return .{};
 
-        const pending = try self.type_store.reserveGenericOwner(.{
-            .identity = .{ .function_declaration_paren = cursor.current.start },
-            .list_span = scanned.span,
-            .projected_span = .{
-                .start = scanned.span.start + 1,
-                .end = scanned.span.end - 1,
+        const OwnerReservation = struct {
+            policy: type_syntax.GenericOwnerPolicy,
+            capture_spans: type_syntax.GenericCaptureSpans,
+            header_admission: FunctionHeaderAdmission,
+        };
+        const reservation: OwnerReservation = switch (name_gap) {
+            .whitespace => switch (opener_gap) {
+                .whitespace => .{
+                    .policy = .callable,
+                    .capture_spans = .{
+                        .actual_erased_span = scanned.span,
+                        .legacy_recorded_span = .{
+                            .start = scanned.span.start + 1,
+                            .end = scanned.span.end - 1,
+                        },
+                    },
+                    .header_admission = .typed,
+                },
+                .block_comment, .line_comment => .{
+                    .policy = .ignored,
+                    .capture_spans = .{
+                        .actual_erased_span = scanned.span,
+                        .legacy_recorded_span = .{
+                            .start = scanned.span.start + 1,
+                            .end = scanned.span.end - 1,
+                        },
+                    },
+                    .header_admission = .runtime_only,
+                },
+                .forbidden => unreachable,
             },
+            .block_comment, .line_comment => switch (opener_gap) {
+                .whitespace => if (scanned.span.end == cursor.current.start)
+                    .{
+                        .policy = .legacy_call,
+                        .capture_spans = .{
+                            .actual_erased_span = scanned.span,
+                            .legacy_recorded_span = .{
+                                .start = scanned.span.start + 1,
+                                .end = scanned.span.end - 1,
+                            },
+                        },
+                        .header_admission = .runtime_only,
+                    }
+                else
+                    return .{},
+                .block_comment, .line_comment => return .{},
+                .forbidden => unreachable,
+            },
+            .forbidden => unreachable,
+        };
+
+        if (reservation.policy == .legacy_call) {
+            const call_scan = switch (try type_syntax.scanExplicitCallTypeArguments(
+                self.type_store.allocator,
+                self.source,
+                scanned.span.start,
+            )) {
+                .not_call, .excluded => return .{},
+                .scanned => |value| value,
+            };
+            if (!std.meta.eql(call_scan.span, scanned.span) or
+                !type_syntax.isPrivateGenericListEligible(self.source, call_scan))
+            {
+                return .{};
+            }
+        }
+        const pending = try self.type_store.reserveGenericOwner(.{
+            .list_span = scanned.span,
+            .capture_spans = reservation.capture_spans,
+            .policy = reservation.policy,
         });
         self.tokenizer = cursor.tokenizer;
         self.current = cursor.current;
         self.previous = previous;
         if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
         accepted = true;
-        return pending;
+        return .{
+            .pending_owner = pending,
+            .header_admission = reservation.header_admission,
+        };
     }
 
-    fn tryReserveArrowGenericOwner(self: *Parser) !?type_syntax.PendingGenericOwner {
+    const ArrowGenericOwnerProbe = union(enum) {
+        not_generic,
+        rejected_call_grammar,
+        reserved: type_syntax.PendingGenericOwner,
+    };
+
+    fn tryReserveArrowGenericOwner(self: *Parser) !ArrowGenericOwnerProbe {
         if (!self.parse_type_syntax or
-            !type_syntax.tokenStartsGenericList(self.source, self.current)) return null;
-        if (!type_syntax.isPrivateArrowPrefixEligible(
-            self.source,
-            self.previous,
-            self.current.start,
-        )) return null;
+            !type_syntax.tokenStartsGenericList(self.source, self.current)) return .not_generic;
 
         const cursor_checkpoint = self.cursorCheckpoint();
         const store_checkpoint = self.type_store.checkpoint();
@@ -836,8 +1099,8 @@ pub const Parser = struct {
             self.type_store.allocator,
             self.source,
             self.current.start,
-        )) orelse return null;
-        if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) return null;
+        )) orelse return .not_generic;
+        if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) return .not_generic;
 
         var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
         var previous = self.current;
@@ -845,47 +1108,232 @@ pub const Parser = struct {
             previous = cursor.current;
             cursor.advance();
         }
-        if (cursor.current.type != .lparen) return null;
+        if (cursor.current.type != .lparen) return .not_generic;
         const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
-        if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return null;
-        if (!cursorStartsBareArrow(cursor)) return null;
+        if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return .not_generic;
+        var after_opener = cursor;
+        after_opener.advance();
+        if (type_syntax.scanParenthesizedArrowHeader(
+            self.source,
+            cursor.current.start,
+            after_opener,
+        ) == null) return .not_generic;
 
-        const projected_span: type_syntax.Span = if (type_syntax.hasDedicatedAssignmentArrowWindow(
+        const has_dedicated_window = type_syntax.hasDedicatedAssignmentArrowWindow(
             self.source,
             self.previous,
             scanned.span.start,
-        )) .{
-            .start = scanned.span.start + 1,
-            .end = scanned.span.end - 1,
-        } else .{
-            .start = scanned.span.start + 1,
-            .end = cursor.current.start - 1,
+        );
+        const OwnerReservation = struct {
+            policy: type_syntax.GenericOwnerPolicy,
+            capture_spans: type_syntax.GenericCaptureSpans,
         };
+        const reservation: OwnerReservation = if (has_dedicated_window)
+            .{ .policy = .callable, .capture_spans = .{
+                .actual_erased_span = scanned.span,
+                .legacy_recorded_span = .{
+                    .start = scanned.span.start + 1,
+                    .end = scanned.span.end - 1,
+                },
+            } }
+        else if (type_syntax.rawLooksLikeComparison(self.source, scanned.span.start)) blk: {
+            const call_scan = switch (try type_syntax.scanExplicitCallTypeArguments(
+                self.type_store.allocator,
+                self.source,
+                scanned.span.start,
+            )) {
+                .not_call, .excluded => return .rejected_call_grammar,
+                .scanned => |value| value,
+            };
+            if (!type_syntax.isPrivateGenericListEligible(self.source, call_scan) or
+                !std.meta.eql(call_scan.span, scanned.span) or
+                call_scan.span.end != cursor.current.start)
+            {
+                return .rejected_call_grammar;
+            }
+            break :blk .{ .policy = .legacy_call, .capture_spans = .{
+                .actual_erased_span = scanned.span,
+                .legacy_recorded_span = .{
+                    .start = scanned.span.start + 1,
+                    .end = scanned.span.end - 1,
+                },
+            } };
+        } else .{ .policy = .callable, .capture_spans = .{
+            .actual_erased_span = .{
+                .start = scanned.span.start,
+                .end = cursor.current.start,
+            },
+            .legacy_recorded_span = .{
+                .start = scanned.span.start + 1,
+                .end = cursor.current.start - 1,
+            },
+        } };
         const pending = try self.type_store.reserveGenericOwner(.{
-            .identity = .{ .arrow_function_paren = cursor.current.start },
             .list_span = scanned.span,
-            .projected_span = projected_span,
+            .capture_spans = reservation.capture_spans,
+            .policy = reservation.policy,
         });
         self.tokenizer = cursor.tokenizer;
         self.current = cursor.current;
         self.previous = previous;
         if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
         accepted = true;
-        return pending;
+        return .{ .reserved = pending };
     }
 
-    fn cursorStartsBareArrow(initial: type_syntax.Cursor) bool {
-        var cursor = initial;
-        cursor.advance();
-        if (cursor.current.type != .rparen) while (true) {
-            if (cursor.current.type != .identifier) return false;
+    fn tryParseErasedExpressionPrefix(self: *Parser) !?NodeIndex {
+        if (!self.parse_type_syntax or
+            !type_syntax.tokenStartsGenericList(self.source, self.current) or
+            type_syntax.rawLooksLikeComparison(self.source, self.current.start))
+        {
+            return null;
+        }
+
+        const scanned = (try type_syntax.scanBalancedGenericList(
+            self.type_store.allocator,
+            self.source,
+            self.current.start,
+        )) orelse return null;
+        if (!type_syntax.isPrivateErasedPrefixListEligible(self.source, scanned)) return null;
+
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var previous = self.current;
+        while (cursor.current.type != .eof and cursor.current.start < scanned.span.end) {
+            previous = cursor.current;
             cursor.advance();
-            if (cursor.current.type == .rparen) break;
-            if (cursor.current.type != .comma) return false;
-            cursor.advance();
+        }
+        if (cursor.current.type != .lbrace and cursor.current.type != .lparen) {
+            return null;
+        }
+        const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
+        if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return null;
+
+        const dedicated = cursor.current.type == .lparen and
+            type_syntax.hasDedicatedAssignmentArrowWindow(
+                self.source,
+                self.previous,
+                scanned.span.start,
+            );
+        const capture_spans: type_syntax.GenericCaptureSpans = if (dedicated)
+            .{
+                .actual_erased_span = scanned.span,
+                .legacy_recorded_span = .{
+                    .start = scanned.span.start + 1,
+                    .end = scanned.span.end - 1,
+                },
+            }
+        else
+            .{
+                .actual_erased_span = .{
+                    .start = scanned.span.start,
+                    .end = cursor.current.start,
+                },
+                .legacy_recorded_span = .{
+                    .start = scanned.span.start + 1,
+                    .end = cursor.current.start - 1,
+                },
+            };
+        const policy: type_syntax.ErasedTypePrefixPolicy = if (cursor.current.type == .lparen)
+            .legacy_parameter_projection
+        else
+            .ignored_parameters;
+
+        var pending = try self.type_store.reserveErasedTypePrefix(.{
+            .list_span = scanned.span,
+            .capture_spans = capture_spans,
+            .policy = policy,
+        });
+        errdefer self.type_store.cancelErasedTypePrefix(&pending);
+
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = previous;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+
+        const error_count = self.errors.getErrors().len;
+        const operand_start = self.current.start;
+        const expression_node = switch (self.current.type) {
+            .lbrace => try self.parseObjectLiteral(),
+            .lparen => try self.parseGroupedOrArrowParams(),
+            else => unreachable,
         };
-        cursor.advance();
-        return cursor.current.type == .arrow;
+        if (!self.typeSyntaxPublicationHealthy(error_count)) {
+            self.type_store.cancelErasedTypePrefix(&pending);
+            return expression_node;
+        }
+        const expected_closer: TokenType = if (self.source[operand_start] == '{') .rbrace else .rparen;
+        if (self.previous.type != expected_closer) return error.InvalidErasedTypePrefix;
+        const operand_end = std.math.add(u32, self.previous.start, self.previous.len) catch
+            return error.InvalidErasedTypePrefix;
+        try self.type_store.finishErasedTypePrefix(&pending, .{
+            .owner = .{ .expression = expression_node },
+            .operand_span = .{ .start = operand_start, .end = operand_end },
+            .view = ir.IrView.fromIRStore(&self.nodes, &self.constants),
+        });
+        return expression_node;
+    }
+
+    fn tryParseErasedBlockPrefix(self: *Parser) !?NodeIndex {
+        if (!self.parse_type_syntax or
+            !type_syntax.tokenStartsGenericList(self.source, self.current) or
+            type_syntax.rawLooksLikeComparison(self.source, self.current.start))
+        {
+            return null;
+        }
+        const scanned = (try type_syntax.scanBalancedGenericList(
+            self.type_store.allocator,
+            self.source,
+            self.current.start,
+        )) orelse return null;
+        if (!type_syntax.isPrivateErasedPrefixListEligible(self.source, scanned)) return null;
+
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        var previous = self.current;
+        while (cursor.current.type != .eof and cursor.current.start < scanned.span.end) {
+            previous = cursor.current;
+            cursor.advance();
+        }
+        if (cursor.current.type != .lbrace) return null;
+        const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
+        if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return null;
+
+        var pending = try self.type_store.reserveErasedTypePrefix(.{
+            .list_span = scanned.span,
+            .capture_spans = .{
+                .actual_erased_span = .{
+                    .start = scanned.span.start,
+                    .end = cursor.current.start,
+                },
+                .legacy_recorded_span = .{
+                    .start = scanned.span.start + 1,
+                    .end = cursor.current.start - 1,
+                },
+            },
+            .policy = .ignored_parameters,
+        });
+        errdefer self.type_store.cancelErasedTypePrefix(&pending);
+
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = previous;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+
+        const error_count = self.errors.getErrors().len;
+        const operand_start = self.current.start;
+        const block_node = try self.parseBlock();
+        if (!self.typeSyntaxPublicationHealthy(error_count)) {
+            self.type_store.cancelErasedTypePrefix(&pending);
+            return block_node;
+        }
+        if (self.previous.type != .rbrace) return error.InvalidErasedTypePrefix;
+        const operand_end = std.math.add(u32, self.previous.start, self.previous.len) catch
+            return error.InvalidErasedTypePrefix;
+        try self.type_store.finishErasedTypePrefix(&pending, .{
+            .owner = .{ .block = block_node },
+            .operand_span = .{ .start = operand_start, .end = operand_end },
+            .view = ir.IrView.fromIRStore(&self.nodes, &self.constants),
+        });
+        return block_node;
     }
 
     fn tryReserveExplicitCall(self: *Parser) !?type_syntax.PendingExplicitCall {
@@ -921,11 +1369,13 @@ pub const Parser = struct {
         }
         if (cursor.current.type != .lparen or cursor.current.start != scanned.span.end) return null;
         const pending = try self.type_store.reserveExplicitCall(.{
-            .lparen_offset = cursor.current.start,
             .list_span = scanned.span,
-            .projected_span = .{
-                .start = scanned.span.start + 1,
-                .end = scanned.span.end - 1,
+            .capture_spans = .{
+                .actual_erased_span = scanned.span,
+                .legacy_recorded_span = .{
+                    .start = scanned.span.start + 1,
+                    .end = scanned.span.end - 1,
+                },
             },
         });
         self.tokenizer = cursor.tokenizer;
@@ -944,6 +1394,7 @@ pub const Parser = struct {
             .tokens_advanced = self.tokens_advanced,
             .brace_depth = self.brace_depth,
             .primed = self.primed,
+            .last_erased_type_span = self.last_erased_type_span,
         };
     }
 
@@ -954,6 +1405,157 @@ pub const Parser = struct {
         self.tokens_advanced = checkpoint.tokens_advanced;
         self.brace_depth = checkpoint.brace_depth;
         self.primed = checkpoint.primed;
+        self.last_erased_type_span = checkpoint.last_erased_type_span;
+    }
+
+    fn parseFunctionReturnSyntax(
+        self: *Parser,
+        previous_token: Token,
+        params: []const NodeIndex,
+    ) !type_syntax.ReturnSyntax {
+        const colon = self.current;
+        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+        const outcome = try type_syntax.parseFunctionReturnAndStore(
+            &self.type_store,
+            colon.start + colon.len,
+            &cursor,
+        );
+        var value = switch (outcome) {
+            .parsed => |parsed| parsed,
+            .excluded => |exclusion| {
+                switch (exclusion.reason) {
+                    .implementation_budget => self.errorAtCurrent("type syntax exceeds the private parser budget"),
+                    .unsupported_syntax, .malformed_syntax => self.errorAtCurrent("type syntax is outside private parser comparison"),
+                }
+                return error.ParseError;
+            },
+            .failure => |failure| {
+                const tok = switch (failure) {
+                    .missing_type => |at| at,
+                    .unmatched_parenthesis => |at| at,
+                    .nesting_too_deep => |at| at,
+                    .unsupported_suffix => |at| at,
+                };
+                switch (failure) {
+                    .nesting_too_deep => self.errors.addErrorAt(
+                        .nesting_too_deep,
+                        tok,
+                        "type syntax nests too deeply; simplify or split it (nesting limit is 512)",
+                    ),
+                    .unmatched_parenthesis => self.errors.addExpectedError(tok, "')' to close type annotation"),
+                    .missing_type => self.errors.addExpectedError(tok, "type annotation"),
+                    .unsupported_suffix => self.errors.addExpectedError(tok, "end of type annotation"),
+                }
+                if (self.errors.outOfMemory()) return error.OutOfMemory;
+                return error.ParseError;
+            },
+        };
+
+        switch (value.structure) {
+            .value => {},
+            .predicate => |*predicate| {
+                const target_text = predicate.target_span.text(self.source);
+                const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
+                for (params) |pattern| {
+                    const tag = view.getTag(pattern) orelse return error.InvalidPredicateTarget;
+                    if (tag != .pattern_element) return error.InvalidPredicateTarget;
+                    const location = view.getLoc(pattern) orelse return error.InvalidPredicateTarget;
+                    const start: usize = location.offset;
+                    if (start >= self.source.len or !isAsciiIdentifierStart(self.source[start])) {
+                        return error.InvalidPredicateTarget;
+                    }
+                    var end = start + 1;
+                    while (end < self.source.len and isAsciiIdentifierContinue(self.source[end])) end += 1;
+                    if (!std.mem.eql(u8, self.source[start..end], target_text)) continue;
+                    const binding = view.paramBinding(pattern) orelse return error.InvalidPredicateTarget;
+                    predicate.target = .{ .resolved = .{
+                        .pattern = pattern,
+                        .binding = binding,
+                    } };
+                    break;
+                }
+            },
+        }
+
+        self.tokenizer = cursor.tokenizer;
+        self.current = cursor.current;
+        self.previous = previous_token;
+        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        return value;
+    }
+
+    fn parseParenthesizedFunctionHeader(
+        self: *Parser,
+        kind: HeaderKind,
+        flags: *FunctionFlags,
+        params: *std.ArrayList(NodeIndex),
+        params_alloc: std.mem.Allocator,
+        pending_signature: ?*type_syntax.PendingFunctionSignature,
+    ) !void {
+        try self.expect(.lparen, "'('");
+        if (!self.check(.rparen)) {
+            var progress: ProgressGuard = .{};
+            while (true) {
+                progress.iteration(self);
+                if (self.match(.spread)) {
+                    self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
+                    flags.has_rest_param = true;
+                }
+                if (self.check(.lbrace) or self.check(.lbracket)) {
+                    self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; bind one parameter, then read its members explicitly in the body");
+                    return error.ParseError;
+                }
+
+                const param_name = try self.expectIdentifier("parameter name");
+                const param_atom = try self.addAtom(param_name.text(self.source));
+                const param_binding = self.scopes.declareBinding(
+                    param_name.text(self.source),
+                    param_atom,
+                    .parameter,
+                    false,
+                ) catch |err| switch (kind) {
+                    .named => {
+                        self.errorAtCurrent("too many parameters");
+                        return error.TooManyLocals;
+                    },
+                    .arrow => return self.bindingFailure(err),
+                };
+                const parameter_type = if (pending_signature != null and self.check(.colon))
+                    try self.parseFunctionTypeValue(param_name)
+                else
+                    null;
+                if (self.match(.assign)) {
+                    self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
+                    return error.ParseError;
+                }
+                const param_node = try self.nodes.add(.{
+                    .tag = .pattern_element,
+                    .loc = param_name.location(),
+                    .data = .{ .pattern_elem = .{
+                        .kind = if (flags.has_rest_param) .rest else .simple,
+                        .binding = param_binding,
+                        .key = null_node,
+                        .key_atom = 0,
+                        .default_value = null_node,
+                    } },
+                });
+                try params.append(params_alloc, param_node);
+                if (parameter_type) |value| {
+                    try self.type_store.appendParameterAnnotation(pending_signature.?, .{
+                        .owner = .{ .pattern = param_node, .binding = param_binding },
+                        .value = value,
+                    });
+                }
+                if (flags.has_rest_param) break;
+                if (!self.match(.comma)) break;
+                if (self.check(.rparen)) break;
+            }
+        }
+        try self.expect(.rparen, "')'");
+        if (pending_signature != null and self.check(.colon)) {
+            const value = try self.parseFunctionReturnSyntax(self.previous, params.items);
+            try self.type_store.setFunctionReturn(pending_signature.?, value);
+        }
     }
 
     /// Parse function parameters and body, producing a FunctionDecl node.
@@ -972,8 +1574,21 @@ pub const Parser = struct {
     ///
     /// Arrow functions: If the body starts with '{', parse as block statement.
     /// Otherwise parse as expression and wrap in implicit return.
-    fn parseFunctionBody(self: *Parser, name_atom: u16, flags: FunctionFlags) anyerror!NodeIndex {
+    fn parseFunctionBody(
+        self: *Parser,
+        name_atom: u16,
+        flags: FunctionFlags,
+        header_admission: FunctionHeaderAdmission,
+    ) anyerror!ParsedFunctionBody {
         const loc = self.current.location();
+        const parameter_opener = self.current.start;
+        const signature_error_count = self.errors.getErrors().len;
+        var pending_signature: ?type_syntax.PendingFunctionSignature = if (self.parse_type_syntax and
+            header_admission == .typed)
+            self.type_store.beginFunctionSignature()
+        else
+            null;
+        errdefer if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
 
         // Enter function scope
         const scope_id = try self.scopes.pushScope(.function);
@@ -993,73 +1608,32 @@ pub const Parser = struct {
             self.scopes.popScope();
         };
 
-        // Parse parameters
-        try self.expect(.lparen, "'('");
         var params_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
         const params_alloc = params_sfa.get();
         var params = std.ArrayList(NodeIndex).empty;
         defer params.deinit(params_alloc);
 
         var param_flags = flags;
-
-        if (!self.check(.rparen)) {
-            var progress: ProgressGuard = .{};
-            while (true) {
-                progress.iteration(self);
-                // Check for rest parameter
-                if (self.match(.spread)) {
-                    self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
-                    param_flags.has_rest_param = true;
-                }
-
-                if (self.check(.lbrace) or self.check(.lbracket)) {
-                    self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; bind one parameter, then read its members explicitly in the body");
-                    return error.ParseError;
-                }
-
-                const param_name = try self.expectIdentifier("parameter name");
-                const param_atom = try self.addAtom(param_name.text(self.source));
-
-                const param_binding = self.scopes.declareBinding(
-                    param_name.text(self.source),
-                    param_atom,
-                    .parameter,
-                    false,
-                ) catch {
-                    self.errorAtCurrent("too many parameters");
-                    return error.TooManyLocals;
-                };
-
-                // Source preparation reports ZTS054 with the model-1 repair.
-                // Keep the raw parser fail-closed too, so callers cannot bypass
-                // that boundary and construct executable default-parameter IR.
-                if (self.match(.assign)) {
-                    self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
-                    return error.ParseError;
-                }
-
-                const param_node = try self.nodes.add(.{
-                    .tag = .pattern_element,
-                    .loc = param_name.location(),
-                    .data = .{ .pattern_elem = .{
-                        .kind = if (param_flags.has_rest_param) .rest else .simple,
-                        .binding = param_binding,
-                        .key = null_node,
-                        .key_atom = 0,
-                        .default_value = null_node,
-                    } },
-                });
-                try params.append(params_alloc, param_node);
-
-                if (param_flags.has_rest_param) break; // Rest must be last
-                if (!self.match(.comma)) break;
-                if (self.check(.rparen)) break; // Trailing comma
-            }
+        try self.parseParenthesizedFunctionHeader(
+            .named,
+            &param_flags,
+            &params,
+            params_alloc,
+            if (pending_signature) |*pending| pending else null,
+        );
+        if (pending_signature) |*pending| {
+            try self.type_store.reserveFunctionSignature(pending, .{
+                .start = parameter_opener,
+                .end = self.current.start,
+            });
         }
-        try self.expect(.rparen, "')'");
 
         // Parse body
         const body = try self.parseBlock();
+        if (!self.typeSyntaxPublicationHealthy(signature_error_count)) {
+            if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
+            pending_signature = null;
+        }
 
         self.in_function = was_in_function;
         self.scopes.popScope();
@@ -1072,7 +1646,7 @@ pub const Parser = struct {
         else
             null_node;
 
-        return try self.nodes.add(.{
+        const function_node = try self.nodes.add(.{
             .tag = .function_expr,
             .loc = loc,
             .data = .{ .function = .{
@@ -1084,6 +1658,12 @@ pub const Parser = struct {
                 .flags = param_flags,
             } },
         });
+        const transferred_signature = pending_signature;
+        pending_signature = null;
+        return .{
+            .function_node = function_node,
+            .pending_signature = transferred_signature,
+        };
     }
 
     fn parseIfStatement(self: *Parser) anyerror!NodeIndex {
@@ -1757,6 +2337,10 @@ pub const Parser = struct {
             return err;
         }
         if (self.errors.outOfMemory()) return error.OutOfMemory;
+        switch (err) {
+            error.TypeOnlyModuleRefused => return,
+            else => {},
+        }
         if (!self.errors.hasErrors()) {
             self.errors.addErrorAt(.expected_statement, self.current, "this statement could not be parsed");
         }
@@ -1767,6 +2351,8 @@ pub const Parser = struct {
         try self.expect(.lbrace, "'{'");
 
         const scope_id = try self.scopes.pushScope(.block);
+        var scope_active = true;
+        errdefer if (scope_active) self.scopes.popScope();
         // The brace level this block's statements sit at. Recovery returns here.
         const block_depth = self.brace_depth;
 
@@ -1778,6 +2364,7 @@ pub const Parser = struct {
         var progress: ProgressGuard = .{};
         while (!self.check(.rbrace) and !self.check(.eof)) {
             progress.iteration(self);
+            if (try self.tryConsumeTypeOnlyModule()) continue;
             if (try self.tryConsumeTypeDeclaration()) continue;
             if (self.parseStatement()) |stmt| {
                 try stmts.append(stmts_alloc, stmt);
@@ -1804,6 +2391,7 @@ pub const Parser = struct {
 
         try self.expect(.rbrace, "'}'");
         self.scopes.popScope();
+        scope_active = false;
 
         const stmts_count = try self.checkedU16Count(loc, stmts.items.len, "too many block statements; limit is 65535");
         const stmts_start = if (stmts.items.len > 0)
@@ -2002,8 +2590,7 @@ pub const Parser = struct {
                     .from_module_idx = 0,
                 } },
             });
-            retain_type_records = self.errors.getErrors().len == error_count and
-                !self.errors.outOfMemory();
+            retain_type_records = self.typeSyntaxPublicationHealthy(error_count);
             return export_node;
         }
 
@@ -2027,8 +2614,7 @@ pub const Parser = struct {
                     .from_module_idx = 0,
                 } },
             });
-            retain_type_records = self.errors.getErrors().len == error_count and
-                !self.errors.outOfMemory();
+            retain_type_records = self.typeSyntaxPublicationHealthy(error_count);
             return export_node;
         }
 
@@ -2067,7 +2653,7 @@ pub const Parser = struct {
         const type_checkpoint = self.type_store.checkpoint();
         const error_count = self.errors.getErrors().len;
         errdefer self.type_store.rollback(type_checkpoint);
-        defer if (self.errors.getErrors().len != error_count or self.errors.outOfMemory()) {
+        defer if (!self.typeSyntaxPublicationHealthy(error_count)) {
             self.type_store.rollback(type_checkpoint);
         };
         self.recursion_depth += 1;
@@ -2089,9 +2675,13 @@ pub const Parser = struct {
                 0;
         }
 
-        if (try self.tryReserveArrowGenericOwner()) |pending_value| {
-            var pending = pending_value;
-            return self.parseArrowFunction(&pending);
+        switch (try self.tryReserveArrowGenericOwner()) {
+            .not_generic => {},
+            .rejected_call_grammar => return self.parsePrefixExpr(),
+            .reserved => |pending_value| {
+                var pending = pending_value;
+                return self.parseArrowFunction(&pending);
+            },
         }
 
         // Check for arrow function
@@ -2099,7 +2689,10 @@ pub const Parser = struct {
             return self.parseArrowFunction(null);
         }
 
-        var left = try self.parsePrefixExpr();
+        var left = if (try self.tryParseErasedExpressionPrefix()) |prefix_node|
+            prefix_node
+        else
+            try self.parsePrefixExpr();
 
         // Pratt parsing builds left-deep trees without increasing
         // recursion_depth. Bound those trees before later AST walkers recurse
@@ -2559,10 +3152,14 @@ pub const Parser = struct {
             } },
         });
         if (pending_call) |pending| {
-            if (self.errors.getErrors().len != error_count or self.errors.outOfMemory()) {
+            if (!self.typeSyntaxPublicationHealthy(error_count)) {
                 self.type_store.cancelExplicitCall(pending);
             } else {
-                try self.type_store.finishExplicitCall(pending);
+                try self.type_store.finishExplicitCall(
+                    pending,
+                    call,
+                    ir.IrView.fromIRStore(&self.nodes, &self.constants),
+                );
             }
         }
         return call;
@@ -3051,6 +3648,14 @@ pub const Parser = struct {
         }
 
         if (self.check(.lparen)) {
+            if (self.parse_type_syntax) {
+                const cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
+                return type_syntax.scanParenthesizedArrowHeader(
+                    self.source,
+                    self.current.start,
+                    cursor,
+                ) != null;
+            }
             // (...) => ...
             const state = self.tokenizer.saveState();
             // The current '(' is already consumed by the tokenizer state, so start
@@ -3084,6 +3689,9 @@ pub const Parser = struct {
         errdefer if (pending_owner) |pending| self.type_store.cancelGenericOwner(pending);
         const loc = self.current.location();
         var flags = FunctionFlags{ .is_arrow = true };
+        const parameter_opener: ?u32 = if (self.check(.lparen)) self.current.start else null;
+        var pending_signature: ?type_syntax.PendingFunctionSignature = if (self.parse_type_syntax and parameter_opener != null) self.type_store.beginFunctionSignature() else null;
+        errdefer if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
 
         // Enter function scope
         const scope_id = try self.scopes.pushScope(.function);
@@ -3130,59 +3738,22 @@ pub const Parser = struct {
             });
             try params.append(params_alloc, param_node);
         } else {
-            // Parenthesized parameters
-            try self.expect(.lparen, "'('");
-
-            if (!self.check(.rparen)) {
-                var progress: ProgressGuard = .{};
-                while (true) {
-                    progress.iteration(self);
-                    if (self.match(.spread)) {
-                        self.errors.addErrorAt(.unsupported_feature, self.previous, "rest parameters ('...args') are not supported; accept an explicit array parameter instead");
-                        flags.has_rest_param = true;
-                    }
-
-                    if (self.check(.lbrace) or self.check(.lbracket)) {
-                        self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; bind one parameter, then read its members explicitly in the body");
-                        return error.ParseError;
-                    }
-
-                    const param_name = try self.expectIdentifier("parameter name");
-                    const param_atom = try self.addAtom(param_name.text(self.source));
-                    const param_binding = self.scopes.declareBinding(
-                        param_name.text(self.source),
-                        param_atom,
-                        .parameter,
-                        false,
-                    ) catch |err| return self.bindingFailure(err);
-
-                    if (self.match(.assign)) {
-                        self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
-                        return error.ParseError;
-                    }
-
-                    const param_node = try self.nodes.add(.{
-                        .tag = .pattern_element,
-                        .loc = param_name.location(),
-                        .data = .{ .pattern_elem = .{
-                            .kind = if (flags.has_rest_param) .rest else .simple,
-                            .binding = param_binding,
-                            .key = null_node,
-                            .key_atom = 0,
-                            .default_value = null_node,
-                        } },
-                    });
-                    try params.append(params_alloc, param_node);
-
-                    if (flags.has_rest_param) break;
-                    if (!self.match(.comma)) break;
-                    if (self.check(.rparen)) break;
-                }
-            }
-            try self.expect(.rparen, "')'");
+            try self.parseParenthesizedFunctionHeader(
+                .arrow,
+                &flags,
+                &params,
+                params_alloc,
+                if (pending_signature) |*pending| pending else null,
+            );
         }
 
         try self.expect(.arrow, "'=>'");
+        if (pending_signature) |*pending| {
+            try self.type_store.reserveFunctionSignature(pending, .{
+                .start = parameter_opener.?,
+                .end = self.current.start,
+            });
+        }
 
         // Parse body
         var body: NodeIndex = undefined;
@@ -3196,6 +3767,10 @@ pub const Parser = struct {
                 .loc = loc,
                 .data = .{ .opt_value = expr },
             });
+        }
+        if (!self.typeSyntaxPublicationHealthy(error_count)) {
+            if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
+            pending_signature = null;
         }
 
         self.in_function = was_in_function;
@@ -3220,11 +3795,24 @@ pub const Parser = struct {
                 .flags = flags,
             } },
         });
+        if (pending_signature) |*pending| {
+            try self.type_store.finishFunctionSignature(
+                pending,
+                arrow,
+                ir.IrView.fromIRStore(&self.nodes, &self.constants),
+            );
+        }
         if (pending_owner) |pending| {
-            if (self.errors.getErrors().len != error_count or self.errors.outOfMemory()) {
+            if (!self.typeSyntaxPublicationHealthy(error_count)) {
                 self.type_store.cancelGenericOwner(pending);
             } else {
-                try self.type_store.finishGenericOwner(pending);
+                try self.type_store.finishGenericOwner(
+                    pending,
+                    .{ .runtime = .{
+                        .owner = arrow,
+                        .view = ir.IrView.fromIRStore(&self.nodes, &self.constants),
+                    } },
+                );
             }
         }
         return arrow;
@@ -3271,6 +3859,10 @@ pub const Parser = struct {
 
     fn isAsciiIdentifierStart(byte: u8) bool {
         return std.ascii.isAlphabetic(byte) or byte == '_' or byte == '$';
+    }
+
+    fn isAsciiIdentifierContinue(byte: u8) bool {
+        return isAsciiIdentifierStart(byte) or std.ascii.isDigit(byte);
     }
 
     /// Report the first character above ASCII in an `invalid` token, once.
@@ -4030,10 +4622,62 @@ test "failed generic speculation restores the complete parser cursor" {
         try std.testing.expectEqual(TokenType.lt, parser.current.type);
         const cursor_before = parser.cursorCheckpoint();
         const store_before = parser.type_store.checkpoint();
-        try std.testing.expect((try parser.tryReserveArrowGenericOwner()) == null);
+        switch (try parser.tryReserveArrowGenericOwner()) {
+            .not_generic => {},
+            .rejected_call_grammar, .reserved => return error.TestUnexpectedResult,
+        }
         try std.testing.expect(std.meta.eql(cursor_before, parser.cursorCheckpoint()));
         try std.testing.expect(std.meta.eql(store_before, parser.type_store.checkpoint()));
     }
+}
+
+test "named function comment with spaced opener restores generic speculation" {
+    const source =
+        "function /* gap */ identity<T> (value) { return value; }";
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    try std.testing.expectEqual(TokenType.kw_function, parser.current.type);
+    parser.advance();
+    const name = try parser.expectIdentifier("function name");
+    try std.testing.expectEqual(TokenType.lt, parser.current.type);
+    const cursor_before = parser.cursorCheckpoint();
+    const store_before = parser.type_store.checkpoint();
+    const reservation = try parser.tryReserveFunctionGenericOwner(
+        name,
+        @intCast("function".len),
+    );
+    try std.testing.expect(reservation.pending_owner == null);
+    try std.testing.expectEqual(Parser.FunctionHeaderAdmission.typed, reservation.header_admission);
+    try std.testing.expect(std.meta.eql(cursor_before, parser.cursorCheckpoint()));
+    try std.testing.expect(std.meta.eql(store_before, parser.type_store.checkpoint()));
+}
+
+test "named function comment call grammar refusal restores seeded speculation" {
+    const sources = [_][]const u8{
+        "const seed: number = 1; function /* gap */ identity<T = string>(value) { return value; }",
+        "const seed: number = 1; function /* gap */ identity<T || U>(value) { return value; }",
+        "const seed: number = 1; function /* gap */ identity<T + U>(value) { return value; }",
+    };
+    for (sources) |source| {
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        defer parser.deinit();
+        _ = try parser.parseStatement();
+        try std.testing.expectEqual(TokenType.kw_function, parser.current.type);
+        const keyword_end = parser.current.start + @as(u32, "function".len);
+        parser.advance();
+        const name = try parser.expectIdentifier("function name");
+        try std.testing.expectEqual(TokenType.lt, parser.current.type);
+        const cursor_before = parser.cursorCheckpoint();
+        const store_before = parser.type_store.checkpoint();
+        try std.testing.expectEqual(@as(usize, 1), store_before.nodes);
+        try std.testing.expectEqual(@as(usize, 1), store_before.annotations);
+        const reservation = try parser.tryReserveFunctionGenericOwner(name, keyword_end);
+        try std.testing.expect(reservation.pending_owner == null);
+        try std.testing.expect(std.meta.eql(cursor_before, parser.cursorCheckpoint()));
+        try std.testing.expect(std.meta.eql(store_before, parser.type_store.checkpoint()));
+        try parser.type_store.validate();
+    }
+    try std.testing.expectEqual(@as(usize, 3), sources.len);
 }
 
 test "parse no-substitution template as string literal" {
@@ -6340,4 +6984,336 @@ test "an error list records one error per offset" {
     try std.testing.expectEqual(@as(usize, 2), list.errorCount());
     try std.testing.expectEqualStrings("first", list.getErrors()[0].message);
     try std.testing.expectEqualStrings("third, elsewhere", list.getErrors()[1].message);
+}
+
+test "type-only module speculation restores the complete cursor and store" {
+    {
+        const source =
+            "import type { Seed } from \"./seed\";\n" ++
+            "import { live } from \"./live\";";
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        defer parser.deinit();
+        try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
+        const cursor_checkpoint = parser.cursorCheckpoint();
+        const store_checkpoint = parser.type_store.checkpoint();
+        const diagnostics_checkpoint = parser.type_only_module_diagnostics.items.len;
+        try std.testing.expect(!try parser.tryConsumeTypeOnlyModule());
+        try std.testing.expect(std.meta.eql(cursor_checkpoint, parser.cursorCheckpoint()));
+        try std.testing.expect(std.meta.eql(store_checkpoint, parser.type_store.checkpoint()));
+        try std.testing.expectEqual(diagnostics_checkpoint, parser.type_only_module_diagnostics.items.len);
+        try std.testing.expect(parser.last_erased_type_span != null);
+    }
+
+    {
+        const source =
+            "import type { Seed } from \"./seed\";\n" ++
+            "import type { Spec } from \"" ++ retired_types_module ++ "\";";
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        defer parser.deinit();
+        try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
+        const cursor_checkpoint = parser.cursorCheckpoint();
+        const store_checkpoint = parser.type_store.checkpoint();
+        try std.testing.expectError(error.TypeOnlyModuleRefused, parser.tryConsumeTypeOnlyModule());
+        try std.testing.expect(std.meta.eql(cursor_checkpoint, parser.cursorCheckpoint()));
+        try std.testing.expect(std.meta.eql(store_checkpoint, parser.type_store.checkpoint()));
+        const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
+        const second_import = std.mem.lastIndexOf(u8, source, "import") orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u32, @intCast(second_import)), refusal.original_location.offset);
+        try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+    }
+}
+
+test "type-only module append failure retains a prior full checkpoint" {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    for (0..128) |_| {
+        try source.appendSlice(std.testing.allocator, "import type { A } from \"./a\";\n");
+    }
+
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source.items);
+    defer parser.deinit();
+    while (parser.type_store.type_only_modules.items.len == 0 or
+        parser.type_store.type_only_modules.items.len < parser.type_store.type_only_modules.capacity)
+    {
+        if (parser.current.type == .eof) return error.TestUnexpectedResult;
+        try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
+    }
+    try std.testing.expect(parser.type_store.type_only_modules.items.len > 0);
+    try std.testing.expect(parser.current.type == .kw_import);
+
+    const cursor_checkpoint = parser.cursorCheckpoint();
+    const store_checkpoint = parser.type_store.checkpoint();
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0, .resize_fail_index = 0 },
+    );
+    const stable_allocator = parser.type_store.allocator;
+    parser.type_store.allocator = failing.allocator();
+    defer parser.type_store.allocator = stable_allocator;
+    try std.testing.expectError(error.OutOfMemory, parser.tryConsumeTypeOnlyModule());
+    parser.type_store.allocator = stable_allocator;
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(std.meta.eql(cursor_checkpoint, parser.cursorCheckpoint()));
+    try std.testing.expect(std.meta.eql(store_checkpoint, parser.type_store.checkpoint()));
+    try parser.type_store.validate();
+}
+
+test "type-only module scan failure restores prior diagnostics" {
+    var source: std.ArrayListUnmanaged(u8) = .empty;
+    defer source.deinit(std.testing.allocator);
+    try source.appendSlice(std.testing.allocator, "import type \"open\nimport type ");
+    for (0..type_syntax.max_template_levels + 1) |_| {
+        try source.appendSlice(std.testing.allocator, "`${");
+    }
+    try source.appendSlice(std.testing.allocator, "value");
+
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source.items);
+    defer parser.deinit();
+    try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
+    try std.testing.expect(parser.type_only_module_exclusion != null);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
+    const prior_diagnostic = parser.type_only_module_diagnostics.items[0];
+    const cursor_checkpoint = parser.cursorCheckpoint();
+    const store_checkpoint = parser.type_store.checkpoint();
+
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    const stable_allocator = parser.type_store.allocator;
+    parser.type_store.allocator = failing.allocator();
+    defer parser.type_store.allocator = stable_allocator;
+    try std.testing.expectError(error.OutOfMemory, parser.tryConsumeTypeOnlyModule());
+    parser.type_store.allocator = stable_allocator;
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(std.meta.eql(cursor_checkpoint, parser.cursorCheckpoint()));
+    try std.testing.expect(std.meta.eql(store_checkpoint, parser.type_store.checkpoint()));
+    try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
+    try std.testing.expect(std.meta.eql(prior_diagnostic, parser.type_only_module_diagnostics.items[0]));
+}
+
+test "type-only module lexical exclusion and refusal keep root priority" {
+    {
+        const source =
+            "import type \"open\n" ++
+            "import type { Spec } from \"" ++ retired_types_module ++ "\";";
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        defer parser.deinit();
+        try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
+        try std.testing.expect(parser.type_only_module_exclusion != null);
+        try std.testing.expect(parser.type_only_module_refusal != null);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+    }
+
+    {
+        const source =
+            "import type \"open\n" ++
+            "const broken = ;\n" ++
+            "import type { Spec } from \"" ++ retired_types_module ++ "\";";
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        defer parser.deinit();
+        try std.testing.expectError(error.TypeOnlyModuleLexicallyExcluded, parser.parse());
+        try std.testing.expect(parser.type_only_module_exclusion != null);
+        try std.testing.expect(parser.type_only_module_refusal == null);
+        try std.testing.expect(parser.errors.getErrors().len > 0);
+    }
+}
+
+test "retained type-only module refusal outranks a later ordinary error" {
+    const source = "const broken = ;";
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.type_only_module_refusal = .{
+        .reason = .zttp_types,
+        .original_location = .{
+            .line = 1,
+            .column = 1,
+            .offset = 0,
+            .end_offset = 6,
+        },
+    };
+
+    try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
+    try std.testing.expect(parser.errors.getErrors().len > 0);
+}
+
+test "native allocation failure outranks a retained type-only module refusal" {
+    const source = "const live = { value: 1 };";
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator, observed_native_oom: *usize) !void {
+            var parser = try Parser.initTyped(allocator, std.testing.allocator, source);
+            defer parser.deinit();
+            parser.type_only_module_refusal = .{
+                .reason = .zttp_types,
+                .original_location = .{
+                    .line = 1,
+                    .column = 1,
+                    .offset = 0,
+                    .end_offset = 6,
+                },
+            };
+            _ = parser.parse() catch |err| switch (err) {
+                error.OutOfMemory => {
+                    observed_native_oom.* += 1;
+                    return err;
+                },
+                error.TypeOnlyModuleRefused => return,
+                else => return err,
+            };
+            return error.TestUnexpectedResult;
+        }
+    };
+    var observed_native_oom: usize = 0;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        Context.run,
+        .{&observed_native_oom},
+    );
+    try std.testing.expect(observed_native_oom > 0);
+}
+
+test "error-list allocation failure outranks a retained type-only module refusal" {
+    const source = "const broken = ;";
+    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.type_only_module_refusal = .{
+        .reason = .zttp_types,
+        .original_location = .{
+            .line = 1,
+            .column = 1,
+            .offset = 0,
+            .end_offset = 6,
+        },
+    };
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    const stable_allocator = parser.errors.allocator;
+    parser.errors.allocator = failing.allocator();
+    defer parser.errors.allocator = stable_allocator;
+
+    try std.testing.expectError(error.OutOfMemory, parser.parse());
+    parser.errors.allocator = stable_allocator;
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expect(parser.errors.outOfMemory());
+}
+
+test "nested type-only module refusal removes enclosing type syntax" {
+    const tails = [_][]const u8{
+        "function helper<T>(value: string): string {import type { Spec } from \"" ++ retired_types_module ++ "\";return value;}",
+        "const helper=<T>(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
+        "export const helper=<T>(value)=>{import type { Spec } from \"" ++ retired_types_module ++ "\";return value;};",
+    };
+    for (tails) |tail| {
+        const source = try std.mem.concat(
+            std.testing.allocator,
+            u8,
+            &.{ "const seed: number = 1;\n", tail },
+        );
+        defer std.testing.allocator.free(source);
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        defer parser.deinit();
+        try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
+        const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
+        const refusal_offset = std.mem.indexOf(u8, source, "import type") orelse
+            return error.TestUnexpectedResult;
+        var refusal_line: u32 = 1;
+        var refusal_column: u32 = 1;
+        for (source[0..refusal_offset]) |byte| {
+            if (byte == '\n') {
+                refusal_line += 1;
+                refusal_column = 1;
+            } else {
+                refusal_column += 1;
+            }
+        }
+        try std.testing.expectEqual(@as(u32, @intCast(refusal_offset)), refusal.original_location.offset);
+        try std.testing.expectEqual(@as(u32, @intCast(refusal_offset + "import".len)), refusal.original_location.end_offset);
+        try std.testing.expectEqual(refusal_line, refusal.original_location.line);
+        try std.testing.expectEqual(refusal_column, refusal.original_location.column);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.nodes.items.len);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
+        try std.testing.expectEqualStrings(
+            "number",
+            parser.type_store.annotations.items[0].raw_span.text(source),
+        );
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_parameters.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.projected_generic_parameters.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.type_only_modules.items.len);
+        try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+        try parser.type_store.validate();
+    }
+}
+
+test "later wrapper failures remove nested type-only module records" {
+    const cases = [_]struct { tail: []const u8, closing: []const u8, signatures: usize }{
+        .{ .tail = "function helper<T>(value: string): string {import type { A } from \"./a\";return value;", .closing = "}", .signatures = 1 },
+        .{ .tail = "const helper=<T>(value)=>{import type { A } from \"./a\";return value;", .closing = "};", .signatures = 0 },
+        .{ .tail = "export const helper=<T>(value)=>{import type { A } from \"./a\";return value;", .closing = "};", .signatures = 0 },
+    };
+    for (cases) |case| {
+        const control_source = try std.mem.concat(
+            std.testing.allocator,
+            u8,
+            &.{ "const seed: number = 1;", case.tail, case.closing },
+        );
+        defer std.testing.allocator.free(control_source);
+        var control_atoms = atom_table.AtomTable.init(std.testing.allocator);
+        defer control_atoms.deinit();
+        var control = try Parser.initTyped(std.testing.allocator, std.testing.allocator, control_source);
+        defer control.deinit();
+        control.setAtomTable(&control_atoms);
+        _ = try control.parse();
+        try std.testing.expectEqual(@as(usize, 0), control.errors.getErrors().len);
+        try std.testing.expectEqual(@as(usize, 1), control.type_store.type_only_modules.items.len);
+        try std.testing.expectEqualStrings(
+            "import type { A } from \"./a\";",
+            control.type_store.type_only_modules.items[0].raw_span.text(control_source),
+        );
+        try std.testing.expectEqual(@as(usize, 1), control.type_store.generic_owners.items.len);
+        try std.testing.expectEqual(case.signatures, control.type_store.function_signatures.items.len);
+        try control.type_store.validateRuntimeOwners(
+            std.testing.allocator,
+            ir.IrView.fromIRStore(&control.nodes, &control.constants),
+        );
+        const source = try std.mem.concat(
+            std.testing.allocator,
+            u8,
+            &.{ "const seed: number = 1;", case.tail },
+        );
+        defer std.testing.allocator.free(source);
+        var atoms = atom_table.AtomTable.init(std.testing.allocator);
+        defer atoms.deinit();
+        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        defer parser.deinit();
+        parser.setAtomTable(&atoms);
+        try std.testing.expectError(error.UnexpectedToken, parser.parse());
+        try std.testing.expectEqual(TokenType.eof, parser.current.type);
+        try std.testing.expectEqual(@as(usize, 1), parser.errors.getErrors().len);
+        const diagnostic = parser.errors.getErrors()[0];
+        try std.testing.expectEqual(error_mod.ErrorKind.expected_token, diagnostic.kind);
+        try std.testing.expectEqualStrings("'}'", diagnostic.expected orelse return error.TestUnexpectedResult);
+        try std.testing.expectEqual(@as(u32, @intCast(source.len)), diagnostic.location.offset);
+        try std.testing.expectEqual(@as(u32, @intCast(source.len)), diagnostic.location.end_offset);
+        try std.testing.expectEqual(@as(u32, 1), diagnostic.location.line);
+        try std.testing.expectEqual(@as(u32, @intCast(source.len + 1)), diagnostic.location.column);
+        try std.testing.expect(parser.type_only_module_refusal == null);
+        try std.testing.expect(parser.type_only_module_exclusion == null);
+        var expected = std.mem.zeroes(type_syntax.Store.Checkpoint);
+        expected.nodes = 1;
+        expected.annotations = 1;
+        try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
+        try std.testing.expectEqualStrings(
+            "number",
+            parser.type_store.annotations.items[0].raw_span.text(source),
+        );
+        try parser.type_store.validate();
+    }
+    try std.testing.expectEqual(@as(usize, 3), cases.len);
 }

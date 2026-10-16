@@ -646,6 +646,40 @@ pub const Tokenizer = struct {
         };
     }
 
+    /// Resume at the end of source bytes that another parser erased.
+    ///
+    /// The caller passes a tokenizer copy taken immediately after the current
+    /// keyword. The erased bytes must not affect lexical state. Only their LF
+    /// bytes affect the position of the next surviving token.
+    pub fn resumeAfterRawErasure(
+        self: *Tokenizer,
+        raw_end: u32,
+        previous_runtime_token: Token,
+    ) void {
+        std.debug.assert(self.pos <= raw_end);
+        std.debug.assert(@as(usize, raw_end) <= self.source.len);
+
+        while (self.pos < raw_end) {
+            const byte = self.source[self.pos];
+            self.pos += 1;
+            if (byte == '\n') {
+                self.line += 1;
+                self.line_start = self.pos;
+            }
+        }
+
+        const previous_is_initial = previous_runtime_token.type == .eof and
+            previous_runtime_token.start == 0 and
+            previous_runtime_token.len == 0 and
+            previous_runtime_token.line == 1 and
+            previous_runtime_token.column == 1;
+        if (previous_is_initial) {
+            self.can_be_regex = true;
+        } else {
+            self.updateRegexState(previous_runtime_token.type);
+        }
+    }
+
     /// Save state for lookahead
     pub fn saveState(self: *const Tokenizer) TokenizerState {
         return .{
@@ -805,4 +839,94 @@ test "state save and restore" {
     tokenizer.restoreState(state);
     const b_tok = tokenizer.next();
     try std.testing.expectEqualStrings("b", b_tok.text("a b c"));
+}
+
+test "raw erasure resumes inside a comment at the exact surviving token" {
+    const source = "import type { A } /* ; */ from \"./a\";";
+    var tokenizer = Tokenizer.init(source);
+    const keyword = tokenizer.next();
+    try std.testing.expectEqual(TokenType.kw_import, keyword.type);
+
+    const raw_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').? + 1);
+    const initial = Token.synthetic(.eof, .{
+        .line = 1,
+        .column = 1,
+        .offset = 0,
+    });
+    tokenizer.resumeAfterRawErasure(raw_end, initial);
+
+    const surviving = tokenizer.next();
+    try std.testing.expectEqual(TokenType.star, surviving.type);
+    try std.testing.expectEqual(@as(u32, 1), surviving.line);
+    try std.testing.expectEqual(@as(u32, 24), surviving.column);
+}
+
+test "raw erasure preserves opaque lexical and cached state" {
+    const source = "`head${export type { `opaque;${value}` /re/ { } };}\nnext";
+    var tokenizer = Tokenizer.init(source);
+    try std.testing.expectEqual(TokenType.template_head, tokenizer.next().type);
+    const keyword = tokenizer.next();
+    try std.testing.expectEqual(TokenType.kw_export, keyword.type);
+
+    tokenizer.current = keyword;
+    tokenizer.has_current = true;
+    const template_depth = tokenizer.template_depth;
+    const subst_brace_depths = tokenizer.subst_brace_depths;
+    const cached = tokenizer.current;
+    const has_cached = tokenizer.has_current;
+    const raw_end: u32 = @intCast(std.mem.lastIndexOfScalar(u8, source, ';').? + 1);
+
+    tokenizer.resumeAfterRawErasure(raw_end, keyword);
+
+    try std.testing.expectEqual(template_depth, tokenizer.template_depth);
+    try std.testing.expectEqualSlices(u16, &subst_brace_depths, &tokenizer.subst_brace_depths);
+    try std.testing.expect(std.meta.eql(cached, tokenizer.current));
+    try std.testing.expectEqual(has_cached, tokenizer.has_current);
+}
+
+test "raw erasure advances LF positions without parsing opaque bytes" {
+    const source = "import type opaque\n{ /ignored/ }\n;\nnext";
+    var tokenizer = Tokenizer.init(source);
+    const keyword = tokenizer.next();
+    try std.testing.expectEqual(TokenType.kw_import, keyword.type);
+
+    const raw_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').? + 1);
+    var previous_tokenizer = Tokenizer.init(";");
+    const previous = previous_tokenizer.next();
+    tokenizer.resumeAfterRawErasure(raw_end, previous);
+
+    const surviving = tokenizer.next();
+    try std.testing.expectEqual(TokenType.identifier, surviving.type);
+    try std.testing.expectEqualStrings("next", surviving.text(source));
+    try std.testing.expectEqual(@as(u32, 4), surviving.line);
+    try std.testing.expectEqual(@as(u32, 1), surviving.column);
+}
+
+test "raw erasure restores regex eligibility from the runtime predecessor" {
+    const source = "import type opaque;/abc/;";
+    const raw_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, ';').? + 1);
+
+    var previous_semicolon_tokenizer = Tokenizer.init(";");
+    const previous_semicolon = previous_semicolon_tokenizer.next();
+    var after_semicolon = Tokenizer.init(source);
+    _ = after_semicolon.next();
+    after_semicolon.resumeAfterRawErasure(raw_end, previous_semicolon);
+    try std.testing.expectEqual(TokenType.regex_literal, after_semicolon.next().type);
+
+    var previous_identifier_tokenizer = Tokenizer.init("name");
+    const previous_identifier = previous_identifier_tokenizer.next();
+    var after_identifier = Tokenizer.init(source);
+    _ = after_identifier.next();
+    after_identifier.resumeAfterRawErasure(raw_end, previous_identifier);
+    try std.testing.expectEqual(TokenType.slash, after_identifier.next().type);
+
+    const initial = Token.synthetic(.eof, .{
+        .line = 1,
+        .column = 1,
+        .offset = 0,
+    });
+    var after_initial = Tokenizer.init(source);
+    _ = after_initial.next();
+    after_initial.resumeAfterRawErasure(raw_end, initial);
+    try std.testing.expectEqual(TokenType.regex_literal, after_initial.next().type);
 }

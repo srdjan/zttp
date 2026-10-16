@@ -125,45 +125,83 @@ Type-only syntax creates no runtime node, atom, constant, or scope.
 The comparison covers one variable annotation with primitives, records, arrays, tuples, unions, intersections, literals, templates, and function types.
 The comparison also covers named references and recognized structural and nominal declarations.
 It also covers generic applications, structural generic declarations, untyped generic functions, untyped generic arrows, and explicit call arguments.
-Thirteen owned arrays hold syntax nodes, child lists, annotation owners, declaration owners, generic parameters, semantic fragments, and call arguments.
+Dedicated comparisons cover typed function headers and type-only modules before the complete-source comparison expands.
+Seventeen owned arrays hold syntax nodes, child lists, annotations, declarations, generic projections, signatures, module records, and erased prefixes.
 Names and literal text borrow original source spans.
-Type nodes retain grouping and readonly modifiers, including modifiers that have no semantic effect.
 
-Annotations retain declaration bindings, raw spans, admission ends, and semantic-prefix ends.
+Type nodes retain grouping and readonly modifiers, including modifiers that have no semantic effect.
+Annotations retain final declaration owners, complete bindings, raw spans, admission ends, and semantic-prefix ends.
+Repeated global declarations can share a binding, so each annotation also needs its distinct declaration node.
+An independently captured declaration start checks the supplied node's source location.
 The admission end synchronizes the runtime cursor; the semantic prefix retains the existing type parser's recognized meaning.
 Explicit absent children differ from successful unknown types and invalid references.
-Present children precede their parents, and failed publication restores every syntax array and the caller cursor.
+Present children precede their parents.
+
+Failed speculation restores every syntax array and the caller cursor.
+Runtime failure removes the current syntax transaction while preserving runtime recovery progress.
 Declarations retain component spans, complete erased spans, source order, and authored scope.
 Type-only declarations create no runtime statement, binding, atom, constant, or export.
 Declaration bodies and annotations own separate ranges of type nodes.
+
 Authored generic parameters retain quoted and comment boundaries independently from the existing raw semantic projection.
 Semantic projection removes one optional angle pair from the recorded window, which differs by owner kind.
 Semantic fragments own disjoint node ranges and retain their recognized prefix ends.
 Generic defaults and structural constraints remain opaque where legacy semantics ignore those bytes.
-Function and arrow owners retain provisional parameter openers until the annotation phase attaches final runtime owners.
-Call arguments retain their touching call opener and separate authored and semantic ranges.
+
+Generic owners retain final declaration indices or final function and arrow nodes.
+Compatibility variants distinguish declaration parameters, ignored parameters, and legacy call arguments.
+Real call arguments retain final call nodes and separate authored and semantic ranges.
 Pending records reserve source order before nested bodies or arguments add records.
 Publication waits for runtime nodes and enclosing declaration wrappers.
 Recovered errors and diagnostic allocation failures cancel pending records while preserving runtime recovery progress.
+
+Parameter annotations retain the actual runtime pattern and its declaration binding.
+Function signatures retain the final function or arrow node, typed parameter range, return syntax, and header span.
+Predicate targets retain an actual parameter identity or an explicit unresolved spelling.
+Return syntax preserves trailing whitespace and separate legacy return classification.
+The syntax tree and the legacy ordinary-return projection can have different roots.
+
+Type-only module records retain their kind and complete raw span without a runtime owner.
+The tokenizer resumes at the exact erased endpoint without interpreting opaque module contents.
+The base module for specifiers owns the built-in prefix and the retired proof module's identity.
+Both frontend refusal checks use that identity during migration.
+
+Erased prefixes retain final expression or block owners and exact operand intervals.
+Brace prefixes create no semantic parameters.
+Parenthesis prefixes retain the legacy parameter projection, including empty-list capture differences.
+Nested operand intervals can share one final runtime expression while keeping separate source records.
+Validation checks interval relationships, exact capture provenance, and complete ownership of parameter and fragment ranges.
+The private comparison admits bounded object, numeric group, simple arrow, and statement block operands.
+Its nested group operands stop at a number; direct parser support remains separate from comparison admission.
 
 A compiler test module lowers syntax directly through existing `TypePool` constructors and binds `TypeEnv` through declaration identities.
 Whole-body alias lookup precedes constructor calls, and source declarations retain their module-wide type namespace.
 The lowerer preserves nominal identity and the existing contractivity census.
 Direct generic APIs bind scope ownership to one environment and remove valid owned scopes after allocation failure.
 The lowerer retains eight-item semantic projections and separate generic and ordinary alias maps.
+
 Function and arrow scopes remain independent; call arguments and variable annotations inherit no enclosing generic scope.
 Generic ownership alone creates no function signature.
 Empty function and arrow projections perform no scope allocation.
 Application lowering preserves constructor allocation order and defers unused base references.
 The comparison checks exact ordered type structure before supplementary canonical keys.
 Canonical encoding has its own depth limit and does not establish parser admission.
+
 The existing checker retains its legacy annotation input until the consumer migration.
+
+Named function comments retain separate compatibility paths.
+A bounded comment before the name selects legacy call arguments when the list and parameter opener remain adjacent.
+A bounded comment after the list selects ignored parameters.
+Those named headers retain runtime-only parsing and refuse typed parameter syntax at its original location.
+Generic arrows retain typed headers through their independently admitted comment paths.
 
 The private preflight scans eligibility before runtime parsing and preserves admission diagnostic order.
 The preflight inspects function bodies with a bounded iterative depth counter.
-Private exclusions retain malformed lists, unsupported raw capture windows, and typed signatures until later reset phases.
+The complete-source preflight still excludes typed signatures that dedicated header comparisons already cover.
+Private exclusions also retain malformed lists and unsupported raw capture windows until later reset phases.
 Unsupported comparison forms produce `out_of_slice`, which declines comparison without selecting another frontend.
 Independent atom tables support comparisons of runtime stores, source locations, binding identities, and allocation counts.
+
 Later reset phases extend the syntax store before any production caller switches.
 
 ### Analysis passes

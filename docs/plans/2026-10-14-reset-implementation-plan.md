@@ -1989,9 +1989,120 @@ Aggregate tests, standalone runtime, optimized builds, verified precompilation, 
 All 734 flow probes match their expected verdicts; all 182 diagnostic corpus cases pass.
 Final documentation, link, and spine checks pass all eight steps in `u10-docs-final.log` with exit 0.
 Whole-repository formatting and the diff check also pass after the propagation correction.
-U10 is ready for its local commit.
+U10 is committed locally as `aa5489c2`.
 
 ### U11 preparation findings
+
+The combined module and nominal gate passed with 2,859 tests and one skip.
+The receipt is `/tmp/zttp-reset-20261015/u11-module-matrix-nominal-diagnostics.log`; its direct exit status is zero.
+Astra accepted nominal diagnostic order and found two gaps in the module tests.
+The corrected wrapper tests require successful closed-body controls before exact missing-brace failures at EOF.
+The rich fixture now requires its final handler owner, exact parameter binding, and both named type roots.
+Astra accepts both corrections by source review.
+The strengthened gate also exits zero with 2,859 tests and one skip.
+The receipt is `/tmp/zttp-reset-20261015/u11-module-probes-corrected.log`.
+
+The arrow candidate needed two corrections before integration.
+Legacy-call capture must retain the angle interior, including the nested-angle contrast.
+Allocation probes must classify source progress independently of Store contents before asserting complete checkpoints.
+The first object-prefix candidate also scanned preceding source while validating its operand endpoint.
+The corrected design scans only the operand interval and checks template and regular-expression delimiters.
+The arrow gate exits zero with 2,865 tests and one skip.
+Its receipt is `/tmp/zttp-reset-20261015/u11-arrow-corrected.log`.
+Astra then required a healthy nested-arrow control and exact runtime evidence after a recovered body error.
+The corrected probe requires two healthy owners and signatures, a later declaration, and the surviving outer return.
+Astra accepts that correction by source review.
+The first object integration stopped on four shadowing errors before any object behavior verdict.
+Main renamed those bindings; the corrected unfiltered gate remains separate from source acceptance.
+The corrected object gate exits zero with 2,870 tests and one skip.
+Its receipt is `/tmp/zttp-reset-20261015/u11-object-pilot-arrow-recovery-corrected.log`.
+The eight-kind census and initial shadowing probe then pass with 2,872 tests and one skip.
+That receipt is `/tmp/zttp-reset-20261015/u11-owner-census.log`.
+Astra accepts the exhaustive kind census but finds that the closure probe does not require an actual capture.
+The corrected probe follows the inner return to an upvalue and ties its source scope and slot to the annotated local.
+The stronger capture assertion still requires execution.
+
+The first named-comment review found two compatibility errors in the candidate.
+Before-name comments must pass `scanExplicitCallTypeArguments` before selecting legacy call compatibility.
+Balanced angles and adjacency alone incorrectly admit default, logical, and arithmetic spellings that legacy leaves raw.
+Refusal restores the complete cursor and syntax checkpoint.
+
+After-list comments suppress generic semantics but do not change the recorded span.
+`handleFunctionDeclaration` records the angle interior before it encounters the comment.
+The final capture therefore retains actual `<T>` and recorded `T`.
+The ignored-function validator and positive probes must check that exact interior.
+An independent TypeMap assertion must check provenance instead of assuming that ignored semantics make capture interchangeable.
+Main corrected both producer errors and the narrow validator exception.
+Three grammar refusals now compare actual legacy parse errors and exact retained locations.
+Seeded speculation probes require an unchanged cursor and all seventeen checkpoint fields.
+Four positive comment cases compare exact recorded endpoints with the independent legacy TypeMap.
+Astra accepts these corrections by source review; the execution gate remains separate.
+The corrected gate then passes sixteen steps with 2,882 tests and one skip.
+Its receipt is `/tmp/zttp-reset-20261015/u11-named-comments-provenance.log` with direct exit status zero.
+The exact closure capture and both named-comment corrections pass execution.
+
+The complete prefix candidate required further corrections before integration.
+Assignment capture can stop before whitespace that precedes a parenthesized operand.
+Ignored compatibility requires braces; projected compatibility requires parentheses.
+The private preflight must recognize the accepted operand shapes instead of permitting an unrestricted token list.
+The positive matrix must execute that preflight, and adjacent refusal probes must require the actual parse error.
+Recovery probes must identify both later runtime declarations and the retained outer annotation.
+
+An authored empty list does not necessarily have an empty recorded projection.
+General spaced `<> (1)` records `>` and creates one legacy generic parameter with that name.
+Assignment `<>(1)` retains an empty projection.
+Projection must use the recorded span without an authored-empty override.
+
+The existing lowering comparison checks reachable aliases, calls, and variable roots.
+Those roots do not expose missing transient generic nodes.
+Prefix acceptance therefore also requires independent full ordered pool comparison against legacy construction.
+A complex bound makes bound constructors observable in the direct API probe.
+An interleaved fixture must exercise generic-owner and prefix ranges together, including an empty projection.
+Overlap and gap mutations must fail that mixed census.
+Main integrated the corrected prefix candidate after source review.
+The finite preflight uses an explicit bounded stack and executes through every positive comparison case.
+Main also restored removed-type diagnostics that the revised preflight had discarded.
+Root, nested, and statement contrasts compare those diagnostics in both admission modes.
+The integrated tests require actual legacy refusal state, recovered runtime declarations, and full ordered pool parity.
+Source acceptance and the unfiltered execution verdict remain pending for this complete prefix slice.
+
+The first complete prefix gate exits one with five failing tests across 2,893 tests.
+The receipt is `/tmp/zttp-reset-20261015/u11-prefix-complete-first.log`.
+Three malformed-record probes expected errors from later checks instead of the guards that rejected their inputs first.
+The corrected probes retain local provenance and range checks.
+A separate misplaced empty range exercises the global source-order census without violating local span provenance.
+
+Successful prefix scans also need an explicit flag before preflight's final annotation requirement.
+The flag changes only after a complete statement or initializer prefix scan succeeds.
+Plain untyped source still fails the original comparison admission requirement.
+
+The proposed addition of prefix `any` diagnostics was incorrect.
+Legacy generic scanning checks removed forms such as `void`, but does not apply the ordinary annotation's `any` check.
+The direct preflight must preserve that distinction.
+
+Measured group and block sources with `any` reach only ZTS500 at contract checking.
+The corresponding `void` sources stop with ZTS060 at columns 16 and 2.
+Receipts remain under `/tmp/zttp-reset-20261015/u11-prefix-diagnostic-baseline/`.
+Root, nested, and statement probes require `void` refusal and `any` equivalence in both admission modes.
+
+The second small gate exits one with two failures and 2,890 passing tests.
+Its receipt is `/tmp/zttp-reset-20261015/u11-prefix-complete-corrected.log`.
+All three local guard probes, the empty-range census, and deeper nesting refusals pass.
+The positive matrix also needs the comparison's syntax-presence check to recognize retained erased prefixes.
+That check does not change parser admission.
+
+Astra found that nested group frames admitted another nested prefix beyond the accepted comparison boundary.
+Nested group operands now require one number.
+Two deeper sources must remain outside private comparison admission.
+This bound changes only preflight; the owner model and direct parser retain independent validation.
+The final corrected small gate exits zero: sixteen steps succeed, 2,892 tests pass, and one test skips.
+Its receipt is `/tmp/zttp-reset-20261015/u11-prefix-complete-diagnostic-parity.log`.
+Astra accepts the complete U11 source within its recorded private scope.
+The review does not establish execution, consumer semantics, production cutover, or rejection of every descendant substitution within one operand interval.
+The broader frontend gate then exits zero: all 45 steps succeed, 3,698 tests pass, and one test skips.
+Its receipt is `/tmp/zttp-reset-20261015/u11-focused.log`.
+The final U12 refresh exposes the declaration identity gap below before U11 closes.
+The bounded amendment requires another small gate, affected frontend checks, and common checks before U11's commit.
 
 Main measured typed parameter contrasts for both function header comment gaps.
 Each command exits 1 with ZTS003 before type analysis.
@@ -2023,6 +2134,37 @@ Implementation still requires U10's commit and final API refresh.
 The adjacent line-comment arrow uses the call-argument variant on its final arrow node.
 The spaced line-comment refusal publishes no owner; the equals-ending comment retains the general declaration projection.
 The call-argument variant performs no generic declaration work and retains ordinary typed signatures.
+
+The refreshed comment review confirms separate legacy paths for generic lists and arrow headers.
+Comments can change generic-list projection without preventing typed arrow headers.
+The measured block-comment arrow reports ZTS208 for `T>`, then ZTS200 for return `T`.
+The adjacent line-comment arrow reports ZTS203 for parameter `T`, then ZTS200 for return `T`.
+The spaced line-comment source remains raw JSX and publishes no owner.
+An equals-ending line comment selects general projection and reports ZTS208, then ZTS200.
+Therefore, arrow production needs no comment-based flag that disables typed headers.
+Named functions retain their separately measured typed-header refusals through comment gaps.
+
+Astra accepts the remaining generic-arrow refresh without new syntax fields.
+The producer confirms the outer arrow through `scanParenthesizedArrowHeader` on a copied cursor after the candidate opener.
+The published cursor remains at that opener; reservation follows confirmation.
+The typed-only producer no longer needs `cursorStartsBareArrow`; plain JavaScript uses its existing separate lookahead.
+Dedicated assignment capture keeps first priority, and general capture keeps its measured whitespace-adjusted window.
+Comparison context must pass `scanExplicitCallTypeArguments` before selecting call compatibility.
+Adjacency alone does not establish that grammar.
+Rejection or exclusion must prevent callable and prefix fallback.
+The list-to-opener gap still permits only legacy whitespace.
+Whole-source preflight can retain its narrower boundary until U12 migrates signature consumers.
+
+Seven measured refresh cases remain in `/tmp/zttp-reset-20261015/u11-generic-header-refresh-baseline/` after a one-case pilot.
+Every command exits 1.
+A typed assignment arrow reports ordinary ZTS200; the general spaced arrow reports ZTS208 for `T>`, then ZTS200.
+A word-ending comment before `<T = string>` leaves raw JSX and reports ZTS002 at line 2, column 1.
+An equals-ending comment with general capture instead reports ordinary ZTS200 at line 3, column 1.
+Untyped named functions with one line comment before the name or after the list reach ZTS601.
+Their function locations remain line 2, columns 12 and 1, respectively.
+Comments in both named-header gaps leave the angle list raw and report ZTS003 at line 1, column 31.
+Seven exact public CHECK assertions now retain those outcomes and await the next unfiltered run.
+Required direct probes cover shared signature ownership, rejected call grammar, nested return-function arrows, and complete rollback.
 
 The current TypeMap has eight kinds, and the existing census in `source_frontend.zig` covers every kind.
 Structural and nominal annotations belong to type declarations without runtime nodes or atoms.
@@ -2156,6 +2298,39 @@ A recovered outer body must remove completed inner syntax while retaining the ea
 The owner validator must reject incorrect node tags before it reads tagged runtime data.
 The first slice retains provisional generic and explicit-call offsets until U11's later owner conversion.
 
+The post-commit refresh confirms these APIs against `aa5489c2` and its thirteen-array Store.
+Astra accepts the refreshed U11 API and the bounded first implementation slice with no design blocker.
+This acceptance does not establish implementation correctness or complete U11.
+The five public baseline tests pass all 230 precompile tests in `u11-public-baseline.log`, with exit 0 across four steps.
+Those tests cover eighteen measured sources and assert exact diagnostics, stages, error counts, and contract presence.
+
+The first source review identifies two transaction and ownership gaps.
+The shared value parser advances the caller's cursor before variable annotation publication; publication failure can retain that advanced cursor.
+The variable wrapper must publish a local cursor copy only after its annotation append succeeds.
+Return-only signatures can swap valid function owners because an empty parameter range supplies no membership check.
+Owner validation must compare the supplied node's header location with the captured header start, without finding owners through offsets.
+The unfiltered `u11-first-slice-red.log` run exits 1 and exposes both failures.
+The run reports 2,561 passing tests, one skip, and exactly two failed regressions.
+
+Astra identifies another ownership gap within a function.
+Two typed parameters can exchange complete `ParameterOwner` values while membership, binding, and uniqueness checks still pass.
+An annotation can also move from a typed parameter to an earlier untyped parameter.
+Validation must bound the supplied parameter's annotation between that parameter's location and the following actual parameter's location.
+The final parameter uses the signature header bound.
+These checks validate supplied owners; they must not find owners through source offsets.
+Both negative contrasts require rejection probes before source acceptance.
+
+The corrected first slice publishes the caller's cursor only after annotation storage succeeds.
+Function validation checks the supplied node's tag before its location and payload.
+Parameter validation retains exact membership, binding, uniqueness, and source-interval checks.
+The corrected tests add both parameter-owner contrasts without claiming an earlier executed failure for those contrasts.
+Flat, nested, and successful allocation probes compare runtime IR before checking syntax records.
+Each comparison uses real local atom tables and separates runtime allocation from the swept syntax allocator.
+Astra accepts the corrected first slice in static source review with no remaining blocker within that scope.
+The unfiltered `u11-first-slice-corrected.log` run exits 0 across sixteen steps, with 2,794 passing tests and one skip.
+All 230 public precompile tests pass, including the eighteen measured U11 sources.
+These receipts establish the first slice only; later U11 ownership and admission work remains incomplete.
+
 The final syntax inventory must also retain nominal declarations with generic lists before production cutover.
 U10 explicitly excludes those lists from its private comparison scope.
 Main measured `nominal Id<T> = string` with an integer assignment to `Id`.
@@ -2169,6 +2344,609 @@ Admitted object-property arrows require final arrow ownership; refused object me
 Function expressions, async forms, default exports, and destructuring retain their existing refusals.
 Exported named functions and constants retain their outer wrapper transactions.
 The concrete fixture specification remains in `/tmp/zttp-reset-20261015/u11-owner-fixture-spec.md` until final API refresh.
+
+The next bounded U11 slice replaces existing generic and call identities without expanding source admission.
+`GenericOwnerIdentity` will distinguish exact structural and nominal declaration indices from final function and arrow node indices.
+`GenericOwner` will retain explicit capture spans and `GenericOwnerCompatibility` alongside its existing syntax ranges.
+`ExplicitCallArguments` will retain its final call node and explicit capture spans instead of `lparen_offset`.
+Reserve options will select projection policy before final identity exists and will read only `Store.source`.
+
+`GenericOwnerCompatibility` will distinguish declaration parameters, ignored declaration parameters, and legacy call arguments.
+The call variant will retain authored argument and semantic fragment ranges.
+Current producers will retain their existing behavior; later slices will admit the recorded compatibility cases.
+A finalizer argument will distinguish declaration indices from runtime owners with a required IR view.
+Runtime finalizers will validate only their completed record, because enclosing reserved slots can remain undefined.
+Global validation will wait until publication finishes.
+
+A declaration transaction will append the declaration before finalizing its reserved generic owner against that declaration's exact back-reference.
+The transaction will then validate the completed declaration.
+No global validation may run between these operations; any failure will restore the existing complete checkpoint.
+Projection policy must distinguish opaque structural parameters from callable bound construction, although both publish declaration-parameter compatibility.
+Ignored and legacy-call variants must own only their respective ranges.
+Structural bounds and defaults remain opaque; callable bounds retain U10's compact-index fragment construction.
+Ignored and legacy-call policies create no bound fragments.
+Only legacy-call compatibility owns its additional authored-call and semantic-fragment ranges.
+`PendingGenericOwner` must retain its reserve policy until finalization.
+Finalization must reject an identity incompatible with that policy, because structural and callable reservations publish the same compatibility tag.
+Structural policy permits structural declaration identity; callable policy permits function and arrow identities.
+Ignored policy permits the recorded nominal and function identities; legacy-call policy permits function and arrow identities.
+No additional persistent identity or policy registry is required.
+
+Tag checks alone cannot reject exchanges between two valid owners.
+Call validation must require the supplied `.call` location to equal `list_span.end`.
+Current function and arrow producers must supply the opener after their captured list, with only already-admitted whitespace between them.
+These checks validate supplied owners without searching for owners.
+Global validation must also reject duplicate runtime owners.
+Capture spans remain independently validated, including empty and unequal legacy windows.
+
+Function publication will follow declaration-wrapper allocation and validation of `VarDecl.init`.
+Arrow publication will follow final arrow creation within its existing enclosing transaction.
+Explicit call publication will follow value arguments, the closing parenthesis, and final `.call` allocation.
+Recovered diagnostics and wrapper failures will restore the complete syntax checkpoint while retaining runtime recovery progress.
+Reservation order will preserve authored order for nested owners.
+
+The private full-store lowerer will receive the actual runtime IR view.
+Its temporary legacy call facade will derive a parenthesis key from a supplied, tag-validated call node's location.
+The facade will perform no text search or owner reconstruction and will retain no offset identity in syntax records.
+Syntax-only lowering tests will reject runtime-owned records instead of inventing an empty IR view.
+Allocation probes with fabricated offsets will use actual runtime nodes and IR-aware finalizers.
+Wrong-offset probes will become wrong-node and wrong-tag probes.
+
+The first vertical contrast will combine a generic-only `identity` declaration with `identity<string>("ok")` in a typed variable initializer.
+The contrast will establish exact wrapper, function, and call ownership, runtime parity, and ordered lowering through the actual IR view.
+The contrast will require zero function signatures for the generic-only declaration.
+Astra accepts this bounded design with the publication, policy, source-provenance, and range rules stated here.
+The corrected first-slice suites pass, so the bounded implementation can proceed.
+Required probes cover nested reservations, owner exchanges, incompatible policies, declaration back-references, and shared or unclaimed ranges.
+Rollback probes retain an earlier published seed; successful probes check runtime parity before ownership and ordered lowering.
+Shared argument ranges must account for real calls and compatibility projections, with exactly one owner per semantic fragment.
+Application planning must not visit compatibility roots twice.
+This acceptance covers design only and does not accept the forthcoming source or complete U11.
+
+The first generic-owner handoff migrates all API callers and passes formatting and diff checks, but source review identifies a capture regression.
+Structural aliases record the complete angle list as their legacy span.
+The handoff instead supplies the interior span, so reservation removes an additional optional angle pair.
+For `structural Box<<T>> = number;`, the direct projection becomes `T` instead of the required `<T>`.
+The correction must retain the complete structural legacy window and exactly one optional-pair removal.
+The first unfiltered handoff run exits 1 with two Store capture-shadowing compilation errors.
+Only the 94 base and contract tests execute; the affected engine, compiler, and precompile artifacts do not compile.
+The next run changes only those capture names so the existing semantic regressions can execute.
+
+Capture validation also requires source relationships, rather than two independently in-range spans alone.
+The actual erased span must contain its generic list.
+Its start must equal the list's start, and it must contain the legacy recorded window.
+Runtime generic provenance must validate the interval from `list_span.end` to the supplied opener.
+Using only the actual erased endpoint lets a forged wider span hide intervening runtime source.
+The general arrow path erases through whitespace to the opener; dedicated assignment and function paths erase only the angle list.
+Each producer must retain its exact actual span independently from its legacy recorded window.
+
+Runtime locations also need explicit bounds and an opening-parenthesis check.
+The whitespace helper clamps offsets, so a supplied location beyond EOF can otherwise pass after trailing whitespace.
+Function and arrow owners must name an in-range `(`; explicit calls require that byte after their exact offset correspondence check.
+Negative probes must cover non-opener and out-of-range locations, widened captures, and unrelated capture spans.
+
+The runtime variant of `GenericOwnerFinal` must contain both the owner and its required `IrView`.
+The handoff's separate view parameter unnecessarily reaches declaration parsing, preflight, and fabricated empty-IR test wrappers.
+Declaration finalization needs only the completed declaration and exact back-reference.
+Removing that parameter and those wrappers preserves mandatory runtime validation while simplifying the API.
+The exact function-plus-call fixture must run ordered `compareLowering` against its own prepared source and direct parser.
+
+Ignored and legacy-call owners intentionally retain projected syntax ranges without bound fragments.
+Those ranges are syntax data, rather than generic semantic construction.
+The private declaration lowerer currently sends every generic owner through generic-alias construction.
+For a valid ignored nominal owner, that branch creates generic semantic work and bypasses nominal wrapping.
+Current parser admission excludes nominal generic source, but the new direct API still needs correct lowering or an explicit refusal.
+The correction will retain ordinary nominal lowering while restricting generic-alias construction to structural declaration-parameter owners.
+
+Successful direct-API probes must cover ignored and legacy-call variants alongside their rejection cases.
+Mixed real-call and compatibility ranges must prove unique authored-argument and fragment ownership, with shared and unclaimed mutations rejected.
+Source acceptance remains blocked until these bounded corrections, their unfiltered execution, and Astra's final delta review complete.
+The shadow-corrected unfiltered run exits 1: fourteen of sixteen steps, 2,798 passing tests, one skip, and one failure.
+The existing recorded-window regression exposes the structural `<<T>>` error.
+All 232 precompile tests pass, including exact diagnostics, stages, counters, and contract presence for the new arrow and module sources.
+This public baseline pass exercises the retained legacy production path and does not accept the new direct owner implementation.
+
+Main reviewed all 1,073 lines of the bounded correction delta.
+The correction restores full structural windows, independent arrow erasure, required runtime IR, nominal wrapping, and exact vertical comparison.
+Main adds capture-start equality and legacy-window containment with checkpoint-preserving refusal probes.
+The unfiltered corrected run exits 0 in `u11-final-owner-corrected.exit`.
+All sixteen steps pass, with 2,802 passing tests, one skip, and all 232 precompile tests passing.
+
+Astra's source review identifies one remaining endpoint gap in both runtime validators.
+A correct owner can still accept an actual erased span that extends through its opener.
+The correction requires actual erasure to end at or before the supplied runtime opener.
+The list-to-opener whitespace check remains necessary and unchanged.
+Direct function, arrow, and call probes reject widened captures, cancel pending syntax, and compare the complete original checkpoint.
+Astra accepts that bounded source correction without another blocker.
+
+The unfiltered endpoint rerun exits 0 in `u11-final-owner-endpoint.exit`.
+All sixteen steps pass, including all 232 precompile tests.
+Source acceptance and execution cover this bounded owner slice; they do not complete U11.
+
+The follow-on predicate and arrow review remains a proposal until the owner slice completes and Astra validates the refreshed design.
+The runtime parser currently recognizes untyped arrows; typed headers require a confirming lookahead before the arrow parser runs.
+That lookahead must preserve the existing return scanner's function-type-prefix continuation rule.
+A depth-zero arrow can belong to a return function type rather than the outer arrow.
+Failed lookahead must retain every cursor field and publish no syntax.
+
+The refreshed header API retains the existing return and signature layouts.
+One transactional return parser owns the complete Store checkpoint and a copied cursor.
+It rolls back on `.failure`, `.excluded`, and native errors; only complete success publishes either state.
+One allocation-free arrow scanner exposes the existing admission scan and function-type continuation rules through a narrow wrapper.
+The shared parenthesized-header helper receives each caller's existing list and its `params_alloc` allocator.
+The helper must not append through a different allocator because both callers free that list through their stack fallback allocator.
+
+Return raw spans retain the complete interval through `admission_end`, including trailing whitespace.
+Legacy named and arrow scanners use that untrimmed interval when they test the exact ` is ` substring.
+The shared return parser must not reuse the trimmed raw span from ordinary annotation parsing.
+`parseAdmittedTypeValue` can retain the complete raw interval and its separate semantic endpoint.
+
+Astra accepts the refreshed bounded header design with these requirements.
+Predicate targets must start at the return interval's first identifier and retain the following `is` spelling.
+Containment alone cannot reject a substituted later name.
+Arrow cleanup must cancel the pending signature before its outer generic owner.
+Rollback assigns array lengths directly, so the opposite order can restore discarded slots.
+Successful publication remains signature first and generic owner second.
+
+The first mixed-parameter guard vertical is released before the broader header matrix.
+
+The worker returns the first header vertical and stops edits after formatting and diff checks pass.
+Main reviews all 996 lines of that handoff's delta.
+Main removes its new source-specific preflight hook and eligibility assertion before execution.
+Full signature consumer lowering belongs to U12, so full-store comparison cannot claim that eligibility yet.
+The dedicated runtime comparison, ordered individual lowering, exact owners, and four predicate-target mutations remain.
+The unfiltered first-header run includes the independently accepted tokenizer helper and the expanded public baselines.
+
+The first-header run exits 0 in `u11-header-first.exit`.
+All sixteen steps pass, with 2,809 passing tests, one skip, and all 233 precompile tests passing.
+This run executes all twenty-six header cases and the eight new prefix baselines through legacy CHECK.
+The isolated tokenizer helper also gains execution evidence in that run.
+
+Astra identifies one remaining producer and validator disagreement for repeated parameter names.
+The parser selects the first matching actual parameter, but the validator retains the last matching parameter.
+The scope analyzer permits repeated names, so this difference rejects a result that the parser produced.
+The correction will stop validation at the first match without changing source ownership or consumer projection.
+Main adds a direct repeated-name contrast with runtime parity first and the exact first pattern and binding.
+The contrast enters an unfiltered red run before that correction.
+
+The repeated-name probe compiles and exposes that exact failure in `u11-header-repeated-red.log`.
+The run exits 1 across eleven successful steps out of thirteen, with 2,576 passing tests, one skip, and one failure.
+The failing direct parse returns `InvalidPredicateTarget` from the validator.
+Main adds one `break` after the validator records its first match.
+Formatting and diff checks pass before the corrected unfiltered run starts.
+
+Astra accepts the corrected first-header source without another blocker in that bounded scope.
+The corrected unfiltered run exits 0 in `u11-header-first-corrected.exit`.
+All sixteen steps pass, with 2,810 passing tests and one skip.
+All 233 precompile tests pass again.
+The broader header matrix can now proceed with independent ownership for source changes and comparison tests.
+
+The return-source worker hands back only `type_syntax.zig` and stops edits.
+Main reviews all 270 lines of that delta.
+Empty narrowing retains the complete whitespace tail after `is`, with absent syntax and zero owned nodes.
+The public admitted-value parser now delegates to one parsing core and preserves its existing native exclusion errors.
+Three direct API tests cover raw provenance, whole-grammar compatibility, facet mutations, and invalid empty roots or ranges.
+Formatting and diff checks pass; source acceptance and execution remain pending until the comparison worker stops.
+
+Astra accepts the frozen return-source delta without a source blocker.
+The comparison worker returns its matrix and stops edits; main reviews all 760 delta lines.
+Main separates allocation failures by parser progress, independently of retained Store contents, and strengthens the missing-arrow diagnostic assertion.
+The first matrix run exits 1 in `u11-header-matrix-first.exit`.
+Fourteen of sixteen steps pass, with 2,822 passing tests, one skip, and two failures.
+All 233 precompile tests pass.
+
+Both failures expose incorrect probe expectations rather than a parser correction.
+Final arrow allocation fails before the variable parser consumes its semicolon; wrapper failures reach EOF.
+The allocation case now carries an explicit expected token and location.
+The readonly compatibility syntax remains `readonly_modifier` over the `is` reference.
+Existing final resolution removes the readonly wrapper for that unrecognized source, so the expected semantic root is the `is` reference.
+Ordered individual lowering now compares each root with an independent legacy environment over the identical raw text.
+
+Main also adds exact case counts and complete early-failure checkpoints.
+Recovery checks use real atom tables, the actual `after` declaration binding, the retained body block, and its later `return true`.
+The checks preserve runtime recovery rather than accepting EOF or a declaration count alone.
+Astra finds no additional parser blocker in the bounded matrix, pending these probe corrections and their execution.
+Formatting and diff checks pass before the corrected unfiltered run starts.
+
+Astra accepts the corrected bounded header matrix without another blocker.
+The corrected run exits 0 in `u11-header-matrix-corrected.exit`.
+All sixteen steps pass, with 2,824 passing tests and one skip.
+All 233 precompile tests pass again.
+Module integration can now start with its smallest vertical; the full U11 census and remaining producers are still pending.
+
+Main measures six return-endpoint contrasts through the unchanged legacy CLI after a one-case pilot.
+Both named and arrow returns ending with `value is ` reach only the handler's ZTS500 refusal.
+Those admitted predicates have no narrowing type after `is`.
+Tab-separated empty narrowing reports ZTS204 at line 1, column 44 for the named function and column 15 for the arrow.
+With nonempty `value is string   `, a named function returning `true` reports ZTS211 at line 1, column 1.
+The corresponding arrow reaches only the handler's ZTS500 refusal.
+
+Every command exits 1; receipts remain in `/tmp/zttp-reset-20261015/u11-return-endpoint-baseline/`.
+The public header table now retains twenty-six cases, including these six outcomes.
+Its new assertions await execution after source handoff.
+The broader header matrix must preserve empty narrowing through existing absent-root syntax rather than introduce a refusal or replacement type.
+U12 must preserve the observed difference between named and arrow predicate verification.
+
+Astra accepts empty narrowing through the existing `TypeValue` model without another type or failure variant.
+The narrowed interval must come from the tail after the verified `is` token and contain only whitespace.
+Its root is absent, its owned range is empty, and every endpoint remains valid.
+Target spelling, binding, and actual parameter membership remain mandatory.
+The tab-separated form still requires a separate ordinary compatibility root over its complete return spelling.
+That root parses as the reference `value` in the measured source.
+
+The census must distinguish stored values from present roots.
+An empty narrowing value claims no other root and cannot satisfy a nonempty-root allocation floor.
+Existing nonempty predicate and compatibility allocation probes remain required.
+This amendment applies to the later header matrix and does not enlarge the current first vertical.
+
+Main measured eighteen related sources through the existing built analyzer, without rebuilding or contacting a provider.
+The one-case pilot and eighteen-case run change only the case limit.
+Receipts remain in `/tmp/zttp-reset-20261015/u11-arrow-return-baseline/`.
+Typed optional function and arrow parameters report ZTS055 at line 1, column 20.
+Untyped optional function and arrow parameters report ZTS003 at the same location, with the suggestion `')'`.
+Typed default arrow parameters report ZTS054 at line 1, column 29; typed async arrows report ZTS001 at column 14.
+
+Ordinary, grouped, object-property, call-argument, and nested-return arrows reach only the handler's ZTS500 refusal at line 2, column 17.
+Unresolved and quoted arrow predicates reach that same refusal.
+Tab-separated ordinary and `readonly` arrow predicates report ZTS204 at line 1, column 15.
+The mixed-signature predicate with an untyped target reports ZTS601 at line 1, column 15.
+A single-identifier typed arrow reports ZTS047 at line 1, column 14.
+The ternary control reaches the handler's ZTS500 refusal.
+Every command exits 1; these are diagnostic baselines, not successful handler builds.
+
+Two targeted controls extend the baseline to twenty sources after another one-case pilot and twenty-case recording run.
+The parenthesized ternary reaches the handler's ZTS500 refusal.
+The return function type without an outer arrow reports ZTS002, `unexpected ')'`, at line 1, column 16.
+Both commands exit 1; their complete receipts share the baseline directory.
+One additional public test retains all twenty sources and exact ordered diagnostics.
+The test also requires the expected stages, error counters, and contract presence through the public CHECK API.
+Those stage assertions await execution after the current ownership source handoff.
+
+The proposed next header slice shares parenthesized parameter and return parsing between named functions and arrows.
+Single-identifier arrows retain their existing untyped path.
+Parameter parsing declares the binding, parses an optional type, creates the pattern, appends the runtime parameter, then attaches its annotation.
+Only annotated parameters enter `parameter_annotations`; predicate resolution uses every actual parameter of the current function.
+The parser must resolve a predicate target through supplied parameter nodes and their declaration names, without a global name or offset join.
+An unresolved target remains valid only when no actual parameter matches its spelling.
+Validation must compare the target occurrence's spelling with the supplied actual parameter's declaration name, alongside membership and binding checks.
+
+One transactional return helper will retain the complete raw return span and independent legacy classification.
+The exact substring ` is ` selects the legacy guard classification independently from structured predicate grammar.
+An ordinary structured predicate requires a separately parsed `legacy_ordinary_prefix` over the complete original span.
+The narrowed root and compatibility root must have disjoint ranges and separate application ownership.
+Any failure during the second parse must remove both ranges through the same checkpoint.
+Validation must recompute the raw ` is ` facet and reject a different stored classification.
+An ordinary structured predicate requires its compatibility root; guard predicates and value structures must not contain that root.
+Direct mutations must exercise incorrect classification, missing required roots, and forbidden extra roots.
+
+Arrow lookahead must confirm the outer `=>` after any nested return function type.
+The assignment path must not treat an unconfirmed colon as sufficient evidence.
+The async path can use the same lookahead only to retain its existing refusal; it must publish no syntax.
+The grouped-expression path remains separate after failed lookahead.
+The lookahead can reuse a small wrapper around `scanAdmissionEnd` with a copied cursor.
+That scanner already applies `isFunctionTypePrefix` without allocation or Store mutation.
+Lookahead must not parse speculative `TypeValue` records or stop at the first depth-zero function-type arrow.
+Private controls must include a parenthesized ternary and a return function type without an outer arrow.
+The measured simple ternary alone does not establish those ambiguity boundaries.
+Function expressions, methods, destructuring, default parameters, optional parameters, async forms, and default exports retain their measured refusals.
+
+The first vertical source is `const guard = (candidate, marker: unknown): candidate is string => typeof candidate === "string";`.
+Its runtime IR must match the legacy parser before syntax assertions run.
+The final arrow must own one signature with two actual parameters and one parameter annotation attached to `marker`.
+The predicate must target the untyped `candidate` pattern and retain `string` narrowing without an ordinary compatibility root.
+The signature interval starts at the parameter opener and ends at the `typeof` body token after `=>`.
+An ordinary `echo` arrow will then establish parameter and return roots without a predicate.
+
+Follow-on probes cover named and arrow unresolved targets, quoted guard classification, tab predicates, and the `readonly` compatibility root.
+Target mutations cover another actual parameter, an external pattern, an incorrect binding, and false unresolved status.
+Allocation sweeps must observe both return ranges, final runtime nodes, signature publication, and enclosing variable and export wrappers.
+Recovered body errors must remove pending syntax while retaining an earlier seed and runtime recovery progress.
+Astra accepts this preliminary header design with the recorded ambiguity, facet, target, and range checks.
+Shared parsing must preserve each caller's binding failures, rest flags, diagnostics, and runtime allocation order.
+This design acceptance does not release implementation or accept changing source.
+The next header slice still requires an API refresh after the current generic-owner handoff.
+
+The type-only module review identifies missing parser producers for the existing storage, checkpoint, rollback, and source-order checks.
+Main measured eighteen module contrasts through the existing built analyzer after a one-case recording pilot.
+Receipts remain in `/tmp/zttp-reset-20261015/u11-type-only-module-baseline/`.
+Every command exits 1 with one diagnostic; complete JSON and direct statuses remain beside each source.
+The rich top-level fixture reaches only the handler's ZTS500 refusal at line 6, column 17.
+
+Nested import and export forms report runtime ZTS002 in both same-line and multiline functions.
+Nested block imports also report ZTS002 in both layouts.
+Those observations cover whitespace before nested keywords; they do not establish universal nested refusal.
+The preliminary top-level-only recommendation was incorrect.
+A comment between `import` and `type` reports ZTS002 at line 1, column 1.
+A newline between `export type` and `{` reports ZTS002 at that location.
+A newline before the import's `type` word remains admitted and reaches the handler's ZTS500 refusal.
+
+The module path can contain a quoted semicolon without ending the erased statement.
+A semicolon inside an unrecognized block comment instead leaves trailing runtime text and reports ZTS002 at line 1, column 24.
+Semicolonless exports with trailing spaces remain admitted.
+The current scanner also erases opaque import bodies and opaque bodies inside export braces.
+The new path must retain those observed admission rules without introducing module resolution or stricter grammar.
+
+The `zttp:types` refusal is asymmetric.
+A type-only import from that name reports ZTS053 at line 1, column 1.
+The same exact quoted name inside the import statement's comment also reports ZTS053.
+A type-only export from that name is erased and reaches only the handler's ZTS500 refusal.
+The preliminary review's broader import-and-export refusal statement was incorrect; the measured and source-checked rule must remain import-specific.
+One additional public CHECK test retains all eighteen module sources; its stage and counter assertions await the source handoff.
+
+A further one-case pilot and twenty-eight-case recording run establish the missing byte-boundary contrasts.
+Nested forms immediately after `{` or at column one reach only the handler's ZTS500 refusal.
+Indentation prevents erasure and retains the previously recorded runtime refusals.
+At top level, one leading space causes ZTS002 at line 1, column 2.
+An import immediately after a semicolon is erased; adding one space produces ZTS002 at line 1, column 25.
+Adjacent type-only statements also differ: blanking the first semicolon prevents erasure of the second statement.
+
+The saved adjacent import/export source reports ZTS002 at line 1, column 30.
+The raw boundary check must model erased spans as spaces while preserving newlines.
+The module producer must update `last_erased_type_span` after publication and apply the existing raw boundary helper.
+The module slice needs both program and block hooks, conditional on that byte-sensitive boundary.
+It must preserve refusal after whitespace and must not infer admission from tokenizer position alone.
+The public test now retains all twenty-eight module sources; stage and counter assertions still await execution.
+
+The proposed module scanner returns `not_type_only`, a separate import refusal, or one `TypeOnlyModule` value.
+The scanner must preserve raw statement-end behavior, including quoted semicolons, semicolon inclusion, newline exclusion, and trailing spaces.
+The scanner must not use tokenizer offsets to infer the raw end or add comment-aware statement termination.
+Token-based cursor advancement is also insufficient when the raw endpoint occurs inside a comment.
+The saved comment-semicolon source leaves `*/ from ...` after erasure and must retain the measured column-24 refusal.
+The hook must resume tokenization at that exact raw endpoint with correct byte, line, column, and runtime lexical state.
+It must not tokenize erased opaque bodies into regex, template, or brace state.
+A direct next-token contrast must assert the surviving token for the saved source.
+Exported structural and nominal declarations must continue through their existing declaration hook without duplicate module records.
+The module record contains only its kind and raw span, with no runtime identity or atom.
+
+The parser hook will check the existing raw boundary helper before scanning through a local cursor.
+It will append the module record before publishing any cursor change or `last_erased_type_span`.
+The hook must preserve the previous runtime token rather than making an erased token the previous token.
+Nonmatches, refusals, and allocation failures must restore complete parser and Store checkpoints.
+The refusal must remain separate from annotation failures and must never become a runtime module-parser retry.
+
+`ParserCursorCheckpoint` currently omits `last_erased_type_span`, although that field changes later boundary decisions.
+The module slice must add the field to checkpoint capture and restoration.
+Existing declaration admission already updates that field only after successful parsing and has no later fallible operation.
+A rollback probe must first publish a module, then exercise nonmatch, refusal, and append failure with a non-null prior erased span.
+The probe must compare the complete parser checkpoint and all Store lengths.
+Later public migration also needs the original refusal location after nested error recovery; the preliminary scanner API does not yet settle that state.
+
+Astra accepts the bounded module design with an exact raw-resumption helper and a separate refusal record.
+The tokenizer currently has no helper that resumes at an arbitrary erased endpoint without tokenizing the erased body.
+The module slice must add one bounded tokenizer helper and explicitly own `tokenizer.zig`.
+The helper copies tokenizer state immediately after the import or export keyword, then advances only byte and line position to the raw endpoint.
+It preserves template state and restores regex eligibility through existing runtime-token logic; the initial synthetic EOF retains initial regex eligibility.
+`Cursor.afterCurrent` then reads the first surviving token from that candidate state.
+
+The scanner's refusal record retains its reason and original `SourceLocation`.
+The parser keeps the first refusal in one optional diagnostic field outside syntax rollback and cursor speculation.
+Typed root completion must reject that retained refusal before creating a successful program node, including after nested recovery.
+Allocation failure retains precedence; no second generic diagnostic or runtime import retry is required.
+The private comparator must inspect the retained record for its original location.
+U14 will map that record to the existing strip-stage ZTS053 output.
+
+The module design still requires a refreshed API after the current generic-owner handoff.
+No module implementation is released by this preliminary design acceptance.
+
+The final module API refresh identifies no layout conflict with the accepted owner or proposed header APIs.
+The module record remains `{ kind, raw_span }`.
+The scanner returns `not_type_only`, a refusal with its original location, or one module record.
+The Store append method validates its span and strict source order before allocation.
+Parser refusal handling uses a dedicated internal error, suppresses generic recovery diagnostics, and retains OOM precedence at root completion.
+
+The independent tokenizer helper is released before parser hooks because its file does not overlap the header work.
+Main reviews its complete delta after the worker stops edits.
+The helper advances byte and LF positions without parsing erased text, then restores regex eligibility from the previous runtime token.
+Four focused tests cover exact comment resumption, opaque lexical state, LF positions, and regex predecessor contrasts.
+Those tests have source-review evidence only until both source workers stop and the unfiltered suites run.
+
+Astra accepts the final module API refresh with additional source and failure invariants.
+One shared raw scanner checks the supplied start, literal keyword boundaries, kind, and exact endpoint.
+Local append and global module validation must require exact correspondence with that scanner.
+Contextual statement admission remains the parser's responsibility.
+Validation must not use `tokenAtOffset`, because opaque erased source can change tokenization before the supplied start.
+Local append validation must not inspect unrelated pending syntax records.
+
+One publication-health helper checks the original diagnostic count, diagnostic allocation health, and absence of a retained module refusal.
+Every enclosing syntax transaction must use that complete condition.
+A recovered nested refusal can otherwise publish a signature because the refusal deliberately adds no generic diagnostic.
+The root still rejects the retained refusal before creating a successful program.
+
+Public `parse()` becomes one failure boundary around private `parseProgram()`.
+That boundary gives native OOM first priority, then diagnostic OOM, retained refusal, and the original error.
+The boundary covers every early return and failures while recording diagnostics.
+`parseProgram()` checks retained refusal before allocating the program list or node.
+The program location remains line 1, column 1, offset 0.
+This private extraction adds no recursion or public API.
+
+Required probes cover leading and module-only erasures, complete rollback with a prior erased span, and exact surviving-token locations.
+Nested refusal must retain priority over a later ordinary error; a later native or diagnostic OOM must retain first priority.
+Successful comparisons check runtime and atoms before module records.
+Header completion remains the prerequisite for module integration.
+
+The first module run exits 1 in `u11-module-first.exit`.
+Fourteen of sixteen steps pass, with 2,826 passing tests, one skip, and one stale error expectation.
+All 233 precompile tests pass.
+The typed diagnostic-allocation probe expects `ParseError`; the accepted root boundary returns `OutOfMemory`.
+Main updates that expectation and adds the missing runtime allocation comparison before module metadata checks.
+Plain JavaScript bypasses the new typed failure boundary and retains its previous error mapping.
+Astra accepts this corrected pilot source; execution remains separate.
+The corrected execution exits 0 in `u11-module-first-corrected.exit`.
+All sixteen steps pass, with 2,827 passing tests and one skip; all 233 precompile tests pass.
+The accepted four-file snapshot is `u11-module-first-accepted/` outside the repository.
+
+Main measures eight lexical module contrasts after a one-case pilot.
+All commands exit 1; receipts remain in `/tmp/zttp-reset-20261015/u11-module-lexical-baseline/`.
+An unescaped newline in an ordinary quote reports ZTS008 at line 1, column 18.
+An escaped newline reaches only the ordinary handler ZTS500 diagnostic.
+An interpolation at depth 512 reaches that handler diagnostic; its overflow reports ZTS044 at line 1, column 527.
+Nested templates beyond 512 levels still reach the handler diagnostic, so the new fixed stack cannot truncate them as success.
+An unterminated quote before a later `zttp:types` import reports only ZTS053 at line 2, column 1.
+A quoted newline inside interpolation reports two ZTS008 diagnostics at line 1, column 21 and line 2, column 5.
+These measurements bound scanner corrections before broader module acceptance.
+The scanner must not erase collected diagnostics or publish a partial endpoint after its own storage limit.
+
+Astra accepts a bounded scanner correction with explicit allocator spill beyond the existing 512 inline frames.
+Each frame holds one template's interpolation depth; the scanner uses no recursive calls.
+At brace overflow, the scanner records the current location and removes only the failing template frame.
+The immediate caller processes the same unconsumed byte, matching legacy error recovery.
+An ordinary quote's unescaped LF records its location and remains available to the immediate caller.
+Escaped LF remains clean.
+Diagnostic deduplication compares source location regardless of kind.
+A separate per-scan flag retains diagnostic status even when deduplication appends nothing.
+
+The scanner owns a diagnostic checkpoint and restores appended entries after nonmatch or OOM.
+Native allocation failure propagates and produces no endpoint.
+A diagnostic-bearing scan returns a complete excluded module span; it never returns a partial span as success.
+The parser resumes that complete span and retains private exclusion outside syntax rollback.
+The parser publishes no module record for an excluded scan.
+Root completion rejects retained exclusion before program allocation, after OOM and retained refusal priority.
+Publication health also requires absence of that exclusion.
+Local append and global validation use the same fallible scanner and accept only complete, clean, exact records.
+
+U11 comparison excludes diagnostic-bearing module scans; U14 must publish their exact diagnostics before production migration.
+Continuation claims cover traversed source and the adjacent measured refusal only.
+The private parser does not claim discovery beyond an intervening runtime error.
+No second global scanner belongs to this bounded correction.
+Required probes cover spill allocation, diagnostic allocation, prior-diagnostic rollback, and all measured lexical contrasts.
+
+Two further measurements extend the lexical corpus to ten cases after another one-case pilot.
+An intervening malformed variable still leaves only the later ZTS053 at line 3, column 1 in public CHECK.
+U14 must preserve that global admission priority before production migration.
+Two saturated template frames report one structured ZTS044 at line 1, column 1041, although stderr prints twice.
+The eight-case public test passes all 234 precompile tests in `u11-module-lexical-public.log` with exit 0.
+The two additional public assertions await the next unfiltered run.
+Sol now owns the bounded scanner correction and full module matrix in the four existing parser and comparison files.
+
+The scanner correction passes all sixteen steps in `u11-module-scanner-correction.log` with exit 0.
+That run contains 2,838 passing tests and one skip; all 235 precompile tests pass.
+Astra then requires probes that fail after appending a diagnostic and exclude a scan after complete deduplication.
+Main adds both controls and removes the duplicate parser allocator field.
+The parser uses its Store allocator for module scanning and diagnostic cleanup.
+The append-growth probe forces both allocation and resize failure.
+Astra accepts the focused corrected source without an algorithmic blocker.
+
+The nominal candidate selects ignored generic parameters while retaining full list spans and exact declaration backlinks.
+Its scalar matrix retains ordinary nominal lowering and creates no generic scope or bound fragment.
+Main makes allocation rollback depend on source progress, independently of the retained checkpoint.
+The successful allocation callback compares its actual runtime parser before syntax metadata.
+The combined focused run passes in `u11-nominal-module-corrected.log` with exit 0.
+All sixteen steps pass, with 2,846 passing tests, one skip, and all 235 precompile tests.
+
+Astra finds one additional nominal diagnostic boundary after that passing run.
+An invalid scalar base hides an earlier removed type form in the generic list.
+Five public CLI measurements confirm the correction after a one-case pilot.
+Receipts remain in `/tmp/zttp-reset-20261015/u11-nominal-diagnostic-baseline/`; all five commands exit 1.
+`void` in the generic list reports ZTS060 before the later ZTS048 for an invalid or absent base.
+`any` in an ignored generic list produces no diagnostic; an invalid base still reports ZTS048.
+`void` followed by an `any` base reports ZTS060 then ZTS041; location deduplication suppresses the base's ZTS048.
+The failed declaration outcome now retains its exact generic-list span while all Store arrays and the cursor roll back.
+Preflight checks that span before existing base diagnostics and retains compile-mode first-refusal behavior.
+New direct tests check exact kinds and spans in both modes against the independent legacy path.
+New public tests retain exact JSON outcomes and stages for all five sources.
+
+Main integrates the broader module matrix after reviewing every changed line.
+Its runtime and atom comparison precedes module metadata, and runtime allocation counts remain separate from type allocations.
+Its error paths propagate native OOM instead of comparing OOM as a syntax refusal.
+Module allocation sweeps classify failure progress independently and compare all seventeen Store lengths.
+The clean sweep ends after its second module, which isolates scanner and module publication failures.
+The active unfiltered run is `u11-module-matrix-nominal-diagnostics.log`.
+The generic-arrow candidate remains outside the repository and still needs source review and integration.
+
+U14 must explicitly transfer or dispose of module diagnostics when it adds typed parsing to the result wrapper.
+The current result wrapper initializes only plain JavaScript, whose module diagnostic list remains empty.
+
+The erased-prefix preparation identifies one missing validation field: `operand_span` on `ErasedTypePrefix`.
+Grouping returns the inner runtime node and creates no grouping node.
+A compound expression records its operator location rather than the grouped operand's opening position.
+Existing IR ancestry therefore supplies no independent root that connects the prefix with its operand.
+The parser must capture the complete operand interval while retaining the actual returned node as its owner.
+That interval supplies validation data, never an attachment identity.
+
+An actual arrow must enter the generic-owner path before erased-prefix reservation.
+Expression prefixes finish after their object or grouped operand completes; statement prefixes finish after their block completes.
+The general path captures actual erasure through the operand opener and retains its separate legacy recorded window.
+The operand interval includes its object, parentheses, or block delimiters.
+Local finalization receives the exact parser return and validates only its completed reserved slot.
+The pending prefix owns the complete existing Store checkpoint.
+
+The owner validator must check the supplied tag and its location within the operand interval.
+Object and block locations must equal their operand start; grouped root locations must lie within their parenthesis interval.
+Exchanged owners from disjoint operands must fail; valid nested prefixes can share their returned runtime node.
+An interval alone cannot independently reject replacing a compound root with its own descendant inside that interval.
+Exact local publication relies on the parser's returned node; the reset must not add an offset-based global node scan.
+This evidence limit must remain explicit rather than becoming a broader mutation-resistance claim.
+
+Ignored brace prefixes allocate no projection ranges or generic semantic records.
+Parenthesis prefixes retain projected parameters and their bound fragments, including valid empty ranges.
+Shared ownership checks must include those projected parameters alongside generic-owner ranges.
+Fragment checks and application planning must visit each prefix fragment exactly once.
+Private lowering must merge transient prefix declarations with ordinary generic declarations in source order.
+No prefix creates a runtime node, atom, binding, signature, or semantic generic owner.
+
+Complete-source eligibility remains limited to the seven accepted forms; bound projection remains direct-API-only.
+The restriction must use syntax shape rather than fixture bytes or identifier names.
+Wider operand grammar still needs characterization before production cutover; this temporary boundary does not authorize public refusal changes.
+The first object-prefix vertical must check runtime parity, exact captures, the actual object owner, and zero prefix-created semantic records.
+Owner exchanges and variable-node allocation failure follow before grouped operands and block recovery.
+Variable and export wrapper failures must remove completed prefixes; recovered block errors preserve runtime progress while removing pending syntax.
+
+Astra accepts the bounded prefix design with the following amendments.
+Implementation still requires refreshed APIs after the current owner, header, and module slices.
+
+Assignment and general paths retain different erasure endpoints.
+The assignment path ends actual erasure at the angle list's end and records its interior.
+The general path ends actual erasure at the operand opener and records the separately measured legacy window.
+Both paths start actual erasure at the angle list's start.
+Actual erasure contains the complete list and the legacy window; every span remains within the source.
+Only legacy type whitespace can separate the list and operand; comments do not satisfy that check.
+Empty windows remain valid, and the two paths retain their measured empty-list differences.
+
+The operand interval ends immediately after its consumed closing delimiter, excluding following whitespace.
+Object and block owners retain their exact opening location.
+Grouped owners require an admissible expression tag and a location strictly inside their delimiters.
+Calls and arrows remain admissible grouped expression roots; only a confirmed generic arrow header bypasses prefix construction.
+Invalid indices, statements, declarations, patterns, and helper tags fail before payload access.
+After prefix completion, expression parsing continues through the existing member, call, suffix, and operator loop.
+
+Pending prefixes reserve their slot before operand parsing and finalize only that slot.
+Global validation waits until all enclosing publication completes.
+The projected-parameter census includes prefix ranges, overlaps, gaps, and empty ranges.
+Each prefix claims its stored fragment range once.
+A separate check confirms that bound references account for that range without duplicate or foreign references.
+Application planning already visits all semantic fragments and must not add a second prefix walk.
+
+Transient prefix construction merges with callable generic construction in source order after aliases and their single contractivity check.
+Nested prefixes can return the same inner node; their compatibility requires characterization before production cutover.
+The unique-owner check must not silently reject an accepted nested form.
+The seven measured forms do not establish that wider grammar.
+
+Main measures eight further prefix sources through the unchanged legacy CLI after a one-case pilot.
+Adjacent `<T><U>` forms refuse as raw JSX in assignment, grouping, and statement contexts.
+Those five commands exit 1 and report ZTS002 at the first prefix.
+The nested form `<T>(<U>(1))` reaches only the ordinary handler's ZTS500 refusal.
+An inner prefix in an object value and a grouped arrow operand also reach only that handler refusal.
+All eight commands exit 1; receipts remain in `/tmp/zttp-reset-20261015/u11-nested-prefix-baseline/`.
+
+Parser source inspection implies that the accepted nested group returns one inner runtime node through both grouping levels.
+Therefore, blanket prefix-owner uniqueness cannot serve as a production invariant.
+The later prefix refresh must distinguish valid nested operand intervals from exchanged disjoint owners.
+Public regression assertions retain these outcomes; their execution remains pending.
+
+Astra accepts a narrower cross-record invariant for the later prefix refresh.
+Distinct records retain unique list starts and source order.
+Operand intervals must be disjoint or strictly nested; crossing and duplicate intervals fail.
+Shared expression owners require both operand boundaries to be strictly nested.
+The outer operand must be parenthesized and contain the inner prefix's complete capture.
+Each record must independently satisfy its tag, capture, and owner-location checks.
+
+Cross-record checks run only after enclosing reservations complete.
+
+Shared owners retain separate prefix records and separate transient construction in source order.
+The nested group retains both `T` and `U` projections.
+Outer failure removes both records and their ranges.
+These checks do not independently reject same-interval descendant substitution; exact parser-return publication retains that responsibility.
+The three new positive receipts remain public baselines until an explicit prefix API refresh expands the seven-form implementation boundary.
 
 The general `<T> extends ...` producer has no established successful runtime owner.
 Main measured assignment, grouped, and statement probes of that prefix.
@@ -2221,6 +2999,154 @@ Exact responses remain in the same baseline directory.
 
 ### U12 preparation findings
 
+The final U11 refresh exposes one variable identity gap.
+Repeated global declarations receive identical complete `BindingRef` values.
+The parser accepts those declarations, and syntax validation does not reject the repeated binding identity.
+A binding-keyed annotation map would collapse separate annotations or apply an annotation to a later untyped declaration.
+U11 must retain each variable annotation's final declaration node before U12 begins.
+
+The variable owner also retains the independently captured declaration start.
+Validation checks the actual `var_decl` tag, complete binding, and runtime location against that captured start.
+Tag and binding checks alone cannot distinguish repeated globals.
+Global validation rejects absent or duplicate declaration owners while allowing distinct declarations with equal bindings.
+Syntax-only callers can retain an explicitly absent runtime owner.
+
+The parser captures its own annotation index before initializer parsing adds nested annotations.
+Publication waits for final declaration allocation and healthy parsing.
+Existing recovery and enclosing-wrapper transactions remove failed records.
+Astra accepts this bounded U11 amendment before the consumer pilot.
+
+The finalizer also validates the local annotation before publishing its owner.
+The captured declaration start must precede the annotation and remain inside the source.
+These checks validate the supplied owner without searching for another owner.
+The wrong-tag probe must pass source bounds before testing the tag guard.
+The established type-allocation sweep retains exact seed checkpoints and checks the finalized seed owner after failure.
+Its progress classification uses the parser cursor, independently of the Store contents under test.
+Astra accepts the completed amendment and bounded probes by source review.
+The repeated-global probes establish runtime identity and ownership; U12 retains semantic comparison.
+The amended small gate exits zero: sixteen steps succeed, 2,896 tests pass, and one test skips.
+Its receipt is `/tmp/zttp-reset-20261015/u11-variable-owners-small.log`.
+The final frontend gate exits zero: all 45 steps succeed, 3,702 tests pass, and one test skips.
+Its receipt is `/tmp/zttp-reset-20261015/u11-focused-final.log`.
+The complete local gate exits zero in `/tmp/zttp-reset-20261015/u11-verify-final.log`.
+That script covers aggregate tests, standalone runtime, release binaries, handler compilation, smoke flows, isolation, offline replay, and formatting.
+Final documentation checks exit zero: all eight steps succeed in `/tmp/zttp-reset-20261015/u11-docs-final.log`.
+Whole-repository formatting and diff checks also pass.
+U11 satisfies its source and execution checks; its local commit must precede U12 integration.
+
+The amended frontend gate exits zero: all 45 steps succeed, 3,702 tests pass, and one test skips.
+Its receipt is `/tmp/zttp-reset-20261015/u11-focused-variable-owners.log`.
+The first full gate exits one during the aggregate because the documentation scan flags retired-module literals in new rejection logic and fixtures.
+The aggregate reports 8,459 passing tests, six skips, and no failing tests.
+Its receipt is `/tmp/zttp-reset-20261015/u11-verify.log`; later script steps do not run.
+
+The shared retired-module identity belongs in the existing base module for specifiers.
+The compiler's restriction registry cannot supply that identity to the engine tier.
+The base module now names the existing built-in prefix and uses that prefix in its existing syntax check.
+The retired module name combines that semantic prefix with its module name.
+Both frontend matchers and the new fixtures use the shared identity.
+
+Astra accepts this correction by source review.
+Existing literal refusal fixtures, diagnostics, registry rows, gates, and allowlists remain unchanged as independent checks.
+The correction requires unchanged diagnostic bytes and metadata hashes before broader checks repeat.
+The correction gate exits zero: all 27 steps succeed, 2,896 tests pass, and one test skips.
+Documentation, metadata, and tier checks pass.
+The receipt is `/tmp/zttp-reset-20261015/u11-retired-module-small.log`.
+
+Astra accepts isolated temporary drafting for the ordinary-annotation pilot while U11's final gates run.
+Temporary copies cannot affect the frozen repository.
+Integration still requires U11's passing checks, local commit, and a refresh against committed APIs.
+Any API change requires renewed review.
+
+Four measured sources remain under `/tmp/zttp-reset-20261015/u12-global-binding-baseline/`.
+Two valid typed declarations and a typed declaration followed by an untyped declaration reach only ZTS500.
+An untyped declaration followed by a bad typed declaration reports ZTS200 on line 2.
+Two bad typed declarations report ZTS200 on lines 1 and 2.
+Every command exits one; these outcomes preserve distinct type-stage and contract-stage refusals.
+
+The proposed API distinguishes omitted, legacy, and direct inputs.
+Direct input borrows the syntax store, IR view, and mutable runtime atom-table receiver.
+The current `AtomTable.getName` signature requires that mutable receiver.
+
+The proposed retained variable map must use final declaration identity and validate the complete binding.
+Complete binding identity alone cannot select the declaration's annotation.
+Function and call maps use final runtime node indices.
+A tagged function reference distinguishes legacy offsets from direct owners.
+Checked query methods reject wrapper nodes as function owners and reject non-call nodes as actual calls.
+The function specification API also distinguishes omitted, legacy, and direct inputs explicitly.
+
+Every typed consumer checks environment health before treating missing metadata as absent.
+
+An unselected environment must preserve existing legacy API behavior.
+An explicit omitted selection remains different from that initial state and from an empty direct store.
+The public direct population entry rejects a repeated selection before mutation.
+The existing legacy population entry retains its established repeat behavior.
+Astra accepts the amended API and bounded pilot, subject to U11's amendment, checks, and commit.
+
+Eligibility validation leaves the environment and source selection unchanged when it fails.
+After successful validation, population reserves the selected mode before lowering.
+Lowering failure consumes that selection, and partial results remain unhealthy.
+Eligibility refusal must not become an allocation failure.
+Existing OOM and pool-capacity flags retain operational failures.
+
+The direct variable map uses the final declaration node and retains the complete binding for validation.
+TypeChecker selects the annotation through its actual declaration node.
+Its existing active semantic maps remain unchanged.
+The annotation census counts authored records, including resolved `null_type_idx` values.
+The existing non-null binding increment remains unchanged, so unresolved annotations still fail that census.
+
+Function specification input must match the environment's selected mode.
+Both typed branches check environment and pool health before an absent result, including an empty effects table.
+Shared compiler-tier helpers can lower syntax ranges into pool nodes.
+TypeEnv retains alias resolution, scopes, ordering, and publication to avoid an import cycle.
+
+The proposed first consumer vertical covers ordinary variable, parameter, and value-return annotations.
+Its subset check rejects declarations, predicates, generic owners, explicit call arguments, and prefixes before environment mutation.
+Production callers retain their legacy entries during that pilot.
+The complete U12 implementation still requires the final owner API refresh and Astra validation.
+
+The proposed `DirectSyntaxInput` borrows the Store, runtime IR view, and real runtime atom table.
+Explicit omitted, legacy, and direct selections keep empty selected syntax distinct from omitted typing.
+Retained variable annotations use final declaration nodes and validate every `BindingRef` field.
+Retained function and call maps use final `NodeIndex` keys.
+Raw signature annotations retain compact parameter positions and exact original spans.
+
+Zig 0.16's `AutoHashMapUnmanaged` hashes struct fields and uses `std.meta.eql` for equality.
+The direct owner maps need no custom hashing implementation.
+TypeChecker must still bind a selected declaration type into its existing active semantic maps.
+Its direct branch skips variable-name ordinals while retaining downstream expression lookup behavior.
+Function specification queries must check runtime tags before selecting the actual function owner.
+
+The first pilot will use this source:
+
+```typescript
+const seed: number = 1;
+export function helper(value: string): Proof<string, "deterministic"> {
+  return value;
+}
+```
+
+The pilot compares runtime identity, ordered type construction, exact declaration and function owners, checker diagnostics, raw boundary checks, and function specifications.
+A negative variable initializer must retain the legacy mismatch.
+A retained-map allocation failure must make every consumer reject an unhealthy environment.
+The pilot must pass before repeated-name and growth matrices expand its scope.
+
+The scalar pilot is healthy for type resolution but is not a zero-error strict fixture.
+The legacy CLI reports one ZTS061 at line 2, column 24, for its raw `string` parameter.
+An inline-record parameter with `return value.id` produces no ZTS061 and reaches the unrelated missing-handler ZTS500.
+That contrast publishes a discharged helper capsule declaring `deterministic`.
+Both commands exit one; the complete receipts remain under `/tmp/zttp-reset-20261015/u12-pilot-boundary-baseline/`.
+The pilot compares those exact outcomes instead of assuming which raw spelling the boundary rule rejects.
+
+The bad-seed contrast reports ZTS200 at line 1, column 1, and the same ZTS061 at line 2, column 24.
+Its initializer is `"x"`, which is not assignable to `number`.
+The public CHECK path retains the strict diagnostic even when type checking also reports a mismatch.
+The same baseline directory retains that source and complete response.
+
+The existing name map still supplies undeclared-global inference at `TypeChecker.declaredTypeForBinding`.
+Direct annotation attachment must not remove that semantic fallback.
+Variable events can retain the existing last-name value through the real runtime atom table without restoring name ordinals.
+
 The consumer census covers TypeEnv, TypeChecker, StrictChecker, and function specifications.
 Current reconstruction uses type text, variable name ordinals, signature parenthesis offsets, alias name spans, and call parenthesis offsets.
 The variable location map has no current reader; name ordinals supply variable semantics before binding to the actual declaration.
@@ -2232,6 +3158,39 @@ The name maps overwrite during hash-map iteration, so their winner has no docume
 Type predicates and some inference fallbacks still select signatures by name.
 Direct owner maps must not silently change those observable selections.
 Forward calls, repeated predicates, repeated helpers, and inference fallbacks need measured expectations.
+
+A proposed temporary `AutoHashMapUnmanaged(u32, ir.NodeIndex)` can preserve the old signature map's compatibility order.
+The temporary key comes from the final runtime header location, solely to reproduce hash iteration.
+Exact owner records attach every annotation; that temporary key performs no attachment or lookup join.
+The initial proposal inserted only when the first annotation created its signature accumulator.
+Astra found that proposal incorrect: Zig's `getOrPut` can grow the map before it discovers an existing key.
+The projection must replay `getOrPut` for every parameter, ordinary return, and guard event that reaches legacy accumulator creation.
+Only the first insertion assigns the final owner value; later accesses still reproduce capacity changes.
+The temporary projection disappears after the final merge.
+Retained semantic maps use only final node indices.
+Astra must validate this proposal, including table growth and measured repeated-name contrasts, before U12 implementation.
+
+Astra accepts the corrected mechanism as preliminary U12 design, subject to the final U11 API refresh.
+The temporary map must start empty, without preallocation or retained capacity.
+Its keys, access sequence, capacity policy, and successful allocations must match the legacy signature map.
+Changing the value type changes allocation size but does not change bucket placement under those conditions.
+Header-key correspondence still requires exact assertions against completed U11 owners.
+
+| Probe | Required observation |
+|---|---|
+| Every accumulator event | Compare capacity and complete iteration order after each event, including repeated keys near both growth boundaries. |
+| Signature kinds | Cover parameter-only, return-only, guard, anonymous arrow, generic-only, and atom-index-zero function cases. |
+| Header correspondence | Compare nested, same-line, generic, and arrow header keys with exact final owners. |
+| Returned allocation errors | Refuse incomplete publication after insertion, repeated-key growth, accumulator, or final-merge failure. |
+| Successful growth fallback | Observe failed growth returning an existing entry without losing metadata; keep this dedicated probe outside strict failure sweeps. |
+
+The successful standard-library fallback retains the existing entry and returns no allocation error.
+Strict allocation sweeps must not falsely classify that successful fallback as a swallowed error.
+
+Current declaration-produced function nodes supply fallback names through their runtime `name_atom` and the runtime atom table.
+Arrow nodes supply no legacy return-name fallback.
+The direct input must include that atom table; it must not reconstruct names from nearby source text.
+A function's atom index of zero must not alone mean that the function has no name.
 
 The parameter compatibility projection retains compacted argument types, the annotation-count lower bound, and the actual-node upper bound.
 Strict completeness also uses that compacted count.
@@ -2253,6 +3212,7 @@ The new path must never retry through legacy reconstruction.
 
 Population order is a compatibility input, separate from final owner identity.
 Legacy population completes aliases and contractivity, then constructs all generic declarations, then resolves all explicit call arguments.
+Contractivity finalization runs once after the complete declaration pass, not after each declaration.
 It next resolves variable, parameter, ordinary return, and guard annotations together in authored source order.
 Finally, its temporary signature map supplies the hash iteration order for name fallbacks.
 The direct path must retain that construction order without reconstructing annotation owners.
@@ -2282,6 +3242,19 @@ Repeated forward return helpers produce ZTS200 on the first numeric assignment, 
 These observations freeze outputs; they do not establish valid forward-call semantics.
 The first forward-helper candidate used prohibited string addition and was discarded before measuring the retained fixture.
 Its response remains separately identified in the index.
+
+Main measured a matrix with six, seven, twelve, and thirteen authored function signatures through the built U10 analyzer.
+Each size has plain, one-space prefix, reordered, and same-line layouts.
+The one-case pilot passes the measurement checks; the sixteen-case run changes only the case limit.
+Every CLI command exits 1 with nonempty JSON diagnostics.
+The sources and responses remain in `/tmp/zttp-reset-20261015/u12-growth-baseline/`, indexed by `index-limit-16.json`.
+
+The seven-signature reordered source reports ZTS202 at line 9, column 8, followed by one ZTS629 at line 2, column 3.
+Three leading spaces change that source to ZTS203 at line 2, column 9, followed by two ZTS629 diagnostics.
+Those ZTS629 diagnostics occur at line 2, column 3, and line 9, column 3.
+Only the leading spaces change; both call sites retain their line and column positions.
+Sixteen measured prefix lengths, from zero through fifteen, retain both observed outcomes in `index-prefix-shifts.json`.
+These measurements establish compatibility outputs, not correct forward-call semantics.
 
 A mixed untyped shadow fixture reaches contract checking without a type diagnostic.
 Its negative contrast produces ZTS200 when the inner string annotation receives the number 2.
