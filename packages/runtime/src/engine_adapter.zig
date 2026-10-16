@@ -72,6 +72,18 @@ pub fn initHandlerPool(
     );
 }
 
+/// Create a pool for the fixed prepared-evaluation source case.
+pub fn initPreparedEvalHandlerPool(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    source: @import("execution_spec.zig").PreparedEvalSource,
+    filename: []const u8,
+    pool_size: usize,
+    pool_wait_timeout_ms: u32,
+) !HandlerPool {
+    return HandlerPool.initPreparedEval(allocator, config, source, filename, pool_size, pool_wait_timeout_ms);
+}
+
 /// Resolved source location of a handler fault. Re-exported so `server.zig`
 /// can name it without importing the engine directly - it reaches the engine
 /// only through this adapter, and the purity script enforces that.

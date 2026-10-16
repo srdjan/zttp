@@ -385,3 +385,22 @@ test "B1: panic isolation: HandlerPanicked leaves pool reusable (needs test-root
     try std.testing.expectEqual(@as(u16, 200), resp.status);
     try std.testing.expectEqualStrings("alive", resp.body);
 }
+
+test "Server.start retains prepared evaluation through its handler pool" {
+    const allocator = std.testing.allocator;
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { const value: number = \"ok\"; return Response.text(value); }" } },
+        .log_requests = false,
+        .pool_size = 1,
+        .port = 0,
+    });
+    defer srv.deinit();
+    try std.testing.expectEqualStrings("<inline>", srv.handler_filename);
+    try srv.start();
+    var request = try getRequest(allocator, "/");
+    defer request.deinit(allocator);
+    var response = try srv.pool.?.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("ok", response.body);
+}

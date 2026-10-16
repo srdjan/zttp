@@ -3464,3 +3464,51 @@ test "sseEvents returns events and a tagged framing failure through the JS API" 
     try std.testing.expectEqualStrings("unterminated_event", output.get("errorTag").?.string);
     try std.testing.expectEqual(@as(i64, 0), output.get("errorOffset").?.integer);
 }
+
+test "prepared evaluation omits authored types while raw virtual and file profiles remain distinct" {
+    const source = "function handler(req: Request): Response { const value: number = \"ok\"; return Response.text(value); }";
+    const raw = try HandlerInstance.init(std.testing.allocator, .{});
+    defer raw.deinit();
+    try std.testing.expectError(error.UnexpectedToken, raw.loadCode(source, "<eval>"));
+    const file = try HandlerInstance.init(std.testing.allocator, .{});
+    defer file.deinit();
+    try std.testing.expectError(error.SoundModeViolation, file.loadCode(source, "handler.ts"));
+    const prepared = try HandlerInstance.init(std.testing.allocator, .{});
+    defer prepared.deinit();
+    try prepared.loadPreparedEval(.{ .code = source }, "<eval>");
+    var request = HttpRequestOwned{
+        .method = try std.testing.allocator.dupe(u8, "GET"),
+        .url = try std.testing.allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(std.testing.allocator);
+    var response = try prepared.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok", response.body);
+    try std.testing.expectError(error.UnsupportedSourceExtension, prepared.loadPreparedEval(.{ .code = source }, "handler.ts"));
+}
+
+test "prepared evaluation keeps typed entry source through imported compilation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = "export function message(value: number): string { return \"ok\"; }" });
+    const source = try std.fmt.allocPrint(allocator, "import {{ message }} from \"./.zig-cache/tmp/{s}/dep.ts\"; function handler(req: Request): Response {{ return Response.text(message(\"wrong\")); }}", .{tmp.sub_path});
+    defer allocator.free(source);
+    const runtime = try HandlerInstance.init(allocator, .{});
+    defer runtime.deinit();
+    try runtime.loadPreparedEval(.{ .code = source }, "<eval>");
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+    var response = try runtime.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("ok", response.body);
+}

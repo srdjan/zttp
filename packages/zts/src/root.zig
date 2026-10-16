@@ -230,6 +230,10 @@ pub const DirectCheckSource = engine.source_frontend.DirectCheckSource;
 pub const DirectCheckOutcome = engine.source_frontend.DirectCheckOutcome;
 pub const classifySourcePath = engine.source_frontend.classifyPath;
 pub const prepareErrorForAdmissionFailure = engine.source_frontend.prepareErrorForAdmissionFailure;
+pub const SourceObservationError = engine.source_frontend.SourceObservationError;
+pub const checkSourceAdmission = engine.source_frontend.checkSourceAdmission;
+pub const sourceDiagnosticFromAdmission = engine.source_frontend.sourceDiagnosticFromAdmission;
+pub const logAdmissionFailure = engine.source_frontend.logAdmissionFailure;
 
 /// Returns one accepted capability set. The module borrows `source_owner` and
 /// must stop use before the owner is destroyed.

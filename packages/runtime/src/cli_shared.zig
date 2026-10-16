@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const project_config_mod = @import("project_config");
 const zts = @import("zts");
+const execution_spec = @import("execution_spec.zig");
 
 /// True when stderr is attached to a real terminal. Used to gate ANSI escape
 /// codes so piped output and CI logs stay clean.
@@ -84,22 +85,18 @@ pub fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const 
     return argv[i.*];
 }
 
-/// Strip TypeScript annotations from an inline `-e`/`--eval` snippet so it
-/// matches the file path, where `.ts`/`.tsx` handlers are stripped before
-/// parsing. Without this, `-e "const x: number = 5"` reaches the parser raw
-/// and fails, while the identical code in a file loads fine.
-///
-/// Returns an owned buffer; the caller owns it (the serve path leaks the
-/// handler source for the process lifetime). If the stripper rejects the
-/// source (an unsupported construct, OOM), the original is duped through
-/// unchanged so plain-JS `-e` keeps its existing behavior and the parser
-/// produces the same diagnostic it always did.
-pub fn stripInlineSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    var prepared = zts.PreparedSource.init(allocator, source, "<eval>.ts", .{ .report_errors = false }) catch {
-        return allocator.dupe(u8, source);
+/// Prepare inline evaluation and retain the original source bytes.
+/// The returned case owns its code buffer. Preparation refusal and OOM select raw parsing.
+pub fn prepareInlineSource(allocator: std.mem.Allocator, source: []const u8) !execution_spec.HandlerSource {
+    const prepared = prepared: {
+        const refusal = zts.checkSourceAdmission(allocator, source) catch |err| switch (err) {
+            error.OutOfMemory => break :prepared false,
+            error.InvalidSourceObservation => return err,
+        };
+        break :prepared refusal == null;
     };
-    defer prepared.deinit();
-    return allocator.dupe(u8, prepared.parserInput());
+    const code = try allocator.dupe(u8, source);
+    return if (prepared) .{ .prepared_eval = .{ .code = code } } else .{ .inline_code = code };
 }
 
 pub fn printVersion() void {
@@ -317,20 +314,93 @@ test "watch set includes the configured capability policy" {
     try std.testing.expect(found_policy);
 }
 
-test "stripInlineSource strips TS annotations ENG7" {
+test "inline preparation retains original bytes and its fixed source case" {
     const allocator = std.testing.allocator;
+    const sources = [_][]const u8{
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }",
+        "function handler(req) { return Response.text(\"ok\"); }",
+    };
+    for (sources) |source| {
+        const prepared = try prepareInlineSource(allocator, source);
+        defer allocator.free(inlineTestCode(prepared));
+        try std.testing.expect(prepared == .prepared_eval);
+        try std.testing.expectEqualStrings(source, prepared.prepared_eval.code);
+        try std.testing.expect(prepared.prepared_eval.code.ptr != source.ptr);
+    }
+    const refused_source = "function handler(req: any): Response { return Response.text(\"ok\"); }";
+    const refused = try prepareInlineSource(allocator, refused_source);
+    defer allocator.free(inlineTestCode(refused));
+    try std.testing.expect(refused == .inline_code);
+    try std.testing.expectEqualStrings(refused_source, refused.inline_code);
+}
 
-    // A type annotation that would be a parse error if fed raw to the parser
-    // must be stripped, matching the file path.
-    const ts_src = "function handler(req) { const x: number = 5; return Response.text(String(x)); }";
-    const stripped = try stripInlineSource(allocator, ts_src);
-    defer allocator.free(stripped);
-    try std.testing.expect(std.mem.indexOf(u8, stripped, ": number") == null);
-    try std.testing.expect(std.mem.indexOf(u8, stripped, "const x") != null);
+const InlinePreparationFaultAllocator = struct {
+    backing: std.mem.Allocator,
+    fail_index: ?usize = null,
+    allocations: usize = 0,
+    induced: bool = false,
 
-    // Plain JS round-trips unchanged so `-e` of pure JS keeps its behavior.
-    const js_src = "function handler(req) { return Response.json({ok:true}); }";
-    const passthrough = try stripInlineSource(allocator, js_src);
-    defer allocator.free(passthrough);
-    try std.testing.expectEqualStrings(js_src, passthrough);
+    fn allocator(self: *InlinePreparationFaultAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(context: *anyopaque, length: usize, alignment: std.mem.Alignment, address: usize) ?[*]u8 {
+        const self: *InlinePreparationFaultAllocator = @ptrCast(@alignCast(context));
+        const index = self.allocations;
+        self.allocations += 1;
+        if (self.fail_index == index) {
+            self.induced = true;
+            return null;
+        }
+        return self.backing.rawAlloc(length, alignment, address);
+    }
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) bool {
+        const self: *InlinePreparationFaultAllocator = @ptrCast(@alignCast(context));
+        return self.backing.rawResize(memory, alignment, length, address);
+    }
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, length: usize, address: usize) ?[*]u8 {
+        const self: *InlinePreparationFaultAllocator = @ptrCast(@alignCast(context));
+        return self.backing.rawRemap(memory, alignment, length, address);
+    }
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, address: usize) void {
+        const self: *InlinePreparationFaultAllocator = @ptrCast(@alignCast(context));
+        self.backing.rawFree(memory, alignment, address);
+    }
+};
+
+fn inlineTestCode(source: execution_spec.HandlerSource) []const u8 {
+    return switch (source) {
+        .inline_code => |code| code,
+        .prepared_eval => |prepared| prepared.code,
+        else => unreachable,
+    };
+}
+
+test "inline preparation recovers one allocation failure and propagates copy failure" {
+    const source = "function handler(req: Request): Response { const value: string = \"ok\"; return Response.text(value); }";
+    var baseline: InlinePreparationFaultAllocator = .{ .backing = std.testing.allocator };
+    const prepared = try prepareInlineSource(baseline.allocator(), source);
+    std.testing.allocator.free(inlineTestCode(prepared));
+    try std.testing.expect(prepared == .prepared_eval);
+    try std.testing.expect(baseline.allocations > 0);
+    var raw_fallbacks: usize = 0;
+    var copy_failures: usize = 0;
+    for (0..baseline.allocations) |index| {
+        var fault: InlinePreparationFaultAllocator = .{ .backing = std.testing.allocator, .fail_index = index };
+        const result = prepareInlineSource(fault.allocator(), source) catch |err| switch (err) {
+            error.OutOfMemory => {
+                try std.testing.expect(fault.induced);
+                copy_failures += 1;
+                continue;
+            },
+            else => return err,
+        };
+        defer std.testing.allocator.free(inlineTestCode(result));
+        try std.testing.expectEqualStrings(source, inlineTestCode(result));
+        if (result == .inline_code) {
+            try std.testing.expect(fault.induced);
+            raw_fallbacks += 1;
+        }
+    }
+    try std.testing.expect(raw_fallbacks > 0);
+    try std.testing.expect(copy_failures > 0);
 }

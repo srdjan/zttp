@@ -173,31 +173,7 @@ pub fn stripDiagnosticFromAdmission(
     source: []const u8,
     diag: parser.type_syntax.AdmissionDiagnostic,
 ) zts.StripDiagnostic {
-    const kind: zts.StripDiagnosticKind = switch (diag.kind) {
-        .any_type => .any_type,
-        .as_assertion => .as_assertion,
-        .satisfies_assertion => .satisfies_assertion,
-        .unterminated_string => .unterminated_string,
-        .nominal_base_not_scalar => .nominal_base_not_scalar,
-        .interface_declaration => .interface_declaration,
-        .type_alias_declaration => .type_alias_declaration,
-        .distinct_type_declaration => .distinct_type_declaration,
-        .legacy_types_import => .legacy_types_import,
-        .default_parameter => .default_parameter,
-        .optional_parameter => .optional_parameter,
-        .default_export => .default_export,
-        .mutable_export => .mutable_export,
-        .array_type_alias => .array_type_alias,
-        .readonly_array_type_alias => .readonly_array_type_alias,
-        .void_type => .void_type,
-        .nesting_too_deep => .nesting_too_deep,
-    };
-    const position = diag.positionIn(source);
-    return .{
-        .kind = kind,
-        .line = position.line,
-        .column = position.column,
-    };
+    return zts.sourceDiagnosticFromAdmission(source, diag);
 }
 
 pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {

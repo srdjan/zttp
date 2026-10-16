@@ -4058,6 +4058,137 @@ const LegacyMatchingBracketScan = union(enum) {
     nesting_too_deep: u32,
 };
 
+const ObservedBracketScan = union(enum) {
+    complete: struct { end: usize, closed: bool },
+    not_matched,
+    nesting_too_deep: u32,
+};
+
+pub const AdmissionHeaderProbe = union(enum) {
+    matched: u32,
+    not_matched,
+    nesting_too_deep: AdmissionDiagnostic,
+};
+
+pub fn scanAdmissionHeaderProbe(
+    allocator: std.mem.Allocator,
+    options: struct {
+        source: []const u8,
+        opener: u32,
+        confirmation: enum { return_colon, arrow },
+        position: AdmissionPosition,
+        caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+    },
+) !AdmissionHeaderProbe {
+    const source = options.source;
+    if (@as(usize, options.opener) >= source.len or source[options.opener] != '(') {
+        return error.InvalidAdmissionSpan;
+    }
+    const checkpoint = options.caught.items.len;
+    errdefer options.caught.items.len = checkpoint;
+    var position = options.position;
+    var suppressed = false;
+    const ending = switch (try scanObservedMatchingBracket(
+        allocator,
+        source,
+        options.opener,
+        '(',
+        &suppressed,
+        options.caught,
+        &position,
+    )) {
+        .complete => |complete| if (complete.closed) complete.end else return .not_matched,
+        .not_matched => return .not_matched,
+        .nesting_too_deep => |offset| return .{ .nesting_too_deep = .{
+            .kind = .nesting_too_deep,
+            .span = .{ .start = offset, .end = offset + 1 },
+            .presentation = position,
+        } },
+    };
+    var offset = ending;
+    while (offset < source.len and isTypeWhitespace(source[offset])) offset += 1;
+    if (offset + 1 < source.len and source[offset] == '=' and source[offset + 1] == '>') {
+        return .{ .matched = @intCast(offset) };
+    }
+    if (offset >= source.len or source[offset] != ':') return .not_matched;
+    if (options.confirmation == .return_colon) return .{ .matched = @intCast(offset) };
+    offset += 1;
+    var depth: u16 = 0;
+    while (offset < source.len) {
+        const byte = source[offset];
+        if (byte == '\'' or byte == '"' or byte == '`') {
+            offset = (try scanProbeQuote(allocator, source, offset, options.caught, &position)) orelse
+                return .not_matched;
+            continue;
+        }
+        if (byte == '=' and offset + 1 < source.len and source[offset + 1] == '>') {
+            if (depth == 0) return .{ .matched = @intCast(offset) };
+            offset += 2;
+            continue;
+        }
+        switch (byte) {
+            '(', '[', '{', '<' => {
+                if (depth >= max_type_depth) return .{ .nesting_too_deep = .{
+                    .kind = .nesting_too_deep,
+                    .span = .{ .start = @intCast(offset), .end = @intCast(offset + 1) },
+                    .presentation = position,
+                } };
+                depth += 1;
+            },
+            ')', ']', '}' => {
+                if (depth == 0) return .not_matched;
+                depth -= 1;
+            },
+            '>' => if (depth > 0) {
+                depth -= 1;
+            },
+            ',', ';' => if (depth == 0) return .not_matched,
+            else => {},
+        }
+        offset += 1;
+    }
+    return .not_matched;
+}
+
+fn scanProbeQuote(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
+    position: *AdmissionPosition,
+) !?usize {
+    const checkpoint = caught.items.len;
+    errdefer caught.items.len = checkpoint;
+    var suppressed = false;
+    var failure: ?LegacyQuoteFailure = null;
+    const ending = try scanLegacyGenericQuotedCore(
+        allocator,
+        source,
+        start,
+        source[start],
+        true,
+        &suppressed,
+        caught,
+        &failure,
+    );
+    if (ending == null) try appendLegacyQuoteFailure(allocator, caught, failure orelse
+        return error.InvalidAdmissionQuoteResult);
+    const context: AdmissionPresentation = .{
+        .source = source,
+        .offset = @intCast(start),
+        .position = position.*,
+    };
+    for (caught.items[checkpoint..]) |*diagnostic| {
+        diagnostic.presentation = try context.positionAt(diagnostic.span.start);
+    }
+    const observed_end = ending orelse switch (failure.?) {
+        .unterminated_string => |offset| offset,
+        .nesting_too_deep => |offset| offset,
+    };
+    position.* = try context.positionAt(@intCast(observed_end));
+    return ending;
+}
+
 fn scanLegacyPlainQuoted(source: []const u8, start: usize, quote: u8) struct {
     end: usize,
     unterminated_line: bool,
@@ -4259,6 +4390,30 @@ fn scanLegacyMatchingBracketCore(
     suppressed_diagnostic: *bool,
     caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
 ) !LegacyMatchingBracketScan {
+    return switch (try scanObservedMatchingBracket(
+        allocator,
+        source,
+        start,
+        open,
+        suppressed_diagnostic,
+        caught,
+        null,
+    )) {
+        .complete => |complete| .{ .complete = complete.end },
+        .nesting_too_deep => |offset| .{ .nesting_too_deep = offset },
+        .not_matched => error.InvalidAdmissionQuoteResult,
+    };
+}
+
+fn scanObservedMatchingBracket(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    start: usize,
+    open: u8,
+    suppressed_diagnostic: *bool,
+    caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
+    probe_position: ?*AdmissionPosition,
+) !ObservedBracketScan {
     if (source.len > std.math.maxInt(u32)) return error.TypeSourceTooLarge;
     const caught_checkpoint = if (caught) |items| items.items.len else 0;
     errdefer {
@@ -4268,13 +4423,18 @@ fn scanLegacyMatchingBracketCore(
         '(' => ')',
         '[' => ']',
         '{' => '}',
-        else => return .{ .complete = start + 1 },
+        else => return .{ .complete = .{ .end = start + 1, .closed = true } },
     };
     var depth: u16 = 1;
     var pos = start + 1;
     while (pos < source.len and depth > 0) {
         const byte = source[pos];
         if (byte == '"' or byte == '\'' or byte == '`') {
+            if (probe_position) |position| {
+                pos = (try scanProbeQuote(allocator, source, pos, caught orelse
+                    return error.InvalidAdmissionQuoteResult, position)) orelse return .not_matched;
+                continue;
+            }
             var failure: ?LegacyQuoteFailure = null;
             pos = (try scanLegacyGenericQuotedCore(
                 allocator,
@@ -4298,7 +4458,7 @@ fn scanLegacyMatchingBracketCore(
         }
         pos += 1;
     }
-    return .{ .complete = pos };
+    return .{ .complete = .{ .end = pos, .closed = depth == 0 } };
 }
 
 fn skipLegacyMatchingBracket(
@@ -6618,7 +6778,7 @@ fn isAdmissionObjectMemberKey(source: []const u8, identifier_end: usize, end: us
     return pos < end and (source[pos] == ':' or source[pos] == '(');
 }
 
-fn isScalarNominalBase(text: []const u8) bool {
+pub fn isScalarNominalBase(text: []const u8) bool {
     const trimmed = std.mem.trim(u8, text, " \t\r\n");
     return std.mem.eql(u8, trimmed, "string") or
         std.mem.eql(u8, trimmed, "number") or

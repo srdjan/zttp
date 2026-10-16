@@ -23,6 +23,7 @@ const HttpRequestOwned = http_types.HttpRequestOwned;
 
 const handler_instance = @import("handler_instance.zig");
 const HandlerInstance = handler_instance.HandlerInstance;
+const PreparedEvalSource = @import("execution_spec.zig").PreparedEvalSource;
 const panic_recovery = @import("panic_recovery.zig");
 
 pub const HandlerPool = struct {
@@ -30,6 +31,7 @@ pub const HandlerPool = struct {
     config: RuntimeConfig,
     handler_code: []const u8,
     handler_filename: []const u8,
+    prepared_eval: bool = false,
     max_size: usize,
     acquire_timeout_ms: u32,
     in_use: std.atomic.Value(usize),
@@ -155,6 +157,32 @@ pub const HandlerPool = struct {
         embedded_bytecode: ?[]const u8,
         runtime_dep_bytecodes: ?[]const []const u8,
     ) !Self {
+        return initWithSource(allocator, config, handler_code, handler_filename, max_size, acquire_timeout_ms, embedded_bytecode, runtime_dep_bytecodes, false);
+    }
+
+    pub fn initPreparedEval(
+        allocator: std.mem.Allocator,
+        config: RuntimeConfig,
+        source: PreparedEvalSource,
+        filename: []const u8,
+        max_size: usize,
+        acquire_timeout_ms: u32,
+    ) !Self {
+        if (zq.classifySourcePath(filename) != .virtual_javascript) return error.UnsupportedSourceExtension;
+        return initWithSource(allocator, config, source.code, filename, max_size, acquire_timeout_ms, null, null, true);
+    }
+
+    fn initWithSource(
+        allocator: std.mem.Allocator,
+        config: RuntimeConfig,
+        handler_code: []const u8,
+        handler_filename: []const u8,
+        max_size: usize,
+        acquire_timeout_ms: u32,
+        embedded_bytecode: ?[]const u8,
+        runtime_dep_bytecodes: ?[]const []const u8,
+        prepared_eval: bool,
+    ) !Self {
         const source_policy = config.dev_capability_policy orelse embedded_handler.capability_policy;
         const policy_generation = try RuntimePolicyGeneration.create(
             allocator,
@@ -184,6 +212,7 @@ pub const HandlerPool = struct {
             .config = installed_config,
             .handler_code = handler_code,
             .handler_filename = handler_filename,
+            .prepared_eval = prepared_eval,
             .max_size = max_size,
             .acquire_timeout_ms = acquire_timeout_ms,
             .in_use = std.atomic.Value(usize).init(0),
@@ -279,6 +308,7 @@ pub const HandlerPool = struct {
 
         self.handler_code = new_code;
         self.handler_filename = new_filename;
+        self.prepared_eval = false;
         self.cache.clear();
         self.embedded_bytecode = null;
         const previous_policy = if (candidate) |generation| blk: {
@@ -899,7 +929,10 @@ pub const HandlerPool = struct {
 
         // Cache MISS confirmed: parse and compile (only one thread does this)
         var buffer: [65536]u8 = undefined;
-        const serialized = try rt.loadCodeWithCaching(self.handler_code, self.handler_filename, &buffer);
+        const serialized = if (self.prepared_eval)
+            try rt.loadPreparedEvalWithCaching(.{ .code = self.handler_code }, self.handler_filename, &buffer)
+        else
+            try rt.loadCodeWithCaching(self.handler_code, self.handler_filename, &buffer);
 
         // Store in cache for future hits, but only while caching is healthy.
         // Once cache_disabled latches, every request recompiles in-process.
@@ -1940,4 +1973,40 @@ test "HandlerPool high contention stress" {
     try std.testing.expectEqual(thread_count * iterations, total);
     // At least some requests should succeed (proves pool works under contention)
     try std.testing.expect(completed_count > 0);
+}
+
+test "prepared evaluation caches bytecode and reload restores raw virtual parsing" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source = "function handler(req: Request): Response { const value: number = \"ok\"; return Response.text(value); }";
+    var pool = try HandlerPool.initPreparedEval(allocator, .{}, .{ .code = source }, "<inline>", 2, 0);
+    defer pool.deinit();
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+    {
+        var response = try pool.executeHandler(request.asView());
+        defer response.deinit();
+        try std.testing.expectEqualStrings("ok", response.body);
+    }
+    try std.testing.expect(pool.cache.count() > 0);
+    {
+        var first = try pool.acquireWorkerRuntime();
+        defer first.deinit();
+        var second = try pool.acquireWorkerRuntime();
+        defer second.deinit();
+        try std.testing.expect(pool.cache.hits.load(.monotonic) > 0);
+    }
+    _ = try pool.reloadHandler(source, "<inline>");
+    try std.testing.expectEqual(@as(usize, 0), pool.cache.count());
+    try std.testing.expectError(error.UnexpectedToken, pool.executeHandler(request.asView()));
+    _ = try pool.reloadHandler("function handler(req) { return Response.text(\"reloaded\"); }", "<inline>");
+    var response = try pool.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("reloaded", response.body);
 }

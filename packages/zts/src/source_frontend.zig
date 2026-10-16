@@ -56,6 +56,72 @@ pub fn prepareErrorForAdmissionFailure(failure: parser.AdmissionFailure) Prepare
     };
 }
 
+pub const SourceObservationError = error{ OutOfMemory, InvalidSourceObservation };
+
+/// Observe complete source admission without creating a runtime tree or atom table.
+/// The returned failure contains value data and outlives the temporary observer.
+pub fn checkSourceAdmission(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+) SourceObservationError!?parser.AdmissionFailure {
+    var observer = try parser.JsParser.initSourceObserver(allocator, allocator, source, .compile);
+    defer observer.deinit();
+    observer.observeSourceProgram() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.AdmissionRefused, error.UnterminatedComment, error.TypeOnlyModuleRefused => {
+            return observer.getAdmissionFailure() orelse error.InvalidSourceObservation;
+        },
+        else => return error.InvalidSourceObservation,
+    };
+    return observer.getAdmissionFailure();
+}
+
+pub fn sourceDiagnosticFromAdmission(
+    source: []const u8,
+    diag: parser.type_syntax.AdmissionDiagnostic,
+) stripper.StripDiagnostic {
+    const kind: stripper.StripDiagnosticKind = switch (diag.kind) {
+        .any_type => .any_type,
+        .as_assertion => .as_assertion,
+        .satisfies_assertion => .satisfies_assertion,
+        .unterminated_string => .unterminated_string,
+        .nominal_base_not_scalar => .nominal_base_not_scalar,
+        .interface_declaration => .interface_declaration,
+        .type_alias_declaration => .type_alias_declaration,
+        .distinct_type_declaration => .distinct_type_declaration,
+        .legacy_types_import => .legacy_types_import,
+        .default_parameter => .default_parameter,
+        .optional_parameter => .optional_parameter,
+        .default_export => .default_export,
+        .mutable_export => .mutable_export,
+        .array_type_alias => .array_type_alias,
+        .readonly_array_type_alias => .readonly_array_type_alias,
+        .void_type => .void_type,
+        .nesting_too_deep => .nesting_too_deep,
+    };
+    const position = diag.positionIn(source);
+    return .{
+        .kind = kind,
+        .line = position.line,
+        .column = position.column,
+    };
+}
+
+/// Preserve diagnostic logging at callers that previously enabled source-preparation reports.
+pub fn logAdmissionFailure(source: []const u8, failure: parser.AdmissionFailure) void {
+    if (@import("builtin").is_test) return;
+    switch (failure) {
+        .unterminated_comment => {},
+        .diagnostic => |diagnostic| switch (diagnostic.kind) {
+            .unterminated_string => {},
+            else => {
+                const mapped = sourceDiagnosticFromAdmission(source, diagnostic);
+                std.log.err("{}:{}: {s}", .{ mapped.line, mapped.column, mapped.kind.message() });
+            },
+        },
+    }
+}
+
 pub const PreparedSource = struct {
     original_source: []const u8,
     path: []const u8,
@@ -921,4 +987,24 @@ test "admission failures retain measured legacy preparation errors" {
     try std.testing.expectEqual(error.UnterminatedComment, prepareErrorForAdmissionFailure(.{
         .unterminated_comment = .{ .opener = 0, .@"resume" = 1 },
     }));
+}
+
+test "source admission preflight returns owned failure values and propagates allocation failure" {
+    const source = "const broken = ; const { value }: { value: any } = input;";
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const failure = (try checkSourceAdmission(allocator, source)) orelse return error.TestUnexpectedResult;
+            switch (failure) {
+                .diagnostic => |diagnostic| {
+                    try std.testing.expectEqual(parser.type_syntax.AdmissionKind.any_type, diagnostic.kind);
+                    try std.testing.expectEqualStrings("any", diagnostic.span.text(source));
+                },
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
+    try std.testing.expect(try checkSourceAdmission(std.testing.allocator, "while (true) {} const value: number = 1;") == null);
+    const unfinished = (try checkSourceAdmission(std.testing.allocator, "/* unfinished")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(unfinished == .unterminated_comment);
 }

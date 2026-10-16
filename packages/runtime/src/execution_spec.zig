@@ -12,7 +12,12 @@ const runtime_config_mod = @import("runtime_config.zig");
 
 pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 
+/// Original inline bytes admitted for the fixed prepared-evaluation path.
+pub const PreparedEvalSource = struct { code: []const u8 };
+
 pub const HandlerSource = union(enum) {
+    prepared_eval: PreparedEvalSource,
+
     /// Inline JavaScript code
     inline_code: []const u8,
 

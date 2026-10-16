@@ -1578,6 +1578,43 @@ pub fn extractContract(
     return analysis.extractContract(filename);
 }
 
+/// Extract authority from prepared evaluation while omitting authored signatures and capsules.
+pub fn extractPreparedEvalContract(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+) !HandlerContract {
+    if (source_frontend_mod.classifyPath(filename) != .virtual_javascript) return error.UnsupportedSourceExtension;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = switch (try parser.parseAdmission()) {
+        .accepted => |root| root,
+        .parser_refused => |refusal| return refusal.first_error,
+        .terminal_admission_refused => |failure| return source_frontend_mod.prepareErrorForAdmissionFailure(failure),
+        .recovered_admission_refused => return error.AdmissionRefused,
+    };
+    _ = parser_mod.optimizeIR(allocator, &parser.nodes, &parser.constants, root) catch {};
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    try parser.type_store.validateRuntimeOwners(allocator, view);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    var options = opts;
+    options.type_map = null;
+    options.source_types = .omitted;
+    if (hasFileImports(view)) {
+        const reader = options.read_file orelse return error.FileImportReaderRequired;
+        return extractMultiModuleContractWithEntry(allocator, source, filename, reader, &atoms, options, true);
+    }
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, options);
+    defer analysis.deinit();
+    try analysis.complete();
+    return analysis.extractContract(filename);
+}
+
 fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, filename: []const u8, opts: ExtractContractOptions) !HandlerContract {
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
@@ -1622,9 +1659,25 @@ fn extractMultiModuleContract(
     atoms: *AtomTable,
     opts: ExtractContractOptions,
 ) !HandlerContract {
+    return extractMultiModuleContractWithEntry(allocator, entry_source, entry_filename, read_file, atoms, opts, false);
+}
+
+fn extractMultiModuleContractWithEntry(
+    allocator: std.mem.Allocator,
+    entry_source: []const u8,
+    entry_filename: []const u8,
+    read_file: modules_mod.module_graph.ReadFileFn,
+    atoms: *AtomTable,
+    opts: ExtractContractOptions,
+    prepared_eval: bool,
+) !HandlerContract {
     var graph = modules_mod.ModuleGraph.init(allocator);
     defer graph.deinit();
-    try graph.build(entry_filename, entry_source, read_file);
+    if (prepared_eval) {
+        try graph.buildPreparedEval(entry_filename, entry_source, read_file);
+    } else {
+        try graph.build(entry_filename, entry_source, read_file);
+    }
 
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
@@ -5432,4 +5485,20 @@ test "serialization failure preserves a completed direct extraction" {
     }
     try testing.expect(failures > 0);
     try testing.expect(failures_after_progress > 0);
+}
+
+test "prepared evaluation contracts omit authored signatures and capsules" {
+    const source = "function helper(value: number): string { return \"ok\"; } function handler(req: Request): Effects<Response, \"env\"> { return Response.text(helper(\"wrong\")); }";
+    var prepared = try source_frontend_mod.PreparedSource.init(std.testing.allocator, source, "inline.ts", .{});
+    defer prepared.deinit();
+    var expected = try extractContract(std.testing.allocator, prepared.parserInput(), "<eval>", .{ .strict = false });
+    defer expected.deinit(std.testing.allocator);
+    var actual = try extractPreparedEvalContract(std.testing.allocator, source, "<eval>", .{ .strict = false });
+    defer actual.deinit(std.testing.allocator);
+    const expected_json = try serializeContractForTest(std.testing.allocator, &expected);
+    defer std.testing.allocator.free(expected_json);
+    const actual_json = try serializeContractForTest(std.testing.allocator, &actual);
+    defer std.testing.allocator.free(actual_json);
+    try std.testing.expectEqualStrings(expected_json, actual_json);
+    try std.testing.expectError(error.UnsupportedSourceExtension, extractPreparedEvalContract(std.testing.allocator, source, "inline.ts", .{}));
 }

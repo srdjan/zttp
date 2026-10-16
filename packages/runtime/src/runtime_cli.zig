@@ -337,19 +337,18 @@ fn serveCommandWithDebugPanicPath(
 
 fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !void {
     switch (config.handler) {
-        .file_path, .inline_code => {
+        .file_path, .inline_code, .prepared_eval => {
             const source = try @import("handler_loader.zig").load(allocator, config.handler);
             defer allocator.free(source.code);
-            var contract = try zts.pipeline.extractContract(
-                allocator,
-                source.code,
-                source.filename,
-                .{
-                    .strict = false,
-                    .type_check = refuseRetiredSourceImports,
-                    .read_file = zts.file_io.readFileForModuleGraph,
-                },
-            );
+            const options: zts.pipeline.ExtractContractOptions = .{
+                .strict = false,
+                .type_check = refuseRetiredSourceImports,
+                .read_file = zts.file_io.readFileForModuleGraph,
+            };
+            var contract = if (source.prepared_eval) |prepared|
+                try zts.pipeline.extractPreparedEvalContract(allocator, prepared.code, source.filename, options)
+            else
+                try zts.pipeline.extractContract(allocator, source.code, source.filename, options);
             defer contract.deinit(allocator);
             if (retired_authority.first(retired_authority.contractFacts(&contract))) |feature| {
                 if (!builtin.is_test) {
@@ -562,7 +561,7 @@ fn applyServeFlags(
             return error.HelpRequested;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--eval")) {
             const raw_eval = try shared.takeArg(&i, argv, error.MissingEvalCode);
-            config.handler = .{ .inline_code = try shared.stripInlineSource(allocator, raw_eval) };
+            config.handler = try shared.prepareInlineSource(allocator, raw_eval);
             handler_set.* = true;
         } else if (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--memory")) {
             const value = try shared.takeArg(&i, argv, error.MissingMemoryValue);

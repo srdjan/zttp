@@ -31,7 +31,6 @@ const std = @import("std");
 const engine = @import("zts-engine");
 
 const parser_mod = engine.parser;
-const source_frontend = engine.source_frontend;
 const AtomTable = engine.atom_table.AtomTable;
 const ir = parser_mod.ir;
 const IrView = ir.IrView;
@@ -50,7 +49,7 @@ pub const Verdict = union(enum) {
     differs: []const u8,
     /// A tag this file does not model was reached, so no answer was formed.
     unmodeled: NodeTag,
-    /// One side did not strip or did not parse, so it has no tree.
+    /// One side failed source admission or runtime parsing, so it has no tree.
     unparsable: Side,
 };
 
@@ -95,10 +94,8 @@ pub fn compare(
     return cmp.nodes(left.root, right.root, 0);
 }
 
-/// One side: the stripped text, the parser that owns the tree, and its root.
+/// One side owns its parser and borrows the original source.
 const Parsed = struct {
-    allocator: std.mem.Allocator,
-    prepared: source_frontend.PreparedSource,
     parser: parser_mod.JsParser,
     root: NodeIndex,
 
@@ -110,16 +107,7 @@ const Parsed = struct {
         atoms: *AtomTable,
         allow_asi: bool,
     ) InitError!Parsed {
-        // The stripper runs first for the same reason the rest of the analyzer
-        // runs it first: the parser reads JavaScript, and a `: T` it never saw
-        // stripped is a syntax error rather than a type.
-        var prepared = source_frontend.PreparedSource.init(allocator, source, "<identity>.ts", .{}) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return error.NoTree,
-        };
-        errdefer prepared.deinit();
-
-        var parser = try parser_mod.JsParser.init(allocator, prepared.parserInput());
+        var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
         errdefer parser.deinit();
         parser.setAtomTable(atoms);
         // Both sides parse permissively, and the equivalence claim is tree
@@ -135,14 +123,16 @@ const Parsed = struct {
         // are identical: same structure, more tokens.
         parser.allow_asi = allow_asi;
 
-        const root = parser.parse() catch |err| switch (err) {
+        const outcome = parser.parseAdmission() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NoTree,
         };
+        const root = switch (outcome) {
+            .accepted => |root| root,
+            .parser_refused, .recovered_admission_refused, .terminal_admission_refused => return error.NoTree,
+        };
 
         return .{
-            .allocator = allocator,
-            .prepared = prepared,
             .parser = parser,
             .root = root,
         };
@@ -154,7 +144,6 @@ const Parsed = struct {
 
     fn deinit(self: *Parsed) void {
         self.parser.deinit();
-        self.prepared.deinit();
     }
 };
 
@@ -820,4 +809,15 @@ test "a change anywhere in the admitted surface is caught" {
             return error.TestFailed;
         }
     }
+}
+
+test "identity ignores admitted type text and retains runtime names and declined comments" {
+    const original = "function f(value: number /* units */): number { return value; }\nconst answer: number = f(1)\n";
+    const repaired = "function f(value : string): string { return value; }\nconst answer : string = f(1);\n";
+    try testing.expectEqual(Verdict.identical, try compare(testing.allocator, original, repaired, .{}));
+    const renamed = "function f(other: string): string { return other; }\nconst answer: string = f(1);\n";
+    try testing.expect(try compare(testing.allocator, original, renamed, .{}) == .differs);
+    const declined = "const answer: /* gap */ number = 1;\n";
+    try testing.expectEqualDeep(Verdict{ .unparsable = .original }, try compare(testing.allocator, declined, repaired, .{}));
+    try testing.expectEqualDeep(Verdict{ .unparsable = .repaired }, try compare(testing.allocator, repaired, declined, .{}));
 }

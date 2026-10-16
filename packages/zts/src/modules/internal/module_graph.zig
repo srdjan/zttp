@@ -141,13 +141,34 @@ pub const ModuleGraph = struct {
         entry_source: []const u8,
         read_file: ReadFileFn,
     ) !void {
+        return self.buildEntry(entry_path, entry_source, read_file, false);
+    }
+
+    /// Build a fixed prepared-evaluation entry with ordinary file dependencies.
+    pub fn buildPreparedEval(
+        self: *ModuleGraph,
+        entry_path: []const u8,
+        entry_source: []const u8,
+        read_file: ReadFileFn,
+    ) !void {
+        if (source_frontend.classifyPath(entry_path) != .virtual_javascript) return error.UnsupportedSourceExtension;
+        return self.buildEntry(entry_path, entry_source, read_file, true);
+    }
+
+    fn buildEntry(
+        self: *ModuleGraph,
+        entry_path: []const u8,
+        entry_source: []const u8,
+        read_file: ReadFileFn,
+        prepared_eval: bool,
+    ) !void {
         // Add entry module (dupe path and source since addModule takes ownership)
         const owned_path = try self.allocator.dupe(u8, entry_path);
         const owned_source = self.allocator.dupe(u8, entry_source) catch |err| {
             self.allocator.free(owned_path);
             return err;
         };
-        const entry_idx = try self.addModule(owned_path, owned_source);
+        const entry_idx = try self.addModuleWithProfile(owned_path, owned_source, if (prepared_eval) .direct else null);
 
         // Recursively discover dependencies
         try self.discoverDependencies(entry_idx, read_file, 0);
@@ -158,6 +179,15 @@ pub const ModuleGraph = struct {
 
     /// Add a module to the graph. Takes ownership of both path and source.
     fn addModule(self: *ModuleGraph, owned_path: []const u8, owned_source: []const u8) !ModuleIndex {
+        return self.addModuleWithProfile(owned_path, owned_source, null);
+    }
+
+    fn addModuleWithProfile(
+        self: *ModuleGraph,
+        owned_path: []const u8,
+        owned_source: []const u8,
+        entry_profile: ?Module.SourceProfile,
+    ) !ModuleIndex {
         const idx: ModuleIndex = @intCast(self.module_list.items.len);
 
         var ownership_transferred = false;
@@ -165,7 +195,7 @@ pub const ModuleGraph = struct {
             self.allocator.free(owned_path);
             self.allocator.free(owned_source);
         };
-        const source_profile = try selectSourceProfile(self.allocator, owned_source, owned_path);
+        const source_profile = entry_profile orelse try selectSourceProfile(self.allocator, owned_source, owned_path);
 
         try self.module_list.append(self.allocator, .{
             .path = owned_path,

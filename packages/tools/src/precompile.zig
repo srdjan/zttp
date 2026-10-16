@@ -1293,9 +1293,8 @@ fn runCheckOnPreparedSource(
             }
         },
         .virtual_javascript => virtual: {
-            prepared_out.* = try zts.PreparedSource.init(allocator, source, handler_path, .{});
-            const prepared = &prepared_out.*.?;
-            legacy_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
+            prepared_out.* = null;
+            legacy_parser = try zts.parser.JsParser.init(allocator, source);
             const parser = &legacy_parser.?;
             parser.setAtomTable(&legacy_atoms);
             result.stages_run.insert(.parse);
@@ -1307,7 +1306,7 @@ fn runCheckOnPreparedSource(
                         result.json_diagnostics.append(allocator, diagnostic) catch diagnostic.deinit(allocator);
                     }
                 } else if (!builtin.is_test) {
-                    printParseErrors(allocator, prepared.sourceView(), errors);
+                    printParseErrors(allocator, .{ .text = source, .name = handler_path }, errors);
                 }
                 result.parse_errors = @intCast(errors.len);
                 return result;
@@ -1771,23 +1770,47 @@ pub fn runGenTests(
     };
     defer allocator.free(source);
 
-    var strip_diag: ?zts.StripDiagnostic = null;
-    var prepared = zts.PreparedSource.init(allocator, source, handler_path, .{
-        .diagnostic_out = &strip_diag,
-    }) catch |err| {
-        debugPrintStripError(handler_path, err, strip_diag);
-        return err;
-    };
-    defer prepared.deinit();
-
+    const source_kind = zts.classifySourcePath(handler_path);
+    if (source_kind == .unsupported) {
+        debugPrintStripError(handler_path, error.UnsupportedSourceExtension, null);
+        return error.UnsupportedSourceExtension;
+    }
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-
-    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
+    var js_parser = if (source_kind.isTyped())
+        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
+    else
+        try zts.parser.JsParser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    const root = js_parser.parse() catch {
-        printParseErrors(allocator, prepared.sourceView(), js_parser.errors.getErrors());
+    var source_view = zts.SourceView.of(source);
+    source_view.name = handler_path;
+    source_view.normalize_positions = source_kind.isTyped();
+    const root = if (source_kind.isTyped()) typed: {
+        const outcome = js_parser.parseAdmission() catch {
+            printParseErrors(allocator, source_view, js_parser.getProjectedErrors());
+            return error.ParseError;
+        };
+        break :typed switch (outcome) {
+            .accepted => |root| root,
+            .parser_refused => {
+                printParseErrors(allocator, source_view, js_parser.getProjectedErrors());
+                return error.ParseError;
+            },
+            .terminal_admission_refused => |failure| {
+                zts.logAdmissionFailure(source, failure);
+                const err = zts.prepareErrorForAdmissionFailure(failure);
+                const diagnostic = if (js_parser.getLastAdmissionObservation()) |found|
+                    json_diag.stripDiagnosticFromAdmission(source, found)
+                else
+                    null;
+                debugPrintStripError(handler_path, err, diagnostic);
+                return err;
+            },
+            .recovered_admission_refused => return error.AdmissionRefused,
+        };
+    } else js_parser.parse() catch {
+        printParseErrors(allocator, source_view, js_parser.getErrors());
         return error.ParseError;
     };
 

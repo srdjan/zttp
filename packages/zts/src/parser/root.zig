@@ -205,7 +205,7 @@ pub const Parser = struct {
         type_allocator: std.mem.Allocator,
         source: []const u8,
         strings: *string.StringTable,
-        atoms: *atom_table_mod.AtomTable,
+        atoms: ?*atom_table_mod.AtomTable,
     ) !Parser {
         var result: Parser = .{
             .allocator = allocator,
@@ -218,7 +218,7 @@ pub const Parser = struct {
             .atoms = atoms,
             .typed_phase = .ready,
         };
-        result.js_parser.setAtomTable(atoms);
+        if (atoms) |table| result.js_parser.setAtomTable(table);
         return result;
     }
 

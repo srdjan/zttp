@@ -38,18 +38,24 @@ pub fn run(
     };
     defer allocator.free(source);
 
-    var prepared = zts.PreparedSource.init(allocator, source, path, .{}) catch |e| {
+    const source_kind = common.admitToolSource(allocator, source, path) catch |e| {
+        switch (e) {
+            error.InvalidSourceObservation => return e,
+            else => {},
+        }
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": TypeScript strip failed: {s}\n",
             .{@errorName(e)},
         );
     };
-    defer prepared.deinit();
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
+    var js_parser = if (source_kind.isTyped())
+        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
+    else
+        try zts.parser.JsParser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 

@@ -60,11 +60,10 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
     std.log.info("Replaying {d} traces against {s}...\n", .{ groups.len, handler_source.filename });
 
     for (groups) |group| {
-        const result = replayOne(
+        const result = replayLoadedHandler(
             allocator,
             replay_config,
-            handler_source.code,
-            handler_source.filename,
+            handler_source,
             &group,
         ) catch |err| {
             const failed_result = ReplayResult.fromReplayError(group, err);
@@ -106,6 +105,15 @@ pub fn replayOne(
     handler_filename: []const u8,
     group: *const trace.RequestTraceGroup,
 ) !ReplayResult {
+    return replayLoadedHandler(allocator, config, .{ .code = handler_code, .filename = handler_filename }, group);
+}
+
+fn replayLoadedHandler(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    handler: handler_loader.LoadedHandler,
+    group: *const trace.RequestTraceGroup,
+) !ReplayResult {
     // Create a fresh runtime for each replay.
     // Config has replay_file_path set, so HandlerInstance.init registers replay stubs
     // for virtual modules and fetchSync instead of real implementations.
@@ -128,7 +136,7 @@ pub fn replayOne(
     defer rt.ctx.module_state[trace.REPLAY_STATE_SLOT] = null;
 
     // Load handler code
-    try rt.loadCode(handler_code, handler_filename);
+    try handler.loadInto(rt);
 
     // Build request from trace
     var headers_list: std.ArrayListUnmanaged(HttpHeader) = .empty;
@@ -882,4 +890,20 @@ test "replayOne preserves an ordinary replay" {
     try std.testing.expect(result.match);
     try std.testing.expectEqualStrings("ordinary", result.actual_body_owned);
     try std.testing.expectEqual(@as(u32, 0), result.io_total);
+}
+
+test "replay retains the prepared source case" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data =
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"response","status":200,"headers":{},"body":"ok"}
+    });
+    const trace_path = try replayExitTestPath(allocator, &tmp);
+    defer allocator.free(trace_path);
+    try run(allocator, .{
+        .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { const value: number = \"ok\"; return Response.text(value); }" } },
+        .runtime_config = .{ .replay_file_path = trace_path, .enforce_arena_escape = false },
+    });
 }

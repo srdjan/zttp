@@ -34,18 +34,24 @@ pub fn run(
     };
     defer allocator.free(source);
 
-    var prepared = zts.PreparedSource.init(allocator, source, path, .{}) catch |e| {
+    const source_kind = common.admitToolSource(allocator, source, path) catch |e| {
+        switch (e) {
+            error.InvalidSourceObservation => return e,
+            else => {},
+        }
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": TypeScript strip failed: {s}\n",
             .{@errorName(e)},
         );
     };
-    defer prepared.deinit();
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
+    var js_parser = if (source_kind.isTyped())
+        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
+    else
+        try zts.parser.JsParser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -68,16 +74,17 @@ pub fn run(
         );
     };
 
-    // A type env populated from the strip pass lets the report show each
-    // function's declared `Effects<...>` ceiling next to the inferred row,
-    // so the expert can surface declared-vs-inferred drift.
     var type_pool = zts.TypePool.init(allocator);
     defer type_pool.deinit(allocator);
     try type_pool.ensureHealthy();
     var type_env = zts.TypeEnv.init(allocator, &type_pool);
     defer type_env.deinit();
     try type_pool.ensureHealthy();
-    if (prepared.typeMap()) |type_map| try type_env.populateFromTypeMap(type_map);
+    try type_env.populateSourceTypes(if (source_kind.isTyped()) .{ .direct = .{
+        .store = &js_parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } } else .omitted);
     try type_pool.ensureHealthy();
 
     const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };
@@ -149,11 +156,18 @@ fn writeFunction(
     {
         var declared: std.ArrayListUnmanaged([]const u8) = .empty;
         defer declared.deinit(ctx.allocator);
-        if (ctx.ir_view.signatureOffset(fe.decl_node)) |offset| {
-            if (ctx.env.getFnSigAt(offset)) |sig| {
-                const extraction = try ctx.env.extractEffectMembers(sig.return_type, &declared);
-                declared_unreadable = extraction.non_literal;
-            }
+        const signature = signature: {
+            const owner = switch (ctx.ir_view.getTag(fe.decl_node) orelse break :signature null) {
+                .function_decl => (ctx.ir_view.getVarDecl(fe.decl_node) orelse break :signature null).init,
+                .function_expr, .arrow_function => fe.decl_node,
+                else => break :signature null,
+            };
+            const reference = ctx.env.functionTypeRef(ctx.ir_view, owner) orelse break :signature null;
+            break :signature ctx.env.getFunctionSignature(reference);
+        };
+        if (signature) |sig| {
+            const extraction = try ctx.env.extractEffectMembers(sig.return_type, &declared);
+            declared_unreadable = extraction.non_literal;
         }
         for (declared.items, 0..) |capname, j| {
             if (j > 0) try writer.writeByte(',');
@@ -165,4 +179,25 @@ fn writeFunction(
     try writer.writeAll("],\"declaredUnreadable\":");
     try writer.writeAll(if (declared_unreadable) "true" else "false");
     try writer.writeAll("}");
+}
+
+test "effect reports retain declared ceilings and unreadable markers" {
+    const cases = [_]struct { source: []const u8, functions: []const u8 }{
+        .{ .source = "export function handler(req: Request): Effects<Response, \"env\" | \"clock\"> { return Response.text(\"ok\"); }", .functions = "[{\"name\":\"handler\",\"pure\":true,\"deterministic\":true,\"recursive\":false,\"has_egress\":false,\"capabilities\":[],\"declared\":[\"env\",\"clock\"],\"declaredUnreadable\":false}]" },
+        .{ .source = "export function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }", .functions = "[{\"name\":\"handler\",\"pure\":true,\"deterministic\":true,\"recursive\":false,\"has_egress\":false,\"capabilities\":[],\"declared\":[],\"declaredUnreadable\":true}]" },
+    };
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for (cases) |case| {
+        try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = case.source });
+        const path = try std.Io.Dir.realPathFileAlloc(tmp.dir, std.testing.io, "handler.ts", std.testing.allocator);
+        defer std.testing.allocator.free(path);
+        var result = try run(std.testing.allocator, path);
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expect(result.ok);
+        const expected = try std.mem.concat(std.testing.allocator, u8, &.{ "{\"path\":\"", path, "\",\"functions\":", case.functions, "}" });
+        defer std.testing.allocator.free(expected);
+        try std.testing.expectEqualStrings(expected, result.llm_text);
+    }
 }

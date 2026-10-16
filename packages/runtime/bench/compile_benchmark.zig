@@ -292,20 +292,12 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8) !CompileStats {
     const parser_alloc = parser_counting.allocator();
     const codegen_alloc = codegen_counting.allocator();
 
-    var prepared = try zq.PreparedSource.init(
-        parser_alloc,
-        source,
-        "benchmark.ts",
-        .{},
-    );
-    defer prepared.deinit();
-
     var strings = zq.StringTable.init(parser_alloc);
     defer strings.deinit();
     var atoms = zq.AtomTable.init(parser_alloc);
     defer atoms.deinit();
 
-    var p = try zq.Parser.init(parser_alloc, prepared.parserInput(), &strings, &atoms);
+    var p = try zq.Parser.initTyped(parser_alloc, parser_alloc, source, &strings, &atoms);
     defer {
         // Nested `FunctionBytecode` payloads live in the codegen's constants and
         // are released by this hook, not by `CodeGen.deinit`, because in the
@@ -313,7 +305,13 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8) !CompileStats {
         if (p.code_gen) |*cg| cg.freeOwnedConstantPayloads();
         p.deinit();
     }
-    const bytecode_data = try p.parseWithCodegenAllocator(codegen_alloc);
+    switch (try p.parseTypedIr()) {
+        .accepted => {},
+        .terminal_admission_refused => |failure| return zq.prepareErrorForAdmissionFailure(failure),
+        .parser_refused => |refusal| return refusal.first_error,
+        .recovered_admission_refused => return error.AdmissionRefused,
+    }
+    const bytecode_data = try p.generateParsed(codegen_alloc);
     const ir_node_count: u64 = @intCast(p.js_parser.nodes.tags.items.len);
 
     return .{

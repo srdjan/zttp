@@ -6621,3 +6621,419 @@ The acceptance covers the ten source hashes and completed U15 receipts.
 The acceptance retains both failed cache receipts and the successful external-cache receipt.
 The acceptance does not establish U16 readiness or close its measured recognition gaps.
 Main owns the exact twelve-path commit and subsequent U16 work.
+
+U15 commits locally as `2019e62d` after the final documentation receipt also passes.
+That receipt is `u15-final-docs-spine-v7.log`, with eight successful build steps and direct exit 0.
+The commit contains exactly its twelve owned paths.
+The untracked sibling plan remains unchanged.
+
+### U16 measured header depth and presentation
+
+The header depth measurement uses the existing 512-level source limit.
+Its one-case pilot passes before the scale changes to four.
+All four unchanged-source observations finish, with direct exit 0.
+The receipt is `u16-header-depth-baseline/full.log` outside the repository.
+The exact source bytes, requests, and compilation status remain alongside it.
+
+At 511 and 512 parentheses, legacy preparation reaches the return type and reports `UnsupportedAnyType`.
+The measured columns are 1040 and 1042, respectively.
+At 513 parentheses, legacy preparation reports `NestingTooDeep` at 1:11.
+The corresponding strict call control reports `NestingTooDeep` at 1:17.
+The current U15 direct parser instead reports a parser refusal for all four sources.
+These measurements confirm both the missed refusal and the nonphysical lookahead presentation.
+
+Astra accepts reuse of the existing raw matching helper with a private quote-failure policy.
+Existing helper callers will retain suppressed quote failures.
+Header probes will decline on a root quote failure while retaining staged observations.
+The strict return-type phase will retain its existing single counter across bracket kinds.
+Comments will remain raw bytes in that lookahead.
+
+The lookahead advances its diagnostic position only through quoted regions.
+Ordinary parenthesis, comment, whitespace, and type bytes advance only the raw offset.
+Physical failure spans remain separate from the explicit diagnostic presentation.
+The assignment path will retain the whitespace-only gap before the opening parenthesis.
+Keyword names will use the existing raw name predicate only during source observation.
+Runtime function-name acceptance will remain unchanged.
+
+The working v4 snapshot contains these bounded corrections and the first optional printer captures.
+Its source and hashes remain outside the repository.
+Execution, printer comparisons, allocation controls, independent review, and production integration remain pending.
+
+### U16 bounded observer and printer measurements
+
+The v4 compile comparison passes all twenty-five cases.
+It compares native errors, diagnostic kinds, exact coordinates, and terminal history against the legacy frontend.
+The set includes the measured colon and header controls, depth boundaries, quote-adjusted positions, and strict return-type depth.
+The one-case pilot and full comparison both exit 0.
+The receipts are `u16-admission-comparison/pilot-v4.log` and `full-v4.log` outside the repository.
+
+The first v4 printer comparison matches the twelve earlier runtime-refusal fixtures.
+A separate eight-case comparison exposes one capture error.
+A typed parenthesized header without an arrow loses its existing successful print and instead reports `missing_semicolon`.
+The failed receipt is `u16-work/printer-recognition-compare-full-v4.log`, with direct exit 1.
+The legacy producer checks that return type but publishes its opaque region only when a confirming arrow exists.
+The v5 correction applies that condition to the recovery mask and printable capture.
+Admission classification still checks the complete return type.
+The corrected eight-case comparison exits 0.
+
+The frozen v5 engine root passes 1,176 tests, with one skip and direct exit 0.
+Its receipt is `u16-work/engine-run-v5.log`.
+This receipt includes existing admission, ownership, allocation, and printer tests.
+New dedicated allocation controls and production integration remain pending.
+
+The v5 collect comparison passes all thirty-one cases.
+It compares complete diagnostic lists, their order, native failures, exact coordinates, and terminal history.
+The six additional controls exercise destructuring, comma bindings, keyword headers, absent arrows, unsupported loops, and nested failures.
+The one-case pilot and full comparison both exit 0.
+The receipts are `u16-admission-collect-comparison/pilot-v5.log` and `full-v5.log`.
+
+The combined printer comparison uses the explicit legacy input and the public direct print entry.
+Its two-case pilot exercises both successful output and refusal before the scale changes to twenty.
+All twenty cases retain exact bytes or the exact refusal.
+Fourteen cases print, and six cases refuse.
+Every successful output retains identical bytes on its second direct print.
+Both direct statuses are 0 in `u16-printer-comparison/pilot-v5.exit` and `full-v5.exit`.
+The native measurement uses the leak-checking allocator.
+These controls do not replace the required normalization corpus or final repository gates.
+
+The v5 snapshot also contains the pending parse-identity migration.
+The complete compiler root compiles without execution as `u16-work/compiler-compile-v5.log`, with direct exit 0.
+Main executes that unfiltered binary separately before claiming parse-identity acceptance.
+
+### U16 independent generic-header findings
+
+The unfiltered frozen v5 compiler root passes all 1,549 tests, with direct exit 0.
+Its receipt is `u16-work/compiler-run-v5.log` outside the repository.
+This result covers the existing root and the temporary parse-identity draft.
+Dedicated identity regression controls remain pending.
+
+Astra finds two source-only generic continuations that still bypass the raw header probe.
+The native two-case comparison confirms both findings before correction.
+`const f = <T>(value: any): string;` loses `UnsupportedAnyType` at 1:22.
+`const f = <T>(value /* ( */): any => value;` invents that refusal at 1:31.
+The failed pilot and full receipts remain under `u16-generic-header-comparison` outside the repository.
+
+The legacy assignment branch commits the generic list before loose header confirmation.
+That branch permits space, tab, and LF between the list and its opener.
+A CR selects the ordinary generic branch, which requires strict arrow confirmation.
+Ordinary generic erasure and explicit call erasure also finish before strict header confirmation.
+A declined header therefore retains the committed generic erasure.
+Named function handling remains separate.
+
+The v8 temporary draft preserves these distinct continuations.
+Its source-only selector commits the generic before checking the raw header.
+Its runtime arrow path checks whether the header admits types.
+A declined typed header uses the existing raw arrow lookahead.
+That path preserves raw JavaScript arrow parsing and prevents an invented source refusal.
+The private typed-header scanner remains unchanged.
+
+The expanded native comparison contains eighty-two cases.
+The two-case pilot passes before only the case limit changes to eighty-two.
+Both v8 direct statuses are 0, with zero mismatches.
+The comparison retains native errors, diagnostic kinds, coordinates, and final observation history.
+The exact inputs and commands remain under `u16-generic-header-comparison` outside the repository.
+An earlier v7 matrix stops at a spaced call with `IncompleteSourceObservation`; that failure remains retained.
+
+Astra then identifies a possible loss in accepted grouped fallback.
+Cancelling a generic owner can remove its projection without publishing an erased-prefix record.
+The control is `const result = flag ? <T>(value) /* gap */ : (x) => x;`.
+Main will compare runtime identity, Store ownership, and exact TypePool construction before accepting this path.
+Raw arrows with parentheses inside comments require accepted controls as well.
+No U16 production source enters the repository at this checkpoint.
+
+### U16 focused source integration
+
+The accepted-group pilot confirms the predicted v8 loss.
+The legacy pool contains nineteen nodes, while the draft contains eighteen.
+Both runtime tag sequences match, but the draft contains no erased-prefix record.
+The failing receipt is `u16-accepted-header-comparison/pilot-v8.log` outside the repository.
+
+The v11 correction shares the existing erased-expression publication helper.
+The fallback copies value-only capture options before cancelling the generic reservation.
+The erased-prefix reservation owns its own checkpoint and cleanup.
+An inactive generic reservation cannot cancel the replacement reservation.
+The accepted-group pilot then passes before the case limit changes from one to three.
+All three accepted controls match six exact TypePool arrays and runtime tag sequences.
+Their Store records pass runtime-owner validation.
+The grouped control retains one erased prefix.
+The generic raw arrow retains one generic owner, and the ordinary raw arrow retains neither.
+Both direct statuses are 0 in `u16-accepted-header-comparison` outside the repository.
+
+The persistent comparison uses public parser entry points and compares complete runtime data and atoms.
+It also compares all pool arrays and primitive indices, then validates runtime owners.
+Its named test is `admission header fallback preserves grouped and raw arrow type construction`.
+The existing compiler root collects that test.
+
+The unfiltered v11 engine root passes 1,181 tests, with one skip and direct exit 0.
+Its receipt is `u16-work/engine-run-v11.log` outside the repository.
+Five new engine tests preserve measured refusals, printer outputs, and allocation behavior.
+The printer table retains twenty measured fixtures: fourteen byte-idempotent outputs and six exact refusals.
+The native replay fault leaves the runtime prefix, Store checkpoint, errors, and empty observation history unchanged.
+This last control does not establish preservation of nonempty history.
+Partial print captures receive allocation sweeps, and their failure floor is nonzero.
+Printer preparation allocation failures retain `strip_failed`; final output allocation failure remains native.
+
+The unfiltered v11 compiler root passes all 1,551 tests, with direct exit 0.
+Its accepted receipt is `u16-work/compiler-run-v11b.log` outside the repository.
+The new identity control preserves type comments, unusual spacing, semicolon repair, runtime names, and side-specific refusal.
+An earlier launch starts before compilation finishes and observes an empty executable.
+That zero-output receipt, `compiler-run-v11.log`, supplies no acceptance evidence.
+The accepted run starts after compilation exits 0 and checks the nonempty 1,551-test completion message.
+
+Astra xhigh accepts frozen v11 for focused source integration.
+Its scope includes ownership, generic continuation, printable capture, and the new persistent tests.
+This acceptance does not complete U16.
+Main integrates only the five reviewed files from that snapshot.
+Their SHA-256 values remain in `u16-work/frozen-v11-hashes.json` outside the repository.
+Remaining caller migration and integrated gates remain pending.
+
+### U16 remaining caller policies and measurements
+
+The shared `checkSourceAdmission` helper observes original bytes without runtime parsing or shared atoms.
+Its `SourceObservationError` set contains `OutOfMemory` and `InvalidSourceObservation`.
+A domain stop requires a terminal failure payload.
+Other internal observer errors become `InvalidSourceObservation`, outside the preparation refusal set.
+The helper returns value data after releasing its observer.
+Path classification remains in each caller.
+Astra accepts this boundary and its closed error projection.
+
+The four Pi tools preserve preparation before actual parser construction.
+Preparation OOM retains the existing strip-failure framing.
+Actual parser construction still propagates native OOM.
+Unknown observation failures propagate instead of becoming source refusals.
+Typed files use direct parsing, while virtual names retain raw parsing.
+The effects tool still runs its analyzer before creating the TypeEnv.
+The analyzer receives no new authored environment.
+The later declaration report receives direct source types or an explicit omitted source.
+
+The Pi baseline first covers eight fixtures and thirty-two tool results.
+A second baseline adds literal effect ceilings, unreadable effect markers, and a real secret-leak fixture.
+That baseline contains eleven fixtures and forty-four results across all four tools.
+The first direct draft loses declared effects because it still looks up source offsets.
+The corrected report resolves the actual function owner through `functionTypeRef` and `getFunctionSignature`.
+Both effect controls have persistent regression tests at the public tool entry point.
+
+The initial forty-four-result comparison covers ToolResult payloads, but excludes separate stderr lines.
+That scope does not establish complete output parity.
+A later check finds missing preparation logs and restores those logs explicitly at the affected caller boundaries.
+The shared diagnostic projection preserves all seventeen named kinds and existing messages.
+Unterminated strings and comments retain the legacy absence of a separate preparation log.
+The complete Pi log then matches all 9,850 bytes.
+Its direct status is 0 in `u16-pi-comparison/compare-complete-v3.exit` outside the repository.
+The matching request retains the exact comparison command and nonempty forty-four-row floor.
+No provider call participates in this measurement.
+
+The machine graph baseline contains twelve source fixtures.
+It distinguishes imports before a failed top-level statement from imports found after that failure.
+It also preserves complete block recovery, hard-refusal fallback, declarations, dependency reads, and ordered rejections.
+The parser saves its node count at the first failed top-level dispatch.
+The checkpoint follows the complete failing statement batch and precedes later top-level recovery.
+`getRetainedImportNodeCount` exposes that bounded observation without changing parser recovery.
+No failed top-level dispatch means the full retained node set remains visible.
+Preparation OOM, unsupported extensions, and internal observation failures still propagate.
+A hard admission refusal selects raw parsing.
+Parser construction failure remains tolerated, and parser failure still permits retained-prefix enumeration.
+The agent protocol propagates the new internal observation error without adding an envelope format.
+
+All twelve complete graph records match the baseline, including hashes, imports, modules, and rejection order.
+Restored stderr logs also match byte for byte.
+The accepted complete-log receipt is `u16-graph-comparison/compare-complete-v3.log` outside the repository.
+Its direct status is 0, and its row floor is twelve.
+The persistent graph fixture preserves all twelve import and rejection observations.
+The earlier `current-v1` graph experiment precedes the actual prefix edit and supplies no migration acceptance.
+
+The integrated caller pilot passes all nineteen steps, with 927 passed tests and one skip.
+It runs `test-module-graph-record`, `test-compile-bench`, and `test-expert-app`, unfiltered with `-j1`.
+Its direct status is 0 in `u16-callers-pilot-v2.exit` outside the repository.
+The first attempt fails compilation because the protocol switch omits the new internal observation error.
+That failed receipt remains retained.
+The passing pilot precedes the later restoration of preparation logs and does not accept those later edits.
+
+The simple compiler retains compilation without an atom table.
+The nullable-atoms amendment creates no replacement table.
+The compile benchmark retains IR optimization and separate parser and code-generation allocators.
+Generated tests retain plain IR parsing without adding optimization or authored type analysis.
+Their final named gates remain pending.
+
+### U16 prepared-inline draft
+
+The twelve-case CLI baseline runs the retained U15 developer binary through `serve --test`.
+Its one-case pilot passes before only the case limit changes to twelve.
+Typed inline input permits an argument mismatch that file TypeScript rejects.
+The same inline policy applies when the entry imports a typed dependency.
+Hard source refusal selects raw parsing, while parser and boolean failures retain their existing native errors.
+Both the plain response and every declared success fixture execute a real handler test.
+The first pilot omits `serve` and reaches the wrong CLI route; that receipt supplies no acceptance evidence.
+
+The temporary draft carries a fixed `prepared_eval` source case with original bytes.
+Existing raw virtual-source APIs remain raw.
+The loader preserves `<eval>`, and the server preserves `<inline>`.
+Prepared evaluation generates bytecode before boolean analysis and creates no authored TypeEnv.
+Authority extraction explicitly omits authored signatures and capability capsules.
+The graph receives a fixed prepared entry, while dependencies retain their file profiles.
+Pool replacement clears the prepared case and cached bytes under the existing locks.
+Astra accepts these source paths and requires one diagnostic-position correction.
+The corrected loader retains `source_kind.isTyped()` for diagnostic normalization.
+Prepared virtual input must not inherit file-only normalization.
+
+The first CLI prototype matches all twelve baseline outcomes and functional output bytes.
+The comparison also preserves the number of allocator leak reports.
+It excludes implementation stack traces and allocation addresses from those existing process-lifetime reports.
+The baseline and prototype both retain the inline code buffer until process exit.
+Raw logs retain every excluded frame and address.
+This bounded comparison does not establish the later diagnostic-position correction or allocation-failure controls.
+The next frozen draft adds public source-profile, import, allocation, cache, reload, loader, and runner controls.
+U16 acceptance remains pending.
+
+### U16 inline integration and public controls
+
+The corrected inline CLI comparison matches twelve legacy outcomes after a one-case pilot.
+The comparison retains functional stdout, stderr, native exit status, and the count of allocator leak reports.
+Raw logs retain implementation stack traces and addresses, which the comparison excludes.
+`u16-inline-baseline/compare-v3` records twelve comparisons with no mismatch and exit 0.
+
+Astra requires public runner tests instead of tests that call their private loaded-handler helpers.
+The replacement replay fixture contains one request and an exact `ok` response.
+The replacement handler-test fixture requires status 200 and the exact `ok` body.
+Both tests pass through `ExecutionSpec`, the loader, and their public `run` functions.
+
+The first cache test reuses one runtime and incorrectly expects a cache hit.
+The corrected test holds two worker leases together, which forces a second runtime to load cached bytecode.
+The test then reloads identical typed bytes through the raw virtual API and requires `UnexpectedToken`.
+A final raw reload must execute and return `reloaded`.
+
+Expected raw and typed refusals emit error logs in the initial test run.
+The final guards suppress only those emissions when `builtin.is_test` is true.
+Diagnostic formatting, allocation, native errors, and production text remain unchanged.
+The corrected frozen runtime root passes 421 tests, skips one test, and exits 0.
+`u16-inline-work/unit-run-v5` records that unfiltered result.
+
+The imported runtime control initially uses `std.testing.allocator` and exposes four nested codegen allocations.
+Every assertion passes, but that run exits 1 because those allocations remain live.
+The final imported control uses the existing arena lifetime for imported handlers.
+That control establishes source-profile behavior and response output; it does not establish individual payload cleanup.
+The separate preparation fault sweep retains `std.testing.allocator` and its leak checks.
+`u16-runtime-final-v1` passes all 230 tests across five steps and exits 0.
+
+The first compiler helper assertion expects `UnexpectedToken` for raw virtual `const value: number` input.
+The actual existing raw grammar returns `MissingSemicolon`.
+That test expectation is corrected without changing production code.
+The same initial compiler run passes the exact prepared-contract comparison and 1,551 other tests.
+The final named frontend command includes the corrected compiler assertion.
+
+The generated-test CLI comparison uses eight inputs after its one-case pilot.
+The inputs cover plain, branched, generic, hard admission, parser refusal, missing handler, unsupported extension, and late admission cases.
+`u16-gen-tests-comparison/compare-v4` matches all outcomes and functional stdout and stderr, with exit 0.
+Only implementation-specific Zig error stack traces are excluded; raw logs remain available.
+The earlier comparison failures identify comparator portability and stack-prefix mistakes, not accepted application outcomes.
+
+The fresh symbol census finds no production call to legacy source preparation after inline integration.
+Remaining executable legacy calls belong to differential tests and their helpers.
+The printer retains its explicit legacy oracle until U17 removes reconstruction.
+TypeEnv retains legacy input adapters until the same phase.
+
+### U17 refreshed removal boundary
+
+Astra confirms that direct compatibility ordering remains necessary after legacy source inputs disappear.
+The direct path retains compact parameter projections, predicate classification, repeated-name winners, and native growth behavior.
+Names containing `legacy_` do not establish dead code.
+Only the caller census and dependency review can establish that a helper belongs exclusively to reconstruction.
+
+The native AST inventory reads all 438 declarations in the differential module and identifies its 186 tests.
+A conservative identifier closure finds 39 tests without legacy preparation dependencies.
+That closure is an inventory, not a decision to delete the other 147 tests.
+Required owner, malformed-Store, rollback, allocation, poisoning, growth, and selection controls remain acceptance requirements.
+Explicit direct expectations must replace an oracle when that oracle supplies a required assertion.
+
+The retained native probe calls `diagnosticCatalogHash()` against the current source before removal.
+`u17-work/catalog-before-run` exits 0 and records this exact hash:
+
+```text
+657967a5eab118485ffc7038480ab754ab8f8f95782e7ffe4f52424056525d15
+```
+
+The final U17 probe must return the same hash.
+The diagnostic catalog retains its `type_stripper` producer tag and ordered public identities.
+
+The temporary TypeEnv measurement passes all 156 unfiltered tests and exits 0.
+Its added measurement case records three growth fixtures, each with 27 ordered signature offsets.
+`u17-work/growth-keys-before.json` retains those values before the TypeMap oracle disappears.
+Those fixed inputs can drive the native map comparison after removal.
+The direct parser must not generate its own expected signature order.
+The full measured source remains under `u17-work/before-zts` outside the repository.
+
+### U16 final acceptance
+
+Astra accepts the integrated production source and public server control.
+The source manifest contains 34 files, including the affected tests.
+All source hashes match `u16-integrated-source-hashes.json` before and after the full verification script.
+The final comment changes remove report narration and correct the parse-identity API description.
+They change no executable statements.
+
+| Receipt under `/tmp/zttp-reset-20261015/` | Direct result |
+|---|---|
+| `u16-frontend-final-v1` | Forty-five steps; 3,961 passed, one skipped, exit 0 |
+| `u16-additional-final-v1` | Fifty steps; 1,376 passed, one skipped, exit 0 |
+| `u16-runtime-final-v1` | Five steps; 230 passed, exit 0 |
+| `u16-server-final-v1` | Five steps; 335 passed, two skipped, exit 0 |
+| `u16-normalize-final-v1` | 33 checked and printed files; no skip, refusal, or byte difference; exit 0 |
+| `u16-spine-final-v1` | Four steps passed, exit 0 |
+| `u16-format-final-v2` | All required Zig paths passed, exit 0 |
+| `u16-verify-final-v1` | Every step in the unchanged full script passed, exit 0 |
+
+The full script runs the aggregate and standalone runtime roots in separate processes.
+The flow census matches all 734 probes, with no fail-open, over-refusal, weak result, or missing verdict.
+The diagnostic corpus runs all 182 cases without a failure and finds no uncovered advertised diagnostic code.
+The developer CLI root passes 605 tests, skips one, and reports no failed assertion, leak, or logged error.
+The script also passes release builds, verified handler precompilation, smoke flows, panic isolation, registry checks, and its final formatting check.
+
+The completed caller census leaves legacy preparation only in test oracles and their retained adapters.
+No production entry path selects that preparation.
+U17 owns removal of those adapters, old reconstruction, and the final differential oracle.
+U16 changes no frozen provider corpus, public wire format, policy identity, or diagnostic catalog identity.
+
+### U17 direct-test migration specification
+
+Astra recommends existing assertions and small literal expectations instead of a new fingerprint framework.
+The 147 tests with legacy dependencies are not a deletion group.
+Many tests combine one parity call with independent owner, span, semantic, or failure assertions.
+Removing only their direct assertions would discard required behavior evidence.
+
+| Current helper group | Retained behavior and required migration |
+|---|---|
+| `expectEquivalent` | Parity-only fixtures need explicit expectations. Parse success alone does not replace equivalence. |
+| Runtime wrappers | Actual owners, IR, bindings, captures, atoms, and source locations remain. Legacy preparation and allocation equality disappear. |
+| Type-only module helpers | Module kinds, raw spans, surviving nodes, validation, native errors, and allocation floors remain. |
+| Semantic drivers | Alias, application, generic, nominal, and contractivity facts remain, including their existing enum cases. |
+| Compound helpers | The existing census retains eight families, 31 quirks, and its explicit semantic assertions. |
+| Consumer drivers | Exact signatures, compact positions, spelling, alias indices, predicate absence, and owner membership remain. |
+| Consumer matrix | Every retained case needs a complete diagnostic verdict after parity disappears. |
+| Capsule and contract drivers | Winner selection, holes, effects, capsules, diagnostics, and full-byte contract comparisons remain. |
+| Allocation and growth helpers | Actual failures, retained seeds, rollback, poison, health, scope restoration, and observation floors remain. |
+
+The compound tests retain the 15/16 parameter boundary and 63/64 array-key boundary.
+Source-backed fixtures use public `populateSourceTypes(.direct)` instead of a second population driver.
+Store-only lowering fixtures can use validated `lowerOwnedRange` inputs.
+`lowerSyntaxStoreInternal` must not survive merely to preserve the old helper shape.
+
+A consumer matrix case with a null diagnostic expectation relies on parity for its verdict.
+Removing parity without supplying that expectation would leave the check incomplete.
+The migration must supply exact values or retain another assertion that establishes the complete verdict.
+
+Exact pool comparisons currently obtain their expected values from the old frontend.
+Their replacements need relevant name bytes, indices, and field, parameter, and template records.
+Counts alone do not establish construction order.
+Constructor names and speculative group construction require literal expectations before the oracle disappears.
+The three header fallback fixtures also require actual runtime and type construction expectations.
+Their grouped erased-prefix projection must remain covered.
+
+Private preflight tests can disappear when they establish only comparator exclusions.
+Actual parser refusals, malformed Store rejection, and native failures remain necessary.
+The annotation census must cover current syntax owners, including type-only modules and erased prefixes.
+No replacement expected value may come from the direct path under test.
+
+Astra completes the U16 execution audit and accepts the isolated local commit.
+The audit checks all 34 source hashes, required direct exit results, comparison limits, and the exact tracked scope.
+The final documentation gate passes all eight steps with exit 0.
+The unrelated user plan remains untracked and excluded.
+No U16 blocker remains.

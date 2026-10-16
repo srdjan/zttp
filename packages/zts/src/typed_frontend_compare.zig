@@ -18009,3 +18009,51 @@ test "direct callback ceilings preserve actual-position compact-gap behavior" {
         .diagnostic = null,
     });
 }
+
+test "admission header fallback preserves grouped and raw arrow type construction" {
+    const cases = [_][]const u8{
+        "const result = flag ? <T>(value) /* gap */ : (x) => x;",
+        "const result = <T>(value /* ( */) => value;",
+        "const result = (value /* ( */) => value;",
+    };
+    try std.testing.expectEqual(@as(usize, 3), cases.len);
+    for (cases) |source| {
+        var prepared = try PreparedSource.init(std.testing.allocator, source, "header-fallback.ts", .{});
+        defer prepared.deinit();
+        var legacy_atoms = AtomTable.init(std.testing.allocator);
+        defer legacy_atoms.deinit();
+        var direct_atoms = AtomTable.init(std.testing.allocator);
+        defer direct_atoms.deinit();
+        var legacy = try JsParser.init(std.testing.allocator, prepared.parserInput());
+        defer legacy.deinit();
+        legacy.setAtomTable(&legacy_atoms);
+        const legacy_root = try legacy.parse();
+        var direct = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+        defer direct.deinit();
+        direct.setAtomTable(&direct_atoms);
+        const direct_root = switch (try direct.parseAdmission()) {
+            .accepted => |root| root,
+            else => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(compareRuntime(&legacy, legacy_root, &legacy_atoms, &direct, direct_root, &direct_atoms) == null);
+        var legacy_pool = TypePool.init(std.testing.allocator);
+        defer legacy_pool.deinit(std.testing.allocator);
+        var direct_pool = TypePool.init(std.testing.allocator);
+        defer direct_pool.deinit(std.testing.allocator);
+        var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+        defer legacy_env.deinit();
+        var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+        defer direct_env.deinit();
+        try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+        try direct_env.populateSourceTypes(.{ .direct = .{
+            .store = &direct.type_store,
+            .ir_view = parserIrView(&direct),
+            .atoms = &direct_atoms,
+        } });
+        try expectExactTypePool(&legacy_pool, &direct_pool);
+        try direct.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&direct));
+        if (std.mem.indexOf(u8, source, "flag ?") != null) {
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.erased_type_prefixes.items.len);
+        }
+    }
+}

@@ -575,6 +575,7 @@ fn handleRequestWithRootReader(
             input,
         ) catch |err| {
             return writeErrorEnvelope(&json, op_name, contextFreeIdentity(), switch (err) {
+                error.InvalidSourceObservation => return err,
                 error.PathOutsideProjectRoot => .{
                     .code = .path_outside_project_root,
                     .message = "input.file resolves outside the project root",

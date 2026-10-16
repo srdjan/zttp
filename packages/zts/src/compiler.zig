@@ -67,16 +67,28 @@ pub fn compileWithOptions(
     source: []const u8,
     options: CompileOptions,
 ) !*bytecode.FunctionBytecode {
-    var prepared = try source_frontend.PreparedSource.init(allocator, source, options.filename, .{});
-    defer prepared.deinit();
+    const kind = source_frontend.classifyPath(options.filename);
+    if (kind == .unsupported) return error.UnsupportedSourceExtension;
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try parser.Parser.init(allocator, prepared.parserInput(), &strings, null);
+    var p = if (kind.isTyped())
+        try parser.Parser.initTyped(allocator, allocator, source, &strings, null)
+    else
+        try parser.Parser.init(allocator, source, &strings, null);
     defer p.deinit();
-    // Note: strict_mode is always true in zts (var keyword rejected)
-
-    const code = try p.parse();
+    const code = if (kind.isTyped()) blk: {
+        switch (try p.parseTypedIr()) {
+            .accepted => {},
+            .terminal_admission_refused => |failure| {
+                source_frontend.logAdmissionFailure(source, failure);
+                return source_frontend.prepareErrorForAdmissionFailure(failure);
+            },
+            .parser_refused => |refusal| return refusal.first_error,
+            .recovered_admission_refused => return error.AdmissionRefused,
+        }
+        break :blk try p.generateParsed(allocator);
+    } else try p.parse();
 
     // Copy code and constants to output allocator (parser memory is freed on deinit)
     const code_copy = try allocator.dupe(u8, code);
@@ -144,4 +156,25 @@ test "simple compile API" {
     }
 
     try std.testing.expect(func.code.len > 0);
+}
+
+test "compile options retain raw virtual source and compilation without atoms" {
+    const source = "const value: number = 1; value;";
+    const raw = "const value         = 1; value;";
+    const typed = try compileWithOptions(std.testing.allocator, source, .{ .filename = "value.ts" });
+    defer freeCompileTestFunction(typed);
+    const legacy_shape = try compile(std.testing.allocator, raw);
+    defer freeCompileTestFunction(legacy_shape);
+    try std.testing.expectEqualSlices(u8, legacy_shape.code, typed.code);
+    try std.testing.expectEqualSlices(value.JSValue, legacy_shape.constants, typed.constants);
+    try std.testing.expectError(error.MissingSemicolon, compileWithOptions(std.testing.allocator, source, .{}));
+    try std.testing.expectError(error.UnsupportedSourceExtension, compileWithOptions(std.testing.allocator, raw, .{ .filename = "value.js" }));
+    try std.testing.expectError(error.UnsupportedAnyType, compileWithOptions(std.testing.allocator, "const { value }: { value: any } = input;", .{ .filename = "value.ts" }));
+}
+
+fn freeCompileTestFunction(function: *bytecode.FunctionBytecode) void {
+    std.testing.allocator.free(function.code);
+    std.testing.allocator.free(function.constants);
+    if (function.line_table) |lines| std.testing.allocator.free(lines);
+    std.testing.allocator.destroy(function);
 }

@@ -8,6 +8,7 @@
 //! this file.
 
 const std = @import("std");
+const execution_spec = @import("execution_spec.zig");
 const builtin = @import("builtin");
 const compat = @import("zts").compat;
 const ascii = std.ascii;
@@ -650,12 +651,15 @@ pub const HandlerInstance = struct {
     /// Build a module graph from file imports, compile all dependencies,
     /// and run them in topological order so their exports are available
     /// as globals when the entry file executes.
-    fn compileAndRunFileImports(self: *Self, entry_source: []const u8, filename: []const u8, refresh_handler: bool) !void {
+    fn compileAndRunFileImports(self: *Self, entry_source: []const u8, filename: []const u8, refresh_handler: bool, prepared_eval: bool) !void {
         // Build module graph
         var graph = zq.modules.ModuleGraph.init(self.allocator);
         defer graph.deinit();
 
-        graph.build(filename, entry_source, readFilePosixForGraph) catch |err| {
+        (if (prepared_eval)
+            graph.buildPreparedEval(filename, entry_source, readFilePosixForGraph)
+        else
+            graph.build(filename, entry_source, readFilePosixForGraph)) catch |err| {
             switch (err) {
                 error.CircularImport => std.log.err("Circular import detected starting from '{s}'", .{filename}),
                 error.ImportFileNotFound => std.log.err("Could not read an imported file from '{s}'", .{filename}),
@@ -764,40 +768,55 @@ pub const HandlerInstance = struct {
 
     /// Load and compile JavaScript code
     pub fn loadCode(self: *Self, code: []const u8, filename: []const u8) !void {
-        _ = try self.loadCodeWithCachingInternal(code, filename, null, true);
+        _ = try self.loadCodeWithCachingInternal(code, filename, null, true, false);
     }
 
     /// Load and compile JavaScript code without requiring a `handler` export.
     /// Used by benchmark and script-style tooling that call other globals directly.
     pub fn loadCodeNoHandler(self: *Self, code: []const u8, filename: []const u8) !void {
-        _ = try self.loadCodeWithCachingInternal(code, filename, null, false);
+        _ = try self.loadCodeWithCachingInternal(code, filename, null, false, false);
     }
 
     /// Load and compile JavaScript code, optionally returning serialized bytecode for caching
     /// If cache_buffer is provided, serializes the bytecode and returns the serialized slice
     pub fn loadCodeWithCaching(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8) !?[]const u8 {
-        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, true);
+        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, true, false);
     }
 
     pub fn loadCodeWithCachingNoHandler(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8) !?[]const u8 {
-        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, false);
+        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, false, false);
     }
 
-    fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8, refresh_handler: bool) !?[]const u8 {
+    pub fn loadPreparedEval(self: *Self, source: execution_spec.PreparedEvalSource, filename: []const u8) !void {
+        _ = try self.loadCodeWithCachingInternal(source.code, filename, null, true, true);
+    }
+
+    pub fn loadPreparedEvalWithCaching(
+        self: *Self,
+        source: execution_spec.PreparedEvalSource,
+        filename: []const u8,
+        cache_buffer: ?[]u8,
+    ) !?[]const u8 {
+        return self.loadCodeWithCachingInternal(source.code, filename, cache_buffer, true, true);
+    }
+
+    fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8, refresh_handler: bool, prepared_eval: bool) !?[]const u8 {
         self.last_opt_stats = .{};
         self.interpreter.resetProfilingCounters();
         const source_kind = zq.classifySourcePath(filename);
         if (source_kind == .unsupported) return error.UnsupportedSourceExtension;
+        if (prepared_eval and source_kind != .virtual_javascript) return error.UnsupportedSourceExtension;
+        const typed_parse = source_kind.isTyped() or prepared_eval;
         var diag_view = zq.SourceView.of(code);
         diag_view.name = filename;
         diag_view.normalize_positions = source_kind.isTyped();
-        var p = if (source_kind.isTyped())
+        var p = if (typed_parse)
             try zq.Parser.initTyped(self.allocator, self.allocator, code, self.strings, &self.ctx.atoms)
         else
             try zq.Parser.init(self.allocator, code, self.strings, &self.ctx.atoms);
         defer p.deinit();
         var bytecode_data: []const u8 = undefined;
-        if (source_kind.isTyped()) {
+        if (typed_parse) {
             switch (try p.parseTypedIr()) {
                 .accepted => {},
                 .parser_refused => |refusal| {
@@ -811,6 +830,7 @@ pub const HandlerInstance = struct {
                 },
                 .recovered_admission_refused => unreachable,
             }
+            if (prepared_eval) bytecode_data = try p.generateParsed(self.allocator);
         } else {
             bytecode_data = p.parse() catch |err| {
                 logParseErrors(self.allocator, diag_view, p.js_parser.getErrors());
@@ -820,14 +840,14 @@ pub const HandlerInstance = struct {
 
         {
             const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
-            const parsed = if (source_kind.isTyped())
+            const parsed = if (source_kind.isTyped() and !prepared_eval)
                 zq.pipeline.ParsedModule.fromTypedExisting(ir_view, p.root_node, &self.ctx.atoms, &p.js_parser.type_store)
             else
                 zq.pipeline.ParsedModule.fromExisting(ir_view, p.root_node, &self.ctx.atoms);
 
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
             defer type_env_storage.deinit(self.allocator);
-            if (source_kind.isTyped()) {
+            if (source_kind.isTyped() and !prepared_eval) {
                 try type_env_storage.initWithSource(self.allocator, .{ .direct = .{
                     .store = &p.js_parser.type_store,
                     .ir_view = ir_view,
@@ -871,7 +891,7 @@ pub const HandlerInstance = struct {
                 var tc_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &tc_output);
                 resolved.formatTypeDiagnostics(diag_view, &tc_aw.writer) catch {};
                 tc_output = tc_aw.toArrayList();
-                if (tc_output.items.len > 0) {
+                if (tc_output.items.len > 0 and !builtin.is_test) {
                     std.log.err("{s}", .{tc_output.items});
                 }
             }
@@ -880,14 +900,14 @@ pub const HandlerInstance = struct {
             }
         }
 
-        if (source_kind.isTyped()) bytecode_data = try p.generateParsed(self.allocator);
+        if (source_kind.isTyped() and !prepared_eval) bytecode_data = try p.generateParsed(self.allocator);
 
         // Resolve module imports and register virtual module native functions
         const has_file_imports = try self.resolveModuleImports(&p);
 
         // If file imports are present, build module graph and compile dependencies
         if (has_file_imports) {
-            try self.compileAndRunFileImports(code, filename, refresh_handler);
+            try self.compileAndRunFileImports(code, filename, refresh_handler, prepared_eval);
             return null; // Disable caching for multi-module handlers
         }
 
@@ -1793,10 +1813,10 @@ fn renderParseErrors(
 fn logParseErrors(allocator: std.mem.Allocator, view: zq.SourceView, errors: []const zq.ParseError) void {
     if (renderParseErrors(allocator, view, errors)) |text| {
         defer allocator.free(text);
-        std.log.err("parse error\n{s}", .{text});
+        if (!builtin.is_test) std.log.err("parse error\n{s}", .{text});
     } else |_| {
         for (errors) |parse_error| {
-            std.log.err("Parse error at {s}:{d}:{d}: {s}", .{
+            if (!builtin.is_test) std.log.err("Parse error at {s}:{d}:{d}: {s}", .{
                 view.name orelse "<source>",
                 parse_error.location.line,
                 parse_error.location.column,

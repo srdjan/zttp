@@ -6,6 +6,8 @@ comptime {
     _ = @import("gate_record.zig");
     _ = @import("registry/registry.zig");
     _ = @import("tools/zts_expert_query.zig");
+    _ = @import("tools/zts_expert_effects.zig");
+    _ = @import("tools/zts_expert_narrow.zig");
     _ = @import("meta_bootstrap.zig");
     _ = @import("tool_registry.zig");
     _ = @import("tool_catalog_consolidation_test.zig");

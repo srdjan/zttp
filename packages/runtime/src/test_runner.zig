@@ -105,11 +105,10 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
     var failed: u32 = 0;
 
     for (tests) |test_case| {
-        const result = runOneTest(
+        const result = runLoadedHandlerTest(
             allocator,
             test_config,
-            handler_code,
-            handler_filename,
+            loaded,
             &test_case,
         );
         if (result.pass) {
@@ -157,6 +156,15 @@ fn runOneTest(
     handler_filename: []const u8,
     test_case: *const TestCase,
 ) TestResult {
+    return runLoadedHandlerTest(allocator, config, .{ .code = handler_code, .filename = handler_filename }, test_case);
+}
+
+fn runLoadedHandlerTest(
+    allocator: std.mem.Allocator,
+    config: RuntimeConfig,
+    handler: handler_loader.LoadedHandler,
+    test_case: *const TestCase,
+) TestResult {
     var failures: std.ArrayList([]const u8) = .empty;
 
     const request = test_case.request orelse {
@@ -186,7 +194,7 @@ fn runOneTest(
     );
     defer rt.ctx.module_state[trace.REPLAY_STATE_SLOT] = null;
 
-    rt.loadCode(handler_code, handler_filename) catch |err| {
+    handler.loadInto(rt) catch |err| {
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
     };
 
@@ -693,4 +701,21 @@ test "checkAssertions: a failure that cannot be recorded is an error, not a pass
         checkAssertions(failing.allocator(), &response, &assertions, &failures),
     );
     try std.testing.expectEqual(@as(usize, 0), failures.items.len);
+}
+
+test "handler tests retain the prepared source case" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "suite.jsonl", .data =
+        \\{"type":"test","name":"prepared response"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200,"body":"ok"}
+    });
+    const test_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/suite.jsonl", .{tmp.sub_path});
+    defer allocator.free(test_path);
+    try run(allocator, .{
+        .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { const value: number = \"ok\"; return Response.text(value); }" } },
+        .runtime_config = .{ .test_file_path = test_path },
+    });
 }

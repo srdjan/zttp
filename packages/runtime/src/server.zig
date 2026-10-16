@@ -1193,6 +1193,7 @@ pub const Server = struct {
         var runtime_dep_bytecodes: ?[]const []const u8 = null;
         const handler_code, const handler_filename = switch (cfg.handler) {
             .inline_code => |code| .{ code, "<inline>" },
+            .prepared_eval => |source| .{ source.code, "<inline>" },
             .file_path => |path| blk: {
                 const source = try readFilePosix(allocator, path, 10 * 1024 * 1024);
                 break :blk .{ source, path };
@@ -1783,16 +1784,26 @@ pub const Server = struct {
         );
 
         var pool_timer = engine.Timer.start() catch null;
-        self.pool = try engine.initHandlerPool(
-            self.allocator,
-            pool_rt_config,
-            self.handler_code,
-            self.handler_filename,
-            self.config.pool_size,
-            self.config.pool_wait_timeout_ms,
-            self.embedded_bytecode,
-            self.runtime_dep_bytecodes,
-        );
+        self.pool = if (self.config.handler == .prepared_eval)
+            try engine.initPreparedEvalHandlerPool(
+                self.allocator,
+                pool_rt_config,
+                .{ .code = self.handler_code },
+                self.handler_filename,
+                self.config.pool_size,
+                self.config.pool_wait_timeout_ms,
+            )
+        else
+            try engine.initHandlerPool(
+                self.allocator,
+                pool_rt_config,
+                self.handler_code,
+                self.handler_filename,
+                self.config.pool_size,
+                self.config.pool_wait_timeout_ms,
+                self.embedded_bytecode,
+                self.runtime_dep_bytecodes,
+            );
         if (pool_rt_config.debug_panic_path) |path| {
             self.pool.?.debug_panic_path = path;
         }

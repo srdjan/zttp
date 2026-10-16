@@ -51,7 +51,7 @@ The authority retains the detailed findings and acceptance evidence.
 | `0b7dc23b` | add owned syntax inputs for type consumers (U12) |
 | `43beacd7` | add direct syntax for proof and printer consumers (U13) |
 | `7b4cf5b2` | switch CHECK to direct typed parsing (U14) |
-| this commit | switch compilation to direct typed parsing (U15) |
+| `2019e62d` | switch compilation to direct typed parsing (U15) |
 
 ## U15 acceptance
 
@@ -83,35 +83,58 @@ Installed U15 binaries and their hashes remain under `retained-binaries` outside
 The earlier legacy analyzer disappears with the shared cache after its eighteen-case comparison finishes.
 All completed comparison receipts and source inputs remain intact.
 
-## Current work: U16 remaining frontend callers
+## U16 acceptance
 
-No U16 production source enters the repository yet.
-The temporary work lives under `/tmp/zttp-reset-20261015/u16-work`.
-The authority records source findings, measured corrections, and the fresh observer design.
-Astra accepts the fresh owner and transactional admission transfer.
-The first frozen observer root passes 1,176 unfiltered engine tests, with one skip.
-That result does not close the new measured compatibility gaps.
+U16 switches the remaining production frontend callers to original-source parsing.
+Astra accepts the integrated source, observer ownership, inline source profiles, and public server control.
+All 34 source hashes match the retained manifest after the complete verification script.
+The authority owns the detailed findings, failed experiments, exact comparisons, and acceptance evidence.
 
-The first native experiment restores four missing legacy `any` refusals.
-The array and initialized-comma controls retain their parser errors.
-Independent controls then expose assignment comments, raw lookahead parentheses, and keyword function names.
-The next observer draft must close those gaps before integration.
-The working overlay also contains an unreviewed printer capture draft and a parse-identity draft.
-The frozen v3 snapshot excludes the printer capture draft.
+| Receipt under `/tmp/zttp-reset-20261015/` | Result |
+|---|---|
+| `u16-frontend-final-v1` | 3,961 passed, one skipped, forty-five steps, exit 0 |
+| `u16-additional-final-v1` | 1,376 passed, one skipped, fifty steps, exit 0 |
+| `u16-runtime-final-v1` | 230 passed, five steps, exit 0 |
+| `u16-server-final-v1` | 335 passed, two skipped, five steps, exit 0 |
+| `u16-normalize-final-v1` | 33 files printed; no skip, refusal, or byte difference; exit 0 |
+| `u16-spine-final-v1` | Four steps passed, exit 0 |
+| `u16-format-final-v2` | All required Zig paths passed, exit 0 |
+| `u16-verify-final-v1` | Every unchanged script step passed, exit 0 |
 
-Prepared inline source must remain separate from raw virtual source and file TypeScript.
-The server retains `<inline>`; the shared loader retains `<eval>`.
-Machine graph records retain imports before the first failed statement.
-The benchmark retains IR optimization and its existing allocator boundaries.
-The printer requires complete source capture, including source refused by the runtime parser.
-Preparation OOM retains `strip_failed`; later printer allocation failure still propagates.
-Partial semantic Store contents do not establish complete printer observation.
+The Pi comparison matches forty-four payloads and all 9,850 stdout and stderr bytes.
+The graph comparison matches twelve records and all 5,944 stdout and stderr bytes.
+The inline CLI comparison matches twelve outcomes and functional output, with allocator leak counts retained.
+The generated-test comparison matches eight outcomes and functional output.
+Those last two comparisons exclude implementation stack traces; the authority states their exact limits.
+The imported runtime control uses the existing arena lifetime and does not establish individual payload cleanup.
 
-## Remaining work and next action
+## Current work: U17 remove reconstruction
 
-Main owns U16 observer corrections, remaining caller migration, exact comparisons, Astra review, and its local commit.
-U17 removes reconstruction only after production legacy calls reach zero.
-U18 encodes recovered workspace ownership.
+U16 acceptance is complete and ready for its isolated local commit.
+Main owns that commit and the subsequent U17 source changes.
+The fresh census records remaining legacy test oracles and adapters outside production entry paths.
+Astra identifies the required semantic compatibility rules and test controls that must remain.
+Main will remove the oracle last after the replacement behavior fixtures pass.
+
+Temporary U17 work remains under `/tmp/zttp-reset-20261015/u17-work`.
+The native AST inventory identifies 438 declarations and 186 tests in the differential module.
+Its identifier closure is an inventory, not permission to delete dependent tests.
+The pre-removal catalog hash and three measured signature-order fixtures remain in that directory and the authority.
+The TypeEnv measurement passes all 156 unfiltered tests.
+The presentation candidate passes seven rendering tests, then 817 tests through its relocated source owner.
+The catalog hash remains exact after that temporary relocation.
+`working-zts` contains the temporary relocation and later comment cleanup; no U17 source enters the repository yet.
+Its temporary forwarding alias remains necessary until the old scanner disappears.
+
+## Remaining work
+
+Main owns U17 removal, exact behavior controls, final census, required gates, Astra review, and its local commit.
+U18 introduces recovered workspace ownership without moving proof, approval, or durable session policy.
+Astra records the owner API, distinct initialization errors, failed-commit policy, and acknowledgement ordering in the session review.
 U19 removes unused proof-review state after a fresh caller census.
 U20 reconciles documentation, measured performance, final evidence, and the required quality checks.
-Main will continue until all approved phases finish.
+Main will continue through all approved phases and the quality checks.
+
+Astra accepts the final U16 execution audit with no remaining blocker.
+The final documentation gate passes all eight steps with exit 0.
+Main owns the exact-path local commit and subsequent U17 migration.

@@ -96,13 +96,14 @@ pub const Options = struct {
 };
 
 pub const Input = union(enum) {
+    original_source: []const u8,
     legacy_source: []const u8,
     parsed_store: *const TypeSyntax.Store,
 };
 
 /// Print `source` in canonical form. The caller owns the result.
 pub fn print(allocator: std.mem.Allocator, source: []const u8, options: Options) Error![]u8 {
-    return printInput(allocator, .{ .legacy_source = source }, options);
+    return printInput(allocator, .{ .original_source = source }, options);
 }
 
 /// Print one selected source form. The caller owns the result.
@@ -210,6 +211,27 @@ const Group = struct {
 // ---------------------------------------------------------------------------
 
 const Region = struct { start: u32, end: u32 };
+
+fn collectSourceRegions(
+    arena: std.mem.Allocator,
+    source: []const u8,
+    options: Options,
+) Error![]Region {
+    var observer = JsParser.initSourceObserver(arena, arena, source, .compile) catch
+        return refuse(options, .strip_failed);
+    defer observer.deinit();
+    const captures = observer.observePrintableSource() catch return refuse(options, .strip_failed);
+    var regions: std.ArrayListUnmanaged(Region) = .empty;
+    for (captures) |capture| switch (capture) {
+        .raw_type => |span| try appendRegion(arena, source, &regions, span),
+        .recorded_generic => |span| try appendGenericProjection(arena, source, &regions, span),
+        .declaration => |declaration| try appendTrimmedRegion(arena, source, &regions, .{
+            .start = declarationStart(source, declaration.name.start),
+            .end = declarationEnd(source, declaration.body.end),
+        }),
+    };
+    return finalizeRegions(arena, &regions);
+}
 
 fn collectLegacyRegions(
     arena: std.mem.Allocator,
@@ -1728,6 +1750,7 @@ fn printInto(
     self_check: bool,
 ) Error![]const u8 {
     const source = switch (input) {
+        .original_source => |value| value,
         .legacy_source => |value| value,
         .parsed_store => |store| store.source,
     };
@@ -1743,6 +1766,7 @@ fn printInto(
     if (source.len == 0) return "";
 
     const regions = switch (input) {
+        .original_source => try collectSourceRegions(arena, source, options),
         .legacy_source => try collectLegacyRegions(arena, source, options),
         .parsed_store => |store| blk: {
             store.validate() catch |err| switch (err) {
@@ -2051,7 +2075,7 @@ test "direct printer preserves measured legacy behavior" {
 
         switch (fixture.outcome) {
             .output => |expected| {
-                const legacy = try print(testing.allocator, fixture.source, .{});
+                const legacy = try printInput(testing.allocator, .{ .legacy_source = fixture.source }, .{});
                 defer testing.allocator.free(legacy);
                 const direct = try printInput(
                     testing.allocator,
@@ -2096,7 +2120,7 @@ fn runDirectPrinterAllocationSweep(allocator: std.mem.Allocator, source: []const
     defer parser.deinit();
     _ = try parser.parse();
 
-    const legacy = try print(testing.allocator, source, .{});
+    const legacy = try printInput(testing.allocator, .{ .legacy_source = source }, .{});
     defer testing.allocator.free(legacy);
     const direct = try printInput(allocator, .{ .parsed_store = &parser.type_store }, .{});
     defer allocator.free(direct);
@@ -2403,4 +2427,85 @@ test "a condition never takes a trailing comma" {
         "if (aaaa) {\n  return 1;\n}\n",
         "if (aaaa) {\n  return 1;\n}\n",
     );
+}
+
+test "source printer preserves measured recovery outputs and refusals" {
+    const fixtures = [_]struct { source: []const u8, output: ?[]const u8, refusal: ?Refusal }{
+        .{ .source = "const a = 1\nconst b = 2\n", .output = null, .refusal = .missing_semicolon },
+        .{ .source = "const value: { left : string ; right: readonly number[] } = ;\n", .output = "const value: { left : string ; right: readonly number[] } =;\n", .refusal = null },
+        .{ .source = "const f = function (value: string): string { return value; };\n", .output = "const f = function (value: string): string {\n  return value;\n};\n", .refusal = null },
+        .{ .source = "const broken = ;\nconst value: { field : string } = input;\n", .output = "const broken =;\nconst value: { field : string } = input;\n", .refusal = null },
+        .{ .source = "function handler(req: Request) { const broken = ; const value: { field : string } = req; return value; }\n", .output = "function handler(req: Request) {\n  const broken =;\n  const value: { field : string } = req;\n  return value;\n}\n", .refusal = null },
+        .{ .source = "function handler(req: Request) { const value: { field : string } = req;\n", .output = null, .refusal = .unbalanced_brackets },
+        .{ .source = "const count = 1;\r\nfunction handler(req) { return Response.text(String(count)); }\r\n", .output = null, .refusal = .carriage_return },
+        .{ .source = "while (true) {} const value: { field : string } = input;\n", .output = "while (true) {} const value: { field : string } = input;\n", .refusal = null },
+        .{ .source = "const broken = ; import   type { A , B } from \"model\"; const value: { field : string } = input;\n", .output = "const broken =;\nimport type { A, B } from \"model\";\nconst value: { field : string } = input;\n", .refusal = null },
+        .{ .source = "const broken = ; function id< T >(value: T): T { return value; } const result: number = id< number >(1);\n", .output = "const broken =;\nfunction id< T >(value: T): T {\n  return value;\n}\nconst result: number = id< number >(1);\n", .refusal = null },
+        .{ .source = "const broken = ; structural Pair<T> = { left : T ; right: T }; const pair: Pair<number> = data;\n", .output = null, .refusal = .missing_semicolon },
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value: { field : string } = input;\n", .output = null, .refusal = .comment_position },
+        .{ .source = "let first: number, second: { text :  string };\n", .output = "let first: number, second: { text :  string };\n", .refusal = null },
+        .{ .source = "let first = 1, second: { text :  string };\n", .output = "let first = 1, second: { text: string };\n", .refusal = null },
+        .{ .source = "let value!: { text :  string };\n", .output = null, .refusal = .unsupported_token },
+        .{ .source = "const { value }: { value :  string } = input;\n", .output = "const { value }: { value :  string } = input;\n", .refusal = null },
+        .{ .source = "const [value]: { value :  string } = input;\n", .output = "const [value]: { value: string } = input;\n", .refusal = null },
+        .{ .source = "const f = (value: { text : string }): number;\n", .output = "const f = (value: { text : string }): number;\n", .refusal = null },
+        .{ .source = "structural  Broken = number |;\n", .output = "structural  Broken = number |;\n", .refusal = null },
+        .{ .source = "function f<T>;\n", .output = "function f<T>;\n", .refusal = null },
+    };
+    try testing.expectEqual(@as(usize, 20), fixtures.len);
+    var printed: usize = 0;
+    var refused: usize = 0;
+    for (fixtures) |fixture| {
+        if (fixture.output) |expected| {
+            const actual = try print(testing.allocator, fixture.source, .{});
+            defer testing.allocator.free(actual);
+            try testing.expectEqualStrings(expected, actual);
+            const twice = try print(testing.allocator, actual, .{});
+            defer testing.allocator.free(twice);
+            try testing.expectEqualStrings(actual, twice);
+            printed += 1;
+        } else {
+            var reason: Refusal = .self_check;
+            try testing.expectError(error.UnprintableConstruct, print(testing.allocator, fixture.source, .{ .reason_out = &reason }));
+            try testing.expectEqual(fixture.refusal.?, reason);
+            refused += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, 14), printed);
+    try testing.expectEqual(@as(usize, 6), refused);
+}
+
+test "source printer maps preparation allocation failures and propagates output failure" {
+    const source =
+        "structural Pair<T> = { left : T };\n" ++
+        "const broken = ;\n" ++
+        "function identity<U>(value: U): U { return value; }\n" ++
+        "const result: Pair<string> = identity<string>({ left: \"ok\" });\n";
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator, preparation_failures: *usize) !void {
+            var reason: Refusal = .self_check;
+            const output = print(allocator, source, .{ .reason_out = &reason }) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                error.UnprintableConstruct => {
+                    try testing.expectEqual(Refusal.strip_failed, reason);
+                    preparation_failures.* += 1;
+                    return error.OutOfMemory;
+                },
+            };
+            allocator.free(output);
+        }
+    };
+    var preparation_failures: usize = 0;
+    try testing.checkAllAllocationFailures(testing.allocator, Context.run, .{&preparation_failures});
+    try testing.expect(preparation_failures > 0);
+
+    var baseline = testing.FailingAllocator.init(testing.allocator, .{});
+    const output = try print(baseline.allocator(), source, .{});
+    baseline.allocator().free(output);
+    try testing.expect(baseline.alloc_index > 0);
+    var faulted = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = baseline.alloc_index - 1 });
+    var reason: Refusal = .self_check;
+    try testing.expectError(error.OutOfMemory, print(faulted.allocator(), source, .{ .reason_out = &reason }));
+    try testing.expect(faulted.has_induced_failure);
+    try testing.expectEqual(Refusal.self_check, reason);
 }

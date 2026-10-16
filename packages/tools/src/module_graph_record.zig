@@ -78,7 +78,7 @@ pub const BuildError = error{
     EntryUnreadable,
     GraphTooLarge,
     UnsupportedSourceExtension,
-} || std.mem.Allocator.Error || agent_identity.PathError;
+} || zts.SourceObservationError || std.mem.Allocator.Error || agent_identity.PathError;
 
 pub const GraphRecord = struct {
     /// Ascending canonical-path order, never traversal order, so the digest
@@ -246,28 +246,24 @@ fn collectImports(
     queue: *std.ArrayList([]const u8),
     seen: *std.StringHashMap(void),
 ) !void {
-    // The parser reads stripped source, exactly as the runtime graph does. A
-    // strip failure is not fatal here: an unparseable module still belongs in
-    // the graph with its digest, and `check` is what reports the error.
-    var prepared: ?zts.PreparedSource = zts.PreparedSource.init(
-        allocator,
-        source,
-        importer_rel,
-        .{},
-    ) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.UnsupportedSourceExtension => return error.UnsupportedSourceExtension,
-        else => null,
-    };
-    defer if (prepared) |*owned| owned.deinit();
-    const parse_source = if (prepared) |*owned| owned.parserInput() else source;
-
-    var js_parser = parser.JsParser.init(allocator, parse_source) catch return;
+    const kind = zts.classifySourcePath(importer_rel);
+    if (kind == .unsupported) return error.UnsupportedSourceExtension;
+    const typed = if (kind.isTyped()) typed: {
+        if (try zts.checkSourceAdmission(allocator, source)) |failure| {
+            zts.logAdmissionFailure(source, failure);
+            break :typed false;
+        }
+        break :typed true;
+    } else false;
+    var js_parser = (if (typed)
+        parser.JsParser.initAdmission(allocator, allocator, source, .compile)
+    else
+        parser.JsParser.init(allocator, source)) catch return;
     defer js_parser.deinit();
     _ = js_parser.parse() catch {};
 
     const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const node_count = view.nodeCount();
+    const node_count = js_parser.getRetainedImportNodeCount();
     var idx: usize = 0;
     while (idx < node_count) : (idx += 1) {
         const node: u32 = @intCast(idx);
@@ -656,5 +652,58 @@ test "contextFreeHash is the builtin-only digest and is stable" {
     for (h) |c| {
         const hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
         try testing.expect(hex);
+    }
+}
+
+test "tolerant graph observation preserves imports before failed top-level statements" {
+    const ExpectedImport = struct { specifier: []const u8, kind: ImportKind, target: []const u8 };
+    const ExpectedRejection = struct { specifier: []const u8, importer: []const u8, reason: []const u8 };
+    const cases = [_]struct {
+        source: []const u8,
+        modules: usize,
+        imports: []const ExpectedImport,
+        rejected: []const ExpectedRejection,
+    }{
+        .{ .source = "import { env } from \"zttp:env\"; const broken = ; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
+        .{ .source = "const broken = ; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{} },
+        .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{.{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" }} },
+        .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; }", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
+        .{ .source = "import { env } from \"zttp:env\"; while (true) {} import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
+        .{ .source = "import { env } from \"zttp:env\"; const value: any = 1; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
+        .{ .source = "const value: any = 1; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{} },
+        .{ .source = "import { env } from \"zttp:env\"; import type { A } /* ; */ from \"./dep\"; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
+        .{ .source = "import { a } from \"unknown\"; import { b } from \"zttp-ext:missing\"; import { c } from \"../outside\"; import { answer } from \"./dep\";", .modules = 2, .imports = &.{ .{ .specifier = "unknown", .kind = .unresolved, .target = "" }, .{ .specifier = "zttp-ext:missing", .kind = .extension, .target = "" }, .{ .specifier = "../outside", .kind = .relative, .target = "" }, .{ .specifier = "./dep", .kind = .relative, .target = "dep.ts" } }, .rejected = &.{ .{ .specifier = "../outside", .importer = "entry.ts", .reason = "path_outside_project_root" }, .{ .specifier = "unknown", .importer = "entry.ts", .reason = "unknown_specifier" }, .{ .specifier = "zttp-ext:missing", .importer = "entry.ts", .reason = "extension_manifest_unavailable" } } },
+        .{ .source = "structural Broken = number |; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
+        .{ .source = "import { env } from \"zttp:env\"; function wrapper() { const broken = ; const value: number = 1; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{.{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" }} },
+        .{ .source = "function wrapper() { import { env } from \"zttp:env\"; const broken = ; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{.{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" }} },
+    };
+    try testing.expectEqual(@as(usize, 12), cases.len);
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "entry.ts", .data = "" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "dep.ts", .data = "export const answer: number = 1;" });
+    const root = try tmpRoot(&tmp, testing.allocator);
+    defer testing.allocator.free(root);
+    for (cases) |case| {
+        var graph = try buildWithEntrySource(testing.allocator, testing.io, root, "entry.ts", case.source);
+        defer graph.deinit(testing.allocator);
+        try testing.expectEqual(case.modules, graph.modules.len);
+        const entry = entry: {
+            for (graph.modules) |module| if (std.mem.eql(u8, module.path, "entry.ts")) break :entry module;
+            return error.TestUnexpectedResult;
+        };
+        try testing.expectEqualSlices(u8, &agent_identity.sourceDigest(case.source), &entry.source_digest);
+        try testing.expectEqual(case.imports.len, entry.imports.len);
+        for (case.imports, entry.imports) |want, found| {
+            try testing.expectEqualStrings(want.specifier, found.specifier);
+            try testing.expectEqual(want.kind, found.kind);
+            try testing.expectEqualStrings(want.target, found.target);
+        }
+        try testing.expectEqual(case.rejected.len, graph.rejected.len);
+        for (case.rejected, graph.rejected) |want, found| {
+            try testing.expectEqualStrings(want.specifier, found.specifier);
+            try testing.expectEqualStrings(want.importer, found.importer);
+            try testing.expectEqualStrings(want.reason, found.reason);
+        }
     }
 }
