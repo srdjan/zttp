@@ -119,13 +119,13 @@ partial output on refusal or failure. Each caller still recognizes
 
 Production callers retain source preparation and the legacy parser initializer during the reset's comparison phases.
 `JsParser.initTyped` parses original source with the same runtime parser and a separate allocator for type syntax.
-The parser owns that syntax store, and `ParseResult` transfers the store with the other parser outputs.
+Private comparison callers read the parser-owned syntax store while the parser remains alive.
+`ParseResult` can transfer that store, but its high-level entry still initializes the legacy parser.
 Type-only syntax creates no runtime node, atom, constant, or scope.
 
-The comparison covers one variable annotation with primitives, records, arrays, tuples, unions, intersections, literals, templates, and function types.
-The comparison also covers named references and recognized structural and nominal declarations.
-It also covers generic applications, structural generic declarations, untyped generic functions, untyped generic arrows, and explicit call arguments.
-Dedicated comparisons cover typed function headers and type-only modules before the complete-source comparison expands.
+Private comparisons cover every current syntax-owner family, including multiple variable annotations and typed function headers.
+They also cover declarations, generics, calls, erased prefixes, type-only modules, predicates, and recovery.
+Complete-source consumer comparisons cover direct `TypeEnv`, `TypeChecker`, `StrictChecker`, and function-specification behavior.
 Seventeen owned arrays hold syntax nodes, child lists, annotations, declarations, generic projections, signatures, module records, and erased prefixes.
 Names and literal text borrow original source spans.
 
@@ -174,7 +174,8 @@ Validation checks interval relationships, exact capture provenance, and complete
 The private comparison admits bounded object, numeric group, simple arrow, and statement block operands.
 Its nested group operands stop at a number; direct parser support remains separate from comparison admission.
 
-A compiler test module lowers syntax directly through existing `TypePool` constructors and binds `TypeEnv` through declaration identities.
+One compiler-tier helper lowers validated syntax ranges through existing `TypePool` constructors.
+The `TypeEnv` consumer binds those values through declaration and runtime owner identities.
 Whole-body alias lookup precedes constructor calls, and source declarations retain their module-wide type namespace.
 The lowerer preserves nominal identity and the existing contractivity census.
 Direct generic APIs bind scope ownership to one environment and remove valid owned scopes after allocation failure.
@@ -187,7 +188,38 @@ Application lowering preserves constructor allocation order and defers unused ba
 The comparison checks exact ordered type structure before supplementary canonical keys.
 Canonical encoding has its own depth limit and does not establish parser admission.
 
-The existing checker retains its legacy annotation input until the consumer migration.
+TypeEnv now distinguishes omitted, legacy, and direct source metadata.
+The private consumer path accepts ordinary variable, parameter, and return annotations through validated final owners.
+It also accepts structural and nominal declarations, including structural generics and ignored nominal generic parameters.
+TypeEnv and the comparison tests share indexed declaration publication, then finish contractivity once after the complete namespace.
+One compiler-tier helper lowers validated syntax ranges into pool nodes for TypeEnv and the comparison tests.
+TypeEnv retains alias resolution, construction order, raw spellings, and publication.
+Captured generic sets retain existing parameter indices and constraints in the same live environment.
+Short scope reuse creates no pool parameter or interned name.
+Scope entry and closure retain owner validation and operational health checks.
+Structural generic declarations share their population helper with the comparison tests.
+Absent bodies create no alias, while present bodies with empty parameter lists retain generic aliases.
+Callable generic construction retains parameter indices for later header reuse.
+Call construction merges actual and compatibility records in authored order after every callable scope closes.
+Actual-call queries reject compatibility records attached to function or arrow owners.
+Erased prefixes complete transient generic work in authored order without publishing signatures.
+Their balanced list bodies retain bounds, defaults, and operator spellings under the existing operand and comparison guards.
+Return construction selects the stored legacy classification before it reads structured predicate syntax.
+Ordinary returns retain their complete raw spelling and lower before signature replay.
+Guards replay first and retain boolean returns without ordinary return spelling.
+Narrowing also requires exact literal-marker provenance and a match among the first sixteen annotated parameter names.
+Missing targets create no narrowing type, even when compound syntax exists.
+An allocation failure keeps partial metadata unhealthy; an eligibility refusal leaves selection unchanged.
+
+A private observer can inspect signature replay capacity and map order during native tests.
+Its borrowed snapshots expire when the callback returns; production population passes no observer.
+The native tests compare complete fallback maps and retained entries across successful and failed growth.
+
+The checked legacy entry preserves repeated legacy population and rejects mixed source modes.
+Omitted source typing retains installed module and ABI metadata.
+TypeChecker and StrictChecker check environment and pool health before accepting results.
+Function specifications preserve declaration-shape eligibility, including empty declarations for variable-arrow capsules.
+Production callers retain legacy inputs while the consumer migration continues.
 
 Named function comments retain separate compatibility paths.
 A bounded comment before the name selects legacy call arguments when the list and parameter opener remain adjacent.
@@ -195,14 +227,16 @@ A bounded comment after the list selects ignored parameters.
 Those named headers retain runtime-only parsing and refuse typed parameter syntax at its original location.
 Generic arrows retain typed headers through their independently admitted comment paths.
 
-The private preflight scans eligibility before runtime parsing and preserves admission diagnostic order.
+The `expectEquivalent` comparison preflight scans eligibility before runtime parsing.
 The preflight inspects function bodies with a bounded iterative depth counter.
-The complete-source preflight still excludes typed signatures that dedicated header comparisons already cover.
+That comparison preflight still excludes many typed signatures.
+Its diagnostics cover a bounded subset of legacy admission rules.
+Separate complete-source consumer comparisons cover typed functions, arrows, predicates, declarations, calls, and shadowing.
 Private exclusions also retain malformed lists and unsupported raw capture windows until later reset phases.
 Unsupported comparison forms produce `out_of_slice`, which declines comparison without selecting another frontend.
 Independent atom tables support comparisons of runtime stores, source locations, binding identities, and allocation counts.
 
-Later reset phases extend the syntax store before any production caller switches.
+Later reset phases switch production callers after private parser and consumer parity.
 
 ### Analysis passes
 

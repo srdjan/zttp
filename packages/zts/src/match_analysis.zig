@@ -1274,7 +1274,7 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var match_node: NodeIndex = null_node;
     var i: NodeIndex = 0;

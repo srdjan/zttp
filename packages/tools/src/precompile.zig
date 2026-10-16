@@ -8255,6 +8255,145 @@ fn expectLegacyCompoundDiagnostic(
     try std.testing.expect(actual.repair_intent == null);
 }
 
+test "CHECK preserves repeated-name fallback through growth and source offsets" {
+    const allocator = std.testing.allocator;
+    const Layout = enum { plain, reordered, same_line };
+    const cases = [_]struct {
+        count: usize,
+        layout: Layout,
+        leading_spaces: usize,
+        diagnostics: []const LegacyCompoundDiagnostic,
+    }{
+        .{ .count = 6, .layout = .plain, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 8, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 8, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 6, .layout = .plain, .leading_spaces = 1, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 8, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 8, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 6, .layout = .reordered, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 2, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 8, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 6, .layout = .same_line, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 1, .column = 244, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 47, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 238, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 7, .layout = .plain, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 9, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 9, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 7, .layout = .plain, .leading_spaces = 1, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 9, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 9, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 7, .layout = .reordered, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS202", .message = "wrong number of arguments: expected 2, got 1", .line = 9, .column = 8, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 7, .layout = .same_line, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 1, .column = 303, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 47, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 297, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 12, .layout = .plain, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 14, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 14, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 12, .layout = .plain, .leading_spaces = 1, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 14, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 14, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 12, .layout = .reordered, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 2, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 14, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 12, .layout = .same_line, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 1, .column = 598, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 47, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 592, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 13, .layout = .plain, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 15, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 15, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 13, .layout = .plain, .leading_spaces = 1, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 15, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 15, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 13, .layout = .reordered, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 2, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 15, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 13, .layout = .same_line, .leading_spaces = 0, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 1, .column = 657, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 47, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 1, .column = 651, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+        .{ .count = 7, .layout = .reordered, .leading_spaces = 3, .diagnostics = &.{
+            .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 2, .column = 9, .suggestion = null },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+            .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 9, .column = 3, .suggestion = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names." },
+        } },
+    };
+    const number_function = "function useNumber(value: number): number {\n  inner(value);\n  function inner(item: number): number { return item; }\n  return value;\n}\n";
+    const text_function = "function useText(value: string): string {\n  inner(value, \"\");\n  function inner(item: string, suffix: string): string { return item; }\n  return value;\n}\n";
+    const handler = "export function handler(req: Request): Response {\n  return Response.json({ number: useNumber(1), text: useText(\"x\") });\n}\n";
+    const expected_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
+    var observed: usize = 0;
+    for (cases) |case| {
+        try std.testing.expect(case.count >= 5);
+        try std.testing.expect(case.count <= 13);
+        try std.testing.expect(case.leading_spaces <= 3);
+        var source_writer = std.Io.Writer.Allocating.init(allocator);
+        defer source_writer.deinit();
+        for (0..case.leading_spaces) |_| try source_writer.writer.writeByte(' ');
+        try source_writer.writer.writeAll(if (case.layout == .reordered) text_function else number_function);
+        for (0..case.count - 5) |index| {
+            try source_writer.writer.print("function padding{d}(value: number): number {{ return value; }}\n", .{index});
+        }
+        try source_writer.writer.writeAll(if (case.layout == .reordered) number_function else text_function);
+        try source_writer.writer.writeAll(handler);
+        if (case.layout == .same_line) try source_writer.writer.writeByte('\n');
+        const source = try allocator.dupe(u8, source_writer.written());
+        defer allocator.free(source);
+        if (case.layout == .same_line) {
+            for (source[0 .. source.len - 1]) |*byte| {
+                if (byte.* == '\n') byte.* = ' ';
+            }
+        }
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        const error_count: u32 = @intCast(case.diagnostics.len);
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+        try std.testing.expectEqual(error_count - 1, result.strict_errors);
+        try std.testing.expect(result.contract == null);
+        try std.testing.expectEqual(error_count, result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 17), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
 test "CHECK preserves legacy compound type diagnostics and semantic prefixes" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
@@ -9432,6 +9571,63 @@ test "CHECK preserves typed arrow return forms and parameter refusals" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
+test "CHECK preserves predicate marker classification" {
+    const FailureStage = enum { types, contract };
+    const cases = [_]struct {
+        source: []const u8,
+        stage: FailureStage,
+        diagnostic: LegacyCompoundDiagnostic,
+    }{
+        .{
+            .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n",
+            .stage = .types,
+            .diagnostic = .{
+                .code = "ZTS211",
+                .message = "type predicate 'guard' is not verified by its body",
+                .line = 1,
+                .column = 1,
+                .suggestion = "Return one admitted narrowing test over the named parameter, combined with &&, || or !.",
+            },
+        },
+        .{
+            .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n",
+            .stage = .contract,
+            .diagnostic = .{
+                .code = "ZTS500",
+                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                .line = 1,
+                .column = 1,
+                .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`.",
+            },
+        },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            std.testing.allocator,
+            case.source,
+            "handler.ts",
+            .{ .json_mode = true },
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        const expected_stages = switch (case.stage) {
+            .types => StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }),
+            .contract => StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict, .contract, .trace, .spec, .canonical }),
+        };
+        try std.testing.expectEqual(expected_stages, result.stages_run);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, if (case.stage == .types) 1 else 0), result.type_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+        try std.testing.expectEqual(case.stage == .contract, result.contract != null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
 test "CHECK preserves type-only module admission and refusal diagnostics" {
     const FailureStage = enum { strip, parse, contract };
     const proof_diagnostic: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
@@ -9600,6 +9796,114 @@ test "CHECK preserves typed generic arrows and comment classification" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
+test "CHECK preserves repeated global declaration bindings" {
+    const Case = enum {
+        two_typed,
+        typed_untyped,
+        untyped_typed_bad,
+        two_typed_bad,
+    };
+    const proof_suggestion =
+        "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
+        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe. " ++
+        "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
+        "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
+        "\"state_isolated\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
+        "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
+        "\"injection_safe\" | \"canonical\">`.";
+    const cases = [_]struct {
+        case: Case,
+        source: []const u8,
+        type_errors: u32,
+        has_contract: bool,
+        diagnostics: []const LegacyCompoundDiagnostic,
+    }{
+        .{
+            .case = .two_typed,
+            .source = "const value: number = 1;\n" ++
+                "const value: string = \"x\";\n",
+            .type_errors = 0,
+            .has_contract = true,
+            .diagnostics = &.{.{
+                .code = "ZTS500",
+                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                .line = 1,
+                .column = 1,
+                .suggestion = proof_suggestion,
+            }},
+        },
+        .{
+            .case = .typed_untyped,
+            .source = "const value: number = 1;\n" ++
+                "const value = \"x\";\n",
+            .type_errors = 0,
+            .has_contract = true,
+            .diagnostics = &.{.{
+                .code = "ZTS500",
+                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                .line = 1,
+                .column = 1,
+                .suggestion = proof_suggestion,
+            }},
+        },
+        .{
+            .case = .untyped_typed_bad,
+            .source = "const value = 1;\n" ++
+                "const value: string = 2;\n",
+            .type_errors = 1,
+            .has_contract = false,
+            .diagnostics = &.{.{
+                .code = "ZTS200",
+                .message = "type '2' is not assignable to type 'string'",
+                .line = 2,
+                .column = 1,
+            }},
+        },
+        .{
+            .case = .two_typed_bad,
+            .source = "const value: number = \"x\";\n" ++
+                "const value: string = 2;\n",
+            .type_errors = 2,
+            .has_contract = false,
+            .diagnostics = &.{
+                .{
+                    .code = "ZTS200",
+                    .message = "type '\"x\"' is not assignable to type 'number'",
+                    .line = 1,
+                    .column = 1,
+                },
+                .{
+                    .code = "ZTS200",
+                    .message = "type '2' is not assignable to type 'string'",
+                    .line = 2,
+                    .column = 1,
+                },
+            },
+        },
+    };
+    var seen = std.EnumSet(Case).initEmpty();
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            std.testing.allocator,
+            case.source,
+            "handler.ts",
+            .{ .json_mode = true },
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(case.type_errors, result.type_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+        try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.totalErrors());
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        try std.testing.expectEqual(case.has_contract, result.contract != null);
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(Case).len, seen.count());
+}
+
 test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
     const cases = [_]struct { source: []const u8, diagnostics: []const LegacyCompoundDiagnostic }{
         .{ .source = "nominal Id<T extends void> = T;", .diagnostics = &.{
@@ -9640,5 +9944,277 @@ test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
         observed += 1;
     }
     try std.testing.expectEqual(@as(usize, 5), cases.len);
+    try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK preserves measured lookup winners shadows and captures" {
+    const ambient_suggestion =
+        "Import a published virtual-module capability or use an ambient name listed by " ++
+        "meta.ambient_names.";
+    const predicate_suggestion =
+        "Return one admitted narrowing test over the named parameter, combined with &&, || or !.";
+    const return_suggestion =
+        "the enclosing function's declared return type is what this value must match; " ++
+        "when it comes back from a virtual-module call, wrap it rather than returning it directly";
+    const untyped_contract_suggestion =
+        "this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
+        "default profile, but it does not hold: fault_covered. Return a narrow Proof capsule " ++
+        "with only the properties it holds, e.g. `function handler(req: Request): " ++
+        "Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | " ++
+        "\"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | " ++
+        "\"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | " ++
+        "\"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
+    const capture_contract_suggestion =
+        "this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
+        "default profile, but it does not hold: fault_covered, idempotent, pure, read_only, " ++
+        "retry_safe, stateless. Return a narrow Proof capsule with only the properties it holds, " ++
+        "e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | " ++
+        "\"state_isolated\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | " ++
+        "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
+        "\"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
+    const cases = [_]struct {
+        source: []const u8,
+        type_errors: u32,
+        strict_errors: u32,
+        has_contract: bool,
+        diagnostics: []const LegacyCompoundDiagnostic,
+    }{
+        .{
+            .source =
+            \\function useNumber(value: number): number {
+            \\  inner(value);
+            \\  function inner(item: number): number { return item; }
+            \\  return value;
+            \\}
+            \\function useText(value: string): string {
+            \\  inner(value, "");
+            \\  function inner(item: string, suffix: string): string { return item; }
+            \\  return value;
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ number: useNumber(1), text: useText("x") });
+            \\}
+            \\
+            ,
+            .type_errors = 1,
+            .strict_errors = 2,
+            .has_contract = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 7, .column = 9 },
+                .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 2, .column = 3, .suggestion = ambient_suggestion },
+                .{ .code = "ZTS629", .message = "unpublished ambient global 'inner'", .line = 7, .column = 3, .suggestion = ambient_suggestion },
+            },
+        },
+        .{
+            .source =
+            \\{
+            \\  function isText(value: string | number): value is string {
+            \\    return typeof value === "string";
+            \\  }
+            \\  const raw: string | number = "first";
+            \\  if (isText(raw)) { const text: string = raw; }
+            \\}
+            \\{
+            \\  function isText(skip: number, value: string | number): value is string {
+            \\    return typeof value === "string";
+            \\  }
+            \\  const raw: string | number = "second";
+            \\  if (isText(0, raw)) { const text: string = raw; }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ ok: true });
+            \\}
+            \\
+            ,
+            .type_errors = 2,
+            .strict_errors = 0,
+            .has_contract = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS211", .message = "type predicate 'isText' is not verified by its body", .line = 9, .column = 3, .suggestion = predicate_suggestion },
+                .{ .code = "ZTS200", .message = "type 'string | number' is not assignable to type 'string'", .line = 13, .column = 25 },
+            },
+        },
+        .{
+            .source =
+            \\function numericValue(): number {
+            \\  const value: number = make();
+            \\  function make(): number { return 1; }
+            \\  return value;
+            \\}
+            \\function textValue(): string {
+            \\  const value: string = make();
+            \\  function make(): string { return "text"; }
+            \\  return value;
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ number: numericValue(), text: textValue() });
+            \\}
+            \\
+            ,
+            .type_errors = 1,
+            .strict_errors = 1,
+            .has_contract = false,
+            .diagnostics = &.{
+                .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 3 },
+                .{ .code = "ZTS629", .message = "unpublished ambient global 'make'", .line = 7, .column = 25, .suggestion = ambient_suggestion },
+            },
+        },
+        .{
+            .source =
+            \\const item: number = 1;
+            \\function readItem(): string {
+            \\  const item = "inferred";
+            \\  {
+            \\    const item: string = "typed";
+            \\    return item;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ top: item, nested: readItem() });
+            \\}
+            \\
+            ,
+            .type_errors = 0,
+            .strict_errors = 0,
+            .has_contract = true,
+            .diagnostics = &.{.{
+                .code = "ZTS500",
+                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                .line = 9,
+                .column = 24,
+                .suggestion = untyped_contract_suggestion,
+            }},
+        },
+        .{
+            .source =
+            \\function compute(): number {
+            \\  const value: number = 1;
+            \\  const readOuter = (): number => value;
+            \\  {
+            \\    const value: string = "inner";
+            \\    const readInner = (): string => value;
+            \\    const outerResult: number = readOuter();
+            \\    const innerResult: string = readInner();
+            \\    return outerResult;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ value: compute() });
+            \\}
+            \\
+            ,
+            .type_errors = 0,
+            .strict_errors = 0,
+            .has_contract = true,
+            .diagnostics = &.{
+                .{
+                    .code = "ZTS500",
+                    .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                    .line = 12,
+                    .column = 24,
+                    .suggestion = capture_contract_suggestion,
+                },
+                .{
+                    .code = "ZTS606",
+                    .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: pure)",
+                    .line = 12,
+                    .column = 24,
+                    .suggestion = "annotate `compute` with `Proof<T, \"pure\">` and satisfy it, or inline the helper into the handler.",
+                },
+                .{
+                    .code = "ZTS606",
+                    .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)",
+                    .line = 12,
+                    .column = 24,
+                    .suggestion = "annotate `compute` with `Proof<T, \"read_only\">` and satisfy it, or inline the helper into the handler.",
+                },
+                .{
+                    .code = "ZTS606",
+                    .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)",
+                    .line = 12,
+                    .column = 24,
+                    .suggestion = "annotate `compute` with `Proof<T, \"deterministic\">` and satisfy it, or inline the helper into the handler.",
+                },
+            },
+        },
+        .{
+            .source =
+            \\const item: number = 1;
+            \\function readItem(): string {
+            \\  const item = "inferred";
+            \\  {
+            \\    const item: string = 2;
+            \\    return item;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ top: item, nested: readItem() });
+            \\}
+            \\
+            ,
+            .type_errors = 1,
+            .strict_errors = 0,
+            .has_contract = false,
+            .diagnostics = &.{.{
+                .code = "ZTS200",
+                .message = "type '2' is not assignable to type 'string'",
+                .line = 5,
+                .column = 5,
+            }},
+        },
+        .{
+            .source =
+            \\function compute(): number {
+            \\  const value: number = 1;
+            \\  const readOuter = (): number => value;
+            \\  {
+            \\    const value: string = "inner";
+            \\    const readInner = (): number => value;
+            \\    const outerResult: number = readOuter();
+            \\    const innerResult: number = readInner();
+            \\    return outerResult;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ value: compute() });
+            \\}
+            \\
+            ,
+            .type_errors = 1,
+            .strict_errors = 0,
+            .has_contract = false,
+            .diagnostics = &.{.{
+                .code = "ZTS204",
+                .message = "return type does not match declared return type",
+                .line = 6,
+                .column = 23,
+                .suggestion = return_suggestion,
+            }},
+        },
+    };
+    var observed: usize = 0;
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            std.testing.allocator,
+            case.source,
+            "handler.ts",
+            .{ .json_mode = true },
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(case.type_errors, result.type_errors);
+        try std.testing.expectEqual(case.strict_errors, result.strict_errors);
+        try std.testing.expectEqual(
+            @as(u32, @intCast(case.diagnostics.len)),
+            result.totalErrors(),
+        );
+        try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
+            try expectLegacyCompoundDiagnostic(actual, expected);
+        }
+        try std.testing.expectEqual(case.has_contract, result.contract != null);
+        observed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 7), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }

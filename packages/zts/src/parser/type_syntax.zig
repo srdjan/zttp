@@ -3809,20 +3809,7 @@ pub fn isPrivateGenericListEligible(source: []const u8, scan: GenericListScan) b
 }
 
 pub fn isPrivateErasedPrefixListEligible(source: []const u8, scan: GenericListScan) bool {
-    if (!isPrivateGenericListEligible(source, scan) or scan.span.end - scan.span.start < 2) {
-        return false;
-    }
-    const body = trimSpan(source, .{
-        .start = scan.span.start + 1,
-        .end = scan.span.end - 1,
-    });
-    if (body.start == body.end) return true;
-    if (!isIdentifierStart(source[body.start])) return false;
-    var offset: usize = body.start + 1;
-    while (offset < body.end) : (offset += 1) {
-        if (!isIdentifierContinue(source[offset])) return false;
-    }
-    return true;
+    return isPrivateGenericListEligible(source, scan) and scan.span.end - scan.span.start >= 2;
 }
 
 pub fn scanExplicitCallTypeArguments(

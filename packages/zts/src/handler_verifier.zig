@@ -1812,7 +1812,7 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     @import("abi_types.zig").populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, null, &env);
     defer type_checker.deinit();

@@ -525,7 +525,7 @@ pub const TypeEnvStorage = struct {
         module_types_mod.populateModuleTypes(&self.env, &self.pool, allocator);
         abi_types_mod.populateHandlerAbiTypes(&self.env, &self.pool, allocator);
         try self.pool.ensureHealthy();
-        if (type_map) |map| self.env.populateFromTypeMap(map);
+        if (type_map) |map| try self.env.populateFromTypeMap(map);
         try self.finishInitialization();
     }
 
@@ -1290,7 +1290,7 @@ pub fn extractContractResultFromParsed(
     module_types_mod.populateModuleTypes(&type_env, &type_pool, allocator);
     abi_types_mod.populateHandlerAbiTypes(&type_env, &type_pool, allocator);
     if (opts.type_map) |type_map| {
-        type_env.populateFromTypeMap(type_map);
+        try type_env.populateFromTypeMap(type_map);
     }
 
     var type_checker = TypeChecker.init(
@@ -1776,7 +1776,7 @@ test "TypeEnvStorage rejects a late poisoned TypePool" {
     module_types_mod.populateModuleTypes(&storage.env, &storage.pool, allocator);
     abi_types_mod.populateHandlerAbiTypes(&storage.env, &storage.pool, allocator);
     try storage.pool.ensureHealthy();
-    storage.env.populateFromTypeMap(&type_map);
+    try storage.env.populateFromTypeMap(&type_map);
     try storage.pool.ensureHealthy();
 
     const record = storage.pool.addRecord(allocator, &.{.{

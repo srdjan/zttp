@@ -8,8 +8,14 @@ const retired_types_module = @import("zts-base").module_specifier.retired_types_
 const type_env_mod = @import("type_env.zig");
 const type_key = @import("type_key.zig");
 const type_pool_mod = @import("type_pool.zig");
+const type_syntax_lowering = @import("type_syntax_lowering.zig");
 const module_types = @import("module_types.zig");
 const abi_types = @import("abi_types.zig");
+const effect_inference = @import("effect_inference.zig");
+const function_specs = @import("function_specs.zig");
+const contract_types = @import("zts-contracts").contract_types;
+const strict_checker_mod = @import("strict_checker.zig");
+const type_checker_mod = @import("type_checker.zig");
 
 const AtomTable = engine.atom_table.AtomTable;
 const JsParser = engine.parser.JsParser;
@@ -23,9 +29,6 @@ const TypeEnv = type_env_mod.TypeEnv;
 const TypeIndex = type_pool_mod.TypeIndex;
 const TypePool = type_pool_mod.TypePool;
 const TypeTag = type_pool_mod.TypeTag;
-const RecordField = type_pool_mod.RecordField;
-const FuncParam = type_pool_mod.FuncParam;
-const PoolTemplatePart = type_pool_mod.TemplatePart;
 const null_type_idx = type_pool_mod.null_type_idx;
 const parseTypeExpr = type_pool_mod.parseTypeExpr;
 
@@ -1784,7 +1787,7 @@ fn compareLowering(
     try legacy_env.ensureHealthy();
     module_types.populateModuleTypes(&legacy_env, &legacy_pool, allocator);
     abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, allocator);
-    legacy_env.populateFromTypeMap(prepared.typeMap() orelse return false);
+    try legacy_env.populateFromTypeMap(prepared.typeMap() orelse return false);
     try legacy_pool.ensureHealthy();
     try legacy_env.ensureHealthy();
 
@@ -1948,7 +1951,7 @@ fn expectOrderedPrefixStoreLowering(
     defer legacy_env.deinit();
     module_types.populateModuleTypes(&legacy_env, &legacy_pool, allocator);
     abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, allocator);
-    legacy_env.populateFromTypeMap(prepared.typeMap() orelse
+    try legacy_env.populateFromTypeMap(prepared.typeMap() orelse
         return error.TestUnexpectedResult);
     try legacy_pool.ensureHealthy();
     try legacy_env.ensureHealthy();
@@ -2058,67 +2061,13 @@ fn lowerSyntaxStoreInternal(
     defer allocator.free(lowered);
     @memset(lowered, null_type_idx);
 
-    for (store.declarations.items) |declaration| {
-        const present = switch (declaration.body) {
-            .absent => continue,
-            .present => |body| body,
-        };
-        if (declaration.generic_owner) |owner_index| {
-            const syntax_owner = store.generic_owners.items[owner_index];
-            if (std.meta.activeTag(syntax_owner.identity) == .structural_declaration and
-                std.meta.activeTag(syntax_owner.compatibility) == .declaration_parameters)
-            {
-                const projected = store.projectedGenericParameterSlice(syntax_owner.projected_parameters) orelse
-                    return error.InvalidTypeRange;
-                var inputs: [type_env_mod.MAX_TYPE_PARAMS]type_env_mod.ParsedGenericInput = undefined;
-                for (projected, 0..) |parameter, index| {
-                    inputs[index] = .{ .name = parameter.name_span.text(store.source) };
-                }
-                var scope = try env.beginParsedGenerics(inputs[0..projected.len]);
-                const type_idx = lowerOwnedGenericRoot(
-                    allocator,
-                    store,
-                    pool,
-                    env,
-                    lowered,
-                    &application_bases,
-                    &scope,
-                    present.root,
-                    present.node_range,
-                    present.raw_span,
-                ) catch |err| return closeParsedScopeAfterError(env, &scope, err);
-                env.putParsedGenericAlias(
-                    declaration.name_span.text(store.source),
-                    &scope,
-                    type_idx,
-                ) catch |err| return closeParsedScopeAfterError(env, &scope, err);
-                try env.endParsedGenerics(&scope);
-                continue;
-            }
-        }
-        const type_idx = try lowerOwnedRoot(
-            allocator,
+    for (store.declarations.items, 0..) |_, declaration_index| {
+        try env.populateParsedDeclaration(
             store,
-            pool,
-            env,
-            lowered,
             &application_bases,
-            present.root,
-            present.node_range,
-            present.raw_span,
+            lowered,
+            declaration_index,
         );
-        const name = declaration.name_span.text(store.source);
-        switch (declaration.kind) {
-            .structural => env.putTypeAlias(name, type_idx),
-            .nominal => {
-                if (type_idx != null_type_idx) {
-                    const nominal = pool.addNominalAlias(allocator, type_idx, name);
-                    if (nominal != null_type_idx) env.putTypeAlias(name, nominal);
-                }
-            },
-        }
-        try pool.ensureHealthy();
-        try env.ensureHealthy();
     }
     env.finishTypeAliasPopulation();
     try env.ensureHealthy();
@@ -2292,10 +2241,10 @@ fn lowerTransientGenericProjection(
             application_bases,
             fragment_index,
             true,
-        ) catch |err| return closeParsedScopeAfterError(env, &scope, err);
+        ) catch |err| return env.closeParsedScopeAfterError(&scope, err);
     }
     env.installParsedConstraints(&scope, inputs[0..projected.len]) catch |err|
-        return closeParsedScopeAfterError(env, &scope, err);
+        return env.closeParsedScopeAfterError(&scope, err);
     try env.endParsedGenerics(&scope);
 }
 
@@ -2336,48 +2285,6 @@ fn parserIrView(parser: *const JsParser) engine.parser.IrView {
     return engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
 }
 
-fn closeParsedScopeAfterError(
-    env: *TypeEnv,
-    scope: *type_env_mod.ParsedGenericScope,
-    original: anyerror,
-) anyerror {
-    const prior_depth = scope.prior_depth;
-    env.endParsedGenerics(scope) catch |cleanup| {
-        if (scope.active or env.generic_scopes.items.len != prior_depth) return error.InvalidParsedGenericOwner;
-        return switch (cleanup) {
-            error.OutOfMemory, error.TypePoolCapacityExceeded => original,
-            else => cleanup,
-        };
-    };
-    if (scope.active or env.generic_scopes.items.len != prior_depth) {
-        return error.InvalidParsedGenericOwner;
-    }
-    return original;
-}
-
-fn lowerOwnedGenericRoot(
-    allocator: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-    pool: *TypePool,
-    env: *TypeEnv,
-    lowered: []TypeIndex,
-    application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
-    owner: *const type_env_mod.ParsedGenericScope,
-    root: TypeSyntax.Child,
-    node_range: TypeSyntax.Range,
-    raw_span: TypeSyntax.Span,
-) !TypeIndex {
-    const exact = std.mem.trim(u8, raw_span.text(store.source), " \t\r\n");
-    if (env.getTypeAlias(exact)) |type_idx| return type_idx;
-    if (try env.resolveParsedGenericParam(owner, exact)) |type_idx| return type_idx;
-    try lowerOwnedRange(allocator, store, pool, lowered, application_bases, node_range);
-    return env.finishParsedGenericRoot(
-        owner,
-        exact,
-        try loweredChild(lowered, root, lowered.len),
-    );
-}
-
 fn lowerGenericSemanticFragment(
     allocator: std.mem.Allocator,
     store: *const TypeSyntax.Store,
@@ -2400,7 +2307,7 @@ fn lowerGenericSemanticFragment(
     if (try env.resolveParsedGenericParam(owner, std.mem.trim(u8, exact, " \t\r\n"))) |type_idx| {
         return type_idx;
     }
-    try lowerOwnedRange(
+    try type_syntax_lowering.lowerOwnedRange(
         allocator,
         store,
         pool,
@@ -2408,7 +2315,7 @@ fn lowerGenericSemanticFragment(
         application_bases,
         fragment.node_range,
     );
-    const root = try loweredChild(lowered, fragment.root, lowered.len);
+    const root = try type_syntax_lowering.loweredChild(lowered, fragment.root, lowered.len);
     return if (is_bound)
         env.finishParsedBoundRoot(owner, exact, root)
     else
@@ -2428,212 +2335,8 @@ fn lowerOwnedRoot(
 ) !TypeIndex {
     const exact = std.mem.trim(u8, raw_span.text(store.source), " \t\r\n");
     if (env.getTypeAlias(exact)) |type_idx| return type_idx;
-    try lowerOwnedRange(allocator, store, pool, lowered, application_bases, node_range);
-    return env.finishParsedTypeRoot(try loweredChild(lowered, root, lowered.len));
-}
-
-fn lowerOwnedRange(
-    allocator: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-    pool: *TypePool,
-    lowered: []TypeIndex,
-    application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
-    node_range: TypeSyntax.Range,
-) !void {
-    const start: usize = node_range.start;
-    const end = std.math.add(usize, start, node_range.count) catch return error.InvalidTypeRange;
-    if (end > store.nodes.items.len or end > lowered.len) return error.InvalidTypeRange;
-    for (store.nodes.items[start..end], start..) |node, index| {
-        if (application_bases.contains(index)) {
-            if (node.tag != .named_reference) return error.InvalidGenericApplicationBase;
-            lowered[index] = null_type_idx;
-            continue;
-        }
-        lowered[index] = switch (node.data) {
-            .primitive => |primitive| primitiveIndex(pool, primitive),
-            .named_reference => |span| pool.addRef(allocator, span.text(store.source)),
-            .generic_application => |application| blk: {
-                const base_index = switch (application.base) {
-                    .absent => return error.InvalidGenericApplicationBase,
-                    .present => |value| @as(usize, value),
-                };
-                const base_span = switch (store.nodes.items[base_index].data) {
-                    .named_reference => |span| span,
-                    else => return error.InvalidGenericApplicationBase,
-                };
-                const base_name = base_span.text(store.source);
-                const children = store.memberSlice(application.arguments) orelse
-                    return error.InvalidTypeRange;
-                var arguments: std.ArrayListUnmanaged(TypeIndex) = .empty;
-                defer arguments.deinit(allocator);
-                try arguments.ensureTotalCapacity(allocator, children.len);
-                for (children) |child| {
-                    arguments.appendAssumeCapacity(try loweredChild(lowered, child, index));
-                }
-                if (std.mem.eql(u8, base_name, "Dict") and arguments.items.len == 2) {
-                    break :blk pool.addDict(allocator, arguments.items[0], arguments.items[1]);
-                }
-                if (std.mem.eql(u8, base_name, "Readonly") and arguments.items.len == 1 and
-                    pool.getTag(arguments.items[0]) == .t_record)
-                {
-                    break :blk pool.makeReadonly(allocator, arguments.items[0]);
-                }
-                const base = pool.addRef(allocator, base_name);
-                break :blk pool.addGenericApp(allocator, base, arguments.items);
-            },
-            .group => |child| try loweredChild(lowered, child, index),
-            .readonly_modifier => |child| blk: {
-                const inner = try loweredChild(lowered, child, index);
-                if (pool.getTag(inner) == .t_array and !pool.isReadonlyArray(inner)) {
-                    break :blk pool.addReadonlyArray(allocator, pool.getArrayElement(inner));
-                }
-                if (pool.getTag(inner) == .t_ref or pool.getTag(inner) == .t_generic_app) {
-                    const base = pool.addRef(allocator, "Readonly");
-                    break :blk pool.addGenericApp(allocator, base, &.{inner});
-                }
-                break :blk inner;
-            },
-            .record => |range| blk: {
-                const fields = store.fieldSlice(range) orelse return error.InvalidTypeRange;
-                var result: std.ArrayListUnmanaged(RecordField) = .empty;
-                defer result.deinit(allocator);
-                try result.ensureTotalCapacity(allocator, fields.len);
-                for (fields) |field| {
-                    const name = pool.addName(allocator, field.name.text(store.source));
-                    result.appendAssumeCapacity(.{
-                        .name_start = name.start,
-                        .name_len = name.len,
-                        .type_idx = try loweredChild(lowered, field.type_child, index),
-                        .optional = field.optional,
-                        .readonly = field.readonly,
-                    });
-                }
-                break :blk pool.addRecord(allocator, result.items);
-            },
-            .array => |child| blk: {
-                const element = try loweredChild(lowered, child, index);
-                if (element == null_type_idx) break :blk null_type_idx;
-                break :blk pool.addArray(allocator, element);
-            },
-            .tuple => |range| blk: {
-                const elements = store.memberSlice(range) orelse return error.InvalidTypeRange;
-                var result: std.ArrayListUnmanaged(TypeIndex) = .empty;
-                defer result.deinit(allocator);
-                try result.ensureTotalCapacity(allocator, elements.len);
-                for (elements) |element| {
-                    const child = try loweredChild(lowered, element, index);
-                    if (child == null_type_idx) break;
-                    result.appendAssumeCapacity(child);
-                }
-                break :blk pool.addTuple(allocator, result.items);
-            },
-            .function => |function| blk: {
-                const params = store.paramSlice(function.params) orelse return error.InvalidTypeRange;
-                var result: std.ArrayListUnmanaged(FuncParam) = .empty;
-                defer result.deinit(allocator);
-                try result.ensureTotalCapacity(allocator, params.len);
-                for (params) |parameter| {
-                    const name = pool.addName(allocator, parameter.name.text(store.source));
-                    result.appendAssumeCapacity(.{
-                        .name_start = name.start,
-                        .name_len = name.len,
-                        .type_idx = try loweredChild(lowered, parameter.type_child, index),
-                        .optional = parameter.optional,
-                    });
-                }
-                break :blk pool.addFunctionWithReturn(
-                    allocator,
-                    result.items,
-                    try loweredChild(lowered, function.ret, index),
-                );
-            },
-            .union_type => |range| try lowerJoin(allocator, store, pool, lowered, index, range, true),
-            .intersection => |range| try lowerJoin(allocator, store, pool, lowered, index, range, false),
-            .literal_string => |span| pool.addLiteralString(allocator, span.text(store.source)),
-            .literal_number => |value| pool.addLiteralNumber(allocator, value),
-            .literal_bool => |value| pool.addLiteralBool(allocator, value),
-            .template => |range| blk: {
-                const parts = store.templatePartSlice(range) orelse return error.InvalidTypeRange;
-                var result: std.ArrayListUnmanaged(PoolTemplatePart) = .empty;
-                defer result.deinit(allocator);
-                try result.ensureTotalCapacity(allocator, parts.len);
-                for (parts) |part| switch (part) {
-                    .literal => |span| {
-                        const name = pool.addName(allocator, span.text(store.source));
-                        result.appendAssumeCapacity(.{
-                            .kind = .literal,
-                            .name_start = name.start,
-                            .name_len = name.len,
-                        });
-                    },
-                    .type_slot => |child| result.appendAssumeCapacity(.{
-                        .kind = .type_slot,
-                        .type_idx = try loweredChild(lowered, child, index),
-                    }),
-                };
-                break :blk pool.addTemplateLiteral(allocator, result.items);
-            },
-        };
-        try pool.ensureHealthy();
-    }
-}
-
-fn loweredChild(lowered: []const TypeIndex, child: TypeSyntax.Child, parent: usize) !TypeIndex {
-    return switch (child) {
-        .absent => null_type_idx,
-        .present => |index| if (@as(usize, index) < parent and @as(usize, index) < lowered.len)
-            lowered[index]
-        else
-            error.InvalidTypeChild,
-    };
-}
-
-fn lowerJoin(
-    allocator: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-    pool: *TypePool,
-    lowered: []const TypeIndex,
-    parent: usize,
-    range: TypeSyntax.Range,
-    is_union: bool,
-) !TypeIndex {
-    const children = store.memberSlice(range) orelse return error.InvalidTypeRange;
-    var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
-    defer members.deinit(allocator);
-    try members.ensureTotalCapacity(allocator, children.len);
-    for (children, 0..) |child, member_index| {
-        const member = try loweredChild(lowered, child, parent);
-        if (member == null_type_idx) {
-            if (member_index == 0) return null_type_idx;
-            break;
-        }
-        members.appendAssumeCapacity(member);
-    }
-    if (is_union and members.items.len == 2) {
-        if (pool.getTag(members.items[1]) == .t_undefined) {
-            return pool.addNullable(allocator, members.items[0]);
-        }
-        if (pool.getTag(members.items[0]) == .t_undefined) {
-            return pool.addNullable(allocator, members.items[1]);
-        }
-    }
-    return if (is_union)
-        pool.addUnion(allocator, members.items)
-    else
-        pool.addIntersection(allocator, members.items);
-}
-
-fn primitiveIndex(pool: *const TypePool, primitive: TypeSyntax.Primitive) TypeIndex {
-    return switch (primitive) {
-        .unknown => pool.idx_unknown,
-        .never => pool.idx_never,
-        .undefined => pool.idx_undefined,
-        .null => pool.idx_null,
-        .boolean => pool.idx_boolean,
-        .number => pool.idx_number,
-        .string => pool.idx_string,
-        .bytes => pool.idx_bytes,
-    };
+    try type_syntax_lowering.lowerOwnedRange(allocator, store, pool, lowered, application_bases, node_range);
+    return env.finishParsedTypeRoot(try type_syntax_lowering.loweredChild(lowered, root, lowered.len));
 }
 
 const TypePair = struct {
@@ -8512,7 +8215,7 @@ fn expectGenericArrowOrderedProjection(
             defer legacy_pool.deinit(std.testing.allocator);
             var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
             defer legacy_env.deinit();
-            legacy_env.populateFromTypeMap(prepared.typeMap() orelse return error.TestUnexpectedResult);
+            try legacy_env.populateFromTypeMap(prepared.typeMap() orelse return error.TestUnexpectedResult);
             try legacy_pool.ensureHealthy();
             try legacy_env.ensureHealthy();
             const legacy_arguments = legacy_env.getCallTypeArgs(opener.offset) orelse
@@ -11765,7 +11468,7 @@ test "later semantic fragment rollback closes every allocation failure" {
                 &application_bases,
                 fragment_index,
                 false,
-            ) catch |err| return closeParsedScopeAfterError(&env, &owner, err);
+            ) catch |err| return env.closeParsedScopeAfterError(&owner, err);
             const is_generic_application = pool.getTag(lowered) == TypeTag.t_generic_app;
             try env.endParsedGenerics(&owner);
             try std.testing.expect(is_generic_application);
@@ -12842,4 +12545,4819 @@ test "shadowed bindings and closure parameters retain their actual owners" {
         .local => |slot| try std.testing.expectEqual(local_binding.slot, @as(u16, slot)),
         .upvalue => return error.TestUnexpectedResult,
     }
+}
+
+fn expectExactTypePool(left: *const TypePool, right: *const TypePool) !void {
+    try std.testing.expectEqual(left.nodes.items.len, right.nodes.items.len);
+    for (left.nodes.items, right.nodes.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqual(left.fields.items.len, right.fields.items.len);
+    for (left.fields.items, right.fields.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqual(left.params.items.len, right.params.items.len);
+    for (left.params.items, right.params.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqualSlices(TypeIndex, left.members.items, right.members.items);
+    try std.testing.expectEqualSlices(u8, left.names.items, right.names.items);
+    try std.testing.expectEqual(left.template_parts.items.len, right.template_parts.items.len);
+    for (left.template_parts.items, right.template_parts.items) |a, b| {
+        try std.testing.expect(std.meta.eql(a, b));
+    }
+    try std.testing.expectEqual(left.idx_boolean, right.idx_boolean);
+    try std.testing.expectEqual(left.idx_number, right.idx_number);
+    try std.testing.expectEqual(left.idx_string, right.idx_string);
+    try std.testing.expectEqual(left.idx_bytes, right.idx_bytes);
+    try std.testing.expectEqual(left.idx_null, right.idx_null);
+    try std.testing.expectEqual(left.idx_undefined, right.idx_undefined);
+    try std.testing.expectEqual(left.idx_void, right.idx_void);
+    try std.testing.expectEqual(left.idx_never, right.idx_never);
+    try std.testing.expectEqual(left.idx_unknown, right.idx_unknown);
+    try std.testing.expectEqual(left.idx_error, right.idx_error);
+}
+
+fn expectExactFunctionSignature(
+    legacy: type_env_mod.FunctionSig,
+    direct: type_env_mod.FunctionSig,
+) !void {
+    try std.testing.expectEqual(legacy.param_count, direct.param_count);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        legacy.param_types[0..legacy.param_count],
+        direct.param_types[0..direct.param_count],
+    );
+    try std.testing.expectEqual(legacy.required_param_count, direct.required_param_count);
+    try std.testing.expectEqual(legacy.max_arg_count, direct.max_arg_count);
+    try std.testing.expectEqual(legacy.return_type, direct.return_type);
+    try std.testing.expectEqual(legacy.type_param_count, direct.type_param_count);
+    for (
+        legacy.type_params[0..legacy.type_param_count],
+        direct.type_params[0..direct.type_param_count],
+    ) |legacy_parameter, direct_parameter| {
+        try std.testing.expectEqualStrings(legacy_parameter.name, direct_parameter.name);
+        try std.testing.expectEqual(legacy_parameter.idx, direct_parameter.idx);
+        try std.testing.expectEqual(legacy_parameter.constraint, direct_parameter.constraint);
+    }
+    try std.testing.expect(std.meta.eql(legacy.type_predicate, direct.type_predicate));
+}
+
+fn expectExactFunctionNameMaps(legacy: *const TypeEnv, direct: *const TypeEnv) !void {
+    try std.testing.expectEqual(legacy.fn_sigs_by_name.count(), direct.fn_sigs_by_name.count());
+    var signatures = legacy.fn_sigs_by_name.iterator();
+    while (signatures.next()) |entry| {
+        try expectExactFunctionSignature(
+            entry.value_ptr.*,
+            direct.fn_sigs_by_name.get(entry.key_ptr.*) orelse return error.TestUnexpectedResult,
+        );
+    }
+
+    try std.testing.expectEqual(
+        legacy.source_fn_sigs_by_name.count(),
+        direct.source_fn_sigs_by_name.count(),
+    );
+    var source_signatures = legacy.source_fn_sigs_by_name.iterator();
+    while (source_signatures.next()) |entry| {
+        try expectExactFunctionSignature(
+            entry.value_ptr.*,
+            direct.source_fn_sigs_by_name.get(entry.key_ptr.*) orelse
+                return error.TestUnexpectedResult,
+        );
+    }
+}
+
+fn expectExactOwnerSignatures(
+    legacy_env: *const TypeEnv,
+    direct_env: *const TypeEnv,
+    legacy_view: engine.parser.IrView,
+    direct_view: engine.parser.IrView,
+    store: *const TypeSyntax.Store,
+) !void {
+    try std.testing.expectEqual(
+        legacy_env.fn_signatures.count(),
+        direct_env.direct_fn_signatures.count(),
+    );
+    try std.testing.expectEqual(
+        legacy_env.source_fn_annotations.count(),
+        direct_env.direct_source_fn_annotations.count(),
+    );
+
+    var published_count: usize = 0;
+    for (store.function_signatures.items) |record| {
+        const tag = direct_view.getTag(record.owner) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(tag == .function_expr or tag == .arrow_function);
+        const legacy_reference = legacy_env.functionTypeRef(legacy_view, record.owner) orelse
+            return error.TestUnexpectedResult;
+        const direct_reference = direct_env.functionTypeRef(direct_view, record.owner) orelse
+            return error.TestUnexpectedResult;
+        const legacy_signature = legacy_env.getFunctionSignature(legacy_reference);
+        const direct_signature = direct_env.getFunctionSignature(direct_reference);
+        if (legacy_signature == null or direct_signature == null) {
+            try std.testing.expect(legacy_signature == null);
+            try std.testing.expect(direct_signature == null);
+            continue;
+        }
+        const expected_signature = legacy_signature.?;
+        const actual_signature = direct_signature.?;
+        try expectExactFunctionSignature(expected_signature, actual_signature);
+        for (0..expected_signature.param_count) |index| {
+            const compact_position: u8 = @intCast(index);
+            const legacy_spelling = legacy_env.getFunctionParameterSpelling(
+                legacy_reference,
+                compact_position,
+            );
+            const direct_spelling = direct_env.getFunctionParameterSpelling(
+                direct_reference,
+                compact_position,
+            );
+            if (legacy_spelling) |spelling| {
+                try std.testing.expectEqualStrings(
+                    spelling,
+                    direct_spelling orelse return error.TestUnexpectedResult,
+                );
+            } else {
+                try std.testing.expect(direct_spelling == null);
+            }
+        }
+        const legacy_return = legacy_env.getFunctionReturnSpelling(legacy_reference);
+        const direct_return = direct_env.getFunctionReturnSpelling(direct_reference);
+        if (legacy_return) |spelling| {
+            try std.testing.expectEqualStrings(
+                spelling,
+                direct_return orelse return error.TestUnexpectedResult,
+            );
+        } else {
+            try std.testing.expect(direct_return == null);
+        }
+
+        const legacy_key = legacy_view.signatureOffset(record.owner) orelse
+            return error.TestUnexpectedResult;
+        try expectExactFunctionSignature(
+            legacy_env.fn_signatures.get(legacy_key) orelse return error.TestUnexpectedResult,
+            direct_env.direct_fn_signatures.get(record.owner) orelse
+                return error.TestUnexpectedResult,
+        );
+        published_count += 1;
+    }
+    try std.testing.expectEqual(published_count, legacy_env.fn_signatures.count());
+    try std.testing.expectEqual(published_count, direct_env.direct_fn_signatures.count());
+
+    var direct_signatures = direct_env.direct_fn_signatures.iterator();
+    while (direct_signatures.next()) |entry| {
+        const owner = entry.key_ptr.*;
+        const tag = direct_view.getTag(owner) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(tag == .function_expr or tag == .arrow_function);
+        var found = false;
+        for (store.function_signatures.items) |record| {
+            if (record.owner != owner) continue;
+            found = true;
+            break;
+        }
+        try std.testing.expect(found);
+        const legacy_key = legacy_view.signatureOffset(owner) orelse
+            return error.TestUnexpectedResult;
+        try expectExactFunctionSignature(
+            legacy_env.fn_signatures.get(legacy_key) orelse return error.TestUnexpectedResult,
+            entry.value_ptr.*,
+        );
+    }
+}
+
+const DirectGenericConsumerCase = enum {
+    interleaved,
+    compound_prefix,
+    duplicate_parameters,
+    generic_arrow,
+    empty_callable,
+    generic_only,
+    ignored_callable,
+    ignored_prefix,
+    empty_prefix,
+};
+
+fn expectDirectGenericConsumer(
+    source: []const u8,
+    case: DirectGenericConsumerCase,
+) !void {
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-phase-two>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    const prior_nodes = direct_pool.nodes.items.len;
+    const prior_names = direct_env.name_storage.items.len;
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
+    try expectExactOwnerSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try legacy_pool.ensureHealthy();
+    try direct_pool.ensureHealthy();
+    try legacy_env.ensureHealthy();
+    try direct_env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
+
+    switch (case) {
+        .interleaved => {
+            try std.testing.expectEqual(prior_nodes + 3, direct_pool.nodes.items.len);
+            for ([_][]const u8{ "P", "T", "Q" }, 0..) |name, index| {
+                const type_index: TypeIndex = @intCast(prior_nodes + index);
+                try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(type_index).?);
+                try std.testing.expectEqualStrings(name, direct_pool.getRefName(type_index));
+            }
+            try std.testing.expectEqual(@as(usize, 3), direct.type_store.erased_type_prefixes.items.len);
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
+            const owner = switch (direct.type_store.generic_owners.items[0].identity) {
+                .function => |node| node,
+                else => return error.TestUnexpectedResult,
+            };
+            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
+                return error.TestUnexpectedResult;
+            const signature = direct_env.getFunctionSignature(reference) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
+            try std.testing.expectEqualStrings("T", signature.type_params[0].name);
+            try std.testing.expectEqual(@as(TypeIndex, @intCast(prior_nodes + 1)), signature.type_params[0].idx);
+            try std.testing.expectEqual(direct_pool.idx_string, signature.type_params[0].constraint);
+            try std.testing.expectEqual(@as(u8, 1), signature.param_count);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
+            try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
+        },
+        .compound_prefix => {
+            try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
+            const parameter: TypeIndex = @intCast(prior_nodes);
+            const bound: TypeIndex = @intCast(prior_nodes + 1);
+            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(parameter).?);
+            try std.testing.expectEqualStrings("P", direct_pool.getRefName(parameter));
+            try std.testing.expectEqual(TypeTag.t_record, direct_pool.getTag(bound).?);
+            const fields = direct_pool.getRecordFields(bound);
+            try std.testing.expectEqual(@as(usize, 1), fields.len);
+            try std.testing.expectEqual(direct_pool.idx_string, fields[0].type_idx);
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
+        },
+        .duplicate_parameters => {
+            try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
+            const owner = switch (direct.type_store.generic_owners.items[0].identity) {
+                .function => |node| node,
+                else => return error.TestUnexpectedResult,
+            };
+            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
+                return error.TestUnexpectedResult;
+            const signature = direct_env.getFunctionSignature(reference) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 2), signature.type_param_count);
+            try std.testing.expectEqualStrings("T", signature.type_params[0].name);
+            try std.testing.expectEqualStrings("T", signature.type_params[1].name);
+            try std.testing.expect(signature.type_params[0].idx != signature.type_params[1].idx);
+            try std.testing.expectEqual(direct_pool.idx_string, signature.type_params[0].constraint);
+            try std.testing.expectEqual(direct_pool.idx_number, signature.type_params[1].constraint);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
+        },
+        .generic_arrow => {
+            try std.testing.expectEqual(prior_nodes + 1, direct_pool.nodes.items.len);
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
+            const generic_owner = direct.type_store.generic_owners.items[0];
+            try std.testing.expect(
+                std.meta.activeTag(generic_owner.compatibility) == .declaration_parameters,
+            );
+            try std.testing.expectEqual(@as(u32, 1), generic_owner.projected_parameters.count);
+            const owner = switch (generic_owner.identity) {
+                .arrow => |node| node,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, direct_view.getTag(owner).?);
+            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
+                return error.TestUnexpectedResult;
+            const signature = direct_env.getFunctionSignature(reference) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
+            try std.testing.expectEqualStrings("T", signature.type_params[0].name);
+            try std.testing.expectEqual(@as(TypeIndex, @intCast(prior_nodes)), signature.type_params[0].idx);
+            try std.testing.expectEqual(direct_pool.idx_string, signature.type_params[0].constraint);
+            try std.testing.expectEqual(@as(u8, 1), signature.param_count);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
+            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.source_fn_sigs_by_name.count());
+            try std.testing.expectEqual(@as(usize, 0), legacy_env.fn_sigs_by_name.count());
+            try std.testing.expectEqual(@as(usize, 0), legacy_env.source_fn_sigs_by_name.count());
+        },
+        .empty_callable => {
+            try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
+            const generic_owner = direct.type_store.generic_owners.items[0];
+            try std.testing.expectEqual(
+                @as(u32, 0),
+                generic_owner.projected_parameters.count,
+            );
+            try std.testing.expect(
+                std.meta.activeTag(generic_owner.compatibility) == .declaration_parameters,
+            );
+            const owner = switch (generic_owner.identity) {
+                .function => |node| node,
+                else => return error.TestUnexpectedResult,
+            };
+            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
+                return error.TestUnexpectedResult;
+            const signature = direct_env.getFunctionSignature(reference) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 0), signature.type_param_count);
+            try std.testing.expectEqual(@as(u8, 1), signature.param_count);
+            try std.testing.expectEqual(direct_pool.idx_string, signature.param_types[0]);
+            try std.testing.expectEqual(direct_pool.idx_string, signature.return_type);
+            try std.testing.expectEqual(@as(usize, 1), direct_env.direct_fn_signatures.count());
+        },
+        .generic_only => {
+            try std.testing.expectEqual(prior_nodes + 1, direct_pool.nodes.items.len);
+            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_nodes)).?);
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_accumulator_events);
+        },
+        .ignored_callable => {
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.erased_type_prefixes.items.len);
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_parameters.items.len);
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                direct.type_store.projected_generic_parameters.items.len,
+            );
+            const owner = direct.type_store.generic_owners.items[0];
+            try std.testing.expect(
+                std.meta.activeTag(owner.compatibility) == .ignored_declaration_parameters,
+            );
+            try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
+            try std.testing.expectEqual(@as(u32, 0), owner.authored_parameters.start);
+            try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
+            try std.testing.expectEqual(@as(u32, 0), owner.projected_parameters.start);
+            try std.testing.expectEqual(@as(u32, 1), owner.projected_parameters.count);
+            const authored = direct.type_store.genericParameterSlice(
+                owner.authored_parameters,
+            ) orelse return error.TestUnexpectedResult;
+            const projected = direct.type_store.projectedGenericParameterSlice(
+                owner.projected_parameters,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), authored.len);
+            try std.testing.expectEqualStrings("T", authored[0].trimmed_span.text(source));
+            try std.testing.expectEqual(@as(usize, 1), projected.len);
+            try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
+            try std.testing.expect(projected[0].bound_fragment == null);
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.semantic_fragments.items.len);
+            const function_owner = switch (owner.identity) {
+                .function => |node| node,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(
+                engine.parser.NodeTag.function_expr,
+                direct_view.getTag(function_owner).?,
+            );
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.function_signatures.items.len);
+            try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
+            try std.testing.expectEqual(prior_names, direct_env.name_storage.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_accumulator_events);
+        },
+        .ignored_prefix => {
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.erased_type_prefixes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_parameters.items.len);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                direct.type_store.projected_generic_parameters.items.len,
+            );
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.semantic_fragments.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_owners.items.len);
+            const prefix = direct.type_store.erased_type_prefixes.items[0];
+            try std.testing.expectEqualStrings("<T>", prefix.list_span.text(source));
+            switch (prefix.compatibility) {
+                .ignored_parameters => {},
+                .legacy_parameter_projection => return error.TestUnexpectedResult,
+            }
+            const expression_owner = switch (prefix.owner) {
+                .expression => |node| node,
+                .block => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(
+                engine.parser.NodeTag.object_literal,
+                direct_view.getTag(expression_owner).?,
+            );
+            try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
+            try std.testing.expectEqual(prior_names, direct_env.name_storage.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_accumulator_events);
+        },
+        .empty_prefix => {
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.erased_type_prefixes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_parameters.items.len);
+            try std.testing.expectEqual(
+                @as(usize, 0),
+                direct.type_store.projected_generic_parameters.items.len,
+            );
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.semantic_fragments.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_owners.items.len);
+            const prefix = direct.type_store.erased_type_prefixes.items[0];
+            try std.testing.expectEqualStrings("<>", prefix.list_span.text(source));
+            const projection = switch (prefix.compatibility) {
+                .legacy_parameter_projection => |value| value,
+                .ignored_parameters => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(@as(u32, 0), projection.projected_parameters.start);
+            try std.testing.expectEqual(@as(u32, 0), projection.projected_parameters.count);
+            try std.testing.expectEqual(@as(u32, 0), projection.semantic_fragments.start);
+            try std.testing.expectEqual(@as(u32, 0), projection.semantic_fragments.count);
+            const expression_owner = switch (prefix.owner) {
+                .expression => |node| node,
+                .block => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(
+                engine.parser.NodeTag.lit_int,
+                direct_view.getTag(expression_owner).?,
+            );
+            try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
+            try std.testing.expectEqual(prior_names, direct_env.name_storage.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_accumulator_events);
+        },
+    }
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    try std.testing.expectEqual(
+        try legacy_checker.check(legacy_root),
+        try direct_checker.check(direct_root),
+    );
+    const legacy_type_diagnostics = legacy_checker.getDiagnostics();
+    const direct_type_diagnostics = direct_checker.getDiagnostics();
+    try std.testing.expectEqual(legacy_type_diagnostics.len, direct_type_diagnostics.len);
+    for (legacy_type_diagnostics, direct_type_diagnostics) |legacy_diagnostic, direct_diagnostic| {
+        try expectSameTypeDiagnostic(
+            legacy_diagnostic,
+            legacy_view,
+            direct_diagnostic,
+            direct_view,
+        );
+    }
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    try std.testing.expectEqual(
+        try legacy_strict.check(legacy_root),
+        try direct_strict.check(direct_root),
+    );
+    const legacy_strict_diagnostics = legacy_strict.getDiagnostics();
+    const direct_strict_diagnostics = direct_strict.getDiagnostics();
+    try std.testing.expectEqual(legacy_strict_diagnostics.len, direct_strict_diagnostics.len);
+    for (legacy_strict_diagnostics, direct_strict_diagnostics) |legacy_diagnostic, direct_diagnostic| {
+        try expectSameStrictDiagnostic(
+            legacy_diagnostic,
+            legacy_view,
+            direct_diagnostic,
+            direct_view,
+        );
+    }
+}
+
+test "direct phase two consumer matrix preserves generics and headers" {
+    const cases = [_]struct {
+        source: []const u8,
+        case: DirectGenericConsumerCase,
+    }{
+        .{
+            .source = "const before = <P extends string>(1);\n" ++
+                "function identity<T extends string>(value: T): T { return value; }\n" ++
+                "const empty = <>(1);\n" ++
+                "const after = <Q extends number>(2);",
+            .case = .interleaved,
+        },
+        .{
+            .source = "const value = <P extends { id: string }>(1);",
+            .case = .compound_prefix,
+        },
+        .{
+            .source = "function duplicate<T extends string, T extends number>(value: T): T { return value; }",
+            .case = .duplicate_parameters,
+        },
+        .{
+            .source = "const identity = <T extends string>(value: T): T => value;",
+            .case = .generic_arrow,
+        },
+        .{
+            .source = "function identity<>(value: string): string { return value; }",
+            .case = .empty_callable,
+        },
+        .{
+            .source = "function identity<T>(value) { return value; }",
+            .case = .generic_only,
+        },
+        .{
+            .source = "function identity<T>/* gap */(value) { return value; }",
+            .case = .ignored_callable,
+        },
+        .{
+            .source = "const value = (<T>{ id: 1 });",
+            .case = .ignored_prefix,
+        },
+        .{
+            .source = "const value = <>(1);",
+            .case = .empty_prefix,
+        },
+    };
+    try std.testing.expectEqual(std.meta.fields(DirectGenericConsumerCase).len, cases.len);
+    var seen = std.EnumSet(DirectGenericConsumerCase).initEmpty();
+    for (cases) |case| {
+        try std.testing.expect(!seen.contains(case.case));
+        try expectDirectGenericConsumer(case.source, case.case);
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(DirectGenericConsumerCase).len, seen.count());
+}
+
+fn compatibilityCallOwner(owner: TypeSyntax.GenericOwner) ?NodeIndex {
+    if (std.meta.activeTag(owner.compatibility) != .legacy_call_arguments) return null;
+    return switch (owner.identity) {
+        .function => |node| node,
+        .arrow => |node| node,
+        .structural_declaration, .nominal_declaration => null,
+    };
+}
+
+fn expectExactCallArguments(
+    legacy_pool: *const TypePool,
+    direct_pool: *const TypePool,
+    legacy: type_env_mod.CallTypeArgs,
+    direct: type_env_mod.CallTypeArgs,
+) !void {
+    try std.testing.expectEqual(legacy.count, direct.count);
+    for (legacy.args[0..legacy.count], direct.args[0..direct.count]) |legacy_arg, direct_arg| {
+        try std.testing.expectEqual(legacy_arg, direct_arg);
+        try std.testing.expect(try orderedTypeEqual(
+            std.testing.allocator,
+            legacy_pool,
+            legacy_arg,
+            direct_pool,
+            direct_arg,
+        ));
+    }
+}
+
+fn expectExactDirectCallMaps(
+    legacy_pool: *const TypePool,
+    direct_pool: *const TypePool,
+    legacy_env: *const TypeEnv,
+    direct_env: *const TypeEnv,
+    legacy_view: engine.parser.IrView,
+    direct_view: engine.parser.IrView,
+    store: *const TypeSyntax.Store,
+) !void {
+    var expected_count: usize = 0;
+    for (store.explicit_call_arguments.items) |record| {
+        const fragments = store.semanticFragmentSlice(record.semantic_fragments) orelse
+            return error.TestUnexpectedResult;
+        const legacy = legacy_env.getCallTypeArgs(record.list_span.end);
+        const direct = direct_env.getCallTypeArgsForCall(direct_view, record.owner);
+        if (fragments.len == 0) {
+            try std.testing.expect(legacy == null);
+            try std.testing.expect(direct == null);
+            continue;
+        }
+        expected_count += 1;
+        try std.testing.expectEqual(engine.parser.NodeTag.call, direct_view.getTag(record.owner).?);
+        try expectExactCallArguments(
+            legacy_pool,
+            direct_pool,
+            legacy orelse return error.TestUnexpectedResult,
+            direct orelse return error.TestUnexpectedResult,
+        );
+    }
+    for (store.generic_owners.items) |record| {
+        const owner = compatibilityCallOwner(record) orelse continue;
+        const expected_tag: engine.parser.NodeTag = switch (record.identity) {
+            .function => .function_expr,
+            .arrow => .arrow_function,
+            .structural_declaration, .nominal_declaration => unreachable,
+        };
+        try std.testing.expectEqual(expected_tag, direct_view.getTag(owner).?);
+        const fragments = switch (record.compatibility) {
+            .legacy_call_arguments => |arguments| store.semanticFragmentSlice(
+                arguments.semantic_fragments,
+            ) orelse return error.TestUnexpectedResult,
+            .declaration_parameters, .ignored_declaration_parameters => unreachable,
+        };
+        const legacy_offset = (legacy_view.getLoc(owner) orelse
+            return error.TestUnexpectedResult).offset;
+        const legacy = legacy_env.getCallTypeArgs(legacy_offset);
+        const direct = direct_env.direct_call_type_args.get(owner);
+        try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, owner) == null);
+        if (fragments.len == 0) {
+            try std.testing.expect(legacy == null);
+            try std.testing.expect(direct == null);
+            continue;
+        }
+        expected_count += 1;
+        try expectExactCallArguments(
+            legacy_pool,
+            direct_pool,
+            legacy orelse return error.TestUnexpectedResult,
+            direct orelse return error.TestUnexpectedResult,
+        );
+    }
+    try std.testing.expectEqual(expected_count, legacy_env.call_type_args.count());
+    try std.testing.expectEqual(expected_count, direct_env.direct_call_type_args.count());
+
+    var published = direct_env.direct_call_type_args.iterator();
+    while (published.next()) |entry| {
+        const published_owner = entry.key_ptr.*;
+        var found = false;
+        for (store.explicit_call_arguments.items) |record| {
+            if (record.owner == published_owner and record.semantic_fragments.count != 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) for (store.generic_owners.items) |record| {
+            const owner = compatibilityCallOwner(record) orelse continue;
+            const count = switch (record.compatibility) {
+                .legacy_call_arguments => |arguments| arguments.semantic_fragments.count,
+                .declaration_parameters, .ignored_declaration_parameters => unreachable,
+            };
+            if (owner == published_owner and count != 0) {
+                found = true;
+                break;
+            }
+        };
+        try std.testing.expect(found);
+    }
+}
+
+const DirectCallConsumerCase = enum {
+    interleaved,
+    generic_scope_contrast,
+    generic_application_argument,
+    arrow_compatibility,
+};
+
+fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !void {
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-phase-three>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    const prior_nodes = direct_pool.nodes.items.len;
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
+    try expectExactOwnerSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try expectExactDirectCallMaps(
+        &legacy_pool,
+        &direct_pool,
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try legacy_pool.ensureHealthy();
+    try direct_pool.ensureHealthy();
+    try legacy_env.ensureHealthy();
+    try direct_env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
+
+    switch (case) {
+        .interleaved => {
+            try std.testing.expectEqual(@as(usize, 3), direct.type_store.explicit_call_arguments.items.len);
+            try std.testing.expectEqual(@as(usize, 2), direct.type_store.generic_owners.items.len);
+            try std.testing.expectEqual(@as(usize, 3), direct_env.direct_call_type_args.count());
+            const before = direct.type_store.explicit_call_arguments.items[0];
+            const empty = direct.type_store.explicit_call_arguments.items[1];
+            const after = direct.type_store.explicit_call_arguments.items[2];
+            try std.testing.expectEqualStrings("<string>", before.list_span.text(source));
+            try std.testing.expectEqualStrings("<>", empty.list_span.text(source));
+            try std.testing.expectEqualStrings("<(),number>", after.list_span.text(source));
+            try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, empty.owner) == null);
+            const after_arguments = direct_env.getCallTypeArgsForCall(
+                direct_view,
+                after.owner,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 2), after_arguments.count);
+            try std.testing.expectEqual(null_type_idx, after_arguments.args[0]);
+            try std.testing.expectEqual(direct_pool.idx_number, after_arguments.args[1]);
+            const compatibility = direct.type_store.generic_owners.items[0];
+            const compatibility_owner = compatibilityCallOwner(compatibility) orelse
+                return error.TestUnexpectedResult;
+            const compatibility_arguments = direct_env.direct_call_type_args.get(
+                compatibility_owner,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), compatibility_arguments.count);
+            try std.testing.expectEqual(
+                TypeTag.t_ref,
+                direct_pool.getTag(compatibility_arguments.args[0]).?,
+            );
+            try std.testing.expectEqualStrings(
+                "T",
+                direct_pool.getRefName(compatibility_arguments.args[0]),
+            );
+            const empty_compatibility = direct.type_store.generic_owners.items[1];
+            const empty_compatibility_owner = compatibilityCallOwner(empty_compatibility) orelse
+                return error.TestUnexpectedResult;
+            const empty_compatibility_range = switch (empty_compatibility.compatibility) {
+                .legacy_call_arguments => |arguments| arguments.semantic_fragments,
+                .declaration_parameters, .ignored_declaration_parameters => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(@as(u32, 0), empty_compatibility_range.count);
+            try std.testing.expect(
+                direct_env.direct_call_type_args.get(empty_compatibility_owner) == null,
+            );
+            try std.testing.expect(
+                direct_env.getCallTypeArgsForCall(direct_view, empty_compatibility_owner) == null,
+            );
+        },
+        .generic_scope_contrast => {
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.explicit_call_arguments.items.len);
+            try std.testing.expectEqual(@as(usize, 1), direct_env.direct_call_type_args.count());
+            const call = direct.type_store.explicit_call_arguments.items[0];
+            const call_arguments = direct_env.getCallTypeArgsForCall(
+                direct_view,
+                call.owner,
+            ) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), call_arguments.count);
+            try std.testing.expectEqual(TypeTag.t_ref, direct_pool.getTag(call_arguments.args[0]).?);
+            try std.testing.expectEqualStrings("T", direct_pool.getRefName(call_arguments.args[0]));
+            var outer_owner: ?NodeIndex = null;
+            for (direct.type_store.generic_owners.items) |owner| switch (owner.identity) {
+                .function => |node| if (std.meta.activeTag(owner.compatibility) == .declaration_parameters) {
+                    outer_owner = node;
+                },
+                .structural_declaration, .nominal_declaration, .arrow => {},
+            };
+            const owner = outer_owner orelse return error.TestUnexpectedResult;
+            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
+                return error.TestUnexpectedResult;
+            const signature = direct_env.getFunctionSignature(reference) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
+            try std.testing.expectEqual(@as(u8, 1), signature.param_count);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
+            try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
+            try std.testing.expect(signature.type_params[0].idx != call_arguments.args[0]);
+            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(signature.type_params[0].idx).?);
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                poolTagCount(&direct_pool, prior_nodes, .t_generic_param),
+            );
+        },
+        .generic_application_argument => {
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.explicit_call_arguments.items.len);
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_owners.items.len);
+            const record = direct.type_store.explicit_call_arguments.items[0];
+            try std.testing.expectEqualStrings("<Box<string>>", record.list_span.text(source));
+            const fragments = direct.type_store.semanticFragmentSlice(record.semantic_fragments) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(usize, 1), fragments.len);
+            const root = switch (fragments[0].root) {
+                .present => |root| root,
+                .absent => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(
+                TypeSyntax.NodeTag.generic_application,
+                std.meta.activeTag(direct.type_store.nodes.items[root].data),
+            );
+            const arguments = direct_env.getCallTypeArgsForCall(direct_view, record.owner) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), arguments.count);
+            try std.testing.expectEqual(TypeTag.t_generic_app, direct_pool.getTag(arguments.args[0]).?);
+            const application = direct_pool.getGenericAppInfo(arguments.args[0]);
+            try std.testing.expectEqual(TypeTag.t_ref, direct_pool.getTag(application.base).?);
+            try std.testing.expectEqualStrings("Box", direct_pool.getRefName(application.base));
+            try std.testing.expectEqualSlices(TypeIndex, &.{direct_pool.idx_string}, application.args);
+        },
+        .arrow_compatibility => {
+            try std.testing.expectEqual(@as(usize, 0), direct.type_store.explicit_call_arguments.items.len);
+            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
+            const record = direct.type_store.generic_owners.items[0];
+            const owner = switch (record.identity) {
+                .arrow => |owner| owner,
+                else => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, direct_view.getTag(owner).?);
+            try std.testing.expectEqual(
+                std.meta.Tag(TypeSyntax.GenericOwnerCompatibility).legacy_call_arguments,
+                std.meta.activeTag(record.compatibility),
+            );
+            try std.testing.expectEqualStrings("<T>", record.list_span.text(source));
+            const arguments = direct_env.direct_call_type_args.get(owner) orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), arguments.count);
+            try std.testing.expectEqual(TypeTag.t_ref, direct_pool.getTag(arguments.args[0]).?);
+            try std.testing.expectEqualStrings("T", direct_pool.getRefName(arguments.args[0]));
+            try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, owner) == null);
+            try std.testing.expectEqual(@as(usize, 1), direct_env.direct_call_type_args.count());
+        },
+    }
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    try std.testing.expectEqual(
+        try legacy_checker.check(legacy_root),
+        try direct_checker.check(direct_root),
+    );
+    try std.testing.expectEqual(
+        legacy_checker.getDiagnostics().len,
+        direct_checker.getDiagnostics().len,
+    );
+    for (legacy_checker.getDiagnostics(), direct_checker.getDiagnostics()) |legacy_diag, direct_diag| {
+        try expectSameTypeDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    }
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    try std.testing.expectEqual(
+        try legacy_strict.check(legacy_root),
+        try direct_strict.check(direct_root),
+    );
+    try std.testing.expectEqual(
+        legacy_strict.getDiagnostics().len,
+        direct_strict.getDiagnostics().len,
+    );
+    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diag, direct_diag| {
+        try expectSameStrictDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    }
+}
+
+test "direct phase three preserves actual and compatibility call construction" {
+    const cases = [_]struct {
+        source: []const u8,
+        case: DirectCallConsumerCase,
+    }{
+        .{
+            .source = "const before = identity<string>(\"a\");\n" ++
+                "function /* gap */ identity<T>(value) { return value; }\n" ++
+                "const empty = identity<>(\"e\");\n" ++
+                "function /* gap */ empty_owner<>(value) { return value; }\n" ++
+                "const after = identity<(),number>(\"b\");",
+            .case = .interleaved,
+        },
+        .{
+            .source = "function identity(value) { return value; }\n" ++
+                "function outer<T>(value: T): T {\n" ++
+                "  const result = identity<T>(value);\n" ++
+                "  return value;\n" ++
+                "}",
+            .case = .generic_scope_contrast,
+        },
+        .{
+            .source = "function identity(value) { return value; }\n" ++
+                "const result = identity<Box<string>>(\"value\");",
+            .case = .generic_application_argument,
+        },
+        .{
+            .source = "const id = // note\n<T>(value: T): T => value;",
+            .case = .arrow_compatibility,
+        },
+    };
+    var seen = std.EnumSet(DirectCallConsumerCase).initEmpty();
+    for (cases) |case| {
+        try expectDirectCallConsumer(case.source, case.case);
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(DirectCallConsumerCase).len, seen.count());
+}
+
+const DirectCallOrderMutation = enum {
+    reversed_actual,
+    equal_cross_stream,
+    reversed_compatibility,
+};
+
+fn expectDirectCallOrderRefusal(
+    source: []const u8,
+    mutation: DirectCallOrderMutation,
+) !void {
+    var runtime_count = CountingAllocator.init(std.testing.allocator);
+    var atoms = AtomTable.init(runtime_count.allocator());
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(
+        runtime_count.allocator(),
+        std.testing.allocator,
+        source,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+
+    const expected_error: anyerror = switch (mutation) {
+        .reversed_actual => blk: {
+            try std.testing.expectEqual(
+                @as(usize, 2),
+                parser.type_store.explicit_call_arguments.items.len,
+            );
+            std.mem.swap(
+                TypeSyntax.ExplicitCallArguments,
+                &parser.type_store.explicit_call_arguments.items[0],
+                &parser.type_store.explicit_call_arguments.items[1],
+            );
+            break :blk error.InvalidTypeSourceOrder;
+        },
+        .equal_cross_stream => blk: {
+            try std.testing.expectEqual(
+                @as(usize, 1),
+                parser.type_store.explicit_call_arguments.items.len,
+            );
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
+            parser.type_store.generic_owners.items[0].list_span.start =
+                parser.type_store.explicit_call_arguments.items[0].list_span.start;
+            break :blk error.InvalidGenericOwner;
+        },
+        .reversed_compatibility => blk: {
+            try std.testing.expectEqual(@as(usize, 2), parser.type_store.generic_owners.items.len);
+            try std.testing.expect(compatibilityCallOwner(
+                parser.type_store.generic_owners.items[0],
+            ) != null);
+            try std.testing.expect(compatibilityCallOwner(
+                parser.type_store.generic_owners.items[1],
+            ) != null);
+            std.mem.swap(
+                TypeSyntax.GenericOwner,
+                &parser.type_store.generic_owners.items[0],
+                &parser.type_store.generic_owners.items[1],
+            );
+            break :blk error.InvalidTypeSourceOrder;
+        },
+    };
+
+    switch (mutation) {
+        .reversed_actual => try parser.type_store.validateRuntimeOwners(
+            std.testing.allocator,
+            parserIrView(&parser),
+        ),
+        .equal_cross_stream, .reversed_compatibility => try std.testing.expectError(
+            expected_error,
+            parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser)),
+        ),
+    }
+
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    const prior_nodes = pool.nodes.items.len;
+    const prior_names = env.name_storage.items.len;
+    const prior_scopes = env.generic_scopes.items.len;
+    const prior_aliases = env.type_aliases.count();
+    const prior_generic_aliases = env.generic_aliases.count();
+    try std.testing.expectError(
+        expected_error,
+        env.populateSourceTypes(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = parserIrView(&parser),
+            .atoms = &atoms,
+        } }),
+    );
+    try std.testing.expect(env.sourceTypeMode() == null);
+    try std.testing.expectEqual(prior_nodes, pool.nodes.items.len);
+    try std.testing.expectEqual(prior_names, env.name_storage.items.len);
+    try std.testing.expectEqual(prior_scopes, env.generic_scopes.items.len);
+    try std.testing.expectEqual(prior_aliases, env.type_aliases.count());
+    try std.testing.expectEqual(prior_generic_aliases, env.generic_aliases.count());
+    try std.testing.expectEqual(@as(usize, 0), env.direct_call_type_args.count());
+    try std.testing.expectEqual(@as(usize, 0), env.direct_var_types.count());
+    try std.testing.expectEqual(@as(usize, 0), env.direct_fn_signatures.count());
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+}
+
+test "direct phase three refuses malformed call order before selection" {
+    const cases = [_]struct {
+        source: []const u8,
+        mutation: DirectCallOrderMutation,
+    }{
+        .{
+            .source = "const first = identity<string>(\"a\");\n" ++
+                "const second = identity<number>(1);",
+            .mutation = .reversed_actual,
+        },
+        .{
+            .source = "const first = identity<string>(\"a\");\n" ++
+                "function /* gap */ identity<T>(value) { return value; }",
+            .mutation = .equal_cross_stream,
+        },
+        .{
+            .source = "function /* gap */ first<T>(value) { return value; }\n" ++
+                "function /* gap */ second<U>(value) { return value; }",
+            .mutation = .reversed_compatibility,
+        },
+    };
+    var seen = std.EnumSet(DirectCallOrderMutation).initEmpty();
+    for (cases) |case| {
+        try expectDirectCallOrderRefusal(case.source, case.mutation);
+        seen.insert(case.mutation);
+    }
+    try std.testing.expectEqual(std.meta.fields(DirectCallOrderMutation).len, seen.count());
+}
+
+const DirectCallAllocationObservations = struct {
+    unselected_validation_failures: usize = 0,
+    selected_failures: usize = 0,
+    post_seed_failures: usize = 0,
+    incomplete_publication_failures: usize = 0,
+    successes: usize = 0,
+};
+
+fn runDirectCallAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *DirectCallAllocationObservations,
+) !void {
+    const source =
+        "structural Seed = string;\n" ++
+        "const first: Seed = identity<Seed>(\"a\");\n" ++
+        "function /* gap */ identity<T>(value) { return value; }\n" ++
+        "const second: Seed = identity<{ id: string }>(\"b\");";
+    var runtime_count = CountingAllocator.init(std.testing.allocator);
+    var atoms = AtomTable.init(runtime_count.allocator());
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(
+        runtime_count.allocator(),
+        std.testing.allocator,
+        source,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try std.testing.expectEqual(@as(usize, 2), parser.type_store.explicit_call_arguments.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    const prior_nodes = pool.nodes.items.len;
+    env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+    } }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+        if (env.sourceTypeMode() == null) {
+            observations.unselected_validation_failures += 1;
+            try std.testing.expectEqual(prior_nodes, pool.nodes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), env.direct_call_type_args.count());
+        } else {
+            observations.selected_failures += 1;
+            try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, env.sourceTypeMode().?);
+            const has_seed = env.getTypeAlias("Seed") != null;
+            if (has_seed) observations.post_seed_failures += 1;
+            if (has_seed and env.direct_call_type_args.count() > 0 and
+                env.direct_call_type_args.count() < 3)
+            {
+                observations.incomplete_publication_failures += 1;
+            }
+        }
+        try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+        var checker = type_checker_mod.TypeChecker.init(
+            std.testing.allocator,
+            parserIrView(&parser),
+            &atoms,
+            &env,
+        );
+        defer checker.deinit();
+        try std.testing.expectError(error.OutOfMemory, checker.check(root));
+        var strict = strict_checker_mod.StrictChecker.init(
+            std.testing.allocator,
+            parserIrView(&parser),
+            &atoms,
+            &env,
+            null,
+        );
+        defer strict.deinit();
+        try std.testing.expectError(error.OutOfMemory, strict.check(root));
+        return err;
+    };
+
+    observations.successes += 1;
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    try std.testing.expect(env.getTypeAlias("Seed") != null);
+    try std.testing.expectEqual(@as(usize, 3), env.direct_call_type_args.count());
+
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-phase-three-oom>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    var legacy_atoms = AtomTable.init(std.testing.allocator);
+    defer legacy_atoms.deinit();
+    var legacy = try JsParser.init(std.testing.allocator, prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    _ = try legacy.parse();
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try expectExactTypePool(&legacy_pool, &pool);
+    try expectExactDirectCallMaps(
+        &legacy_pool,
+        &pool,
+        &legacy_env,
+        &env,
+        parserIrView(&legacy),
+        parserIrView(&parser),
+        &parser.type_store,
+    );
+}
+
+test "direct phase three allocation failures retain selection and incomplete calls" {
+    var observations: DirectCallAllocationObservations = .{};
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runDirectCallAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.expect(observations.unselected_validation_failures > 0);
+    try std.testing.expect(observations.selected_failures > 0);
+    try std.testing.expect(observations.post_seed_failures > 0);
+    try std.testing.expect(observations.incomplete_publication_failures > 0);
+    try std.testing.expect(observations.successes > 0);
+}
+
+const DirectPredicateCase = enum {
+    named_value,
+    arrow_value,
+    named_guard_verified,
+    named_guard_unverified,
+    arrow_guard_unverified,
+    ordinary_tab,
+    arrow_ordinary_tab,
+    readonly_tab,
+    quoted_value,
+    empty_narrowing,
+    unresolved_target,
+    mixed_untyped_target,
+    compact_target_position,
+    repeated_target,
+    target_after_sixteen,
+    captured_generic,
+    trailing_ordinary,
+    quoted_marker_space,
+    quoted_marker_tab,
+};
+
+const ExpectedPredicate = union(enum) {
+    absent,
+    parameter: u8,
+    captured_generic,
+    literal: []const u8,
+};
+
+fn expectDirectPredicateConsumer(
+    source: []const u8,
+    case: DirectPredicateCase,
+    expected_predicate: ExpectedPredicate,
+    expected_return_spelling: ?[]const u8,
+) !void {
+    errdefer |err| std.debug.print(
+        "direct predicate case {s} failed with {s}\nsource: {s}\n",
+        .{ @tagName(case), @errorName(err), source },
+    );
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-predicate>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    try std.testing.expectEqual(@as(usize, 1), direct.type_store.function_signatures.items.len);
+    const syntax_signature = direct.type_store.function_signatures.items[0];
+    const return_syntax = syntax_signature.return_syntax orelse return error.TestUnexpectedResult;
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    const prior_nodes = direct_pool.nodes.items.len;
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
+    try expectExactOwnerSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try expectExactDirectCallMaps(
+        &legacy_pool,
+        &direct_pool,
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try legacy_pool.ensureHealthy();
+    try direct_pool.ensureHealthy();
+    try legacy_env.ensureHealthy();
+    try direct_env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
+
+    const direct_reference = direct_env.functionTypeRef(
+        direct_view,
+        syntax_signature.owner,
+    ) orelse return error.TestUnexpectedResult;
+    const legacy_reference = legacy_env.functionTypeRef(
+        legacy_view,
+        syntax_signature.owner,
+    ) orelse return error.TestUnexpectedResult;
+    const direct_signature = direct_env.getFunctionSignature(direct_reference) orelse
+        return error.TestUnexpectedResult;
+    const legacy_signature = legacy_env.getFunctionSignature(legacy_reference) orelse
+        return error.TestUnexpectedResult;
+    try expectExactFunctionSignature(legacy_signature, direct_signature);
+
+    if (expected_return_spelling) |expected| {
+        try std.testing.expectEqualStrings(
+            expected,
+            direct_env.getFunctionReturnSpelling(direct_reference) orelse
+                return error.TestUnexpectedResult,
+        );
+    } else {
+        try std.testing.expect(direct_env.getFunctionReturnSpelling(direct_reference) == null);
+    }
+
+    switch (expected_predicate) {
+        .absent => try std.testing.expect(direct_signature.type_predicate == null),
+        .parameter => |expected_index| {
+            const predicate = direct_signature.type_predicate orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(expected_index, predicate.param_index);
+            try std.testing.expectEqual(direct_pool.idx_string, predicate.narrowed);
+        },
+        .captured_generic => {
+            const predicate = direct_signature.type_predicate orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 0), predicate.param_index);
+            try std.testing.expectEqual(@as(u8, 1), direct_signature.type_param_count);
+            try std.testing.expectEqual(direct_signature.type_params[0].idx, predicate.narrowed);
+            try std.testing.expectEqualStrings("T", direct_signature.type_params[0].name);
+            try std.testing.expectEqual(
+                prior_nodes,
+                @as(usize, @intCast(direct_signature.type_params[0].idx)),
+            );
+        },
+        .literal => |expected_literal| {
+            const predicate = direct_signature.type_predicate orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 0), predicate.param_index);
+            try std.testing.expectEqual(
+                TypeTag.t_literal_string,
+                direct_pool.getTag(predicate.narrowed).?,
+            );
+            try std.testing.expectEqualStrings(
+                expected_literal,
+                direct_pool.getLiteralStringValue(predicate.narrowed).?,
+            );
+        },
+    }
+
+    if (case == .mixed_untyped_target or case == .compact_target_position or
+        case == .repeated_target or case == .target_after_sixteen)
+    {
+        const predicate = switch (return_syntax.structure) {
+            .predicate => |value| value,
+            .value => return error.TestUnexpectedResult,
+        };
+        const target = switch (predicate.target) {
+            .resolved => |value| value,
+            .unresolved => return error.TestUnexpectedResult,
+        };
+        const function = direct_view.getFunction(syntax_signature.owner) orelse
+            return error.TestUnexpectedResult;
+        const expected_actual_position: u8 = switch (case) {
+            .mixed_untyped_target, .repeated_target => 0,
+            .compact_target_position => 2,
+            .target_after_sixteen => 16,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(
+            direct_view.getListIndex(function.params_start, expected_actual_position),
+            target.pattern,
+        );
+        try std.testing.expectEqual(
+            switch (case) {
+                .mixed_untyped_target => @as(u8, 1),
+                .compact_target_position, .repeated_target => 2,
+                .target_after_sixteen => 16,
+                else => unreachable,
+            },
+            direct_signature.param_count,
+        );
+    }
+
+    if (case == .unresolved_target or case == .mixed_untyped_target or
+        case == .target_after_sixteen)
+    {
+        const predicate = switch (return_syntax.structure) {
+            .predicate => |value| value,
+            .value => return error.TestUnexpectedResult,
+        };
+        try std.testing.expect(predicate.narrowed.node_range.count > 0);
+        try std.testing.expectEqualStrings(
+            "string[]",
+            predicate.narrowed.raw_span.text(source),
+        );
+        const narrowed_root = direct.type_store.node(
+            try syntaxChildIndex(predicate.narrowed.root),
+        ) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(TypeSyntax.NodeTag.array, narrowed_root.tag);
+        try std.testing.expect(direct_signature.type_predicate == null);
+        try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
+    }
+
+    switch (case) {
+        .named_value, .arrow_value, .trailing_ordinary => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.ordinary,
+                return_syntax.legacy_return_kind,
+            );
+            try std.testing.expectEqual(direct_pool.idx_string, direct_signature.return_type);
+        },
+        .ordinary_tab, .arrow_ordinary_tab => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.ordinary,
+                return_syntax.legacy_return_kind,
+            );
+            try std.testing.expect(return_syntax.legacy_ordinary_prefix != null);
+            try std.testing.expectEqualStrings(
+                "candidate\tis\tstring ",
+                return_syntax.raw_span.text(source),
+            );
+            try std.testing.expectEqual(TypeTag.t_ref, direct_pool.getTag(direct_signature.return_type).?);
+            try std.testing.expectEqualStrings(
+                "candidate",
+                direct_pool.getRefName(direct_signature.return_type),
+            );
+        },
+        .readonly_tab => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.ordinary,
+                return_syntax.legacy_return_kind,
+            );
+            try std.testing.expect(return_syntax.legacy_ordinary_prefix != null);
+            try std.testing.expectEqual(
+                TypeTag.t_ref,
+                direct_pool.getTag(direct_signature.return_type).?,
+            );
+            try std.testing.expectEqualStrings(
+                "is",
+                direct_pool.getRefName(direct_signature.return_type),
+            );
+        },
+        .empty_narrowing => {
+            const predicate = switch (return_syntax.structure) {
+                .predicate => |value| value,
+                .value => return error.TestUnexpectedResult,
+            };
+            switch (predicate.narrowed.root) {
+                .absent => {},
+                .present => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(@as(u32, 0), predicate.narrowed.node_range.count);
+            try std.testing.expectEqualStrings(" ", predicate.narrowed.raw_span.text(source));
+        },
+        .quoted_value => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.type_guard,
+                return_syntax.legacy_return_kind,
+            );
+            switch (return_syntax.structure) {
+                .value => {},
+                .predicate => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
+        },
+        .quoted_marker_tab => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.type_guard,
+                return_syntax.legacy_return_kind,
+            );
+            const predicate = switch (return_syntax.structure) {
+                .predicate => |value| value,
+                .value => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqualStrings("candidate", predicate.target_span.text(source));
+            try std.testing.expectEqualStrings("\"a is b\"", predicate.narrowed.raw_span.text(source));
+            const target = switch (predicate.target) {
+                .resolved => |value| value,
+                .unresolved => return error.TestUnexpectedResult,
+            };
+            const function = direct_view.getFunction(syntax_signature.owner) orelse
+                return error.TestUnexpectedResult;
+            const first_parameter = direct_view.getListIndex(function.params_start, 0);
+            try std.testing.expectEqual(first_parameter, target.pattern);
+            try std.testing.expect(std.meta.eql(
+                direct_view.paramBinding(first_parameter).?,
+                target.binding,
+            ));
+            try std.testing.expectEqualStrings(
+                "candidate\tis \"a is b\" ",
+                return_syntax.raw_span.text(source),
+            );
+            try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
+        },
+        .quoted_marker_space => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.type_guard,
+                return_syntax.legacy_return_kind,
+            );
+            const predicate = switch (return_syntax.structure) {
+                .predicate => |value| value,
+                .value => return error.TestUnexpectedResult,
+            };
+            try std.testing.expectEqualStrings("candidate", predicate.target_span.text(source));
+            try std.testing.expectEqualStrings("\"a is b\"", predicate.narrowed.raw_span.text(source));
+            try std.testing.expectEqualStrings(
+                "candidate is \"a is b\" ",
+                return_syntax.raw_span.text(source),
+            );
+            try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
+        },
+        .unresolved_target => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.type_guard,
+                return_syntax.legacy_return_kind,
+            );
+            const predicate = switch (return_syntax.structure) {
+                .predicate => |value| value,
+                .value => return error.TestUnexpectedResult,
+            };
+            switch (predicate.target) {
+                .unresolved => {},
+                .resolved => return error.TestUnexpectedResult,
+            }
+            try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
+        },
+        .named_guard_verified,
+        .named_guard_unverified,
+        .arrow_guard_unverified,
+        .mixed_untyped_target,
+        .compact_target_position,
+        .repeated_target,
+        .target_after_sixteen,
+        .captured_generic,
+        => {
+            try std.testing.expectEqual(
+                TypeSyntax.LegacyReturnKind.type_guard,
+                return_syntax.legacy_return_kind,
+            );
+            try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
+        },
+    }
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    try std.testing.expectEqual(
+        try legacy_checker.check(legacy_root),
+        try direct_checker.check(direct_root),
+    );
+    try std.testing.expectEqual(
+        legacy_checker.getDiagnostics().len,
+        direct_checker.getDiagnostics().len,
+    );
+    for (legacy_checker.getDiagnostics(), direct_checker.getDiagnostics()) |legacy_diag, direct_diag| {
+        try expectSameTypeDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    }
+    if (case == .named_guard_unverified or case == .quoted_marker_space) {
+        try std.testing.expectEqual(@as(usize, 1), direct_checker.getDiagnostics().len);
+        try std.testing.expectEqual(
+            type_checker_mod.DiagnosticKind.invalid_type_predicate,
+            direct_checker.getDiagnostics()[0].kind,
+        );
+    }
+    if (case == .named_guard_verified or case == .arrow_guard_unverified) {
+        try std.testing.expectEqual(@as(usize, 0), direct_checker.getDiagnostics().len);
+    }
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    try std.testing.expectEqual(
+        try legacy_strict.check(legacy_root),
+        try direct_strict.check(direct_root),
+    );
+    try std.testing.expectEqual(
+        legacy_strict.getDiagnostics().len,
+        direct_strict.getDiagnostics().len,
+    );
+    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diag, direct_diag| {
+        try expectSameStrictDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    }
+}
+
+test "direct predicates preserve construction and checker behavior" {
+    const cases = [_]struct {
+        case: DirectPredicateCase,
+        source: []const u8,
+        predicate: ExpectedPredicate,
+        return_spelling: ?[]const u8,
+    }{
+        .{ .case = .named_value, .source = "function echo(value: string): string { return value; }", .predicate = .absent, .return_spelling = "string " },
+        .{ .case = .arrow_value, .source = "const echo = (value: string): string => value;", .predicate = .absent, .return_spelling = "string " },
+        .{ .case = .named_guard_verified, .source = "function guard(candidate: unknown): candidate is string { return typeof candidate === \"string\"; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .named_guard_unverified, .source = "function guard(candidate: unknown): candidate is string { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .arrow_guard_unverified, .source = "const guard = (candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .ordinary_tab, .source = "function guard(candidate: unknown): candidate\tis\tstring { return true; }", .predicate = .absent, .return_spelling = "candidate\tis\tstring " },
+        .{ .case = .arrow_ordinary_tab, .source = "const guard = (candidate: unknown): candidate\tis\tstring => true;", .predicate = .absent, .return_spelling = "candidate\tis\tstring " },
+        .{ .case = .readonly_tab, .source = "function guard(readonly: unknown): readonly\tis\tstring { return true; }", .predicate = .absent, .return_spelling = "readonly\tis\tstring " },
+        .{ .case = .quoted_value, .source = "const text = (): \"x is y\" => true;", .predicate = .absent, .return_spelling = null },
+        .{ .case = .empty_narrowing, .source = "function guard(candidate: unknown): candidate is { return true; }", .predicate = .absent, .return_spelling = null },
+        .{ .case = .unresolved_target, .source = "function guard(candidate: unknown): missing is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
+        .{ .case = .mixed_untyped_target, .source = "function guard(candidate, marker: unknown): candidate is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
+        .{ .case = .compact_target_position, .source = "const guard = (lead, marker: unknown, candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 1 }, .return_spelling = null },
+        .{ .case = .repeated_target, .source = "const guard = (candidate, candidate: number, candidate: string): candidate is string => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .target_after_sixteen, .source = "const guard = (p0: unknown, p1: unknown, p2: unknown, p3: unknown, p4: unknown, p5: unknown, p6: unknown, p7: unknown, p8: unknown, p9: unknown, p10: unknown, p11: unknown, p12: unknown, p13: unknown, p14: unknown, p15: unknown, target: unknown): target is string[] => true;\n", .predicate = .absent, .return_spelling = null },
+        .{ .case = .captured_generic, .source = "const guard = <T>(candidate: unknown): candidate is T => true;", .predicate = .captured_generic, .return_spelling = null },
+        .{ .case = .trailing_ordinary, .source = "function echo(value: string): string   { return value; }", .predicate = .absent, .return_spelling = "string   " },
+        .{ .case = .quoted_marker_space, .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
+        .{ .case = .quoted_marker_tab, .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n", .predicate = .absent, .return_spelling = null },
+    };
+    var seen = std.EnumSet(DirectPredicateCase).initEmpty();
+    for (cases) |case| {
+        try expectDirectPredicateConsumer(
+            case.source,
+            case.case,
+            case.predicate,
+            case.return_spelling,
+        );
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(DirectPredicateCase).len, cases.len);
+    try std.testing.expectEqual(cases.len, seen.count());
+}
+
+const PredicateAllocationObservations = struct {
+    unselected_failures: usize = 0,
+    selected_failures: usize = 0,
+    post_seed_failures: usize = 0,
+    incomplete_publication_failures: usize = 0,
+    successes: usize = 0,
+};
+
+fn runPredicateAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *PredicateAllocationObservations,
+) !void {
+    const source =
+        "structural Seed = string;\n" ++
+        "const guard = <T>(candidate: Seed): candidate is T[] => true;\n";
+    var runtime_count = CountingAllocator.init(std.testing.allocator);
+    var atoms = AtomTable.init(runtime_count.allocator());
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(
+        runtime_count.allocator(),
+        std.testing.allocator,
+        source,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    module_types.populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    const prior_nodes = pool.nodes.items.len;
+    env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+    } }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+        if (env.sourceTypeMode() == null) {
+            observations.unselected_failures += 1;
+            try std.testing.expectEqual(prior_nodes, pool.nodes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), env.direct_fn_signatures.count());
+        } else {
+            observations.selected_failures += 1;
+            try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, env.sourceTypeMode().?);
+            const has_seed = env.getTypeAlias("Seed") != null;
+            if (has_seed and poolTagCount(&pool, prior_nodes, .t_generic_param) > 0) {
+                observations.post_seed_failures += 1;
+            }
+            if (has_seed and env.direct_source_fn_annotations.count() > 0 and
+                env.direct_fn_signatures.count() == 0)
+            {
+                observations.incomplete_publication_failures += 1;
+            }
+        }
+        try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+        var checker = type_checker_mod.TypeChecker.init(
+            std.testing.allocator,
+            parserIrView(&parser),
+            &atoms,
+            &env,
+        );
+        defer checker.deinit();
+        try std.testing.expectError(error.OutOfMemory, checker.check(root));
+        var strict = strict_checker_mod.StrictChecker.init(
+            std.testing.allocator,
+            parserIrView(&parser),
+            &atoms,
+            &env,
+            null,
+        );
+        defer strict.deinit();
+        try std.testing.expectError(error.OutOfMemory, strict.check(root));
+        return err;
+    };
+
+    observations.successes += 1;
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    try std.testing.expect(env.getTypeAlias("Seed") != null);
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-predicate-oom>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    var legacy_atoms = AtomTable.init(std.testing.allocator);
+    defer legacy_atoms.deinit();
+    var legacy = try JsParser.init(std.testing.allocator, prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    _ = try legacy.parse();
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try expectExactTypePool(&legacy_pool, &pool);
+    try expectExactFunctionNameMaps(&legacy_env, &env);
+    try expectExactOwnerSignatures(
+        &legacy_env,
+        &env,
+        parserIrView(&legacy),
+        parserIrView(&parser),
+        &parser.type_store,
+    );
+
+    const syntax_signature = parser.type_store.function_signatures.items[0];
+    const reference = env.functionTypeRef(parserIrView(&parser), syntax_signature.owner) orelse
+        return error.TestUnexpectedResult;
+    const signature = env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
+    const predicate = signature.type_predicate orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 0), predicate.param_index);
+    try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(predicate.narrowed).?);
+    const element = pool.getArrayElement(predicate.narrowed);
+    try std.testing.expectEqual(TypeTag.t_ref, pool.getTag(element).?);
+    try std.testing.expectEqualStrings("T", pool.getRefName(element));
+    try std.testing.expect(element != signature.type_params[0].idx);
+}
+
+test "direct predicate allocation failures restore scopes and poison consumers" {
+    var observations: PredicateAllocationObservations = .{};
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runPredicateAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.expect(observations.unselected_failures > 0);
+    try std.testing.expect(observations.selected_failures > 0);
+    try std.testing.expect(observations.post_seed_failures > 0);
+    try std.testing.expect(observations.incomplete_publication_failures > 0);
+    try std.testing.expect(observations.successes > 0);
+}
+
+test "bounded erased prefixes preserve preflight and consumer admission" {
+    const Case = enum { scalar_bound, compound_bound, any_bound, default_parameter, operator_parameter };
+    const cases = [_]struct { case: Case, source: []const u8 }{
+        .{ .case = .scalar_bound, .source = "const value = <T extends string>(1);" },
+        .{ .case = .compound_bound, .source = "const value = <T extends { id: string }>(1);" },
+        .{ .case = .any_bound, .source = "const value = <T extends any>(1);" },
+        .{ .case = .default_parameter, .source = "const value = <T = string>(1);" },
+        .{ .case = .operator_parameter, .source = "const value = <T | U>(1);" },
+    };
+    const modes = [_]AdmissionMode{ .collect, .compile };
+    var seen = std.EnumSet(Case).initEmpty();
+    for (cases) |case| {
+        for (modes) |mode| switch (try compare(std.testing.allocator, case.source, mode)) {
+            .equivalent => {},
+            else => return error.TestUnexpectedResult,
+        };
+        try expectDirectDeclarationConsumer(case.source, &.{}, "", false);
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(Case).len, seen.count());
+    try std.testing.expectEqual(@as(usize, 2), modes.len);
+
+    for (modes) |mode| switch (try compare(
+        std.testing.allocator,
+        "const value = <T extends void>(1);",
+        mode,
+    )) {
+        .admission_refused => |refusal| {
+            try std.testing.expectEqual(AdmissionKind.void_type, refusal.first);
+            try std.testing.expectEqual(@as(usize, 1), refusal.count);
+        },
+        else => return error.TestUnexpectedResult,
+    };
+}
+
+test "direct callable bounds stop before excluded projected fragments" {
+    const source =
+        "function compact<T, = string, U extends { id: string }>(value: T): T { " ++
+        "return value; }";
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-compact-stop>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
+    const owner = direct.type_store.generic_owners.items[0];
+    const projected = direct.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 3), projected.len);
+    try std.testing.expectEqualStrings("T", projected[0].name_span.text(source));
+    try std.testing.expectEqualStrings("", projected[1].name_span.text(source));
+    try std.testing.expectEqualStrings("U", projected[2].name_span.text(source));
+    try std.testing.expectEqualStrings(
+        "{ id: string }",
+        (projected[2].legacy_bound_span orelse return error.TestUnexpectedResult).text(source),
+    );
+    try std.testing.expect(projected[2].bound_fragment == null);
+    const fragment_index = try TypeSyntax.parseSemanticFragmentAndStore(
+        &direct.type_store,
+        projected[2].legacy_bound_span.?,
+    );
+    direct.type_store.projected_generic_parameters.items[
+        owner.projected_parameters.start + 2
+    ].bound_fragment = fragment_index;
+    try direct.type_store.validateRuntimeOwners(std.testing.allocator, direct_view);
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    const prior_nodes = direct_pool.nodes.items.len;
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
+    try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
+    try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_nodes)).?);
+    try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_nodes + 1)).?);
+    try std.testing.expectEqualStrings("T", direct_pool.getRefName(@intCast(prior_nodes)));
+    try std.testing.expectEqualStrings("U", direct_pool.getRefName(@intCast(prior_nodes + 1)));
+    const function_owner = switch (owner.identity) {
+        .function => |node| node,
+        else => return error.TestUnexpectedResult,
+    };
+    const reference = direct_env.functionTypeRef(direct_view, function_owner) orelse
+        return error.TestUnexpectedResult;
+    const signature = direct_env.getFunctionSignature(reference) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 2), signature.type_param_count);
+    try std.testing.expectEqualStrings("T", signature.type_params[0].name);
+    try std.testing.expectEqualStrings("U", signature.type_params[1].name);
+    try std.testing.expectEqual(null_type_idx, signature.type_params[1].constraint);
+    try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
+    try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
+    try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
+}
+
+fn poolHasGenericName(pool: *const TypePool, start: usize, name: []const u8) bool {
+    for (start..pool.nodes.items.len) |index| {
+        const type_index: TypeIndex = @intCast(index);
+        if (pool.getTag(type_index) != .t_generic_param) continue;
+        if (std.mem.eql(u8, pool.getRefName(type_index), name)) return true;
+    }
+    return false;
+}
+
+fn poolTagCount(pool: *const TypePool, start: usize, tag: TypeTag) usize {
+    var count: usize = 0;
+    for (start..pool.nodes.items.len) |index| {
+        if (pool.getTag(@intCast(index)) == tag) count += 1;
+    }
+    return count;
+}
+
+const DirectGenericAllocationObservations = struct {
+    unselected_plan_failures: usize = 0,
+    selected_failures: usize = 0,
+    bound_failures: usize = 0,
+    generic_only_validation_failures: usize = 0,
+    retained_map_failures: usize = 0,
+    publication_failures: usize = 0,
+    successes: usize = 0,
+};
+
+fn runDirectGenericAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *DirectGenericAllocationObservations,
+) !void {
+    const source =
+        "structural Seed = string;\n" ++
+        "const before = <P extends { id: string }>(1);\n" ++
+        "function identity<T extends string>(value: T): T { return value; }\n" ++
+        "const after = <Q extends number>(2);";
+    var runtime_count = CountingAllocator.init(std.testing.allocator);
+    var atoms = AtomTable.init(runtime_count.allocator());
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(
+        runtime_count.allocator(),
+        std.testing.allocator,
+        source,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    const prior_nodes = pool.nodes.items.len;
+    env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+    } }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+        if (env.sourceTypeMode() == null) {
+            observations.unselected_plan_failures += 1;
+            try std.testing.expectEqual(prior_nodes, pool.nodes.items.len);
+        } else {
+            try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, env.sourceTypeMode().?);
+            observations.selected_failures += 1;
+            const has_p = poolHasGenericName(&pool, prior_nodes, "P");
+            const has_t = poolHasGenericName(&pool, prior_nodes, "T");
+            const has_q = poolHasGenericName(&pool, prior_nodes, "Q");
+            const records = poolTagCount(&pool, prior_nodes, .t_record);
+            const has_seed = env.getTypeAlias("Seed") != null;
+            if (has_p and !has_t and records == 0) {
+                try std.testing.expect(has_seed);
+                observations.bound_failures += 1;
+            }
+            if (has_p and has_t and has_q and
+                env.direct_source_fn_annotations.count() == 2 and
+                env.direct_fn_signatures.count() == 0)
+            {
+                try std.testing.expect(has_seed);
+                observations.publication_failures += 1;
+            }
+        }
+        try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+        return err;
+    };
+
+    observations.successes += 1;
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    try std.testing.expect(env.getTypeAlias("Seed") != null);
+    try std.testing.expect(poolHasGenericName(&pool, prior_nodes, "P"));
+    try std.testing.expect(poolHasGenericName(&pool, prior_nodes, "T"));
+    try std.testing.expect(poolHasGenericName(&pool, prior_nodes, "Q"));
+    try std.testing.expectEqual(@as(usize, 1), env.direct_fn_signatures.count());
+}
+
+fn runDirectGenericMapAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *DirectGenericAllocationObservations,
+) !void {
+    const source =
+        "structural Seed = string;\n" ++
+        "function identity<T>(value) { return value; }";
+    var runtime_count = CountingAllocator.init(std.testing.allocator);
+    var atoms = AtomTable.init(runtime_count.allocator());
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(
+        runtime_count.allocator(),
+        std.testing.allocator,
+        source,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    const prior_nodes = pool.nodes.items.len;
+    env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+    } }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+        if (env.sourceTypeMode() == null) {
+            observations.generic_only_validation_failures += 1;
+        } else {
+            try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, env.sourceTypeMode().?);
+            if (poolHasGenericName(&pool, prior_nodes, "T")) {
+                try std.testing.expect(env.getTypeAlias("Seed") != null);
+                observations.retained_map_failures += 1;
+            }
+        }
+        try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+        return err;
+    };
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    try std.testing.expect(env.getTypeAlias("Seed") != null);
+    try std.testing.expect(poolHasGenericName(&pool, prior_nodes, "T"));
+    try std.testing.expectEqual(@as(usize, 0), env.direct_fn_signatures.count());
+}
+
+test "direct callable generic allocation failures close scopes by construction stage" {
+    var observations: DirectGenericAllocationObservations = .{};
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runDirectGenericAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runDirectGenericMapAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.expect(observations.unselected_plan_failures > 0);
+    try std.testing.expect(observations.selected_failures > 0);
+    try std.testing.expect(observations.bound_failures > 0);
+    try std.testing.expect(observations.generic_only_validation_failures > 0);
+    try std.testing.expect(observations.retained_map_failures > 0);
+    try std.testing.expect(observations.publication_failures > 0);
+    try std.testing.expect(observations.successes > 0);
+}
+
+fn functionWrapper(view: engine.parser.IrView, owner: NodeIndex) ?NodeIndex {
+    for (0..view.nodeCount()) |raw| {
+        const node: NodeIndex = @intCast(raw);
+        if (view.getTag(node) != .function_decl) continue;
+        const declaration = view.getVarDecl(node) orelse continue;
+        if (declaration.init == owner) return node;
+    }
+    return null;
+}
+
+fn expectSameTypeDiagnostic(
+    left: type_checker_mod.Diagnostic,
+    left_view: engine.parser.IrView,
+    right: type_checker_mod.Diagnostic,
+    right_view: engine.parser.IrView,
+) !void {
+    try std.testing.expectEqual(left.kind, right.kind);
+    try std.testing.expectEqualStrings(left.message, right.message);
+    try std.testing.expect(std.meta.eql(left_view.getLoc(left.node).?, right_view.getLoc(right.node).?));
+}
+
+fn expectSameStrictDiagnostic(
+    left: strict_checker_mod.Diagnostic,
+    left_view: engine.parser.IrView,
+    right: strict_checker_mod.Diagnostic,
+    right_view: engine.parser.IrView,
+) !void {
+    try std.testing.expectEqual(left.kind, right.kind);
+    try std.testing.expectEqualStrings(left.message, right.message);
+    try std.testing.expect(std.meta.eql(left_view.getLoc(left.node).?, right_view.getLoc(right.node).?));
+}
+
+test "direct source pilot preserves runtime types owners checks and capsules" {
+    const source =
+        "const seed: number = 1;\n" ++
+        "export function helper(value: string): Proof<string, \"deterministic\"> {\n" ++
+        "  return value;\n" ++
+        "}";
+    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-pilot>.ts", .{});
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    const legacy_allocator = legacy_count.allocator();
+    const direct_allocator = direct_count.allocator();
+    const type_allocator = type_count.allocator();
+    var legacy_atoms = AtomTable.init(legacy_allocator);
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_allocator);
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_allocator, prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(direct_allocator, type_allocator, source);
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try std.testing.expectEqual(type_env_mod.SourceTypeMode.legacy, legacy_env.sourceTypeMode().?);
+    try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, direct_env.sourceTypeMode().?);
+    try std.testing.expectEqual(@as(usize, 1), direct_env.varAnnotationCount());
+    try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
+
+    const annotation = direct.type_store.annotations.items[0];
+    const annotation_owner = annotation.runtime_owner orelse return error.TestUnexpectedResult;
+    const declaration = direct_view.getVarDecl(annotation_owner.declaration) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(std.meta.eql(annotation.binding, declaration.binding));
+    try std.testing.expectEqual(direct_pool.idx_number, direct_env.getVarTypeForDeclaration(
+        direct_view,
+        annotation_owner.declaration,
+    ).?);
+    try std.testing.expect(direct_env.getVarTypeForDeclaration(direct_view, direct_root) == null);
+
+    const signature_record = direct.type_store.function_signatures.items[0];
+    const owner = signature_record.owner;
+    try std.testing.expectEqual(engine.parser.NodeTag.function_expr, direct_view.getTag(owner).?);
+    const wrapper = functionWrapper(direct_view, owner) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(engine.parser.NodeTag.function_decl, direct_view.getTag(wrapper).?);
+    try std.testing.expect(direct_env.functionTypeRef(direct_view, wrapper) == null);
+    const direct_reference = direct_env.functionTypeRef(direct_view, owner) orelse
+        return error.TestUnexpectedResult;
+    const legacy_reference = legacy_env.functionTypeRef(legacy_view, owner) orelse
+        return error.TestUnexpectedResult;
+    const direct_signature = direct_env.getFunctionSignature(direct_reference) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), direct_signature.param_count);
+    try std.testing.expectEqual(direct_pool.idx_string, direct_signature.param_types[0]);
+    try std.testing.expectEqualStrings(
+        "string",
+        direct_env.getFunctionParameterSpelling(direct_reference, 0).?,
+    );
+    try std.testing.expectEqualStrings(
+        legacy_env.getFunctionParameterSpelling(legacy_reference, 0).?,
+        direct_env.getFunctionParameterSpelling(direct_reference, 0).?,
+    );
+    try std.testing.expectEqualStrings(
+        "Proof<string, \"deterministic\"> ",
+        direct_env.getFunctionReturnSpelling(direct_reference).?,
+    );
+    try std.testing.expectEqualStrings(
+        legacy_env.getFunctionReturnSpelling(legacy_reference).?,
+        direct_env.getFunctionReturnSpelling(direct_reference).?,
+    );
+    try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, owner) == null);
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    try std.testing.expectEqual(@as(u32, 0), try legacy_checker.check(legacy_root));
+    try std.testing.expectEqual(@as(u32, 0), try direct_checker.check(direct_root));
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    try std.testing.expectEqual(@as(u32, 1), try legacy_strict.check(legacy_root));
+    try std.testing.expectEqual(@as(u32, 1), try direct_strict.check(direct_root));
+    const legacy_strict_diagnostics = legacy_strict.getDiagnostics();
+    const direct_strict_diagnostics = direct_strict.getDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), legacy_strict_diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 1), direct_strict_diagnostics.len);
+    try expectSameStrictDiagnostic(
+        legacy_strict_diagnostics[0],
+        legacy_view,
+        direct_strict_diagnostics[0],
+        direct_view,
+    );
+    try std.testing.expectEqual(
+        strict_checker_mod.DiagnosticKind.raw_exported_boundary_type,
+        direct_strict_diagnostics[0].kind,
+    );
+    try std.testing.expectEqualStrings(
+        "exported function parameter type `string` exposes raw `string`",
+        direct_strict_diagnostics[0].message,
+    );
+    const strict_location = direct_view.getLoc(direct_strict_diagnostics[0].node).?;
+    try std.testing.expectEqual(@as(u32, 2), strict_location.line);
+    try std.testing.expectEqual(@as(u32, 24), strict_location.column);
+
+    var legacy_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        legacy_root,
+        .{},
+    );
+    defer legacy_effects.deinit(std.testing.allocator);
+    var direct_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        direct_root,
+        .{},
+    );
+    defer direct_effects.deinit(std.testing.allocator);
+    var legacy_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &legacy_effects,
+        .{ .legacy = &legacy_env },
+        legacy_view,
+    );
+    defer legacy_capsules.deinit(std.testing.allocator);
+    var direct_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &direct_effects,
+        .{ .direct = &direct_env },
+        direct_view,
+    );
+    defer direct_capsules.deinit(std.testing.allocator);
+    const legacy_capsule = legacy_capsules.byName("helper") orelse return error.TestUnexpectedResult;
+    const direct_capsule = direct_capsules.byName("helper") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), direct_capsule.declared.items.len);
+    try std.testing.expectEqualStrings("deterministic", direct_capsule.declared.items[0]);
+    try std.testing.expect(direct_capsule.proven.total);
+    try std.testing.expect(direct_capsule.proven.pure);
+    try std.testing.expect(direct_capsule.proven.read_only);
+    try std.testing.expect(direct_capsule.proven.deterministic);
+    try std.testing.expect(direct_capsule.discharged());
+    try std.testing.expectEqualStrings(legacy_capsule.declared.items[0], direct_capsule.declared.items[0]);
+    try std.testing.expect(std.meta.eql(legacy_capsule.proven, direct_capsule.proven));
+    try std.testing.expectEqual(legacy_capsule.discharged(), direct_capsule.discharged());
+}
+
+fn expectPilotCheckerContrast(
+    source: []const u8,
+    expected_type_errors: u32,
+    expected_strict_errors: u32,
+) !void {
+    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-contrast>.ts", .{});
+    defer prepared.deinit();
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    try std.testing.expectEqual(expected_type_errors, try legacy_checker.check(legacy_root));
+    try std.testing.expectEqual(expected_type_errors, try direct_checker.check(direct_root));
+    try std.testing.expectEqual(
+        legacy_checker.getDiagnostics().len,
+        direct_checker.getDiagnostics().len,
+    );
+    for (legacy_checker.getDiagnostics(), direct_checker.getDiagnostics()) |legacy_diag, direct_diag| {
+        try expectSameTypeDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    }
+    if (expected_type_errors == 1) {
+        const diagnostic = direct_checker.getDiagnostics()[0];
+        try std.testing.expectEqual(type_checker_mod.DiagnosticKind.type_mismatch, diagnostic.kind);
+        const location = direct_view.getLoc(diagnostic.node).?;
+        try std.testing.expectEqual(@as(u32, 1), location.line);
+        try std.testing.expectEqual(@as(u32, 1), location.column);
+    }
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    try std.testing.expectEqual(expected_strict_errors, try legacy_strict.check(legacy_root));
+    try std.testing.expectEqual(expected_strict_errors, try direct_strict.check(direct_root));
+    try std.testing.expectEqual(
+        legacy_strict.getDiagnostics().len,
+        direct_strict.getDiagnostics().len,
+    );
+    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diag, direct_diag| {
+        try expectSameStrictDiagnostic(legacy_diag, legacy_view, direct_diag, direct_view);
+    }
+    if (expected_strict_errors == 1) {
+        const diagnostic = direct_strict.getDiagnostics()[0];
+        try std.testing.expectEqual(
+            strict_checker_mod.DiagnosticKind.raw_exported_boundary_type,
+            diagnostic.kind,
+        );
+        try std.testing.expectEqualStrings(
+            "exported function parameter type `string` exposes raw `string`",
+            diagnostic.message,
+        );
+        const location = direct_view.getLoc(diagnostic.node).?;
+        try std.testing.expectEqual(@as(u32, 2), location.line);
+        try std.testing.expectEqual(@as(u32, 24), location.column);
+    }
+}
+
+test "direct source pilot retains independent type and strict failures" {
+    const source =
+        "const seed: number = \"x\";\n" ++
+        "export function helper(value: string): Proof<string, \"deterministic\"> {\n" ++
+        "  return value;\n" ++
+        "}";
+    try expectPilotCheckerContrast(source, 1, 1);
+}
+
+test "direct source pilot keeps inline record boundaries accepted" {
+    const source =
+        "const seed: number = 1;\n" ++
+        "export function helper(value: { id: string }): Proof<string, \"deterministic\"> {\n" ++
+        "  return value.id;\n" ++
+        "}";
+    try expectPilotCheckerContrast(source, 0, 0);
+}
+
+test "direct source selection distinguishes omitted and empty inputs" {
+    var omitted_pool = TypePool.init(std.testing.allocator);
+    defer omitted_pool.deinit(std.testing.allocator);
+    var omitted_env = TypeEnv.init(std.testing.allocator, &omitted_pool);
+    defer omitted_env.deinit();
+    module_types.populateModuleTypes(&omitted_env, &omitted_pool, std.testing.allocator);
+    try omitted_pool.ensureHealthy();
+    try omitted_env.ensureHealthy();
+    try std.testing.expect(omitted_env.getFnSigByName("sha256") != null);
+    try omitted_env.populateSourceTypes(.omitted);
+    try std.testing.expectEqual(type_env_mod.SourceTypeMode.omitted, omitted_env.sourceTypeMode().?);
+    try std.testing.expectEqual(@as(usize, 0), omitted_env.varAnnotationCount());
+    try std.testing.expect(omitted_env.getFnSigByName("sha256") != null);
+    try std.testing.expectError(
+        error.TypeSourceAlreadySelected,
+        omitted_env.populateSourceTypes(.omitted),
+    );
+
+    var empty_prepared = try PreparedSource.init(
+        std.testing.allocator,
+        "",
+        "<u12-empty-legacy>.ts",
+        .{},
+    );
+    defer empty_prepared.deinit();
+    const empty_type_map = empty_prepared.typeMap().?;
+    try std.testing.expectError(
+        error.TypeSourceAlreadySelected,
+        omitted_env.populateFromTypeMap(empty_type_map),
+    );
+
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var empty_parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, "");
+    defer empty_parser.deinit();
+    empty_parser.setAtomTable(&atoms);
+    const empty_root = try empty_parser.parse();
+    const empty_view = parserIrView(&empty_parser);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &empty_parser.type_store,
+        .ir_view = empty_view,
+        .atoms = &atoms,
+    } });
+    try std.testing.expectEqual(type_env_mod.SourceTypeMode.direct, direct_env.sourceTypeMode().?);
+    try std.testing.expectEqual(@as(usize, 0), direct_env.varAnnotationCount());
+    try std.testing.expect(direct_env.functionTypeRef(empty_view, empty_root) == null);
+    try std.testing.expect(direct_env.getVarTypeForDeclaration(empty_view, empty_root) == null);
+    try std.testing.expect(direct_env.getCallTypeArgsForCall(empty_view, empty_root) == null);
+    try std.testing.expectError(
+        error.TypeSourceAlreadySelected,
+        direct_env.populateFromTypeMap(empty_type_map),
+    );
+
+    var repeated_pool = TypePool.init(std.testing.allocator);
+    defer repeated_pool.deinit(std.testing.allocator);
+    var repeated_env = TypeEnv.init(std.testing.allocator, &repeated_pool);
+    defer repeated_env.deinit();
+    try repeated_env.populateFromTypeMap(empty_type_map);
+    try repeated_env.populateFromTypeMap(empty_type_map);
+    try std.testing.expect(repeated_env.sourceTypeMode() == null);
+    try repeated_env.populateSourceTypes(.{ .legacy = empty_type_map });
+    try std.testing.expectEqual(type_env_mod.SourceTypeMode.legacy, repeated_env.sourceTypeMode().?);
+    try repeated_env.populateFromTypeMap(empty_type_map);
+
+    var legacy_first_pool = TypePool.init(std.testing.allocator);
+    defer legacy_first_pool.deinit(std.testing.allocator);
+    var legacy_first_env = TypeEnv.init(std.testing.allocator, &legacy_first_pool);
+    defer legacy_first_env.deinit();
+    try legacy_first_env.populateFromTypeMap(empty_type_map);
+    try std.testing.expectError(
+        error.TypeSourceAlreadySelected,
+        legacy_first_env.populateSourceTypes(.{ .direct = .{
+            .store = &empty_parser.type_store,
+            .ir_view = empty_view,
+            .atoms = &atoms,
+        } }),
+    );
+    try std.testing.expect(legacy_first_env.sourceTypeMode() == null);
+    try legacy_first_env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), legacy_first_env.direct_var_types.count());
+    try std.testing.expectEqual(@as(usize, 0), legacy_first_env.direct_fn_signatures.count());
+
+    var legacy_omitted_pool = TypePool.init(std.testing.allocator);
+    defer legacy_omitted_pool.deinit(std.testing.allocator);
+    var legacy_omitted_env = TypeEnv.init(std.testing.allocator, &legacy_omitted_pool);
+    defer legacy_omitted_env.deinit();
+    try legacy_omitted_env.populateFromTypeMap(empty_type_map);
+    try std.testing.expectError(
+        error.TypeSourceAlreadySelected,
+        legacy_omitted_env.populateSourceTypes(.omitted),
+    );
+    try std.testing.expect(legacy_omitted_env.sourceTypeMode() == null);
+    try legacy_omitted_env.ensureHealthy();
+    const empty_effects: effect_inference.EffectFacts = .{};
+    try std.testing.expectError(
+        error.TypeSourceModeMismatch,
+        function_specs.dischargeWithTypeSource(
+            std.testing.allocator,
+            &empty_effects,
+            .{ .legacy = &direct_env },
+            empty_view,
+        ),
+    );
+    direct_pool.failure = error.TypePoolCapacityExceeded;
+    var capacity_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        empty_view,
+        &atoms,
+        &direct_env,
+        null,
+    );
+    defer capacity_strict.deinit();
+    try std.testing.expectError(
+        error.TypePoolCapacityExceeded,
+        capacity_strict.check(empty_root),
+    );
+    direct_pool.failure = null;
+    direct_env.markAllocationFailure();
+    var unhealthy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        empty_view,
+        &atoms,
+        &direct_env,
+    );
+    defer unhealthy_checker.deinit();
+    try std.testing.expectError(error.OutOfMemory, unhealthy_checker.check(empty_root));
+    var unhealthy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        empty_view,
+        &atoms,
+        &direct_env,
+        null,
+    );
+    defer unhealthy_strict.deinit();
+    try std.testing.expectError(error.OutOfMemory, unhealthy_strict.check(empty_root));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        function_specs.dischargeWithTypeSource(
+            std.testing.allocator,
+            &empty_effects,
+            .{ .direct = &direct_env },
+            empty_view,
+        ),
+    );
+}
+
+const PilotAllocationObservations = struct {
+    unselected_plan_failures: usize = 0,
+    selected_failures: usize = 0,
+    populated_failures: usize = 0,
+};
+
+fn runDirectPilotAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *PilotAllocationObservations,
+) !void {
+    const source =
+        "const seed: number = 1;\n" ++
+        "export function helper(value: string): Proof<string, \"deterministic\"> {\n" ++
+        "  return value;\n" ++
+        "}";
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = parserIrView(&parser);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    try pool.ensureHealthy();
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    module_types.populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } }) catch |err| {
+        if (env.sourceTypeMode() == null) {
+            observations.unselected_plan_failures += 1;
+            try std.testing.expect(env.sourceTypeMode() == null);
+            try std.testing.expectEqual(@as(usize, 0), env.direct_var_types.count());
+            try std.testing.expectEqual(@as(usize, 0), env.direct_fn_signatures.count());
+            try std.testing.expectEqual(@as(usize, 0), env.direct_source_fn_annotations.count());
+            try std.testing.expectEqual(@as(usize, 0), env.direct_call_type_args.count());
+            try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+            var checker = type_checker_mod.TypeChecker.init(allocator, view, &atoms, &env);
+            defer checker.deinit();
+            try std.testing.expectError(error.OutOfMemory, checker.check(root));
+            var strict = strict_checker_mod.StrictChecker.init(
+                allocator,
+                view,
+                &atoms,
+                &env,
+                null,
+            );
+            defer strict.deinit();
+            try std.testing.expectError(error.OutOfMemory, strict.check(root));
+            const empty_effects: effect_inference.EffectFacts = .{};
+            try std.testing.expectError(
+                error.OutOfMemory,
+                function_specs.dischargeWithTypeSource(
+                    allocator,
+                    &empty_effects,
+                    .{ .legacy = &env },
+                    view,
+                ),
+            );
+            try std.testing.expectError(
+                error.TypeSourceModeMismatch,
+                function_specs.dischargeWithTypeSource(
+                    allocator,
+                    &empty_effects,
+                    .{ .direct = &env },
+                    view,
+                ),
+            );
+        } else if (env.sourceTypeMode() == .direct) {
+            observations.selected_failures += 1;
+            if (env.direct_var_types.count() > 0 or env.direct_fn_signatures.count() > 0) {
+                observations.populated_failures += 1;
+            }
+            try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+            var checker = type_checker_mod.TypeChecker.init(allocator, view, &atoms, &env);
+            defer checker.deinit();
+            try std.testing.expectError(error.OutOfMemory, checker.check(root));
+            var strict = strict_checker_mod.StrictChecker.init(
+                allocator,
+                view,
+                &atoms,
+                &env,
+                null,
+            );
+            defer strict.deinit();
+            try std.testing.expectError(error.OutOfMemory, strict.check(root));
+            const empty_effects: effect_inference.EffectFacts = .{};
+            try std.testing.expectError(
+                error.OutOfMemory,
+                function_specs.dischargeWithTypeSource(
+                    allocator,
+                    &empty_effects,
+                    .{ .direct = &env },
+                    view,
+                ),
+            );
+        }
+        return err;
+    };
+
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 1), env.direct_var_types.count());
+    try std.testing.expectEqual(@as(usize, 1), env.direct_fn_signatures.count());
+    try std.testing.expectEqual(@as(usize, 2), env.direct_source_fn_annotations.count());
+    try std.testing.expectEqual(@as(usize, 2), env.direct_accumulator_events);
+}
+
+test "direct source pilot allocation failures poison populated consumers" {
+    var observations: PilotAllocationObservations = .{};
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runDirectPilotAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.expect(observations.unselected_plan_failures > 0);
+    try std.testing.expect(observations.selected_failures > 0);
+    try std.testing.expect(observations.populated_failures > 0);
+}
+
+const ExpectedDeclarationDiagnostic = struct {
+    kind: type_checker_mod.DiagnosticKind,
+    line: u32 = 2,
+    column: u32 = 1,
+};
+
+fn expectDirectDeclarationConsumer(
+    source: []const u8,
+    expected_diagnostics: []const ExpectedDeclarationDiagnostic,
+    contractivity_name: []const u8,
+    expected_non_contractive: bool,
+) !void {
+    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-declarations>.ts", .{});
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try std.testing.expectEqual(legacy_env.type_aliases.count(), direct_env.type_aliases.count());
+    var aliases = legacy_env.type_aliases.iterator();
+    while (aliases.next()) |entry| {
+        const direct_alias = direct_env.getTypeAlias(entry.key_ptr.*) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(entry.value_ptr.*, direct_alias);
+        try std.testing.expect(try orderedTypeEqual(
+            std.testing.allocator,
+            &legacy_pool,
+            entry.value_ptr.*,
+            &direct_pool,
+            direct_alias,
+        ));
+        try std.testing.expectEqual(
+            legacy_env.isNonContractiveAlias(entry.key_ptr.*),
+            direct_env.isNonContractiveAlias(entry.key_ptr.*),
+        );
+        try std.testing.expectEqual(
+            legacy_env.isNonContractiveType(entry.value_ptr.*),
+            direct_env.isNonContractiveType(direct_alias),
+        );
+    }
+    try std.testing.expectEqual(legacy_env.generic_aliases.count(), direct_env.generic_aliases.count());
+    var generic_aliases = legacy_env.generic_aliases.iterator();
+    while (generic_aliases.next()) |entry| {
+        const direct_alias = direct_env.generic_aliases.get(entry.key_ptr.*) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(entry.value_ptr.body, direct_alias.body);
+        try std.testing.expectEqual(entry.value_ptr.param_count, direct_alias.param_count);
+        for (
+            entry.value_ptr.param_names[0..entry.value_ptr.param_count],
+            direct_alias.param_names[0..direct_alias.param_count],
+        ) |legacy_name, direct_name| {
+            try std.testing.expectEqualStrings(legacy_name, direct_name);
+        }
+        try std.testing.expect(try orderedTypeEqual(
+            std.testing.allocator,
+            &legacy_pool,
+            entry.value_ptr.body,
+            &direct_pool,
+            direct_alias.body,
+        ));
+    }
+    try std.testing.expectEqual(
+        legacy_env.non_contractive_aliases.count(),
+        direct_env.non_contractive_aliases.count(),
+    );
+    var non_contractive_aliases = legacy_env.non_contractive_aliases.iterator();
+    while (non_contractive_aliases.next()) |entry| {
+        try std.testing.expect(direct_env.non_contractive_aliases.contains(entry.key_ptr.*));
+    }
+    try std.testing.expectEqual(
+        legacy_env.non_contractive_indices.count(),
+        direct_env.non_contractive_indices.count(),
+    );
+    var non_contractive_indices = legacy_env.non_contractive_indices.iterator();
+    while (non_contractive_indices.next()) |entry| {
+        try std.testing.expect(direct_env.non_contractive_indices.contains(entry.key_ptr.*));
+    }
+    try std.testing.expectEqual(
+        expected_non_contractive,
+        direct_env.isNonContractiveAlias(contractivity_name),
+    );
+    try std.testing.expectEqual(direct.type_store.annotations.items.len, direct_env.varAnnotationCount());
+    for (direct.type_store.annotations.items) |annotation| {
+        const owner = annotation.runtime_owner orelse return error.TestUnexpectedResult;
+        const runtime = direct_view.getVarDecl(owner.declaration) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(std.meta.eql(annotation.binding, runtime.binding));
+        try std.testing.expect(direct_env.getVarTypeForDeclaration(
+            direct_view,
+            owner.declaration,
+        ) != null);
+    }
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    try std.testing.expectEqual(@as(u32, @intCast(expected_diagnostics.len)), try legacy_checker.check(legacy_root));
+    try std.testing.expectEqual(@as(u32, @intCast(expected_diagnostics.len)), try direct_checker.check(direct_root));
+    try std.testing.expectEqual(expected_diagnostics.len, direct_checker.getDiagnostics().len);
+    for (
+        legacy_checker.getDiagnostics(),
+        direct_checker.getDiagnostics(),
+        expected_diagnostics,
+    ) |legacy_diagnostic, direct_diagnostic, expected| {
+        try expectSameTypeDiagnostic(legacy_diagnostic, legacy_view, direct_diagnostic, direct_view);
+        try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
+        const location = direct_view.getLoc(direct_diagnostic.node).?;
+        try std.testing.expectEqual(expected.line, location.line);
+        try std.testing.expectEqual(expected.column, location.column);
+    }
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    const legacy_strict_count = try legacy_strict.check(legacy_root);
+    const direct_strict_count = try direct_strict.check(direct_root);
+    try std.testing.expectEqual(legacy_strict_count, direct_strict_count);
+    try std.testing.expectEqual(
+        legacy_strict.getDiagnostics().len,
+        direct_strict.getDiagnostics().len,
+    );
+    for (legacy_strict.getDiagnostics(), direct_strict.getDiagnostics()) |legacy_diagnostic, direct_diagnostic| {
+        try expectSameStrictDiagnostic(legacy_diagnostic, legacy_view, direct_diagnostic, direct_view);
+    }
+}
+
+test "direct declarations preserve namespace contractivity and diagnostics" {
+    try expectDirectDeclarationConsumer(
+        "structural Label = string;\n" ++
+            "nominal Count = number;\n" ++
+            "const label: Label = \"ok\";\n" ++
+            "const count: Count = 1;",
+        &.{},
+        "Label",
+        false,
+    );
+    try expectDirectDeclarationConsumer(
+        "structural Loop = Loop;\n" ++
+            "const value: Loop = 1;",
+        &.{
+            .{ .kind = .non_contractive_alias },
+            .{ .kind = .type_mismatch },
+        },
+        "Loop",
+        true,
+    );
+    try expectDirectDeclarationConsumer(
+        "structural Loop = Loop;\n" ++
+            "structural Loop = string;\n" ++
+            "const value: Loop = \"ok\";",
+        &.{},
+        "Loop",
+        false,
+    );
+}
+
+const RepeatedGlobalBindingCase = enum {
+    two_typed,
+    typed_untyped,
+    untyped_typed_bad,
+    two_typed_bad,
+};
+
+test "direct declaration consumer preserves repeated global bindings" {
+    const cases = [_]struct {
+        case: RepeatedGlobalBindingCase,
+        source: []const u8,
+        diagnostics: []const ExpectedDeclarationDiagnostic,
+    }{
+        .{
+            .case = .two_typed,
+            .source = "const value: number = 1;\n" ++
+                "const value: string = \"x\";\n",
+            .diagnostics = &.{},
+        },
+        .{
+            .case = .typed_untyped,
+            .source = "const value: number = 1;\n" ++
+                "const value = \"x\";\n",
+            .diagnostics = &.{},
+        },
+        .{
+            .case = .untyped_typed_bad,
+            .source = "const value = 1;\n" ++
+                "const value: string = 2;\n",
+            .diagnostics = &.{.{ .kind = .type_mismatch }},
+        },
+        .{
+            .case = .two_typed_bad,
+            .source = "const value: number = \"x\";\n" ++
+                "const value: string = 2;\n",
+            .diagnostics = &.{
+                .{ .kind = .type_mismatch, .line = 1 },
+                .{ .kind = .type_mismatch },
+            },
+        },
+    };
+    var seen = std.EnumSet(RepeatedGlobalBindingCase).initEmpty();
+    for (cases) |case| {
+        try expectDirectDeclarationConsumer(case.source, case.diagnostics, "", false);
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(RepeatedGlobalBindingCase).len, seen.count());
+}
+
+const GenericDeclarationFactCase = enum {
+    combined,
+    collision,
+    absent_body,
+    empty_parameters,
+};
+
+fn expectDirectGenericDeclarationFacts(
+    source: []const u8,
+    case: GenericDeclarationFactCase,
+) !void {
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    module_types.populateModuleTypes(&env, &pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, std.testing.allocator);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+    } });
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+
+    switch (case) {
+        .combined => {
+            const box = env.generic_aliases.get("Box") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), box.param_count);
+            try std.testing.expectEqualStrings("T", box.param_names[0]);
+            try std.testing.expectEqual(TypeTag.t_record, pool.getTag(box.body).?);
+            const fields = pool.getRecordFields(box.body);
+            try std.testing.expectEqual(@as(usize, 1), fields.len);
+            try std.testing.expectEqual(TypeTag.t_ref, pool.getTag(fields[0].type_idx).?);
+            try std.testing.expectEqualStrings("T", pool.getRefName(fields[0].type_idx));
+            const user_id = env.getTypeAlias("UserId") orelse return error.TestUnexpectedResult;
+            try std.testing.expect(pool.isNominal(user_id));
+            try std.testing.expectEqualStrings("UserId", pool.nominalName(user_id));
+            try std.testing.expect(env.generic_aliases.get("UserId") == null);
+        },
+        .collision => {
+            try std.testing.expectEqual(pool.idx_number, env.getTypeAlias("Box").?);
+            const box = env.generic_aliases.get("Box") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 1), box.param_count);
+            try std.testing.expectEqualStrings("T", box.param_names[0]);
+            try std.testing.expectEqual(TypeTag.t_record, pool.getTag(box.body).?);
+        },
+        .absent_body => {
+            try std.testing.expect(env.getTypeAlias("Empty") == null);
+            try std.testing.expect(env.generic_aliases.get("Empty") == null);
+        },
+        .empty_parameters => {
+            const unit = env.generic_aliases.get("Unit") orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u8, 0), unit.param_count);
+            try std.testing.expectEqual(pool.idx_number, unit.body);
+            try std.testing.expect(env.getTypeAlias("Unit") == null);
+        },
+    }
+}
+
+test "direct generic declarations preserve aliases and empty distinctions" {
+    const cases = [_]struct {
+        source: []const u8,
+        case: GenericDeclarationFactCase,
+    }{
+        .{
+            .source = "structural Box<T> = { value: T };\n" ++
+                "nominal UserId<T> = string;\n" ++
+                "const box: Box<number> = { value: 1 };\n" ++
+                "const id: UserId = \"x\";",
+            .case = .combined,
+        },
+        .{
+            .source = "structural Box = number;\n" ++
+                "structural Box<T> = { value: T };\n" ++
+                "const plain: Box = 1;\n" ++
+                "const generic: Box<string> = { value: \"ok\" };",
+            .case = .collision,
+        },
+        .{ .source = "structural Empty<T> =;", .case = .absent_body },
+        .{
+            .source = "structural Unit<> = number;\n" ++
+                "const value: Unit<> = 1;",
+            .case = .empty_parameters,
+        },
+    };
+    var seen = std.EnumSet(GenericDeclarationFactCase).initEmpty();
+    for (cases) |case| {
+        try expectDirectDeclarationConsumer(case.source, &.{}, "", false);
+        try expectDirectGenericDeclarationFacts(case.source, case.case);
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(GenericDeclarationFactCase).len, seen.count());
+}
+
+test "parsed declaration helper retains operational failure and checks absent health" {
+    const record_source = "structural Record = { id: string };";
+    var record_atoms = AtomTable.init(std.testing.allocator);
+    defer record_atoms.deinit();
+    var record_parser = try JsParser.initTyped(
+        std.testing.allocator,
+        std.testing.allocator,
+        record_source,
+    );
+    defer record_parser.deinit();
+    record_parser.setAtomTable(&record_atoms);
+    _ = try record_parser.parse();
+    var record_plan = try record_parser.type_store.planApplicationBasesWithIr(
+        std.testing.allocator,
+        parserIrView(&record_parser),
+    );
+    defer record_plan.deinit();
+    const record_lowered = try std.testing.allocator.alloc(
+        TypeIndex,
+        record_parser.type_store.nodes.items.len,
+    );
+    defer std.testing.allocator.free(record_lowered);
+    @memset(record_lowered, null_type_idx);
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = std.math.maxInt(usize) },
+    );
+    const semantic_allocator = failing.allocator();
+    var record_pool = TypePool.init(semantic_allocator);
+    defer record_pool.deinit(semantic_allocator);
+    var record_env = TypeEnv.init(semantic_allocator, &record_pool);
+    defer record_env.deinit();
+    try record_pool.ensureHealthy();
+    try record_env.ensureHealthy();
+    const setup_allocations = failing.alloc_index;
+    failing.fail_index = failing.alloc_index;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        record_env.populateParsedDeclaration(
+            &record_parser.type_store,
+            &record_plan,
+            record_lowered,
+            0,
+        ),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(setup_allocations, failing.alloc_index);
+    try record_pool.ensureHealthy();
+    try std.testing.expectError(error.OutOfMemory, record_env.ensureHealthy());
+
+    const empty_source = "structural Empty =;";
+    var empty_atoms = AtomTable.init(std.testing.allocator);
+    defer empty_atoms.deinit();
+    var empty_parser = try JsParser.initTyped(
+        std.testing.allocator,
+        std.testing.allocator,
+        empty_source,
+    );
+    defer empty_parser.deinit();
+    empty_parser.setAtomTable(&empty_atoms);
+    _ = try empty_parser.parse();
+    var empty_plan = try empty_parser.type_store.planApplicationBasesWithIr(
+        std.testing.allocator,
+        parserIrView(&empty_parser),
+    );
+    defer empty_plan.deinit();
+    const empty_lowered = try std.testing.allocator.alloc(
+        TypeIndex,
+        empty_parser.type_store.nodes.items.len,
+    );
+    defer std.testing.allocator.free(empty_lowered);
+    @memset(empty_lowered, null_type_idx);
+    var empty_pool = TypePool.init(std.testing.allocator);
+    defer empty_pool.deinit(std.testing.allocator);
+    var empty_env = TypeEnv.init(std.testing.allocator, &empty_pool);
+    defer empty_env.deinit();
+    try std.testing.expectEqual(
+        std.meta.Tag(TypeSyntax.DeclarationBody).absent,
+        std.meta.activeTag(empty_parser.type_store.declarations.items[0].body),
+    );
+    empty_pool.failure = error.TypePoolCapacityExceeded;
+    try std.testing.expectError(
+        error.TypePoolCapacityExceeded,
+        empty_env.populateParsedDeclaration(
+            &empty_parser.type_store,
+            &empty_plan,
+            empty_lowered,
+            0,
+        ),
+    );
+    empty_pool.failure = null;
+    empty_env.markAllocationFailure();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        empty_env.populateParsedDeclaration(
+            &empty_parser.type_store,
+            &empty_plan,
+            empty_lowered,
+            0,
+        ),
+    );
+    try empty_pool.ensureHealthy();
+}
+
+test "parsed generic declaration helper restores scope and retains failure" {
+    const source = "structural Unit<> = number;";
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    var plan = try parser.type_store.planApplicationBasesWithIr(
+        std.testing.allocator,
+        parserIrView(&parser),
+    );
+    defer plan.deinit();
+    const lowered = try std.testing.allocator.alloc(TypeIndex, parser.type_store.nodes.items.len);
+    defer std.testing.allocator.free(lowered);
+    @memset(lowered, null_type_idx);
+
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = std.math.maxInt(usize) },
+    );
+    const semantic_allocator = failing.allocator();
+    var pool = TypePool.init(semantic_allocator);
+    defer pool.deinit(semantic_allocator);
+    var env = TypeEnv.init(semantic_allocator, &pool);
+    defer env.deinit();
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    const setup_allocations = failing.alloc_index;
+    failing.fail_index = setup_allocations;
+    try std.testing.expectError(
+        error.OutOfMemory,
+        env.populateParsedDeclaration(&parser.type_store, &plan, lowered, 0),
+    );
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(setup_allocations, failing.alloc_index);
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    try std.testing.expect(env.generic_aliases.get("Unit") == null);
+    try pool.ensureHealthy();
+    try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+}
+
+test "parsed generic declaration helper validates exact owner before mutation" {
+    const source = "structural Box<T> = T;";
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    var plan = try parser.type_store.planApplicationBasesWithIr(
+        std.testing.allocator,
+        parserIrView(&parser),
+    );
+    defer plan.deinit();
+    const lowered = try std.testing.allocator.alloc(TypeIndex, parser.type_store.nodes.items.len);
+    defer std.testing.allocator.free(lowered);
+    @memset(lowered, null_type_idx);
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    const initial_nodes = pool.nodes.items.len;
+    const initial_names = env.name_storage.items.len;
+    const initial_generic_aliases = env.generic_aliases.count();
+
+    const owner_index = parser.type_store.declarations.items[0].generic_owner.?;
+    const original_identity = parser.type_store.generic_owners.items[owner_index].identity;
+    parser.type_store.generic_owners.items[owner_index].identity = .{ .structural_declaration = 1 };
+    try std.testing.expectError(
+        error.InvalidGenericOwner,
+        env.populateParsedDeclaration(&parser.type_store, &plan, lowered, 0),
+    );
+    parser.type_store.generic_owners.items[owner_index].identity = original_identity;
+
+    const original_compatibility = parser.type_store.generic_owners.items[owner_index].compatibility;
+    parser.type_store.generic_owners.items[owner_index].compatibility = .ignored_declaration_parameters;
+    try std.testing.expectError(
+        error.InvalidGenericOwner,
+        env.populateParsedDeclaration(&parser.type_store, &plan, lowered, 0),
+    );
+    parser.type_store.generic_owners.items[owner_index].compatibility = original_compatibility;
+
+    parser.type_store.declarations.items[0].kind = .nominal;
+    try std.testing.expectError(
+        error.InvalidGenericOwner,
+        env.populateParsedDeclaration(&parser.type_store, &plan, lowered, 0),
+    );
+    parser.type_store.declarations.items[0].kind = .structural;
+    try std.testing.expectEqual(initial_nodes, pool.nodes.items.len);
+    try std.testing.expectEqual(initial_names, env.name_storage.items.len);
+    try std.testing.expectEqual(initial_generic_aliases, env.generic_aliases.count());
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+}
+
+test "parsed generic declaration helper rejects malformed oversized projected Store" {
+    const wide_source = "structural Wide<A, B, C, D, E, F, G, H, I> = string;";
+    var wide_atoms = AtomTable.init(std.testing.allocator);
+    defer wide_atoms.deinit();
+    var wide_parser = try JsParser.initTyped(
+        std.testing.allocator,
+        std.testing.allocator,
+        wide_source,
+    );
+    defer wide_parser.deinit();
+    wide_parser.setAtomTable(&wide_atoms);
+    _ = try wide_parser.parse();
+    const wide_owner = wide_parser.type_store.generic_owners.items[0];
+    try std.testing.expectEqual(@as(u32, 9), wide_owner.authored_parameters.count);
+    try std.testing.expectEqual(
+        @as(u32, @intCast(type_env_mod.MAX_TYPE_PARAMS)),
+        wide_owner.projected_parameters.count,
+    );
+    var wide_plan = try wide_parser.type_store.planApplicationBasesWithIr(
+        std.testing.allocator,
+        parserIrView(&wide_parser),
+    );
+    defer wide_plan.deinit();
+    const extra_projected = wide_parser.type_store.projected_generic_parameters.items[7];
+    try wide_parser.type_store.projected_generic_parameters.append(
+        std.testing.allocator,
+        extra_projected,
+    );
+    wide_parser.type_store.generic_owners.items[0].projected_parameters.count += 1;
+    const malformed_owner = wide_parser.type_store.generic_owners.items[0];
+    const malformed_projected = wide_parser.type_store.projectedGenericParameterSlice(
+        malformed_owner.projected_parameters,
+    ) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, type_env_mod.MAX_TYPE_PARAMS + 1), malformed_projected.len);
+    const wide_lowered = try std.testing.allocator.alloc(
+        TypeIndex,
+        wide_parser.type_store.nodes.items.len,
+    );
+    defer std.testing.allocator.free(wide_lowered);
+    @memset(wide_lowered, null_type_idx);
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    const initial_nodes = pool.nodes.items.len;
+    const initial_names = env.name_storage.items.len;
+    const initial_generic_aliases = env.generic_aliases.count();
+    try std.testing.expectError(
+        error.InvalidTypeRange,
+        env.populateParsedDeclaration(&wide_parser.type_store, &wide_plan, wide_lowered, 0),
+    );
+    try std.testing.expectEqual(initial_nodes, pool.nodes.items.len);
+    try std.testing.expectEqual(initial_names, env.name_storage.items.len);
+    try std.testing.expectEqual(initial_generic_aliases, env.generic_aliases.count());
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+}
+
+const DirectDeclarationAllocationObservations = struct {
+    selected_failures: usize = 0,
+    post_seed_failures: usize = 0,
+};
+
+fn runDirectDeclarationAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *DirectDeclarationAllocationObservations,
+) !void {
+    const source =
+        "structural Seed = string;\n" ++
+        "structural Loop = Loop;\n" ++
+        "const seed: Seed = \"ok\";";
+    var runtime_count = CountingAllocator.init(std.testing.allocator);
+    var atoms = AtomTable.init(runtime_count.allocator());
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(runtime_count.allocator(), std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+    } }) catch |err| {
+        if (env.sourceTypeMode() == .direct) {
+            observations.selected_failures += 1;
+            if (env.getTypeAlias("Seed") != null) observations.post_seed_failures += 1;
+            try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+        }
+        return err;
+    };
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expect(env.getTypeAlias("Seed") != null);
+    try std.testing.expect(env.isNonContractiveAlias("Loop"));
+    try std.testing.expectEqual(@as(usize, 1), env.varAnnotationCount());
+}
+
+test "direct declaration allocation failures retain selected health" {
+    var observations: DirectDeclarationAllocationObservations = .{};
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runDirectDeclarationAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.expect(observations.selected_failures > 0);
+    try std.testing.expect(observations.post_seed_failures > 0);
+}
+
+const DirectGenericDeclarationAllocationObservations = struct {
+    selected_failures: usize = 0,
+    post_seed_failures: usize = 0,
+    generic_construction_failures: usize = 0,
+};
+
+fn runDirectGenericDeclarationAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *DirectGenericDeclarationAllocationObservations,
+) !void {
+    const source =
+        "structural Seed = string;\n" ++
+        "structural Box<T> = { value: T };\n" ++
+        "const seed: Seed = \"ok\";";
+    var runtime_count = CountingAllocator.init(std.testing.allocator);
+    var atoms = AtomTable.init(runtime_count.allocator());
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(runtime_count.allocator(), std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = parserIrView(&parser),
+        .atoms = &atoms,
+    } }) catch |err| {
+        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+        if (env.sourceTypeMode() == .direct) {
+            observations.selected_failures += 1;
+            if (env.getTypeAlias("Seed") != null) {
+                observations.post_seed_failures += 1;
+                if (env.generic_aliases.get("Box") == null) {
+                    observations.generic_construction_failures += 1;
+                }
+            }
+            try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+        }
+        return err;
+    };
+    try pool.ensureHealthy();
+    try env.ensureHealthy();
+    try std.testing.expect(env.getTypeAlias("Seed") != null);
+    const box = env.generic_aliases.get("Box") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), box.param_count);
+    try std.testing.expectEqualStrings("T", box.param_names[0]);
+    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+}
+
+test "direct generic declaration allocation failures restore scope after seed" {
+    var observations: DirectGenericDeclarationAllocationObservations = .{};
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        runDirectGenericDeclarationAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.expect(observations.selected_failures > 0);
+    try std.testing.expect(observations.post_seed_failures > 0);
+    try std.testing.expect(observations.generic_construction_failures > 0);
+}
+
+test "direct source pilot compacts annotated parameters by final owner" {
+    const source = "function helper(skip, value: string): number { return 1; }";
+    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-compact>.ts", .{});
+    defer prepared.deinit();
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    const signature_record = direct.type_store.function_signatures.items[0];
+    const reference = direct_env.functionTypeRef(direct_view, signature_record.owner) orelse
+        return error.TestUnexpectedResult;
+    const legacy_reference = legacy_env.functionTypeRef(
+        legacy_view,
+        signature_record.owner,
+    ) orelse return error.TestUnexpectedResult;
+    const signature = direct_env.getFunctionSignature(reference) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), signature.param_count);
+    try std.testing.expectEqual(direct_pool.idx_string, signature.param_types[0]);
+    try std.testing.expectEqualStrings(
+        "string",
+        direct_env.getFunctionParameterSpelling(reference, 0).?,
+    );
+    try std.testing.expectEqualStrings(
+        legacy_env.getFunctionParameterSpelling(legacy_reference, 0).?,
+        direct_env.getFunctionParameterSpelling(reference, 0).?,
+    );
+    try std.testing.expect(direct_env.getFunctionParameterSpelling(reference, 1) == null);
+    try std.testing.expectEqualStrings(
+        "number ",
+        direct_env.getFunctionReturnSpelling(reference).?,
+    );
+    try std.testing.expectEqualStrings(
+        legacy_env.getFunctionReturnSpelling(legacy_reference).?,
+        direct_env.getFunctionReturnSpelling(reference).?,
+    );
+    try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
+}
+
+test "direct function specifications preserve variable arrow capsule absence" {
+    const source =
+        "const helper = (value: number): Proof<number, \"deterministic\"> => value;";
+    var prepared = try PreparedSource.init(std.testing.allocator, source, "<u12-arrow-capsule>.ts", .{});
+    defer prepared.deinit();
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+
+    var legacy_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        legacy_root,
+        .{},
+    );
+    defer legacy_effects.deinit(std.testing.allocator);
+    var direct_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        direct_root,
+        .{},
+    );
+    defer direct_effects.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), legacy_effects.all().len);
+    try std.testing.expectEqual(@as(usize, 1), direct_effects.all().len);
+    const legacy_effect = legacy_effects.all()[0];
+    const direct_effect = direct_effects.all()[0];
+    try std.testing.expectEqual(engine.parser.NodeTag.var_decl, legacy_view.getTag(legacy_effect.decl_node).?);
+    try std.testing.expectEqual(engine.parser.NodeTag.var_decl, direct_view.getTag(direct_effect.decl_node).?);
+    const direct_declaration = direct_view.getVarDecl(direct_effect.decl_node) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, direct_view.getTag(direct_declaration.init).?);
+    const arrow_reference = direct_env.functionTypeRef(direct_view, direct_declaration.init) orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(direct_env.getFunctionSignature(arrow_reference) != null);
+
+    var legacy_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &legacy_effects,
+        .{ .legacy = &legacy_env },
+        legacy_view,
+    );
+    defer legacy_capsules.deinit(std.testing.allocator);
+    var direct_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &direct_effects,
+        .{ .direct = &direct_env },
+        direct_view,
+    );
+    defer direct_capsules.deinit(std.testing.allocator);
+    const legacy_capsule = legacy_capsules.byName("helper") orelse return error.TestUnexpectedResult;
+    const direct_capsule = direct_capsules.byName("helper") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 0), legacy_capsule.declared.items.len);
+    try std.testing.expectEqual(@as(usize, 0), direct_capsule.declared.items.len);
+    try std.testing.expectEqual(@as(usize, 0), legacy_capsule.effect_declared.items.len);
+    try std.testing.expectEqual(@as(usize, 0), direct_capsule.effect_declared.items.len);
+    try std.testing.expectEqual(@as(usize, 0), legacy_capsule.inferred_caps.count());
+    try std.testing.expectEqual(@as(usize, 0), direct_capsule.inferred_caps.count());
+    try std.testing.expect(legacy_capsule.proven.total);
+    try std.testing.expect(legacy_capsule.proven.pure);
+    try std.testing.expect(legacy_capsule.proven.read_only);
+    try std.testing.expect(legacy_capsule.proven.deterministic);
+    try std.testing.expect(std.meta.eql(legacy_capsule.proven, direct_capsule.proven));
+    try std.testing.expect(!legacy_capsule.discharged());
+    try std.testing.expect(!direct_capsule.discharged());
+    try std.testing.expect(!legacy_capsule.effectDischarged());
+    try std.testing.expect(!direct_capsule.effectDischarged());
+}
+
+const ExpectedConsumerTypeDiagnostic = struct {
+    kind: type_checker_mod.DiagnosticKind,
+    line: ?u32 = null,
+    column: ?u32 = null,
+};
+
+const ExpectedConsumerStrictDiagnostic = struct {
+    kind: strict_checker_mod.DiagnosticKind,
+    line: ?u32 = null,
+    column: ?u32 = null,
+};
+
+fn expectDirectConsumerMatrixCase(
+    source: []const u8,
+    expected_type_diagnostics: ?[]const ExpectedConsumerTypeDiagnostic,
+    expected_strict_diagnostics: ?[]const ExpectedConsumerStrictDiagnostic,
+) !void {
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-consumer-matrix>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
+    try expectExactOwnerSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try expectExactDirectCallMaps(
+        &legacy_pool,
+        &direct_pool,
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try std.testing.expectEqual(
+        direct.type_store.annotations.items.len,
+        direct_env.varAnnotationCount(),
+    );
+    for (direct.type_store.annotations.items) |annotation| {
+        const owner = annotation.runtime_owner orelse return error.TestUnexpectedResult;
+        const declaration = direct_view.getVarDecl(owner.declaration) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(std.meta.eql(annotation.binding, declaration.binding));
+        try std.testing.expect(direct_env.getVarTypeForDeclaration(
+            direct_view,
+            owner.declaration,
+        ) != null);
+    }
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    const legacy_type_count = try legacy_checker.check(legacy_root);
+    const direct_type_count = try direct_checker.check(direct_root);
+    try std.testing.expectEqual(legacy_type_count, direct_type_count);
+    const legacy_type_diagnostics = legacy_checker.getDiagnostics();
+    const direct_type_diagnostics = direct_checker.getDiagnostics();
+    try std.testing.expectEqual(legacy_type_diagnostics.len, direct_type_diagnostics.len);
+    for (legacy_type_diagnostics, direct_type_diagnostics) |legacy_diagnostic, direct_diagnostic| {
+        try expectSameTypeDiagnostic(
+            legacy_diagnostic,
+            legacy_view,
+            direct_diagnostic,
+            direct_view,
+        );
+    }
+    if (expected_type_diagnostics) |expected_diagnostics| {
+        try std.testing.expectEqual(expected_diagnostics.len, direct_type_diagnostics.len);
+        for (direct_type_diagnostics, expected_diagnostics) |direct_diagnostic, expected| {
+            try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
+            const location = direct_view.getLoc(direct_diagnostic.node) orelse
+                return error.TestUnexpectedResult;
+            if (expected.line) |line| try std.testing.expectEqual(line, location.line);
+            if (expected.column) |column| try std.testing.expectEqual(column, location.column);
+        }
+    }
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    const legacy_strict_count = try legacy_strict.check(legacy_root);
+    const direct_strict_count = try direct_strict.check(direct_root);
+    try std.testing.expectEqual(legacy_strict_count, direct_strict_count);
+    const legacy_strict_diagnostics = legacy_strict.getDiagnostics();
+    const direct_strict_diagnostics = direct_strict.getDiagnostics();
+    try std.testing.expectEqual(legacy_strict_diagnostics.len, direct_strict_diagnostics.len);
+    for (legacy_strict_diagnostics, direct_strict_diagnostics) |legacy_diagnostic, direct_diagnostic| {
+        try expectSameStrictDiagnostic(
+            legacy_diagnostic,
+            legacy_view,
+            direct_diagnostic,
+            direct_view,
+        );
+    }
+    if (expected_strict_diagnostics) |expected_diagnostics| {
+        try std.testing.expectEqual(expected_diagnostics.len, direct_strict_diagnostics.len);
+        for (direct_strict_diagnostics, expected_diagnostics) |direct_diagnostic, expected| {
+            try std.testing.expectEqual(expected.kind, direct_diagnostic.kind);
+            const location = direct_view.getLoc(direct_diagnostic.node) orelse
+                return error.TestUnexpectedResult;
+            if (expected.line) |line| try std.testing.expectEqual(line, location.line);
+            if (expected.column) |column| try std.testing.expectEqual(column, location.column);
+        }
+    }
+}
+
+const LookupConsumerCase = enum {
+    forward_repeated,
+    repeated_predicates,
+    return_fallback,
+    untyped_shadow_gap,
+    shadowed_capture,
+    untyped_shadow_gap_mismatch,
+    shadowed_capture_mismatch,
+};
+
+test "direct consumers preserve measured lookup winners shadows and captures" {
+    const cases = [_]struct {
+        case: LookupConsumerCase,
+        source: []const u8,
+        type_diagnostics: []const ExpectedConsumerTypeDiagnostic,
+        strict_diagnostics: []const ExpectedConsumerStrictDiagnostic,
+    }{
+        .{
+            .case = .forward_repeated,
+            .source =
+            \\function useNumber(value: number): number {
+            \\  inner(value);
+            \\  function inner(item: number): number { return item; }
+            \\  return value;
+            \\}
+            \\function useText(value: string): string {
+            \\  inner(value, "");
+            \\  function inner(item: string, suffix: string): string { return item; }
+            \\  return value;
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ number: useNumber(1), text: useText("x") });
+            \\}
+            \\
+            ,
+            .type_diagnostics = &.{.{ .kind = .arg_type_mismatch, .line = 7, .column = 9 }},
+            .strict_diagnostics = &.{
+                .{ .kind = .unpublished_ambient_global, .line = 2, .column = 3 },
+                .{ .kind = .unpublished_ambient_global, .line = 7, .column = 3 },
+            },
+        },
+        .{
+            .case = .repeated_predicates,
+            .source =
+            \\{
+            \\  function isText(value: string | number): value is string {
+            \\    return typeof value === "string";
+            \\  }
+            \\  const raw: string | number = "first";
+            \\  if (isText(raw)) { const text: string = raw; }
+            \\}
+            \\{
+            \\  function isText(skip: number, value: string | number): value is string {
+            \\    return typeof value === "string";
+            \\  }
+            \\  const raw: string | number = "second";
+            \\  if (isText(0, raw)) { const text: string = raw; }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ ok: true });
+            \\}
+            \\
+            ,
+            .type_diagnostics = &.{
+                .{ .kind = .invalid_type_predicate, .line = 9, .column = 3 },
+                .{ .kind = .type_mismatch, .line = 13, .column = 25 },
+            },
+            .strict_diagnostics = &.{},
+        },
+        .{
+            .case = .return_fallback,
+            .source =
+            \\function numericValue(): number {
+            \\  const value: number = make();
+            \\  function make(): number { return 1; }
+            \\  return value;
+            \\}
+            \\function textValue(): string {
+            \\  const value: string = make();
+            \\  function make(): string { return "text"; }
+            \\  return value;
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ number: numericValue(), text: textValue() });
+            \\}
+            \\
+            ,
+            .type_diagnostics = &.{.{ .kind = .type_mismatch, .line = 2, .column = 3 }},
+            .strict_diagnostics = &.{
+                .{
+                    .kind = .unpublished_ambient_global,
+                    .line = 2,
+                    .column = 25,
+                },
+                .{
+                    .kind = .unpublished_ambient_global,
+                    .line = 7,
+                    .column = 25,
+                },
+            },
+        },
+        .{
+            .case = .untyped_shadow_gap,
+            .source =
+            \\const item: number = 1;
+            \\function readItem(): string {
+            \\  const item = "inferred";
+            \\  {
+            \\    const item: string = "typed";
+            \\    return item;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ top: item, nested: readItem() });
+            \\}
+            \\
+            ,
+            .type_diagnostics = &.{},
+            .strict_diagnostics = &.{},
+        },
+        .{
+            .case = .shadowed_capture,
+            .source =
+            \\function compute(): number {
+            \\  const value: number = 1;
+            \\  const readOuter = (): number => value;
+            \\  {
+            \\    const value: string = "inner";
+            \\    const readInner = (): string => value;
+            \\    const outerResult: number = readOuter();
+            \\    const innerResult: string = readInner();
+            \\    return outerResult;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ value: compute() });
+            \\}
+            \\
+            ,
+            .type_diagnostics = &.{},
+            .strict_diagnostics = &.{},
+        },
+        .{
+            .case = .untyped_shadow_gap_mismatch,
+            .source =
+            \\const item: number = 1;
+            \\function readItem(): string {
+            \\  const item = "inferred";
+            \\  {
+            \\    const item: string = 2;
+            \\    return item;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ top: item, nested: readItem() });
+            \\}
+            \\
+            ,
+            .type_diagnostics = &.{.{ .kind = .type_mismatch, .line = 5, .column = 5 }},
+            .strict_diagnostics = &.{},
+        },
+        .{
+            .case = .shadowed_capture_mismatch,
+            .source =
+            \\function compute(): number {
+            \\  const value: number = 1;
+            \\  const readOuter = (): number => value;
+            \\  {
+            \\    const value: string = "inner";
+            \\    const readInner = (): number => value;
+            \\    const outerResult: number = readOuter();
+            \\    const innerResult: number = readInner();
+            \\    return outerResult;
+            \\  }
+            \\}
+            \\export function handler(req: Request): Response {
+            \\  return Response.json({ value: compute() });
+            \\}
+            \\
+            ,
+            .type_diagnostics = &.{.{
+                .kind = .return_type_mismatch,
+                .line = 6,
+                .column = 23,
+            }},
+            .strict_diagnostics = &.{},
+        },
+    };
+    try std.testing.expectEqual(std.meta.fields(LookupConsumerCase).len, cases.len);
+    var seen = std.EnumSet(LookupConsumerCase).initEmpty();
+    for (cases) |case| {
+        try std.testing.expect(!seen.contains(case.case));
+        try expectDirectConsumerMatrixCase(
+            case.source,
+            case.type_diagnostics,
+            case.strict_diagnostics,
+        );
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(LookupConsumerCase).len, seen.count());
+}
+
+const ConsumerSemanticCase = enum {
+    generic_substitution,
+    generic_constraint,
+    compact_arity,
+    incomplete_signature,
+    annotated_arrow_without_return,
+};
+
+test "direct consumers preserve generic calls compact arity and strict signature rules" {
+    const cases = [_]struct {
+        case: ConsumerSemanticCase,
+        source: []const u8,
+        type_diagnostics: ?[]const ExpectedConsumerTypeDiagnostic,
+        strict_diagnostics: ?[]const ExpectedConsumerStrictDiagnostic,
+    }{
+        .{
+            .case = .generic_substitution,
+            .source =
+            \\function first<T>(values: T[]): T | undefined { return values[0]; }
+            \\function handler(req: Request): Response {
+            \\  const head: number | undefined = first(["a"]);
+            \\  return Response.json({ head: head });
+            \\}
+            ,
+            .type_diagnostics = &.{.{ .kind = .type_mismatch }},
+            .strict_diagnostics = &.{},
+        },
+        .{
+            .case = .generic_constraint,
+            .source =
+            \\function idOf<T extends { id: string }>(value: T): string { return value.id; }
+            \\function handler(req: Request): Response {
+            \\  const value = idOf({ name: "no id" });
+            \\  return Response.json({ value: value });
+            \\}
+            ,
+            .type_diagnostics = &.{.{ .kind = .type_constraint_violation }},
+            .strict_diagnostics = &.{},
+        },
+        .{
+            .case = .compact_arity,
+            .source =
+            \\const first = (a: number, b): number => a;
+            \\function handler(req: Request): Response {
+            \\  return Response.json({ value: first(1, 2, 3) });
+            \\}
+            ,
+            .type_diagnostics = &.{.{ .kind = .arg_count_mismatch }},
+            .strict_diagnostics = &.{.{ .kind = .missing_public_annotation }},
+        },
+        .{
+            .case = .incomplete_signature,
+            .source =
+            \\function handler(req: Request): Response { return Response.json({}); }
+            \\const first = (a: number, b): number => a;
+            ,
+            .type_diagnostics = null,
+            .strict_diagnostics = &.{.{ .kind = .missing_public_annotation }},
+        },
+        .{
+            .case = .annotated_arrow_without_return,
+            .source =
+            \\function handler(req: Request): Response {
+            \\  return Response.json({ ys: [1].map((x: number) => x) });
+            \\}
+            ,
+            .type_diagnostics = &.{},
+            .strict_diagnostics = &.{},
+        },
+    };
+    try std.testing.expectEqual(std.meta.fields(ConsumerSemanticCase).len, cases.len);
+    var seen = std.EnumSet(ConsumerSemanticCase).initEmpty();
+    for (cases) |case| {
+        try std.testing.expect(!seen.contains(case.case));
+        try expectDirectConsumerMatrixCase(
+            case.source,
+            case.type_diagnostics,
+            case.strict_diagnostics,
+        );
+        seen.insert(case.case);
+    }
+    try std.testing.expectEqual(std.meta.fields(ConsumerSemanticCase).len, seen.count());
+}
+
+fn expectDirectPrimitiveFacts(source: []const u8) !void {
+    try expectDirectConsumerMatrixCase(source, null, null);
+
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const view = parserIrView(&parser);
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    module_types.populateModuleTypes(&env, &pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, std.testing.allocator);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+
+    try std.testing.expectEqual(@as(usize, 0), parser.type_store.annotations.items.len);
+    try std.testing.expectEqual(@as(usize, 0), env.varAnnotationCount());
+
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
+    const owner = parser.type_store.function_signatures.items[0].owner;
+    const reference = env.functionTypeRef(view, owner) orelse return error.TestUnexpectedResult;
+    const signature = env.getFunctionSignature(reference) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 3), signature.param_count);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        &.{ pool.idx_null, pool.idx_undefined, pool.idx_unknown },
+        signature.param_types[0..signature.param_count],
+    );
+    try std.testing.expectEqual(pool.idx_unknown, signature.return_type);
+}
+
+test "direct consumers preserve null undefined and unknown primitives" {
+    const source =
+        \\function kinds(a: null, b: undefined, c: unknown): unknown { return c; }
+        \\
+    ;
+    try expectDirectPrimitiveFacts(source);
+}
+
+test "direct consumers preserve present null failure and hide refused expression types" {
+    const source =
+        \\const absent: `` = "";
+        \\const known: unknown = 1;
+        \\const n: number = 1;
+        \\const refused = n + "y";
+        \\
+    ;
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-present-null>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+
+    try expectExactTypePool(&legacy_pool, &direct_pool);
+    try expectExactFunctionNameMaps(&legacy_env, &direct_env);
+    try expectExactOwnerSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try expectExactDirectCallMaps(
+        &legacy_pool,
+        &direct_pool,
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct.type_store,
+    );
+    try std.testing.expectEqual(
+        direct.type_store.annotations.items.len,
+        direct_env.varAnnotationCount(),
+    );
+    try std.testing.expectEqual(@as(usize, 3), direct.type_store.annotations.items.len);
+    var found_absent = false;
+    var found_unknown = false;
+    var found_number = false;
+    for (direct.type_store.annotations.items) |annotation| {
+        const owner = annotation.runtime_owner orelse return error.TestUnexpectedResult;
+        const declaration = direct_view.getVarDecl(owner.declaration) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expect(std.meta.eql(annotation.binding, declaration.binding));
+        const direct_type = direct_env.getVarTypeForDeclaration(
+            direct_view,
+            owner.declaration,
+        ) orelse return error.TestUnexpectedResult;
+        if (std.mem.eql(u8, annotation.raw_span.text(source), "``")) {
+            try std.testing.expectEqual(null_type_idx, direct_type);
+            found_absent = true;
+        } else if (std.mem.eql(u8, annotation.raw_span.text(source), "unknown")) {
+            try std.testing.expectEqual(direct_pool.idx_unknown, direct_type);
+            found_unknown = true;
+        } else if (std.mem.eql(u8, annotation.raw_span.text(source), "number")) {
+            try std.testing.expectEqual(direct_pool.idx_number, direct_type);
+            found_number = true;
+        } else {
+            return error.TestUnexpectedResult;
+        }
+    }
+    try std.testing.expect(found_absent);
+    try std.testing.expect(found_unknown);
+    try std.testing.expect(found_number);
+    try std.testing.expectEqual(null_type_idx, legacy_env.getVarTypeByName("absent").?);
+    try std.testing.expectEqual(
+        legacy_pool.idx_unknown,
+        legacy_env.getVarTypeByName("known").?,
+    );
+    try std.testing.expectEqual(
+        legacy_pool.idx_number,
+        legacy_env.getVarTypeByName("n").?,
+    );
+
+    var legacy_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+    );
+    defer legacy_checker.deinit();
+    var direct_checker = type_checker_mod.TypeChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+    );
+    defer direct_checker.deinit();
+    try std.testing.expectError(error.UnresolvedTypeBinding, legacy_checker.check(legacy_root));
+    try std.testing.expectError(error.UnresolvedTypeBinding, direct_checker.check(direct_root));
+    try legacy_pool.ensureHealthy();
+    try direct_pool.ensureHealthy();
+    try legacy_env.ensureHealthy();
+    try direct_env.ensureHealthy();
+    try std.testing.expectError(error.UnresolvedTypeBinding, legacy_checker.ensureHealthy());
+    try std.testing.expectError(error.UnresolvedTypeBinding, direct_checker.ensureHealthy());
+    const legacy_diagnostics = legacy_checker.getDiagnostics();
+    const direct_diagnostics = direct_checker.getDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), legacy_diagnostics.len);
+    try std.testing.expectEqual(legacy_diagnostics.len, direct_diagnostics.len);
+    for (legacy_diagnostics, direct_diagnostics) |legacy_diagnostic, direct_diagnostic| {
+        try expectSameTypeDiagnostic(
+            legacy_diagnostic,
+            legacy_view,
+            direct_diagnostic,
+            direct_view,
+        );
+    }
+    try std.testing.expectEqual(
+        type_checker_mod.DiagnosticKind.string_add,
+        direct_diagnostics[0].kind,
+    );
+
+    var legacy_refused: ?NodeIndex = null;
+    for (0..legacy_view.nodeCount()) |raw| {
+        const node: NodeIndex = @intCast(raw);
+        if (legacy_view.getTag(node) != .binary_op) continue;
+        const binary = legacy_view.getBinary(node) orelse continue;
+        if (binary.op == .add) {
+            legacy_refused = node;
+            break;
+        }
+    }
+    var direct_refused: ?NodeIndex = null;
+    for (0..direct_view.nodeCount()) |raw| {
+        const node: NodeIndex = @intCast(raw);
+        if (direct_view.getTag(node) != .binary_op) continue;
+        const binary = direct_view.getBinary(node) orelse continue;
+        if (binary.op == .add) {
+            direct_refused = node;
+            break;
+        }
+    }
+    try std.testing.expectEqual(
+        null_type_idx,
+        legacy_checker.inferTypeWithoutDiagnostics(
+            legacy_refused orelse return error.TestUnexpectedResult,
+        ),
+    );
+    try std.testing.expectEqual(
+        null_type_idx,
+        direct_checker.inferTypeWithoutDiagnostics(
+            direct_refused orelse return error.TestUnexpectedResult,
+        ),
+    );
+
+    var legacy_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        &legacy_env,
+        &legacy_checker,
+    );
+    defer legacy_strict.deinit();
+    var direct_strict = strict_checker_mod.StrictChecker.init(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        &direct_env,
+        &direct_checker,
+    );
+    defer direct_strict.deinit();
+    try std.testing.expectError(error.UnresolvedTypeBinding, legacy_strict.check(legacy_root));
+    try std.testing.expectError(error.UnresolvedTypeBinding, direct_strict.check(direct_root));
+    try std.testing.expectEqual(
+        legacy_strict.getDiagnostics().len,
+        direct_strict.getDiagnostics().len,
+    );
+    for (
+        legacy_strict.getDiagnostics(),
+        direct_strict.getDiagnostics(),
+    ) |legacy_diagnostic, direct_diagnostic| {
+        try expectSameStrictDiagnostic(
+            legacy_diagnostic,
+            legacy_view,
+            direct_diagnostic,
+            direct_view,
+        );
+    }
+}
+
+fn expectOptionalStringEqual(left: ?[]const u8, right: ?[]const u8) !void {
+    if (left) |value| {
+        try std.testing.expectEqualStrings(value, right orelse return error.TestUnexpectedResult);
+    } else {
+        try std.testing.expect(right == null);
+    }
+}
+
+fn expectSameSpecDiagnostic(
+    left: contract_types.SpecDiagnostic,
+    right: contract_types.SpecDiagnostic,
+) !void {
+    try std.testing.expectEqual(left.kind, right.kind);
+    try std.testing.expectEqualStrings(left.spec_name, right.spec_name);
+    try std.testing.expect(std.meta.eql(left.cause, right.cause));
+    try expectOptionalStringEqual(left.incompatible_module, right.incompatible_module);
+    try expectOptionalStringEqual(left.suggestion, right.suggestion);
+    try expectOptionalStringEqual(left.function, right.function);
+    try std.testing.expectEqual(left.implicit_default, right.implicit_default);
+}
+
+fn expectSameCapsule(
+    left: *const function_specs.Capsule,
+    right: *const function_specs.Capsule,
+) !void {
+    try std.testing.expectEqualStrings(left.name, right.name);
+    try std.testing.expectEqual(left.line, right.line);
+    try std.testing.expectEqual(left.declared.items.len, right.declared.items.len);
+    for (left.declared.items, right.declared.items) |left_name, right_name| {
+        try std.testing.expectEqualStrings(left_name, right_name);
+    }
+    try std.testing.expect(std.meta.eql(left.proven, right.proven));
+    try std.testing.expectEqual(left.diagnostics.items.len, right.diagnostics.items.len);
+    for (left.diagnostics.items, right.diagnostics.items) |left_diagnostic, right_diagnostic| {
+        try expectSameSpecDiagnostic(left_diagnostic, right_diagnostic);
+    }
+    try std.testing.expectEqual(left.effect_declared.items.len, right.effect_declared.items.len);
+    for (left.effect_declared.items, right.effect_declared.items) |left_name, right_name| {
+        try std.testing.expectEqualStrings(left_name, right_name);
+    }
+    try std.testing.expect(std.meta.eql(left.inferred_caps, right.inferred_caps));
+    try std.testing.expectEqual(
+        left.effect_diagnostics.items.len,
+        right.effect_diagnostics.items.len,
+    );
+    for (
+        left.effect_diagnostics.items,
+        right.effect_diagnostics.items,
+    ) |left_diagnostic, right_diagnostic| {
+        try expectSameSpecDiagnostic(left_diagnostic, right_diagnostic);
+    }
+    try std.testing.expectEqual(left.exported, right.exported);
+    try std.testing.expectEqual(left.discharged(), right.discharged());
+    try std.testing.expectEqual(left.effectDischarged(), right.effectDischarged());
+}
+
+fn expectDirectFunctionCapsules(source: []const u8) !void {
+    try expectDirectConsumerMatrixCase(source, null, null);
+
+    var prepared = try PreparedSource.init(
+        std.testing.allocator,
+        source,
+        "<u12-capsules>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    var legacy_count = CountingAllocator.init(std.testing.allocator);
+    var direct_count = CountingAllocator.init(std.testing.allocator);
+    var type_count = CountingAllocator.init(std.testing.allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy = try JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy.deinit();
+    legacy.setAtomTable(&legacy_atoms);
+    var direct = try JsParser.initTyped(
+        direct_count.allocator(),
+        type_count.allocator(),
+        source,
+    );
+    defer direct.deinit();
+    direct.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy.parse();
+    const direct_root = try direct.parse();
+    const legacy_view = parserIrView(&legacy);
+    const direct_view = parserIrView(&direct);
+    try std.testing.expect(compareRuntime(
+        &legacy,
+        legacy_root,
+        &legacy_atoms,
+        &direct,
+        direct_root,
+        &direct_atoms,
+    ) == null);
+    try std.testing.expect(legacy_count.sameRuntimeShape(direct_count));
+
+    var legacy_pool = TypePool.init(std.testing.allocator);
+    defer legacy_pool.deinit(std.testing.allocator);
+    var direct_pool = TypePool.init(std.testing.allocator);
+    defer direct_pool.deinit(std.testing.allocator);
+    var legacy_env = TypeEnv.init(std.testing.allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(std.testing.allocator, &direct_pool);
+    defer direct_env.deinit();
+    module_types.populateModuleTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&legacy_env, &legacy_pool, std.testing.allocator);
+    module_types.populateModuleTypes(&direct_env, &direct_pool, std.testing.allocator);
+    abi_types.populateHandlerAbiTypes(&direct_env, &direct_pool, std.testing.allocator);
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+
+    var legacy_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        legacy_view,
+        &legacy_atoms,
+        legacy_root,
+        .{},
+    );
+    defer legacy_effects.deinit(std.testing.allocator);
+    var direct_effects = try effect_inference.buildEffectFacts(
+        std.testing.allocator,
+        direct_view,
+        &direct_atoms,
+        direct_root,
+        .{},
+    );
+    defer direct_effects.deinit(std.testing.allocator);
+    try std.testing.expectEqual(legacy_effects.all().len, direct_effects.all().len);
+    try std.testing.expectEqual(@as(usize, 2), legacy_effects.all().len);
+
+    var legacy_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &legacy_effects,
+        .{ .legacy = &legacy_env },
+        legacy_view,
+    );
+    defer legacy_capsules.deinit(std.testing.allocator);
+    var direct_capsules = try function_specs.dischargeWithTypeSource(
+        std.testing.allocator,
+        &direct_effects,
+        .{ .direct = &direct_env },
+        direct_view,
+    );
+    defer direct_capsules.deinit(std.testing.allocator);
+    try std.testing.expectEqual(
+        legacy_capsules.capsules.items.len,
+        direct_capsules.capsules.items.len,
+    );
+    try std.testing.expectEqual(@as(usize, 2), legacy_capsules.capsules.items.len);
+    for (
+        legacy_capsules.capsules.items,
+        direct_capsules.capsules.items,
+    ) |*legacy_capsule, *direct_capsule| {
+        try expectSameCapsule(legacy_capsule, direct_capsule);
+    }
+
+    const legacy_selected = legacy_capsules.byName("helper") orelse
+        return error.TestUnexpectedResult;
+    const direct_selected = direct_capsules.byName("helper") orelse
+        return error.TestUnexpectedResult;
+    try expectSameCapsule(legacy_selected, direct_selected);
+    try std.testing.expect(legacy_selected == &legacy_capsules.capsules.items[0]);
+    try std.testing.expect(direct_selected == &direct_capsules.capsules.items[0]);
+    try std.testing.expectEqual(@as(u32, 4), legacy_selected.line);
+    try std.testing.expectEqual(@as(usize, 0), legacy_selected.declared.items.len);
+    try std.testing.expect(legacy_selected.proven.total);
+    try std.testing.expect(!legacy_selected.proven.pure);
+    try std.testing.expect(legacy_selected.proven.read_only);
+    try std.testing.expect(legacy_selected.proven.deterministic);
+    try std.testing.expect(!legacy_selected.discharged());
+    try std.testing.expectEqual(@as(usize, 1), legacy_selected.effect_declared.items.len);
+    try std.testing.expectEqualStrings("crypto", legacy_selected.effect_declared.items[0]);
+    try std.testing.expectEqual(@as(usize, 1), legacy_selected.inferred_caps.count());
+    try std.testing.expect(legacy_selected.inferred_caps.contains(.crypto));
+    try std.testing.expect(legacy_selected.effectDischarged());
+
+    const legacy_second = &legacy_capsules.capsules.items[1];
+    const direct_second = &direct_capsules.capsules.items[1];
+    try expectSameCapsule(legacy_second, direct_second);
+    try std.testing.expectEqualStrings("helper", legacy_second.name);
+    try std.testing.expectEqual(@as(u32, 8), legacy_second.line);
+    try std.testing.expectEqual(@as(usize, 0), legacy_second.declared.items.len);
+    try std.testing.expect(legacy_second.proven.total);
+    try std.testing.expect(legacy_second.proven.pure);
+    try std.testing.expect(legacy_second.proven.read_only);
+    try std.testing.expect(legacy_second.proven.deterministic);
+    try std.testing.expect(!legacy_second.discharged());
+    try std.testing.expectEqual(@as(usize, 1), legacy_second.effect_declared.items.len);
+    try std.testing.expectEqualStrings("clock", legacy_second.effect_declared.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), legacy_second.inferred_caps.count());
+    try std.testing.expect(legacy_second.effectDischarged());
+}
+
+test "direct function specifications preserve nonempty effects and repeated helper selection" {
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\structural Text = string;
+        \\{
+        \\  function helper(value: Text): Effects<Text, "crypto"> { return sha256(value); }
+        \\  helper("first");
+        \\}
+        \\{
+        \\  function helper(value: Text): Effects<Text, "clock"> { return value; }
+        \\  helper("second");
+        \\}
+        \\
+    ;
+    try expectDirectFunctionCapsules(source);
 }

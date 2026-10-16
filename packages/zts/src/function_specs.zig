@@ -24,6 +24,12 @@ const TypeEnv = type_env_mod.TypeEnv;
 const SpecDiagnostic = contract_types.SpecDiagnostic;
 const CapsuleFacts = spec_discharge.CapsuleFacts;
 
+pub const TypeSource = union(enum) {
+    omitted,
+    legacy: *const TypeEnv,
+    direct: *const TypeEnv,
+};
+
 /// The reserved handler entry point - discharged via `Proof<...>` elsewhere.
 const handler_fn_name = "handler";
 
@@ -111,6 +117,21 @@ pub fn discharge(
     env: ?*const TypeEnv,
     ir_view: IrView,
 ) !CapsuleTable {
+    return dischargeWithTypeSource(
+        allocator,
+        effects,
+        if (env) |value| .{ .legacy = value } else .omitted,
+        ir_view,
+    );
+}
+
+pub fn dischargeWithTypeSource(
+    allocator: std.mem.Allocator,
+    effects: *const EffectFacts,
+    source: TypeSource,
+    ir_view: IrView,
+) !CapsuleTable {
+    const env = try validateTypeSource(source);
     var table: CapsuleTable = .{};
     errdefer table.deinit(allocator);
 
@@ -118,7 +139,7 @@ pub fn discharge(
         if (std.mem.eql(u8, fe.name, handler_fn_name)) continue;
 
         const line: u32 = if (ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
-        const signature_offset = ir_view.signatureOffset(fe.decl_node);
+        const signature = try functionSignature(source, ir_view, fe.decl_node);
 
         const facts: CapsuleFacts = .{
             .total = handler_verifier.functionAlwaysReturns(ir_view, fe.body_node),
@@ -134,7 +155,7 @@ pub fn discharge(
             for (declared.items) |s| allocator.free(s);
             declared.deinit(allocator);
         }
-        _ = try collectDeclared(allocator, env, signature_offset, &declared, false);
+        _ = try collectDeclared(allocator, env, signature, &declared, false);
 
         var diagnostics = try spec_discharge.dischargeCapsule(allocator, declared.items, facts);
         errdefer {
@@ -147,7 +168,7 @@ pub fn discharge(
             for (effect_declared.items) |s| allocator.free(s);
             effect_declared.deinit(allocator);
         }
-        const effect_extraction = try collectDeclared(allocator, env, signature_offset, &effect_declared, true);
+        const effect_extraction = try collectDeclared(allocator, env, signature, &effect_declared, true);
 
         var effect_diagnostics = try spec_discharge.dischargeEffects(
             allocator,
@@ -180,6 +201,62 @@ pub fn discharge(
     return table;
 }
 
+fn validateTypeSource(source: TypeSource) !?*const TypeEnv {
+    return switch (source) {
+        .omitted => null,
+        .legacy => |env| blk: {
+            const mode = env.sourceTypeMode();
+            if (mode != null and mode != .legacy) return error.TypeSourceModeMismatch;
+            try env.ensureHealthy();
+            try env.pool.ensureHealthy();
+            break :blk env;
+        },
+        .direct => |env| blk: {
+            if (env.sourceTypeMode() != .direct) return error.TypeSourceModeMismatch;
+            try env.ensureHealthy();
+            try env.pool.ensureHealthy();
+            break :blk env;
+        },
+    };
+}
+
+fn functionSignature(
+    source: TypeSource,
+    ir_view: IrView,
+    declaration: ir.NodeIndex,
+) !?type_env_mod.FunctionSig {
+    const env = switch (source) {
+        .omitted => return null,
+        .legacy => |env| {
+            const offset = ir_view.signatureOffset(declaration) orelse return null;
+            return env.getFunctionSignature(.{ .legacy_offset = offset });
+        },
+        .direct => |env| env,
+    };
+    const owner = switch (ir_view.getTag(declaration) orelse return error.InvalidFunctionOwner) {
+        .function_expr, .arrow_function => declaration,
+        .function_decl => (ir_view.getVarDecl(declaration) orelse
+            return error.InvalidFunctionOwner).init,
+        .var_decl => {
+            const variable = ir_view.getVarDecl(declaration) orelse
+                return error.InvalidFunctionOwner;
+            const init_tag = ir_view.getTag(variable.init) orelse
+                return error.InvalidFunctionOwner;
+            if (init_tag != .function_expr and init_tag != .arrow_function) {
+                return error.InvalidFunctionOwner;
+            }
+            return null;
+        },
+        else => return error.InvalidFunctionOwner,
+    };
+    const owner_tag = ir_view.getTag(owner) orelse return error.InvalidFunctionOwner;
+    if (owner_tag != .function_expr and owner_tag != .arrow_function) {
+        return error.InvalidFunctionOwner;
+    }
+    const reference = env.functionTypeRef(ir_view, owner) orelse return error.TypeSourceModeMismatch;
+    return env.getFunctionSignature(reference);
+}
+
 /// Read the declared capsule property names (`Proof<...>`) or capability
 /// names (`Effects<...>`, when `effects` is true) from a function's
 /// return-type annotation. Owned, de-duplicated copies are appended to `out`.
@@ -189,13 +266,12 @@ pub fn discharge(
 fn collectDeclared(
     allocator: std.mem.Allocator,
     env: ?*const TypeEnv,
-    signature_offset: ?u32,
+    signature: ?type_env_mod.FunctionSig,
     out: *std.ArrayList([]const u8),
     comptime effects: bool,
 ) !type_env_mod.MarkerExtraction {
     const e = env orelse return .{};
-    const offset = signature_offset orelse return .{};
-    const sig = e.getFnSigAt(offset) orelse return .{};
+    const sig = signature orelse return .{};
     if (sig.return_type == type_pool_mod.null_type_idx) return .{};
 
     var raw: std.ArrayListUnmanaged([]const u8) = .empty;

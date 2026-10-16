@@ -354,6 +354,7 @@ pub const TypeChecker = struct {
     /// Reject proof/type results after either the checker or its shared pool
     /// encounters an operational allocation or compact-capacity failure.
     pub fn ensureHealthy(self: *const TypeChecker) TypeCheckerError!void {
+        try self.env.ensureHealthy();
         try self.env.pool.ensureHealthy();
         if (self.allocation_failed) return error.OutOfMemory;
         if (self.binding_resolution_failed) return error.UnresolvedTypeBinding;
@@ -582,7 +583,7 @@ pub const TypeChecker = struct {
 
             .var_decl => {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
-                const declared = self.bindVarDeclaration(vd.binding);
+                const declared = self.bindVarDeclaration(node, vd.binding);
                 self.reportIfNonContractive(declared, node);
                 self.bindCallableMetadata(vd.binding, .unavailable);
                 if (vd.init != null_node) {
@@ -798,7 +799,7 @@ pub const TypeChecker = struct {
                 // The signature is the one whose parameter list opens where this
                 // function's does. A name does not identify it: nested functions
                 // repeat names, and the later one used to win for both.
-                const sig = if (self.ir_view.getLoc(decl.init)) |l| self.env.getFnSigAt(l.offset) else null;
+                const sig = self.sourceFunctionSignature(decl.init);
                 self.bindCallableMetadata(decl.binding, sourceFunctionMetadata(func, sig));
                 const active_start = self.active_declared_types.items.len;
                 defer self.active_declared_types.items.len = active_start;
@@ -825,8 +826,7 @@ pub const TypeChecker = struct {
                 const func = self.ir_view.getFunction(node) orelse return;
                 const active_start = self.active_declared_types.items.len;
                 defer self.active_declared_types.items.len = active_start;
-                const loc = self.ir_view.getLoc(node);
-                const sig = if (loc) |l| self.env.getFnSigAt(l.offset) else null;
+                const sig = self.sourceFunctionSignature(node);
                 const saved_return = self.current_return_type;
                 // A nested function has its own return contract. Leaving the
                 // enclosing one in place checked an inner `return` against an
@@ -1027,8 +1027,7 @@ pub const TypeChecker = struct {
                 const func = self.ir_view.getFunction(node) orelse return;
                 const active_start = self.active_declared_types.items.len;
                 defer self.active_declared_types.items.len = active_start;
-                const loc = self.ir_view.getLoc(node);
-                const sig = if (loc) |l| self.env.getFnSigAt(l.offset) else null;
+                const sig = self.sourceFunctionSignature(node);
                 const saved_return = self.current_return_type;
                 // A nested function has its own return contract. Leaving the
                 // enclosing one in place checked an inner `return` against an
@@ -2697,21 +2696,29 @@ pub const TypeChecker = struct {
     // Match expression narrowing
     // -------------------------------------------------------------------
 
-    fn bindVarDeclaration(self: *TypeChecker, binding: ir.BindingRef) TypeIndex {
-        const name = self.resolveAtomName(binding.name_atom) orelse {
-            self.pushActiveDeclared(binding.name_atom, null_type_idx);
-            return null_type_idx;
+    fn bindVarDeclaration(
+        self: *TypeChecker,
+        declaration: NodeIndex,
+        binding: ir.BindingRef,
+    ) TypeIndex {
+        const declared = switch (self.env.sourceTypeMode() orelse .legacy) {
+            .direct => self.env.getVarTypeForDeclaration(self.ir_view, declaration) orelse null_type_idx,
+            .omitted => null_type_idx,
+            .legacy => legacy: {
+                const name = self.resolveAtomName(binding.name_atom) orelse {
+                    self.pushActiveDeclared(binding.name_atom, null_type_idx);
+                    return null_type_idx;
+                };
+                const gop = self.var_name_ordinals.getOrPut(self.allocator, binding.name_atom) catch {
+                    self.markAllocationFailure();
+                    return null_type_idx;
+                };
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                const ordinal = gop.value_ptr.*;
+                gop.value_ptr.* += 1;
+                break :legacy self.env.getVarTypeByNameOrdinal(name, ordinal) orelse null_type_idx;
+            },
         };
-
-        const gop = self.var_name_ordinals.getOrPut(self.allocator, binding.name_atom) catch {
-            self.markAllocationFailure();
-            return null_type_idx;
-        };
-        if (!gop.found_existing) gop.value_ptr.* = 0;
-        const ordinal = gop.value_ptr.*;
-        gop.value_ptr.* += 1;
-
-        const declared = self.env.getVarTypeByNameOrdinal(name, ordinal) orelse null_type_idx;
         if (declared != null_type_idx) {
             self.env.bindVarType(binding.scope_id, binding.name_atom, declared) catch self.markAllocationFailure();
             self.bound_var_annotations += 1;
@@ -2771,6 +2778,14 @@ pub const TypeChecker = struct {
         return self.env.getFnSigByName(name);
     }
 
+    fn sourceFunctionSignature(
+        self: *const TypeChecker,
+        owner: NodeIndex,
+    ) ?type_env_mod.FunctionSig {
+        const reference = self.env.functionTypeRef(self.ir_view, owner) orelse return null;
+        return self.env.getFunctionSignature(reference);
+    }
+
     /// What a call may rely on for the callee a `const` or declaration binds.
     ///
     /// The parameter nodes of a source function are the authority on how many
@@ -2804,8 +2819,7 @@ pub const TypeChecker = struct {
                 break :blk .{ .signature = sig };
             },
             .function_expr, .arrow_function => blk: {
-                const loc = self.ir_view.getLoc(node) orelse break :blk .unavailable;
-                const sig = self.env.getFnSigAt(loc.offset);
+                const sig = self.sourceFunctionSignature(node);
                 if (exact_arity) {
                     if (self.ir_view.getFunction(node)) |func| break :blk sourceFunctionMetadata(func, sig);
                 }
@@ -3077,8 +3091,7 @@ pub const TypeChecker = struct {
     /// offset of the call's `(`, which is what the stripper recorded one past
     /// the closing `>`.
     fn explicitTypeArgs(self: *const TypeChecker, node: NodeIndex) ?type_env_mod.CallTypeArgs {
-        const loc = self.ir_view.getLoc(node) orelse return null;
-        return self.env.getCallTypeArgs(loc.offset);
+        return self.env.getCallTypeArgsForCall(self.ir_view, node);
     }
 
     /// Bind every type parameter of `sig` for this call. Pure: it reports what
@@ -3171,10 +3184,7 @@ pub const TypeChecker = struct {
     /// caller asking for it.
     fn functionExprType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const func = self.ir_view.getFunction(node) orelse return null_type_idx;
-        const declared: ?type_env_mod.FunctionSig = if (self.ir_view.getLoc(node)) |loc|
-            self.env.getFnSigAt(loc.offset)
-        else
-            null;
+        const declared = self.sourceFunctionSignature(node);
         if (declared) |sig| {
             if (sig.return_type != null_type_idx) {
                 return self.env.pool.addFunctionWithReturn(self.allocator, &.{}, sig.return_type);
@@ -4315,7 +4325,7 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
     var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
     const errors = try checker.check(root);
@@ -4351,7 +4361,7 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
@@ -4390,7 +4400,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
@@ -4839,7 +4849,7 @@ fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_fol
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
@@ -5831,7 +5841,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
@@ -5977,7 +5987,7 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();
@@ -7157,7 +7167,7 @@ test "a call that merely carries a callback keeps its mismatch at the outer retu
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env);
     defer checker.deinit();

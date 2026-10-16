@@ -253,7 +253,10 @@ pub const StrictChecker = struct {
     }
 
     pub fn check(self: *StrictChecker, root: NodeIndex) !u32 {
-        if (self.type_env) |env| try env.ensureHealthy();
+        if (self.type_env) |env| {
+            try env.ensureHealthy();
+            try env.pool.ensureHealthy();
+        }
         if (self.type_checker) |tc| try tc.ensureHealthy();
         self.scanImports();
         self.collectAnnotatedFunctions(root);
@@ -262,7 +265,10 @@ pub const StrictChecker = struct {
         self.collectAssignments(root);
         self.collectCallCounts(root);
         self.walkStmt(root);
-        if (self.type_env) |env| try env.ensureHealthy();
+        if (self.type_env) |env| {
+            try env.ensureHealthy();
+            try env.pool.ensureHealthy();
+        }
         if (self.type_checker) |tc| try tc.ensureHealthy();
         if (self.allocation_failed) return error.OutOfMemory;
 
@@ -978,14 +984,14 @@ pub const StrictChecker = struct {
         // signature; do not guess which parameter an entry belonged to.
         if (sig.param_count == func.params_count) {
             for (0..func.params_count) |i| {
-                const annotation = env.getSourceFnParamAnnotation(source_sig.key, @intCast(i)) orelse continue;
+                const annotation = env.getFunctionParameterSpelling(source_sig.reference, @intCast(i)) orelse continue;
                 const raw = rawBoundaryBase(env, annotation) orelse continue;
                 const param = self.ir_view.getListIndex(func.params_start, @intCast(i));
                 self.addRawBoundaryDiagnostic(param, "parameter", annotation, raw);
             }
         }
 
-        if (env.getSourceFnReturnAnnotation(source_sig.key)) |annotation| {
+        if (env.getFunctionReturnSpelling(source_sig.reference)) |annotation| {
             if (rawBoundaryBase(env, annotation)) |raw| {
                 self.addRawBoundaryDiagnostic(node, "return", annotation, raw);
             }
@@ -994,7 +1000,7 @@ pub const StrictChecker = struct {
 
     const SourceFunctionSig = struct {
         sig: FunctionSig,
-        key: u32,
+        reference: type_env_mod.FunctionTypeRef,
     };
 
     fn functionSignature(
@@ -1004,9 +1010,9 @@ pub const StrictChecker = struct {
     ) ?SourceFunctionSig {
         _ = func;
         const env = self.type_env orelse return null;
-        const loc = self.ir_view.getLoc(node) orelse return null;
-        const sig = env.getFnSigAt(loc.offset) orelse return null;
-        return .{ .sig = sig, .key = env.signatureKeyAt(loc.offset) };
+        const reference = env.functionTypeRef(self.ir_view, node) orelse return null;
+        const sig = env.getFunctionSignature(reference) orelse return null;
+        return .{ .sig = sig, .reference = reference };
     }
 
     fn addRawBoundaryDiagnostic(
@@ -1043,8 +1049,7 @@ pub const StrictChecker = struct {
         const func = self.ir_view.getFunction(node) orelse return;
         if (!self.functionNeedsAnnotation(node, func)) return;
 
-        const loc = self.ir_view.getLoc(node) orelse return;
-        if (!self.hasCompleteFunctionAnnotation(func, loc.offset)) {
+        if (!self.hasCompleteFunctionAnnotation(node, func)) {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_public_annotation,
@@ -1578,14 +1583,19 @@ pub const StrictChecker = struct {
         // reads as fully typed, while a call to it is checked against the one
         // parameter that was annotated.
         const env = self.type_env orelse return false;
-        const loc = self.ir_view.getLoc(node) orelse return false;
-        const sig = env.getFnSigAt(loc.offset) orelse return false;
+        const reference = env.functionTypeRef(self.ir_view, node) orelse return false;
+        const sig = env.getFunctionSignature(reference) orelse return false;
         return sig.param_count < func.params_count;
     }
 
-    fn hasCompleteFunctionAnnotation(self: *const StrictChecker, func: ir.Node.FunctionExpr, signature_offset: u32) bool {
+    fn hasCompleteFunctionAnnotation(
+        self: *const StrictChecker,
+        node: NodeIndex,
+        func: ir.Node.FunctionExpr,
+    ) bool {
         const env = self.type_env orelse return false;
-        return functionSigCovers(env.getFnSigAt(signature_offset), func.params_count);
+        const reference = env.functionTypeRef(self.ir_view, node) orelse return false;
+        return functionSigCovers(env.getFunctionSignature(reference), func.params_count);
     }
 
     fn checkCall(self: *StrictChecker, node: NodeIndex) void {
@@ -1738,8 +1748,9 @@ pub const StrictChecker = struct {
 
     fn functionHasAnnotation(self: *const StrictChecker, node: NodeIndex) bool {
         const func = self.ir_view.getFunction(node) orelse return false;
-        const loc = self.ir_view.getLoc(node) orelse return false;
-        const sig = if (self.type_env) |env| env.getFnSigAt(loc.offset) else null;
+        const env = self.type_env orelse return false;
+        const reference = env.functionTypeRef(self.ir_view, node) orelse return false;
+        const sig = env.getFunctionSignature(reference);
         return if (sig) |s|
             s.return_type != null_type_idx and s.param_count >= func.params_count
         else
@@ -2404,7 +2415,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
     defer pool.deinit(testing.allocator);
     var env = TypeEnv.init(testing.allocator, &pool);
     defer env.deinit();
-    env.populateFromTypeMap(&stripped.type_map);
+    try env.populateFromTypeMap(&stripped.type_map);
     var tc = TypeChecker.init(testing.allocator, view, null, &env);
     defer tc.deinit();
     _ = try tc.check(root);
@@ -2566,7 +2577,7 @@ fn checkStrippedWithSections(
     const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
     h.env = TypeEnv.init(testing.allocator, &h.pool);
-    h.env.populateFromTypeMap(&h.stripped.type_map);
+    try h.env.populateFromTypeMap(&h.stripped.type_map);
     h.tc = TypeChecker.init(testing.allocator, view, null, &h.env);
     _ = try h.tc.check(root);
     h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);

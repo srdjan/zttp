@@ -27,87 +27,65 @@ No browser session was opened.
 
 ## Current work
 
-U1 through U10 are complete and committed locally.
-U10's commit is `aa5489c2`; production callers retain the legacy frontend.
-U11's complete owner model passes its frontend and full local gates.
-The final declaration owner closes the repeated-global identity gap.
-U12's isolated pilot draft runs outside the repository.
-U13 through U20 implementations remain unstarted.
-No product decision blocks progress.
+U1 through U11 are committed locally.
+The current commit is `f48b8295`, which completes annotation ownership.
+U12's type-consumer implementation and required checks are complete; its local commit remains pending.
+Astra accepts the complete U12 source and evidence with no remaining requirement blocker.
+The task continues through U20 and the required quality checks.
 
-U11 retains final annotation, signature, generic, call, module, and prefix owners.
-All seventeen arrays participate in rollback and destruction.
-The exhaustive census covers all eight legacy annotation kinds.
-Closure probes identify the actual captured binding.
-The authority retains compatibility details and the limit on descendant substitution within one operand interval.
+U12 adds explicit source modes and final-owner inputs for type environments, type checking, strict checking, and function specifications.
+The implementation preserves construction order, generic reuse, compact signatures, repeated-name winners, calls, predicates, and operational health.
+The corrected small gate passes all 21 steps with 2,939 tests and one skip.
+The final frontend gate passes all 45 steps with 3,757 tests and one skip.
+All 182 diagnostic corpus cases pass within the existing cost budget.
 
-Astra accepts the complete U11 source after the bounded corrections.
-The final small gate exits zero with 2,892 passing tests and one skip.
-Its receipt is `u11-prefix-complete-diagnostic-parity.log`.
-Whole-repository formatting and diff checks pass.
-The broader frontend gate exits zero: all 45 steps succeed, with 3,698 tests passing and one skip.
-Its receipt is `u11-focused.log`.
-Repeated global declarations share one complete binding identity, so U11 must retain each annotation's final declaration node.
-The owner also retains an independently captured start to reject exchanged owners with equal bindings.
-Astra accepts the amendment design and requires source bounds plus local annotation validation.
-Main reviewed every final candidate line and integrated its three patches without fuzz.
-The finalizer checks the local record, source bounds, tag, location, and complete binding before publication.
-The existing allocation sweep checks exact checkpoints and finalized owners.
-Main makes its progress classification independent of Store contents by using the parser cursor.
+The full local script exits zero as `u12-verify.log`.
+Its aggregate tests, standalone runtime, release binaries, verified handler compilation, workflows, offline checks, and formatting pass.
+The final documentation gate exits zero across all eight steps.
+Whole-repository formatting and `git diff --check` also pass.
+The receipt table retains every failed and corrected run separately.
 
-The amended small gate exits zero with 2,896 tests passing and one skip.
-Its receipt is `u11-variable-owners-small.log`.
-Astra accepts the corrected final code and bounded probes by source review.
-The repeated-global probes establish runtime identity and ownership; U12 still owns semantic comparison.
-The amended frontend gate exits zero: all 45 steps succeed, with 3,702 tests passing and one skip.
-The first full gate exits one during its aggregate.
-All 8,459 tests pass, six tests skip, and the documentation drift scan fails.
-The scan flags literal retired-module references in the new rejection logic and negative probes.
-Standalone runtime and later script steps do not run after that failure.
+The simplification review applies reuse one, quality one, and comments one; efficiency and test changes remain zero.
+The review preserves every proof test, helper, observation seam, source order, and public behavior.
+Broader lowering consolidation lacks exact equivalence, while shared whitespace helpers would expand the parser API; both proposals remain excluded.
+The independent documentation review corrects current coverage, ownership, high-level entry, and bounded comparison-preflight descriptions.
+Production frontend callers still use legacy source preparation.
 
-Astra accepts a shared identity in the existing base module for specifiers.
-The built-in prefix supplies that identity and still serves the existing syntax check.
-Both frontend matchers and the new fixtures use the shared constant.
-Existing literal refusal fixtures, diagnostics, registry rows, gates, and allowlists remain unchanged.
-Main reviewed every candidate line and integrated the five exact patches without fuzz.
-Formatting and diff checks pass.
+I will record the final receipts and commit the completed U12 files on local main.
+The earlier current-work narration remains in `worklog-through-u12-acceptance.md` outside the repository.
+The authority owns detailed findings; this worklog owns current state and receipts.
 
-The correction gate exits zero: all 27 steps succeed, with 2,896 tests passing and one skip.
-Documentation, metadata, and tier checks pass with the original gate unchanged.
-Its receipt is `u11-retired-module-small.log`.
-The final frontend gate exits zero: all 45 steps succeed, with 3,702 tests passing and one skip.
-Its receipt is `u11-focused-final.log`.
-The sequential full gate also exits zero in `u11-verify-final.log`.
-That script covers aggregate tests, standalone runtime, release binaries, handler compilation, smoke flows, isolation, offline replay, and formatting.
-Final documentation checks exit zero: all eight steps succeed in `u11-docs-final.log`.
-Whole-repository formatting and diff checks also pass.
-U11 is ready for its local commit.
+U13 implementation remains unstarted.
+Astra accepts the bounded printer packet with fourteen measured legacy outputs and exact refusal and OOM behavior.
+The consumer packet still needs its measured ABI amendment and a positive callback ceiling fixture before implementation release.
+The nine-case legacy harness compiles and passes both its one-case pilot and complete run.
+Those receipts retain callback facts, transient contract fields, and six complete contract byte strings.
+The omitted native `isDict` hole expects `boolean`; the ordinary helper control expects `unknown`.
+The admission census for U14 remains preparation, with its final API refresh and production measurements pending.
 
-Astra accepts isolated drafting overlap for U12's ordinary-annotation pilot.
-Sol works only in temporary copies under `u12-pilot-candidate/`.
-The exact packet is `u12-pilot-packet.md`; main captured its source base in `u12-pilot-draft-base.sha256`.
-Integration still requires U11's passing checks, commit, and a refresh against committed APIs.
-Any API change requires renewed review.
-
-Main measured the pilot's strict boundary outcomes before Sol completes its tests.
-The scalar source has one ZTS061 at line 2, column 24.
-The inline-record contrast has no ZTS061 and discharges the helper's `deterministic` capsule.
-Both CLI cases exit one at different stages; `u12-pilot-boundary-baseline/` retains the complete receipts.
-Main also confirms that undeclared-global inference still uses the semantic name map.
-The packet retains that fallback separately from declaration-based annotation attachment.
-
-The bad-seed contrast retains both ZTS200 at line 1 and ZTS061 at line 2.
-The public path does not suppress that strict diagnostic after the type mismatch.
-
-Main owns the full gate, documentation checks, and U11 commit.
-U12's refreshed API handoff remains preparation until U11 completes.
-Main owns review, execution, integration, documentation, and Git.
-
-Sol freezes the six-file production draft under `u12-pilot-candidate/final/production/`.
-Astra reviews that snapshot while Sol adds bounded pilot tests outside the repository.
-Sol used the wrong formatter version and reports unrelated builtin rewrites.
-Sol will supply a separate correction and use the explicit Zig 0.16.0 binary.
-Main will review that correction before integration.
+| U12 receipt | Actual result and scope |
+|---|---|
+| `u12-pilot-small.log` | Exit 1; nine of 21 steps, 1,148 pass, one skip. Import shadowing, duplicate error handling, and tracking block consumer compilation. |
+| `u12-pilot-corrected.log` | Exit 1; sixteen of 21 steps, 1,401 pass, one skip. An error-handler arm and its explanation block acceptance. |
+| `u12-pilot-error-handler.log` | Exit 0; all 21 steps, 2,903 pass, one skip. The seven consumer tests and unchanged repository gates pass. |
+| `u12-declarations-small.log` | Exit 0; all 21 steps, 2,907 pass, one skip. Four declaration tests and the unchanged repository gates pass. |
+| `u12-generic-set-small.log` | Exit 0; all 21 steps, 2,911 pass, one skip. Four captured-set tests and the unchanged repository gates pass. |
+| `u12-generic-declarations-small.log` | Exit 1; eighteen of 21 steps, 1,401 pass, one skip. Captured error-defer typing prevents the compiler root from compiling. |
+| `u12-generic-declarations-corrected-growth-small.log` | Exit 1; nineteen of 21 steps, 2,916 pass, one skip, one failure. All 237 precompile tests pass; one direct-only alias fact has a stale expected tag. |
+| `u12-generic-declarations-facts-small.log` | Exit 0; all 21 steps, 2,917 pass, one skip. Five generic-declaration tests and the seventeen-case public CHECK growth test pass. |
+| `u12-phase-two-small.log` | Exit 1; thirteen of 21 steps, 1,148 pass, one skip. One unused declaration blocks compiler and precompile test artifacts. |
+| `u12-phase-two-globals-corrected-small.log` | Exit 1; seventeen of 21 steps, 2,919 pass, one skip, three failures. Bounded prefix parsing blocks two compiler tests; one public contract-presence expectation is wrong. |
+| `u12-phase-two-prefix-admission-small.log` | Exit 0; all 21 steps, 2,923 pass, one skip. Callable generics, complete bounded prefixes, repeated globals, and unchanged repository gates pass. |
+| `u12-phase-three-small.log` | Exit 1; nineteen of 21 steps, 2,925 pass, one skip, one failure. Positive calls and the allocation sweep pass; a refusal assertion ignores the built-in generic aliases. |
+| `u12-phase-three-alias-baseline-small.log` | Exit 0; all 21 steps, 2,926 pass, one skip. All four call cases, three validation mutations, and the seeded allocation sweep pass. |
+| `u12-predicates-native-matrix-small.log` | Exit 1; thirteen of 21 steps, 1,148 pass, one skip. An unqualified helper call blocks compiler and precompile test artifacts. |
+| `u12-predicates-native-matrix-qualified.log` | Exit 1; seventeen of 21 steps, 2,934 pass, one skip, five failures. Four compiler assertions and one public stage assertion fail. |
+| `u12-predicates-native-matrix-fixtures.log` | Exit 0; all 21 steps, 2,939 pass, one skip. All 1,534 compiler and 240 precompile tests pass after the five test corrections. |
+| `u12-focused.log` | Exit 0; all 45 steps, 3,757 pass, one skip. The complete frontend command passes before the accepted mechanical simplifications. |
+| `u12-focused-final.log` | Exit 0; all 45 steps, 3,757 pass, one skip. The complete frontend command passes after all final source edits. |
+| `u12-verify.log` | Exit 0; the full local script passes aggregate tests, standalone runtime, release and handler compilation, workflows, offline gates, and formatting. |
+| `u12-docs-final.log` | Exit 0; all eight documentation drift, link, and spine steps pass. |
+| Final Astra acceptance | U12 is complete for local commit, with no remaining source or requirement blocker. |
 
 | U11 receipt | Actual result and scope |
 |---|---|
@@ -146,6 +124,9 @@ Main will review that correction before integration.
 | `u11-focused-variable-owners.log` | Exit 0; 45 steps, 3,702 pass, one skip. Complete amended frontend checks pass. |
 | `u11-verify.log` | Exit 1; aggregate reports 188 of 191 steps, 8,459 pass, six skips. Only documentation drift fails; later script steps do not run. |
 | `u11-retired-module-small.log` | Exit 0; 27 steps, 2,896 pass, one skip. Documentation, metadata, tier, and behavior checks pass after the shared-identity correction. |
+| `u11-focused-final.log` | Exit 0; all 45 steps, 3,702 pass, one skip. The complete frontend command passes. |
+| `u11-verify-final.log` | Exit 0; every CI test-job step in the full script passes. |
+| `u11-docs-final.log` | Exit 0; all eight documentation and spine steps pass. |
 
 Every temporary artifact path in this worklog is relative to `/tmp/zttp-reset-20261015/`.
 The authority retains detailed findings, source corrections, and accepted design requirements.
@@ -160,7 +141,7 @@ Lowering failure consumes selection and leaves incomplete metadata unhealthy.
 The authority retains the complete API conditions.
 Isolated drafting can overlap U11's frozen gates, as Astra accepted.
 Integration waits for the U11 commit and a refresh against committed APIs.
-The external `u12-growth-tools.zig` fragment remains unintegrated and unexecuted.
+The external `u12-growth-tools.zig` fragment now has an integrated, source-reviewed seventeen-case test.
 The sixteen layout cases and sixteen prefix shifts remain in `u12-growth-baseline/`.
 
 The task continues through U20.

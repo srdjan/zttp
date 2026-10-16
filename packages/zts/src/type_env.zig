@@ -1,18 +1,19 @@
 //! Type Environment: resolves type names to TypePool indices.
 //!
-//! Populated from TypeMap entries extracted by the stripper. Provides:
+//! Resolves validated syntax owners or explicit legacy TypeMap entries. Provides:
 //! - Type alias resolution (structural Foo = ...)
 //! - Interface resolution (interface Bar { ... })
 //! - Variable type annotations (const x: Type = ...)
 //! - Function signatures (params + return types)
 //! - Generic scope tracking
 //!
-//! The TypeEnv is the bridge between raw type text (from the stripper's TypeMap)
-//! and the structured types in the TypePool.
+//! TypeEnv publishes structured types in TypePool and retains selected source metadata.
 
 const std = @import("std");
+const engine = @import("zts-engine");
 const type_pool_mod = @import("type_pool.zig");
 const type_map_mod = @import("zts-base").type_map;
+const type_syntax_lowering = @import("type_syntax_lowering.zig");
 
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
@@ -21,6 +22,87 @@ const parseTypeExpr = type_pool_mod.parseTypeExpr;
 const TypeMap = type_map_mod.TypeMap;
 const TypeMapKind = type_map_mod.TypeMapKind;
 const TypeMapEntry = type_map_mod.TypeMapEntry;
+const TypeSyntax = engine.parser.type_syntax;
+const IrView = engine.parser.IrView;
+const NodeIndex = engine.parser.NodeIndex;
+const AtomTable = engine.atom_table.AtomTable;
+const Atom = engine.object.Atom;
+
+pub const SourceTypeMode = enum {
+    omitted,
+    legacy,
+    direct,
+};
+
+pub const DirectSyntaxInput = struct {
+    store: *const TypeSyntax.Store,
+    ir_view: IrView,
+    atoms: *AtomTable,
+};
+
+pub const SourceTypeInput = union(SourceTypeMode) {
+    omitted,
+    legacy: *const TypeMap,
+    direct: DirectSyntaxInput,
+};
+
+pub const FunctionTypeRef = union(enum) {
+    legacy_offset: u32,
+    direct_owner: NodeIndex,
+};
+
+const DirectVariableType = struct {
+    binding: engine.parser.BindingRef,
+    type_idx: TypeIndex,
+};
+
+const DirectSourceAnnotationKey = struct {
+    owner: NodeIndex,
+    slot: u8,
+};
+
+const DirectFunctionAccumulator = struct {
+    signature: FunctionSig = .{},
+    publish_name: bool = false,
+};
+
+const DirectCompatibilityOrder = std.AutoHashMapUnmanaged(u32, NodeIndex);
+const DirectFunctionAccumulators = std.AutoHashMapUnmanaged(NodeIndex, DirectFunctionAccumulator);
+
+const DirectReplayPhase = enum {
+    before,
+    after,
+};
+
+/// A callback may read these maps only until the callback returns.
+const DirectReplaySnapshot = struct {
+    phase: DirectReplayPhase,
+    compatibility_key: u32,
+    owner: NodeIndex,
+    compatibility_found_existing: bool,
+    compatibility_capacity: usize,
+    compatibility_count: usize,
+    accumulator_capacity: usize,
+    accumulator_count: usize,
+    compatibility_order: *const DirectCompatibilityOrder,
+    accumulators: *const DirectFunctionAccumulators,
+};
+
+const DirectReplayObserver = struct {
+    context: *anyopaque,
+    visit: *const fn (context: *anyopaque, snapshot: DirectReplaySnapshot) void,
+
+    fn observe(self: DirectReplayObserver, snapshot: DirectReplaySnapshot) void {
+        self.visit(self.context, snapshot);
+    }
+};
+
+const DirectGenericSets = std.AutoHashMapUnmanaged(NodeIndex, ParsedGenericSet);
+
+const GenericProjectionRetention = enum {
+    transient,
+    callable,
+};
 
 /// The field name used to mark a record as the proof payload of an instantiated
 /// `Proof<T, P>` capsule. The verifier looks for records bearing this field
@@ -151,6 +233,12 @@ pub const ParsedGenericScope = struct {
     params: [MAX_TYPE_PARAMS]GenericParam = @splat(.{}),
     count: u8 = 0,
     active: bool = true,
+};
+
+pub const ParsedGenericSet = struct {
+    owner_env: *TypeEnv,
+    params: [MAX_TYPE_PARAMS]GenericParam = @splat(.{}),
+    count: u8 = 0,
 };
 
 /// Explicit type arguments written at a call site (`first<string>(xs)`),
@@ -381,17 +469,25 @@ pub const TypeEnv = struct {
     var_annotations: std.ArrayListUnmanaged(NamedVarAnnotation),
     /// Scoped binding identity: packed(scope_id, name_atom) -> declared type.
     var_types_by_binding: std.AutoHashMapUnmanaged(u32, TypeIndex),
+    /// Direct annotations keyed by their final runtime declaration.
+    direct_var_types: std.AutoHashMapUnmanaged(NodeIndex, DirectVariableType),
     /// Function name -> signature (for name-based lookup)
     fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
     /// Source-declared function name -> signature. Kept separate from module
     /// exports so a colliding module name cannot masquerade as a user's
     /// function declaration while binding-local metadata is established.
     source_fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
+    /// Direct signatures keyed by their final function or arrow node.
+    direct_fn_signatures: std.AutoHashMapUnmanaged(NodeIndex, FunctionSig),
+    /// Owned raw spellings keyed by final owner and compact annotation slot.
+    direct_source_fn_annotations: std.AutoHashMapUnmanaged(DirectSourceAnnotationKey, []const u8),
     /// Generic scope stack
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
     /// Explicit call-site type arguments, keyed by the byte offset of the
     /// call's `(` in the stripped source.
     call_type_args: std.AutoHashMapUnmanaged(u32, CallTypeArgs),
+    /// Direct call and compatibility arguments keyed by final runtime owner.
+    direct_call_type_args: std.AutoHashMapUnmanaged(NodeIndex, CallTypeArgs),
     /// Alias names whose definition contains a cycle that no data constructor
     /// guards (spec 5.7). Filled once, after the type-namespace pass; read by
     /// the type checker at every site that resolves such a name.
@@ -414,6 +510,10 @@ pub const TypeEnv = struct {
     /// author declared nothing". `TypeChecker` and `TypePool` already carry
     /// the same flag for the same reason.
     allocation_failed: bool = false,
+    source_selection: ?SourceTypeMode = null,
+    legacy_source_populated: bool = false,
+    direct_annotation_count: usize = 0,
+    direct_accumulator_events: usize = 0,
     next_generic_owner_token: u64 = 1,
 
     pub fn init(allocator: std.mem.Allocator, pool: *TypePool) TypeEnv {
@@ -428,10 +528,14 @@ pub const TypeEnv = struct {
             .var_types_by_name = .empty,
             .var_annotations = .empty,
             .var_types_by_binding = .empty,
+            .direct_var_types = .empty,
             .fn_sigs_by_name = .empty,
             .source_fn_sigs_by_name = .empty,
+            .direct_fn_signatures = .empty,
+            .direct_source_fn_annotations = .empty,
             .generic_scopes = .empty,
             .call_type_args = .empty,
+            .direct_call_type_args = .empty,
             .non_contractive_aliases = .empty,
             .non_contractive_indices = .empty,
             .name_storage = .empty,
@@ -506,10 +610,14 @@ pub const TypeEnv = struct {
         self.var_types_by_name.deinit(self.allocator);
         self.var_annotations.deinit(self.allocator);
         self.var_types_by_binding.deinit(self.allocator);
+        self.direct_var_types.deinit(self.allocator);
         self.fn_sigs_by_name.deinit(self.allocator);
         self.source_fn_sigs_by_name.deinit(self.allocator);
+        self.direct_fn_signatures.deinit(self.allocator);
+        self.direct_source_fn_annotations.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
         self.call_type_args.deinit(self.allocator);
+        self.direct_call_type_args.deinit(self.allocator);
         for (self.name_storage.items) |name| {
             self.allocator.free(name);
         }
@@ -520,10 +628,1067 @@ pub const TypeEnv = struct {
     // Population from TypeMap
     // -------------------------------------------------------------------
 
+    const DirectHeaderCursor = struct {
+        signature_index: usize = 0,
+        parameter_index: usize = 0,
+        return_consumed: bool = false,
+    };
+
+    const DirectHeaderEvent = union(enum) {
+        parameter: struct {
+            signature: *const TypeSyntax.FunctionSignature,
+            annotation: *const TypeSyntax.ParameterAnnotation,
+        },
+        return_value: struct {
+            signature: *const TypeSyntax.FunctionSignature,
+            syntax: *const TypeSyntax.ReturnSyntax,
+        },
+
+        fn start(self: DirectHeaderEvent) u32 {
+            return switch (self) {
+                .parameter => |event| event.annotation.value.raw_span.start,
+                .return_value => |event| event.syntax.raw_span.start,
+            };
+        }
+    };
+
+    /// Select one source of type metadata. Explicit selections are single-use.
+    pub fn populateSourceTypes(self: *TypeEnv, input: SourceTypeInput) !void {
+        return self.populateSourceTypesImpl(input, null);
+    }
+
+    fn populateSourceTypesImpl(
+        self: *TypeEnv,
+        input: SourceTypeInput,
+        observer: ?DirectReplayObserver,
+    ) !void {
+        if (self.source_selection != null) return error.TypeSourceAlreadySelected;
+        switch (input) {
+            .omitted => {
+                if (self.legacy_source_populated) return error.TypeSourceAlreadySelected;
+                self.source_selection = .omitted;
+            },
+            .legacy => |type_map| {
+                self.source_selection = .legacy;
+                try self.populateFromTypeMap(type_map);
+                try self.pool.ensureHealthy();
+                try self.ensureHealthy();
+            },
+            .direct => |direct| {
+                if (self.legacy_source_populated) return error.TypeSourceAlreadySelected;
+                var application_bases = validation: {
+                    errdefer |err| switch (err) {
+                        error.OutOfMemory => self.markAllocationFailure(),
+                        // exhaustive: other validation errors refuse eligibility before environment mutation.
+                        else => {},
+                    };
+                    break :validation try direct.store.planApplicationBasesWithIr(
+                        self.allocator,
+                        direct.ir_view,
+                    );
+                };
+                defer application_bases.deinit();
+                try validateDirectSourceOrder(direct.store);
+
+                self.source_selection = .direct;
+                self.direct_annotation_count = direct.store.annotations.items.len;
+                errdefer |err| self.retainDirectPopulationFailure(err);
+                try self.populateDirectSourceTypes(direct, &application_bases, observer);
+                try self.pool.ensureHealthy();
+                try self.ensureHealthy();
+            },
+        }
+    }
+
+    fn retainDirectPopulationFailure(self: *TypeEnv, err: anyerror) void {
+        switch (err) {
+            error.TypePoolCapacityExceeded => {}, // The pool retains this failure.
+            else => self.markAllocationFailure(),
+        }
+    }
+
+    pub fn sourceTypeMode(self: *const TypeEnv) ?SourceTypeMode {
+        return self.source_selection;
+    }
+
+    fn validateDirectSourceOrder(store: *const TypeSyntax.Store) !void {
+        try validateDirectCallOrder(store);
+
+        var previous_annotation_start: ?u32 = null;
+        for (store.annotations.items) |annotation| {
+            if (previous_annotation_start) |previous| {
+                if (previous >= annotation.raw_span.start) return error.InvalidTypeSourceOrder;
+            }
+            previous_annotation_start = annotation.raw_span.start;
+        }
+
+        var previous_header_start: ?u32 = null;
+        for (store.function_signatures.items) |signature| {
+            const parameters = store.parameterAnnotationSlice(signature.parameters) orelse
+                return error.InvalidTypeRange;
+            for (parameters) |parameter| {
+                if (previous_header_start) |previous| {
+                    if (previous >= parameter.value.raw_span.start) return error.InvalidTypeSourceOrder;
+                }
+                previous_header_start = parameter.value.raw_span.start;
+            }
+            if (signature.return_syntax) |return_syntax| {
+                if (previous_header_start) |previous| {
+                    if (previous >= return_syntax.raw_span.start) return error.InvalidTypeSourceOrder;
+                }
+                previous_header_start = return_syntax.raw_span.start;
+            }
+        }
+    }
+
+    fn validateDirectCallOrder(store: *const TypeSyntax.Store) !void {
+        var explicit_index: usize = 0;
+        var compatibility_index: usize = 0;
+        var previous_merged_start: ?u32 = null;
+        while (true) {
+            while (compatibility_index < store.generic_owners.items.len and
+                std.meta.activeTag(store.generic_owners.items[compatibility_index].compatibility) !=
+                    .legacy_call_arguments)
+            {
+                compatibility_index += 1;
+            }
+
+            const explicit_start = if (explicit_index < store.explicit_call_arguments.items.len)
+                store.explicit_call_arguments.items[explicit_index].list_span.start
+            else
+                null;
+            const compatibility_start = if (compatibility_index < store.generic_owners.items.len)
+                store.generic_owners.items[compatibility_index].list_span.start
+            else
+                null;
+            if (explicit_start == null and compatibility_start == null) break;
+
+            const use_explicit = compatibility_start == null or
+                (explicit_start != null and explicit_start.? < compatibility_start.?);
+            const start = if (use_explicit) explicit_start.? else compatibility_start.?;
+            if (previous_merged_start) |previous| {
+                if (previous >= start) return error.InvalidTypeSourceOrder;
+            }
+            previous_merged_start = start;
+            if (use_explicit) explicit_index += 1 else compatibility_index += 1;
+        }
+    }
+
+    fn populateDirectSourceTypes(
+        self: *TypeEnv,
+        input: DirectSyntaxInput,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        observer: ?DirectReplayObserver,
+    ) !void {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+
+        const lowered = try self.allocator.alloc(TypeIndex, input.store.nodes.items.len);
+        defer self.allocator.free(lowered);
+        @memset(lowered, null_type_idx);
+
+        for (input.store.declarations.items, 0..) |_, declaration_index| {
+            try self.populateParsedDeclaration(
+                input.store,
+                application_bases,
+                lowered,
+                declaration_index,
+            );
+        }
+        self.finishTypeAliasPopulation();
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+
+        // Phase 2: create callable and transient generic parameters in source order.
+        var callable_sets: DirectGenericSets = .empty;
+        defer callable_sets.deinit(self.allocator);
+        try self.populateDirectGenericPhase(
+            input,
+            application_bases,
+            lowered,
+            &callable_sets,
+        );
+
+        // Phase 3: resolve actual and compatibility call arguments in source order.
+        try self.populateDirectCallPhase(input, application_bases, lowered);
+
+        var compatibility_order: DirectCompatibilityOrder = .empty;
+        defer compatibility_order.deinit(self.allocator);
+        var function_accumulators: DirectFunctionAccumulators = .empty;
+        defer function_accumulators.deinit(self.allocator);
+
+        // Phase 4: merge variable and header values by their authored spans.
+        var annotation_index: usize = 0;
+        var header_cursor: DirectHeaderCursor = .{};
+        while (true) {
+            const header_event = directHeaderEvent(input.store, &header_cursor);
+            const annotation = if (annotation_index < input.store.annotations.items.len)
+                &input.store.annotations.items[annotation_index]
+            else
+                null;
+            if (annotation == null and header_event == null) break;
+
+            if (annotation != null and
+                (header_event == null or annotation.?.raw_span.start < header_event.?.start()))
+            {
+                try self.populateDirectVariable(
+                    input,
+                    application_bases,
+                    lowered,
+                    annotation.?,
+                );
+                annotation_index += 1;
+                continue;
+            }
+
+            const event = header_event.?;
+            switch (event) {
+                .parameter => |parameter_event| {
+                    const accumulator = try self.replayDirectSignatureEvent(
+                        input.ir_view,
+                        parameter_event.signature,
+                        &compatibility_order,
+                        &function_accumulators,
+                        observer,
+                    );
+                    const parameter = parameter_event.annotation;
+                    const type_idx = try self.lowerDirectHeaderRoot(
+                        input.store,
+                        application_bases,
+                        lowered,
+                        &callable_sets,
+                        parameter_event.signature.owner,
+                        parameter.value.root,
+                        parameter.value.node_range,
+                        parameter.value.raw_span,
+                    );
+                    if (accumulator.signature.param_count < accumulator.signature.param_types.len) {
+                        const compact_position = accumulator.signature.param_count;
+                        accumulator.signature.param_types[compact_position] = type_idx;
+                        accumulator.signature.param_count += 1;
+                        try self.putDirectSourceAnnotation(
+                            parameter_event.signature.owner,
+                            compact_position,
+                            parameter.value.raw_span.text(input.store.source),
+                        );
+                    }
+                },
+                .return_value => |return_event| {
+                    try self.populateDirectReturn(
+                        input,
+                        application_bases,
+                        lowered,
+                        &callable_sets,
+                        return_event.signature,
+                        return_event.syntax,
+                        &compatibility_order,
+                        &function_accumulators,
+                        observer,
+                    );
+                },
+            }
+            advanceDirectHeaderCursor(&header_cursor, event);
+        }
+
+        // Phase 5: retain signatures and merge name fallbacks in bucket order.
+        var iterator = compatibility_order.iterator();
+        while (iterator.next()) |entry| {
+            const owner = entry.value_ptr.*;
+            var accumulator = function_accumulators.get(owner) orelse
+                return error.InvalidFunctionSignatureOwner;
+            if (callable_sets.get(owner)) |set| {
+                @memcpy(
+                    accumulator.signature.type_params[0..set.count],
+                    set.params[0..set.count],
+                );
+                accumulator.signature.type_param_count = set.count;
+            }
+            try self.direct_fn_signatures.put(self.allocator, owner, accumulator.signature);
+            if (!accumulator.publish_name) continue;
+            const function = input.ir_view.getFunction(owner) orelse
+                return error.InvalidFunctionSignatureOwner;
+            const name = runtimeAtomName(input.atoms, function.name_atom) orelse continue;
+            const owned_name = self.internName(name);
+            try self.ensureHealthy();
+            try self.fn_sigs_by_name.put(self.allocator, owned_name, accumulator.signature);
+            try self.source_fn_sigs_by_name.put(self.allocator, owned_name, accumulator.signature);
+        }
+    }
+
+    fn populateDirectGenericPhase(
+        self: *TypeEnv,
+        input: DirectSyntaxInput,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        callable_sets: *DirectGenericSets,
+    ) !void {
+        var owner_index: usize = 0;
+        var prefix_index: usize = 0;
+        while (true) {
+            while (owner_index < input.store.generic_owners.items.len) {
+                const owner = input.store.generic_owners.items[owner_index];
+                const is_callable = switch (owner.identity) {
+                    .function, .arrow => true,
+                    .structural_declaration, .nominal_declaration => false,
+                };
+                if (is_callable and
+                    std.meta.activeTag(owner.compatibility) == .declaration_parameters)
+                {
+                    break;
+                }
+                owner_index += 1;
+            }
+            while (prefix_index < input.store.erased_type_prefixes.items.len and
+                std.meta.activeTag(input.store.erased_type_prefixes.items[prefix_index].compatibility) !=
+                    .legacy_parameter_projection)
+            {
+                prefix_index += 1;
+            }
+
+            const owner = if (owner_index < input.store.generic_owners.items.len)
+                &input.store.generic_owners.items[owner_index]
+            else
+                null;
+            const prefix = if (prefix_index < input.store.erased_type_prefixes.items.len)
+                &input.store.erased_type_prefixes.items[prefix_index]
+            else
+                null;
+            if (owner == null and prefix == null) break;
+
+            if (prefix == null or
+                (owner != null and owner.?.list_span.start < prefix.?.list_span.start))
+            {
+                const owner_node = switch (owner.?.identity) {
+                    .function => |node| node,
+                    .arrow => |node| node,
+                    .structural_declaration, .nominal_declaration => return error.InvalidGenericOwner,
+                };
+                if (try self.populateDirectGenericProjection(
+                    input.store,
+                    application_bases,
+                    lowered,
+                    owner.?.projected_parameters,
+                    .callable,
+                )) |set| {
+                    try callable_sets.put(self.allocator, owner_node, set);
+                }
+                owner_index += 1;
+            } else {
+                const projection = switch (prefix.?.compatibility) {
+                    .legacy_parameter_projection => |value| value,
+                    .ignored_parameters => return error.InvalidGenericOwner,
+                };
+                _ = try self.populateDirectGenericProjection(
+                    input.store,
+                    application_bases,
+                    lowered,
+                    projection.projected_parameters,
+                    .transient,
+                );
+                prefix_index += 1;
+            }
+        }
+    }
+
+    fn populateDirectCallPhase(
+        self: *TypeEnv,
+        input: DirectSyntaxInput,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+    ) !void {
+        var explicit_index: usize = 0;
+        var compatibility_index: usize = 0;
+        while (true) {
+            while (compatibility_index < input.store.generic_owners.items.len and
+                std.meta.activeTag(input.store.generic_owners.items[compatibility_index].compatibility) !=
+                    .legacy_call_arguments)
+            {
+                compatibility_index += 1;
+            }
+
+            const explicit = if (explicit_index < input.store.explicit_call_arguments.items.len)
+                &input.store.explicit_call_arguments.items[explicit_index]
+            else
+                null;
+            const compatibility_owner = if (compatibility_index < input.store.generic_owners.items.len)
+                &input.store.generic_owners.items[compatibility_index]
+            else
+                null;
+            if (explicit == null and compatibility_owner == null) break;
+
+            if (compatibility_owner == null or
+                (explicit != null and explicit.?.list_span.start < compatibility_owner.?.list_span.start))
+            {
+                try self.populateDirectCallArguments(
+                    input,
+                    application_bases,
+                    lowered,
+                    explicit.?.owner,
+                    .call,
+                    explicit.?.semantic_fragments,
+                );
+                explicit_index += 1;
+                continue;
+            }
+
+            const owner = compatibility_owner.?;
+            const semantic_fragments = switch (owner.compatibility) {
+                .legacy_call_arguments => |arguments| arguments.semantic_fragments,
+                .declaration_parameters, .ignored_declaration_parameters => return error.InvalidGenericOwner,
+            };
+            const runtime_owner, const expected_tag = switch (owner.identity) {
+                .function => |node| .{ node, engine.parser.NodeTag.function_expr },
+                .arrow => |node| .{ node, engine.parser.NodeTag.arrow_function },
+                .structural_declaration, .nominal_declaration => return error.InvalidGenericOwner,
+            };
+            try self.populateDirectCallArguments(
+                input,
+                application_bases,
+                lowered,
+                runtime_owner,
+                expected_tag,
+                semantic_fragments,
+            );
+            compatibility_index += 1;
+        }
+    }
+
+    fn populateDirectCallArguments(
+        self: *TypeEnv,
+        input: DirectSyntaxInput,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        owner: NodeIndex,
+        expected_tag: engine.parser.NodeTag,
+        fragment_range: TypeSyntax.Range,
+    ) !void {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        const tag = input.ir_view.getTag(owner) orelse return error.InvalidGenericOwner;
+        if (tag != expected_tag) return error.InvalidGenericOwner;
+        const fragments = input.store.semanticFragmentSlice(fragment_range) orelse
+            return error.InvalidTypeRange;
+        if (fragments.len > MAX_TYPE_PARAMS) return error.InvalidTypeRange;
+        if (fragments.len == 0) return;
+
+        var arguments: CallTypeArgs = .{};
+        for (fragments, 0..) |fragment, index| {
+            arguments.args[index] = try self.lowerDirectRoot(
+                input.store,
+                application_bases,
+                lowered,
+                fragment.root,
+                fragment.node_range,
+                fragment.raw_span,
+            );
+        }
+        arguments.count = @intCast(fragments.len);
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        try self.direct_call_type_args.put(self.allocator, owner, arguments);
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+    }
+
+    fn populateDirectGenericProjection(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        projected_range: TypeSyntax.Range,
+        retention: GenericProjectionRetention,
+    ) !?ParsedGenericSet {
+        const projected = store.projectedGenericParameterSlice(projected_range) orelse
+            return error.InvalidTypeRange;
+        if (projected.len == 0) return null;
+        if (projected.len > MAX_TYPE_PARAMS) return error.InvalidTypeRange;
+
+        var inputs: [MAX_TYPE_PARAMS]ParsedGenericInput = undefined;
+        for (projected, 0..) |parameter, index| {
+            inputs[index] = .{ .name = parameter.name_span.text(store.source) };
+        }
+
+        var scope = try self.beginParsedGenerics(inputs[0..projected.len]);
+        for (projected, 0..) |parameter, index| {
+            if (index >= scope.count) break;
+            const fragment_index = parameter.bound_fragment orelse continue;
+            const constraint_result = self.lowerParsedGenericBound(
+                store,
+                application_bases,
+                lowered,
+                &scope,
+                fragment_index,
+            );
+            inputs[index].constraint = if (constraint_result) |constraint|
+                constraint
+            else |err|
+                return @as(anyerror!?ParsedGenericSet, self.closeParsedScopeAfterError(&scope, err));
+        }
+
+        const installation_result = self.installParsedConstraints(
+            &scope,
+            inputs[0..projected.len],
+        );
+        if (installation_result) |_| {} else |err| {
+            return @as(anyerror!?ParsedGenericSet, self.closeParsedScopeAfterError(&scope, err));
+        }
+
+        const retained: ?ParsedGenericSet = switch (retention) {
+            .transient => null,
+            .callable => if (scope.count == 0)
+                null
+            else blk: {
+                const capture_result = self.captureParsedGenericSet(&scope);
+                break :blk if (capture_result) |set|
+                    set
+                else |err|
+                    return @as(
+                        anyerror!?ParsedGenericSet,
+                        self.closeParsedScopeAfterError(&scope, err),
+                    );
+            },
+        };
+        try self.endParsedGenerics(&scope);
+        return retained;
+    }
+
+    fn lowerParsedGenericBound(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        owner: *const ParsedGenericScope,
+        fragment_index: u32,
+    ) !TypeIndex {
+        if (@as(usize, fragment_index) >= store.semantic_fragments.items.len) {
+            return error.InvalidTypeRange;
+        }
+        const fragment = store.semantic_fragments.items[fragment_index];
+        const exact = fragment.raw_span.text(store.source);
+        const trimmed = std.mem.trim(u8, exact, " \t\r\n");
+        if (std.mem.eql(u8, trimmed, "DictKey")) {
+            return self.finishParsedBoundRoot(owner, exact, null_type_idx);
+        }
+        if (self.getTypeAlias(trimmed)) |type_idx| return type_idx;
+        if (try self.resolveParsedGenericParam(owner, trimmed)) |type_idx| return type_idx;
+        try type_syntax_lowering.lowerOwnedRange(
+            self.allocator,
+            store,
+            self.pool,
+            lowered,
+            application_bases,
+            fragment.node_range,
+        );
+        return self.finishParsedBoundRoot(
+            owner,
+            exact,
+            try type_syntax_lowering.loweredChild(lowered, fragment.root, lowered.len),
+        );
+    }
+
+    fn lowerDirectHeaderRoot(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        callable_sets: *const DirectGenericSets,
+        owner: NodeIndex,
+        root: TypeSyntax.Child,
+        node_range: TypeSyntax.Range,
+        raw_span: TypeSyntax.Span,
+    ) !TypeIndex {
+        const set = callable_sets.get(owner) orelse return self.lowerDirectRoot(
+            store,
+            application_bases,
+            lowered,
+            root,
+            node_range,
+            raw_span,
+        );
+        var scope = try self.beginParsedGenericUse(&set);
+        const lowering_result = self.lowerParsedGenericRoot(
+            store,
+            application_bases,
+            lowered,
+            &scope,
+            root,
+            node_range,
+            raw_span,
+        );
+        const type_idx = if (lowering_result) |result|
+            result
+        else |err|
+            return @as(anyerror!TypeIndex, self.closeParsedScopeAfterError(&scope, err));
+        try self.endParsedGenerics(&scope);
+        return type_idx;
+    }
+
+    fn populateDirectReturn(
+        self: *TypeEnv,
+        input: DirectSyntaxInput,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        callable_sets: *const DirectGenericSets,
+        signature: *const TypeSyntax.FunctionSignature,
+        syntax: *const TypeSyntax.ReturnSyntax,
+        compatibility_order: *DirectCompatibilityOrder,
+        function_accumulators: *DirectFunctionAccumulators,
+        observer: ?DirectReplayObserver,
+    ) !void {
+        switch (syntax.legacy_return_kind) {
+            .ordinary => {
+                const value = switch (syntax.structure) {
+                    .value => |value| value,
+                    .predicate => syntax.legacy_ordinary_prefix orelse
+                        return error.InvalidReturnSyntax,
+                };
+                const type_idx = try self.lowerDirectHeaderRoot(
+                    input.store,
+                    application_bases,
+                    lowered,
+                    callable_sets,
+                    signature.owner,
+                    value.root,
+                    value.node_range,
+                    value.raw_span,
+                );
+                const accumulator = try self.replayDirectSignatureEvent(
+                    input.ir_view,
+                    signature,
+                    compatibility_order,
+                    function_accumulators,
+                    observer,
+                );
+                accumulator.signature.return_type = type_idx;
+                accumulator.publish_name = input.ir_view.getTag(signature.owner) == .function_expr;
+                try self.putDirectSourceAnnotation(
+                    signature.owner,
+                    return_annotation_slot,
+                    syntax.raw_span.text(input.store.source),
+                );
+            },
+            .type_guard => {
+                const accumulator = try self.replayDirectSignatureEvent(
+                    input.ir_view,
+                    signature,
+                    compatibility_order,
+                    function_accumulators,
+                    observer,
+                );
+                accumulator.signature.return_type = self.pool.idx_boolean;
+                accumulator.publish_name = input.ir_view.getTag(signature.owner) == .function_expr;
+
+                const predicate = switch (syntax.structure) {
+                    .value => return,
+                    .predicate => |predicate| predicate,
+                };
+                switch (predicate.target) {
+                    .unresolved => return,
+                    .resolved => {},
+                }
+                switch (predicate.narrowed.root) {
+                    .absent => return,
+                    .present => {},
+                }
+                if (!directPredicateMarkerMatches(input.store, syntax, predicate)) return;
+                const compact_position = directPredicateParameterIndex(
+                    input.store,
+                    input.atoms,
+                    signature,
+                    predicate.target_span.text(input.store.source),
+                ) orelse return;
+                const narrowed = try self.lowerDirectHeaderRoot(
+                    input.store,
+                    application_bases,
+                    lowered,
+                    callable_sets,
+                    signature.owner,
+                    predicate.narrowed.root,
+                    predicate.narrowed.node_range,
+                    predicate.narrowed.raw_span,
+                );
+                if (narrowed == null_type_idx) return;
+                accumulator.signature.type_predicate = .{
+                    .param_index = compact_position,
+                    .narrowed = narrowed,
+                };
+            },
+        }
+    }
+
+    fn directPredicateParameterIndex(
+        store: *const TypeSyntax.Store,
+        atoms: *AtomTable,
+        signature: *const TypeSyntax.FunctionSignature,
+        target: []const u8,
+    ) ?u8 {
+        const parameters = store.parameterAnnotationSlice(signature.parameters) orelse return null;
+        for (parameters[0..@min(parameters.len, 16)], 0..) |parameter, index| {
+            const name = runtimeAtomName(atoms, parameter.owner.binding.name_atom) orelse continue;
+            if (std.mem.eql(u8, name, target)) return @intCast(index);
+        }
+        return null;
+    }
+
+    fn directPredicateMarkerMatches(
+        store: *const TypeSyntax.Store,
+        syntax: *const TypeSyntax.ReturnSyntax,
+        predicate: TypeSyntax.PredicateSyntax,
+    ) bool {
+        const marker = " is ";
+        const raw = syntax.raw_span.text(store.source);
+        const relative_marker_start = std.mem.indexOf(u8, raw, marker) orelse return false;
+        // Store validation bounds raw_span; indexOf keeps the complete marker inside that span.
+        const marker_start = syntax.raw_span.start + @as(u32, @intCast(relative_marker_start));
+        const narrowed_start = marker_start + @as(u32, marker.len);
+        const target_span = trimDirectTypeSpan(store.source, .{
+            .start = syntax.raw_span.start,
+            .end = marker_start,
+        });
+        const narrowed_span = trimDirectTypeSpan(store.source, .{
+            .start = narrowed_start,
+            .end = syntax.raw_span.end,
+        });
+        return std.meta.eql(target_span, predicate.target_span) and
+            std.meta.eql(narrowed_span, predicate.narrowed.raw_span);
+    }
+
+    fn trimDirectTypeSpan(source: []const u8, span: TypeSyntax.Span) TypeSyntax.Span {
+        var start: usize = span.start;
+        var end: usize = span.end;
+        while (start < end and isDirectTypeWhitespace(source[start])) start += 1;
+        while (end > start and isDirectTypeWhitespace(source[end - 1])) end -= 1;
+        return .{ .start = @intCast(start), .end = @intCast(end) };
+    }
+
+    fn isDirectTypeWhitespace(byte: u8) bool {
+        return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
+    }
+
+    fn populateDirectVariable(
+        self: *TypeEnv,
+        input: DirectSyntaxInput,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        annotation: *const TypeSyntax.Annotation,
+    ) !void {
+        const owner = annotation.runtime_owner orelse return error.InvalidAnnotationOwner;
+        const type_idx = try self.lowerDirectRoot(
+            input.store,
+            application_bases,
+            lowered,
+            annotation.root,
+            annotation.node_range,
+            annotation.raw_span,
+        );
+        try self.direct_var_types.put(self.allocator, owner.declaration, .{
+            .binding = annotation.binding,
+            .type_idx = type_idx,
+        });
+
+        const name = runtimeAtomName(input.atoms, annotation.binding.name_atom) orelse return;
+        const owned_name = self.internName(name);
+        try self.ensureHealthy();
+        try self.var_types_by_name.put(self.allocator, owned_name, type_idx);
+    }
+
+    fn lowerDirectRoot(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        root: TypeSyntax.Child,
+        node_range: TypeSyntax.Range,
+        raw_span: TypeSyntax.Span,
+    ) !TypeIndex {
+        const exact = std.mem.trim(u8, raw_span.text(store.source), " \t\r\n");
+        if (self.getTypeAlias(exact)) |type_idx| return type_idx;
+        try type_syntax_lowering.lowerOwnedRange(
+            self.allocator,
+            store,
+            self.pool,
+            lowered,
+            application_bases,
+            node_range,
+        );
+        const result = self.finishParsedTypeRoot(try type_syntax_lowering.loweredChild(
+            lowered,
+            root,
+            lowered.len,
+        ));
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        return result;
+    }
+
+    /// Publish one parsed declaration through the shared direct lowerer.
+    pub fn populateParsedDeclaration(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        declaration_index: usize,
+    ) !void {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        if (declaration_index >= store.declarations.items.len) return error.InvalidTypeRange;
+        const declaration = store.declarations.items[declaration_index];
+        var structural_parameters: ?[]const TypeSyntax.ProjectedGenericParameter = null;
+        if (declaration.generic_owner) |owner_index| {
+            if (@as(usize, owner_index) >= store.generic_owners.items.len) return error.InvalidGenericOwner;
+            const owner = store.generic_owners.items[owner_index];
+            const projected = store.projectedGenericParameterSlice(owner.projected_parameters) orelse
+                return error.InvalidTypeRange;
+            if (projected.len > MAX_TYPE_PARAMS) return error.InvalidTypeRange;
+            switch (declaration.kind) {
+                .structural => {
+                    switch (owner.identity) {
+                        .structural_declaration => |owner_declaration_index| {
+                            if (@as(usize, owner_declaration_index) != declaration_index) {
+                                return error.InvalidGenericOwner;
+                            }
+                        },
+                        else => return error.InvalidGenericOwner,
+                    }
+                    if (std.meta.activeTag(owner.compatibility) != .declaration_parameters) {
+                        return error.InvalidGenericOwner;
+                    }
+                    structural_parameters = projected;
+                },
+                .nominal => {
+                    switch (owner.identity) {
+                        .nominal_declaration => |owner_declaration_index| {
+                            if (@as(usize, owner_declaration_index) != declaration_index) {
+                                return error.InvalidGenericOwner;
+                            }
+                        },
+                        else => return error.InvalidGenericOwner,
+                    }
+                    if (std.meta.activeTag(owner.compatibility) != .ignored_declaration_parameters) {
+                        return error.InvalidGenericOwner;
+                    }
+                },
+            }
+        }
+
+        const present = switch (declaration.body) {
+            .absent => {
+                try self.pool.ensureHealthy();
+                try self.ensureHealthy();
+                return;
+            },
+            .present => |body| body,
+        };
+        errdefer |err| self.retainDirectPopulationFailure(err);
+        if (structural_parameters) |projected| {
+            var inputs: [MAX_TYPE_PARAMS]ParsedGenericInput = undefined;
+            for (projected, 0..) |parameter, index| {
+                inputs[index] = .{ .name = parameter.name_span.text(store.source) };
+            }
+            var scope = try self.beginParsedGenerics(inputs[0..projected.len]);
+            const lowered_result = self.lowerParsedGenericRoot(
+                store,
+                application_bases,
+                lowered,
+                &scope,
+                present.root,
+                present.node_range,
+                present.raw_span,
+            );
+            const type_idx = if (lowered_result) |result|
+                result
+            else |err|
+                return @as(anyerror!void, self.closeParsedScopeAfterError(&scope, err));
+            const publication_result = self.putParsedGenericAlias(
+                declaration.name_span.text(store.source),
+                &scope,
+                type_idx,
+            );
+            if (publication_result) |_| {} else |err| {
+                return @as(anyerror!void, self.closeParsedScopeAfterError(&scope, err));
+            }
+            try self.endParsedGenerics(&scope);
+            return;
+        }
+        const type_idx = try self.lowerDirectRoot(
+            store,
+            application_bases,
+            lowered,
+            present.root,
+            present.node_range,
+            present.raw_span,
+        );
+        const name = declaration.name_span.text(store.source);
+        switch (declaration.kind) {
+            .structural => self.putTypeAlias(name, type_idx),
+            .nominal => if (type_idx != null_type_idx) {
+                const nominal = self.pool.addNominalAlias(self.allocator, type_idx, name);
+                if (nominal != null_type_idx) self.putTypeAlias(name, nominal);
+            },
+        }
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+    }
+
+    fn lowerParsedGenericRoot(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        owner: *const ParsedGenericScope,
+        root: TypeSyntax.Child,
+        node_range: TypeSyntax.Range,
+        raw_span: TypeSyntax.Span,
+    ) !TypeIndex {
+        const exact = std.mem.trim(u8, raw_span.text(store.source), " \t\r\n");
+        if (self.getTypeAlias(exact)) |type_idx| return type_idx;
+        if (try self.resolveParsedGenericParam(owner, exact)) |type_idx| return type_idx;
+        try type_syntax_lowering.lowerOwnedRange(
+            self.allocator,
+            store,
+            self.pool,
+            lowered,
+            application_bases,
+            node_range,
+        );
+        return self.finishParsedGenericRoot(
+            owner,
+            exact,
+            try type_syntax_lowering.loweredChild(lowered, root, lowered.len),
+        );
+    }
+
+    fn replayDirectSignatureEvent(
+        self: *TypeEnv,
+        view: IrView,
+        signature: *const TypeSyntax.FunctionSignature,
+        compatibility_order: *DirectCompatibilityOrder,
+        accumulators: *DirectFunctionAccumulators,
+        observer: ?DirectReplayObserver,
+    ) !*DirectFunctionAccumulator {
+        const compatibility_key = view.signatureOffset(signature.owner) orelse
+            return error.InvalidFunctionSignatureOwner;
+        if (observer) |active| {
+            observeDirectReplay(
+                active,
+                .before,
+                compatibility_key,
+                signature.owner,
+                compatibility_order.contains(compatibility_key),
+                compatibility_order,
+                accumulators,
+            );
+        }
+        const compatibility = try compatibility_order.getOrPut(self.allocator, compatibility_key);
+        if (!compatibility.found_existing) {
+            compatibility.value_ptr.* = signature.owner;
+        } else if (compatibility.value_ptr.* != signature.owner) {
+            return error.InvalidFunctionSignatureOwner;
+        }
+        self.direct_accumulator_events += 1;
+
+        const accumulator = try accumulators.getOrPut(self.allocator, signature.owner);
+        if (!accumulator.found_existing) accumulator.value_ptr.* = .{};
+        if (observer) |active| {
+            observeDirectReplay(
+                active,
+                .after,
+                compatibility_key,
+                signature.owner,
+                compatibility.found_existing,
+                compatibility_order,
+                accumulators,
+            );
+        }
+        return accumulator.value_ptr;
+    }
+
+    fn observeDirectReplay(
+        observer: DirectReplayObserver,
+        phase: DirectReplayPhase,
+        compatibility_key: u32,
+        owner: NodeIndex,
+        compatibility_found_existing: bool,
+        compatibility_order: *const DirectCompatibilityOrder,
+        accumulators: *const DirectFunctionAccumulators,
+    ) void {
+        observer.observe(.{
+            .phase = phase,
+            .compatibility_key = compatibility_key,
+            .owner = owner,
+            .compatibility_found_existing = compatibility_found_existing,
+            .compatibility_capacity = compatibility_order.capacity(),
+            .compatibility_count = compatibility_order.count(),
+            .accumulator_capacity = accumulators.capacity(),
+            .accumulator_count = accumulators.count(),
+            .compatibility_order = compatibility_order,
+            .accumulators = accumulators,
+        });
+    }
+
+    fn putDirectSourceAnnotation(
+        self: *TypeEnv,
+        owner: NodeIndex,
+        slot: u8,
+        spelling: []const u8,
+    ) !void {
+        const owned = self.internName(spelling);
+        try self.ensureHealthy();
+        try self.direct_source_fn_annotations.put(self.allocator, .{
+            .owner = owner,
+            .slot = slot,
+        }, owned);
+    }
+
+    fn directHeaderEvent(
+        store: *const TypeSyntax.Store,
+        cursor: *DirectHeaderCursor,
+    ) ?DirectHeaderEvent {
+        while (cursor.signature_index < store.function_signatures.items.len) {
+            const signature = &store.function_signatures.items[cursor.signature_index];
+            const parameters = store.parameterAnnotationSlice(signature.parameters) orelse return null;
+            if (cursor.parameter_index < parameters.len) {
+                return .{ .parameter = .{
+                    .signature = signature,
+                    .annotation = &parameters[cursor.parameter_index],
+                } };
+            }
+            if (!cursor.return_consumed) {
+                if (signature.return_syntax) |*syntax| {
+                    return .{ .return_value = .{ .signature = signature, .syntax = syntax } };
+                }
+            }
+            cursor.signature_index += 1;
+            cursor.parameter_index = 0;
+            cursor.return_consumed = false;
+        }
+        return null;
+    }
+
+    fn advanceDirectHeaderCursor(cursor: *DirectHeaderCursor, event: DirectHeaderEvent) void {
+        switch (event) {
+            .parameter => cursor.parameter_index += 1,
+            .return_value => cursor.return_consumed = true,
+        }
+    }
+
+    fn runtimeAtomName(atoms: *AtomTable, value: u16) ?[]const u8 {
+        const atom: Atom = @enumFromInt(value);
+        if (atom.toPredefinedName()) |name| return name;
+        return atoms.getName(atom);
+    }
+
     /// Populate the environment from a TypeMap (extracted by the stripper).
     /// Processes entries in order: type aliases first, then interfaces,
     /// then variable/param/return annotations.
-    pub fn populateFromTypeMap(self: *TypeEnv, tm: *const TypeMap) void {
+    pub fn populateFromTypeMap(
+        self: *TypeEnv,
+        tm: *const TypeMap,
+    ) error{TypeSourceAlreadySelected}!void {
+        if (self.source_selection == .direct or self.source_selection == .omitted) {
+            return error.TypeSourceAlreadySelected;
+        }
+        self.legacy_source_populated = true;
 
         // First pass: type aliases and interfaces (defines the type namespace)
         // Collect generic_params entries keyed by (name_start, name_end) for alias lookup.
@@ -1290,6 +2455,7 @@ pub const TypeEnv = struct {
 
     /// Resolve one declaration annotation by semantic name occurrence.
     pub fn getVarTypeByNameOrdinal(self: *const TypeEnv, name: []const u8, ordinal: u32) ?TypeIndex {
+        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
         for (self.var_annotations.items) |annotation| {
             if (annotation.ordinal == ordinal and std.mem.eql(u8, annotation.name, name)) {
                 return annotation.type_idx;
@@ -1299,7 +2465,25 @@ pub const TypeEnv = struct {
     }
 
     pub fn varAnnotationCount(self: *const TypeEnv) usize {
-        return self.var_annotations.items.len;
+        return switch (self.source_selection orelse .legacy) {
+            .omitted => 0,
+            .legacy => self.var_annotations.items.len,
+            .direct => self.direct_annotation_count,
+        };
+    }
+
+    /// Read one direct annotation through its final declaration owner.
+    pub fn getVarTypeForDeclaration(
+        self: *const TypeEnv,
+        view: IrView,
+        declaration: NodeIndex,
+    ) ?TypeIndex {
+        if (self.source_selection != .direct) return null;
+        if (view.getTag(declaration) != .var_decl) return null;
+        const retained = self.direct_var_types.get(declaration) orelse return null;
+        const runtime = view.getVarDecl(declaration) orelse return null;
+        if (!std.meta.eql(runtime.binding, retained.binding)) return null;
+        return retained.type_idx;
     }
 
     pub fn bindVarType(self: *TypeEnv, scope_id: u16, name_atom: u16, type_idx: TypeIndex) !void {
@@ -1318,7 +2502,78 @@ pub const TypeEnv = struct {
     /// Look up only a signature declared by the checked source. Module export
     /// signatures deliberately do not participate in this lookup.
     pub fn getSourceFnSigByName(self: *const TypeEnv, name: []const u8) ?FunctionSig {
+        if (self.source_selection == .omitted) return null;
         return self.source_fn_sigs_by_name.get(name);
+    }
+
+    /// Select a source signature without mixing direct owners and legacy offsets.
+    pub fn functionTypeRef(
+        self: *const TypeEnv,
+        view: IrView,
+        owner: NodeIndex,
+    ) ?FunctionTypeRef {
+        const tag = view.getTag(owner) orelse return null;
+        if (tag != .function_expr and tag != .arrow_function) return null;
+        return switch (self.source_selection orelse .legacy) {
+            .omitted => null,
+            .legacy => .{ .legacy_offset = view.signatureOffset(owner) orelse return null },
+            .direct => .{ .direct_owner = owner },
+        };
+    }
+
+    pub fn getFunctionSignature(
+        self: *const TypeEnv,
+        reference: FunctionTypeRef,
+    ) ?FunctionSig {
+        return switch (reference) {
+            .legacy_offset => |offset| switch (self.source_selection orelse .legacy) {
+                .legacy => self.getFnSigAt(offset),
+                .omitted, .direct => null,
+            },
+            .direct_owner => |owner| if (self.source_selection == .direct)
+                self.direct_fn_signatures.get(owner)
+            else
+                null,
+        };
+    }
+
+    pub fn getFunctionParameterSpelling(
+        self: *const TypeEnv,
+        reference: FunctionTypeRef,
+        compact_position: u8,
+    ) ?[]const u8 {
+        return switch (reference) {
+            .legacy_offset => |offset| switch (self.source_selection orelse .legacy) {
+                .legacy => self.getSourceFnParamAnnotation(self.signatureKeyAt(offset), compact_position),
+                .omitted, .direct => null,
+            },
+            .direct_owner => |owner| if (self.source_selection == .direct)
+                self.direct_source_fn_annotations.get(.{
+                    .owner = owner,
+                    .slot = compact_position,
+                })
+            else
+                null,
+        };
+    }
+
+    pub fn getFunctionReturnSpelling(
+        self: *const TypeEnv,
+        reference: FunctionTypeRef,
+    ) ?[]const u8 {
+        return switch (reference) {
+            .legacy_offset => |offset| switch (self.source_selection orelse .legacy) {
+                .legacy => self.getSourceFnReturnAnnotation(self.signatureKeyAt(offset)),
+                .omitted, .direct => null,
+            },
+            .direct_owner => |owner| if (self.source_selection == .direct)
+                self.direct_source_fn_annotations.get(.{
+                    .owner = owner,
+                    .slot = return_annotation_slot,
+                })
+            else
+                null,
+        };
     }
 
     /// Look up a type alias by name.
@@ -1346,18 +2601,21 @@ pub const TypeEnv = struct {
     /// Look up the signature whose parameter list opens at `parser_offset`.
     /// Absent when that function carries no annotation at all.
     pub fn getFnSigAt(self: *const TypeEnv, parser_offset: u32) ?FunctionSig {
+        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
         return self.fn_signatures.get(self.signatureKeyAt(parser_offset));
     }
 
     /// Exact source spelling of one declared parameter annotation of the
     /// signature `key` names (see `signatureKeyAt`).
     pub fn getSourceFnParamAnnotation(self: *const TypeEnv, key: u32, index: u8) ?[]const u8 {
+        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
         return self.source_fn_annotations.get(sourceFnAnnotationKey(key, index));
     }
 
     /// Exact source spelling of the return annotation of the signature `key`
     /// names (see `signatureKeyAt`).
     pub fn getSourceFnReturnAnnotation(self: *const TypeEnv, key: u32) ?[]const u8 {
+        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
         return self.source_fn_annotations.get(sourceFnAnnotationKey(key, return_annotation_slot));
     }
 
@@ -1369,7 +2627,22 @@ pub const TypeEnv = struct {
 
     /// Explicit type arguments written at the call whose `(` sits at `offset`.
     pub fn getCallTypeArgs(self: *const TypeEnv, offset: u32) ?CallTypeArgs {
+        if (self.source_selection == .omitted or self.source_selection == .direct) return null;
         return self.call_type_args.get(offset);
+    }
+
+    /// Read actual call arguments. Compatibility owners are not calls.
+    pub fn getCallTypeArgsForCall(
+        self: *const TypeEnv,
+        view: IrView,
+        call: NodeIndex,
+    ) ?CallTypeArgs {
+        if (view.getTag(call) != .call) return null;
+        return switch (self.source_selection orelse .legacy) {
+            .omitted => null,
+            .legacy => self.call_type_args.get((view.getLoc(call) orelse return null).offset),
+            .direct => self.direct_call_type_args.get(call),
+        };
     }
 
     /// Walk a TypeIndex (typically a function return-type annotation),
@@ -1647,6 +2920,66 @@ pub const TypeEnv = struct {
         return owner;
     }
 
+    pub fn captureParsedGenericSet(
+        self: *TypeEnv,
+        owner: *const ParsedGenericScope,
+    ) !ParsedGenericSet {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        _ = try self.validateParsedGenericScope(owner);
+        if (owner.count > MAX_TYPE_PARAMS) return error.InvalidParsedGenericOwner;
+        return .{
+            .owner_env = self,
+            .params = owner.params,
+            .count = owner.count,
+        };
+    }
+
+    pub fn beginParsedGenericUse(
+        self: *TypeEnv,
+        set: *const ParsedGenericSet,
+    ) !ParsedGenericScope {
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        if (set.owner_env != self or set.count > MAX_TYPE_PARAMS) {
+            return error.InvalidParsedGenericOwner;
+        }
+
+        const prior_depth = self.generic_scopes.items.len;
+        self.pushGenericScope();
+        if (self.generic_scopes.items.len != prior_depth + 1) {
+            try self.ensureHealthy();
+            return error.OutOfMemory;
+        }
+        var owns_push = true;
+        errdefer if (owns_push and self.generic_scopes.items.len == prior_depth + 1) {
+            self.popGenericScope();
+        };
+
+        const token = self.next_generic_owner_token;
+        self.next_generic_owner_token +%= 1;
+        if (self.next_generic_owner_token == 0) self.next_generic_owner_token = 1;
+        self.generic_scopes.items[prior_depth].owner_token = token;
+        const owner: ParsedGenericScope = .{
+            .owner_env = self,
+            .prior_depth = prior_depth,
+            .owner_token = token,
+            .params = set.params,
+            .count = set.count,
+        };
+        for (set.params[0..set.count]) |parameter| {
+            self.generic_scopes.items[prior_depth].addConstrainedParam(
+                parameter.name,
+                parameter.idx,
+                parameter.constraint,
+            );
+        }
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
+        owns_push = false;
+        return owner;
+    }
+
     pub fn installParsedConstraints(
         self: *TypeEnv,
         owner: *ParsedGenericScope,
@@ -1767,6 +3100,29 @@ pub const TypeEnv = struct {
         owner.active = false;
         try self.pool.ensureHealthy();
         try self.ensureHealthy();
+    }
+
+    pub fn closeParsedScopeAfterError(
+        self: *TypeEnv,
+        owner: *ParsedGenericScope,
+        original: anyerror,
+    ) anyerror {
+        const prior_depth = owner.prior_depth;
+        const cleanup_result = self.endParsedGenerics(owner);
+        if (cleanup_result) |_| {
+            if (owner.active or self.generic_scopes.items.len != prior_depth) {
+                return error.InvalidParsedGenericOwner;
+            }
+            return original;
+        } else |err| {
+            if (owner.active or self.generic_scopes.items.len != prior_depth) {
+                return error.InvalidParsedGenericOwner;
+            }
+            switch (err) {
+                error.OutOfMemory, error.TypePoolCapacityExceeded => return original,
+                else => return err,
+            }
+        }
     }
 
     fn validateParsedGenericScope(
@@ -2032,6 +3388,258 @@ test "parsed generic API census observes every case" {
     try std.testing.expectEqual(std.meta.fields(ParsedGenericApiCase).len, seen.count());
 }
 
+test "captured generic set supports repeated scope use without semantic allocation" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
+    try env.installParsedConstraints(&owner, &.{.{
+        .name = "T",
+        .constraint = pool.idx_string,
+    }});
+    const generic_index = owner.params[0].idx;
+    const capture_node_count = pool.nodes.items.len;
+    const capture_name_count = env.name_storage.items.len;
+    const capture_depth = env.generic_scopes.items.len;
+    const set = try env.captureParsedGenericSet(&owner);
+    try std.testing.expectEqual(capture_node_count, pool.nodes.items.len);
+    try std.testing.expectEqual(capture_name_count, env.name_storage.items.len);
+    try std.testing.expectEqual(capture_depth, env.generic_scopes.items.len);
+    try env.endParsedGenerics(&owner);
+
+    env.putTypeAlias("T", pool.idx_number);
+    env.putTypeAlias("DictKey", pool.idx_boolean);
+    try env.ensureHealthy();
+    const stable_node_count = pool.nodes.items.len;
+    const stable_name_count = env.name_storage.items.len;
+
+    var parameter_use = try env.beginParsedGenericUse(&set);
+    try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);
+    try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+    try std.testing.expectEqual(generic_index, parameter_use.params[0].idx);
+    try std.testing.expectEqual(pool.idx_string, parameter_use.params[0].constraint);
+    try std.testing.expectEqual(
+        generic_index,
+        (try env.resolveParsedGenericParam(&parameter_use, "T")).?,
+    );
+    try std.testing.expectEqual(
+        pool.idx_number,
+        try env.finishParsedGenericRoot(&parameter_use, "T", generic_index),
+    );
+    try env.endParsedGenerics(&parameter_use);
+    try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);
+    try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+
+    var return_use = try env.beginParsedGenericUse(&set);
+    try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);
+    try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+    try std.testing.expectEqual(generic_index, return_use.params[0].idx);
+    try std.testing.expectEqual(pool.idx_string, return_use.params[0].constraint);
+    const bound = try env.finishParsedBoundRoot(&return_use, "DictKey", generic_index);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, pool.getTag(bound).?);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        &.{ pool.idx_string, pool.idx_number },
+        pool.getUnionMembers(bound),
+    );
+    try env.endParsedGenerics(&return_use);
+    try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+}
+
+test "captured generic set rejects invalid owners and environments before mutation" {
+    const allocator = std.testing.allocator;
+    var left_pool = TypePool.init(allocator);
+    defer left_pool.deinit(allocator);
+    var right_pool = TypePool.init(allocator);
+    defer right_pool.deinit(allocator);
+    var left = TypeEnv.init(allocator, &left_pool);
+    defer left.deinit();
+    var right = TypeEnv.init(allocator, &right_pool);
+    defer right.deinit();
+
+    var owner = try left.beginParsedGenerics(&.{.{ .name = "T" }});
+    const set = try left.captureParsedGenericSet(&owner);
+    const left_depth = left.generic_scopes.items.len;
+    const left_nodes = left_pool.nodes.items.len;
+    const left_names = left.name_storage.items.len;
+    const right_depth = right.generic_scopes.items.len;
+    const right_nodes = right_pool.nodes.items.len;
+    const right_names = right.name_storage.items.len;
+
+    try std.testing.expectError(
+        error.InvalidParsedGenericOwner,
+        right.captureParsedGenericSet(&owner),
+    );
+    try std.testing.expectError(
+        error.InvalidParsedGenericOwner,
+        right.beginParsedGenericUse(&set),
+    );
+    var invalid_count = set;
+    invalid_count.count = MAX_TYPE_PARAMS + 1;
+    try std.testing.expectError(
+        error.InvalidParsedGenericOwner,
+        left.beginParsedGenericUse(&invalid_count),
+    );
+    const valid_count = owner.count;
+    owner.count = MAX_TYPE_PARAMS + 1;
+    try std.testing.expectError(
+        error.InvalidParsedGenericOwner,
+        left.captureParsedGenericSet(&owner),
+    );
+    owner.count = valid_count;
+
+    try std.testing.expectEqual(left_depth, left.generic_scopes.items.len);
+    try std.testing.expectEqual(left_nodes, left_pool.nodes.items.len);
+    try std.testing.expectEqual(left_names, left.name_storage.items.len);
+    try std.testing.expectEqual(right_depth, right.generic_scopes.items.len);
+    try std.testing.expectEqual(right_nodes, right_pool.nodes.items.len);
+    try std.testing.expectEqual(right_names, right.name_storage.items.len);
+    try left.ensureHealthy();
+    try right.ensureHealthy();
+    try left_pool.ensureHealthy();
+    try right_pool.ensureHealthy();
+
+    try left.endParsedGenerics(&owner);
+    try std.testing.expectError(
+        error.InvalidParsedGenericOwner,
+        left.captureParsedGenericSet(&owner),
+    );
+}
+
+test "captured generic set preserves duplicate and long-name lookup behavior" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const name32 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const name33 = name32 ++ "b";
+    var owner = try env.beginParsedGenerics(&.{
+        .{ .name = "T" },
+        .{ .name = "T" },
+        .{ .name = name33 },
+    });
+    try env.installParsedConstraints(&owner, &.{
+        .{ .name = "T", .constraint = pool.idx_string },
+        .{ .name = "T", .constraint = pool.idx_number },
+        .{ .name = name33, .constraint = pool.idx_boolean },
+    });
+    const set = try env.captureParsedGenericSet(&owner);
+    try env.endParsedGenerics(&owner);
+
+    try std.testing.expectEqual(@as(u8, 3), set.count);
+    try std.testing.expectEqualStrings("T", set.params[0].name);
+    try std.testing.expectEqualStrings("T", set.params[1].name);
+    try std.testing.expectEqualStrings(name33, set.params[2].name);
+    try std.testing.expect(set.params[0].idx != set.params[1].idx);
+    try std.testing.expect(set.params[1].idx != set.params[2].idx);
+    try std.testing.expectEqual(pool.idx_string, set.params[0].constraint);
+    try std.testing.expectEqual(pool.idx_number, set.params[1].constraint);
+    try std.testing.expectEqual(pool.idx_boolean, set.params[2].constraint);
+
+    const stable_node_count = pool.nodes.items.len;
+    const stable_name_count = env.name_storage.items.len;
+    const stable_depth = env.generic_scopes.items.len;
+    var use = try env.beginParsedGenericUse(&set);
+    try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);
+    try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+    try std.testing.expectEqual(set.params[0].idx, (try env.resolveParsedGenericParam(&use, "T")).?);
+    try std.testing.expect((try env.resolveParsedGenericParam(&use, name33)) == null);
+    const active_scope = env.generic_scopes.items[use.prior_depth];
+    try std.testing.expectEqual(pool.idx_string, active_scope.params[0].constraint);
+    try std.testing.expectEqual(pool.idx_number, active_scope.params[1].constraint);
+    try std.testing.expectEqual(pool.idx_boolean, active_scope.params[2].constraint);
+    try std.testing.expectEqualStrings(name33, use.params[2].name);
+    try std.testing.expectEqual(pool.idx_boolean, use.params[2].constraint);
+    try env.endParsedGenerics(&use);
+    try std.testing.expectEqual(stable_depth, env.generic_scopes.items.len);
+    try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);
+    try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+}
+
+test "captured generic use preserves allocation failure and poisoned exit cleanup" {
+    const allocator = std.testing.allocator;
+    {
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const injected = failing.allocator();
+        var pool = TypePool.init(injected);
+        defer pool.deinit(injected);
+        var env = TypeEnv.init(injected, &pool);
+        defer env.deinit();
+
+        var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
+        const set = try env.captureParsedGenericSet(&owner);
+        try env.endParsedGenerics(&owner);
+
+        const scope_capacity = env.generic_scopes.capacity;
+        try std.testing.expect(scope_capacity > env.generic_scopes.items.len);
+        var active_uses: std.ArrayListUnmanaged(ParsedGenericScope) = .empty;
+        defer active_uses.deinit(allocator);
+        try active_uses.ensureTotalCapacityPrecise(
+            allocator,
+            scope_capacity - env.generic_scopes.items.len,
+        );
+        while (env.generic_scopes.items.len < scope_capacity) {
+            active_uses.appendAssumeCapacity(try env.beginParsedGenericUse(&set));
+        }
+
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        const stable_depth = env.generic_scopes.items.len;
+        const stable_node_count = pool.nodes.items.len;
+        const stable_name_count = env.name_storage.items.len;
+
+        try std.testing.expectError(error.OutOfMemory, env.beginParsedGenericUse(&set));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(stable_depth, env.generic_scopes.items.len);
+        try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);
+        try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+        try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+        try pool.ensureHealthy();
+        while (active_uses.pop()) |active_value| {
+            var active = active_value;
+            try std.testing.expectError(error.OutOfMemory, env.endParsedGenerics(&active));
+            try std.testing.expect(!active.active);
+        }
+        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
+    }
+    {
+        var pool = TypePool.init(allocator);
+        defer pool.deinit(allocator);
+        var env = TypeEnv.init(allocator, &pool);
+        defer env.deinit();
+
+        var owner = try env.beginParsedGenerics(&.{.{ .name = "T" }});
+        const set = try env.captureParsedGenericSet(&owner);
+        try env.endParsedGenerics(&owner);
+        const stable_depth = env.generic_scopes.items.len;
+        const stable_node_count = pool.nodes.items.len;
+        const stable_name_count = env.name_storage.items.len;
+
+        var pool_poisoned = try env.beginParsedGenericUse(&set);
+        pool.failure = error.TypePoolCapacityExceeded;
+        try std.testing.expectError(
+            error.TypePoolCapacityExceeded,
+            env.endParsedGenerics(&pool_poisoned),
+        );
+        try std.testing.expect(!pool_poisoned.active);
+        try std.testing.expectEqual(stable_depth, env.generic_scopes.items.len);
+        pool.failure = null;
+
+        var env_poisoned = try env.beginParsedGenericUse(&set);
+        env.markAllocationFailure();
+        try std.testing.expectError(error.OutOfMemory, env.endParsedGenerics(&env_poisoned));
+        try std.testing.expect(!env_poisoned.active);
+        try std.testing.expectEqual(stable_depth, env.generic_scopes.items.len);
+        try std.testing.expectEqual(stable_node_count, pool.nodes.items.len);
+        try std.testing.expectEqual(stable_name_count, env.name_storage.items.len);
+    }
+}
+
 test "parsed generic scope entry preserves an outer scope across allocation failures" {
     const Context = struct {
         fn run(injected: std.mem.Allocator) !void {
@@ -2135,7 +3743,7 @@ test "TypeEnv basic type alias resolution" {
         .name_end = name_span.end,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const config_idx = env.getTypeAlias("Config");
     try std.testing.expect(config_idx != null);
@@ -2164,7 +3772,7 @@ test "TypeEnv variable annotation" {
         .name_end = 10,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const port_type = env.getVarTypeByName("port");
     try std.testing.expect(port_type != null);
@@ -2226,7 +3834,7 @@ test "TypeEnv resolves type aliases in annotations" {
         .name_end = code_span.end,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     // "Status" should resolve to number
     const status_idx = env.getTypeAlias("Status");
@@ -2285,7 +3893,7 @@ test "TypeEnv function signature from params and return" {
         .name_end = 0,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const sig = env.getFnSigAt(1);
     try std.testing.expect(sig != null);
@@ -2372,7 +3980,7 @@ test "TypeEnv generic type alias Result<string>" {
         .name_end = auth_span.end,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     // "Result" should be in generic_aliases, not type_aliases
     try std.testing.expect(env.getTypeAlias("Result") == null);
@@ -2444,7 +4052,7 @@ test "TypeEnv generic alias with multiple params" {
         .name_end = p_span.start + 1,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const p_type = env.getVarTypeByName("p");
     try std.testing.expect(p_type != null);
@@ -2631,7 +4239,7 @@ test "TypeEnv intersection alias type AB = A & B" {
         .name_end = name_span.end,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const ab_idx = env.getTypeAlias("AB");
     try std.testing.expect(ab_idx != null);
@@ -2673,7 +4281,7 @@ test "TypeEnv return-type intersection X & Y" {
         .name_end = 0,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const sig = env.getFnSigAt(7);
     try std.testing.expect(sig != null);
@@ -2889,7 +4497,7 @@ test "extractProofMembers walks a generic Proof alias to its literal union" {
         .name_end = 0,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const sig = env.getFnSigAt(7) orelse return error.MissingSig;
 
@@ -2925,7 +4533,7 @@ test "extractProofMembers handles an inline Proof return capsule" {
         .name_end = 0,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const sig = env.getFnSigAt(3) orelse return error.MissingSig;
 
@@ -2960,7 +4568,7 @@ test "extractProofMembers returns empty when no Proof marker" {
         .name_end = 0,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const sig = env.getFnSigAt(5) orelse return error.MissingSig;
 
@@ -3033,7 +4641,7 @@ test "extractProofMembers handles inline return type Proof<T, \"name\">" {
         .name_end = 0,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const sig = env.getFnSigAt(4) orelse return error.MissingSig;
 
@@ -3247,7 +4855,7 @@ test "TypeEnv leading-pipe union literal" {
         .name_end = name_span.end,
     });
 
-    env.populateFromTypeMap(&tm);
+    try env.populateFromTypeMap(&tm);
 
     const names_idx = env.getTypeAlias("Names");
     try std.testing.expect(names_idx != null);
@@ -3313,7 +4921,7 @@ test "a generic alias instantiates through the stripper's own recording" {
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     const box = env.resolveType("Box<string>");
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(box).?);
@@ -3355,7 +4963,7 @@ test "a type-parameter list wrapped across lines still reaches its signature" {
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     const sig = env.getFnSigByName("pick") orelse return error.MissingSig;
     try std.testing.expectEqual(@as(u8, 2), sig.type_param_count);
@@ -3379,7 +4987,7 @@ test "an explicit type argument carrying a comma is one argument" {
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     var it = env.call_type_args.iterator();
     var seen: usize = 0;
@@ -3406,7 +5014,7 @@ test "readonly on an array alias survives to the resolved type" {
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     const resolved = env.resolveType("readonly Items");
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_array, pool.getTag(resolved).?);
@@ -3419,7 +5027,6 @@ test "functions on one line and nested functions of one name keep separate signa
     const allocator = std.testing.allocator;
     const source = "function a(x: number): number { function h(p: number): number { return p; } return h(x); }\n" ++
         "function b(): number { function h(p: number, q: number): number { return p + q; } return h(1, 2); }\n";
-    const engine = @import("zts-engine");
     var strip_result = try engine.stripper.strip(allocator, source, .{});
     defer strip_result.deinit();
     var parser = try engine.parser.JsParser.init(allocator, strip_result.code);
@@ -3430,7 +5037,7 @@ test "functions on one line and nested functions of one name keep separate signa
     defer pool.deinit(allocator);
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    env.populateFromTypeMap(&strip_result.type_map);
+    try env.populateFromTypeMap(&strip_result.type_map);
 
     // Every function node finds its own signature: `a` and its `h` share a
     // line, and the two `h` share a name.
@@ -3445,4 +5052,1197 @@ test "functions on one line and nested functions of one name keep separate signa
     try std.testing.expectEqual(@as(usize, 4), seen);
     // Parse order is inner-first: a's h, a, b's h, b.
     try std.testing.expectEqualSlices(u8, &.{ 1, 1, 2, 0 }, counts[0..seen]);
+}
+
+const GrowthCountingAllocator = struct {
+    backing: std.mem.Allocator,
+    alloc_calls: usize = 0,
+    resize_calls: usize = 0,
+    remap_calls: usize = 0,
+    free_calls: usize = 0,
+    live_bytes: usize = 0,
+
+    fn init(backing: std.mem.Allocator) GrowthCountingAllocator {
+        return .{ .backing = backing };
+    }
+
+    fn allocator(self: *GrowthCountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = countAlloc,
+            .resize = countResize,
+            .remap = countRemap,
+            .free = countFree,
+        } };
+    }
+
+    fn sameShape(self: GrowthCountingAllocator, other: GrowthCountingAllocator) bool {
+        return self.alloc_calls == other.alloc_calls and
+            self.resize_calls == other.resize_calls and
+            self.remap_calls == other.remap_calls and
+            self.free_calls == other.free_calls and
+            self.live_bytes == other.live_bytes;
+    }
+
+    fn countAlloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *GrowthCountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.backing.rawAlloc(len, alignment, ra) orelse return null;
+        self.alloc_calls += 1;
+        self.live_bytes += len;
+        return result;
+    }
+
+    fn countResize(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) bool {
+        const self: *GrowthCountingAllocator = @ptrCast(@alignCast(context));
+        if (!self.backing.rawResize(memory, alignment, new_len, ra)) return false;
+        self.resize_calls += 1;
+        self.live_bytes = self.live_bytes - memory.len + new_len;
+        return true;
+    }
+
+    fn countRemap(
+        context: *anyopaque,
+        memory: []u8,
+        alignment: std.mem.Alignment,
+        new_len: usize,
+        ra: usize,
+    ) ?[*]u8 {
+        const self: *GrowthCountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.backing.rawRemap(memory, alignment, new_len, ra) orelse return null;
+        self.remap_calls += 1;
+        self.live_bytes = self.live_bytes - memory.len + new_len;
+        return result;
+    }
+
+    fn countFree(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *GrowthCountingAllocator = @ptrCast(@alignCast(context));
+        self.free_calls += 1;
+        self.live_bytes -= memory.len;
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+fn growthParserView(parser: *const engine.parser.JsParser) IrView {
+    return IrView.fromIRStore(&parser.nodes, &parser.constants);
+}
+
+fn growthEqualRuntime(
+    left: *const engine.parser.JsParser,
+    left_root: NodeIndex,
+    left_atoms: *AtomTable,
+    right: *const engine.parser.JsParser,
+    right_root: NodeIndex,
+    right_atoms: *AtomTable,
+) bool {
+    if (left_root != right_root) return false;
+    if (!std.mem.eql(engine.parser.NodeTag, left.nodes.tags.items, right.nodes.tags.items)) return false;
+    if (left.nodes.locs.items.len != right.nodes.locs.items.len) return false;
+    for (left.nodes.locs.items, right.nodes.locs.items) |a, b| if (!std.meta.eql(a, b)) return false;
+    if (left.nodes.data.items.len != right.nodes.data.items.len) return false;
+    for (left.nodes.data.items, right.nodes.data.items) |a, b| {
+        if (a.a != b.a or a.b != b.b) return false;
+    }
+    if (!std.mem.eql(u16, left.nodes.binding_name_atoms.items, right.nodes.binding_name_atoms.items)) return false;
+    if (!std.mem.eql(u32, left.nodes.extra.items, right.nodes.extra.items)) return false;
+    if (!std.mem.eql(NodeIndex, left.nodes.index_lists.items, right.nodes.index_lists.items)) return false;
+    if (left.constants.strings.items.len != right.constants.strings.items.len) return false;
+    for (left.constants.strings.items, right.constants.strings.items) |a, b| {
+        if (!std.mem.eql(u8, a, b)) return false;
+    }
+    if (left.constants.floats.items.len != right.constants.floats.items.len) return false;
+    for (left.constants.floats.items, right.constants.floats.items) |a, b| {
+        if (@as(u64, @bitCast(a)) != @as(u64, @bitCast(b))) return false;
+    }
+    if (left.scopes.current_scope != right.scopes.current_scope or
+        left.scopes.next_scope_id != right.scopes.next_scope_id or
+        left.scopes.scopes.items.len != right.scopes.scopes.items.len) return false;
+    for (left.scopes.scopes.items, right.scopes.scopes.items) |a, b| {
+        if (a.id != b.id or a.parent != b.parent or a.kind != b.kind or
+            a.enclosing_function != b.enclosing_function or
+            a.max_local_count != b.max_local_count or
+            a.current_local_slot != b.current_local_slot or
+            a.bindings.items.len != b.bindings.items.len or
+            a.upvalues.items.len != b.upvalues.items.len) return false;
+        for (a.bindings.items, b.bindings.items) |ab, bb| {
+            if (!std.mem.eql(u8, ab.name, bb.name) or
+                ab.name_atom != bb.name_atom or ab.slot != bb.slot or
+                ab.kind != bb.kind or ab.is_const != bb.is_const or
+                ab.is_captured != bb.is_captured) return false;
+        }
+        for (a.upvalues.items, b.upvalues.items) |au, bu| {
+            if (au.source_scope_id != bu.source_scope_id or au.source_slot != bu.source_slot or
+                au.slot != bu.slot or !std.meta.eql(au.capture, bu.capture) or
+                !std.mem.eql(u8, au.name, bu.name)) return false;
+        }
+    }
+    if (left_atoms.count() != right_atoms.count() or left_atoms.next_id != right_atoms.next_id) return false;
+    var raw = Atom.FIRST_DYNAMIC;
+    while (raw < left_atoms.next_id) : (raw += 1) {
+        const atom: Atom = @enumFromInt(raw);
+        const left_name = left_atoms.getName(atom) orelse return false;
+        const right_name = right_atoms.getName(atom) orelse return false;
+        if (!std.mem.eql(u8, left_name, right_name)) return false;
+    }
+    return true;
+}
+
+fn growthExpectExactPool(left: *const TypePool, right: *const TypePool) !void {
+    try std.testing.expectEqual(left.nodes.items.len, right.nodes.items.len);
+    for (left.nodes.items, right.nodes.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqual(left.fields.items.len, right.fields.items.len);
+    for (left.fields.items, right.fields.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqual(left.params.items.len, right.params.items.len);
+    for (left.params.items, right.params.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+    try std.testing.expectEqualSlices(TypeIndex, left.members.items, right.members.items);
+    try std.testing.expectEqualSlices(u8, left.names.items, right.names.items);
+    try std.testing.expectEqual(left.template_parts.items.len, right.template_parts.items.len);
+    for (left.template_parts.items, right.template_parts.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
+}
+
+fn growthExpectExactSignature(left: FunctionSig, right: FunctionSig) !void {
+    try std.testing.expectEqual(left.param_count, right.param_count);
+    try std.testing.expectEqualSlices(
+        TypeIndex,
+        left.param_types[0..left.param_count],
+        right.param_types[0..right.param_count],
+    );
+    try std.testing.expectEqual(left.required_param_count, right.required_param_count);
+    try std.testing.expectEqual(left.max_arg_count, right.max_arg_count);
+    try std.testing.expectEqual(left.return_type, right.return_type);
+    try std.testing.expectEqual(left.type_param_count, right.type_param_count);
+    for (left.type_params[0..left.type_param_count], right.type_params[0..right.type_param_count]) |a, b| {
+        try std.testing.expectEqualStrings(a.name, b.name);
+        try std.testing.expectEqual(a.idx, b.idx);
+        try std.testing.expectEqual(a.constraint, b.constraint);
+    }
+    try std.testing.expect(std.meta.eql(left.type_predicate, right.type_predicate));
+}
+
+const GrowthTraceEvent = struct {
+    key: u32 = 0,
+    owner: NodeIndex = 0,
+    found_existing: bool = false,
+    before_capacity: usize = 0,
+    before_count: usize = 0,
+    after_capacity: usize = 0,
+    after_count: usize = 0,
+    accumulator_count: usize = 0,
+    keys_start: usize = 0,
+    keys_count: usize = 0,
+};
+
+const GrowthTrace = struct {
+    events: []GrowthTraceEvent,
+    keys: []u32,
+    event_count: usize = 0,
+    key_count: usize = 0,
+    pending: bool = false,
+    invalid: bool = false,
+    view: IrView,
+
+    fn observer(self: *GrowthTrace) DirectReplayObserver {
+        return .{ .context = self, .visit = visit };
+    }
+
+    fn visit(context: *anyopaque, snapshot: DirectReplaySnapshot) void {
+        const self: *GrowthTrace = @ptrCast(@alignCast(context));
+        if (snapshot.phase == .before) {
+            if (self.pending or self.event_count >= self.events.len) {
+                self.invalid = true;
+                return;
+            }
+            self.pending = true;
+            self.events[self.event_count] = .{
+                .key = snapshot.compatibility_key,
+                .owner = snapshot.owner,
+                .found_existing = snapshot.compatibility_found_existing,
+                .before_capacity = snapshot.compatibility_capacity,
+                .before_count = snapshot.compatibility_count,
+            };
+            return;
+        }
+        if (!self.pending or self.event_count >= self.events.len) {
+            self.invalid = true;
+            return;
+        }
+        var event = &self.events[self.event_count];
+        if (event.key != snapshot.compatibility_key or event.owner != snapshot.owner or
+            event.found_existing != snapshot.compatibility_found_existing)
+        {
+            self.invalid = true;
+        }
+        event.after_capacity = snapshot.compatibility_capacity;
+        event.after_count = snapshot.compatibility_count;
+        event.accumulator_count = snapshot.accumulator_count;
+        event.keys_start = self.key_count;
+        var compatibility = snapshot.compatibility_order.iterator();
+        while (compatibility.next()) |entry| {
+            if (self.key_count >= self.keys.len) {
+                self.invalid = true;
+                break;
+            }
+            self.keys[self.key_count] = entry.key_ptr.*;
+            self.key_count += 1;
+            const owner = entry.value_ptr.*;
+            if (self.view.signatureOffset(owner) != entry.key_ptr.* or
+                !snapshot.accumulators.contains(owner)) self.invalid = true;
+        }
+        event.keys_count = self.key_count - event.keys_start;
+        var accumulators = snapshot.accumulators.iterator();
+        while (accumulators.next()) |entry| {
+            var claimed = false;
+            var owners = snapshot.compatibility_order.valueIterator();
+            while (owners.next()) |owner| {
+                if (owner.* == entry.key_ptr.*) {
+                    claimed = true;
+                    break;
+                }
+            }
+            if (!claimed) self.invalid = true;
+        }
+        if (snapshot.compatibility_count != snapshot.accumulator_count) self.invalid = true;
+        self.pending = false;
+        self.event_count += 1;
+    }
+};
+
+fn growthIsSignatureEvent(kind: TypeMapKind) bool {
+    return switch (kind) {
+        .param_annotation, .return_annotation, .type_guard_annotation => true,
+        // exhaustive: other TypeMap kinds do not access the temporary signature accumulator.
+        else => false,
+    };
+}
+
+fn growthBuildLegacyTrace(
+    allocator: std.mem.Allocator,
+    map: *const TypeMap,
+    events: []GrowthTraceEvent,
+    keys: []u32,
+) !usize {
+    var accumulator: std.AutoHashMapUnmanaged(u32, FunctionSig) = .empty;
+    defer accumulator.deinit(allocator);
+    var event_count: usize = 0;
+    var key_count: usize = 0;
+    for (map.entries.items) |entry| {
+        if (!growthIsSignatureEvent(entry.kind)) continue;
+        if (event_count >= events.len) return error.TestUnexpectedResult;
+        const key = entry.signature_offset orelse return error.TestUnexpectedResult;
+        const gop = try accumulator.getOrPut(allocator, key);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        events[event_count] = .{
+            .key = key,
+            .found_existing = gop.found_existing,
+            .after_capacity = accumulator.capacity(),
+            .after_count = accumulator.count(),
+            .keys_start = key_count,
+        };
+        var iterator = accumulator.keyIterator();
+        while (iterator.next()) |value| {
+            if (key_count >= keys.len) return error.TestUnexpectedResult;
+            keys[key_count] = value.*;
+            key_count += 1;
+        }
+        events[event_count].keys_count = key_count - events[event_count].keys_start;
+        event_count += 1;
+    }
+    return event_count;
+}
+
+fn growthExpectTraceEqual(
+    legacy_events: []const GrowthTraceEvent,
+    legacy_keys: []const u32,
+    direct: *const GrowthTrace,
+) ![2]usize {
+    try std.testing.expect(!direct.invalid);
+    try std.testing.expect(!direct.pending);
+    try std.testing.expectEqual(legacy_events.len, direct.event_count);
+    var boundaries: [2]usize = undefined;
+    var boundary_count: usize = 0;
+    var previous_capacity: usize = 0;
+    for (legacy_events, direct.events[0..direct.event_count], 0..) |legacy, actual, index| {
+        try std.testing.expectEqual(legacy.key, actual.key);
+        try std.testing.expectEqual(legacy.found_existing, actual.found_existing);
+        try std.testing.expectEqual(legacy.after_capacity, actual.after_capacity);
+        try std.testing.expectEqual(legacy.after_count, actual.after_count);
+        try std.testing.expectEqual(legacy.keys_count, actual.keys_count);
+        try std.testing.expectEqualSlices(
+            u32,
+            legacy_keys[legacy.keys_start..][0..legacy.keys_count],
+            direct.keys[actual.keys_start..][0..actual.keys_count],
+        );
+        if (previous_capacity != 0 and legacy.after_capacity > previous_capacity) {
+            try std.testing.expect(legacy.found_existing);
+            if (boundary_count >= boundaries.len) return error.TestUnexpectedResult;
+            boundaries[boundary_count] = index;
+            boundary_count += 1;
+        }
+        previous_capacity = legacy.after_capacity;
+    }
+    try std.testing.expectEqual(boundaries.len, boundary_count);
+    return boundaries;
+}
+
+fn growthExpectFinalSignatures(
+    legacy: *const TypeEnv,
+    direct: *const TypeEnv,
+    legacy_view: IrView,
+    direct_view: IrView,
+    store: *const TypeSyntax.Store,
+) !void {
+    try std.testing.expectEqual(legacy.fn_signatures.count(), direct.direct_fn_signatures.count());
+    for (store.function_signatures.items) |record| {
+        const key = direct_view.signatureOffset(record.owner) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(key, legacy_view.signatureOffset(record.owner).?);
+        const direct_ref = direct.functionTypeRef(direct_view, record.owner) orelse
+            return error.TestUnexpectedResult;
+        try growthExpectExactSignature(
+            legacy.getFnSigAt(key) orelse return error.TestUnexpectedResult,
+            direct.getFunctionSignature(direct_ref) orelse return error.TestUnexpectedResult,
+        );
+    }
+    try std.testing.expectEqual(legacy.fn_sigs_by_name.count(), direct.fn_sigs_by_name.count());
+    var fallback_signatures = legacy.fn_sigs_by_name.iterator();
+    while (fallback_signatures.next()) |entry| {
+        try growthExpectExactSignature(
+            entry.value_ptr.*,
+            direct.fn_sigs_by_name.get(entry.key_ptr.*) orelse return error.TestUnexpectedResult,
+        );
+    }
+    try std.testing.expectEqual(
+        legacy.source_fn_sigs_by_name.count(),
+        direct.source_fn_sigs_by_name.count(),
+    );
+    var source_signatures = legacy.source_fn_sigs_by_name.iterator();
+    while (source_signatures.next()) |entry| {
+        try growthExpectExactSignature(
+            entry.value_ptr.*,
+            direct.source_fn_sigs_by_name.get(entry.key_ptr.*) orelse return error.TestUnexpectedResult,
+        );
+    }
+}
+
+const growth_source_plain =
+    "function useNumber(value: number): number {\n" ++
+    "  inner(value);\n" ++
+    "  function inner(item: number): number { return item; }\n" ++
+    "  return value;\n" ++
+    "}\n" ++
+    "function padding0(value: number): number { return value; }\n" ++
+    "function padding1(value: number): number { return value; }\n" ++
+    "function padding2(value: number): number { return value; }\n" ++
+    "function padding3(value: number): number { return value; }\n" ++
+    "function padding4(value: number): number { return value; }\n" ++
+    "function padding5(value: number): number { return value; }\n" ++
+    "function padding6(value: number): number { return value; }\n" ++
+    "function padding7(value: number): number { return value; }\n" ++
+    "function useText(value: string): string {\n" ++
+    "  inner(value, \"\");\n" ++
+    "  function inner(item: string, suffix: string): string { return item; }\n" ++
+    "  return value;\n" ++
+    "}\n" ++
+    "export function handler(req: Request): Response {\n" ++
+    "  return Response.json({ number: useNumber(1), text: useText(\"x\") });\n" ++
+    "}\n";
+
+const growth_source_reordered =
+    "function useText(value: string): string {\n" ++
+    "  inner(value, \"\");\n" ++
+    "  function inner(item: string, suffix: string): string { return item; }\n" ++
+    "  return value;\n" ++
+    "}\n" ++
+    "function padding0(value: number): number { return value; }\n" ++
+    "function padding1(value: number): number { return value; }\n" ++
+    "function padding2(value: number): number { return value; }\n" ++
+    "function padding3(value: number): number { return value; }\n" ++
+    "function padding4(value: number): number { return value; }\n" ++
+    "function padding5(value: number): number { return value; }\n" ++
+    "function padding6(value: number): number { return value; }\n" ++
+    "function padding7(value: number): number { return value; }\n" ++
+    "function useNumber(value: number): number {\n" ++
+    "  inner(value);\n" ++
+    "  function inner(item: number): number { return item; }\n" ++
+    "  return value;\n" ++
+    "}\n" ++
+    "export function handler(req: Request): Response {\n" ++
+    "  return Response.json({ number: useNumber(1), text: useText(\"x\") });\n" ++
+    "}\n";
+
+const growth_source_same_line = "function useNumber(value: number): number {   inner(value);   function inner(item: number): number { return item; }   return value; } function padding0(value: number): number { return value; } function padding1(value: number): number { return value; } function padding2(value: number): number { return value; } function padding3(value: number): number { return value; } function padding4(value: number): number { return value; } function padding5(value: number): number { return value; } function padding6(value: number): number { return value; } function padding7(value: number): number { return value; } function useText(value: string): string {   inner(value, \"\");   function inner(item: string, suffix: string): string { return item; }   return value; } export function handler(req: Request): Response {   return Response.json({ number: useNumber(1), text: useText(\"x\") }); } ";
+
+fn growthExpectTraceCase(source: []const u8) ![2]usize {
+    const allocator = std.testing.allocator;
+    var prepared = try engine.source_frontend.PreparedSource.init(
+        allocator,
+        source,
+        "<native-growth>.ts",
+        .{},
+    );
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(usize, 0), prepared.stripDiagnostics().len);
+
+    var legacy_count = GrowthCountingAllocator.init(allocator);
+    var direct_count = GrowthCountingAllocator.init(allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy_parser = try engine.parser.JsParser.init(
+        legacy_count.allocator(),
+        prepared.parserInput(),
+    );
+    defer legacy_parser.deinit();
+    legacy_parser.setAtomTable(&legacy_atoms);
+    var direct_parser = try engine.parser.JsParser.initTyped(
+        direct_count.allocator(),
+        allocator,
+        source,
+    );
+    defer direct_parser.deinit();
+    direct_parser.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy_parser.parse();
+    const direct_root = try direct_parser.parse();
+    try std.testing.expect(growthEqualRuntime(
+        &legacy_parser,
+        legacy_root,
+        &legacy_atoms,
+        &direct_parser,
+        direct_root,
+        &direct_atoms,
+    ));
+    try std.testing.expect(legacy_count.sameShape(direct_count));
+    const legacy_view = growthParserView(&legacy_parser);
+    const direct_view = growthParserView(&direct_parser);
+
+    var legacy_pool = TypePool.init(allocator);
+    defer legacy_pool.deinit(allocator);
+    var direct_pool = TypePool.init(allocator);
+    defer direct_pool.deinit(allocator);
+    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(allocator, &direct_pool);
+    defer direct_env.deinit();
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct_parser.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try growthExpectExactPool(&legacy_pool, &direct_pool);
+    try growthExpectFinalSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct_parser.type_store,
+    );
+
+    const max_events = 64;
+    const max_keys = max_events * 32;
+    const direct_events = try allocator.alloc(GrowthTraceEvent, max_events);
+    defer allocator.free(direct_events);
+    const direct_keys = try allocator.alloc(u32, max_keys);
+    defer allocator.free(direct_keys);
+    const legacy_events = try allocator.alloc(GrowthTraceEvent, max_events);
+    defer allocator.free(legacy_events);
+    const legacy_keys = try allocator.alloc(u32, max_keys);
+    defer allocator.free(legacy_keys);
+    var trace: GrowthTrace = .{
+        .events = direct_events,
+        .keys = direct_keys,
+        .view = direct_view,
+    };
+    var trace_pool = TypePool.init(allocator);
+    defer trace_pool.deinit(allocator);
+    var trace_env = TypeEnv.init(allocator, &trace_pool);
+    defer trace_env.deinit();
+    try trace_env.populateSourceTypesImpl(.{ .direct = .{
+        .store = &direct_parser.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } }, trace.observer());
+    try growthExpectExactPool(&direct_pool, &trace_pool);
+    try growthExpectFinalSignatures(
+        &legacy_env,
+        &trace_env,
+        legacy_view,
+        direct_view,
+        &direct_parser.type_store,
+    );
+
+    var parameter_count: usize = 0;
+    var return_count: usize = 0;
+    for (prepared.typeMap().?.entries.items) |entry| switch (entry.kind) {
+        .param_annotation => parameter_count += 1,
+        .return_annotation => return_count += 1,
+        // exhaustive: this source contains no guards; other kinds do not contribute header events.
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 14), parameter_count);
+    try std.testing.expectEqual(@as(usize, 13), return_count);
+    const legacy_event_count = try growthBuildLegacyTrace(
+        allocator,
+        prepared.typeMap().?,
+        legacy_events,
+        legacy_keys,
+    );
+    try std.testing.expectEqual(parameter_count + return_count, legacy_event_count);
+    return growthExpectTraceEqual(
+        legacy_events[0..legacy_event_count],
+        legacy_keys,
+        &trace,
+    );
+}
+
+test "direct signature replay matches legacy capacity and bucket order at two growth boundaries" {
+    const plain = try growthExpectTraceCase(growth_source_plain);
+    const reordered = try growthExpectTraceCase(growth_source_reordered);
+    const same_line = try growthExpectTraceCase(growth_source_same_line);
+    try std.testing.expect(plain[0] != plain[1]);
+    try std.testing.expect(reordered[0] != reordered[1]);
+    try std.testing.expect(same_line[0] != same_line[1]);
+}
+
+test "direct signature replay retains exact nested generic arrow and same-line owners" {
+    const allocator = std.testing.allocator;
+    const source = "function outer<T extends number>(value: T): T { " ++
+        "function same(value: number): number { return value; } return value; } " ++
+        "function same(value: string): string { return value; } " ++
+        "const arrow = <U extends string>(value: U): U => value;";
+    var prepared = try engine.source_frontend.PreparedSource.init(allocator, source, "<growth-owners>.ts", .{});
+    defer prepared.deinit();
+    var legacy_count = GrowthCountingAllocator.init(allocator);
+    var direct_count = GrowthCountingAllocator.init(allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy_parser = try engine.parser.JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy_parser.deinit();
+    legacy_parser.setAtomTable(&legacy_atoms);
+    var direct_parser = try engine.parser.JsParser.initTyped(direct_count.allocator(), allocator, source);
+    defer direct_parser.deinit();
+    direct_parser.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy_parser.parse();
+    const direct_root = try direct_parser.parse();
+    try std.testing.expect(growthEqualRuntime(
+        &legacy_parser,
+        legacy_root,
+        &legacy_atoms,
+        &direct_parser,
+        direct_root,
+        &direct_atoms,
+    ));
+    try std.testing.expect(legacy_count.sameShape(direct_count));
+    const legacy_view = growthParserView(&legacy_parser);
+    const direct_view = growthParserView(&direct_parser);
+    var legacy_pool = TypePool.init(allocator);
+    defer legacy_pool.deinit(allocator);
+    var direct_pool = TypePool.init(allocator);
+    defer direct_pool.deinit(allocator);
+    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(allocator, &direct_pool);
+    defer direct_env.deinit();
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct_parser.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try growthExpectExactPool(&legacy_pool, &direct_pool);
+    try growthExpectFinalSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct_parser.type_store,
+    );
+    try std.testing.expectEqual(@as(usize, 4), direct_parser.type_store.function_signatures.items.len);
+    var owners: [4]NodeIndex = undefined;
+    var repeated_same: [2]NodeIndex = undefined;
+    var same_count: usize = 0;
+    var arrow_count: usize = 0;
+    for (direct_parser.type_store.function_signatures.items, 0..) |record, index| {
+        owners[index] = record.owner;
+        const key = direct_view.signatureOffset(record.owner) orelse return error.TestUnexpectedResult;
+        try std.testing.expect(legacy_env.getFnSigAt(key) != null);
+        const function = direct_view.getFunction(record.owner) orelse return error.TestUnexpectedResult;
+        const name = TypeEnv.runtimeAtomName(&direct_atoms, function.name_atom);
+        if (name != null and std.mem.eql(u8, name.?, "same")) {
+            if (same_count >= repeated_same.len) return error.TestUnexpectedResult;
+            repeated_same[same_count] = record.owner;
+            same_count += 1;
+        }
+        if (direct_view.getTag(record.owner) == .arrow_function) arrow_count += 1;
+        try std.testing.expectEqual(@as(u32, 1), direct_view.getLoc(record.owner).?.line);
+    }
+    try std.testing.expectEqual(@as(usize, 2), same_count);
+    try std.testing.expect(repeated_same[0] != repeated_same[1]);
+    try std.testing.expectEqual(@as(usize, 1), arrow_count);
+    for (owners, 0..) |owner, index| {
+        for (owners[index + 1 ..]) |other| {
+            try std.testing.expect(owner != other);
+        }
+    }
+    const outer = direct_view.getFunction(owners[0]) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("outer", TypeEnv.runtimeAtomName(&direct_atoms, outer.name_atom).?);
+    try std.testing.expectEqual(engine.parser.NodeTag.block, direct_view.getTag(outer.body).?);
+    const outer_body = direct_view.getBlock(outer.body) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u16, 2), outer_body.stmts_count);
+    const inner_declaration = direct_view.getListIndex(outer_body.stmts_start, 0);
+    try std.testing.expectEqual(engine.parser.NodeTag.function_decl, direct_view.getTag(inner_declaration).?);
+    const inner_binding = direct_view.getVarDecl(inner_declaration) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(repeated_same[0], inner_binding.init);
+    try std.testing.expectEqual(@as(usize, 2), direct_parser.type_store.generic_owners.items.len);
+    for (direct_parser.type_store.generic_owners.items) |generic_owner| {
+        const owner = switch (generic_owner.identity) {
+            .function => |node| node,
+            .arrow => |node| node,
+            else => return error.TestUnexpectedResult,
+        };
+        const reference = direct_env.functionTypeRef(direct_view, owner) orelse
+            return error.TestUnexpectedResult;
+        const signature = direct_env.getFunctionSignature(reference) orelse
+            return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
+        try std.testing.expect(signature.type_params[0].idx == signature.param_types[0]);
+        try std.testing.expect(signature.type_params[0].idx == signature.return_type);
+    }
+}
+
+fn growthExpectSignatureKind(
+    source: []const u8,
+    expected_events: usize,
+    expected_signatures: usize,
+    expected_names: usize,
+) !void {
+    const allocator = std.testing.allocator;
+    var prepared = try engine.source_frontend.PreparedSource.init(allocator, source, "<growth-kind>.ts", .{});
+    defer prepared.deinit();
+    var legacy_count = GrowthCountingAllocator.init(allocator);
+    var direct_count = GrowthCountingAllocator.init(allocator);
+    var legacy_atoms = AtomTable.init(legacy_count.allocator());
+    defer legacy_atoms.deinit();
+    var direct_atoms = AtomTable.init(direct_count.allocator());
+    defer direct_atoms.deinit();
+    var legacy_parser = try engine.parser.JsParser.init(legacy_count.allocator(), prepared.parserInput());
+    defer legacy_parser.deinit();
+    legacy_parser.setAtomTable(&legacy_atoms);
+    var direct_parser = try engine.parser.JsParser.initTyped(direct_count.allocator(), allocator, source);
+    defer direct_parser.deinit();
+    direct_parser.setAtomTable(&direct_atoms);
+    const legacy_root = try legacy_parser.parse();
+    const direct_root = try direct_parser.parse();
+    try std.testing.expect(growthEqualRuntime(
+        &legacy_parser,
+        legacy_root,
+        &legacy_atoms,
+        &direct_parser,
+        direct_root,
+        &direct_atoms,
+    ));
+    try std.testing.expect(legacy_count.sameShape(direct_count));
+    const legacy_view = growthParserView(&legacy_parser);
+    const direct_view = growthParserView(&direct_parser);
+    var legacy_pool = TypePool.init(allocator);
+    defer legacy_pool.deinit(allocator);
+    var direct_pool = TypePool.init(allocator);
+    defer direct_pool.deinit(allocator);
+    var legacy_env = TypeEnv.init(allocator, &legacy_pool);
+    defer legacy_env.deinit();
+    var direct_env = TypeEnv.init(allocator, &direct_pool);
+    defer direct_env.deinit();
+    try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+    try direct_env.populateSourceTypes(.{ .direct = .{
+        .store = &direct_parser.type_store,
+        .ir_view = direct_view,
+        .atoms = &direct_atoms,
+    } });
+    try growthExpectExactPool(&legacy_pool, &direct_pool);
+    try growthExpectFinalSignatures(
+        &legacy_env,
+        &direct_env,
+        legacy_view,
+        direct_view,
+        &direct_parser.type_store,
+    );
+    try std.testing.expectEqual(expected_events, direct_env.direct_accumulator_events);
+    try std.testing.expectEqual(expected_signatures, direct_env.direct_fn_signatures.count());
+    try std.testing.expectEqual(expected_names, direct_env.fn_sigs_by_name.count());
+}
+
+test "direct signature replay covers parameter return guard generic-only and atom-zero cases" {
+    try growthExpectSignatureKind("const value = (item: string) => item;", 1, 1, 0);
+    try growthExpectSignatureKind("function value(): string { return \"x\"; }", 1, 1, 1);
+    try growthExpectSignatureKind(
+        "function guard(value: unknown): value is string { return true; }",
+        2,
+        1,
+        1,
+    );
+    try growthExpectSignatureKind("const value = (item: string): string => item;", 2, 1, 0);
+    try growthExpectSignatureKind("function identity<T>(value) { return value; }", 0, 0, 0);
+
+    const allocator = std.testing.allocator;
+    const source = "function named(value: string): string { return value; } " ++
+        "const arrow = (value: number): number => value;";
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try engine.parser.JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const view = growthParserView(&parser);
+    var function_owner: ?NodeIndex = null;
+    var arrow_owner: ?NodeIndex = null;
+    for (parser.type_store.function_signatures.items) |record| switch (view.getTag(record.owner).?) {
+        .function_expr => function_owner = record.owner,
+        .arrow_function => arrow_owner = record.owner,
+        else => return error.TestUnexpectedResult,
+    };
+    const named_owner = function_owner orelse return error.TestUnexpectedResult;
+    const anonymous_owner = arrow_owner orelse return error.TestUnexpectedResult;
+    const function_extra = parser.nodes.data.items[@intCast(named_owner)].a;
+    parser.nodes.extra.items[@as(usize, function_extra) + 1] = @intFromEnum(Atom.null);
+    try parser.type_store.validateRuntimeOwners(allocator, view);
+    try std.testing.expectEqual(@as(u16, 0), view.getFunction(named_owner).?.name_atom);
+    try std.testing.expectEqual(@as(u16, 0), view.getFunction(anonymous_owner).?.name_atom);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } });
+    try std.testing.expect(env.getFnSigByName("null") != null);
+    try std.testing.expectEqual(@as(usize, 1), env.fn_sigs_by_name.count());
+    try std.testing.expectEqual(@as(usize, 1), env.source_fn_sigs_by_name.count());
+    try std.testing.expect(env.getFnSigByName("named") == null);
+    try std.testing.expect(env.source_fn_sigs_by_name.get("named") == null);
+    const named_ref = env.functionTypeRef(view, named_owner) orelse return error.TestUnexpectedResult;
+    const anonymous_ref = env.functionTypeRef(view, anonymous_owner) orelse return error.TestUnexpectedResult;
+    const named_signature = env.getFunctionSignature(named_ref) orelse return error.TestUnexpectedResult;
+    const anonymous_signature = env.getFunctionSignature(anonymous_ref) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u8, 1), named_signature.param_count);
+    try std.testing.expectEqual(@as(u8, 1), anonymous_signature.param_count);
+    try std.testing.expectEqual(pool.idx_string, named_signature.param_types[0]);
+    try std.testing.expectEqual(pool.idx_number, anonymous_signature.param_types[0]);
+    try std.testing.expectEqual(pool.idx_string, named_signature.return_type);
+    try std.testing.expectEqual(pool.idx_number, anonymous_signature.return_type);
+    try growthExpectExactSignature(named_signature, env.getFnSigByName("null").?);
+    try growthExpectExactSignature(
+        named_signature,
+        env.source_fn_sigs_by_name.get("null") orelse return error.TestUnexpectedResult,
+    );
+}
+
+const GrowthFailureObservations = struct {
+    validation_failures: usize = 0,
+    selected_failures: usize = 0,
+    source_annotation_failures: usize = 0,
+    publication_failures: usize = 0,
+    name_merge_failures: usize = 0,
+    successes: usize = 0,
+};
+
+const GrowthCompletionObserver = struct {
+    completed_events: usize = 0,
+
+    fn observer(self: *GrowthCompletionObserver) DirectReplayObserver {
+        return .{ .context = self, .visit = visit };
+    }
+
+    fn visit(context: *anyopaque, snapshot: DirectReplaySnapshot) void {
+        const self: *GrowthCompletionObserver = @ptrCast(@alignCast(context));
+        if (snapshot.phase == .after) self.completed_events += 1;
+    }
+};
+
+fn growthPublicAllocationSweep(
+    allocator: std.mem.Allocator,
+    observations: *GrowthFailureObservations,
+) !void {
+    const source = "function value(item: string): string { return item; }";
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try engine.parser.JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const view = growthParserView(&parser);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    var completion: GrowthCompletionObserver = .{};
+    if (env.populateSourceTypesImpl(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = view,
+        .atoms = &atoms,
+    } }, completion.observer())) |_| {} else |err| {
+        switch (err) {
+            error.OutOfMemory => {},
+            else => return err,
+        }
+        if (env.sourceTypeMode() == null) {
+            observations.validation_failures += 1;
+            try std.testing.expectError(error.OutOfMemory, env.ensureHealthy());
+            return err;
+        }
+        try std.testing.expectEqual(SourceTypeMode.direct, env.sourceTypeMode().?);
+        observations.selected_failures += 1;
+        var unhealthy = false;
+        if (env.ensureHealthy()) |_| {} else |health_err| {
+            switch (health_err) {
+                error.OutOfMemory => unhealthy = true,
+            }
+        }
+        if (pool.ensureHealthy()) |_| {} else |health_err| {
+            switch (health_err) {
+                error.OutOfMemory, error.TypePoolCapacityExceeded => unhealthy = true,
+            }
+        }
+        try std.testing.expect(unhealthy);
+        if (completion.completed_events > 0 and env.direct_source_fn_annotations.count() == 0) {
+            observations.source_annotation_failures += 1;
+        }
+        if (env.direct_accumulator_events == 2 and
+            env.direct_source_fn_annotations.count() == 2 and
+            env.direct_fn_signatures.count() == 0)
+        {
+            observations.publication_failures += 1;
+        }
+        if (env.direct_fn_signatures.count() == 1 and env.fn_sigs_by_name.count() == 0) {
+            observations.name_merge_failures += 1;
+        }
+        return err;
+    }
+    observations.successes += 1;
+    try env.ensureHealthy();
+    try pool.ensureHealthy();
+    try std.testing.expectEqual(@as(usize, 2), env.direct_accumulator_events);
+    try std.testing.expectEqual(@as(usize, 1), env.direct_fn_signatures.count());
+    try std.testing.expectEqual(@as(usize, 1), env.fn_sigs_by_name.count());
+}
+
+const GrowthPostBoundaryArm = struct {
+    failing: *std.testing.FailingAllocator,
+    before_capacity: usize = 0,
+    armed: bool = false,
+
+    fn observer(self: *GrowthPostBoundaryArm) DirectReplayObserver {
+        return .{ .context = self, .visit = visit };
+    }
+
+    fn visit(context: *anyopaque, snapshot: DirectReplaySnapshot) void {
+        const self: *GrowthPostBoundaryArm = @ptrCast(@alignCast(context));
+        if (snapshot.phase == .before) {
+            self.before_capacity = snapshot.compatibility_capacity;
+            return;
+        }
+        if (!self.armed and snapshot.compatibility_found_existing and
+            snapshot.compatibility_capacity > self.before_capacity)
+        {
+            self.armed = true;
+            self.failing.fail_index = self.failing.alloc_index;
+            self.failing.resize_fail_index = self.failing.resize_index;
+        }
+    }
+};
+
+test "direct signature replay allocation failures poison incomplete publication" {
+    var observations: GrowthFailureObservations = .{};
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        growthPublicAllocationSweep,
+        .{&observations},
+    );
+    try std.testing.expect(observations.validation_failures > 0);
+    try std.testing.expect(observations.selected_failures > 0);
+    try std.testing.expect(observations.source_annotation_failures > 0);
+    try std.testing.expect(observations.publication_failures > 0);
+    try std.testing.expect(observations.name_merge_failures > 0);
+    try std.testing.expect(observations.successes > 0);
+
+    const source = "function value(item: string): string { return item; }";
+    var atoms = AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    var parser = try engine.parser.JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const view = growthParserView(&parser);
+    const signature = &parser.type_store.function_signatures.items[0];
+    var compatibility_failures: usize = 0;
+    var accumulator_failures: usize = 0;
+    for (0..8) |offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const injected = failing.allocator();
+        var pool = TypePool.init(injected);
+        defer pool.deinit(injected);
+        var env = TypeEnv.init(injected, &pool);
+        defer env.deinit();
+        var compatibility: DirectCompatibilityOrder = .empty;
+        defer compatibility.deinit(injected);
+        var accumulators: DirectFunctionAccumulators = .empty;
+        defer accumulators.deinit(injected);
+        failing.fail_index = failing.alloc_index + offset;
+        _ = env.replayDirectSignatureEvent(
+            view,
+            signature,
+            &compatibility,
+            &accumulators,
+            null,
+        ) catch |err| {
+            switch (err) {
+                error.OutOfMemory => {},
+                else => return err,
+            }
+            try std.testing.expect(failing.has_induced_failure);
+            if (compatibility.count() == 0 and accumulators.count() == 0) {
+                compatibility_failures += 1;
+            } else if (compatibility.count() == 1 and accumulators.count() == 0) {
+                accumulator_failures += 1;
+            }
+            continue;
+        };
+    }
+    try std.testing.expect(compatibility_failures > 0);
+    try std.testing.expect(accumulator_failures > 0);
+
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const injected = failing.allocator();
+    var growth_atoms = AtomTable.init(std.testing.allocator);
+    defer growth_atoms.deinit();
+    var growth_parser = try engine.parser.JsParser.initTyped(
+        std.testing.allocator,
+        std.testing.allocator,
+        growth_source_plain,
+    );
+    defer growth_parser.deinit();
+    growth_parser.setAtomTable(&growth_atoms);
+    _ = try growth_parser.parse();
+    var growth_pool = TypePool.init(injected);
+    defer growth_pool.deinit(injected);
+    var growth_env = TypeEnv.init(injected, &growth_pool);
+    defer growth_env.deinit();
+    var arm: GrowthPostBoundaryArm = .{ .failing = &failing };
+    try std.testing.expectError(error.OutOfMemory, growth_env.populateSourceTypesImpl(.{ .direct = .{
+        .store = &growth_parser.type_store,
+        .ir_view = growthParserView(&growth_parser),
+        .atoms = &growth_atoms,
+    } }, arm.observer()));
+    try std.testing.expect(arm.armed);
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(SourceTypeMode.direct, growth_env.sourceTypeMode().?);
+    try std.testing.expectError(error.OutOfMemory, growth_env.ensureHealthy());
+}
+
+fn growthSignatureEqual(left: FunctionSig, right: FunctionSig) bool {
+    if (left.param_count != right.param_count or
+        !std.mem.eql(
+            TypeIndex,
+            left.param_types[0..left.param_count],
+            right.param_types[0..right.param_count],
+        ) or
+        left.required_param_count != right.required_param_count or
+        left.max_arg_count != right.max_arg_count or
+        left.return_type != right.return_type or
+        left.type_param_count != right.type_param_count or
+        !std.meta.eql(left.type_predicate, right.type_predicate)) return false;
+    for (left.type_params[0..left.type_param_count], right.type_params[0..right.type_param_count]) |a, b| {
+        if (!std.mem.eql(u8, a.name, b.name) or a.idx != b.idx or a.constraint != b.constraint) return false;
+    }
+    return true;
+}
+
+const GrowthCompatibilityEntry = struct {
+    key: u32,
+    owner: NodeIndex,
+};
+
+const GrowthAccumulatorEntry = struct {
+    owner: NodeIndex,
+    accumulator: DirectFunctionAccumulator,
+};
+
+const GrowthFallbackObserver = struct {
+    failing: *std.testing.FailingAllocator,
+    target_event: usize,
+    before_compatibility_entries: []GrowthCompatibilityEntry,
+    before_accumulator_entries: []GrowthAccumulatorEntry,
+    event_index: usize = 0,
+    before_compatibility_entries_count: usize = 0,
+    before_accumulator_entries_count: usize = 0,
+    before_compatibility_capacity: usize = 0,
+    before_compatibility_count: usize = 0,
+    before_accumulator_capacity: usize = 0,
+    before_accumulator_count: usize = 0,
+    armed: bool = false,
+    observed_after: bool = false,
+    invalid: bool = false,
+
+    fn observer(self: *GrowthFallbackObserver) DirectReplayObserver {
+        return .{ .context = self, .visit = visit };
+    }
+
+    fn visit(context: *anyopaque, snapshot: DirectReplaySnapshot) void {
+        const self: *GrowthFallbackObserver = @ptrCast(@alignCast(context));
+        if (snapshot.phase == .before) {
+            if (self.event_index != self.target_event) return;
+            if (!snapshot.compatibility_found_existing) {
+                self.invalid = true;
+                return;
+            }
+            self.before_compatibility_capacity = snapshot.compatibility_capacity;
+            self.before_compatibility_count = snapshot.compatibility_count;
+            self.before_accumulator_capacity = snapshot.accumulator_capacity;
+            self.before_accumulator_count = snapshot.accumulator_count;
+            if (!snapshot.accumulators.contains(snapshot.owner)) {
+                self.invalid = true;
+                return;
+            }
+            var compatibility_entries = snapshot.compatibility_order.iterator();
+            while (compatibility_entries.next()) |entry| {
+                if (self.before_compatibility_entries_count >= self.before_compatibility_entries.len) {
+                    self.invalid = true;
+                    return;
+                }
+                self.before_compatibility_entries[self.before_compatibility_entries_count] = .{
+                    .key = entry.key_ptr.*,
+                    .owner = entry.value_ptr.*,
+                };
+                self.before_compatibility_entries_count += 1;
+            }
+            var accumulator_entries = snapshot.accumulators.iterator();
+            while (accumulator_entries.next()) |entry| {
+                if (self.before_accumulator_entries_count >= self.before_accumulator_entries.len) {
+                    self.invalid = true;
+                    return;
+                }
+                self.before_accumulator_entries[self.before_accumulator_entries_count] = .{
+                    .owner = entry.key_ptr.*,
+                    .accumulator = entry.value_ptr.*,
+                };
+                self.before_accumulator_entries_count += 1;
+            }
+            self.failing.fail_index = self.failing.alloc_index;
+            self.failing.resize_fail_index = self.failing.resize_index;
+            self.armed = true;
+            return;
+        }
+        if (self.event_index == self.target_event) {
+            if (!self.armed or !self.failing.has_induced_failure or
+                snapshot.compatibility_capacity != self.before_compatibility_capacity or
+                snapshot.compatibility_count != self.before_compatibility_count or
+                snapshot.accumulator_capacity != self.before_accumulator_capacity or
+                snapshot.accumulator_count != self.before_accumulator_count)
+            {
+                self.invalid = true;
+            }
+            var index: usize = 0;
+            var compatibility_entries = snapshot.compatibility_order.iterator();
+            while (compatibility_entries.next()) |entry| : (index += 1) {
+                if (index >= self.before_compatibility_entries_count or
+                    self.before_compatibility_entries[index].key != entry.key_ptr.* or
+                    self.before_compatibility_entries[index].owner != entry.value_ptr.*)
+                {
+                    self.invalid = true;
+                    break;
+                }
+            }
+            if (index != self.before_compatibility_entries_count) self.invalid = true;
+            index = 0;
+            var accumulator_entries = snapshot.accumulators.iterator();
+            while (accumulator_entries.next()) |entry| : (index += 1) {
+                if (index >= self.before_accumulator_entries_count) {
+                    self.invalid = true;
+                    break;
+                }
+                const before = self.before_accumulator_entries[index];
+                if (before.owner != entry.key_ptr.* or
+                    before.accumulator.publish_name != entry.value_ptr.publish_name or
+                    !growthSignatureEqual(before.accumulator.signature, entry.value_ptr.signature))
+                {
+                    self.invalid = true;
+                    break;
+                }
+            }
+            if (index != self.before_accumulator_entries_count) self.invalid = true;
+            self.failing.fail_index = std.math.maxInt(usize);
+            self.failing.resize_fail_index = std.math.maxInt(usize);
+            self.observed_after = true;
+        }
+        self.event_index += 1;
+    }
+};
+
+test "direct signature replay preserves existing entries after failed growth" {
+    const boundaries = try growthExpectTraceCase(growth_source_plain);
+    for (boundaries) |target_event| {
+        const allocator = std.testing.allocator;
+        var prepared = try engine.source_frontend.PreparedSource.init(
+            allocator,
+            growth_source_plain,
+            "<failed-growth>.ts",
+            .{},
+        );
+        defer prepared.deinit();
+        var atoms = AtomTable.init(allocator);
+        defer atoms.deinit();
+        var parser = try engine.parser.JsParser.initTyped(allocator, allocator, growth_source_plain);
+        defer parser.deinit();
+        parser.setAtomTable(&atoms);
+        _ = try parser.parse();
+        const view = growthParserView(&parser);
+        var legacy_pool = TypePool.init(allocator);
+        defer legacy_pool.deinit(allocator);
+        var legacy_env = TypeEnv.init(allocator, &legacy_pool);
+        defer legacy_env.deinit();
+        try legacy_env.populateSourceTypes(.{ .legacy = prepared.typeMap().? });
+
+        var failing = std.testing.FailingAllocator.init(allocator, .{});
+        const injected = failing.allocator();
+        var direct_pool = TypePool.init(injected);
+        defer direct_pool.deinit(injected);
+        var direct_env = TypeEnv.init(injected, &direct_pool);
+        defer direct_env.deinit();
+        const before_compatibility_entries = try allocator.alloc(GrowthCompatibilityEntry, 32);
+        defer allocator.free(before_compatibility_entries);
+        const before_accumulator_entries = try allocator.alloc(GrowthAccumulatorEntry, 32);
+        defer allocator.free(before_accumulator_entries);
+        var observer: GrowthFallbackObserver = .{
+            .failing = &failing,
+            .target_event = target_event,
+            .before_compatibility_entries = before_compatibility_entries,
+            .before_accumulator_entries = before_accumulator_entries,
+        };
+        try direct_env.populateSourceTypesImpl(.{ .direct = .{
+            .store = &parser.type_store,
+            .ir_view = view,
+            .atoms = &atoms,
+        } }, observer.observer());
+        try std.testing.expect(observer.armed);
+        try std.testing.expect(observer.observed_after);
+        try std.testing.expect(!observer.invalid);
+        try std.testing.expect(failing.has_induced_failure);
+        try direct_env.ensureHealthy();
+        try direct_pool.ensureHealthy();
+        try growthExpectExactPool(&legacy_pool, &direct_pool);
+        try growthExpectFinalSignatures(
+            &legacy_env,
+            &direct_env,
+            view,
+            view,
+            &parser.type_store,
+        );
+    }
 }

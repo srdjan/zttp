@@ -77,7 +77,7 @@ pub fn run(
     var type_env = zts.TypeEnv.init(allocator, &type_pool);
     defer type_env.deinit();
     try type_pool.ensureHealthy();
-    if (prepared.typeMap()) |type_map| type_env.populateFromTypeMap(type_map);
+    if (prepared.typeMap()) |type_map| try type_env.populateFromTypeMap(type_map);
     try type_pool.ensureHealthy();
 
     const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };
