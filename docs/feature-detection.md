@@ -4,17 +4,16 @@ This document catalogs all unsupported JavaScript and TypeScript features detect
 
 ## Detection Architecture
 
-zttp validates in three layers:
+zttp validates in two layers:
 
-1. **TypeScript Stripper** (`packages/zts/src/stripper.zig`): Runs first for `.ts` files and catches unsupported syntax in type positions.
-2. **Parser** (`packages/zts/src/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
-3. **Strict checker** (`packages/zts/src/strict_checker.zig`): Runs after parsing on `zttp check` and `zttp verify-paths`, and enforces the [canonical profile](#canonical-profile-strict-checker)
+1. **Parser** (`packages/zts/src/parser/parse.zig`): Reads `.ts` source directly and catches unsupported JavaScript and TypeScript features.
+2. **Strict checker** (`packages/zts/src/strict_checker.zig`): Runs after parsing on `zttp check` and `zttp verify-paths`, and enforces the [canonical profile](#canonical-profile-strict-checker).
 
 **Principle**: Each feature should be detected at exactly one layer to avoid duplicate error reporting and ensure consistent error messages regardless of file type.
 
-## TypeScript Stripper Features
+## TypeScript Type-Position Features
 
-These features exist only in TypeScript type annotation positions that are stripped before parsing. The parser never sees them.
+The parser checks these features in TypeScript type positions.
 
 | Feature | Error Type | Suggested Alternative |
 |---------|------------|----------------------|
@@ -23,9 +22,8 @@ These features exist only in TypeScript type annotation positions that are strip
 | `satisfies` operator (e.g., `x satisfies T`) | UnsupportedAssertion | Use explicit type annotations on declarations |
 | A string literal that reaches the end of its line | UnterminatedString | Close the quote, or write the newline as `\n` |
 
-The stripper runs before the parser, so it is what meets an unterminated string
-first. It reports one as ZTS008 with a line and a column - the same code the
-parser uses for the same fault.
+The parser reports an unterminated string as ZTS008 with a line and a column,
+including when the string occurs in a type position.
 
 ## Lexical Rules
 
@@ -62,8 +60,8 @@ path. That spelling is refused outright now, so its base is no longer reached:
 one line gets one diagnostic, and it is the one naming the repair.
 
 `interface` is recognized rather than merely rejected: the body is scanned so
-the span is known and the repair is exact, and no type-map entry is recorded,
-so nothing downstream resolves it. Open interfaces, `extends`, merging, and
+the span is known and the repair is exact, and no supported type declaration is
+published, so nothing downstream resolves it. Open interfaces, `extends`, merging, and
 declaration augmentation were never supported and are not repaired into an
 alias. The heuristic that made an all-function interface nominal went with the
 form - nominal identity now comes only from a `nominal` declaration.
@@ -332,7 +330,7 @@ Examples:
 When adding detection for a new unsupported feature:
 
 1. **Determine Layer**:
-   - TypeScript type-position-only syntax (e.g., `any` type) -> Stripper
+   - TypeScript type-position-only syntax (e.g., `any` type) -> Parser type-syntax admission
    - Everything else (JS features, TS keywords that exist as statements) -> Parser
 
 2. **Add Detection Code**:
@@ -341,8 +339,7 @@ When adding detection for a new unsupported feature:
    - Preserve source location for accurate error reporting
 
 3. **Add Tests**:
-   - Stripper: Add test in `packages/zts/src/stripper.zig` test section
-   - Parser: Add test in `packages/zts/src/parser/parse.zig` test section
+   - Add a parser test in `packages/zts/src/parser/parse.zig` or beside the affected type-syntax code.
    - Verify error message content, not just error type
 
 4. **Update This Document**:
@@ -357,9 +354,11 @@ When adding detection for a new unsupported feature:
 
 ### Why Two Layers?
 
-**TypeScript Stripper**: Handles TypeScript syntax that exists only in type annotation positions (e.g., `any` type). These are stripped before parsing, so the parser never sees them.
+**Parser**: Checks TypeScript syntax in annotations, including `any`, and
+rejects unsupported statements such as `enum`, `namespace`, and `class`.
 
-**Parser**: Handles all other feature detection - both ECMAScript-derived forms and TypeScript keywords that appear as statements (enum, namespace, implements, decorators, access modifiers). Running detection in the parser gives every `.ts` core input the same rich diagnostic.
+**Strict checker**: Applies profile and type-directed rules after parsing,
+including implicit globals, avoidable `let`, and invalid uses of a parsed type.
 
 ### Why Not Runtime Detection?
 
@@ -373,6 +372,8 @@ Runtime checks should only exist as defensive programming (e.g., `UnimplementedO
 
 ### Why Move Detection to the Parser?
 
-Before consolidation, features like `class` and `enum` were split between the stripper and parser. The parser now gives accepted `.ts` inputs one diagnostic path. `.js`, `.jsx`, and `.tsx` are rejected earlier with ZTS052.
+The parser diagnoses unsupported forms such as `class` and `enum` in accepted
+`.ts` input. File extension admission rejects `.js`, `.jsx`, and `.tsx` with
+ZTS052 before parsing.
 
-The features remaining in the stripper are `any` type detection (because `any` only appears in type annotation positions that are stripped before the parser runs) and `as`/`satisfies` assertion rejection (because these are type-position syntax that the parser never sees).
+The parser also checks `any` types and `as`/`satisfies` assertions in the original source.

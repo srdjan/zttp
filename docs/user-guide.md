@@ -434,13 +434,14 @@ replay compatibility or current model quality.
    operation union and uses separate proof tools where a verdict is required.
 3. It authors complete source for one or more files and submits one ordered
    `propose_change_set` proposal.
-4. Before any write, the host normalizes the whole source overlay, proves it
-   once, and records every proof input in a read set. A draft that introduces a
-   violation is rejected and the agent retries.
+4. The host acquires the recovered workspace owner and its lock. Before any
+   write, it normalizes the whole source overlay, proves it once, and records
+   every proof input in a read set. A draft that introduces a violation is
+   rejected and the agent retries.
 5. On a pass you see every normalized diff plus one aggregate proof card and
    approve or reject once. `--yes` approves every verified change set;
    `--no-edit` blocks writes entirely.
-6. The host rechecks the full read set and commits under a workspace lock and
+6. The host rechecks the full read set and commits under that lock and its
    crash-recovery journal. The agent never writes source files itself.
 
 The discovery views and focused compiler projections share the

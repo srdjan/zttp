@@ -52,6 +52,11 @@ The authority retains the detailed findings and acceptance evidence.
 | `43beacd7` | add direct syntax for proof and printer consumers (U13) |
 | `7b4cf5b2` | switch CHECK to direct typed parsing (U14) |
 | `2019e62d` | switch compilation to direct typed parsing (U15) |
+| `e6f8381f` | switch remaining callers to direct typed parsing (U16) |
+| `d2697471` | remove legacy typed frontend reconstruction (U17) |
+| `66fb05c2` | bind edits to recovered workspace ownership (U18) |
+| `6f39fc48` | remove retired proof-review state helpers (U19) |
+| This worklog's commit | reconcile final documentation and evidence (U20) |
 
 ## U15 acceptance
 
@@ -108,10 +113,10 @@ The generated-test comparison matches eight outcomes and functional output.
 Those last two comparisons exclude implementation stack traces; the authority states their exact limits.
 The imported runtime control uses the existing arena lifetime and does not establish individual payload cleanup.
 
-## Current work: U17 remove reconstruction
+## U17: remove reconstruction
 
-U16 acceptance is complete and ready for its isolated local commit.
-Main owns that commit and the subsequent U17 source changes.
+U16 is committed as `e6f8381f` after its completed acceptance audit.
+Main owns the U17 source changes, review, and verification.
 The fresh census records remaining legacy test oracles and adapters outside production entry paths.
 Astra identifies the required semantic compatibility rules and test controls that must remain.
 Main will remove the oracle last after the replacement behavior fixtures pass.
@@ -123,18 +128,125 @@ The pre-removal catalog hash and three measured signature-order fixtures remain 
 The TypeEnv measurement passes all 156 unfiltered tests.
 The presentation candidate passes seven rendering tests, then 817 tests through its relocated source owner.
 The catalog hash remains exact after that temporary relocation.
-`working-zts` contains the temporary relocation and later comment cleanup; no U17 source enters the repository yet.
-Its temporary forwarding alias remains necessary until the old scanner disappears.
+The reviewed presentation relocation and its existing tests now enter the repository.
+U17's direct parser migration is accepted by the read-only Astra review.
+The unfiltered `test-zts` run passes 2,707 tests with one skip. The frontend
+batch passes all 45 steps, including the corpus, contract, module-boundary,
+and layering gates. The registry and spine batch, normalization check, and
+format check also pass. Exact catalog identity remains unchanged.
 
-## Remaining work
+The direct-source migration now covers diagnostic presentation, checker and
+pipeline fixtures, ASI and fuzz censuses, example evidence, printer and bytecode
+controls, runtime witness and error rendering, and the check command. The
+stripper and TypeMap implementation files, exports, TypeEnv joins, and test
+oracles are removed. The direct fixtures retain literal contract and bytecode
+results, semantic owners, allocation failure controls, and original-source
+admission spans. The first post-removal unfiltered ZTS run exited 0 with 2,717
+passes and one skip. The retained direct test file was then renamed and its
+oracle scaffolding entered a second review pass. Its private source preflight
+scanner and duplicate Store lowering driver are removed. Direct fixtures pin
+the speculative group and three header fallback constructions with literal
+pool and owner expectations.
 
-Main owns U17 removal, exact behavior controls, final census, required gates, Astra review, and its local commit.
-U18 introduces recovered workspace ownership without moving proof, approval, or durable session policy.
-Astra records the owner API, distinct initialization errors, failed-commit policy, and acknowledgement ordering in the session review.
-U19 removes unused proof-review state after a fresh caller census.
-U20 reconciles documentation, measured performance, final evidence, and the required quality checks.
-Main will continue through all approved phases and the quality checks.
+The post-removal `diagnosticCatalogHash()` probe exits 0 and matches the
+pre-removal hash exactly:
+`657967a5eab118485ffc7038480ab754ab8f8f95782e7ffe4f52424056525d15`.
+Build and run receipts are `catalog-after-build-v2` and `catalog-after-run`
+under the temporary U17 work directory.
 
-Astra accepts the final U16 execution audit with no remaining blocker.
-The final documentation gate passes all eight steps with exit 0.
-Main owns the exact-path local commit and subsequent U17 migration.
+The sandbox initially denied staging the rename and deletions through
+`git add -A`. An explicit path staging command later succeeded. A temporary
+index under the U17 work directory let Git-backed structural gates run before
+the local commit.
+With that index, the ZTS layering gate passes (166 reachable files, zero
+cross-tier edges) and the module-boundary test passes (54 allowed reaches).
+The local main commit remains unavailable until the Git directory is writable.
+The aggregate gate reaches 8,627 passes but cannot pass in this sandbox:
+loopback listeners and connections return `EPERM` in recorder, cassette,
+simulator, runtime server, stand-in, and CLI cases. Its first run also found
+two gate harness issues. The docs-drift exclusion followed the removed
+stripper rather than the relocated diagnostic text; that exclusion is now
+bound to `source_diagnostics.zig` and its named gate passes. Temporary Git
+fixtures inherited the alternate index and emptied later file censuses; a
+scoped Git wrapper now preserves the 477 package Zig paths through fixture
+writes, and the affected structural gates pass in a separate unfiltered run.
+
+## U18: recovered workspace owner
+
+`RecoveredWorkspace` acquires the lock and completes recovery before callers
+can commit or read pending receipts. It captures the canonical root, rejects a
+different commit root before writing, and requires close and reopen after a
+failed commit. Five production callers use this owner. The receipt retry test
+checks that a pending receipt exists before retry and that durable recording
+precedes acknowledgement. Astra accepted the implementation.
+
+The unfiltered `test-expert-app` run reached 908 passes, one skip, two failed
+tests, and one crash. The stand-in, simulator, recorder, and cassette batch
+reached 1,590 passes, 14 failed tests, and one crash. All failures reached
+local bind or connect operations denied with `EPERM` by this sandbox. No U18
+fixture failed before a network operation. Receipts are under `u18-work/`.
+
+## U19: remove retired proof-review state
+
+The fresh caller census found no remaining use of the retired proof-review
+state, type, or I/O helpers. The ledger owns its `.zttp` directory creation.
+The three unused helpers, their exports and test imports, the CLI force import,
+and the stale module-boundary row are removed. A sentinel test compares the
+literal proof JSONL row, including its newline, and confirms that an existing
+`.zttp/deploy-state.json` file retains its exact bytes. Astra accepted the
+source and the revised sentinel.
+
+The named proof-review, boundary, docs, links, and runtime-purity batch passes
+17 steps and 28 tests (`u19-work/named-core-v1`). The unfiltered CLI run after
+the sentinel change reaches 603 passes, one skip, and three failures, all in
+loopback cases denied by the sandbox (`u19-work/cli-row-v1`). `smoke-v1` also
+stops when its local server cannot respond (`u19-work/cli-smoke-v1`).
+
+## U20: documentation and measurements
+
+The architecture, TypeScript, feature-detection, and user guides now describe
+the direct parser, parser-owned syntax, and recovered workspace owner.
+The current-doc census finds no reference to the deleted frontend or
+proof-review helpers. `scripts/audit-docs.sh .` passes. The unfiltered
+documentation, link, and spine batch passes (`u20-docs-v1`).
+
+`smoke-getting-started` builds and initializes the app, then fails at its
+`zttp dev` loopback listener with `EPERM` (`u20-smoke-v1`). The compile-bench
+pilot and 50-iteration measurements pass (`u20-compile-pilot-v1` and
+`u20-compile-50-v1`). All eight fixtures retain their IR-node, bytecode, and
+codegen-byte counts. The 50-iteration times are lower than the U1 baseline in
+this one host observation; they are not a general speed claim.
+
+`bench-check` fails three times against the committed five-run baseline:
+`intArithmetic` by 8.69%, then `stringOps` by 9.21% and 9.38%
+(`u20-bench-check-v1` through `v3`). The repeated string result rules out a
+single one-off threshold crossing. This advisory gate remains unresolved;
+the baseline is unchanged and no release-readiness claim follows from it.
+
+## Final local checks and limits
+
+Astra found and Main corrected four documentation wording errors about lock
+order, parser replay, receipt acknowledgement, and detection layers. The final
+`test-proof-swallow`, docs-drift, doc-links, test-spine, and check-spine batch
+passes (`u20-recheck-v1`). The first final aggregate found seven obsolete
+proof-swallow allowlist rows after the type-consumer deletion; those rows were
+removed. The unchanged `scripts/verify.sh` then reports proof-swallow OK:
+16 files, 141 reviewed swallows, 87 silent arms, and zero unreviewed.
+
+The verification script stops at its aggregate step with 8,649 of 8,681 tests
+passed, six skipped, 24 failed, and two crashed (`u20-verify-v1`). Its eight
+failed roots are the recorder, cassette, simulator, expert, stand-in, runtime,
+server, and CLI network suites. Their failures reach local bind or connect
+operations denied with `EPERM`; no remaining structural gate fails. The
+standalone `test-zruntime` reaches 221 passes and ten loopback `EPERM` failures
+(`u20-zruntime-v1`). The script cannot reach later steps in this sandbox.
+
+Run separately after that stop: ReleaseFast and the verified handler
+precompile both pass (`u20-release-build-v1`, `u20-handler-build-v1`). The
+33-file normalization check, module-spec render check, agent determinism gate,
+and policy hash comparison pass. `zig fmt --check` over `build.zig`, `build/`,
+`packages/`, and `tooling/`, the docs link audit, and `git diff --check` pass.
+
+U17, U18, and U19 have separate local main commits. U20 closes in the commit
+that carries this worklog. The unrelated untracked sibling-module plan remains
+untouched and excluded from every commit.

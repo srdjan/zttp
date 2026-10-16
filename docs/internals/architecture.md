@@ -58,13 +58,17 @@ acceptance rules for legacy parts, session payloads, checkpoints, and version
 errors. `Reader` checks framing only. Tail recovery validates complete frames
 before it repairs an incomplete tail, then derives the entry sequence.
 
-Workspace recovery stays under the existing lock in `change_transaction.zig`.
-It observes markers in precedence order and validates the manifest and images
-before classifying a prepared transaction. A pure planner checks each target
-digest before the next target read. It publishes a plan only after all required
-observations succeed. One interpreter performs the planned writes, synchronization,
-candidate verification, and commit marking. Committed receipts remain pending
-until the session acknowledges them durably.
+`RecoveredWorkspace` in `change_transaction.zig` acquires the workspace lock,
+recovers pending work, and then exposes writes and pending receipts to the
+expert loop. Recovery observes markers in precedence order and validates the
+manifest and images before classifying a prepared transaction. A pure planner
+checks each target digest before the next target read. It publishes a plan only
+after all required observations succeed. One interpreter performs the planned
+writes, synchronization, candidate verification, and commit marking. A failed
+commit makes the owner unusable until it is closed and reopened. Committed
+receipts remain pending until the session records and acknowledges them in
+persisted sessions. Workspace-only operation can acknowledge without a
+durable session journal.
 
 All provider adapters serialize a shared `ModelRequestSnapshot`. The snapshot
 measures system, tools, active history, transient text, framing, wire bytes, and
@@ -97,9 +101,10 @@ it stores, rather than the lifetime of a worker thread.
 
 For a handler source file:
 
-1. Strip supported TypeScript syntax.
-2. Parse only the restricted TypeScript core grammar.
-3. Resolve imports, including `zttp:*` virtual modules.
+1. Parse original source with the restricted typed grammar, retaining runtime
+   IR and parser-owned type syntax with original source spans.
+2. Resolve imports, including `zttp:*` virtual modules.
+3. Build semantic types from the selected parser-owned syntax.
 4. Run type, path, Result/optional, state-isolation, flow, and spec checks.
 5. Extract a handler contract and module capability surface.
 6. Emit bytecode and optional artifacts such as contract JSON and generated
@@ -115,165 +120,38 @@ atom resolver. It returns complete owned JSON bytes or no literal, and releases
 partial output on refusal or failure. Each caller still recognizes
 `JSON.stringify`, handles raw schema strings, and interprets schema types.
 
-### Private typed parser comparison
+### Typed source and semantic types
 
-Production callers retain source preparation and the legacy parser initializer during the reset's comparison phases.
-`JsParser.initTyped` parses original source with the same runtime parser and a separate allocator for type syntax.
-Private comparison callers read the parser-owned syntax store while the parser remains alive.
-`ParseResult` can transfer that store, but its high-level entry still initializes the legacy parser.
-Type-only syntax creates no runtime node, atom, constant, or scope.
+The parser reads original TypeScript source. It creates runtime IR and a
+separate syntax store for annotations, declarations, generic arguments,
+signatures, type-only modules, and erased expressions. Type-only syntax creates
+no runtime statement or binding. Store records retain original source spans
+and refer to final runtime owners when a type belongs to a runtime node.
+Failed speculation rolls back the syntax it attempted.
 
-Private comparisons cover every current syntax-owner family, including multiple variable annotations and typed function headers.
-They also cover declarations, generics, calls, erased prefixes, type-only modules, predicates, and recovery.
-Complete-source consumer comparisons cover direct `TypeEnv`, `TypeChecker`, `StrictChecker`, and function-specification behavior.
-Seventeen owned arrays hold syntax nodes, child lists, annotations, declarations, generic projections, signatures, module records, and erased prefixes.
-Names and literal text borrow original source spans.
+`DirectCheckSource` owns source admission and the parser result used by CHECK
+and compilation. It keeps parser diagnostics on original source coordinates.
+The file-path admission boundary accepts `.ts`; it refuses `.js`, `.jsx`,
+and `.tsx` with ZTS052. Virtual JavaScript input has a separate path.
+Unsupported TypeScript constructs fail before bytecode generation; the
+published subset and diagnostic stages are in [TypeScript Support](../typescript.md)
+and [Feature Detection](../feature-detection.md).
 
-Type nodes retain grouping and readonly modifiers, including modifiers that have no semantic effect.
-Annotations retain final declaration owners, complete bindings, raw spans, admission ends, and semantic-prefix ends.
-Repeated global declarations can share a binding, so each annotation also needs its distinct declaration node.
-An independently captured declaration start checks the supplied node's source location.
-The admission end synchronizes the runtime cursor; the semantic prefix retains the existing type parser's recognized meaning.
-Explicit absent children differ from successful unknown types and invalid references.
-Present children precede their parents.
+`TypeEnv` selects either omitted or direct source typing. Direct population
+lowers validated store ranges through `TypePool` and binds semantic types
+to final declaration and runtime owners. It retains the authored type
+namespace, alias construction order, generic scope, and function signatures.
+Omitted typing is used where a contract is extracted without authored source
+annotations. Consumers must receive the matching source selection and a
+healthy environment and pool.
 
-Failed speculation restores every syntax array and the caller cursor.
-Runtime failure removes the current syntax transaction while preserving runtime recovery progress.
-Declarations retain component spans, complete erased spans, source order, and authored scope.
-Type-only declarations create no runtime statement, binding, atom, constant, or export.
-Declaration bodies and annotations own separate ranges of type nodes.
-
-Authored generic parameters retain quoted and comment boundaries independently from the existing raw semantic projection.
-Semantic projection removes one optional angle pair from the recorded window, which differs by owner kind.
-Semantic fragments own disjoint node ranges and retain their recognized prefix ends.
-Generic defaults and structural constraints remain opaque where legacy semantics ignore those bytes.
-
-Generic owners retain final declaration indices or final function and arrow nodes.
-Compatibility variants distinguish declaration parameters, ignored parameters, and legacy call arguments.
-Real call arguments retain final call nodes and separate authored and semantic ranges.
-Pending records reserve source order before nested bodies or arguments add records.
-Publication waits for runtime nodes and enclosing declaration wrappers.
-Recovered errors and diagnostic allocation failures cancel pending records while preserving runtime recovery progress.
-
-Parameter annotations retain the actual runtime pattern and its declaration binding.
-Function signatures retain the final function or arrow node, typed parameter range, return syntax, and header span.
-Predicate targets retain an actual parameter identity or an explicit unresolved spelling.
-Return syntax preserves trailing whitespace and separate legacy return classification.
-The syntax tree and the legacy ordinary-return projection can have different roots.
-
-Type-only module records retain their kind and complete raw span without a runtime owner.
-The tokenizer resumes at the exact erased endpoint without interpreting opaque module contents.
-The base module for specifiers owns the built-in prefix and the retired proof module's identity.
-Both frontend refusal checks use that identity during migration.
-
-Erased prefixes retain final expression or block owners and exact operand intervals.
-Brace prefixes create no semantic parameters.
-Parenthesis prefixes retain the legacy parameter projection, including empty-list capture differences.
-Nested operand intervals can share one final runtime expression while keeping separate source records.
-Validation checks interval relationships, exact capture provenance, and complete ownership of parameter and fragment ranges.
-The private comparison admits bounded object, numeric group, simple arrow, and statement block operands.
-Its nested group operands stop at a number; direct parser support remains separate from comparison admission.
-
-One compiler-tier helper lowers validated syntax ranges through existing `TypePool` constructors.
-The `TypeEnv` consumer binds those values through declaration and runtime owner identities.
-Whole-body alias lookup precedes constructor calls, and source declarations retain their module-wide type namespace.
-The lowerer preserves nominal identity and the existing contractivity census.
-Direct generic APIs bind scope ownership to one environment and remove valid owned scopes after allocation failure.
-The lowerer retains eight-item semantic projections and separate generic and ordinary alias maps.
-
-Function and arrow scopes remain independent; call arguments and variable annotations inherit no enclosing generic scope.
-Generic ownership alone creates no function signature.
-Empty function and arrow projections perform no scope allocation.
-Application lowering preserves constructor allocation order and defers unused base references.
-The comparison checks exact ordered type structure before supplementary canonical keys.
-Canonical encoding has its own depth limit and does not establish parser admission.
-
-TypeEnv now distinguishes omitted, legacy, and direct source metadata.
-The private consumer path accepts ordinary variable, parameter, and return annotations through validated final owners.
-It also accepts structural and nominal declarations, including structural generics and ignored nominal generic parameters.
-TypeEnv and the comparison tests share indexed declaration publication, then finish contractivity once after the complete namespace.
-One compiler-tier helper lowers validated syntax ranges into pool nodes for TypeEnv and the comparison tests.
-TypeEnv retains alias resolution, construction order, raw spellings, and publication.
-Captured generic sets retain existing parameter indices and constraints in the same live environment.
-Short scope reuse creates no pool parameter or interned name.
-Scope entry and closure retain owner validation and operational health checks.
-Structural generic declarations share their population helper with the comparison tests.
-Absent bodies create no alias, while present bodies with empty parameter lists retain generic aliases.
-Callable generic construction retains parameter indices for later header reuse.
-Call construction merges actual and compatibility records in authored order after every callable scope closes.
-Actual-call queries reject compatibility records attached to function or arrow owners.
-Erased prefixes complete transient generic work in authored order without publishing signatures.
-Their balanced list bodies retain bounds, defaults, and operator spellings under the existing operand and comparison guards.
-Return construction selects the stored legacy classification before it reads structured predicate syntax.
-Ordinary returns retain their complete raw spelling and lower before signature replay.
-Guards replay first and retain boolean returns without ordinary return spelling.
-Narrowing also requires exact literal-marker provenance and a match among the first sixteen annotated parameter names.
-Missing targets create no narrowing type, even when compound syntax exists.
-An allocation failure keeps partial metadata unhealthy; an eligibility refusal leaves selection unchanged.
-
-A private observer can inspect signature replay capacity and map order during native tests.
-Its borrowed snapshots expire when the callback returns; production population passes no observer.
-The native tests compare complete fallback maps and retained entries across successful and failed growth.
-
-The checked legacy entry preserves repeated legacy population and rejects mixed source modes.
-Omitted source typing retains installed module and ABI metadata.
-TypeChecker and StrictChecker check environment and pool health before accepting results.
-Function specifications preserve declaration-shape eligibility, including empty declarations for variable-arrow capsules.
-Production callers retain legacy inputs while the consumer migration continues.
-
-Named function comments retain separate compatibility paths.
-A bounded comment before the name selects legacy call arguments when the list and parameter opener remain adjacent.
-A bounded comment after the list selects ignored parameters.
-Those named headers retain runtime-only parsing and refuse typed parameter syntax at its original location.
-Generic arrows retain typed headers through their independently admitted comment paths.
-
-The `expectEquivalent` comparison preflight scans eligibility before runtime parsing.
-The preflight inspects function bodies with a bounded iterative depth counter.
-That comparison preflight still excludes many typed signatures.
-Its diagnostics cover a bounded subset of legacy admission rules.
-Separate complete-source consumer comparisons cover typed functions, arrows, predicates, declarations, calls, and shadowing.
-Private exclusions also retain malformed lists and unsupported raw capture windows until later reset phases.
-Unsupported comparison forms produce `out_of_slice`, which declines comparison without selecting another frontend.
-Independent atom tables support comparisons of runtime stores, source locations, binding identities, and allocation counts.
-
-Later reset phases switch production callers after private parser and consumer parity.
-
-Direct lowering plans name construction before changing the type pool.
-The plan preserves parameter, field, and template name order at the existing constructor boundaries.
-Grouped syntax retains completed parameter attempts in the existing parameter array when parsing selects the grouped child.
-Attempted parameter spans use the enclosing raw type interval; the selected semantic endpoint remains unchanged.
-Planning allocation failures leave the pool unchanged, while pool allocation failures retain the pool's unhealthy state.
-
-### Selected syntax for proof and printing
-
-`ConsumerTypeSource` borrows one omitted, legacy, or direct selection for an already-populated environment.
-Selected environments and their pools must remain healthy before consumers interpret missing metadata.
-Legacy wrappers reject direct environments; direct consumers use the explicit source input.
-
-Contract extraction keeps semantic types separate from authored signature selection.
-Handler specifications retain the existing name winner before an owner lookup.
-Nested declaration holes use final owners, while ordinary function holes retain the existing name winner.
-Omitted source typing can retain an ABI signature only through a healthy semantic environment that also selects omitted typing.
-Function capsules and callback signatures remain absent under omitted typing.
-
-Callback effect lookup uses final owners and preserves the existing actual parameter index into the compact signature.
-An earlier untyped parameter can therefore hide an annotated callback ceiling.
-Contract effects use selected source types; path effects retain their source-free analysis.
-
-`ParsedModule.fromTypedExisting` binds a borrowed syntax Store to its runtime IR and AtomTable.
-Direct single-module sessions derive population inputs from that module.
-Completed-checker reuse preserves the checker's legacy signatures unless the caller supplies an explicit source selection.
-Explicit direct reuse requires matching typed module input before temporary facts are allocated.
-Graph reparsing retains legacy input until each replacement parse supplies its own Store.
-Contract-only sessions omit authored types; serialization follows successful extraction and cannot change its completed state.
-
-The printer accepts original legacy source or a completed parser-owned Store.
-The direct source always comes from that Store.
-Carriage-return and token refusals precede Store validation.
-Direct validation propagates allocation failure; other validation failures retain the `strip_failed` refusal.
-Validation checks supplied records, so the caller must retain complete parser-owned input.
-Both inputs preserve raw type regions, declaration boundaries, generic capture windows, and ordinary token formatting for type-only modules.
-Legacy preparation retains its existing failure mapping and allocation order.
+`ParsedModule.fromTypedExisting` binds a borrowed syntax store to runtime IR
+and atoms. Single-module analysis borrows that selection through the life of
+the parser result. Graph reparsing supplies a store for each replacement
+module. Contract effects use selected source types; path effects use
+source-free analysis. The printer takes original source and a completed
+parser-owned store so type regions and type-only declarations can be rendered
+without changing ordinary token formatting.
 
 ### Analysis passes
 
@@ -298,7 +176,8 @@ intentionally not attempted: the traversals are not the same traversal.
 
 `ModuleAnalysisSession` owns analysis storage for one parsed module.
 The caller initializes the session in its final address.
-The session borrows parser IR, atoms, type maps, registries, and injected module facts.
+The session borrows parser IR, atoms, the selected parser-owned syntax store,
+registries, and injected module facts.
 The session owns type environments, checkers, internal facts, and pass results.
 
 The session prepares immutable path effect facts only when path analysis requests them.
@@ -307,7 +186,7 @@ Path facts use no registry, type environment, injected module facts, or imported
 An unavailable effect result makes path coverage report recursion conservatively.
 
 The session builds separate contract effect facts during contract extraction.
-These facts retain the selected handler and its legacy property summary.
+These facts retain the selected handler and its property summary.
 They also retain reachability from the first function named `handler`.
 The session builds these facts after late context and custom type checking are complete.
 The contract builder borrows completed module and effect facts.

@@ -227,6 +227,14 @@ The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplifica
 The shared import and binding index shipped. The old parser-deletion estimate
 is obsolete.
 
+The [reset implementation plan](plans/2026-10-14-reset-implementation-plan.md)
+governs the direct typed parser, shared analysis, workspace owner, and retired
+state removal. U1–U20 are committed locally. The
+[worklog](plans/2026-10-15-reset-worklog.md) records test receipts, sandbox
+limits, and the unresolved advisory benchmark result. The historical phase
+plans remain evidence of their own
+completed work, not a second implementation authority.
+
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | Shared IR shape helpers | Deferred | A concrete new consumer, such as a build cache or incremental compile | Identify the repeated shape operation the consumer needs | A shared helper replaces measured duplication and preserves analyzer behavior |

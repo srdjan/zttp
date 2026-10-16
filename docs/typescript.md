@@ -1,6 +1,7 @@
 # TypeScript Support
 
-zttp supports a restricted TypeScript profile. A type stripper removes supported type annotations before parsing.
+zttp supports a restricted TypeScript profile. The parser reads annotations
+and runtime syntax directly from the original source.
 
 Strict ZigTS is the default profile. Named functions must carry explicit
 parameter and return annotations, `any` is rejected, capability access
@@ -15,34 +16,37 @@ conditions, arithmetic, and comparisons.
 
 ---
 
-## Type Stripper
+## Typed Parser
 
-The type stripper (`packages/zts/src/stripper.zig`) removes TypeScript syntax before parsing, preserving line/column positions for error reporting by replacing stripped spans with spaces.
+The parser (`packages/zts/src/parser/parse.zig`) records type syntax in a
+parser-owned store alongside runtime IR. `source_frontend.zig` owns source
+admission and keeps that store alive for analysis. Diagnostics use positions in
+the original source.
 
 ### Supported Subset
 
-**Type declarations** (stripped entirely):
+**Type declarations** (recorded for analysis, absent at runtime):
 - `structural` aliases (including ADT unions)
 - `nominal` declarations (nominal/branded types)
 - `export structural ...` / `export nominal ...` / `import type ...`
 
-**Type annotations** (stripped in place):
+**Type annotations** (recorded for analysis, absent at runtime):
 - Variable annotations: `const x: T = ...` or reassigned `let x: T = ...`
 - Parameter annotations: `function f(x: T) { ... }`
 - Return annotations: `function f(): T { ... }`
 
-**Assertions** (stripped):
+**Assertions** (rejected):
 - `as` assertions: `value as T`
 - `satisfies` assertions: `value satisfies T`
 
-**Basic generics** (stripped):
+**Basic generics** (recorded for analysis, absent at runtime):
 - Generic params on an alias: `structural Box<T> = ...`
 - Generic params on functions: `function id<T>(x: T): T { ... }`
 - Generic arrow functions in .ts files: `const id = <T>(x: T): T => x;`
 
-**Generic type aliases** (stripped and type-checked):
+**Generic type aliases** (recorded and type-checked):
 
-Generic type aliases like `structural Result<T> = { ok: boolean; value: T }` are stripped at load time and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
+Generic type aliases like `structural Result<T> = { ok: boolean; value: T }` are recorded by the parser and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
 
 ```typescript
 structural Result<T> = { ok: boolean; value: T; error: string };
@@ -165,25 +169,25 @@ error, so a warning behind a flag would have covered the same helpers.
 ### Examples
 
 ```typescript
-// Input
+// Accepted source
 structural User = { id: number; name: string };
-let u: User = { id: 1, name: "a" };
+const u: User = { id: 1, name: "a" };
 function add(a: number, b: number): number { return a + b; }
-const x = (foo as number) + 1;
+const x: number = add(u.id, 1);
 
-// After stripping
-let u         = { id: 1, name: "a" };
-function add(a         , b         )          { return a + b; }
-const x = (foo          ) + 1;
+// Conceptual runtime shape (no rewritten source file is produced)
+const u = { id: 1, name: "a" };
+function add(a, b) { return a + b; }
+const x = add(u.id, 1);
 ```
 
 ### Unsupported TypeScript Features
 
-These produce clear error messages at strip or parse time:
+These produce clear errors during parsing:
 
 | Feature | Error Location | Suggested Alternative |
 |---------|---------------|----------------------|
-| `any` type | Stripper | Use specific types or union types |
+| `any` type | Parser | Use specific types or union types |
 | `enum` / `const enum` | Parser | Use object literals or discriminated unions |
 | `namespace` / `module` | Parser | Use ES6 modules |
 | `implements` | Parser | Use duck typing or runtime checks |
@@ -192,7 +196,7 @@ These produce clear error messages at strip or parse time:
 
 ## Type Checking
 
-The type checker (`packages/zts/src/type_checker.zig`) validates type annotations at build time. It runs after stripping and parsing, before bytecode generation.
+The type checker (`packages/zts/src/type_checker.zig`) validates annotations recorded by the parser before bytecode generation.
 
 ### Checked Properties
 
@@ -698,7 +702,7 @@ These tips are not advice in zts. The compiler rejects the alternative.
 Idiom: `any` is a hard error, so a value of unknown shape is typed `unknown` and
 narrowed with a reusable `x is T` predicate before use.
 
-The stripper rejects the `any` type outright (see the unsupported-features
+The parser rejects the `any` type outright (see the unsupported-features
 table in [TypeScript](typescript.md)). That removes the escape hatch the canon
 warns about: there is no `any` to drift into. The only way to use a value of
 unknown shape is to narrow it. A type-guard function plus an `assert` statement
@@ -1028,8 +1032,11 @@ not worth trading for it.
 
 ### Files
 
-- `packages/zts/src/stripper.zig` - TypeScript stripper and source map.
+- `packages/zts/src/parser/parse.zig` - TypeScript and runtime parsing.
+- `packages/zts/src/source_frontend.zig` - Source admission and parser-result ownership.
+- `packages/zts/src/type_env.zig` - Semantic types from parser-owned syntax.
 
 ### Build-Time Integration
 
-The stripper runs as a prepass for `.ts` sources before zts parsing. The runtime parser receives stripped output.
+The parser reads `.ts` source directly. Type-only syntax is absent from runtime
+IR; the type environment lowers it from the parser-owned store for analysis.
