@@ -368,3 +368,31 @@ file, while the built-in case uses virtual JavaScript.
 
 The performance gate remains unresolved. No runtime code, benchmark policy,
 or baseline was changed on this evidence.
+
+## Historical benchmark narrowing (2026-10-17)
+
+The September 28 checkpoint (`4d18c679`) builds with the same Zig 0.16.0
+toolchain. Fifteen alternating baseline/midpoint/current runs of the built-in
+suite show that the best `intArithmetic` result overlaps across all three:
+21,240,441, 21,222,410, and 21,141,649 ops/s. The corresponding
+`propertyAccess` medians are 18,416,206, 18,057,060, and 17,253,278
+ops/s; each revision's best result exceeds 18.8 million. This spread makes
+a five-run absolute comparison an unstable way to attribute a source change.
+
+The runner's execution-only `propertyAccess` probe gives a clearer trend.
+Across 15 alternating triplets, September, midpoint, and current medians are
+18,879,323, 18,483,605, and 17,798,661 ops/s. Fifteen idle-host pairs of
+the October 15 reset checkpoint (`ad1aa961`) and current give medians of
+17,963,641 and 17,901,256 ops/s, so the recent reset does not explain the
+gap. All of these probes report five million inline-cache hits in five
+million accesses.
+
+To check the October 7 match-pattern series, 20 alternating execution-only
+pairs used its preceding revision (`a990caf8`) and final revision
+(`bdc23b06`). Their medians are 18,173,227 and 18,091,034 ops/s; their
+ranges overlap. The 392 added lines in `interpreter.zig` in that series are
+tests, and the 20 commits from the September 28 midpoint to the preceding
+revision do not change the interpreter, object, inline-cache, context, or GC
+source files. These measurements do not identify a source-level cause. The
+official `bench-check` remains red; the baseline and gate policy remain as
+committed.
