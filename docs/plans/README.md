@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Weak test assertion census](2026-10-17-weak-assertion-census-plan.md) | Complete 2026-10-17; 576 rows classified, 127 weak assertions fixed with sabotage evidence; results in the [worklog](2026-10-17-weak-assertion-census-worklog.md) | Owner set the goal to finish Item 4 (the census) |
 | [Reset implementation](2026-10-14-reset-implementation-plan.md) | U1–U20 committed locally; final gate and benchmark limits are in the [worklog](2026-10-15-reset-worklog.md) | Owner reviewed the plan and authorized implementation with subagents and Astra verification |
 | [Zig agent spine](2026-10-14-agent-spine-plan.md) | Complete 2026-10-14; full local gate passed, with evidence in the [worklog](2026-10-14-agent-spine-worklog.md) | Owner selected Option A and approved the full local gate |
 | [Plan 005 Phase 3: language and orchestration removal](2026-10-12-1444-refactor-feature-removal-phase-three-plan.md) | Active 2026-10-12; reviewed sequence and evidence in the [worklog](2026-10-12-feature-removal-phase-3-worklog.md) | Owner authorized Phase 3 and its complete DeepSeek recording with "go ahead with phase 3" |

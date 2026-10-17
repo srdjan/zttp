@@ -1,6 +1,7 @@
 # Weak test assertion census
 
-Date: 2026-10-17. Status: revision 2, after a Fable review. A Codex astra fact
+Date: 2026-10-17. Status: complete; results are in the
+[worklog](2026-10-17-weak-assertion-census-worklog.md). Revision 2, after a Fable review. A Codex astra fact
 check did not run, because that account was at its usage limit. Opus measured
 the counts and checked the build-step names directly.
 
@@ -28,8 +29,9 @@ Measured: 575 lines in 111 files. By package: `packages/zts` 395,
 `packages/tools` 81, `packages/pi` 52, `packages/runtime` 34,
 `packages/proof-checker` 10, `packages/modules` 2, `tooling` 1. The pattern
 misses an `expect(` call that spans lines. Thirteen lines end with `expect(`.
-Opus read all 13, and one of them is in the class:
-`packages/zts/src/typed_frontend_tests.zig:507`. The set is therefore 576 rows.
+Opus read all 13, and one of them is in the class: the disjunction in
+`expectDirectAccepted` (`packages/zts/src/typed_frontend_tests.zig#expectDirectAccepted`).
+The set is therefore 576 rows.
 
 ## Verdicts
 
