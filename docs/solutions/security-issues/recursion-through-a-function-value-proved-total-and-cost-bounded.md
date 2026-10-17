@@ -41,19 +41,19 @@ The termination claims `total` (a helper's Proof capsule) and `cost_bounded` (a 
 
 Stop judging each call. Judge whether any function value can escape, and refuse termination claims for the whole module when one does.
 
-A function value escapes when it appears anywhere outside a closed position (`scanFunctionValueEscapes`, `packages/zts/src/effect_inference.zig:1749`):
+A function value escapes when it appears anywhere outside a closed position (`scanFunctionValueEscapes` in `packages/zts/src/effect_inference.zig`):
 
 - P0: the declaration site of a function literal.
 - P1: the callee of a call by name, where the name is not a `let`, or is an import.
-- P2: the first argument of a listed array builtin (`callback_methods`, `effect_inference.zig:1695`), on a receiver that is not a function-holding module binding, when the argument is not a `let`-bound name.
-- P2b: a function argument of an allowlisted `zttp:result` export (`callback_imports`, `effect_inference.zig:1706`). Each entry is added only after its native implementation is read, to confirm that it calls the callback and does not return or keep it.
+- P2: the first argument of a listed array builtin (`callback_methods` in `packages/zts/src/effect_inference.zig`), on a receiver that is not a function-holding module binding, when the argument is not a `let`-bound name.
+- P2b: a function argument of an allowlisted `zttp:result` export (`callback_imports` in `packages/zts/src/effect_inference.zig`). Each entry is added only after its native implementation is read, to confirm that it calls the callback and does not return or keep it.
 - P3: a value in a module `const` route table whose every reference is a stable `routerMatch` first argument.
 
-When any function value escapes, `CapsuleFacts.holds` refuses `total` for every function (`packages/zts/src/spec_discharge.zig:523`), and the cost envelope is unbounded, which refuses `cost_bounded`. Each refusal names the first escaping site. Three additions close the remaining gaps:
+When any function value escapes, `CapsuleFacts.holds` refuses `total` for every function (`packages/zts/src/spec_discharge.zig`), and the cost envelope is unbounded, which refuses `cost_bounded`. Each refusal names the first escaping site. Three additions close the remaining gaps:
 
-- A function passed as a callback argument inside its own body marks itself recursive (`effect_inference.zig:1689`).
-- `cost_bounded` also requires that the handler's propagated row is not a lower bound (`packages/zts/src/path_generator.zig:1087`). This covers a call by name to a nested function or a body-local closure, which has no collected-function edge.
-- A reference to a relative import whose module escapes, or whose result was not supplied, is itself an escape of the importing module (`referencesEscapingSibling`, `effect_inference.zig:1842`).
+- A function passed as a callback argument inside its own body marks itself recursive (`recordFunctionValueArg` in `packages/zts/src/effect_inference.zig`).
+- `cost_bounded` also requires that the handler's propagated row is not a lower bound (`packages/zts/src/path_generator.zig`). This covers a call by name to a nested function or a body-local closure, which has no collected-function edge.
+- A reference to a relative import whose module escapes, or whose result was not supplied, is itself an escape of the importing module (`referencesEscapingSibling` in `packages/zts/src/effect_inference.zig`).
 
 The cost path now receives the sibling-module results (`pipeline.zig`, `pathEffectFacts`). Without them, every handler that called a relative-import helper lost `cost_bounded` under the lower-bound rule.
 
