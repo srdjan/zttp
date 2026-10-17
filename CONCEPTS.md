@@ -39,6 +39,11 @@ The compiler's inferred summary of what one function does when it runs: the Capa
 
 A row is an over-approximation only when the analysis resolved every callee. A call through a value it could not resolve makes the row a lower bound, and a lower bound proves no Property. A demotion is decided from what the callee reaches, never from what the call added to the row, because an exemption earlier in the function can leave a bit in the row without its consequence.
 
+### Escaped function value
+A function used as a value anywhere other than the few places where the compiler can see every call it makes: its own declaration, a call by a name that cannot be reassigned, a callback slot of a built-in that calls it and keeps nothing, or a stable route table. Once one escapes, a call through it may run any function with no call-graph edge, so the module proves no termination Property.
+
+The refusal covers the whole module, not only the functions near the escape, because a function value can travel through arguments and return values to code that never names it. A module that imports from a sibling module with an escape, or from one whose analysis result is unknown, counts as escaping too.
+
 ### Failure severity
 How the fault-coverage Property treats a built-in function's failure: critical (a success response on the failure path is a warning), expected (a success response is normal degradation), upstream (an external service failed, and a success response is reported as a fallback), or none (the function is not counted). Every call to a function with a severity other than none must have an explicit failure path before the Handler is fault-covered.
 
