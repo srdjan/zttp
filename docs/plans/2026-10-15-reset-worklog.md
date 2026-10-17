@@ -250,3 +250,39 @@ and policy hash comparison pass. `zig fmt --check` over `build.zig`, `build/`,
 U17, U18, and U19 have separate local main commits. U20 closes in the commit
 that carries this worklog. The unrelated untracked sibling-module plan remains
 untouched and excluded from every commit.
+
+## Post-U20 verification follow-up (2026-10-17)
+
+The sandbox still refuses a loopback `127.0.0.1` listener with `EPERM`, so the
+full `scripts/verify.sh` network suites cannot pass here. The aggregate
+`zig build test` at `e56636a9` reaches 8,677 of 8,709 tests passed, six
+skipped, 24 failed, and two crashed. Its eight failed roots have the same
+loopback-dependent failure classes as U20; no new full-script verdict is
+claimed. This checkout remains local and unpushed.
+
+Two more `bench-check` runs fail against the committed September baseline, one
+on `intArithmetic` by 10.48% and one on `stringOps` by 11.59%. The built-in
+timer includes parse, compile, and execution in `loadCodeNoHandler`; its
+`ops_per_sec` is not an execution-only measure. The benchmark programs and
+their reported interpreter and optimization counters match the baseline.
+
+To separate source changes from host conditions, the September source commit
+`e8e2c0dc` was built from a temporary `git archive` with the same Zig 0.16.0
+binary as this checkout. Fifteen alternating `zig build bench -- --json --quiet`
+runs per source used the same machine and the suite's per-benchmark best
+aggregation. The comparison was not a new checked-in baseline:
+
+| Benchmark | September source built today | Current source built today | Current difference |
+| --- | ---: | ---: | ---: |
+| `stringOps` | 19,047,619 ops/s | 18,726,591 ops/s | -1.69% |
+| `propertyAccess` | 18,037,518 ops/s | 16,784,155 ops/s | -6.95% |
+| `gcPressure` | 7,693,491 ops/s | 7,321,716 ops/s | -4.83% |
+
+Every current case is within 8% of its same-host September-source result.
+The September source itself reaches only 19,047,619 `stringOps` ops/s today,
+7.62% below its committed 20,618,556 ops/s result. Host load was elevated
+during these measurements, and the same-host differences are still noisy;
+they do not establish that the remaining gaps are source regressions. The
+committed `bench-check` still fails, its baseline remains unchanged, and
+release readiness still requires an unsandboxed full verification run and a
+quiet-host benchmark rerun or further controlled investigation.
