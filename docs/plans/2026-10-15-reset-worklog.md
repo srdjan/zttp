@@ -309,3 +309,33 @@ respectively. Every current case is within 8% of the archived source's
 same-host best over these 15 runs. This comparison is diagnostic, not a
 passing `bench-check`: the official five-run gate remains red, and the
 remaining property and allocation gaps have no established source cause.
+
+## Property benchmark investigation (2026-10-17)
+
+The benchmark build settings match the September source: `zttp-bench` uses
+ReleaseFast in both. The engine's property access hot path has no direct source
+change since that baseline. The built-in timer wraps `loadCodeNoHandler`, so
+it includes parsing, code generation, and the first 50,000-iteration call.
+
+An archived U1 reset checkpoint (`ad1aa961`) and the current source were run
+in 15 alternating built-in benchmark pairs. `propertyAccess` reached
+17,831,669 versus 16,914,749 ops/s by per-source best (-5.14% current).
+Interpreter and optimization counters matched for all thirteen cases. This
+comparison includes cold compilation and execution and does not isolate the
+cause of the difference.
+
+The runner's existing `--script --bench` mode timed an exact copy of its
+`propertyAccess` function after loading, using a temporary `.ts` file outside
+the repository. In 20 paired, warmed 500,000-iteration calls, the best results
+were 16,879,346 for U1 and 16,919,901 ops/s for current (+0.24%). In 40
+paired, unwarmed 50,000-iteration calls, the best results were 17,295,053
+and 17,059,024 ops/s (-1.36%). Those runs use the typed file path rather
+than the built-in virtual JavaScript path, so they are a runtime-path probe,
+not a substitute for `bench-check`.
+
+The host was saturated during this follow-up: load average reached 17.72,
+`top` reported 0% CPU idle, and many independent Deno processes were active.
+Run medians moved far more than the best results. The evidence does not
+justify changing property access code or replacing the baseline. A new
+five-run gate measurement needs an idle host before source attribution or a
+release performance verdict.
