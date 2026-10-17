@@ -973,7 +973,8 @@ test {
 // engine_root.zig, the module that owns them.
 
 test "version" {
-    try std.testing.expectEqualStrings("0.22.2", version.string);
+    // The value is checked against VERSION by the release-check drift test.
+    _ = try std.SemanticVersion.parse(version.string);
 }
 
 test "ContractProof projects proof metadata through the stable surface" {
