@@ -442,7 +442,10 @@ test "prepared snapshot clamps output to the model capacity left after input" {
     const before_hash = snapshot.request_context_sha256;
     try snapshot.completePreparation(wire_body);
 
+    const window = context_budget.limitsForModel(.local, "LiquidAI/LFM2.5-2.6B-MLX-8bit").context_window_tokens;
+    const remaining = window - snapshot.budget.?.tokens.total;
     try testing.expect(try snapshot.clampOutputToRemainingContext());
+    try testing.expectEqual(@as(u32, @intCast(remaining)), snapshot.config.max_output_tokens);
     try testing.expect(snapshot.config.max_output_tokens < 8_192);
     try testing.expect(snapshot.config.max_output_tokens > 0);
     try testing.expect(snapshot.budget == null);

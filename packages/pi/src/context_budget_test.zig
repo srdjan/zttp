@@ -169,7 +169,7 @@ test "current repository full preset fixed prefix meets U2 budget and stays stab
     try testing.expectEqual(@as(u64, tools_json.len), budget.bytes.tools);
     try testing.expectEqual(@as(u64, 0), budget.bytes.history);
     try testing.expectEqual(@as(u64, 0), budget.bytes.transient);
-    try testing.expect(budget.bytes.framing > 0);
+    try testing.expectEqual(@as(u64, body.len - prompt.len - tools_json.len), budget.bytes.framing);
     try testing.expectEqual(@as(u64, body.len), budget.bytes.wire);
     try testing.expect(budget.tokens.total <= fixed_prefix_target_tokens);
     try testing.expect(
@@ -218,7 +218,12 @@ test "request preparation accounts all visible components and exact wire bytes" 
 
     try testing.expectEqual(@as(u64, snapshot.config.system_prompt.len), budget.bytes.system);
     try testing.expectEqual(@as(u64, snapshot.config.tools_json.?.len), budget.bytes.tools);
-    try testing.expect(budget.bytes.history > 0);
+    // History is every transcript string the model sees: the user text, both tool
+    // calls (id, name, args), the one result (id, name, text), and the system note.
+    var expected_history: u64 = "inspect the project".len + "export default 1;".len + "checkpoint context".len +
+        "call_1".len + "workspace_read_file".len;
+    for (calls) |call| expected_history += call.id.len + call.name.len + call.args_json.len;
+    try testing.expectEqual(expected_history, budget.bytes.history);
     try testing.expectEqual(@as(u64, snapshot.extra_user_text.?.len), budget.bytes.transient);
     try testing.expectEqual(@as(u64, body.len), budget.bytes.wire);
     try testing.expectEqual(

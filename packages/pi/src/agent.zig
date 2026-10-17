@@ -4894,8 +4894,9 @@ test "gate log: a session turn carries its identity into the record" {
 
     try testing.expectEqual(@as(usize, 2), collector.records.items.len);
     try testing.expectEqualStrings("sess-42", collector.records.items[0].session_id);
-    // Host-assigned, from the classifier the host already runs.
-    try testing.expect(collector.records.items[0].task_class.len > 0);
+    // Host-assigned, from the classifier the host already runs. No needle in
+    // expert_workflow.classify matches this text, so the kind is the default.
+    try testing.expectEqualStrings("unknown", collector.records.items[0].task_class);
     // The ordinal advances, so a niche's turns can be ordered.
     try testing.expectEqual(@as(u32, 0), collector.records.items[0].turn_index);
     try testing.expectEqual(@as(u32, 1), collector.records.items[1].turn_index);

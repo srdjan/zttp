@@ -693,6 +693,8 @@ test "simulator recorder promotes and replays a compacted two-Turn flow" {
             }
             try testing.expect(completed.estimated_input_tokens >= completed.logical_input_tokens);
             try testing.expect(completed.reported_input_tokens > 0);
+            // The first call replays the fixture response, which reports 379 prompt tokens.
+            if (index == 0) try testing.expectEqual(@as(u64, 379), completed.reported_input_tokens);
             try testing.expectEqual(completed.reported_input_tokens, completed.logical_input_tokens);
             try testing.expectEqual(
                 context_budget.InputObservationSource.provider_reported,
@@ -753,6 +755,14 @@ test "simulator recorder promotes and replays a compacted two-Turn flow" {
                     checkpoint.projection_first_kept_entry_id != null;
             }
             try testing.expect(stored_projection_cut);
+            // Each stored checkpoint agrees with the live event for the same call.
+            for (flow_case.trace.model_calls, progress_probe.events.items) |checkpoint, event| switch (event) {
+                .model_call_completed => |completed| {
+                    try testing.expectEqual(@as(?u64, completed.reported_input_tokens), checkpoint.normalized_input_tokens);
+                    try testing.expectEqual(completed.wire_bytes, checkpoint.request_budget.?.bytes.wire);
+                },
+                .model_call_failed => return error.TestUnexpectedResult,
+            };
             var runner = runner_mod.Runner.init(testing.allocator, flow_case, &registry, request_config);
             const replay = try runner.run();
             try testing.expectEqual(@as(usize, 2), replay.turns);

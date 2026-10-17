@@ -225,6 +225,7 @@ test "in-process publisher answers a zttp:sql handler with a result, not a Zig e
     var result = try renderFromSource(testing.allocator, source, "handler.ts", "handler.ts");
     defer result.deinit(testing.allocator);
     try testing.expect(result.llm_text.len > 0);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"holes\":[{") != null);
 }
 
 test "a projection too large for one result comes back trimmed, not as an error" {

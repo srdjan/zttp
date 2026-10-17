@@ -540,6 +540,7 @@ test "candidateFromSource verifies a guard repair in memory" {
     try testing.expect(cand.proposed_content != null);
     try testing.expect(std.mem.indexOf(u8, cand.proposed_content.?, "if (!result.ok)") != null);
     try testing.expect(cand.plan_ids.len >= 1);
+    try testing.expect(std.mem.indexOf(u8, cand.plans_json, cand.plan_ids[0]) != null);
 }
 
 test "candidateFromSource reports already_satisfied for a clean handler" {

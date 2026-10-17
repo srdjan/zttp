@@ -482,6 +482,15 @@ test "process result uses a bounded UTF-8-safe digest and preserves full UI outp
     try testing.expect(!stdout_digest.get("complete").?.bool);
     try testing.expect(stdout_digest.get("omitted_bytes").?.integer > 0);
     try testing.expectEqual(@as(i64, @intCast(stdout.items.len)), stdout_digest.get("total_bytes").?.integer);
+    // The digest accounts for every byte: head, tail, and the omitted middle.
+    const head = stdout_digest.get("head").?.string;
+    const tail = stdout_digest.get("tail").?.string;
+    try testing.expect(std.mem.startsWith(u8, stdout.items, head));
+    try testing.expect(std.mem.endsWith(u8, stdout.items, tail));
+    try testing.expectEqual(
+        @as(i64, @intCast(stdout.items.len - head.len - tail.len)),
+        stdout_digest.get("omitted_bytes").?.integer,
+    );
 
     switch (result.ui_payload.?) {
         .command_outcome => |payload| try testing.expectEqualStrings(stdout.items, payload.stdout),

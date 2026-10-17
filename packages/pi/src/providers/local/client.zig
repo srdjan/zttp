@@ -1864,5 +1864,4 @@ test "local client exposes the loop-facing request signature" {
     var client = Client.init(.{ .system_prompt = "s" });
     const model_client = client.asModelClient();
     try testing.expect(model_client.context == @as(*anyopaque, @ptrCast(&client)));
-    try testing.expect(@intFromPtr(model_client.request_fn) != 0);
 }

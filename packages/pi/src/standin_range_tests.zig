@@ -342,7 +342,16 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
         switch (outcome.reply.response) {
             .final_text => |text| switch (entry.action) {
                 .answer => try testing.expect(text.len >= 120),
-                .change_set => try testing.expect(text.len > 0),
+                .change_set => {
+                    // The seeded fix arm reaches its repair step here, and no draft was
+                    // rejected, so it says there is nothing to repair. Every other arm
+                    // is past its last step.
+                    const expected = if (std.mem.eql(u8, entry.id, "fix"))
+                        "there is nothing to repair."
+                    else
+                        "No further step is available.";
+                    try testing.expect(std.mem.endsWith(u8, text, expected));
+                },
                 .blocked => try testing.expect(std.mem.indexOf(u8, text, "source-only") != null),
             },
             else => return error.ExpectedFinalText,

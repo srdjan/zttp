@@ -2224,7 +2224,11 @@ test "autoReject returns false for any preview" {
 }
 
 test "ApprovalPolicy enum is exported" {
-    try testing.expect(@sizeOf(ApprovalPolicy) > 0);
+    const fields = std.meta.fields(ApprovalPolicy);
+    try testing.expectEqual(@as(usize, 3), fields.len);
+    try testing.expectEqualStrings("ask", fields[0].name);
+    try testing.expectEqualStrings("auto_approve", fields[1].name);
+    try testing.expectEqualStrings("auto_reject", fields[2].name);
 }
 
 test "replay_mode skips filesystem writes for a verified edit" {
@@ -2385,7 +2389,17 @@ test "verified edit path appends one aggregate receipt before the proof card" {
                     try testing.expectEqualStrings("absent", payload.changes[0].baseline_state);
                     try testing.expect(payload.changes[0].before == null);
                     try testing.expectEqualStrings(clean_handler, payload.changes[0].after);
-                    try testing.expect(payload.proof_inputs.len > 0);
+                    // One proof input per snapshot entry; the written file is among them,
+                    // absent before the write.
+                    var found_handler = false;
+                    for (payload.proof_inputs) |input| {
+                        try testing.expectEqual(@as(usize, 64), input.sha256.len);
+                        if (std.mem.eql(u8, input.path, "handler.ts")) {
+                            try testing.expectEqualStrings("absent", input.state);
+                            found_handler = true;
+                        }
+                    }
+                    try testing.expect(found_handler);
                 },
                 else => return error.TestFailed,
             }

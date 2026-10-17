@@ -367,7 +367,7 @@ test "contract gate: every failure reason has a distinct stable label" {
         .enum_violation,   .malformed_schema,
     };
     for (reasons, 0..) |a, i| {
-        try testing.expect(reasonLabel(a).len > 0);
+        try testing.expectEqualStrings(@tagName(a), reasonLabel(a));
         for (reasons[i + 1 ..]) |b| {
             try testing.expect(!std.mem.eql(u8, reasonLabel(a), reasonLabel(b)));
         }

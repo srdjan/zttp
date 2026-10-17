@@ -663,7 +663,7 @@ test "broken handler (var) fails the veto and body surfaces ZTS001" {
     try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"ZTS001\"") != null);
     try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"introduced_by_patch\":true") != null);
     try testing.expect(result.outcome.ui_payload != null);
-    try testing.expect(result.report.new >= 1);
+    try testing.expectEqual(@as(u32, 1), result.report.new);
 }
 
 test "failedVetoWithGuidance yields a failed veto with actionable guidance" {
@@ -833,7 +833,7 @@ test "pre-existing violation with matching before passes the veto" {
     try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"introduced_by_patch\":false") != null);
     try testing.expect(std.mem.indexOf(u8, result.outcome.llm_text, "\"new\":0") != null);
     try testing.expectEqual(@as(u32, 0), result.report.new);
-    try testing.expect(result.report.preexisting >= 1);
+    try testing.expectEqual(@as(u32, 1), result.report.preexisting);
 }
 
 test "runVeto output fits turn.TurnMachine edit_verified event path" {
@@ -849,7 +849,7 @@ test "runVeto output fits turn.TurnMachine edit_verified event path" {
     try testing.expectEqual(turn.TurnState.done, machine.state);
     switch (action) {
         .render => |msg| switch (msg) {
-            .proof_card => |body| try testing.expect(body.llm_text.len > 0),
+            .proof_card => |body| try testing.expectEqualStrings(result.outcome.llm_text, body.llm_text),
             else => return error.TestFailed,
         },
         else => return error.TestFailed,
