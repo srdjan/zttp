@@ -12112,6 +12112,20 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\  return Response.json({ v: loop((g: Step): number => loop(g)) });
         \\}
         },
+        // A function declared in a body, handed to a builtin that calls it.
+        .{ .name = "n1", .total_refused = true, .source =
+        \\function down(n: number): Proof<number, "total"> {
+        \\  function g(x: number): number {
+        \\    const xs: number[] = [x];
+        \\    return xs.map(g)[0] ?? x;
+        \\  }
+        \\  const seed: number[] = [n];
+        \\  return seed.map(g)[0] ?? n;
+        \\}
+        \\function handler(req: Request): Proof<Response, "cost_bounded"> {
+        \\  return Response.json({ v: down(3) });
+        \\}
+        },
         // Direct self-recursion by name stays refused.
         .{ .name = "p2r", .total_refused = true, .source =
         \\function down(n: number): Proof<number, "total"> {

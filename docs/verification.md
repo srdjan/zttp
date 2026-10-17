@@ -417,9 +417,12 @@ call graph, so recursion through it is invisible. The module then proves no
 site. A reference to a relative import counts as such a site when the
 imported module has one of its own, or when its result is unknown. A function value is not an escape when it is declared once and called by
 name, passed as the first argument of `map`, `filter`, `forEach`, `reduce`,
-`some`, `every`, `find`, `findIndex`, `flatMap`, or `sort`, passed to
-`mapResult`, `andThen`, `mapError`, or `orElse`, or held as a value of a route
-table that only `routerMatch` reads. The handler also loses `cost_bounded` when
+`some`, `every`, `find`, `findIndex`, `flatMap`, or `sort`, passed as the
+callback argument of `mapResult`, `andThen`, `mapError`, or `orElse`, or held
+as a value of a route table that only `routerMatch` reads. A callback argument
+is closed only when it is an inline function, an import, or a module-level
+function: a function declared inside another function has no call-graph edge,
+so passing it to `map` is an escape. The handler also loses `cost_bounded` when
 its effect row is a lower bound, for example when it calls a closure declared
 in its own body.
 

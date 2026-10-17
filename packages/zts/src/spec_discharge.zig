@@ -512,7 +512,8 @@ pub const CapsuleFacts = struct {
     /// still charges the value, so the other properties are unaffected.
     function_value_escape: bool = false,
     /// Where the escape sits in this function's own module. Null when the
-    /// escape comes from a sibling module. Borrowed from the effect facts.
+    /// escape comes from a sibling module. Borrowed from the effect facts, so
+    /// only `dischargeCapsule` reads it; a stored capsule holds null.
     escape_site: ?effect_inference.FunctionValueEscape = null,
 
     pub fn holds(self: CapsuleFacts, prop: CapsuleProperty) bool {

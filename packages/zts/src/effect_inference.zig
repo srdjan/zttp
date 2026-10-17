@@ -594,9 +594,10 @@ pub const Analyzer = struct {
 
         for (self.functions.items, 0..) |fe, function_index| {
             if (!fe.exported) continue;
+            // `computeBaseEffects` already set `function_value_escape` on every
+            // function row of an escaping module.
             var row = fe.row;
             row.recursive = reaches_recursion[function_index];
-            if (self.function_value_escape != null) row.function_value_escape = true;
             entries[filled] = .{
                 .name = try self.allocator.dupe(u8, fe.name),
                 .effect = .{ .callable = row },
@@ -1749,8 +1750,10 @@ pub const Analyzer = struct {
     ///   or `let` with an arrow or function initializer).
     /// - P1: the callee of a call by name, when the name is not a `let`.
     /// - P2: the first argument of `R.m(...)` with `m` in `callback_methods`,
-    ///   when `R` is not a module binding that holds functions.
-    /// - P2b: a function argument of an export in `callback_imports`.
+    ///   when `R` is not a module binding that holds functions, and the
+    ///   argument is a function literal, an import, or a collected function.
+    /// - P2b: the callback argument (argument 1) of an export in
+    ///   `callback_imports`, under the same rule for the argument.
     /// - P3: a property value of a module `const` object literal whose every
     ///   reference is the first argument of a `routerMatch` call, when every
     ///   route dispatch in the module is stable.
@@ -1797,11 +1800,13 @@ pub const Analyzer = struct {
                 if (self.functionValueRef(call.callee, &declared)) |ref| {
                     if (!ref.reassignable) closed[call.callee] = true;
                 }
-                if (self.isCallbackImport(call.callee)) {
-                    for (0..call.args_count) |i| {
-                        const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
-                        self.closeFunctionArgument(arg, &declared, closed);
-                    }
+                // Only the callback slot (argument 1) is closed. Each combinator
+                // returns its first argument unchanged when that argument is
+                // not a native Result (`resultMap` and its siblings in
+                // `builtins/result.zig`), so a function there comes back out as
+                // a value with no call-graph edge.
+                if (call.args_count > 1 and self.isCallbackImport(call.callee)) {
+                    self.closeFunctionArgument(self.ir_view.getListIndex(call.args_start, 1), &declared, closed);
                 }
             } else if (callee_tag == .member_access and call.args_count > 0 and
                 self.isCallbackMethod(call.callee))
@@ -1899,8 +1904,15 @@ pub const Analyzer = struct {
         return .{ .reassignable = declared.get(binding.name_atom) orelse false };
     }
 
-    /// Close `arg` when it is a function literal or a reference to a function
-    /// value that no assignment can change.
+    /// Close `arg` when it is a function literal, or a reference that no
+    /// assignment can change to an import or a collected function.
+    ///
+    /// A callback slot is closed only where `recordFunctionValueArg` gives the
+    /// callee a call-graph edge, and that edge exists only for a collected
+    /// function. A function declared in a body (`function g` or `const g = ...`
+    /// inside another function) has none: `xs.map(g)` inside `g` left no cycle
+    /// and proved `total` and `cost_bounded` for a recursion without end. Such
+    /// a reference stays open, so the final pass reports it as an escape.
     fn closeFunctionArgument(
         self: *const Analyzer,
         arg: NodeIndex,
@@ -1913,7 +1925,10 @@ pub const Analyzer = struct {
             .function_expr, .arrow_function => closed[arg] = true,
             .identifier => {
                 const ref = self.functionValueRef(arg, declared) orelse return;
-                if (!ref.reassignable) closed[arg] = true;
+                if (ref.reassignable) return;
+                const binding = self.ir_view.getBinding(arg) orelse return;
+                if (self.importOf(binding) == null and self.userFnOf(binding) == null) return;
+                closed[arg] = true;
             },
             // exhaustive: any other expression is not a function value, or
             // holds one the final pass judges on its own.
@@ -4910,6 +4925,13 @@ test "a function value outside the closed positions sets the escape flag" {
         .{ .name = "an anonymous function", .source = "const ops = { a: (n) => n };\nfunction handler(k) { return k; }" },
         .{ .name = "an anonymous function", .source = "function handler(k) { return ((n) => n)(k); }" },
         .{ .name = "down", .source = "function down(n) { for (const f of [down]) { return f(n); } return n; }" },
+        // A body-local function has no call-graph edge, so a callback slot
+        // does not close it: recursion through `map` would leave no cycle.
+        .{ .name = "g", .source = "function handler(k) { function g(x) { return [x].map(g)[0]; } return [k].map(g); }" },
+        .{ .name = "g", .source = "function handler(k) { const g = (x) => [x].map(g)[0]; return [k].map(g); }" },
+        // A combinator returns a first argument that is not a Result
+        // unchanged, so only its callback slot is closed.
+        .{ .name = "down", .source = "import { mapResult } from \"zttp:result\";\nfunction down(n) { return mapResult(down, (x) => x)(n); }" },
     };
     for (cases) |case| try expectEscape(case.source, case.name);
 }
