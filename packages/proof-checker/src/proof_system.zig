@@ -294,7 +294,7 @@ test "every property states its subject and names itself" {
     inline for (@typeInfo(Property).@"enum".fields) |field| {
         const p: Property = @enumFromInt(field.value);
         if (p.subjectIsEntryFunction()) entry_function_subjects += 1;
-        try std.testing.expect(p.name().len > 0);
+        try std.testing.expectEqualStrings(field.name, p.name());
     }
     // Exactly one property is about a named IR member. If that stops being
     // true, obligation reconstruction has to change with it.

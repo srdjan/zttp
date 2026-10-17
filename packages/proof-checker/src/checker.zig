@@ -1689,7 +1689,7 @@ test "a guarded artifact is accepted, and its guards are counted apart from its 
     try testing.expectEqual(@as(u32, 1), result.guards.required);
     try testing.expectEqual(@as(u32, 1), result.guards.covered);
     try testing.expect(result.guards.ready());
-    try testing.expect(result.guards.kinds & (@as(u8, 1) << 0) != 0);
+    try testing.expectEqual(@as(u8, 1 << 0), result.guards.kinds);
 
     // A covered guard is not a discharged property. Nothing about the guard
     // appears in the property verdicts, and the grade is still the weakest
@@ -3137,7 +3137,9 @@ test "scratch smaller than the kernel needs is refused rather than truncated" {
 test "scratchBytes covers two bits per node at the configured bound" {
     const needed = scratchBytes(.{ .max_ir_nodes = 64, .max_witnesses = 4 });
     try testing.expectEqual(@as(usize, 176), needed);
-    try testing.expect(scratchBytes(.{}) > 0);
+    // Defaults: 65536 nodes give 8192 bytes per bit array (two arrays), 2 bytes of
+    // depth per node, and 8 bytes of range stack per witness (65536 witnesses).
+    try testing.expectEqual(@as(usize, 8192 * 2 + 65_536 * 2 + 65_536 * 8), scratchBytes(.{}));
 }
 
 const ReasonProbe = enum { root_mismatch, zero_root, trailing_member, missing_evidence, fabricated_totality };

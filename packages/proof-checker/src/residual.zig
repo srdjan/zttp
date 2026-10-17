@@ -513,7 +513,7 @@ test "every alphabet member round trips and names itself" {
         inline for (@typeInfo(T).@"enum".fields) |field| {
             const member: T = @enumFromInt(field.value);
             try testing.expectEqual(@as(?T, member), T.fromWire(field.value));
-            try testing.expect(member.name().len > 0);
+            try testing.expectEqualStrings(field.name, member.name());
         }
         try testing.expectEqual(@as(?T, null), T.fromWire(0));
         try testing.expectEqual(@as(?T, null), T.fromWire(200));
