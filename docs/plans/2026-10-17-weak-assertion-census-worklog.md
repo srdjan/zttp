@@ -54,7 +54,7 @@ The table counts keep rows that the audit found weak.
 No kind passed the 5 percent threshold, so no kind was re-run. The accepted
 residual is about 13 weak rows still labelled `FLOOR`, estimated from the
 sample rate. The 3 rows that the audit found were fixed in round E. Opus
-rejected 2 audit tautologies (`typed_frontend_tests.zig:661` and `:1811`):
+rejected 2 audit tautologies (`typed_frontend_tests.zig` (ledger lines 661 and 1811)):
 they check that the counting allocator is wired in, and they fail if it is not.
 
 ## Fixes and sabotage evidence
@@ -70,25 +70,25 @@ break first: `typed_frontend_tests.zig` 1200, 1289, 1292, 1293, 1294 and
 
 Derivations that the run corrected, not defects:
 
-- `precompile.zig:4300`: the default profile also raises ZTS611, so
+- `precompile.zig` (ledger line 4300): the default profile also raises ZTS611, so
   `canonical_errors` is the sum of the ZTS610 and ZTS611 counts.
-- `arena.zig:500`: the arena rounds a request up to 8 bytes.
-- `proof_ir.zig:1031`: both `env` and `Response.text` lower to a capability call.
-- `standin_range_tests.zig:345`: the `fix` arm ends with a different fixed sentence.
-- `runtime_pool.zig:2003`: the old line already refused the named break. The
+- `arena.zig` (ledger line 500): the arena rounds a request up to 8 bytes.
+- `proof_ir.zig` (ledger line 1031): both `env` and `Response.text` lower to a capability call.
+- `standin_range_tests.zig` (ledger line 345): the `fix` arm ends with a different fixed sentence.
+- `runtime_pool.zig` (ledger line 2003): the old line already refused the named break. The
   exact count catches over-counting instead.
 
 ## Open and deferred rows
 
-- `precompile.zig:4796` stays weak. The classifier derived that the handler
+- `precompile.zig` (ledger line 4796) stays weak. The classifier derived that the handler
   hole lists `deterministic`, and the run did not. Opus probed the cause. The
   handler reports `deterministic: true` only when the `uuid()` result is
   discarded. When the value reaches the response, directly or through a
   helper, `deterministic` is false. So this is not a fail-open. No independent
   oracle for the handler hole set exists.
-- `mlx_e2e_test.zig:163` and `:222` are deferred. They run only against a local
+- `mlx_e2e_test.zig` (ledger lines 163 and 222) are deferred. They run only against a local
   MLX server, which runs only when the operator asks.
-- `parse.zig:10880` and `:10900` pin the location but not the kind. The kind
+- `parse.zig` (ledger lines 10880 and 10900) pin the location but not the kind. The kind
   `expected_expression` (ZTS004) has no producer, as
   `scripts/corpus-uncovered.allow` already records.
 
