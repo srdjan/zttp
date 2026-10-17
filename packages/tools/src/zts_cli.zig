@@ -123,7 +123,7 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         std.mem.eql(u8, command, "--version") or
         std.mem.eql(u8, command, "-v"))
     {
-        std.debug.print("zts {s}\n", .{expert_meta.compiler_version});
+        std.debug.print("zts {s}\n", .{zts.version.string});
         return;
     }
 

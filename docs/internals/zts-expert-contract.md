@@ -29,7 +29,8 @@ recorded model transcript and therefore of the cassette digests, so tying this
 field to the release version made every release invalidate the whole recorded
 corpus while changing nothing about the analyzer. It is pinned in
 `expert_meta.analyzer_surface_version`, and moving it owes a full re-record. A
-client that wants the shipped release reads `zttp --version`.
+client that wants the shipped release reads `zttp --version` or
+`zts --version`. Both print the release version.
 
 ## Diagnostics
 
