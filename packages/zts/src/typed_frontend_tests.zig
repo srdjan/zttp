@@ -635,6 +635,36 @@ fn expectFirstFunctionSliceLowering(parser: *const JsParser) !void {
     try std.testing.expectEqual(TypeTag.t_string, pool.getTag(return_string).?);
 }
 
+fn expectSeedAnnotationLowersToNumber(parser: *const JsParser) !void {
+    const store = &parser.type_store;
+    var pool = TypePool.init(std.testing.allocator);
+    defer pool.deinit(std.testing.allocator);
+    var env = TypeEnv.init(std.testing.allocator, &pool);
+    defer env.deinit();
+    var application_bases = try store.planApplicationBasesWithIr(
+        std.testing.allocator,
+        parserIrView(parser),
+    );
+    defer application_bases.deinit();
+    const lowered = try std.testing.allocator.alloc(TypeIndex, store.nodes.items.len);
+    defer std.testing.allocator.free(lowered);
+    @memset(lowered, null_type_idx);
+
+    const annotation = store.annotations.items[0];
+    const number = try lowerOwnedRoot(
+        std.testing.allocator,
+        store,
+        &pool,
+        &env,
+        lowered,
+        &application_bases,
+        annotation.root,
+        annotation.node_range,
+        annotation.raw_span,
+    );
+    try std.testing.expectEqual(TypeTag.t_number, pool.getTag(number).?);
+}
+
 fn expectFunctionSliceRuntimeParity(
     runtime_allocator: std.mem.Allocator,
     source: []const u8,
@@ -840,6 +870,17 @@ fn expectTypeOnlyModuleCase(
     expected_modules: []const ExpectedTypeOnlyModule,
     expect_runtime_success: bool,
 ) !void {
+    try expectTypeOnlyModuleCaseRejectedAt(source, expected_modules, expect_runtime_success, null);
+}
+
+/// A rejected case names the substring where the parser reports its single
+/// unexpected-token error: the first byte of that substring is the error offset.
+fn expectTypeOnlyModuleCaseRejectedAt(
+    source: []const u8,
+    expected_modules: []const ExpectedTypeOnlyModule,
+    expect_runtime_success: bool,
+    rejected_at: ?[]const u8,
+) !void {
     var direct_alloc = CountingAllocator.init(std.testing.allocator);
     var type_alloc = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_alloc.allocator());
@@ -867,6 +908,13 @@ fn expectTypeOnlyModuleCase(
     } else {
         try std.testing.expect(direct_error != null);
         try std.testing.expect(direct.errors.getErrors().len > 0);
+        const marker = rejected_at orelse return error.TestUnexpectedResult;
+        const expected_offset = std.mem.indexOf(u8, source, marker) orelse
+            return error.TestUnexpectedResult;
+        const errors = direct.errors.getErrors();
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
+        try std.testing.expectEqual(@as(u32, @intCast(expected_offset)), errors[0].location.offset);
     }
 
     try std.testing.expectEqual(expected_modules.len, direct.type_store.type_only_modules.items.len);
@@ -1197,7 +1245,8 @@ fn runHeaderTypeAllocation(
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
     try std.testing.expect(parser.type_store.nodes.items.len > 0);
-    try std.testing.expect(parser.type_store.annotations.items.len > 0);
+    // The seed `number` is the only variable annotation; parameters are stored apart.
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
     try std.testing.expect(parser.type_store.parameter_annotations.items.len > 0);
     try std.testing.expect(parser.type_store.function_signatures.items.len > 0);
     const return_syntax = parser.type_store.function_signatures.items[0].return_syntax orelse
@@ -1286,12 +1335,14 @@ fn runGenericArrowTypeAllocation(
     try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser));
     try std.testing.expect(parser.type_store.nodes.items.len > 0);
-    try std.testing.expect(parser.type_store.annotations.items.len > 0);
-    try std.testing.expect(parser.type_store.generic_parameters.items.len > 0);
-    try std.testing.expect(parser.type_store.projected_generic_parameters.items.len > 0);
-    try std.testing.expect(parser.type_store.generic_owners.items.len > 0);
-    try std.testing.expect(parser.type_store.parameter_annotations.items.len > 0);
-    try std.testing.expect(parser.type_store.function_signatures.items.len > 0);
+    try expectSeedAnnotationLowersToNumber(&parser);
+    // Both sources hold the seed annotation and one arrow `<T>(value: T): T`.
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_parameters.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.projected_generic_parameters.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
     switch (case) {
         .dedicated => {
             try std.testing.expectEqual(
@@ -1301,8 +1352,13 @@ fn runGenericArrowTypeAllocation(
             try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
         },
         .legacy_call => {
-            try std.testing.expect(parser.type_store.authored_call_arguments.items.len > 0);
-            try std.testing.expect(parser.type_store.semantic_fragments.items.len > 0);
+            // One authored call argument, `T`, and one fragment for it.
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.authored_call_arguments.items.len);
+            try std.testing.expectEqualStrings(
+                "T",
+                parser.type_store.authored_call_arguments.items[0].full_span.text(source),
+            );
+            try std.testing.expectEqual(@as(usize, 1), parser.type_store.semantic_fragments.items.len);
         },
     }
 }
@@ -2233,6 +2289,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
         source: []const u8,
         modules: []const ExpectedTypeOnlyModule,
         runtime_success: bool,
+        rejected_at: ?[]const u8 = null,
     };
     const cases = [_]Case{
         .{
@@ -2240,18 +2297,21 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "function helper(): number { export type { A }; return 1; }\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "export",
         },
         .{
             .source = "{ import type { A } from \"./a\"; const live = 1; }\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "import type { A } from \"./a;b\";\n" ++
@@ -2265,12 +2325,14 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{.{ .kind = .import_type, .raw = "import type { A } /* ;" }},
             .runtime_success = false,
+            .rejected_at = "*/",
         },
         .{
             .source = "import /* gap */ type { A } from \"./a\";\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "export type { Spec } from \"" ++ retired_types_module ++ "\";\n" ++
@@ -2294,6 +2356,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "export",
         },
         .{
             .source = "import\n" ++
@@ -2322,6 +2385,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "function helper(): number {\n" ++
@@ -2331,6 +2395,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "export",
         },
         .{
             .source = "{\n" ++
@@ -2340,6 +2405,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "{import type { A } from \"./a\";}\n" ++
@@ -2390,6 +2456,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "const live: number = 1;import type { A } from \"./a\";\n" ++
@@ -2402,17 +2469,24 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "import type { A } from \"./a\";export type { B };\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{.{ .kind = .import_type, .raw = "import type { A } from \"./a\";" }},
             .runtime_success = false,
+            .rejected_at = "export",
         },
     };
 
     for (cases) |case| {
-        try expectTypeOnlyModuleCase(case.source, case.modules, case.runtime_success);
+        try expectTypeOnlyModuleCaseRejectedAt(
+            case.source,
+            case.modules,
+            case.runtime_success,
+            case.rejected_at,
+        );
     }
     try std.testing.expectEqual(@as(usize, 25), cases.len);
 }
@@ -3034,11 +3108,18 @@ test "empty predicate narrowing retains the untrimmed whitespace tail" {
             try std.testing.expectEqual(predicate.narrowed.raw_span.end, predicate.narrowed.semantic_prefix_end);
         } else {
             try std.testing.expect(predicate.narrowed.node_range.count > 0);
+            switch (predicate.narrowed.root) {
+                .present => {},
+                .absent => return error.TestUnexpectedResult,
+            }
+            try expectOrderedTypeValueTags(&parser, &.{predicate.narrowed}, &.{.t_string});
         }
         if (case.kind == .ordinary) {
             const compatibility = return_syntax.legacy_ordinary_prefix orelse
                 return error.TestUnexpectedResult;
             try std.testing.expect(compatibility.node_range.count > 0);
+            // The ordinary prefix `value` is a named reference.
+            try expectOrderedTypeValueTags(&parser, &.{compatibility}, &.{.t_ref});
             try std.testing.expectEqualStrings(case.expected_raw, compatibility.raw_span.text(case.source));
         } else {
             try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
@@ -3483,6 +3564,7 @@ test "function signature type allocation failures preserve published seed syntax
                 &atoms,
             );
             try expectFirstFunctionSliceRecords(&parser, source);
+            try expectFirstFunctionSliceLowering(&parser);
             try std.testing.expect(parser.type_store.nodes.items.len > 0);
             try std.testing.expect(parser.type_store.annotations.items.len > 0);
             try std.testing.expect(parser.type_store.parameter_annotations.items.len > 0);
@@ -4582,7 +4664,11 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
-    try std.testing.expect(parser.type_store.declarations.items.len > 0);
+    // Every declaration in these fixtures starts with its own keyword.
+    try std.testing.expectEqual(
+        std.mem.count(u8, source, "structural ") + std.mem.count(u8, source, "nominal "),
+        parser.type_store.declarations.items.len,
+    );
 
     var pool = TypePool.init(std.testing.allocator);
     defer pool.deinit(std.testing.allocator);
@@ -6673,6 +6759,8 @@ test "nested generic arrows reserve outer owners before expression bodies" {
     ];
     try std.testing.expect(outer_fragment.node_range.count > 0);
     try std.testing.expect(inner_fragment.node_range.count > 0);
+    try std.testing.expectEqualStrings("string", outer_fragment.raw_span.text(source));
+    try std.testing.expectEqualStrings("number", inner_fragment.raw_span.text(source));
     try std.testing.expect(outer_fragment.node_range.start + outer_fragment.node_range.count <= inner_fragment.node_range.start);
 
     var pool = TypePool.init(std.testing.allocator);
@@ -7651,10 +7739,11 @@ test "diagnostic allocation failure removes arrow and call records from wrappers
         try control.type_store.validate();
         try std.testing.expectEqual(fixture.control_owners, control.type_store.generic_owners.items.len);
         try std.testing.expectEqual(fixture.control_calls, control.type_store.explicit_call_arguments.items.len);
-        try std.testing.expect(control.type_store.generic_parameters.items.len > 0);
-        try std.testing.expect(control.type_store.projected_generic_parameters.items.len > 0);
-        try std.testing.expect(control.type_store.authored_call_arguments.items.len > 0);
-        try std.testing.expect(control.type_store.semantic_fragments.items.len > 0);
+        // Each arrow owner holds one type parameter and each call one argument.
+        try std.testing.expectEqual(fixture.control_owners, control.type_store.generic_parameters.items.len);
+        try std.testing.expectEqual(fixture.control_owners, control.type_store.projected_generic_parameters.items.len);
+        try std.testing.expectEqual(fixture.control_calls, control.type_store.authored_call_arguments.items.len);
+        try std.testing.expectEqual(fixture.control_calls, control.type_store.semantic_fragments.items.len);
 
         var parser = try JsParser.initTyped(
             std.testing.allocator,
@@ -9345,7 +9434,8 @@ test "direct compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(pool.idx_number, omitted_fields[0].type_idx);
     try std.testing.expectEqualStrings("y", pool.getName(omitted_fields[1].name_start, omitted_fields[1].name_len));
     try std.testing.expectEqual(pool.idx_string, omitted_fields[1].type_idx);
-    try std.testing.expect((try type_key.typeKey(&pool, allocator, omitted_separator)).len > 0);
+    // Fields sort by name; a plain field writes "." then name length, name, and type.
+    try std.testing.expectEqualStrings("R2.1:xn.1:ys", try type_key.typeKey(&pool, allocator, omitted_separator));
     quirks.insert(.omitted_record_separator);
 
     const readonly_optional = try parseDirectAnnotation(&pool, "{ readonly id?: number; name: string }");
@@ -9441,7 +9531,8 @@ test "direct compound family and semantic quirk census is exhaustive" {
     const nullable = try parseDirectAnnotation(&pool, "string | undefined");
     try expectTag(&pool, nullable, .t_nullable);
     try std.testing.expectEqual(pool.idx_string, pool.getNullableInner(nullable));
-    try std.testing.expect((try type_key.typeKey(&pool, allocator, nullable)).len > 0);
+    // A nullable keys as a union with undefined: U, two members, sorted "s" and "u".
+    try std.testing.expectEqualStrings("U2su", try type_key.typeKey(&pool, allocator, nullable));
     quirks.insert(.nullable_shorthand);
 
     const wide_undefined = try parseDirectAnnotation(&pool, "string | number | undefined");
@@ -9521,7 +9612,7 @@ test "direct compound family and semantic quirk census is exhaustive" {
     try std.testing.expect(!named_info.params[1].optional);
     try std.testing.expectEqual(pool.idx_number, named_info.params[1].type_idx);
     try std.testing.expectEqual(pool.idx_boolean, named_info.ret);
-    try std.testing.expect((try type_key.typeKey(&pool, allocator, named_function)).len > 0);
+    try std.testing.expectEqualStrings("F2.s.n->b", try type_key.typeKey(&pool, allocator, named_function));
     families.insert(.function);
     quirks.insert(.named_function_parameters);
 
@@ -9560,7 +9651,10 @@ test "direct compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(pool.idx_number, multipart_parts[3].type_idx);
     try std.testing.expectEqual(.literal, multipart_parts[4].kind);
     try std.testing.expectEqualStrings("-post", pool.getName(multipart_parts[4].name_start, multipart_parts[4].name_len));
-    try std.testing.expect((try type_key.typeKey(&pool, allocator, multipart)).len > 0);
+    try std.testing.expectEqualStrings(
+        "M5l4:pre-tsl5:-mid-tnl5:-post",
+        try type_key.typeKey(&pool, allocator, multipart),
+    );
     families.insert(.template);
     quirks.insert(.multi_part_template);
 
@@ -9620,7 +9714,10 @@ test "direct function annotations preserve the packed parameter boundary" {
                 try std.testing.expect(!parameter.optional);
             }
             try std.testing.expectEqual(pool.idx_string, info.ret);
-            try std.testing.expect((try type_key.typeKey(&pool, allocator, idx)).len > 0);
+            try std.testing.expectEqualStrings(
+                "F15" ++ ".n" ** 15 ++ "->s",
+                try type_key.typeKey(&pool, allocator, idx),
+            );
         }
     }
 }
