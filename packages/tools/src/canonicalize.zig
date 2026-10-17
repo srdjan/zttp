@@ -2872,6 +2872,12 @@ test "invalid applied replacement is caught by edit simulation" {
     });
     defer simulated.deinit(std.testing.allocator);
     try std.testing.expect(simulated.new_count > 0);
+    // `const = ;` is a parse error (ZTS003) on the edited line, line 2.
+    var saw_parse_error = false;
+    for (simulated.violations.items) |v| {
+        if (v.introduced_by_patch and v.line == 2 and std.mem.eql(u8, v.code, "ZTS003")) saw_parse_error = true;
+    }
+    try std.testing.expect(saw_parse_error);
 }
 
 test "collect output can clear canonical diagnostic through edit simulation" {
@@ -2922,7 +2928,9 @@ test "collect output can clear capability alias diagnostic through edit simulati
     ;
     var preview = try collectFromSource(std.testing.allocator, source, "handler.ts");
     defer preview.deinit(std.testing.allocator);
-    try std.testing.expect(preview.repairs.items.len >= 1);
+    // The single `let key` alias yields exactly one capability-key repair.
+    try std.testing.expectEqual(@as(usize, 1), preview.repairs.items.len);
+    try std.testing.expectEqual(RepairIntent.canonicalize_capability_key_alias, preview.repairs.items[0].intent);
 
     var proposed = try std.ArrayList(u8).initCapacity(std.testing.allocator, source.len + 8);
     defer proposed.deinit(std.testing.allocator);

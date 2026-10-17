@@ -350,13 +350,17 @@ test "writeIdiomListJson emits every registry row with a stable id" {
 
     const idioms = parsed.value.object.get("idioms").?.array;
     try testing.expectEqual(idiomCatalog.idioms().len, idioms.items.len);
-    for (idioms.items) |item| {
+    for (idioms.items, idiomCatalog.idioms()) |item, row| {
         const obj = item.object;
         try testing.expect(std.mem.startsWith(u8, obj.get("id").?.string, "idiom."));
         try testing.expect(obj.get("operation").?.string.len > 0);
         try testing.expect(obj.get("idiomatic").?.string.len > 0);
         try testing.expect(obj.get("superseded").?.string.len > 0);
         try testing.expect(obj.get("precondition").?.string.len > 0);
+        try testing.expectEqualStrings(row.operation, obj.get("operation").?.string);
+        try testing.expectEqualStrings(row.idiomatic, obj.get("idiomatic").?.string);
+        try testing.expectEqualStrings(row.superseded, obj.get("superseded").?.string);
+        try testing.expectEqualStrings(row.precondition, obj.get("precondition").?.string);
         // The key is always present: an absent rewrite is the signal that the
         // row is advisory-only, so a consumer has to be able to see the null.
         _ = obj.get("rewrite_rule") orelse return error.MissingRewriteRuleKey;

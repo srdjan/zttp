@@ -2905,7 +2905,10 @@ test "meta bootstrap view is bounded and routes to full discovery" {
     try testing.expectEqualStrings("meta", full.get("operation").?.string);
     try testing.expectEqualStrings("full", full.get("input").?.object.get("view").?.string);
     const sections = payload.get("full_meta_sections").?.array;
-    try testing.expect(sections.items.len > 0);
+    try testing.expectEqual(specFor(.meta).payload_fields.len, sections.items.len);
+    for (specFor(.meta).payload_fields, sections.items) |field, section| {
+        try testing.expectEqualStrings(field, section.string);
+    }
     try testing.expect(payload.get("grammar") == null);
     try testing.expect(payload.get("examples") == null);
 }
@@ -3455,7 +3458,7 @@ test "modules returns the resolved graph and binds one hash in two places" {
         payload.get("module_graph_hash").?.string,
     );
     try testing.expectEqual(@as(usize, 2), payload.get("graph").?.array.items.len);
-    try testing.expect(payload.get("builtins").?.array.items.len > 0);
+    try testing.expectEqual(zts.builtinModules.len, payload.get("builtins").?.array.items.len);
     try testing.expectEqual(@as(usize, 0), payload.get("rejected").?.array.items.len);
 
     const imports = payload.get("graph").?.array.items[0].object.get("imports").?.array;
@@ -4576,7 +4579,11 @@ test "check on a rejected handler binds every diagnostic to the digest" {
             found_chain = true;
             try testing.expectEqualStrings("canonical_ternary_chain", d.get("rule_id").?.string);
             try testing.expectEqualStrings("error", d.get("severity").?.string);
-            try testing.expect(d.get("byte_offset").?.integer > 0);
+            // The diagnostic anchors on the `?` of the outer conditional, the
+            // first `?` in the fixture, and the span covers that one byte.
+            const outer_question = std.mem.indexOf(u8, ternary_chain_handler, "? 1 :").?;
+            try testing.expectEqual(@as(i64, @intCast(outer_question)), d.get("byte_offset").?.integer);
+            try testing.expectEqual(outer_question + 1, end);
             // A range, not a point: the diagnostic names the token it points
             // at. An empty span here would mean the producer had no extent,
             // which is the state this task closed.
@@ -4649,6 +4656,11 @@ test "canonicalize publishes the span a repair is keyed on" {
     defer parsed.deinit();
     const candidates = parsed.value.object.get("payload").?.object.get("candidates").?.array;
     try testing.expect(candidates.items.len >= 1);
+    // The one avoidable `let` in the fixture is the first candidate, and its
+    // snapshot is the whole `let` line (line 6).
+    const first = candidates.items[0].object;
+    try testing.expectEqualStrings("replace_let_with_const", first.get("intent").?.string);
+    try testing.expectEqualStrings("    let name = \"world\";", first.get("original").?.string);
     for (candidates.items) |item| {
         const c = item.object;
         const span = c.get("span").?.object;
@@ -5271,19 +5283,22 @@ test "every verifier row publishes spec 4.8's required inputs, prerequisites, gr
     try testing.expect(verifiers.items.len > 0);
     try testing.expectEqual(zts.proof_trace.verifiers.len, verifiers.items.len);
 
-    for (verifiers.items) |item| {
+    for (verifiers.items, zts.proof_trace.verifiers) |item, registry| {
         const row = item.object;
-        for ([_][]const u8{ "inputs", "prerequisites", "grades" }) |field| {
+        const registry_fields = [_][]const []const u8{ registry.inputs, registry.prerequisites, registry.grades };
+        for ([_][]const u8{ "inputs", "prerequisites", "grades" }, registry_fields) |field, expected| {
             const arr = row.get(field).?.array;
             try testing.expect(arr.items.len > 0);
-            for (arr.items) |entry| try testing.expect(entry.string.len > 0);
+            try testing.expectEqual(expected.len, arr.items.len);
+            for (expected, arr.items) |want, entry| try testing.expectEqualStrings(want, entry.string);
         }
         const schema = row.get("result_schema").?.array;
         try testing.expect(schema.items.len > 0);
-        for (schema.items) |field| {
-            try testing.expect(field.object.get("name").?.string.len > 0);
-            try testing.expect(field.object.get("type").?.string.len > 0);
-            try testing.expect(field.object.get("presence").?.string.len > 0);
+        try testing.expectEqual(registry.result_schema.len, schema.items.len);
+        for (registry.result_schema, schema.items) |want, field| {
+            try testing.expectEqualStrings(want.name, field.object.get("name").?.string);
+            try testing.expectEqualStrings(want.json_type, field.object.get("type").?.string);
+            try testing.expectEqualStrings(want.presence, field.object.get("presence").?.string);
         }
     }
 }
@@ -5483,10 +5498,11 @@ test "check publishes the path-coverage cause, not only a bool" {
     var parsed = try parse(a, out);
     defer parsed.deinit();
     const paths = parsed.value.object.get("payload").?.object.get("paths").?.object;
-    try testing.expect(paths.get("enumerated").?.integer >= 1);
-    try testing.expect(paths.get("exhaustive").? == .bool);
+    // The handler is one unbranched return: one path, fully enumerated.
+    try testing.expectEqual(@as(i64, 1), paths.get("enumerated").?.integer);
+    try testing.expect(paths.get("exhaustive").?.bool);
     // Phase 0 replaced a bare bool with a cause; the wire carries the cause.
-    try testing.expect(paths.get("coverage_note").?.string.len > 0);
+    try testing.expectEqualStrings("exhaustive", paths.get("coverage_note").?.string);
 }
 
 const let_handler =
@@ -5533,7 +5549,8 @@ test "canonicalize candidates carry a grade and the original span text" {
     // D3 §5: v1 drops original_line at the JSON boundary, so a client cannot
     // re-validate staleness. The v2 wire carries it.
     try testing.expect(first.get("original").? == .string);
-    try testing.expect(first.get("line").?.integer > 0);
+    // The fixture opens with two empty lines, so the `let` is on line 6.
+    try testing.expectEqual(@as(i64, 6), first.get("line").?.integer);
 
     // D3 §5: the v2 candidate carries the typed intent, not a producer-local
     // string. `canonicalize_let_const` is the v1 name for this row and must not
@@ -5603,8 +5620,11 @@ test "normalize reaches a fixed point and writes nothing to disk" {
     defer parsed.deinit();
     const payload = parsed.value.object.get("payload").?.object;
     try testing.expect(payload.get("converged").?.bool);
-    try testing.expect(payload.get("iterations").?.integer >= 1);
-    try testing.expect(payload.get("canonical_source").?.string.len > 0);
+    // One `let` takes one rewrite pass.
+    try testing.expectEqual(@as(i64, 1), payload.get("iterations").?.integer);
+    const canonical = payload.get("canonical_source").?.string;
+    try testing.expect(std.mem.indexOf(u8, canonical, "const name") != null);
+    try testing.expect(std.mem.indexOf(u8, canonical, "let name") == null);
     // The rewrite happened in memory only.
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
     defer a.free(on_disk);
@@ -5769,10 +5789,11 @@ test "meta publishes the built-in module catalog from the bindings" {
 
     const catalog = parsed.value.object.get("payload").?.object.get("module_catalog").?.array;
     try testing.expectEqual(zts.builtinModules.len, catalog.items.len);
-    for (catalog.items) |item| {
+    for (catalog.items, zts.builtinModules) |item, binding| {
         const module = item.object;
         try testing.expect(std.mem.startsWith(u8, module.get("specifier").?.string, "zttp:"));
         try testing.expect(module.get("exports").?.array.items.len >= 1);
+        try testing.expectEqual(binding.exports.len, module.get("exports").?.array.items.len);
         try testing.expect(module.get("required_capabilities").? == .array);
     }
 }
@@ -5851,7 +5872,10 @@ test "meta publishes every decision kind a refusal can carry, with its next acti
         const published = item.object;
         try testing.expectEqualStrings(row.id.wire(), published.get("id").?.string);
         try testing.expectEqualStrings(@tagName(row.next_action), published.get("next_action").?.string);
-        try testing.expect(published.get("parameters").?.array.items.len > 0);
+        const parameters = published.get("parameters").?.array;
+        try testing.expect(parameters.items.len > 0);
+        try testing.expectEqual(row.parameters.len, parameters.items.len);
+        for (row.parameters, parameters.items) |want, got| try testing.expectEqualStrings(want, got.string);
     }
 
     for (parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section_row| {

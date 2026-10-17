@@ -4205,6 +4205,20 @@ test "runCheckOnlyFromSource: helper reaching outside its Effects ceiling gets Z
     try std.testing.expect(saw_503);
     try std.testing.expect(saw_505);
     try std.testing.expect(contract.function_effect_capsules.items.len >= 1);
+
+    // `digest` declares "env" and calls sha256, which reaches "crypto".
+    var digest_index: ?usize = null;
+    for (contract.function_effect_capsules.items, 0..) |capsule, i| {
+        if (std.mem.eql(u8, capsule.function, "digest")) digest_index = i;
+    }
+    const digest = contract.function_effect_capsules.items[digest_index orelse return error.TestUnexpectedResult];
+    try std.testing.expectEqual(@as(usize, 1), digest.declared.items.len);
+    try std.testing.expectEqualStrings("env", digest.declared.items[0]);
+    var saw_crypto = false;
+    for (digest.inferred.items) |name| {
+        if (std.mem.eql(u8, name, "crypto")) saw_crypto = true;
+    }
+    try std.testing.expect(saw_crypto);
 }
 
 test "runCheckOnlyFromSource: helper exceeding handler Effects budget gets ZTS607" {
@@ -4256,15 +4270,16 @@ test "runCheckOnlyFromSource: canonical reused arrow helper fails strict check" 
     });
     defer result.deinit(allocator);
 
-    var saw_608 = false;
+    var n608: u32 = 0;
     for (result.json_diagnostics.items) |d| {
         if (std.mem.eql(u8, d.code, "ZTS608")) {
-            saw_608 = true;
+            n608 += 1;
             try std.testing.expectEqualStrings("error", d.severity);
         }
     }
-    try std.testing.expect(saw_608);
-    try std.testing.expect(result.totalErrors() > 0);
+    // One reused arrow helper, one diagnostic, counted as the only strict error.
+    try std.testing.expectEqual(@as(u32, 1), n608);
+    try std.testing.expectEqual(n608, result.strict_errors);
 }
 
 test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
@@ -4289,15 +4304,21 @@ test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
     });
     defer result.deinit(allocator);
 
-    var saw_610 = false;
+    var n610: u32 = 0;
+    var n611: u32 = 0;
     for (result.json_diagnostics.items) |d| {
         if (std.mem.eql(u8, d.code, "ZTS610")) {
-            saw_610 = true;
+            n610 += 1;
             try std.testing.expectEqualStrings("error", d.severity);
         }
+        if (std.mem.eql(u8, d.code, "ZTS611")) n611 += 1;
     }
-    try std.testing.expect(saw_610);
-    try std.testing.expect(result.totalErrors() > 0);
+    // `digest` is the only exported helper. The handler declares no Spec, so the
+    // default profile also owes it a Proof capsule (ZTS611). Each canonical
+    // diagnostic adds one canonical error.
+    try std.testing.expectEqual(@as(u32, 1), n610);
+    try std.testing.expectEqual(@as(u32, 1), n611);
+    try std.testing.expectEqual(n610 + n611, result.canonical_errors);
 }
 
 test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
@@ -4319,14 +4340,16 @@ test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
     });
     defer result.deinit(allocator);
 
-    var saw_611 = false;
+    var n611: u32 = 0;
     for (result.json_diagnostics.items) |d| {
         if (std.mem.eql(u8, d.code, "ZTS611")) {
-            saw_611 = true;
+            n611 += 1;
             try std.testing.expectEqualStrings("error", d.severity);
         }
     }
-    try std.testing.expect(saw_611);
+    // `stable` is the only exported helper, so one diagnostic and one canonical error.
+    try std.testing.expectEqual(@as(u32, 1), n611);
+    try std.testing.expectEqual(n611, result.canonical_errors);
     try std.testing.expect(result.totalErrors() > 0);
 }
 
@@ -4355,12 +4378,13 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
     });
     defer result.deinit(allocator);
 
-    var saw_611 = false;
+    var n611: u32 = 0;
     for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS611")) saw_611 = true;
+        if (std.mem.eql(u8, d.code, "ZTS611")) n611 += 1;
     }
-    try std.testing.expect(saw_611);
-    try std.testing.expect(result.canonical_errors > 0);
+    // Only `unrelated` is exported: `stable` is internal and owes no capsule.
+    try std.testing.expectEqual(@as(u32, 1), n611);
+    try std.testing.expectEqual(n611, result.canonical_errors);
 }
 
 test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs" {
@@ -5302,6 +5326,7 @@ test "check still stops before the verifier when a computed stage has an error" 
     });
     defer result.deinit(std.testing.allocator);
 
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
     try std.testing.expect(result.totalErrors() > 0);
     try std.testing.expect(!result.verify_ran);
 }
@@ -5323,7 +5348,13 @@ test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
     for (zts.spec_discharge.v1_specs) |spec| {
         try std.testing.expect(handler_contract.containsString(contract.declared_specs.items, spec.name));
     }
-    try std.testing.expect(result.totalErrors() > 0);
+    // The default profile's error-severity spec diagnostics are the only errors.
+    var spec_err_count: usize = 0;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind.severity() == .err) spec_err_count += 1;
+    }
+    try std.testing.expect(spec_err_count > 0);
+    try std.testing.expectEqual(@as(u32, @intCast(spec_err_count)), result.totalErrors());
 }
 
 test "runCheckOnlyFromSource refuses unsupported source extensions with ZTS052" {
@@ -7930,7 +7961,9 @@ test "compileHandler stamps the fault coverage record, the property, and the cau
     try std.testing.expect(!fc.isCovered());
     try std.testing.expect(!contract.properties.?.fault_covered);
     const cause = contract.property_provenance.fault_covered orelse return error.TestUnexpectedResult;
-    try std.testing.expect(cause.snippet.len > 0);
+    // The cause names the unseen call, which sits on line 3 of the source.
+    try std.testing.expectEqualStrings("jwtVerify", cause.snippet);
+    try std.testing.expectEqual(@as(u32, 3), cause.line);
 }
 
 test "compileHandler and the check path agree on the fault coverage record" {

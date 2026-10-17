@@ -134,6 +134,7 @@ test "compute fills all fields" {
     try std.testing.expectEqualStrings("embedded", info.mode);
     try std.testing.expectEqual(@as(usize, 64), info.module_registry_hash.len);
     try std.testing.expect(info.rule_count > 0);
+    try std.testing.expectEqual(policy_catalog.rules().len, info.rule_count);
     try std.testing.expectEqual(info.rule_count, info.categories.verifier + info.categories.policy + info.categories.property);
 }
 

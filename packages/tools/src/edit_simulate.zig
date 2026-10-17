@@ -755,14 +755,17 @@ test "simulate flags newly introduced canonical diagnostics" {
     defer result.deinit(std.testing.allocator);
 
     var saw_608 = false;
+    var introduced: u32 = 0;
     for (result.violations.items) |v| {
+        if (v.introduced_by_patch) introduced += 1;
         if (std.mem.eql(u8, v.code, "ZTS608")) {
             saw_608 = true;
             try std.testing.expect(v.introduced_by_patch);
         }
     }
     try std.testing.expect(saw_608);
-    try std.testing.expect(result.new_count > 0);
+    try std.testing.expect(introduced > 0);
+    try std.testing.expectEqual(introduced, result.new_count);
 }
 
 test "simulate preserves sibling module proof context" {
