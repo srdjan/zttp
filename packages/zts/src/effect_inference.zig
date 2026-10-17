@@ -109,6 +109,21 @@ pub const FunctionValueEscape = struct {
     line: u32,
     column: u32,
     name: []const u8,
+    /// `value`: the site itself sits outside every closed position.
+    /// `sibling`: the site is a closed reference to a relative import whose
+    /// module lets a function value escape, or whose result is unknown.
+    cause: Cause = .value,
+
+    pub const Cause = enum { value, sibling };
+
+    /// The clause a refusal puts after the site, so the author sees why it
+    /// escapes. A sibling import is only called, not used as a value.
+    pub fn reason(self: FunctionValueEscape) []const u8 {
+        return switch (self.cause) {
+            .value => "is used as a value",
+            .sibling => "is imported from a module where a function value escapes or whose effects are unknown",
+        };
+    }
 };
 
 /// A visible export's completed effect result.
@@ -1831,7 +1846,9 @@ pub const Analyzer = struct {
             if (first) |current| {
                 if (line > current.line or (line == current.line and column >= current.column)) continue;
             }
-            first = .{ .line = line, .column = column, .name = name };
+            // A closed node reaches here only through an escaping sibling.
+            const cause: FunctionValueEscape.Cause = if (closed[index]) .sibling else .value;
+            first = .{ .line = line, .column = column, .name = name, .cause = cause };
         }
         self.function_value_escape = first;
     }
@@ -2728,6 +2745,7 @@ fn projectEffectFacts(
             .line = site.line,
             .column = site.column,
             .name = try allocator.dupe(u8, site.name),
+            .cause = site.cause,
         };
     }
     switch (options.contract_projection) {
@@ -4869,6 +4887,7 @@ fn expectEscape(source: []const u8, expected_name: ?[]const u8) !void {
             return error.EscapeMissing;
         };
         try testing.expectEqualStrings(name, found.name);
+        try testing.expectEqual(FunctionValueEscape.Cause.value, found.cause);
         for (facts.all()) |function| try testing.expect(function.row.function_value_escape);
     } else {
         if (site) |found| {
@@ -4993,6 +5012,7 @@ test "a sibling module's escaped function value reaches every function of the im
     try testing.expect(via_other.function_value_escape);
     const site = analyzer.function_value_escape orelse return error.EscapeNotRecorded;
     try testing.expectEqualStrings("run", site.name);
+    try testing.expectEqual(FunctionValueEscape.Cause.sibling, site.cause);
 }
 
 test "a clean sibling module leaves the importer's escape flag clear" {

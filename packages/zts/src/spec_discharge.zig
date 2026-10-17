@@ -570,10 +570,10 @@ fn escapeSuggestion(
     );
     return std.fmt.allocPrint(
         allocator,
-        "{s} at line {d}, column {d} is used as a value, so the compiler cannot follow every " ++
+        "{s} at line {d}, column {d} {s}, so the compiler cannot follow every " ++
             "call in this module and `total` cannot be discharged for any function in it; " ++
             "call helpers by name and pass no function as a value, or drop `total` from the capsule.",
-        .{ found.name, found.line, found.column },
+        .{ found.name, found.line, found.column, found.reason() },
     );
 }
 

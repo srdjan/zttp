@@ -1070,8 +1070,8 @@ pub const PathGenerator = struct {
             const escape_desc = if (site) |found|
                 try std.fmt.allocPrint(
                     allocator,
-                    "{s} at line {d}, column {d} is used as a value, so a call through it is not followed",
-                    .{ found.name, found.line, found.column },
+                    "{s} at line {d}, column {d} {s}, so a call through it is not followed",
+                    .{ found.name, found.line, found.column, found.reason() },
                 )
             else
                 try allocator.dupe(
