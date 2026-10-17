@@ -110,9 +110,16 @@ instead of inheriting JavaScript object and prototype behavior.
 
 Recursion is accepted for recursive application data, but termination and
 cost certificates require a proved decreasing measure. Syntax acceptance and
-property proof remain separate decisions.
+property proof remain separate decisions. The analyzer has no decreasing-measure
+proof yet, so any recursion refuses `total` and `cost_bounded`
+(`CapsuleFacts.holds` in `packages/zts/src/spec_discharge.zig`). That includes
+recursion that the call graph cannot see: a call through a function value adds
+no edge. So when any function value escapes a closed position, the module
+refuses both claims. See
+[recursion through a function value](../security-issues/recursion-through-a-function-value-proved-total-and-cost-bounded.md).
 
 ## Related
 
 - [ZTS advanced formal-spec northstar](../../zts-formal-spec-northstar-advanced.md)
+- [Recursion through a function value proved total and cost_bounded](../security-issues/recursion-through-a-function-value-proved-total-and-cost-bounded.md): the termination rule enforced for calls through values
 - Earlier formal-spec northstar (`pre-rebase:docs/archive/spec-explainers/zts-formal-spec-northstar.html`)
