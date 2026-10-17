@@ -2320,6 +2320,7 @@ test "strict checker flags avoidable let" {
     defer checker.deinit();
     const errors = try checker.check(root);
     try testing.expect(errors > 0);
+    try expectKind(&checker, .avoidable_let);
 }
 
 test "strict checker accepts reassigned let" {

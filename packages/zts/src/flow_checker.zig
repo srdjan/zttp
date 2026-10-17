@@ -7094,7 +7094,7 @@ test "FlowChecker reports a credential response built inside a helper and discar
         \\}
     ;
     const report = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_response, &buf);
-    try std.testing.expect(report.count >= 1);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
     try std.testing.expect(!report.properties.no_credential_leakage);
 }
 
@@ -7141,7 +7141,7 @@ test "FlowChecker reports a credential in an opaque fetch init as an egress body
         \\}
     ;
     const report = try runFlowDiagnostics(std.testing.allocator, source, .credential_in_egress_body, &buf);
-    try std.testing.expect(report.count >= 1);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
     try std.testing.expect(!report.properties.no_credential_leakage);
 }
 
@@ -7287,7 +7287,8 @@ test "FlowChecker reports callee-built HTML only when it reaches the response (F
     };
     for (shapes) |source| {
         const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
-        try std.testing.expect(report.count >= 1);
+        // Each shape holds one `Response.html` call, so one diagnostic.
+        try std.testing.expectEqual(@as(usize, 1), report.count);
         try std.testing.expect(!report.properties.injection_safe);
     }
 
@@ -9717,7 +9718,7 @@ test "mask keeps user_input: request text through it into an egress body is refu
     ;
     var buf: [256]u8 = undefined;
     const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
-    try std.testing.expect(report.count >= 1);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
     try std.testing.expect(!report.properties.injection_safe);
 }
 

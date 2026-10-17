@@ -937,6 +937,7 @@ test "every policy rule resolves through the closed diagnostic catalog" {
             return error.UncatalogedDiagnostic;
         };
         try std.testing.expect(diagnostic.code.len > 0);
+        try std.testing.expectEqualStrings(rule.code, diagnostic.code);
     }
 }
 

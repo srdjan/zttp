@@ -785,15 +785,19 @@ test "direct source exposes ordered refusal diagnostics" {
         \\let callback: (value: string) => void = use;
         \\function optional(value?: string): string { return value ?? ""; }
     ;
-    const expected = [_]struct { kind: source_diagnostics.StripDiagnosticKind, line: u32 }{
-        .{ .kind = .interface_declaration, .line = 1 },
-        .{ .kind = .type_alias_declaration, .line = 2 },
-        .{ .kind = .distinct_type_declaration, .line = 3 },
-        .{ .kind = .any_type, .line = 4 },
-        .{ .kind = .as_assertion, .line = 5 },
-        .{ .kind = .satisfies_assertion, .line = 6 },
-        .{ .kind = .void_type, .line = 7 },
-        .{ .kind = .optional_parameter, .line = 8 },
+    // `marker` is the text the diagnostic is anchored to on its line; the column
+    // is one past the marker's byte index in that line. For `as` and
+    // `satisfies` the anchor is the type after the keyword, as in the admission
+    // marker test in parser/parse.zig.
+    const expected = [_]struct { kind: source_diagnostics.StripDiagnosticKind, line: u32, marker: []const u8 }{
+        .{ .kind = .interface_declaration, .line = 1, .marker = "interface" },
+        .{ .kind = .type_alias_declaration, .line = 2, .marker = "type" },
+        .{ .kind = .distinct_type_declaration, .line = 3, .marker = "distinct" },
+        .{ .kind = .any_type, .line = 4, .marker = "any" },
+        .{ .kind = .as_assertion, .line = 5, .marker = "string" },
+        .{ .kind = .satisfies_assertion, .line = 6, .marker = "Alias" },
+        .{ .kind = .void_type, .line = 7, .marker = "void" },
+        .{ .kind = .optional_parameter, .line = 8, .marker = "?" },
     };
 
     var owner: DirectCheckSource = undefined;
@@ -810,6 +814,11 @@ test "direct source exposes ordered refusal diagnostics" {
         try std.testing.expectEqual(want.kind, got.kind);
         try std.testing.expectEqual(want.line, got.line);
         try std.testing.expect(got.column > 0);
+        var lines = std.mem.splitScalar(u8, source, '\n');
+        var line_text: []const u8 = "";
+        for (0..want.line) |_| line_text = lines.next() orelse return error.TestUnexpectedResult;
+        const marker_at = std.mem.indexOf(u8, line_text, want.marker) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(u32, @intCast(marker_at + 1)), got.column);
     }
 }
 

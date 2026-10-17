@@ -9191,7 +9191,8 @@ test "an unknown escape is refused rather than copied" {
     const errors = parser.getErrors();
     try std.testing.expect(errors.len >= 1);
     try std.testing.expectEqual(error_mod.ErrorKind.invalid_escape_sequence, errors[0].kind);
-    try std.testing.expect(errors[0].location.line >= 1);
+    // The source is one line.
+    try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
 }
 
 test "a backslash before a real newline is refused" {
@@ -10362,6 +10363,24 @@ test "a match binding is scoped to its arm" {
     // read of the same name is not, because that binding is out of scope.
     try std.testing.expect(locals >= 2);
     try std.testing.expect(non_locals >= 1);
+
+    // Pin the second arm itself: it is the only source line that holds the
+    // out-of-scope read, and `command` on line 1 would satisfy the counts above.
+    var second_arm_locals: usize = 0;
+    var second_arm_non_locals: usize = 0;
+    node = 0;
+    while (node < view.nodeCount()) : (node += 1) {
+        if (view.getTag(node) != .identifier) continue;
+        const loc = view.getLoc(node) orelse continue;
+        if (loc.line != 3) continue;
+        const binding = view.getBinding(node) orelse continue;
+        switch (binding.kind) {
+            .local, .argument, .upvalue => second_arm_locals += 1,
+            .global, .undeclared_global => second_arm_non_locals += 1,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), second_arm_locals);
+    try std.testing.expectEqual(@as(usize, 1), second_arm_non_locals);
 }
 
 test "match as property name" {
@@ -10878,6 +10897,8 @@ test "type-only module lexical exclusion and refusal keep root priority" {
         try std.testing.expect(parser.type_only_module_exclusion != null);
         try std.testing.expect(parser.type_only_module_refusal == null);
         try std.testing.expect(parser.errors.getErrors().len > 0);
+        // `const broken = ;` is line 2 of the source.
+        try std.testing.expectEqual(@as(u32, 2), parser.errors.getErrors()[0].location.line);
     }
 }
 
@@ -10898,6 +10919,8 @@ test "retained type-only module refusal outranks a later ordinary error" {
 
     try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
     try std.testing.expect(parser.errors.getErrors().len > 0);
+    // The `;` that cannot start an expression is byte 15 of the source.
+    try std.testing.expectEqual(@as(u32, 15), parser.errors.getErrors()[0].location.offset);
 }
 
 test "native allocation failure outranks a retained type-only module refusal" {

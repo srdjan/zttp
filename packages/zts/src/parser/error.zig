@@ -376,10 +376,11 @@ test "error formatting" {
     try std.testing.expect(list.hasErrors());
     try std.testing.expectEqual(@as(usize, 1), list.errorCount());
 
-    // Test formatting (just verify it doesn't crash)
     var buf: [1024]u8 = undefined;
     const output = list.formatFirstError(&buf);
     try std.testing.expect(output.len > 0);
+    // The format is "error at line:column: message" over the error added above.
+    try std.testing.expectEqualStrings("error at 1:9: expected expression", output);
 }
 
 test "panic mode suppresses errors" {

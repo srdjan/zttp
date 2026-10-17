@@ -1596,7 +1596,9 @@ test "GC allocWithGC triggers collection" {
     // This should trigger GC
     _ = try gc_state.allocWithGC(100);
 
-    try std.testing.expect(gc_state.minor_gc_count >= 1);
+    // Each request rounds up to 104 bytes, so two fit in 256 and the third
+    // overflows the nursery once.
+    try std.testing.expectEqual(@as(u64, 1), gc_state.minor_gc_count);
 }
 
 test "GC statistics" {

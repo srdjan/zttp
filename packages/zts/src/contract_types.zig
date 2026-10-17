@@ -603,9 +603,16 @@ test "HandlerProperties.provenSpecNames excludes inverse-polarity facts" {
     var buf: [HandlerProperties.max_proven_specs]?[]const u8 = undefined;
     const count = props.provenSpecNames(&buf);
     try std.testing.expect(count > 0);
+    var found_no_secret_leakage = false;
     for (buf[0..count]) |name_opt| {
         try std.testing.expect(!std.mem.eql(u8, name_opt.?, "has_egress"));
+        // Fields set false above are not proven, so they are not named.
+        try std.testing.expect(!std.mem.eql(u8, name_opt.?, "pure"));
+        try std.testing.expect(!std.mem.eql(u8, name_opt.?, "deterministic"));
+        // The default leaves no_secret_leakage true, so it is among the names.
+        if (std.mem.eql(u8, name_opt.?, "no_secret_leakage")) found_no_secret_leakage = true;
     }
+    try std.testing.expect(found_no_secret_leakage);
     try std.testing.expect(!HandlerProperties.isMonotonicProvenSpecName("has_egress"));
     try std.testing.expect(HandlerProperties.isMonotonicProvenSpecName("no_secret_leakage"));
 }

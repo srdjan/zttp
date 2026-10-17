@@ -1192,7 +1192,10 @@ test "route roots use the strictest external severity" {
 
     const report = checker.getReport();
     try std.testing.expect(!report.isClean());
-    try std.testing.expect(report.warning_count > 0);
+    // The one failable path is the cacheGet miss; its warning carries the
+    // external reason.
+    try std.testing.expectEqual(@as(u32, 1), report.warning_count);
+    try std.testing.expectEqualStrings("order lookup must fail closed", report.diagnostics[0].message);
 }
 
 test "external severity does not downgrade critical to expected" {

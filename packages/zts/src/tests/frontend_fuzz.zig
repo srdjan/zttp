@@ -207,11 +207,17 @@ fn countNewlines(text: []const u8) u32 {
 }
 
 /// Line and column must name a place inside `text`. Lines are 1-based and the
-/// last line starts after the final newline.
-fn expectPositionInside(text: []const u8, line: u32, column: u32) !void {
+/// last line starts after the final newline. They must also equal the position
+/// recounted from the bytes before `start`, the offset the diagnostic names.
+fn expectPositionInside(text: []const u8, start: u32, line: u32, column: u32) !void {
     try std.testing.expect(line >= 1);
     try std.testing.expect(line <= countNewlines(text) + 1);
     try std.testing.expect(column >= 1);
+    try std.testing.expect(start <= text.len);
+    const before = text[0..start];
+    const line_start = if (std.mem.lastIndexOfScalar(u8, before, '\n')) |newline| newline + 1 else 0;
+    try std.testing.expectEqual(countNewlines(before) + 1, line);
+    try std.testing.expectEqual(@as(u32, @intCast(start - line_start + 1)), column);
 }
 
 // ----------------------------------------------------------------------------
@@ -327,7 +333,7 @@ fn expectAdmissionInside(src: []const u8, diagnostic: TypeSyntax.AdmissionDiagno
         try std.testing.expect(position.line >= 1);
         try std.testing.expect(position.column >= 1);
     } else {
-        try expectPositionInside(src, position.line, position.column);
+        try expectPositionInside(src, diagnostic.span.start, position.line, position.column);
     }
 }
 
@@ -374,7 +380,7 @@ fn checkTyped(
             try std.testing.expect(errors.len > 0);
             for (errors) |recorded| {
                 const location = recorded.location;
-                try expectPositionInside(src, location.line, location.column);
+                try expectPositionInside(src, location.offset, location.line, location.column);
                 const span = location.span();
                 try expectSpanInside(src, span.start, span.end);
             }
@@ -517,7 +523,7 @@ fn checkParseInput(
         try std.testing.expect(parser.hasErrors());
         for (parser.getErrors()) |recorded| {
             const loc = recorded.location;
-            try expectPositionInside(input, loc.line, loc.column);
+            try expectPositionInside(input, loc.offset, loc.line, loc.column);
             const span = loc.span();
             try std.testing.expect(span.start <= span.end);
             try std.testing.expect(span.end <= input.len);

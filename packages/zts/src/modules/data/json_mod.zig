@@ -866,6 +866,8 @@ test "a large magnitude encodes instead of failing the call" {
     buf.clearRetainingCapacity();
     try encode(h.ctx, JSValue.fromFloat(5e-324), &buf, 0);
     try testing.expect(buf.items.len > 0);
+    // The text is a JSON number that reads back as the same double.
+    try testing.expectEqual(@as(f64, 5e-324), try std.fmt.parseFloat(f64, buf.items));
 }
 
 test "a round trip is byte-identical for a canonical document" {

@@ -749,6 +749,10 @@ test "SDK filesystem reads require canonical allowlist entry" {
     const bytes = try readFileChecked(ctx, "build.zig", 1024 * 1024);
     defer allocator.free(bytes);
     try std.testing.expect(bytes.len > 0);
+    // The checked read returns the whole file, as the standard library reads it.
+    const expected = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(1024 * 1024));
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, bytes);
 }
 
 test "SDK sqlite opens require canonical allowlist entry" {

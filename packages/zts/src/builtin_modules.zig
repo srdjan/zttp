@@ -302,6 +302,8 @@ test "every in-tree builtin module has a module spec artifact" {
         const contents = try file_io.readFile(std.testing.allocator, entry.spec_path, 64 * 1024);
         defer std.testing.allocator.free(contents);
         try std.testing.expect(contents.len > 0);
+        // The artifact is rendered from the binding, so it names the same specifier.
+        try std.testing.expect(std.mem.indexOf(u8, contents, "\"specifier\": \"" ++ entry.specifier ++ "\"") != null);
     }
 }
 

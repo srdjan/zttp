@@ -451,5 +451,6 @@ test "every rewrite kind names itself" {
     inline for (@typeInfo(RewriteKind).@"enum".fields) |field| {
         const kind: RewriteKind = @enumFromInt(field.value);
         try testing.expect(kind.name().len > 0);
+        try testing.expectEqualStrings(field.name, kind.name());
     }
 }

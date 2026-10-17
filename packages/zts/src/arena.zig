@@ -498,6 +498,9 @@ test "Arena overflow handling" {
 
     const stats = arena.getStats();
     try std.testing.expect(stats.overflow_bytes > 0);
+    // The overflow node header plus the 100 requested bytes, which the arena
+    // rounds up to its 8-byte alignment.
+    try std.testing.expectEqual(@sizeOf(OverflowNode) + std.mem.alignForward(usize, 100, 8), stats.overflow_bytes);
     try std.testing.expectEqual(@as(u64, 1), stats.overflow_count);
 
     // Reset should free overflow
@@ -612,6 +615,8 @@ test "Arena resetWithAudit returns pre-reset snapshot and zeros state" {
     const snapshot = try arena.resetWithAudit();
     try std.testing.expect(snapshot.bump_used >= 128);
     try std.testing.expect(snapshot.overflow_bytes > 0);
+    // The overflow node header plus the 1024 requested bytes.
+    try std.testing.expectEqual(@sizeOf(OverflowNode) + 1024, snapshot.overflow_bytes);
     try std.testing.expectEqual(@as(u64, 1), snapshot.overflow_count);
     try std.testing.expect(snapshot.alloc_count >= 3);
 

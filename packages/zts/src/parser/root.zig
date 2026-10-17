@@ -430,6 +430,13 @@ test "legacy Parser API" {
     try std.testing.expect(bytecode_data.len > 0);
     // Global variables don't need local slots - they use put_global
     // max_local_count is 0 for top-level code with only global vars
+
+    // `let x = 1;` pushes 1, stores it to the global (opcode plus u16 atom),
+    // and the generator ends every program with ret_undefined.
+    try std.testing.expectEqual(@as(usize, 5), bytecode_data.len);
+    try std.testing.expectEqual(@intFromEnum(bytecode.Opcode.push_1), bytecode_data[0]);
+    try std.testing.expectEqual(@intFromEnum(bytecode.Opcode.put_global), bytecode_data[1]);
+    try std.testing.expectEqual(@intFromEnum(bytecode.Opcode.ret_undefined), bytecode_data[4]);
 }
 
 test "legacy Parser API getImports returns imported names" {

@@ -1029,6 +1029,10 @@ test "a guarded call is reachable wherever an expression is" {
     , resolver);
     defer in_init.deinit();
     try testing.expect(countTag(in_init.proof, .capability_call) >= 1);
+    // EveryCallResolver admits every call, so the source's two calls, env and
+    // Response.text, give two nodes, each at row 3.
+    try testing.expectEqual(@as(usize, 2), countTag(in_init.proof, .capability_call));
+    try testing.expectEqual(@as(u32, 3), guardedAux(in_init.proof).?);
 
     const control_flow_cases = [_][]const u8{
         \\function handler(req) {

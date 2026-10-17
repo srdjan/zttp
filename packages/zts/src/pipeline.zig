@@ -2993,8 +2993,11 @@ test "pipeline.resolve flags pointless object truthy condition" {
     var resolved = try resolve(allocator, parsed, .{});
     defer resolved.deinit();
 
-    try testing.expect(resolved.bool_error_count > 0);
-    try testing.expect(resolved.boolDiagnostics().len > 0);
+    // One object-literal condition gives one diagnostic, as the bool checker's
+    // own `if ({})` test pins.
+    try testing.expectEqual(@as(u32, 1), resolved.bool_error_count);
+    try testing.expectEqual(@as(usize, 1), resolved.boolDiagnostics().len);
+    try testing.expectEqual(bool_checker_mod.DiagnosticKind.condition_not_boolean, resolved.boolDiagnostics()[0].kind);
 }
 
 test "pipeline.resolve rejects optional module value in boolean context" {
@@ -3623,6 +3626,9 @@ test "the error type exists only where a type error was reported" {
             fn run(session: Session) anyerror!void {
                 try testing.expect(session.resolved.type_checker.?.refusedExpressionCount() > 0);
                 try testing.expect(session.resolved.typeErrorCount() > 0);
+                // Every source adds a string to the number `n`, so the first
+                // reported error is the string-add refusal.
+                try testing.expectEqual(type_checker_mod.DiagnosticKind.string_add, session.resolved.typeDiagnostics()[0].kind);
             }
         }.run);
     }
@@ -3840,8 +3846,9 @@ test "dropRepeatsOfTypeErrors removes a strict diagnostic below a type error and
             const before = countKind(resolved.strictDiagnostics(), strict_checker_mod.DiagnosticKind.missing_public_annotation);
             resolved.dropRepeatsOfTypeErrors();
             const after = countKind(resolved.strictDiagnostics(), strict_checker_mod.DiagnosticKind.missing_public_annotation);
-            try testing.expect(before > after);
-            try testing.expect(after > 0);
+            // One diagnostic below the call node and one in the second statement.
+            try testing.expectEqual(@as(usize, 2), before);
+            try testing.expectEqual(@as(usize, 1), after);
         }
     }.run);
 }

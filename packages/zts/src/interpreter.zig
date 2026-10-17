@@ -2745,6 +2745,36 @@ test "Interpreter modulo INT_MIN % -1 does not panic" {
     try std.testing.expectEqual(@as(f64, 0.0), as_num);
 }
 
+/// Parse `source` with the context's atom table, run it, and return the value
+/// of the global `result` that the program assigns.
+fn runAndReadResultGlobal(
+    allocator: std.mem.Allocator,
+    ctx: *context.Context,
+    strings: *@import("string.zig").StringTable,
+    source: []const u8,
+) !?value.JSValue {
+    var p = try @import("parser/root.zig").Parser.init(allocator, source, strings, &ctx.atoms);
+    defer p.deinit();
+    const code = try p.parse();
+    const shapes = p.getShapes();
+    if (shapes.len > 0) try ctx.materializeShapes(shapes);
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+    return ctx.getGlobal(try ctx.atoms.intern("result"));
+}
+
 test "End-to-end: parse and execute JS" {
     // Use arena to avoid memory leak detection issues with function bytecode
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -2794,6 +2824,11 @@ test "End-to-end: parse and execute JS" {
     // Full integration testing is done in zruntime tests
     const result = try interp.run(&func);
     try std.testing.expect(result.isUndefined());
+
+    // The call itself ran: store its value in a global and read it back.
+    const result_value = (try runAndReadResultGlobal(allocator, ctx, &strings, "function f() { return 1 + 2; } let result = f();")) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(result_value.isInt());
+    try std.testing.expectEqual(@as(i32, 3), result_value.getInt());
 }
 
 test "Hybrid: reject arena escape to global" {
@@ -3246,6 +3281,16 @@ test "End-to-end: function declaration" {
     // Expression statements drop values, so result is undefined
     const result = try interp.run(&func);
     try std.testing.expect(result.isUndefined());
+
+    // The nested call ran: store its value in a global and read it back.
+    const result_value = (try runAndReadResultGlobal(
+        allocator,
+        ctx,
+        &strings,
+        "function outer() { function add(a, b) { return a + b; } return add(3, 4); } let result = outer();",
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(result_value.isInt());
+    try std.testing.expectEqual(@as(i32, 7), result_value.getInt());
 }
 
 test "Interpreter refuses string addition in malformed bytecode" {
@@ -3384,6 +3429,24 @@ test "End-to-end: optional method call short-circuits on nullish receiver" {
     // Must NOT raise error.NotCallable; the call short-circuits to undefined.
     const result = try interp.run(&func);
     try std.testing.expect(result.isUndefined());
+
+    // The short-circuit value is observed, and the call path is live when the
+    // receiver is defined.
+    const nullish = (try runAndReadResultGlobal(
+        allocator,
+        ctx,
+        &strings,
+        "function outer() { const a = undefined; return a?.foo(); } let result = outer();",
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(nullish.isUndefined());
+    const defined = (try runAndReadResultGlobal(
+        allocator,
+        ctx,
+        &strings,
+        "function outer() { const a = { foo: () => 5 }; return a?.foo(); } let result = outer();",
+    )) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(defined.isInt());
+    try std.testing.expectEqual(@as(i32, 5), defined.getInt());
 }
 
 test "Interpreter unary negation" {

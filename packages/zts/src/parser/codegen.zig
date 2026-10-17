@@ -2616,6 +2616,10 @@ test "basic codegen" {
 
     const result = try gen.generate(lit_node);
     try std.testing.expect(result.code.len > 0);
+    // 42 is in 4..127, so it takes push_i8 and its byte.
+    try std.testing.expect(result.code.len >= 2);
+    try std.testing.expectEqual(@intFromEnum(Opcode.push_i8), result.code[0]);
+    try std.testing.expectEqual(@as(u8, 42), result.code[1]);
 }
 
 test "global binding codegen uses the binding name atom" {

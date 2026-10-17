@@ -2659,6 +2659,13 @@ test "diffContracts reclassifies when multiple paths match in any order" {
 
     try std.testing.expectEqual(Classification.equivalent_modulo_laws, diff.classify());
     try std.testing.expect(diff.laws_used.items.len >= 1);
+
+    // The collapsed read is the redundant env("KEY_A"), justified by env.env.pure.
+    var found_env_pure = false;
+    for (diff.laws_used.items) |id| {
+        if (std.mem.eql(u8, id, "env.env.pure")) found_env_pure = true;
+    }
+    try std.testing.expect(found_env_pure);
 }
 
 test "diffContracts does not upgrade when surface differs" {

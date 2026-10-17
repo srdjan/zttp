@@ -4106,6 +4106,7 @@ test "a path that checks two calls to one function stubs each call by its own co
         switch (test_case.expected_status) {
             401 => {
                 // The first call fails. The second call is never reached.
+                try std.testing.expectEqual(@as(usize, 1), test_case.io_stubs.items.len);
                 try std.testing.expect(!first_ok);
                 checked_first_fail += 1;
             },

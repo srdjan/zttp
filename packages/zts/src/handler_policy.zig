@@ -854,8 +854,13 @@ test "the retired egress key names its replacement" {
     const help = policyErrorHelp(error.EgressAllowHostsRetired);
     try std.testing.expect(std.mem.indexOf(u8, help, endpoints_field) != null);
     try std.testing.expect(std.mem.indexOf(u8, help, scopes_field) != null);
-    try std.testing.expect(policyErrorHelp(error.InvalidEgressEndpoint).len > 0);
-    try std.testing.expect(policyErrorHelp(error.UnknownAddressScope).len > 0);
+    try std.testing.expect(std.mem.indexOf(u8, policyErrorHelp(error.InvalidEgressEndpoint), "scheme://host") != null);
+    // The help for an unknown scope lists every scope the enum accepts.
+    const scope_help = policyErrorHelp(error.UnknownAddressScope);
+    inline for (@typeInfo(endpoint.AddressScope).@"enum".fields) |field| {
+        const scope: endpoint.AddressScope = @enumFromInt(field.value);
+        try std.testing.expect(std.mem.indexOf(u8, scope_help, scope.name()) != null);
+    }
     // An error with nothing extra to say says nothing rather than something
     // generic, which is how the caller decides whether to print a second line.
     try std.testing.expectEqualStrings("", policyErrorHelp(error.InvalidPolicy));

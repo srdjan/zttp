@@ -156,6 +156,8 @@ test "simple compile API" {
     }
 
     try std.testing.expect(func.code.len > 0);
+    // The generator ends every program with ret_undefined.
+    try std.testing.expectEqual(@intFromEnum(bytecode.Opcode.ret_undefined), func.code[func.code.len - 1]);
 }
 
 test "compile options retain raw virtual source and compilation without atoms" {

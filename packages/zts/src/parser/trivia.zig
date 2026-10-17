@@ -413,6 +413,10 @@ test "trivia offsets index the source they were collected from" {
     ;
     const t = try collectTest(source);
     defer testing.allocator.free(t);
+    // The source has two blank runs: one empty line after "// header" and two
+    // empty lines before "const b".
+    const expected_blank_lines = [_]u32{ 1, 2 };
+    var blank_runs: usize = 0;
     for (t) |item| {
         try testing.expect(item.end <= source.len);
         try testing.expect(item.start <= item.end);
@@ -427,7 +431,11 @@ test "trivia offsets index the source they were collected from" {
                     try testing.expect(c == '\n' or c == ' ' or c == '\t' or c == '\r');
                 }
                 try testing.expect(item.blank_lines >= 1);
+                try testing.expect(blank_runs < expected_blank_lines.len);
+                try testing.expectEqual(expected_blank_lines[blank_runs], item.blank_lines);
+                blank_runs += 1;
             },
         }
     }
+    try testing.expectEqual(expected_blank_lines.len, blank_runs);
 }
