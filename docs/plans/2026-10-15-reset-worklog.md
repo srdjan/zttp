@@ -286,3 +286,26 @@ they do not establish that the remaining gaps are source regressions. The
 committed `bench-check` still fails, its baseline remains unchanged, and
 release readiness still requires an unsandboxed full verification run and a
 quiet-host benchmark rerun or further controlled investigation.
+
+## Loopback-enabled verification follow-up (2026-10-17)
+
+Loopback binding now succeeds. At `727fc930`, the unchanged
+`bash scripts/verify.sh` exits 0. Its aggregate suite, standalone
+`test-zruntime`, ReleaseFast build, verified handler precompile, smoke flow,
+panic isolation, structural gates, policy hash, and final format check all
+pass. The earlier sandbox limit is closed for this checkout.
+
+The advisory `bench-check` still fails three times against the committed
+September baseline. Each invocation takes the best per benchmark from five
+runs. All three stop on `propertyAccess`, at 10.16%, 9.87%, and 10.06% below
+the recorded 19,700,551 ops/s. No baseline was replaced.
+
+Fifteen further alternating runs of the archived September source and current
+source on the same, less busy host narrow the source difference. Their
+per-benchmark best results are 19,004,180 versus 18,168,604 ops/s for
+`propertyAccess` (-4.40%), and 8,116,883 versus 7,855,459 ops/s for
+`gcPressure` (-3.22%). The median-run differences are -5.82% and -6.40%,
+respectively. Every current case is within 8% of the archived source's
+same-host best over these 15 runs. This comparison is diagnostic, not a
+passing `bench-check`: the official five-run gate remains red, and the
+remaining property and allocation gaps have no established source cause.
