@@ -149,6 +149,10 @@ pub fn add(ctx: Context) Result {
 
     const release_check_tests = b.addTest(.{ .filters = test_filters, .root_module = release_check_mod });
     const run_release_check_tests = b.addRunArtifact(release_check_tests);
+    // The repository-version test reads README.md, VERSION, and the package
+    // manifests by relative path, so it must run from the repository root
+    // whatever directory the invoker used.
+    run_release_check_tests.setCwd(b.path("."));
     const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
     release_check_test_step.dependOn(&run_release_check_tests.step);
 

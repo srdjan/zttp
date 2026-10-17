@@ -234,9 +234,11 @@ import their measurement noise into the gate, so `bench-check` stays separate.
 The benchmark sampler, threshold policy, and atomic baseline writer live in
 `tooling/benchmark.zig`, a native Zig test root.
 
-`build.zig.zon` remains the release-version authority. Root `VERSION` is a
-convenience mirror, and `test-release-check` rejects a missing, malformed, or
-stale marker before release.
+Root `VERSION` is the release-version authority. The package manifests,
+`packages/zts/src/root.zig`, the `README.md` heading, and the `install.sh`
+"current:" comment must each equal it. `test-release-check` reads those real
+files, runs inside `zig build test`, and fails with the name of the first
+source that differs. It also rejects a missing, malformed, or stale marker.
 
 ## What `zig build test` Excludes
 

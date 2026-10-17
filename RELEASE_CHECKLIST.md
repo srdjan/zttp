@@ -5,7 +5,7 @@ gates, and keep release notes user-facing.
 
 ## Metadata
 
-- Version: ______ (from `build.zig.zon`)
+- Version: ______ (from `VERSION`, the authority; every other copy must match it)
 - Previous stable tag: ______ (`git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1`)
 - Zig toolchain: ______ (from `build.zig.zon` `minimum_zig_version`)
 
@@ -46,10 +46,12 @@ cross-compile without Docker.
 
 ## Tag And Publish
 
-- [ ] Confirm `build.zig.zon` `.version` matches the intended release.
-- [ ] Confirm `packages/zts/build.zig.zon` and
-      `packages/runtime/build.zig.zon` match the intended release.
-- [ ] Confirm `packages/zts/src/root.zig` `version.string` matches the intended release.
+- [ ] Confirm `VERSION` holds the intended release. It is the authority.
+- [ ] Confirm `build.zig.zon`, `packages/zts/build.zig.zon`, and
+      `packages/runtime/build.zig.zon` `.version` equal `VERSION`.
+- [ ] Confirm `packages/zts/src/root.zig` `version.string`, the `README.md`
+      heading, and the `install.sh` "current:" comment equal `VERSION`.
+      `zig build test` fails on any difference.
 - [ ] Promote `CHANGELOG.md` `[Unreleased]` to `[X.Y.Z] - <date>`, open a fresh `[Unreleased]` section, and update the bottom compare-link anchors (`[Unreleased]` base + a new `[X.Y.Z]` link).
 - [ ] Add `### Highlights` and `### Breaking changes` to the versioned
       `CHANGELOG.md` entry. Use `.github/RELEASE_NOTES_TEMPLATE.md` as the

@@ -338,13 +338,26 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
     defer if (zts_zon) |bytes| allocator.free(bytes);
     const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
     defer if (runtime_zon) |bytes| allocator.free(bytes);
+    const readme = readOptionalFile(allocator, "README.md", 1024 * 1024);
+    defer if (readme) |bytes| allocator.free(bytes);
+    const install = readOptionalFile(allocator, "install.sh", 256 * 1024);
+    defer if (install) |bytes| allocator.free(bytes);
 
-    const alignment = release_version.check(zon, version_file, root, zts_zon, runtime_zon);
+    const sources: release_version.Sources = .{
+        .zon = zon,
+        .marker = version_file,
+        .root = root,
+        .zts_zon = zts_zon,
+        .runtime_zon = runtime_zon,
+        .readme = readme,
+        .install = install,
+    };
+    const alignment = release_version.check(sources);
     const row: struct { status: ReleaseCheckStatus, detail: []const u8 } = switch (alignment) {
-        .missing => .{ .status = .fail, .detail = "VERSION, a release package manifest, or packages/zts/src/root.zig is missing" },
+        .missing => .{ .status = .fail, .detail = "VERSION, a release package manifest, packages/zts/src/root.zig, README.md, or install.sh is missing" },
         .malformed_marker => .{ .status = .fail, .detail = "VERSION must contain exactly one SemVer line ending in a newline" },
-        .mismatch => .{ .status = .fail, .detail = "VERSION, root, zts, runtime, and binary versions do not agree" },
-        .aligned => .{ .status = .ok, .detail = "VERSION, root, zts, runtime, and binary versions agree" },
+        .mismatch => .{ .status = .fail, .detail = "a release version copy differs from VERSION: root and package manifests, the README heading, or the installer comment" },
+        .aligned => .{ .status = .ok, .detail = "VERSION, root, zts, runtime, README, and installer versions agree" },
     };
     try passport.add(allocator, "version", "Version alignment", row.status, row.detail, "zig build release-check");
 }
@@ -775,6 +788,53 @@ test "release passport blocks a stale VERSION marker" {
     try expectVersionFixtureBlocked(.stale);
 }
 
+test "every release version copy in this repository equals VERSION" {
+    // Reads the real repository files from the cwd, which the build step pins
+    // to the repository root. A file that cannot be read yields `.missing`, so
+    // a run that finds no files fails instead of passing on nothing.
+    const allocator = std.testing.allocator;
+    const zon = readOptionalFile(allocator, "build.zig.zon", 256 * 1024);
+    defer if (zon) |bytes| allocator.free(bytes);
+    const marker = readOptionalFile(allocator, "VERSION", 256);
+    defer if (marker) |bytes| allocator.free(bytes);
+    const root = readOptionalFile(allocator, "packages/zts/src/root.zig", 4 * 1024 * 1024);
+    defer if (root) |bytes| allocator.free(bytes);
+    const zts_zon = readOptionalFile(allocator, "packages/zts/build.zig.zon", 256 * 1024);
+    defer if (zts_zon) |bytes| allocator.free(bytes);
+    const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
+    defer if (runtime_zon) |bytes| allocator.free(bytes);
+    const readme = readOptionalFile(allocator, "README.md", 1024 * 1024);
+    defer if (readme) |bytes| allocator.free(bytes);
+    const install = readOptionalFile(allocator, "install.sh", 256 * 1024);
+    defer if (install) |bytes| allocator.free(bytes);
+
+    const sources: release_version.Sources = .{
+        .zon = zon,
+        .marker = marker,
+        .root = root,
+        .zts_zon = zts_zon,
+        .runtime_zon = runtime_zon,
+        .readme = readme,
+        .install = install,
+    };
+    const alignment = release_version.check(sources);
+    if (alignment != .aligned) {
+        std.debug.print(
+            "release version drift: {s} differs from VERSION (check result: {s})\n",
+            .{ release_version.firstDrift(sources) orelse "unknown source", @tagName(alignment) },
+        );
+    }
+    try std.testing.expectEqual(release_version.Alignment.aligned, alignment);
+}
+
+test "release passport blocks a drifted README heading" {
+    try expectVersionFixtureBlocked(.stale_readme_heading);
+}
+
+test "release passport blocks a drifted installer comment" {
+    try expectVersionFixtureBlocked(.stale_install_comment);
+}
+
 test "release passport blocks stale public claims" {
     const testing = std.testing;
 
@@ -846,6 +906,8 @@ const VersionMarkerFixture = enum {
     missing,
     malformed,
     stale,
+    stale_readme_heading,
+    stale_install_comment,
 };
 
 fn expectVersionFixtureBlocked(version_marker: VersionMarkerFixture) !void {
@@ -897,7 +959,9 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         .missing => {},
         .malformed => try tmp.dir.writeFile(io, .{ .sub_path = "VERSION", .data = "v0.18.0\n" }),
         .stale => try tmp.dir.writeFile(io, .{ .sub_path = "VERSION", .data = "0.17.0\n" }),
+        .stale_readme_heading, .stale_install_comment => try tmp.dir.writeFile(io, .{ .sub_path = "VERSION", .data = "0.18.0\n" }),
     }
+    const readme_heading: []const u8 = if (opts.version_marker == .stale_readme_heading) "# zttp v0.17.0" else "# zttp v0.18.0";
     try tmp.dir.writeFile(io, .{
         .sub_path = "packages/zts/src/root.zig",
         .data =
@@ -999,12 +1063,22 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         \\| `zttp:env` | `env` | `env`, `policy_check` |
         ,
     });
+    const readme_body = if (opts.stale_readme)
+        "Numbers: 3ms runtime init. 1.2MB binary. 4MB memory baseline.\n"
+    else
+        "Numbers: cold-start floor 3.5 ms, typical 7-15 ms, RSS 13 MB, throughput 112k req/s. These numbers are pending receipt-backed measurement.\n";
+    const readme_data = try std.fmt.allocPrint(std.testing.allocator, "{s}\n\n{s}", .{ readme_heading, readme_body });
+    defer std.testing.allocator.free(readme_data);
     try tmp.dir.writeFile(io, .{
         .sub_path = "README.md",
-        .data = if (opts.stale_readme)
-            "Numbers: 3ms runtime init. 1.2MB binary. 4MB memory baseline.\n"
+        .data = readme_data,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "install.sh",
+        .data = if (opts.version_marker == .stale_install_comment)
+            "#   ZTTP_VERSION - pin to a specific version (current: v0.17.0)\n"
         else
-            "Numbers: cold-start floor 3.5 ms, typical 7-15 ms, RSS 13 MB, throughput 112k req/s. These numbers are pending receipt-backed measurement.\n",
+            "#   ZTTP_VERSION - pin to a specific version (current: v0.18.0)\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "docs/performance.md",
