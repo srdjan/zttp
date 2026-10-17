@@ -659,9 +659,11 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     const policy_path = opts.policy_path;
 
     // Read the handler source file (using posix for synchronous I/O)
+    // Each read failure is printed here. A distinct error lets the CLI exit 1
+    // without a stack trace, as `zttp build` does with `HandlerReadFailed`.
     const source = readFilePosix(allocator, handler_path_final, 10 * 1024 * 1024) catch |err| {
         debugPrint("Error reading handler file '{s}': {s}\n", .{ handler_path_final, readFailureReason(err) });
-        return err;
+        return error.HandlerReadFailed;
     };
     defer allocator.free(source);
 
@@ -670,7 +672,7 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     if (policy_path) |path| {
         const policy_source = readFilePosix(allocator, path, 1024 * 1024) catch |err| {
             debugPrint("Error reading policy file '{s}': {s}\n", .{ path, readFailureReason(err) });
-            return err;
+            return error.PolicyReadFailed;
         };
         defer allocator.free(policy_source);
 

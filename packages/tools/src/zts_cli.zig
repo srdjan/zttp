@@ -133,7 +133,11 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     // `compile` names different operations in `zts` (precompile to .zig) and
     // `zttp` (build a binary), so it stays out of the shared registry.
     if (std.mem.eql(u8, command, "compile")) {
-        try precompile.runCompileWithArgs(allocator, argv[1..]);
+        precompile.runCompileWithArgs(allocator, argv[1..]) catch |err| switch (err) {
+            // precompile already printed the file and the plain reason.
+            error.HandlerReadFailed, error.PolicyReadFailed => std.process.exit(1),
+            else => return err,
+        };
         return;
     }
     for (commands) |c| {

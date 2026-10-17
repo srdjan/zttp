@@ -352,6 +352,7 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
             error.NoBytecode,
             error.FileNotFound,
             error.AccessDenied,
+            error.HandlerReadFailed,
             error.PolicyContextFailed,
             error.PolicyViolation,
             error.DeclarationContextFailed,
