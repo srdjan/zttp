@@ -1670,6 +1670,8 @@ test "generic clone leaks nothing when an allocation fails partway" {
         }
     }
     try testing.expect(fail_index > 0);
+    // A sweep that never saw a successful clone also ends at the bound.
+    try testing.expect(fail_index < 32);
 }
 
 test "diagnostics payload round-trips" {
