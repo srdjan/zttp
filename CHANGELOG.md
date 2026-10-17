@@ -10,6 +10,81 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-10-17
+
+### Highlights
+
+zttp 0.22.2 closes several cases in which the effect and termination analyses
+reported a property as proven when it was not. A function value that escapes
+the call graph, or a call into a module the analyzer cannot see, no longer
+proves `total`, `cost_bounded`, `read_only`, `pure`, or `deterministic`. The
+CLI also exits with a plain message on unreadable input. Version 0.22.1 was
+not published.
+
+### Breaking changes
+
+- **Proofs can get weaker with no source change.** A handler whose verdict
+  rested on one of the gaps under Security now reports the property as
+  unproven, and a declared `Proof<T, P>` that names it fails with ZTS500.
+  Migration: run `zttp check` on each handler and remove or satisfy the
+  property it names.
+- **Rebuild artifacts built by 0.22.0.** The certificate schema (5), the
+  self-extract payload format (7), and the policy hash did not change, so the
+  runtime still accepts an older artifact. An artifact built by 0.22.0 may
+  carry `total`, `cost_bounded`, `read_only`, `pure`, or `deterministic`
+  falsely. Migration: rebuild and redeploy every artifact.
+- **`zttp help <unknown>` exits non-zero.** It printed the general help and
+  exited 0 before. Migration: a script that called it must use a known
+  command name.
+
+### Security
+
+- **Termination claims refuse an escaping function value.** A function that
+  recursed through a function value proved `total`, and a handler that reached
+  it proved `cost_bounded`. The call graph has an edge only for a call by name,
+  a function handed to a builtin, and a stable route dispatch. A function value
+  that leaves those positions now refuses termination for its owner. A
+  function value returned by an escaping sibling module refuses termination for
+  the whole importing module.
+- **A builtin callback slot closes only for a function with a call-graph
+  edge.** A function declared inside another function and handed to `map` or
+  `filter` recursed with no detected cycle, and proved `total` and
+  `cost_bounded`.
+- **A function value is charged where it is referenced.** A reference to an
+  import or a user function outside callee position now adds its effects to the
+  owner. An export of a module the analyzer cannot see counts as a write and an
+  egress, whether it is called directly, referenced as a value, or handed to a
+  callback slot.
+- **`read_only` and `pure` refuse a lower-bound effect row.** When the
+  analyzer cannot see every effect, it no longer proves either property.
+- **Determinism follows what a callee reaches.** A discarded `logInfo` left
+  the clock in the effect row, so a later clock read added nothing new and the
+  handler stayed `deterministic`.
+- **Capsule properties report what holds.** `proofCapsules[].proven` and the
+  ZTS611 repair read raw facts, so a recursive, escaping, or lower-bound helper
+  reported `total` (and `pure`, `read_only`, `deterministic`) as proven, and the
+  repair asked the author to declare properties that then failed ZTS500.
+
+### Changed
+
+- **`zts --version` prints the release version.** It printed the analyzer
+  surface identity (0.19.0). The `zts meta` envelope still carries that
+  identity as `compiler_version`.
+- **Release version drift fails `zig build test`.** `VERSION` is the
+  authority, and the three `build.zig.zon` files, `version.string`, the
+  `README.md` heading, and the `install.sh` comment must equal it.
+
+### Fixed
+
+- **Plain errors for unreadable or missing input.** `zttp check` names a
+  missing handler, a missing project, a wrong extension, and an unreadable
+  file. `zttp dev` and `zttp serve` check their flags before analysis and
+  explain a bad flag in plain words. `zttp gen-tests`, `zts compile`, `zttp
+  serve`, and `zttp deploy` exit with the read reason instead of a stack trace.
+- **Allocation failures.** Import scans, diagnostic copies, contract copies,
+  and module-audit messages free their memory when an allocation fails. A
+  second type environment initialization is refused.
+
 ## [0.22.0] - 2026-10-13
 
 ### Highlights
@@ -928,7 +1003,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.22.2...HEAD
+[0.22.2]: https://github.com/srdjan/zigttp/compare/v0.22.0...v0.22.2
 [0.22.0]: https://github.com/srdjan/zigttp/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/srdjan/zigttp/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/srdjan/zigttp/compare/v0.20.0...v0.21.0
