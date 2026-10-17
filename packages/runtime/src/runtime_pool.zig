@@ -988,7 +988,7 @@ test "WorkerRuntimeLease deinit is a no-op after quarantine" {
 
     const metrics = pool.getMetrics();
     try testing.expectEqual(@as(u64, 1), metrics.panics);
-    try testing.expect(metrics.recycles >= 1);
+    try testing.expectEqual(@as(u64, 1), metrics.recycles);
 }
 
 test "acquireForRequest waits out contention up to the timeout, not a retry cap" {
@@ -1309,6 +1309,7 @@ test "HandlerPool bytecode cache" {
     const hits = pool.cache.hits.load(.monotonic);
     const misses = pool.cache.misses.load(.monotonic);
     try std.testing.expect(hits + misses >= 1);
+    try std.testing.expect(pool.cache.contains(zq.sourceCacheKey(handler_code, "<handler>")));
 }
 test "HandlerPool handler remains callable across resets" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -1359,7 +1360,7 @@ test "HandlerPool exhaustion and recovery" {
 
     try std.testing.expectError(error.PoolExhausted, pool.acquireWorkerRuntime());
     const metrics = pool.getMetrics();
-    try std.testing.expect(metrics.exhausted >= 1);
+    try std.testing.expectEqual(@as(u64, 1), metrics.exhausted);
 
     lease1.deinit();
     lease1_active = false;

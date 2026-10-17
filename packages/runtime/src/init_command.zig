@@ -843,7 +843,9 @@ test "init --extension package fingerprint uses package name checksum" {
     try testing.expectEqualStrings("zttp_ext_demo_ext", package_name);
     const fingerprint = extensionPackageFingerprint(io, package_name);
     try testing.expectEqual(std.hash.Crc32.hash(package_name), @as(u32, @truncate(fingerprint >> 32)));
-    try testing.expect(@as(u32, @truncate(fingerprint)) != 0);
+    // Zig rejects fingerprint ids 0 and 0xffffffff (checked against the 0.16.0 compiler).
+    const id: u32 = @truncate(fingerprint);
+    try testing.expect(id != 0 and id != 0xffffffff);
 }
 
 test "init --extension package name stays within Zig manifest limit" {

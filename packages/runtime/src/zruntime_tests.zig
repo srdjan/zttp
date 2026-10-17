@@ -2888,8 +2888,11 @@ test "request deadline arms and clears" {
     var rt = try HandlerInstance.init(allocator, .{ .request_timeout_ms = 50 });
     defer rt.deinit();
 
+    const before = try compat.monotonicNowNs();
     rt.armRequestDeadline();
-    try std.testing.expect(rt.ctx.deadline_ns != 0);
+    const after = try compat.monotonicNowNs();
+    try std.testing.expect(rt.ctx.deadline_ns >= before + 50 * std.time.ns_per_ms);
+    try std.testing.expect(rt.ctx.deadline_ns <= after + 50 * std.time.ns_per_ms);
     rt.clearRequestDeadline();
     try std.testing.expectEqual(@as(u64, 0), rt.ctx.deadline_ns);
 }

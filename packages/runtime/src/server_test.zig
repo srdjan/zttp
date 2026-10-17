@@ -67,7 +67,9 @@ test "Server.init auto-sizes the pool when pool_size is zero" {
         .pool_size = 0,
     });
     defer srv.deinit();
-    try std.testing.expect(srv.config.pool_size > 0);
+    // Twice the CPU count, clamped to 8..128.
+    const cpus = try std.Thread.getCpuCount();
+    try std.testing.expectEqual(std.math.clamp(cpus * 2, 8, 128), srv.config.pool_size);
 }
 
 test "Server.start rejects a malformed present contract" {

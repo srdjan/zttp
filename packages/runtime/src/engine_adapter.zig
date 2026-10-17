@@ -130,5 +130,5 @@ test "a type fault leaves its source line on the runtime for the pool to copy ou
 
     try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
     const loc = rt.last_fault_location orelse return error.ExpectedFaultLocation;
-    try std.testing.expect(loc.line > 0);
+    try std.testing.expectEqual(@as(u32, 3), loc.line);
 }

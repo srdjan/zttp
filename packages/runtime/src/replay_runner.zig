@@ -693,7 +693,7 @@ test "replay flags an argument change at the matched path (#5)" {
     // replay verification fails closed on the behavior change.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    try std.testing.expect(try replaySha256ArgDivergences(arena.allocator(), "BBB") > 0);
+    try std.testing.expectEqual(@as(u32, 1), try replaySha256ArgDivergences(arena.allocator(), "BBB"));
 }
 
 test "replay does not flag matching arguments (#5 control)" {
