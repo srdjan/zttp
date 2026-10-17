@@ -725,10 +725,13 @@ pub const ContractBuilder = struct {
                 var summary = contract_types.CapsuleSummary{
                     .function = try self.allocator.dupe(u8, cap.name),
                     .line = cap.line,
-                    .proven_total = cap.proven.total,
-                    .proven_pure = cap.proven.pure,
-                    .proven_read_only = cap.proven.read_only,
-                    .proven_deterministic = cap.proven.deterministic,
+                    // `holds` and not the raw facts: a recursive, escaping, or
+                    // lower-bound row refuses a property its raw fact still
+                    // sets, and ZTS611 builds its repair from these fields.
+                    .proven_total = cap.proven.holds(.total),
+                    .proven_pure = cap.proven.holds(.pure),
+                    .proven_read_only = cap.proven.holds(.read_only),
+                    .proven_deterministic = cap.proven.holds(.deterministic),
                     .discharged = cap.discharged(),
                     .exported = cap.exported,
                     .handler_reachable = reachable_from_handler,
