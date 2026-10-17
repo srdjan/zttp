@@ -359,6 +359,43 @@ fn rootFileIndex(files: []const File, relative: []const u8) ?usize {
     return null;
 }
 
+fn namedImportViolates(source_tier: u8, target_tier: u8) bool {
+    return source_tier < target_tier;
+}
+
+// Every current tier is a separate build module. Any relative edge across a
+// tier line compiles a second copy and is illegal.
+fn relativeImportViolates(source_tier: u8, target_tier: u8) bool {
+    return source_tier != target_tier;
+}
+
+const LayeringCounts = struct {
+    edges: usize = 0,
+    cross: usize = 0,
+    named: usize = 0,
+    named_violations: usize = 0,
+    relative_violations: usize = 0,
+};
+
+fn countLayering(files: []const File) LayeringCounts {
+    var counts: LayeringCounts = .{};
+    for (files) |file| {
+        const source_tier = file.tier.?;
+        counts.edges += file.edges.items.len;
+        counts.named += file.named_tiers.items.len;
+        for (file.named_tiers.items) |target_tier| {
+            if (namedImportViolates(source_tier, target_tier)) counts.named_violations += 1;
+        }
+        for (file.edges.items) |target_index| {
+            const target_tier = files[target_index].tier.?;
+            if (source_tier == target_tier) continue;
+            counts.cross += 1;
+            if (relativeImportViolates(source_tier, target_tier)) counts.relative_violations += 1;
+        }
+    }
+    return counts;
+}
+
 fn reportLayering(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -367,33 +404,18 @@ fn reportLayering(
     writer: *std.Io.Writer,
 ) !void {
     try parseManifest(io, allocator, graph.files);
-    var edge_count: usize = 0;
-    var cross_count: usize = 0;
-    var named_count: usize = 0;
-    var named_violations: usize = 0;
-    var relative_violations: usize = 0;
-    for (graph.files) |file| {
-        const source_tier = file.tier.?;
-        edge_count += file.edges.items.len;
-        named_count += file.named_tiers.items.len;
-        for (file.named_tiers.items) |target_tier| {
-            if (source_tier < target_tier) named_violations += 1;
-        }
-        for (file.edges.items) |target_index| {
-            const target_tier = graph.files[target_index].tier.?;
-            if (source_tier == target_tier) continue;
-            cross_count += 1;
-            // Every current tier is a separate build module. Any relative edge
-            // across a tier line compiles a second copy and is illegal.
-            relative_violations += 1;
-        }
-    }
+    const counts = countLayering(graph.files);
+    const edge_count = counts.edges;
+    const cross_count = counts.cross;
+    const named_count = counts.named;
+    const named_violations = counts.named_violations;
+    const relative_violations = counts.relative_violations;
     if (named_violations != 0) {
         std.debug.print("zts layering: {d} module-name imports point from a lower tier to a higher one:\n", .{named_violations});
         for (graph.files) |file| {
             const source_tier = file.tier.?;
             for (file.named_tiers.items) |target_tier| {
-                if (source_tier < target_tier) {
+                if (namedImportViolates(source_tier, target_tier)) {
                     std.debug.print("    {s}  ->  @import(\"{s}\")\n", .{ file.path[prefix.len..], roots[target_tier].module_name });
                 }
             }
@@ -408,7 +430,7 @@ fn reportLayering(
         std.debug.print("zts layering: {d} relative imports cross a module line illegally:\n", .{relative_violations});
         for (graph.files) |file| {
             for (file.edges.items) |target_index| {
-                if (file.tier.? != graph.files[target_index].tier.?) {
+                if (relativeImportViolates(file.tier.?, graph.files[target_index].tier.?)) {
                     std.debug.print("    {s}  ->  {s}\n", .{ file.path[prefix.len..], graph.files[target_index].path[prefix.len..] });
                 }
             }
@@ -918,4 +940,50 @@ test "import end skips an escaped quote and reports an unclosed import" {
     const line = "@import(\"a\\\"b.zig\") x";
     try std.testing.expectEqual(@as(?usize, 17), importEnd(line, 9));
     try std.testing.expectEqual(@as(?usize, null), importEnd("@import(\"open", 9));
+}
+
+fn testFile(allocator: std.mem.Allocator, tier: u8, edges: []const usize, named: []const u8) !File {
+    var file: File = .{ .path = "", .tier = tier };
+    errdefer file.deinit(allocator);
+    try file.edges.appendSlice(allocator, edges);
+    try file.named_tiers.appendSlice(allocator, named);
+    return file;
+}
+
+test "layering counts an upward module name and every cross-tier relative edge" {
+    const allocator = std.testing.allocator;
+    var files = [_]File{
+        // Own-tier name and a same-tier relative edge are legal.
+        try testFile(allocator, 0, &.{1}, &.{0}),
+        try testFile(allocator, 0, &.{}, &.{}),
+        // Lower and own-tier names are legal. The relative edge up to tier 3 is not.
+        try testFile(allocator, 2, &.{3}, &.{ 0, 1, 2 }),
+        // The name of tier 4 is upward. The relative edge down to tier 0 is still illegal.
+        try testFile(allocator, 3, &.{0}, &.{4}),
+        try testFile(allocator, 4, &.{}, &.{3}),
+    };
+    defer for (&files) |*file| file.deinit(allocator);
+    const counts = countLayering(&files);
+    try std.testing.expectEqual(@as(usize, 3), counts.edges);
+    try std.testing.expectEqual(@as(usize, 2), counts.cross);
+    try std.testing.expectEqual(@as(usize, 6), counts.named);
+    try std.testing.expectEqual(@as(usize, 1), counts.named_violations);
+    try std.testing.expectEqual(@as(usize, 2), counts.relative_violations);
+}
+
+test "layering counts no violation in a graph that only names down and stays in tier" {
+    const allocator = std.testing.allocator;
+    var files = [_]File{
+        try testFile(allocator, 0, &.{1}, &.{}),
+        try testFile(allocator, 0, &.{0}, &.{0}),
+        try testFile(allocator, 4, &.{3}, &.{ 0, 1, 2, 3, 4 }),
+        try testFile(allocator, 4, &.{}, &.{4}),
+    };
+    defer for (&files) |*file| file.deinit(allocator);
+    const counts = countLayering(&files);
+    try std.testing.expectEqual(@as(usize, 3), counts.edges);
+    try std.testing.expectEqual(@as(usize, 0), counts.cross);
+    try std.testing.expectEqual(@as(usize, 7), counts.named);
+    try std.testing.expectEqual(@as(usize, 0), counts.named_violations);
+    try std.testing.expectEqual(@as(usize, 0), counts.relative_violations);
 }
