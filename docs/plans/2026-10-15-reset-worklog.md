@@ -339,3 +339,32 @@ Run medians moved far more than the best results. The evidence does not
 justify changing property access code or replacing the baseline. A new
 five-run gate measurement needs an idle host before source attribution or a
 release performance verdict.
+
+## Idle-host benchmark and profile follow-up (2026-10-17)
+
+After the Deno workload ended, `top` reported 74–86% CPU idle and the host
+remained on AC power. Two consecutive official five-run `bench-check` calls
+still fail against the committed September baseline, now on `intArithmetic`
+by 8.83% and 9.10%. The failing case changed from `propertyAccess` without a
+source edit, so the stored absolute result remains sensitive to host state.
+
+Fifteen alternating runs of the archived September source and current HEAD
+on this idle host show `intArithmetic` best at 19,623,233 versus 19,193,857
+ops/s (-2.19% current). The September source itself is 5.14% below its
+committed result. `propertyAccess` is 18,587,360 versus 17,531,556 ops/s
+(-5.68% current), and `gcPressure` is 7,891,414 versus 7,363,770 ops/s
+(-6.69% current). The same-host gap is below the gate's 8% per-case limit for
+each, but the official gate still fails against its stored baseline.
+
+A 20-pair execution-only probe through the runner's existing `--script --bench`
+mode times 500,000 `propertyAccess` iterations after loading. September's
+best is 19,003,458 ops/s and current's is 17,665,347 (-7.04%); both report
+five million cache hits out of five million accesses. Longer 400-million
+iteration calls take 22.390 seconds and 24.061 seconds, respectively, with
+two billion cache hits each. Ten-second macOS samples of each binary put
+their time in the same interpreter dispatch and property setter paths. They
+do not isolate one changed function. The script probe uses a temporary typed
+file, while the built-in case uses virtual JavaScript.
+
+The performance gate remains unresolved. No runtime code, benchmark policy,
+or baseline was changed on this evidence.
