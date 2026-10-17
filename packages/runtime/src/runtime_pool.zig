@@ -1974,6 +1974,9 @@ test "HandlerPool high contention stress" {
     try std.testing.expectEqual(thread_count * iterations, total);
     // At least some requests should succeed (proves pool works under contention)
     try std.testing.expect(completed_count > 0);
+    // acquire_timeout_ms is 0 and each request acquires once, so PoolExhausted is the
+    // only legitimate failure and the pool counts one exhaustion per returned error.
+    try std.testing.expectEqual(pool.exhausted_count.load(.acquire), @as(u64, error_count));
 }
 
 test "prepared evaluation caches bytecode and reload restores raw virtual parsing" {
@@ -2002,6 +2005,8 @@ test "prepared evaluation caches bytecode and reload restores raw virtual parsin
         var second = try pool.acquireWorkerRuntime();
         defer second.deinit();
         try std.testing.expect(pool.cache.hits.load(.monotonic) > 0);
+        try std.testing.expectEqual(@as(u64, 1), pool.cache.hits.load(.monotonic));
+        try std.testing.expect(!pool.cache_disabled.load(.monotonic));
     }
     _ = try pool.reloadHandler(source, "<inline>");
     try std.testing.expectEqual(@as(usize, 0), pool.cache.count());
