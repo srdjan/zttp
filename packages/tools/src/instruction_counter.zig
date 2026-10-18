@@ -9,6 +9,7 @@
 //! report on the CPU-time fallback:
 //!
 //! - macOS: `proc_pid_rusage` with `RUSAGE_INFO_V4`, field `ri_instructions`.
+//!   A virtual machine answers the call with a zero count, which falls back.
 //! - Linux: `perf_event_open` with `PERF_COUNT_HW_INSTRUCTIONS`, user space
 //!   only. It fails under a strict `perf_event_paranoid` setting and in a
 //!   virtual machine with no performance counters.
@@ -123,6 +124,15 @@ const darwin = struct {
         if (proc_pid_rusage(std.c.getpid(), rusage_info_v4_flavor, &info) != 0) return null;
         return info.ri_instructions;
     }
+
+    /// True inside a hypervisor guest (`kern.hv_vmm_present`). A macOS guest,
+    /// such as a GitHub Actions runner, exposes no performance counters.
+    fn inVirtualMachine() bool {
+        var value: c_int = 0;
+        var size: usize = @sizeOf(c_int);
+        if (std.c.sysctlbyname("kern.hv_vmm_present", &value, &size, null, 0) != 0) return false;
+        return value != 0;
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -188,8 +198,11 @@ pub const Counter = struct {
     pub fn open() Counter {
         switch (builtin.os.tag) {
             .macos => {
-                // Probe once: a host that refuses the call falls back.
-                if (darwin.read() != null) return .{ .source = .instructions_darwin };
+                // Probe once: a host that refuses the call, or answers it with
+                // a zero count from a process that has already run, falls back.
+                if (darwin.read()) |value| {
+                    if (value > 0) return .{ .source = .instructions_darwin };
+                }
             },
             .linux => {
                 if (linux_perf.open()) |fd| {
@@ -248,9 +261,10 @@ fn cost(counter: *const Counter, iterations: u64) !u64 {
 test "counter names its source and never silently falls back on macOS" {
     var counter = Counter.open();
     defer counter.close();
-    if (builtin.os.tag == .macos) {
+    if (builtin.os.tag == .macos and !darwin.inVirtualMachine()) {
         // A fallback on the developer machine would turn every budget gate
-        // into a report-only check without anyone noticing.
+        // into a report-only check without anyone noticing. A virtual machine
+        // has no counters, so it falls back the way a Linux runner does.
         try std.testing.expectEqual(Source.instructions_darwin, counter.source);
     }
     const reading = counter.read();
