@@ -115,6 +115,12 @@ detect_platform() {
             exit 1
             ;;
     esac
+
+    # A shell under Rosetta reports x86_64 on Apple Silicon. Select the native
+    # build there: the release publishes no Intel macOS binary.
+    if [ "$OS" = "macos" ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ]; then
+        ARCH="aarch64"
+    fi
 }
 
 resolve_version() {
@@ -205,6 +211,10 @@ resolve_release_assets() {
         ZTS_SOURCE="zigts"
         RUNTIME_SOURCE="zigttp-runtime"
     else
+        if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
+            printf "Error: zttp publishes no Intel macOS build from 0.22.3 on. Build from source, or pin ZTTP_VERSION to v0.21.0 or earlier.\n" >&2
+            exit 1
+        fi
         printf "Error: release %s has no complete archive/checksum pair for %s/%s\n" "$VERSION" "$OS" "$ARCH" >&2
         printf "Expected either %s or %s and its exact .sha256 asset\n" \
             "${current_root}.tar.gz" "${legacy_root}.tar.gz" >&2
