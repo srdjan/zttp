@@ -2774,10 +2774,11 @@ fn projectEffectFacts(
                 .facts = facts,
                 .registry = options.manifest_registry,
             };
-            result.contract = .{ .complete = try builder.build(
-                analyzer,
-                contract_options.selected_handler,
-            ) };
+            // Build into a local first: assigning `.{ .complete = try ... }`
+            // in place sets the tag before the call can fail, and the errdefer
+            // above would then free an unwritten payload.
+            const contract = try builder.build(analyzer, contract_options.selected_handler);
+            result.contract = .{ .complete = contract };
         },
     }
     return result;
