@@ -43,7 +43,7 @@ whatever moved it, and `git log docs/coverage.json` is the history.
 |---|---|---|
 | 59 | 2 | 57 |
 
-Tripped: `ZTS500`, `ZTS502`
+Tripped: `ZTS500`, `ZTS501`
 
 The list above is a fair description of what these prompts ask for and a poor
 description of what the compiler proves. It is the mechanical form of an
@@ -56,21 +56,21 @@ was wrong the first time the count moved. Nothing in this section restates a
 number the generator computes; the codes are printed, and a reader who wants the
 breakdown reads them.
 
-Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS511`, `ZTS512`, `ZTS514`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS400`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`, `ZTS408`
+Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS502`, `ZTS600`, `ZTS629`, `ZTS601`, `ZTS061`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS616`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS511`, `ZTS512`, `ZTS514`, `POL001`, `POL003`, `POL005`, `POL007`, `ZTS400`, `ZTS401`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`, `ZTS407`, `ZTS408`
 
 ## What this corpus has ever reached
 
 The row above is one draw. Recordings of the same headline corpus have measured
 different sets. A rule is counted only when the recorded model output makes the
-mistake that trips it. Across the 7 published runs of corpus `db16cf2221a6`,
-the tripped set took one shape, the smallest naming 2
+mistake that trips it. Across the 9 published runs of corpus `db16cf2221a6`,
+the tripped set took 2 distinct shapes, the smallest naming 2
 rules and the largest 2.
 
 | Union across runs | Smallest single run | Largest single run |
 |---|---|---|
-| 2 | 2 | 2 |
+| 3 | 2 | 2 |
 
-Ever tripped: `ZTS500`, `ZTS502`
+Ever tripped: `ZTS500`, `ZTS501`, `ZTS502`
 
 This is the fairer answer to "what do these prompts reach", and no single row
 can give it. It is computed by `zig build coverage-union` from
@@ -126,7 +126,7 @@ since covered. Neither list can drift from the registry without failing a build.
 
 ## Codes the registry does not carry
 
-`ZTS001`, `ZTS056`, `ZTS202`, `ZTS203`
+`ZTS056`, `ZTS203`
 
 These are real diagnostics the corpus trips that no `rule_registry` entry
 carries - the parser, type-position admission, bool-checker, and type-checker families. The
