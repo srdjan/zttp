@@ -10,6 +10,13 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Changed
+
+- **The proof gate workflow is an example.** It moved from
+  `.github/workflows/proof-gate.yml` to `docs/examples/proof-gate.yml`, and the
+  zttp repository no longer runs it. Copy it to `.github/workflows/` in your
+  project, as before.
+
 ## [0.22.3] - 2026-10-18
 
 ### Highlights

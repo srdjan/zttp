@@ -453,9 +453,11 @@ in the report. An added file is skipped for the same reason: it counts as
 
 ### GitHub Actions
 
-The shipped workflow posts a sticky proof comment on every pull request and
-fails the check on `breaking`. Copy `.github/workflows/proof-gate.yml` and
-`scripts/proof-gate.sh` into your project.
+The example workflow posts a sticky proof comment on every pull request and
+fails the check on `breaking`. Copy
+[`docs/examples/proof-gate.yml`](examples/proof-gate.yml) to
+`.github/workflows/proof-gate.yml` in your project, and copy
+`scripts/proof-gate.sh` too. The zttp repository does not run this workflow.
 
 ```yaml
 on: pull_request

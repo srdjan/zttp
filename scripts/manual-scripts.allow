@@ -28,3 +28,9 @@ setup.sh developer-setup
 # rendered table against the registry row by row - so this script is the
 # author-side fix for a failure that gate reports, not a check of its own.
 update-restrictions-doc.sh regeneration-tool
+
+# The proof gate a user's pull request workflow runs. Users copy it with the
+# example workflow docs/examples/proof-gate.yml; this repository runs no
+# workflow (D-009, D13). The verdict logic it calls, `zttp proofs gate`, is
+# tested in packages/runtime/src/proofs/pr_gate.zig.
+proof-gate.sh user-template

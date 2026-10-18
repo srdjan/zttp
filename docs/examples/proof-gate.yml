@@ -1,5 +1,9 @@
 name: Proof Gate
 
+# Example workflow. The zttp repository does not run it. To use it, copy this
+# file to .github/workflows/proof-gate.yml in your project, together with
+# scripts/proof-gate.sh.
+#
 # Posts a behavioral-proof verdict for every changed handler as a sticky PR
 # comment and fails the check when a change is `breaking` or the proof gate
 # itself errors. A change is `breaking` when a route or response is removed or
