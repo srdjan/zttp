@@ -2254,7 +2254,7 @@ pub const FlowChecker = struct {
             // `obj.field = secret` / `obj[k] = secret`: taint the base object so
             // a later read of `obj` keeps the label. Merge rather than replace,
             // since other fields may already taint it.
-            self.recordSelectionWrite(asgn.target, labels);
+            if (self.ir_view.getMember(asgn.target)) |member| self.recordSelectionWrite(member.object, labels);
             if (labels.isEmpty()) return;
             const binding = self.assignmentRootBinding(asgn.target) orelse return;
             const key = packBindingKey(binding.scope_id, binding.slot);
@@ -2263,8 +2263,8 @@ pub const FlowChecker = struct {
         }
     }
 
-    /// The literal allocation behind a binding or aggregate access. Multiple
-    /// recorded values and unresolved parameters deliberately answer unknown.
+    /// The literal allocation behind a binding. Property reads may retrieve an
+    /// alias stored in another object, so they deliberately answer unknown.
     fn storageOrigin(self: *const FlowChecker, node: NodeIndex, depth: u8) ?NodeIndex {
         if (depth >= max_summary_depth) return null;
         return switch (self.ir_view.getTag(node) orelse return null) {
@@ -2276,10 +2276,6 @@ pub const FlowChecker = struct {
                 const values = self.binding_value_nodes.get(key) orelse break :blk null;
                 if (values.items.len != 1) break :blk null;
                 break :blk self.storageOrigin(values.items[0], depth + 1);
-            },
-            .member_access, .optional_chain, .computed_access => blk: {
-                const member = self.ir_view.getMember(node) orelse break :blk null;
-                break :blk self.storageOrigin(member.object, depth + 1);
             },
             // exhaustive: other expressions have no stable allocation identity;
             // null makes their writes potential aliases rather than discarding them.
@@ -6305,6 +6301,8 @@ test "selection callbacks carry writes into selected elements" {
         .{ .callback = "(v) => { parts[1] = req.url; return req.url !== \"\"; }", .safe = false },
         .{ .callback = "(v) => { parts[1] = req.url; return true; }", .safe = false },
         .{ .setup = "const alias = parts;", .callback = "(v) => { alias[1] = req.url; return true; }", .safe = false },
+        .{ .setup = "const holder = { items: parts };", .callback = "(v) => { holder.items[1] = req.url; return true; }", .safe = false },
+        .{ .setup = "const holder = [parts];", .callback = "(v) => { holder[0].splice(1, 0, req.url); return true; }", .safe = false },
         .{ .callback = "(v, i, all) => { all[1] = req.url; return true; }", .safe = false },
         .{ .setup = "function replace(xs) { xs[1] = req.url; }", .callback = "(v) => { replace(parts); return true; }", .safe = false },
         .{ .callback = "(v) => { parts.splice(1, 0, req.url); return true; }", .safe = false },
