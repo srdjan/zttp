@@ -70,7 +70,7 @@ dist="$work/dist"
 manifest="$work/manifest"
 notes="$work/release-notes.md"
 
-linux_image="zttp-release-linux:0.16.0-amd64"
+linux_image="zttp-release-linux:0.16.0-arm64"
 linux_cpus=10
 # bash 3.2 has no associative arrays and fails on an empty array under set -u.
 # Container names hold no spaces, so a plain string is a safe list.
@@ -320,18 +320,20 @@ container system start
 if container image inspect "$linux_image" >/dev/null 2>&1; then
   echo "image present; not rebuilding"
 else
-  container build --arch amd64 -f scripts/release-linux.Containerfile -t "$linux_image" scripts/
+  container build --arch arm64 -f scripts/release-linux.Containerfile -t "$linux_image" scripts/
 fi
 
-step "Linux gate: release verifier in $linux_image (amd64 under Rosetta)"
+step "Linux gate: release verifier in $linux_image (native arm64)"
 # The default relative .zig-cache is deliberate: it is the configuration that
-# exposed the relative-path bug. Rosetta is deliberate too: Zig's Debug x86_64
-# backend is self-hosted, which is where the 0.22.2 crash showed. The container
-# exit status is the gate result.
+# exposed the relative-path bug. The gate runs on arm64 because it cannot run
+# under Rosetta: Zig builds its translate-c helper with the self-hosted x86_64
+# backend, and Rosetta refuses that binary ("bss_size overflow"), so every
+# compile that imports sqlite3.h fails. x86_64 Linux is covered only by the
+# tarball smoke test below. The container exit status is the gate result.
 verify_name="zttp-release-verify-$$"
 container_names="$container_names $verify_name"
 SECONDS=0
-container run --rm --name "$verify_name" --arch amd64 --rosetta --cpus "$linux_cpus" --memory 12G \
+container run --rm --name "$verify_name" --arch arm64 --cpus "$linux_cpus" --memory 12G \
   -v "$repo":/src:ro "$linux_image" \
   bash -c "nproc; free -m; zig version; git clone -q /src /work && cd /work && git checkout -q $tag && bash scripts/verify.sh --release"
 echo "Linux gate took ${SECONDS}s"
@@ -375,8 +377,9 @@ cat -- *.sha256 >checksums-sha256.txt
 ls -l "$dist"
 cd "$work/host"
 
-step "smoke test: linux-x86_64 in $linux_image (amd64 under Rosetta)"
-run_container_smoke smoke-x86 amd64 "$linux_image" "zttp-$tag-linux-x86_64" ""
+step "smoke test: linux-x86_64 in ubuntu:24.04 (amd64 under Rosetta)"
+run_container_smoke smoke-x86 amd64 ubuntu:24.04 "zttp-$tag-linux-x86_64" \
+  "apt-get update -qq >/dev/null && apt-get install -y -qq curl >/dev/null; "
 
 step "smoke test: linux-aarch64 in ubuntu:24.04 (arm64)"
 run_container_smoke smoke-arm arm64 ubuntu:24.04 "zttp-$tag-linux-aarch64" \

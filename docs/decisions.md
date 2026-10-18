@@ -100,3 +100,5 @@ GitHub's macOS runner hit the 30-minute job limit in the v0.22.3 release run. Th
 The owner now verifies, builds, smoke-tests, and publishes each release with `scripts/release.sh` on an Apple Silicon Mac. Linux runs inside Apple's `container` CLI.
 
 Two choices follow from this. First (D9), releases publish no Intel macOS binary (`x86_64-macos-none`). Second (D12), `.github/workflows/ci.yml` and `.github/workflows/release.yml` are deleted, so no workflow builds or tests the repository. The `proof-gate.yml` workflow stays, because `docs/proofs-and-receipts.md` documents it as a template users copy.
+
+Third (D14), the Linux gate runs `scripts/verify.sh --release` in a native arm64 container. The first local run of the gate under Rosetta failed 28 compile steps. Rosetta refuses the `translate-c` helper that Zig 0.16 builds with its x86_64 backend ("bss_size overflow"). Only the Rosetta smoke test of the shipped tarball checks x86_64 Linux. That smoke test cannot catch a crash that occurs only in x86_64 Debug builds, such as the 0.22.2 crash.

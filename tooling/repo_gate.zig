@@ -22,7 +22,7 @@ const ReleaseFailure = error{
 fn releaseMessage(failure: ReleaseFailure) []const u8 {
     return switch (failure) {
         error.MissingHostVerify => "release script: missing a `bash scripts/verify.sh --release` host gate",
-        error.MissingContainerVerify => "release script: missing a `container run --arch amd64` line that runs `scripts/verify.sh --release`",
+        error.MissingContainerVerify => "release script: missing a `container run --arch arm64` line that runs `scripts/verify.sh --release`; Rosetta cannot run the gate",
         error.InvalidBenchmarkStepCount => "release script: expected exactly one zig build bench-check line",
         error.BenchmarkMustBeAdvisory => "release script: machine-local bench-check must be advisory (`||`)",
         error.MissingSmokeGettingStarted => "release script: missing `zig build smoke-getting-started`",
@@ -296,7 +296,7 @@ fn validateReleaseLines(lines: []const []const u8) ReleaseFailure!void {
         const trimmed = std.mem.trimStart(u8, line, " \t");
         if (std.mem.startsWith(u8, trimmed, "bash scripts/verify.sh --release")) host_verify = true;
         if (std.mem.find(u8, line, "container run") != null and
-            std.mem.find(u8, line, "--arch amd64") != null and
+            std.mem.find(u8, line, "--arch arm64") != null and
             std.mem.find(u8, line, "scripts/verify.sh --release") != null) container_verify = true;
         if (std.mem.find(u8, line, "zig build bench-check") != null) {
             bench_lines += 1;
@@ -340,7 +340,7 @@ fn expectReleaseFailure(allocator: std.mem.Allocator, source: []const u8, expect
 }
 
 const container_block =
-    \\container run --rm --arch amd64 --rosetta \
+    \\container run --rm --arch arm64 \
     \\  -v "$repo":/src:ro "$image" \
     \\  bash -c "git clone -q /src /work && cd /work && bash scripts/verify.sh --release"
 ;
@@ -374,8 +374,8 @@ const negative_cases = [_]NegativeCase{
     .{ .name = "host verify commented out", .from = "\nbash scripts/verify.sh --release\n", .to = "\n# bash scripts/verify.sh --release\n", .expected = error.MissingHostVerify },
     .{ .name = "host verify absent", .from = "\nbash scripts/verify.sh --release\n", .to = "\n", .expected = error.MissingHostVerify },
     .{ .name = "host verify without the release flag", .from = "\nbash scripts/verify.sh --release\n", .to = "\nbash scripts/verify.sh\n", .expected = error.MissingHostVerify },
-    .{ .name = "container verify only in a comment", .from = container_block, .to = "# container run --rm --arch amd64 bash -c \"bash scripts/verify.sh --release\"", .expected = error.MissingContainerVerify },
-    .{ .name = "container verify on arm64", .from = "--arch amd64", .to = "--arch arm64", .expected = error.MissingContainerVerify },
+    .{ .name = "container verify only in a comment", .from = container_block, .to = "# container run --rm --arch arm64 bash -c \"bash scripts/verify.sh --release\"", .expected = error.MissingContainerVerify },
+    .{ .name = "container verify under Rosetta", .from = "--arch arm64", .to = "--arch amd64 --rosetta", .expected = error.MissingContainerVerify },
     .{ .name = "container verify without the release flag", .from = "scripts/verify.sh --release\"", .to = "scripts/verify.sh\"", .expected = error.MissingContainerVerify },
     .{ .name = "benchmark absent", .from = "zig build bench-check || echo \"warning: advisory bench-check missed\"\n", .to = "", .expected = error.InvalidBenchmarkStepCount },
     .{ .name = "benchmark only in a comment", .from = "zig build bench-check ||", .to = "# zig build bench-check ||", .expected = error.InvalidBenchmarkStepCount },
@@ -685,7 +685,7 @@ test "release script joins a continued line before it applies a rule" {
 
 test "release script comment inside a continuation ends the logical line" {
     const source = "bash scripts/verify.sh --release\n" ++
-        "container run --arch amd64 \\\n" ++
+        "container run --arch arm64 \\\n" ++
         "# scripts/verify.sh --release\n";
     const lines = try normalizeScript(std.testing.allocator, source);
     defer {

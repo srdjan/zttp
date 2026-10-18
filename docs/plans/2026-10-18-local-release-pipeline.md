@@ -268,3 +268,16 @@ under Rosetta: on Darwin, when `sysctl -n hw.optional.arm64` prints `1`, set
 7. Owner: `git push origin main`, `git push origin :refs/tags/v0.22.3`,
    `git push origin v0.22.3`.
 8. `bash scripts/release.sh v0.22.3 --publish`.
+
+## Amendment: the Linux gate runs on arm64 (D14 A)
+
+The first `--no-publish` run failed the Linux gate under Rosetta. 28 compile
+steps failed, each with "rosetta error: bss_size overflow". Zig 0.16 builds its
+`translate-c` helper with the self-hosted x86_64 backend, and Rosetta refuses
+that binary. Every compile that imports `sqlite3.h` runs the helper, so the
+step 6 fallback (Debug `zig build test` under Rosetta) fails the same way.
+
+The same `verify.sh --release` passed in a native arm64 container in 516 s.
+The gate now runs there. The x86_64 tarball smoke test still runs under
+Rosetta, in `ubuntu:24.04`, because the shipped binaries are built with LLVM on
+the host and do not run the helper. No full x86_64 test run remains.

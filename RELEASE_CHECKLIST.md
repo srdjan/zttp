@@ -61,9 +61,11 @@ GitHub. It runs these steps in order and stops at the first failure:
       warning and does not stop the run. Rerun it once after a warning, and
       block the release if the rerun also misses.
 - [ ] `zig build release-check -- --json`.
-- [ ] The same `bash scripts/verify.sh --release` on Linux x86_64, inside the
-      `zttp-release-linux:0.16.0-amd64` image under Rosetta. Note the duration
-      the script prints.
+- [ ] The same `bash scripts/verify.sh --release` on Linux arm64, inside the
+      `zttp-release-linux:0.16.0-arm64` image. Note the duration the script
+      prints. The gate cannot run under Rosetta: Rosetta refuses the
+      `translate-c` helper that Zig builds with its x86_64 backend. No full
+      x86_64 test run occurs, so only the tarball smoke test checks x86_64 Linux.
 - [ ] Cross-compile `x86_64-linux-gnu`, `aarch64-linux-gnu`, and
       `aarch64-macos-none` with `-Doptimize=ReleaseFast -Dstrip`. SQLite is
       vendored as a static amalgamation, so no container is needed to build.
@@ -71,8 +73,8 @@ GitHub. It runs these steps in order and stops at the first failure:
 - [ ] Package the three tarballs, their `.sha256` files, and
       `checksums-sha256.txt` in `${XDG_CACHE_HOME:-$HOME/.cache}/zttp-release/vX.Y.Z/dist`.
 - [ ] Smoke-test each tarball: `zttp version`, `zttp --help`, and a served
-      `ok:true` response. Linux x86_64 and aarch64 run in containers; macOS
-      aarch64 runs on the host.
+      `ok:true` response. Linux x86_64 (under Rosetta) and aarch64 run in
+      `ubuntu:24.04` containers; macOS aarch64 runs on the host.
 - [ ] Check release binary sizes with `ls -lh` on the `dist` tarballs. Stripped
       `zttp` measured 12.1-13.3 MB across the four targets at 0.21.0. A
       debug-sized artifact in the release means `-Dstrip` was dropped.
