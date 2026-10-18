@@ -74,8 +74,9 @@ pub const Severity = enum {
 /// hashed. 2 is the checker after sinks in callees, captured values, module
 /// constants, unresolved calls, recursion, cross-file helpers, and credential
 /// reads through a passed request were fixed. 3 prevents validation from one
-/// contributor laundering raw input in an aggregate or call result.
-pub const flow_analyzer_version: u32 = 3;
+/// contributor laundering raw input in an aggregate or call result. 4 accounts
+/// for writes that can replace elements while an array callback runs.
+pub const flow_analyzer_version: u32 = 4;
 
 pub const DiagnosticKind = enum {
     secret_in_response, // {secret} data in Response body/headers
@@ -150,6 +151,14 @@ pub const DefendedPath = struct {
 const GuardInfo = struct {
     func: []const u8,
     node: NodeIndex,
+};
+
+/// Writes observed while an array method evaluates its callbacks. Distinct
+/// literal allocations cannot alias; an unresolved origin may name the receiver.
+const SelectionWrites = struct {
+    parent: ?*SelectionWrites,
+    origin: ?NodeIndex,
+    labels: LabelSet = LabelSet.empty,
 };
 
 /// Map a diagnostic kind to the property tag it witnesses. `null` when the
@@ -417,6 +426,7 @@ pub const FlowChecker = struct {
     /// that call passes it. `addDiagnostic` deduplicates the repeats that
     /// re-walking a callee per call site produces.
     summary_returns: ?*LabelSet,
+    selection_writes: ?*SelectionWrites = null,
     /// Callee summaries in progress (recursion guard).
     summary_stack: [max_summary_depth]u32,
     /// The call expression that entered each summary frame, parallel to
@@ -2244,11 +2254,51 @@ pub const FlowChecker = struct {
             // `obj.field = secret` / `obj[k] = secret`: taint the base object so
             // a later read of `obj` keeps the label. Merge rather than replace,
             // since other fields may already taint it.
+            self.recordSelectionWrite(asgn.target, labels);
             if (labels.isEmpty()) return;
             const binding = self.assignmentRootBinding(asgn.target) orelse return;
             const key = packBindingKey(binding.scope_id, binding.slot);
             const existing = self.binding_labels.get(key) orelse LabelSet.empty;
             self.binding_labels.put(self.allocator, key, LabelSet.mergeValues(existing, labels)) catch self.markAllocationFailure();
+        }
+    }
+
+    /// The literal allocation behind a binding or aggregate access. Multiple
+    /// recorded values and unresolved parameters deliberately answer unknown.
+    fn storageOrigin(self: *const FlowChecker, node: NodeIndex, depth: u8) ?NodeIndex {
+        if (depth >= max_summary_depth) return null;
+        return switch (self.ir_view.getTag(node) orelse return null) {
+            .array_literal, .object_literal => node,
+            .identifier => blk: {
+                const binding = self.bindingAt(node) orelse break :blk null;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                if (self.param_values.get(key)) |passed| break :blk self.storageOrigin(passed, depth + 1);
+                const values = self.binding_value_nodes.get(key) orelse break :blk null;
+                if (values.items.len != 1) break :blk null;
+                break :blk self.storageOrigin(values.items[0], depth + 1);
+            },
+            .member_access, .optional_chain, .computed_access => blk: {
+                const member = self.ir_view.getMember(node) orelse break :blk null;
+                break :blk self.storageOrigin(member.object, depth + 1);
+            },
+            // exhaustive: other expressions have no stable allocation identity;
+            // null makes their writes potential aliases rather than discarding them.
+            else => null,
+        };
+    }
+
+    fn recordSelectionWrite(self: *FlowChecker, target: NodeIndex, labels: LabelSet) void {
+        var capture = self.selection_writes;
+        if (capture == null or labels.isEmpty()) return;
+        const origin = self.storageOrigin(target, 0);
+        var written = labels;
+        // An unvalidated value of unknown provenance may contain request data.
+        // Normalize each write before folding, so a later escaped write cannot
+        // validate an earlier unknown one.
+        if (written.unknown and !written.validated) written.user_input = true;
+        while (capture) |current| : (capture = current.parent) {
+            if (origin != null and current.origin != null and origin.? != current.origin.?) continue;
+            current.labels = LabelSet.mergeValues(current.labels, written);
         }
     }
 
@@ -2287,14 +2337,15 @@ pub const FlowChecker = struct {
             std.mem.eql(u8, method, "unshift") or
             std.mem.eql(u8, method, "splice");
         if (!mutating) return;
-        // Receiver must be a plain identifier binding.
-        if (self.ir_view.getTag(member.object) != .identifier) return;
-        const binding = self.bindingAt(member.object) orelse return;
         var arg_labels = LabelSet.empty;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             arg_labels = LabelSet.mergeValues(arg_labels, self.inferLabels(arg));
         }
+        self.recordSelectionWrite(member.object, arg_labels);
+        // Receiver must be a plain identifier binding for the binding update.
+        if (self.ir_view.getTag(member.object) != .identifier) return;
+        const binding = self.bindingAt(member.object) orelse return;
         if (arg_labels.isEmpty()) return;
         const key = packBindingKey(binding.scope_id, binding.slot);
         const existing = self.binding_labels.get(key) orelse LabelSet.empty;
@@ -3017,16 +3068,41 @@ pub const FlowChecker = struct {
                 std.mem.eql(u8, name, "toSorted") or std.mem.eql(u8, name, "slice")
         else
             false;
+        var writes = SelectionWrites{
+            .parent = self.selection_writes,
+            .origin = if (self.ir_view.getMember(call_data.callee)) |member| self.storageOrigin(member.object, 0) else null,
+        };
+        const iterates_values = selects_values or maps_values;
+        if (iterates_values) self.selection_writes = &writes;
+        defer if (iterates_values) {
+            self.selection_writes = writes.parent;
+        };
         var labels = callee_labels;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             const arg_tag = self.ir_view.getTag(arg) orelse .lit_undefined;
+            const callback = if (is_method and (arg_tag == .arrow_function or arg_tag == .function_expr))
+                arg
+            else if (is_method and arg_tag == .identifier)
+                self.namedFunctionArg(arg)
+            else
+                null;
             var callback_result: ?LabelSet = null;
-            if (is_method and (arg_tag == .arrow_function or arg_tag == .function_expr)) {
-                callback_result = self.closureResultLabelsBound(arg, callee_labels);
-            } else if (is_method and arg_tag == .identifier) {
-                if (self.namedFunctionArg(arg)) |fn_node| {
-                    callback_result = self.closureResultLabelsBound(fn_node, callee_labels);
+            if (callback) |fn_node| {
+                var inputs = callee_labels;
+                var passes: u8 = 0;
+                while (true) {
+                    const returned = self.closureResultLabelsBound(fn_node, inputs);
+                    callback_result = if (callback_result) |prior| LabelSet.mergeValues(prior, returned) else returned;
+                    if (!iterates_values) break;
+                    // A write can supply a later iteration's input. Rewalk
+                    // with those labels until both returns and writes settle,
+                    // including sinks inside callbacks whose result is ignored.
+                    const widened = LabelSet.mergeValues(callee_labels, writes.labels);
+                    if (@as(u16, @bitCast(widened)) == @as(u16, @bitCast(inputs))) break;
+                    passes += 1;
+                    if (passes > max_fixpoint_passes) return self.unresolvedCallLabels(widened);
+                    inputs = widened;
                 }
             }
             labels = LabelSet.mergeValues(labels, callback_result orelse self.inferLabels(arg));
@@ -3038,9 +3114,14 @@ pub const FlowChecker = struct {
         }
         // Selection and ordering controls never become element content. Keep
         // their provenance and observed sinks, but take the output's validation
-        // from the receiver: neither a raw predicate unescapes safe elements nor
-        // a validated predicate sanitizes raw ones.
-        if (selects_values) labels.validated = callee_labels.validated;
+        // from the receiver and anything a callback can write into it. A raw
+        // predicate alone cannot unescape safe elements, but replacing a later
+        // element can. Unknown write targets may alias the receiver.
+        if (selects_values) {
+            labels = LabelSet.mergeValues(labels, writes.labels);
+            const elements = LabelSet.mergeValues(callee_labels, writes.labels);
+            labels.validated = elements.validated;
+        }
         return labels;
     }
 
@@ -6217,6 +6298,78 @@ test "selection predicates cannot change element validation" {
         try std.testing.expectEqual(case.safe, report.properties.injection_safe);
         try std.testing.expectEqual(@as(usize, if (case.safe) 0 else 1), report.count);
     }
+}
+
+test "selection callbacks carry writes into selected elements" {
+    const cases = [_]struct { setup: []const u8 = "", callback: []const u8, safe: bool }{
+        .{ .callback = "(v) => { parts[1] = req.url; return req.url !== \"\"; }", .safe = false },
+        .{ .callback = "(v) => { parts[1] = req.url; return true; }", .safe = false },
+        .{ .setup = "const alias = parts;", .callback = "(v) => { alias[1] = req.url; return true; }", .safe = false },
+        .{ .callback = "(v, i, all) => { all[1] = req.url; return true; }", .safe = false },
+        .{ .setup = "function replace(xs) { xs[1] = req.url; }", .callback = "(v) => { replace(parts); return true; }", .safe = false },
+        .{ .callback = "(v) => { parts.splice(1, 0, req.url); return true; }", .safe = false },
+        .{ .callback = "(v) => { [\"x\"].filter((x) => { parts[1] = req.url; return true; }); return true; }", .safe = false },
+        .{ .callback = "(v) => { parts[1] = escapeHtml(req.url); return req.url !== \"\"; }", .safe = true },
+        .{ .setup = "const other = {};", .callback = "(v) => { other.raw = req.url; return req.url !== \"\"; }", .safe = true },
+    };
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\function handler(req) {{
+            \\  const parts = [escapeHtml(req.url), escapeHtml(req.url)];
+            \\  {s}
+            \\  const out = parts.filter({s}).join("");
+            \\  return Response.html(out);
+            \\}}
+        , .{ case.setup, case.callback });
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        if (report.properties.injection_safe != case.safe) {
+            std.debug.print("selection write verdict for {s}\n", .{case.callback});
+            return error.WrongSelectionWriteVerdict;
+        }
+        try std.testing.expectEqual(@as(usize, if (case.safe) 0 else 1), report.count);
+    }
+}
+
+test "map callbacks see values written into later elements" {
+    const cases = [_]struct { callback: []const u8, safe: bool }{
+        .{ .callback = "(v) => { parts[1] = req.url; return v; }", .safe = false },
+        .{ .callback = "(v, i, all) => { all[1] = req.url; return v; }", .safe = false },
+        .{ .callback = "(v) => { parts[1] = req.url; return escapeHtml(v); }", .safe = true },
+        .{ .callback = "(v) => { parts[1] = req.url; return \"static\"; }", .safe = true },
+    };
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\function handler(req) {{
+            \\  const parts = [escapeHtml(req.url), escapeHtml(req.url)];
+            \\  const out = parts.map({s}).join("");
+            \\  return Response.html(out);
+            \\}}
+        , .{case.callback});
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        try std.testing.expectEqual(case.safe, report.properties.injection_safe);
+    }
+}
+
+test "later iteration writes reach callback sinks even when its result is discarded" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const parts = ["a", "b"];
+        \\  parts.filter((v) => { parts[1] = secret; console.log(v); return true; });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var buf: [512]u8 = undefined;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
+    try std.testing.expect(!report.properties.no_secret_leakage);
 }
 
 test "FlowChecker names the guard of a validated value under a unary operator" {

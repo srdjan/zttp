@@ -913,9 +913,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // The refreshed recording first trips ZTS501 before correcting its
-        // effect declaration and returning the queried rows.
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: the `deterministic` loosening. The property moved from "was a
@@ -1045,7 +1043,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
     },
 
     // ---------------------------------------------------------------------
@@ -2516,9 +2514,8 @@ test "record codegen baseline corpus (live, gated)" {
 // deterministically and fails if a compiler/policy change would regress it.
 // Uses an arena over the page allocator (the replay executes the full tool +
 // veto stack; this is a fidelity check, not a leak test).
-/// Coverage pinned to the complete DeepSeek recording. The refreshed policy-3
-/// cohort trips ZTS501 instead of ZTS502; historical draws remain in the
-/// published coverage union, while this floor names the current artifacts.
+/// Coverage pinned to the complete DeepSeek recording; historical draws remain
+/// in the published coverage union, while this floor names current artifacts.
 fn coverageBaseline(
     provider: agent.Provider,
     model: []const u8,
@@ -2527,7 +2524,7 @@ fn coverageBaseline(
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
         !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
         return null;
-    return &.{ "ZTS500", "ZTS501" };
+    return &.{"ZTS502"};
 }
 
 /// Sorted code slice for stable JSON evidence.
