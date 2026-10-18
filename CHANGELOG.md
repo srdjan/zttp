@@ -10,6 +10,31 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.22.3] - 2026-10-18
+
+### Highlights
+
+zttp 0.22.3 is the first published 0.22 release. It ships everything in 0.22.0
+and 0.22.2 and fixes the release build that stopped 0.22.2 from publishing. If
+you upgrade from 0.21, read the 0.22.2 and 0.22.0 entries in CHANGELOG.md first.
+
+### Breaking changes
+
+None in this patch. The 0.22.2 and 0.22.0 entries in CHANGELOG.md list the
+breaking changes that a 0.21 user gets with this release, each with its
+migration step.
+
+### Fixed
+
+- **Effect facts no longer free an unwritten contract.** When an allocation
+  failed while the analyzer built the contract projection, the cleanup path
+  freed memory it had never written. On Linux x86_64 this crashed the process.
+- **`cli-abuse-check` runs from a relative cache path.** The check could not
+  find the `zts` binary when the build cache path was relative, as it is in CI.
+- **The instruction counter falls back on a macOS virtual machine.** A macOS
+  VM reports zero retired instructions. The counter now uses CPU time there,
+  as it does on a Linux runner, and stays strict on a physical Mac.
+
 ## [0.22.2] - 2026-10-17
 
 ### Highlights
@@ -1003,7 +1028,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.22.2...HEAD
+[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.22.3...HEAD
+[0.22.3]: https://github.com/srdjan/zigttp/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/srdjan/zigttp/compare/v0.22.0...v0.22.2
 [0.22.0]: https://github.com/srdjan/zigttp/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/srdjan/zigttp/compare/v0.21.0...v0.21.1
