@@ -122,7 +122,14 @@ pub fn main(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, gpa);
     defer args.deinit();
     _ = args.next();
-    const zts = args.next() orelse return usage();
+    const zts_arg = args.next() orelse return usage();
+    // The child runs in the temporary directory, so a relative path from the
+    // build (CI's `./.zig-cache/...`) would not resolve there.
+    const zts = Io.Dir.realPathFileAlloc(.cwd(), io, zts_arg, gpa) catch |err| {
+        std.debug.print("error: cannot resolve the zts path {s}: {s}\n", .{ zts_arg, @errorName(err) });
+        std.process.exit(1);
+    };
+    defer gpa.free(zts);
 
     const tmp_root = init.environ_map.get("TMPDIR") orelse "/tmp";
     var name_buf: [64]u8 = undefined;
