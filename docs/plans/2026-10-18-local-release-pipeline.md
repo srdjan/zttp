@@ -222,7 +222,8 @@ under Rosetta: on Darwin, when `sysctl -n hw.optional.arm64` prints `1`, set
   the completion messages near line 195. Do not change any command string in
   `release_check.zig` `verify_script_markers`.
 - Stale release-process text: `.github/RELEASE_NOTES_TEMPLATE.md:3`,
-  `build/artifacts.zig:117`, `build.zig:64`, `docs/internals/architecture.md:327`,
+  the `-Dstrip` comment in `build/artifacts.zig`, the docs-drift comment in
+  `build.zig`, `docs/internals/architecture.md:327`,
   `docs/internals/capabilities.md:118`, `docs/internals/cassette-recording.md:6`,
   `docs/convergence.md:605` (check whether a generator owns it before editing).
 - Platform claims: `README.md:37` (no Intel macOS binary) and
