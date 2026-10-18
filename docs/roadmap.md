@@ -34,7 +34,9 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
 
 ## Supported Now
 
-- macOS and Linux on x86_64 and aarch64.
+- Source builds on macOS and Linux, on x86_64 and aarch64.
+- Published binaries for Linux on x86_64 and aarch64, and for macOS on aarch64.
+  There is no Intel macOS binary.
 - Zig `0.16.0` as declared by `build.zig.zon`.
 - Threaded HTTP/1.1 server with per-request runtime isolation and decoded
   `Content-Length` or `Transfer-Encoding: chunked` request bodies.

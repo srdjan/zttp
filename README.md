@@ -34,7 +34,8 @@ zttp deploy   # self-contained binary, proof ledger entry, signed receipt
 
 ## Install
 
-Pre-built binaries are published for macOS and Linux on x86_64 and aarch64:
+Pre-built binaries are published for Linux on x86_64 and aarch64, and for macOS
+on aarch64. There is no Intel macOS binary; build from source there.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh

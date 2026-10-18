@@ -602,7 +602,7 @@ commands, the environment, and what to republish afterwards are in
 
 Replay is deterministic and free. It reads the committed cassettes and re-runs
 the recorded tool calls through the real veto, the real apply path, and the
-real metrics. This is what CI runs and what the table above reports. The
+real metrics. This is what `scripts/verify.sh` runs and what the table above reports. The
 replay is also a ratchet: it fails if a compiler change flips a recorded
 first-draft outcome, so the rate cannot drift without somebody noticing.
 

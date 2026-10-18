@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/verify.sh
 #
-# One-command local gate that mirrors the `test` job in
-# .github/workflows/ci.yml step-for-step, in order, one process per step.
+# One-command local gate, in order, one process per step. No GitHub workflow
+# runs it: scripts/release.sh runs it in release mode on the host and on Linux.
 #
 # Sequential by design: the build graph may run the pool-heavy `test` and
 # `test-zruntime` roots in parallel and reintroduce the macOS teardown TRAP
@@ -13,16 +13,16 @@
 # and `test-doc-links` are both dependencies of the `test` step (build.zig), and
 # neither is cached, so step 1 already runs them. Do not re-add them.
 #
-# The format gate is a separate CI job (ci.yml: Check formatting); it is run
-# LAST here so a local `bash scripts/verify.sh` still catches formatting drift
-# without gating the test suite on it. Note: the repo is fmt-clean only under
-# the pinned toolchain (0.16.0, matching CI's ZIG_VERSION); running under a
-# nightly `zig` may report spurious drift, so keeping fmt last means the full
-# correctness suite always runs first regardless.
+# The format gate is run LAST here so a local `bash scripts/verify.sh` still
+# catches formatting drift without gating the test suite on it. Note: the repo
+# is fmt-clean only under the pinned toolchain (0.16.0, the build.zig.zon
+# minimum_zig_version); running under a nightly `zig` may report spurious
+# drift, so keeping fmt last means the full correctness suite always runs first
+# regardless.
 #
 # Usage (from anywhere; the script cd's to the repo root):
-#   bash scripts/verify.sh             # the per-commit gate, run by ci.yml
-#   bash scripts/verify.sh --release   # adds the release-only gates
+#   bash scripts/verify.sh             # the per-commit gate
+#   bash scripts/verify.sh --release   # adds the release-only gates; scripts/release.sh runs it
 #
 # Release-evidence provenance is a RELEASE gate and not a per-commit one. It
 # fails until docs/coverage.json and docs/convergence.json are republished from
@@ -125,7 +125,7 @@ bash scripts/check-agent-determinism.sh
 step "bash scripts/test-install-archive-safety.sh  (installer archive path safety)"
 bash scripts/test-install-archive-safety.sh
 
-step "policy hash unchanged  (ci.yml: Assert policy hash unchanged)"
+step "policy hash unchanged  (rules changed without updating policy-hash.txt)"
 if [ ! -f policy-hash.txt ]; then
   echo "error: policy-hash.txt is missing - the policy hash baseline must be committed" >&2
   echo "Run: ./zig-out/bin/zts describe-rule --hash > policy-hash.txt" >&2
@@ -172,9 +172,9 @@ step "zts module-spec-render --check  (module specs match the Zig bindings)"
 # stale rather than skipping it.
 ./zig-out/bin/zts module-spec-render --check
 
-step "verify expert subsystem  (ci.yml: Verify expert subsystem)"
+step "verify expert subsystem  (rule count and policy hash from zts meta)"
 if ! command -v jq >/dev/null 2>&1; then
-  echo "error: jq is required for the expert-subsystem check (matches ci.yml)" >&2
+  echo "error: jq is required for the expert-subsystem check" >&2
   exit 1
 fi
 META=$(./zig-out/bin/zts meta --json)
@@ -187,13 +187,13 @@ if [ "$release_mode" = true ]; then
   zig build release-provenance
 fi
 
-step "zig fmt --check build.zig build/ packages/  (ci.yml: Check formatting)"
+step "zig fmt --check build.zig build/ packages/  (formatting)"
 zig fmt --check build.zig build/ packages/
 
 printf '\n========================================\n'
 if [ "$release_mode" = true ]; then
-  printf '>> verify.sh: all CI and release gates passed\n'
+  printf '>> verify.sh: all per-commit and release gates passed\n'
 else
-  printf '>> verify.sh: all CI test-job steps passed\n'
+  printf '>> verify.sh: all per-commit gates passed\n'
 fi
 printf '========================================\n'

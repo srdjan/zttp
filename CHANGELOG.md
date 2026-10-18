@@ -20,9 +20,11 @@ you upgrade from 0.21, read the 0.22.2 and 0.22.0 entries in CHANGELOG.md first.
 
 ### Breaking changes
 
-None in this patch. The 0.22.2 and 0.22.0 entries in CHANGELOG.md list the
-breaking changes that a 0.21 user gets with this release, each with its
-migration step.
+- **No Intel macOS binary.** Migration: build from source, or pin v0.21.0 or
+  earlier.
+
+The 0.22.2 and 0.22.0 entries in CHANGELOG.md list the breaking changes that a
+0.21 user gets with this release, each with its migration step.
 
 ### Fixed
 

@@ -115,7 +115,7 @@ Guard-surface changes also run `zig build test-residual-guards-drift`. That gate
 compares the consumer catalog, compiler mirror, enabled families, measured
 stand-in conversions, and the published verification boundary exactly.
 
-The release CI job runs both checks explicitly. Local `zig build test` also depends on `test-module-governance`.
+The release script runs `bash scripts/verify.sh --release`. Local `zig build test` also depends on `test-module-governance`.
 
 ## Adding a new module
 

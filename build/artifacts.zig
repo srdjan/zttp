@@ -114,7 +114,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     gates.meta_drift.addFileArg(zts_exe.getEmittedBin());
 
     // Strip debug info from the three installed binaries when -Dstrip is set.
-    // The release workflow passes -Dstrip so shipped tarballs stay small; local
+    // scripts/release.sh passes -Dstrip so shipped tarballs stay small; local
     // builds keep symbols by default. Stripping happens at link time, so it is
     // correct for every cross-compiled -Dtarget.
     if (ctx.strip_enabled) {

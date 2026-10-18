@@ -1,8 +1,8 @@
 # Test Steps
 
 `zig build test` is the aggregate unit suite. It is not the full gate.
-`scripts/verify.sh` is the full local gate, and it mirrors the CI test job step
-for step. This document says which steps each one runs, which steps `zig build
+`scripts/verify.sh` is the full local gate. No GitHub workflow runs the test
+suite. This document says which steps each one runs, which steps `zig build
 test` deliberately leaves out, and why.
 
 `bash scripts/verify.sh --release` adds one step the per-commit gate does not
@@ -10,7 +10,8 @@ run: `zig build release-provenance`, which checks that `docs/coverage.json` and
 `docs/convergence.json` were published from a clean source commit the tree still
 matches apart from generated evidence. Every ordinary source commit fails that
 check until the corpus is replayed and both pages republished, so it belongs to
-the release path (`release.yml`, `RELEASE_CHECKLIST.md`) rather than to CI.
+the release path (`scripts/release.sh`, `RELEASE_CHECKLIST.md`) rather than to
+every commit.
 
 The authority is `build.zig` and `build/`. When the two disagree, the build is right and
 this document is stale.
@@ -214,8 +215,8 @@ every run, and probes every failure kind through a small synthetic census.
 `-- --list` prints every probe, and `-- --dump DIR` writes the probes to `DIR`.
 
 The docs drift and link gates run here and only here. Neither Run step is
-cached, so `zig build test` always executes both scripts, and `verify.sh` and
-CI deliberately do not invoke them a second time.
+cached, so `zig build test` always executes both scripts, and `verify.sh`
+deliberately does not invoke them a second time.
 
 The native agent spine also runs in the aggregate test step.
 `check-spine` validates the installed manifest, area contracts, decisions, solution bindings, source anchors, and generated root blocks.
@@ -272,7 +273,7 @@ passed, 0 failed" and exited 0.
 
 The general form of that mistake now has its own gate.
 `scripts/check-script-reachability.sh` asserts that every script under
-`scripts/` is invoked by `build.zig` or `build/`, another script, or CI - or carries a row
+`scripts/` is invoked by `build.zig` or `build/`, another script, or a workflow - or carries a row
 in `scripts/manual-scripts.allow` saying why a developer runs it by hand. It
 found `scripts/test-zruntime.sh`, which invoked `zig test` on
 `packages/runtime/src/zruntime.zig`, a file deleted in the monorepo
@@ -287,22 +288,25 @@ not what the aggregate step depends on: `test_step.dependOn(&run_server_tests
 top-level step over the same Run, so "is `test-server` reachable from `test`"
 is the wrong question. The gate walks the real dependency graph instead.
 It asks whether another entry point runs every step in each closure.
-An entry point is `zig build test` or a step that `scripts/verify.sh` or CI invokes.
+An entry point is `zig build test` or a step that `scripts/verify.sh`,
+`scripts/release.sh`, or a workflow invokes.
 For five shell gates, the entry point can invoke the same script directly. The workflow
-directory is read rather than listed, so a workflow added later becomes a
-coverage source without anyone remembering this gate.
+directory is read when it exists, so a workflow added later becomes a
+coverage source without anyone remembering this gate. The OK line counts the
+steps that only `scripts/release.sh` runs: they are covered at release and not
+on every commit.
 
 `scripts/manual-steps.allow` declares the manual build steps. Both directions
 are enforced. A row for an automated step fails the same gate.
 
 Four floors sit under it, because a coverage check over an empty input reports
-that everything is covered: the CI workflow read must find at least one file,
-the coverage text must name at least one `zig build` invocation, the covered
+that everything is covered: `scripts/verify.sh` and `scripts/release.sh` must
+each be non-empty and name at least one `zig build` invocation, the covered
 closure must be plausibly large, and the allowlist must parse at least one row.
 Each was verified by breaking it.
 
 It also runs seven registry-drift and determinism gates, most of which need the
-built binary. `ci.yml` runs the same seven:
+built binary. `scripts/verify.sh` runs the same seven:
 
 | Gate | Asserts |
 |---|---|
@@ -335,13 +339,13 @@ fold it in by importing it; it needs its own step either way.
 
 ## Parallelism On macOS
 
-Both `scripts/verify.sh` and the CI test job run `zig build test -j1` on macOS
-and plain `zig build test` elsewhere. The serialization is for the same
+`scripts/verify.sh` runs `zig build test -j1` on macOS and plain
+`zig build test` elsewhere. The serialization is for the same
 teardown instability that keeps the zruntime root standalone.
 
 ## Source Coverage Is Unavailable
 
-The repository and CI use Zig 0.16.0. Its normal `zig test` path does not
+The repository uses Zig 0.16.0. Its normal `zig test` path does not
 provide source line or branch coverage instrumentation. `zig test --help`
 exposes PC instrumentation only through `-ffuzz`, which measures fuzzing
 inputs rather than ordinary test execution. The local LLVM report tools cannot

@@ -324,10 +324,10 @@ no artifact and no certificate, so they get no promotion at all.
 
 ## Testing And Governance
 
-Important gates (`bash scripts/verify.sh` runs the CI `test`-job set in one command; the individual steps below are for focused runs):
+Important gates (`bash scripts/verify.sh` runs the full local gate in one command; the individual steps below are for focused runs):
 
 ```bash
-bash scripts/verify.sh             # full local gate, mirrors CI
+bash scripts/verify.sh             # full local gate
 zig build test
 zig build test-zts
 zig build test-zruntime

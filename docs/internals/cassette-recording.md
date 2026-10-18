@@ -3,7 +3,7 @@
 The published convergence number is a measurement of a live model. It comes
 from a corpus of recorded model turns, one cassette per case, replayed offline
 by `zig build test-expert-app`. Replay is deterministic, needs no network and
-no key, and is what CI runs. Recording is the opposite: it spends real model
+no key, and is what `scripts/verify.sh` runs. Recording is the opposite: it spends real model
 time, and for a hosted provider it sends handler source off the machine.
 
 This page states how to record the thirteen current DeepSeek cases. The corpus

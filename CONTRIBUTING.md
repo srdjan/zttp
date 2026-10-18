@@ -19,7 +19,7 @@ zig build -Dhandler=handler.ts         # precompile a handler
 ## Test
 
 ```bash
-bash scripts/verify.sh                 # the full gate; CI runs exactly this
+bash scripts/verify.sh                 # the full local gate
 zig build test                         # aggregate suite, including examples
 zig build test-zts                     # engine only
 zig build test-zruntime                # runtime only, a standalone root
@@ -29,9 +29,9 @@ zig build bench                        # Zig-native microbenchmarks
 
 `zig build test` leaves out the standalone runtime root, the smoke and
 panic-isolation steps, and shell-driven registry gates. It includes the
-end-to-end example handlers. `scripts/verify.sh` runs the full sequence, and
-`ci.yml` uses it as the authoritative test command. A PR that passed only
-`zig build test` can still fail CI.
+end-to-end example handlers. `scripts/verify.sh` runs the full sequence. It is
+the authoritative test command, and no workflow replaces it. A change that
+passed only `zig build test` can still fail `scripts/verify.sh`.
 [Test Steps](docs/internals/testing.md) maps which step runs what.
 
 Run the relevant focused step while you work. Run `scripts/verify.sh` before
@@ -65,7 +65,7 @@ Rules live in the checker cluster (`type_checker.zig`, `flow_checker.zig`, `faul
 
 ## Code style
 
-- `zig fmt` before every commit. CI does not auto-format.
+- `zig fmt` before every commit. Nothing formats the code for you.
 - Types `UpperCamelCase`, functions/variables `lowerCamelCase`, files lowercase (`server.zig`, `handler_instance.zig`).
 - Use native Zig error unions (`!T`) for expected failures across the engine and runtime. `Result<T>` is a user-facing JS and verification construct in handlers, not a Zig engine pattern.
 - `errdefer` every allocation. `orelse` over `?` unwrap on hot paths.

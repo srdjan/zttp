@@ -62,8 +62,8 @@ pub fn build(b: *std.Build) void {
     // the step by hand. Compile it here, without installing it.
     test_step.dependOn(&tools.standin_exe.step);
     // The docs drift and link gates run here, and only here: neither Run step is
-    // cached, so `zig build test` always executes both scripts. CI and
-    // scripts/verify.sh deliberately do not invoke test-docs-drift or
+    // cached, so `zig build test` always executes both scripts.
+    // scripts/verify.sh deliberately does not invoke test-docs-drift or
     // test-doc-links a second time.
     test_step.dependOn(gates.docs_drift_step);
     test_step.dependOn(&gates.doc_links.step);

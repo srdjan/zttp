@@ -1,6 +1,6 @@
 # CHANGELOG.md release entry
 
-Before tagging, add the release entry to `CHANGELOG.md`. The release workflow
+Before tagging, add the release entry to `CHANGELOG.md`. `scripts/release.sh`
 copies the complete entry into the GitHub Release, then adds the stable Install
 and Documentation sections. GitHub adds the generated commit list after this
 curated body.
