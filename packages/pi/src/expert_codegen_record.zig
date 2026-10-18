@@ -862,7 +862,7 @@ const record_corpus = [_]RecordCase{
         // meant to measure. Asking for raw claims and accepting a confirmation
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
         .expect_committed_intent_pass = true,
     },
     .{
@@ -913,13 +913,9 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // Recorded with the best model (Sonnet): writes correct SQL, self-checks
-        // cleanly, and first-draft-passes. Previously it failed because the
-        // property analysis reported read_only as PROVEN for a SELECT and the
-        // agent declared it (then ZTS501 rejected it); the classifier now gates
-        // declarable read_only on write-effect imports, so the agent is no
-        // longer told to declare a property the import forbids.
-        .expect_first_attempt_green = true,
+        // The refreshed recording first trips ZTS501 before correcting its
+        // effect declaration and returning the queried rows.
+        .expect_first_attempt_green = false,
     },
     .{
         // Fence: the `deterministic` loosening. The property moved from "was a
@@ -946,7 +942,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: a read from mutable module state is its own varying source,
@@ -972,7 +968,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: the shapes of egress options object the flow checker could not
@@ -2520,8 +2516,9 @@ test "record codegen baseline corpus (live, gated)" {
 // deterministically and fails if a compiler/policy change would regress it.
 // Uses an arena over the page allocator (the replay executes the full tool +
 // veto stack; this is a fidelity check, not a leak test).
-/// A coverage floor needs a complete measurement for this exact corpus.
-/// The final DeepSeek recording must establish that floor before publication.
+/// Coverage pinned to the complete DeepSeek recording. The refreshed policy-3
+/// cohort trips ZTS501 instead of ZTS502; historical draws remain in the
+/// published coverage union, while this floor names the current artifacts.
 fn coverageBaseline(
     provider: agent.Provider,
     model: []const u8,
@@ -2530,7 +2527,7 @@ fn coverageBaseline(
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
         !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
         return null;
-    return &.{ "ZTS500", "ZTS502" };
+    return &.{ "ZTS500", "ZTS501" };
 }
 
 /// Sorted code slice for stable JSON evidence.

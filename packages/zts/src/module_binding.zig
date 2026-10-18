@@ -212,6 +212,26 @@ test "LabelSet merge combines labels" {
     try std.testing.expect(!merged.user_input);
 }
 
+test "value aggregation requires every user input contributor to be validated" {
+    const raw = LabelSet{ .user_input = true, .secret = true };
+    const checked = LabelSet{ .user_input = true, .validated = true, .credential = true };
+    const escaped = LabelSet{ .validated = true };
+    for ([_]LabelSet{ checked, escaped }) |safe| {
+        for ([_]LabelSet{ LabelSet.mergeValues(raw, safe), LabelSet.mergeValues(safe, raw) }) |mixed| {
+            try std.testing.expect(mixed.user_input);
+            try std.testing.expect(mixed.secret);
+            try std.testing.expectEqual(safe.credential, mixed.credential);
+            try std.testing.expect(!mixed.validated);
+            // A later validated sibling cannot restore a lost guarantee.
+            try std.testing.expect(!LabelSet.mergeValues(mixed, checked).validated);
+        }
+        try std.testing.expect(LabelSet.mergeValues(LabelSet.empty, safe).validated);
+        try std.testing.expect(LabelSet.mergeValues(safe, LabelSet.empty).validated);
+        try std.testing.expect(LabelSet.mergeValues(safe, safe).validated);
+    }
+    try std.testing.expect(!LabelSet.mergeValues(LabelSet.empty, LabelSet.empty).validated);
+}
+
 test "LabelSet has checks specific label" {
     const labels = LabelSet{ .secret = true, .user_input = true };
     try std.testing.expect(labels.has(.secret));

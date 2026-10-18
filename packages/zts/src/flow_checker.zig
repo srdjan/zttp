@@ -73,8 +73,9 @@ pub const Severity = enum {
 /// 1 is the implicit version before this constant existed: no flow version was
 /// hashed. 2 is the checker after sinks in callees, captured values, module
 /// constants, unresolved calls, recursion, cross-file helpers, and credential
-/// reads through a passed request were fixed.
-pub const flow_analyzer_version: u32 = 2;
+/// reads through a passed request were fixed. 3 prevents validation from one
+/// contributor laundering raw input in an aggregate or call result.
+pub const flow_analyzer_version: u32 = 3;
 
 pub const DiagnosticKind = enum {
     secret_in_response, // {secret} data in Response body/headers
@@ -634,7 +635,7 @@ pub const FlowChecker = struct {
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             if (self.closuresWithin(arg)) |from_closure| {
-                labels = LabelSet.merge(labels, from_closure);
+                labels = LabelSet.mergeValues(labels, from_closure);
             }
         }
         return labels;
@@ -659,7 +660,7 @@ pub const FlowChecker = struct {
                 while (i < arr.elements_count) : (i += 1) {
                     const elem = self.ir_view.getListIndex(arr.elements_start, i);
                     if (self.closuresWithin(elem)) |found| {
-                        labels = LabelSet.merge(labels orelse LabelSet.empty, found);
+                        labels = LabelSet.mergeValues(labels orelse LabelSet.empty, found);
                     }
                 }
                 return labels;
@@ -673,7 +674,7 @@ pub const FlowChecker = struct {
                     if ((self.ir_view.getTag(prop_idx) orelse continue) != .object_property) continue;
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
                     if (self.closuresWithin(prop.value)) |found| {
-                        labels = LabelSet.merge(labels orelse LabelSet.empty, found);
+                        labels = LabelSet.mergeValues(labels orelse LabelSet.empty, found);
                     }
                 }
                 return labels;
@@ -862,7 +863,7 @@ pub const FlowChecker = struct {
         keep: usize,
     ) !ImportedWalk {
         var arg_union = LabelSet.empty;
-        for (labels) |l| arg_union = LabelSet.merge(arg_union, l);
+        for (labels) |l| arg_union = LabelSet.mergeValues(arg_union, l);
         self.properties = start_properties;
         const returns = self.enterFunctionFrame(fn_node, func, passed, labels, arg_union);
         if (self.allocation_failed) return error.OutOfMemory;
@@ -1098,7 +1099,7 @@ pub const FlowChecker = struct {
                 if (!picked) continue;
                 const walk = &summary.walks[i][f];
                 self.applyImportedWalk(summary, walk, site);
-                returned = LabelSet.merge(returned, walk.returns);
+                returned = LabelSet.mergeValues(returned, walk.returns);
             }
             var rest = labels;
             rest.secret = false;
@@ -1106,7 +1107,7 @@ pub const FlowChecker = struct {
             rest.user_input = false;
             rest.unknown = false;
             if (labels.user_input) rest.validated = false;
-            returned = LabelSet.merge(returned, rest);
+            returned = LabelSet.mergeValues(returned, rest);
         }
         return returned;
     }
@@ -2229,7 +2230,7 @@ pub const FlowChecker = struct {
             if (asgn.op) |_| {
                 // Compound assignment (+=, etc): merge with existing
                 const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-                self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
+                self.binding_labels.put(self.allocator, key, LabelSet.mergeValues(existing, labels)) catch self.markAllocationFailure();
             } else {
                 // Simple assignment: replace
                 self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
@@ -2247,7 +2248,7 @@ pub const FlowChecker = struct {
             const binding = self.assignmentRootBinding(asgn.target) orelse return;
             const key = packBindingKey(binding.scope_id, binding.slot);
             const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-            self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
+            self.binding_labels.put(self.allocator, key, LabelSet.mergeValues(existing, labels)) catch self.markAllocationFailure();
         }
     }
 
@@ -2292,12 +2293,12 @@ pub const FlowChecker = struct {
         var arg_labels = LabelSet.empty;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-            arg_labels = LabelSet.merge(arg_labels, self.inferLabels(arg));
+            arg_labels = LabelSet.mergeValues(arg_labels, self.inferLabels(arg));
         }
         if (arg_labels.isEmpty()) return;
         const key = packBindingKey(binding.scope_id, binding.slot);
         const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-        self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, arg_labels)) catch self.markAllocationFailure();
+        self.binding_labels.put(self.allocator, key, LabelSet.mergeValues(existing, arg_labels)) catch self.markAllocationFailure();
     }
 
     /// Record a defining value node for a binding so the response-sink check
@@ -2390,7 +2391,7 @@ pub const FlowChecker = struct {
                     // too: `return fetch(url, { body: secret })`, a field of
                     // the response, a concise arrow body (which is a return).
                     if (self.summary_returns) |acc| {
-                        acc.* = LabelSet.merge(acc.*, self.inferLabels(ret_val));
+                        acc.* = LabelSet.mergeValues(acc.*, self.inferLabels(ret_val));
                         self.scanExprSinks(ret_val);
                     } else {
                         self.scanExprSinks(ret_val);
@@ -2556,15 +2557,18 @@ pub const FlowChecker = struct {
 
             .binary_op => {
                 const bin = self.ir_view.getBinary(node) orelse return LabelSet.empty;
-                return LabelSet.merge(self.inferLabels(bin.left), self.inferLabels(bin.right));
+                return LabelSet.mergeValues(self.inferLabels(bin.left), self.inferLabels(bin.right));
             },
 
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return LabelSet.empty;
-                return LabelSet.merge(
-                    self.inferLabels(t.condition),
-                    LabelSet.mergeConditional(self.inferLabels(t.then_branch), self.inferLabels(t.else_branch)),
-                );
+                const branches = LabelSet.mergeConditional(self.inferLabels(t.then_branch), self.inferLabels(t.else_branch));
+                // The condition contributes provenance, never validation of
+                // the selected value. An escaped condition cannot sanitize a
+                // raw branch, and a raw condition cannot unescape safe ones.
+                var labels = LabelSet.merge(self.inferLabels(t.condition), branches);
+                labels.validated = branches.validated;
+                return labels;
             },
 
             .member_access, .optional_chain => {
@@ -2587,7 +2591,7 @@ pub const FlowChecker = struct {
                         const binding = self.bindingAt(member.object) orelse return labels;
                         const key = packBindingKey(binding.scope_id, binding.slot);
                         if (self.result_binding_labels.get(key)) |result_labels| {
-                            labels = LabelSet.merge(labels, result_labels);
+                            labels = LabelSet.mergeValues(labels, result_labels);
                         }
                     }
                 }
@@ -2623,10 +2627,10 @@ pub const FlowChecker = struct {
                     const prop_tag = self.ir_view.getTag(prop_idx) orelse continue;
                     if (prop_tag == .object_property) {
                         const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-                        labels = LabelSet.merge(labels, self.inferLabels(prop.value));
+                        labels = LabelSet.mergeValues(labels, self.inferLabels(prop.value));
                     } else if (prop_tag == .object_spread) {
                         if (self.ir_view.getOptValue(prop_idx)) |val| {
-                            labels = LabelSet.merge(labels, self.inferLabels(val));
+                            labels = LabelSet.mergeValues(labels, self.inferLabels(val));
                         }
                     }
                 }
@@ -2639,7 +2643,7 @@ pub const FlowChecker = struct {
                 var i: u16 = 0;
                 while (i < arr.elements_count) : (i += 1) {
                     const elem_idx = self.ir_view.getListIndex(arr.elements_start, i);
-                    labels = LabelSet.merge(labels, self.inferLabels(elem_idx));
+                    labels = LabelSet.mergeValues(labels, self.inferLabels(elem_idx));
                 }
                 return labels;
             },
@@ -2653,13 +2657,17 @@ pub const FlowChecker = struct {
 
             .match_expr => {
                 const match_data = self.ir_view.getMatchExpr(node) orelse return LabelSet.empty;
-                var labels = self.inferLabels(match_data.discriminant);
+                var branches: ?LabelSet = null;
                 var i: u8 = 0;
                 while (i < match_data.arms_count) : (i += 1) {
                     const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
                     const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-                    labels = LabelSet.merge(labels, self.inferLabels(arm.body));
+                    const arm_labels = self.inferLabels(arm.body);
+                    branches = if (branches) |prior| LabelSet.mergeValues(prior, arm_labels) else arm_labels;
                 }
+                const values = branches orelse LabelSet.empty;
+                var labels = LabelSet.merge(self.inferLabels(match_data.discriminant), values);
+                labels.validated = values.validated;
                 return labels;
             },
 
@@ -2771,13 +2779,17 @@ pub const FlowChecker = struct {
         // thing carrying `user_input`, and clearing first would let the merge
         // put it straight back.
         labels.user_input = false;
+        // This call validates the combined value; validation is established
+        // here, never borrowed while merging independent arguments.
+        labels.validated = true;
         return labels;
     }
 
     /// Labels for a call to an export declaring `derives_from_args`: its result
-    /// can contain what an argument carried, and it validates nothing, so every
-    /// label survives it. This is `parsedResultLabels` without the discharge -
-    /// the two differ by exactly the claim `.validated` makes.
+    /// can contain what any argument carried. Sensitivity labels survive;
+    /// validation requires every user-input contributor to be validated. This
+    /// is `parsedResultLabels` without establishing validation or discharging
+    /// user input.
     ///
     /// Without this an export declaring no labels answers the empty set, and a
     /// secret through `dictSet` and back out of `dictGet` reached the response
@@ -2786,7 +2798,7 @@ pub const FlowChecker = struct {
         var labels = base;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-            labels = LabelSet.merge(labels, self.inferLabels(arg));
+            labels = LabelSet.mergeValues(labels, self.inferLabels(arg));
         }
         return labels;
     }
@@ -2847,13 +2859,13 @@ pub const FlowChecker = struct {
                 if (!self.declassificationBoundIsLiteral(binding.slot, call_data)) {
                     return self.argDerivedLabels(base_labels, call_data);
                 }
-                var result = LabelSet.merge(base_labels, self.closureArgLabels(call_data));
+                var result = LabelSet.mergeValues(base_labels, self.closureArgLabels(call_data));
                 // A declassifier discharges the labels it names and keeps the
                 // rest of what its arguments carried. `mask(req.url, 4)` is
                 // still request text, so `user_input` survives it.
                 if (self.module_fn_declassify_bound.get(binding.slot)) |rule| {
                     const kept = self.argDerivedLabels(LabelSet.empty, call_data).without(rule.clears);
-                    result = LabelSet.merge(result, kept);
+                    result = LabelSet.mergeValues(result, kept);
                 }
                 return result;
             }
@@ -2885,8 +2897,9 @@ pub const FlowChecker = struct {
                 var labels = LabelSet{ .validated = true };
                 for (0..call_data.args_count) |i| {
                     const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-                    labels = LabelSet.merge(labels, self.inferLabels(arg));
+                    labels = LabelSet.mergeValues(labels, self.inferLabels(arg));
                 }
+                labels.validated = true;
                 return labels;
             }
 
@@ -2994,22 +3007,40 @@ pub const FlowChecker = struct {
     /// read as before.
     fn mergeArgLabels(self: *FlowChecker, callee_labels: LabelSet, call_data: Node.CallExpr) LabelSet {
         const is_method = self.ir_view.getTag(call_data.callee) == .member_access;
+        const method_name = if (is_method) blk: {
+            const member = self.ir_view.getMember(call_data.callee) orelse break :blk null;
+            break :blk self.resolveAtomName(member.property);
+        } else null;
+        const maps_values = call_data.args_count == 1 and if (method_name) |name| std.mem.eql(u8, name, "map") else false;
+        const selects_values = if (method_name) |name|
+            std.mem.eql(u8, name, "filter") or std.mem.eql(u8, name, "find") or
+                std.mem.eql(u8, name, "toSorted") or std.mem.eql(u8, name, "slice")
+        else
+            false;
         var labels = callee_labels;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             const arg_tag = self.ir_view.getTag(arg) orelse .lit_undefined;
+            var callback_result: ?LabelSet = null;
             if (is_method and (arg_tag == .arrow_function or arg_tag == .function_expr)) {
-                labels = LabelSet.merge(labels, self.closureResultLabelsBound(arg, callee_labels));
+                callback_result = self.closureResultLabelsBound(arg, callee_labels);
             } else if (is_method and arg_tag == .identifier) {
-                const arg_labels = if (self.namedFunctionArg(arg)) |fn_node|
-                    self.closureResultLabelsBound(fn_node, callee_labels)
-                else
-                    self.inferLabels(arg);
-                labels = LabelSet.merge(labels, arg_labels);
-            } else {
-                labels = LabelSet.merge(labels, self.inferLabels(arg));
+                if (self.namedFunctionArg(arg)) |fn_node| {
+                    callback_result = self.closureResultLabelsBound(fn_node, callee_labels);
+                }
+            }
+            labels = LabelSet.mergeValues(labels, callback_result orelse self.inferLabels(arg));
+            if (maps_values) {
+                // map produces callback results, so escaping every resulting
+                // element can establish validation.
+                if (callback_result) |result| labels.validated = result.validated;
             }
         }
+        // Selection and ordering controls never become element content. Keep
+        // their provenance and observed sinks, but take the output's validation
+        // from the receiver: neither a raw predicate unescapes safe elements nor
+        // a validated predicate sanitizes raw ones.
+        if (selects_values) labels.validated = callee_labels.validated;
         return labels;
     }
 
@@ -3036,9 +3067,9 @@ pub const FlowChecker = struct {
 
         var labels = LabelSet.empty;
         for (targets.functions.items) |function| {
-            labels = LabelSet.merge(labels, self.routeFunctionCallLabels(function, call_data));
+            labels = LabelSet.mergeValues(labels, self.routeFunctionCallLabels(function, call_data));
         }
-        if (targets.unresolved) labels = LabelSet.merge(labels, self.unknownRouteCallLabels());
+        if (targets.unresolved) labels = LabelSet.mergeValues(labels, self.unknownRouteCallLabels());
         return labels;
     }
 
@@ -3400,7 +3431,7 @@ pub const FlowChecker = struct {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             const labels = self.inferLabels(arg);
             if (i < max_summary_params) arg_labels[i] = labels;
-            arg_union = LabelSet.merge(arg_union, labels);
+            arg_union = LabelSet.mergeValues(arg_union, labels);
         }
 
         // Every exit below that does not read the callee's body returns the
@@ -3450,7 +3481,7 @@ pub const FlowChecker = struct {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             const labels = self.inferLabels(arg);
             if (i < max_summary_params) arg_labels[i] = labels;
-            arg_union = LabelSet.merge(arg_union, labels);
+            arg_union = LabelSet.mergeValues(arg_union, labels);
         }
         return self.functionCallLabels(fn_node, call_data, arg_labels, arg_union);
     }
@@ -3604,7 +3635,7 @@ pub const FlowChecker = struct {
                 };
             }
             const again = self.summaryBodyLabels(func) orelse return self.unresolvedCallLabels(arg_union);
-            returned = LabelSet.merge(returned, again);
+            returned = LabelSet.mergeValues(returned, again);
         }
         return returned;
     }
@@ -4542,7 +4573,7 @@ pub const FlowChecker = struct {
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
             if ((self.ir_view.getTag(prop_idx) orelse continue) != .object_spread) continue;
             if (self.ir_view.getOptValue(prop_idx)) |val| {
-                labels = LabelSet.merge(labels, self.inferLabels(val));
+                labels = LabelSet.mergeValues(labels, self.inferLabels(val));
             }
         }
         return labels;
@@ -5988,6 +6019,204 @@ test "FlowChecker records validated defended path reaching an HTML response" {
     }
     try std.testing.expect(found);
     try std.testing.expect(checker.getProperties().injection_safe);
+}
+
+test "an escaped array sibling cannot discharge injection_safe for raw input" {
+    var buf: [512]u8 = undefined;
+    const raw =
+        \\function handler(req) { return Response.html([req.url].join("")); }
+    ;
+    const raw_report = try runFlowDiagnostics(std.testing.allocator, raw, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 1), raw_report.count);
+    try std.testing.expect(!raw_report.properties.injection_safe);
+
+    const sibling =
+        \\import { escapeHtml } from "zttp:text";
+        \\function handler(req) { return Response.html([req.url, escapeHtml(req.url)].join("")); }
+    ;
+    const sibling_report = try runFlowDiagnostics(std.testing.allocator, sibling, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 1), sibling_report.count);
+    try std.testing.expect(!sibling_report.properties.injection_safe);
+}
+
+test "a schema validated array sibling cannot discharge injection_safe for raw input" {
+    var buf: [512]u8 = undefined;
+    const source =
+        \\import { validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  const checked = validateJson("s", req.body);
+        \\  return Response.html([req.url, checked.value].join(""));
+        \\}
+    ;
+    const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+    try std.testing.expectEqual(@as(usize, 1), report.count);
+    try std.testing.expect(!report.properties.injection_safe);
+}
+
+test "value combinations cannot borrow validation from another contributor" {
+    const expressions = [_][]const u8{
+        "[a, b].join(\"\")",
+        "[b, a].join(\"\")",
+        "[b, a, b].join(\"\")",
+        "[...[b], a].join(\"\")",
+        "[...{ values: [a, b] }.values].join(\"\")",
+        "({ raw: a, safe: b }).raw",
+        "({ safe: b, raw: a }).raw",
+        "({ ...{ safe: b }, ...{ raw: a } }).raw",
+        "({ ...{ raw: a }, ...{ safe: b } }).raw",
+        "[b].concat([a]).join(\"\")",
+        "[b, b].join(a)",
+        "[a].filter((v) => escapeHtml(v)).join(\"\")",
+        "a ?? b",
+        "b || a",
+        "b ? a : b",
+        "match (b) { when \"\": b, default: a }",
+        "match (a) { when \"\": a, default: b }",
+        "choose(a, b)",
+        "dictGet(dictSet(dictSet(dictEmpty(), \"raw\", a), \"safe\", b), \"raw\")",
+    };
+    for (expressions) |expression| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\import {{ dictEmpty, dictSet, dictGet }} from "zttp:collections";
+            \\function choose(raw, safe) {{
+            \\  if (raw === "") return safe;
+            \\  return raw;
+            \\}}
+            \\function handler(req) {{
+            \\  const a = req.url;
+            \\  const b = escapeHtml(req.url);
+            \\  return Response.html({s});
+            \\}}
+        , .{expression});
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        if (report.count != 1 or report.properties.injection_safe) {
+            std.debug.print("validation laundering through {s}\n", .{expression});
+            return error.ValidationLaundered;
+        }
+    }
+}
+
+test "member writes and array mutations cannot validate raw siblings" {
+    const bodies = [_][]const u8{
+        "const parts = [a]; parts.push(b); return Response.html(parts.join(\"\"));",
+        "const parts = [b]; parts.push(a); return Response.html(parts.join(\"\"));",
+        "const parts = []; parts.push(a, b); return Response.html(parts.join(\"\"));",
+        "const parts = { raw: a }; parts.safe = b; return Response.html(parts.raw);",
+        "const parts = { safe: b }; parts.raw = a; return Response.html(parts.raw);",
+    };
+    for (bodies) |body| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\function handler(req) {{
+            \\  const a = req.url;
+            \\  const b = escapeHtml(req.url);
+            \\  {s}
+            \\}}
+        , .{body});
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        try std.testing.expectEqual(@as(usize, 1), report.count);
+        try std.testing.expect(!report.properties.injection_safe);
+    }
+}
+
+test "egress assembly and spread cannot borrow sibling validation" {
+    const options = [_][]const u8{
+        "{ body: [a, b].join(\"\") }",
+        "{ ...{ body: a }, ...{ extra: b } }",
+        "{ ...{ extra: b }, ...{ body: a } }",
+    };
+    for (options) |init| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\import {{ fetch }} from "zttp:fetch";
+            \\function handler(req) {{
+            \\  const a = req.url;
+            \\  const b = escapeHtml(a);
+            \\  fetch("https://api.example.com", {s});
+            \\  return Response.json({{ ok: true }});
+            \\}}
+        , .{init});
+        defer std.testing.allocator.free(source);
+        const properties = try runFlowProperties(std.testing.allocator, source);
+        try std.testing.expect(!properties.injection_safe);
+        try std.testing.expect(!properties.input_validated);
+    }
+}
+
+test "escaped assembly with static markup still proves injection_safe" {
+    const expressions = [_][]const u8{
+        "[\"<p>\", b, \"</p>\"].join(\"\")",
+        "[b, b].join(\"\")",
+        "({ ...{ safe: b }, markup: \"<p>\" }).safe",
+        "[b].concat([\"<p>\"]).join(\"\")",
+        "[a].map((v) => escapeHtml(v)).join(\"\")",
+        "escapeHtml([a, b].join(\"\"))",
+        "req.method === \"GET\" ? b : escapeHtml(a)",
+        "match (a) { when \"\": b, default: escapeHtml(a) }",
+    };
+    for (expressions) |expression| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\function handler(req) {{
+            \\  const a = req.url;
+            \\  const b = escapeHtml(a);
+            \\  return Response.html({s});
+            \\}}
+        , .{expression});
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        try std.testing.expectEqual(@as(usize, 0), report.count);
+        try std.testing.expect(report.properties.injection_safe);
+    }
+}
+
+test "literal match arms preserve escaped content validation" {
+    const expressions = [_][]const u8{
+        "match (req.url) { when \"\": \"\", default: escapeHtml(req.url) }",
+        "match (req.url) { when \"\": escapeHtml(req.url), default: \"\" }",
+        "match (req.url) { when \"\": \"\", when \"/\": escapeHtml(req.url), default: \"static\" }",
+    };
+    for (expressions) |expression| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\function handler(req) {{ return Response.html({s}); }}
+        , .{expression});
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        try std.testing.expectEqual(@as(usize, 0), report.count);
+        try std.testing.expect(report.properties.injection_safe);
+    }
+}
+
+test "selection predicates cannot change element validation" {
+    const cases = [_]struct { expression: []const u8, safe: bool }{
+        .{ .expression = "[escapeHtml(req.url)].filter((v) => req.url !== \"\").join(\"\")", .safe = true },
+        .{ .expression = "[escapeHtml(req.url)].find((v) => req.url !== \"\") ?? \"\"", .safe = true },
+        .{ .expression = "[escapeHtml(req.url)].toSorted((a, b) => req.url.length).join(\"\")", .safe = true },
+        .{ .expression = "[escapeHtml(req.url)].slice(req.url.length).join(\"\")", .safe = true },
+        .{ .expression = "[req.url].filter((v) => escapeHtml(v) !== \"\").join(\"\")", .safe = false },
+        .{ .expression = "[req.url].find((v) => escapeHtml(v) !== \"\") ?? \"\"", .safe = false },
+        .{ .expression = "[req.url].toSorted((a, b) => escapeHtml(a).length).join(\"\")", .safe = false },
+        .{ .expression = "[req.url].slice(escapeHtml(req.url).length).join(\"\")", .safe = false },
+    };
+    for (cases) |case| {
+        const source = try std.fmt.allocPrint(std.testing.allocator,
+            \\import {{ escapeHtml }} from "zttp:text";
+            \\function handler(req) {{ return Response.html({s}); }}
+        , .{case.expression});
+        defer std.testing.allocator.free(source);
+        var buf: [512]u8 = undefined;
+        const report = try runFlowDiagnostics(std.testing.allocator, source, .unvalidated_input_in_egress, &buf);
+        try std.testing.expectEqual(case.safe, report.properties.injection_safe);
+        try std.testing.expectEqual(@as(usize, if (case.safe) 0 else 1), report.count);
+    }
 }
 
 test "FlowChecker names the guard of a validated value under a unary operator" {

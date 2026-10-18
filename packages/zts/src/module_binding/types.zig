@@ -148,7 +148,8 @@ pub const DataLabel = enum(u4) {
     unknown, // provenance the checker could not follow: proves nothing
 };
 
-/// Bitset of data provenance labels. Propagates through operations via merge (OR).
+/// Bitset of data provenance labels. Value aggregation uses `mergeValues`;
+/// `merge` only unions facts about the same value or declared label sets.
 /// Compact enough (2 bytes) to store per-node in the flow checker's label map.
 pub const LabelSet = packed struct(u16) {
     secret: bool = false,
@@ -183,6 +184,19 @@ pub const LabelSet = packed struct(u16) {
         const ai: u16 = @bitCast(a);
         const bi: u16 = @bitCast(b);
         return @bitCast(ai | bi);
+    }
+
+    /// Combine values without letting one validated contributor validate its
+    /// siblings. Taint uses OR; validation holds only if some contributor is
+    /// validated and every contributor carrying user input is validated.
+    /// Untainted values (including the empty accumulator and literals) are
+    /// neutral, so adding static markup does not invalidate escaped content.
+    /// Unlike `mergeConditional`, this also serves as an accumulation fold.
+    pub fn mergeValues(a: LabelSet, b: LabelSet) LabelSet {
+        var labels = merge(a, b);
+        labels.validated = (a.validated or b.validated) and
+            (!a.user_input or a.validated) and (!b.user_input or b.validated);
+        return labels;
     }
 
     /// The labels of `self` that `cleared` does not name: bitwise AND NOT.
