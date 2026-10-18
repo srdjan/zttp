@@ -3,9 +3,9 @@
 # Enforced in both directions by the step-coverage gate in build/step_coverage.zig, which
 # walks the real dependency graph rather than parsing source: a top-level step
 # whose dependency closure is not reached by `zig build test`, by a step
-# `scripts/verify.sh` or a CI workflow invokes, or by a shell gate one of those
-# runs directly, must appear here. A row for a step that something now runs
-# fails the same gate, and so does a row naming a step that no longer exists.
+# `scripts/verify.sh`, `scripts/release.sh`, or a workflow invokes, or by a shell
+# gate one of those runs directly, must appear here. A row for a step that
+# something now runs fails the same gate, and so does a row naming a step that no longer exists.
 #
 # One row per (step, reason slug). A row is a claim that this step is an
 # operation a human asks for, not a check that was wired and forgotten. That
@@ -29,8 +29,8 @@ zttp-standin interactive-server
 
 # Measurements, not assertions. Both print numbers and pass regardless, so
 # there is no failure for a gate to catch. The gated forms exist and do run:
-# `bench-check` compares against benchmarks/perf-baseline.json in CI, and
-# `test-compile-bench` runs the unit tests behind the compile benchmarks.
+# `bench-check` compares against benchmarks/perf-baseline.json in the release
+# script, and `test-compile-bench` runs the unit tests behind the compile benchmarks.
 bench measurement
 compile-bench measurement
 production-branch-metric-json measurement

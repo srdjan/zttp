@@ -7,7 +7,7 @@
 //!
 //! This shipped as `zttp doctor --release` until it moved here. Every check
 //! reads paths that exist in this repository and nowhere else (README.md,
-//! docs/performance.md, scripts/verify.sh, .github/workflows/*.yml), so it
+//! docs/performance.md, scripts/verify.sh, scripts/release.sh), so it
 //! was 581 lines of repository tooling inside the user-facing binary.
 //!
 //! Run it with `zig build release-check -- [--json] [--out FILE]`.
@@ -39,10 +39,6 @@ const build_gate_markers = [_][]const u8{
     "test-examples",
 };
 
-const ci_gate_markers = [_][]const u8{
-    "bash scripts/verify.sh",
-};
-
 // `test-docs-drift`, `test-doc-links` and `test-examples` are dependencies of
 // `zig build test` and are asserted against the build sources in
 // `build_gate_markers`. The verifier must carry every other repository gate
@@ -68,12 +64,14 @@ const verify_script_markers = [_][]const u8{
     "zig fmt --check build.zig build/ packages/",
 };
 
-const release_permission_marker = "contents: write";
+// The local release script creates the GitHub release. The passport asserts it
+// still does, so a script that verifies and builds but never publishes fails.
+const release_publish_marker = "gh release create";
 
 // Release-evidence provenance is a release gate, not a per-commit one: it fails
 // until coverage and convergence are republished from a source commit the tree
-// still matches. `ci.yml` runs the plain verifier; only the release workflow
-// passes `--release`, and this asserts it still does.
+// still matches. A plain `scripts/verify.sh` run omits it; only the release
+// script passes `--release`, and this asserts it still does.
 const release_only_verify_marker = "bash scripts/verify.sh --release";
 
 pub const ReleaseDoctorOptions = struct {
@@ -412,10 +410,8 @@ fn releaseProvenancePasses(allocator: std.mem.Allocator) bool {
 fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
     const build_zig = readBuildSources(allocator);
     defer if (build_zig) |bytes| allocator.free(bytes);
-    const ci_yml = readOptionalFile(allocator, ".github/workflows/ci.yml", 512 * 1024);
-    defer if (ci_yml) |bytes| allocator.free(bytes);
-    const release_yml = readOptionalFile(allocator, ".github/workflows/release.yml", 512 * 1024);
-    defer if (release_yml) |bytes| allocator.free(bytes);
+    const release_sh = readOptionalFile(allocator, "scripts/release.sh", 512 * 1024);
+    defer if (release_sh) |bytes| allocator.free(bytes);
     const verify_sh = readOptionalFile(allocator, "scripts/verify.sh", 256 * 1024);
     defer if (verify_sh) |bytes| allocator.free(bytes);
 
@@ -423,18 +419,17 @@ fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport)
     const examples_ok = zts.file_io.fileExists(allocator, "scripts/test-examples.sh");
     const installer_ok = zts.file_io.fileExists(allocator, "scripts/test-install-archive-safety.sh");
     const semantics_ok = zts.file_io.fileExists(allocator, "scripts/check-semantics-spec.sh");
-    const workflow_ok = workflow: {
-        const build_bytes = build_zig orelse break :workflow false;
-        const ci_bytes = ci_yml orelse break :workflow false;
-        const release_bytes = release_yml orelse break :workflow false;
-        const verify_bytes = verify_sh orelse break :workflow false;
-        break :workflow releaseGateRequirementsPresent(build_bytes, ci_bytes, release_bytes, verify_bytes);
+    const release_script_ok = release_script: {
+        const build_bytes = build_zig orelse break :release_script false;
+        const release_bytes = release_sh orelse break :release_script false;
+        const verify_bytes = verify_sh orelse break :release_script false;
+        break :release_script releaseGateRequirementsPresent(build_bytes, release_bytes, verify_bytes);
     };
 
-    if (smoke_ok and examples_ok and installer_ok and semantics_ok and workflow_ok) {
-        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, browser analyzer, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
+    if (smoke_ok and examples_ok and installer_ok and semantics_ok and release_script_ok) {
+        try passport.add(allocator, "release_gates", "Release gates", .ok, "release script, local verifier, browser analyzer, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
     } else {
-        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring, scripts, or workflows", "bash scripts/verify.sh && zig build release-check");
+        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring or scripts", "bash scripts/verify.sh && zig build release-check");
     }
 }
 
@@ -666,13 +661,11 @@ fn hasPendingReceiptBackedMeasurementNote(haystack: []const u8) bool {
         std.mem.indexOf(u8, haystack, "pending\nreceipt-backed measurement") != null;
 }
 
-fn releaseGateRequirementsPresent(build_zig: []const u8, ci_yml: []const u8, release_yml: []const u8, verify_sh: []const u8) bool {
+fn releaseGateRequirementsPresent(build_zig: []const u8, release_sh: []const u8, verify_sh: []const u8) bool {
     return containsAll(build_zig, &build_gate_markers) and
-        containsAll(ci_yml, &ci_gate_markers) and
-        containsAll(release_yml, &ci_gate_markers) and
-        containsAll(release_yml, &release_verify_commands) and
-        std.mem.indexOf(u8, release_yml, release_only_verify_marker) != null and
-        std.mem.indexOf(u8, release_yml, release_permission_marker) != null and
+        containsAll(release_sh, &release_verify_commands) and
+        std.mem.indexOf(u8, release_sh, release_only_verify_marker) != null and
+        std.mem.indexOf(u8, release_sh, release_publish_marker) != null and
         containsAll(verify_sh, &verify_script_markers);
 }
 
@@ -702,11 +695,10 @@ test "release gate requirements require semantics and doctor wiring" {
         "smoke-v1 test-panic-isolation smoke-getting-started " ++
         "test-module-governance test-capability-audit test-docs-drift test-evidence-marker " ++
         "test-examples";
-    const ci_yml = "bash scripts/verify.sh\n";
-    const release_yml =
+    const release_sh =
         "bash scripts/verify.sh --release\n" ++
         "zig build smoke-getting-started\n" ++
-        "zig build bench-check\nzig build release-check\ncontents: write\n";
+        "zig build bench-check\nzig build release-check\ngh release create\n";
     const verify_sh =
         "zig build test\nzig build test-zruntime\n" ++
         "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
@@ -718,19 +710,27 @@ test "release gate requirements require semantics and doctor wiring" {
         "zts module-spec-render --check\nzts meta --json\n" ++
         "zig build release-provenance\nzig fmt --check build.zig build/ packages/\n";
 
-    try std.testing.expect(releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, verify_sh));
-    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));
-    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, "zig build test\n", release_yml, verify_sh));
-    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, "zig build test\n"));
+    try std.testing.expect(releaseGateRequirementsPresent(build_zig, release_sh, verify_sh));
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, "zig build test\n", verify_sh));
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, release_sh, "zig build test\n"));
+    try std.testing.expect(!releaseGateRequirementsPresent("// no gate markers\n", release_sh, verify_sh));
 
-    // The release workflow must run the release form. A release.yml that runs
-    // only the per-commit verifier never reaches the evidence-provenance gate,
-    // and the passport would still report every gate wired.
-    const per_commit_release_yml =
-        ci_yml ++
+    // The release script must run the release form. A script that runs only
+    // the per-commit verifier never reaches the evidence-provenance gate, and
+    // the passport would still report every gate wired.
+    const per_commit_release_sh =
+        "bash scripts/verify.sh\n" ++
         "zig build smoke-getting-started\n" ++
-        "zig build bench-check\nzig build release-check\ncontents: write\n";
-    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, per_commit_release_yml, verify_sh));
+        "zig build bench-check\nzig build release-check\ngh release create\n";
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, per_commit_release_sh, verify_sh));
+
+    // A script that verifies and builds but never creates the release has
+    // nothing to publish.
+    const never_publishes =
+        "bash scripts/verify.sh --release\n" ++
+        "zig build smoke-getting-started\n" ++
+        "zig build bench-check\nzig build release-check\n";
+    try std.testing.expect(!releaseGateRequirementsPresent(build_zig, never_publishes, verify_sh));
 }
 
 fn chdirTmpForTest(tmp: *std.testing.TmpDir) ![:0]u8 {
@@ -943,7 +943,6 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.createDirPath(io, "docs/virtual-modules");
     try tmp.dir.createDirPath(io, "docs");
     try tmp.dir.createDirPath(io, "scripts");
-    try tmp.dir.createDirPath(io, ".github/workflows");
 
     try tmp.dir.writeFile(io, .{
         .sub_path = "build.zig.zon",
@@ -1020,17 +1019,13 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         ,
     });
     try tmp.dir.writeFile(io, .{
-        .sub_path = ".github/workflows/ci.yml",
-        .data = "bash scripts/verify.sh\n",
-    });
-    try tmp.dir.writeFile(io, .{
-        .sub_path = ".github/workflows/release.yml",
+        .sub_path = "scripts/release.sh",
         .data =
         \\bash scripts/verify.sh --release
         \\zig build smoke-getting-started
         \\zig build bench-check
         \\zig build release-check
-        \\contents: write
+        \\gh release create
         ,
     });
     try tmp.dir.writeFile(io, .{

@@ -1,29 +1,35 @@
 //! Structured readers for repository verification gates.
 //!
 //! The shell entry points keep command execution and temporary-file handling.
-//! This command owns structured JSON and release-workflow validation.
+//! This command owns structured JSON and release-script validation.
 
 const std = @import("std");
 
 const max_input_bytes = 16 * 1024 * 1024;
 
 const ReleaseFailure = error{
-    MissingTestJob,
-    InvalidOsMatrix,
-    MissingMacos,
+    MissingHostVerify,
+    MissingContainerVerify,
     InvalidBenchmarkStepCount,
-    InvalidBenchmarkCondition,
     BenchmarkMustBeAdvisory,
+    MissingSmokeGettingStarted,
+    MissingReleaseCheck,
+    MissingReleaseTarget,
+    IntelMacosTarget,
+    ReleaseNotDraft,
 };
 
 fn releaseMessage(failure: ReleaseFailure) []const u8 {
     return switch (failure) {
-        error.MissingTestJob => "release workflow: missing test job",
-        error.InvalidOsMatrix => "release workflow: expected one test matrix os row",
-        error.MissingMacos => "release workflow: test matrix must include macos-latest",
-        error.InvalidBenchmarkStepCount => "release workflow: expected exactly one zig build bench-check step",
-        error.InvalidBenchmarkCondition => "release workflow: advisory bench-check must run on macos-latest",
-        error.BenchmarkMustBeAdvisory => "release workflow: machine-local bench-check must be advisory",
+        error.MissingHostVerify => "release script: missing a `bash scripts/verify.sh --release` host gate",
+        error.MissingContainerVerify => "release script: missing a `container run --arch amd64` line that runs `scripts/verify.sh --release`",
+        error.InvalidBenchmarkStepCount => "release script: expected exactly one zig build bench-check line",
+        error.BenchmarkMustBeAdvisory => "release script: machine-local bench-check must be advisory (`||`)",
+        error.MissingSmokeGettingStarted => "release script: missing `zig build smoke-getting-started`",
+        error.MissingReleaseCheck => "release script: missing `zig build release-check`",
+        error.MissingReleaseTarget => "release script: a release target (x86_64-linux-gnu, aarch64-linux-gnu, aarch64-macos-none) is missing",
+        error.IntelMacosTarget => "release script: x86_64-macos-none must not be built; no Intel macOS binary is published",
+        error.ReleaseNotDraft => "release script: every `gh release create` must create a draft (`--draft`)",
     };
 }
 
@@ -232,160 +238,202 @@ fn validateMetaValue(value: std.json.Value, pins: MetaPins) !void {
     try comparePin("builtin_registry_hash", builtin, pins.builtin);
 }
 
-fn lineEquals(line: []const u8, expected: []const u8) bool {
-    return std.mem.eql(u8, std.mem.trimEnd(u8, line, "\r"), expected);
-}
-
-const LineRange = struct { start: usize, end: usize };
-
-fn findTestJob(lines: []const []const u8) ReleaseFailure!LineRange {
-    var start: ?usize = null;
-    for (lines, 0..) |line, index| {
-        if (lineEquals(line, "  test:")) {
-            start = index;
-            break;
-        }
+/// Join backslash-continued physical lines into logical lines and drop
+/// comments, so a rule cannot be satisfied by text the shell never runs. A line
+/// whose first non-space character is `#` is a comment, including inside a
+/// continuation (the shell ends the logical line at the comment). A trailing
+/// comment after a command is not stripped: the rules below are text checks and
+/// do not parse shell quoting.
+fn normalizeScript(allocator: std.mem.Allocator, source: []const u8) std.mem.Allocator.Error![]const []const u8 {
+    var logical: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (logical.items) |line| allocator.free(line);
+        logical.deinit(allocator);
     }
-    const first = start orelse return error.MissingTestJob;
-    var end = lines.len;
-    for (lines[first + 1 ..], first + 1..) |raw, index| {
+    var current: std.ArrayList(u8) = .empty;
+    defer current.deinit(allocator);
+    var physical = std.mem.splitScalar(u8, source, '\n');
+    while (physical.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
-        if (std.mem.startsWith(u8, line, "  ") and
-            !std.mem.startsWith(u8, line, "    ") and
-            std.mem.endsWith(u8, line, ":"))
-        {
-            end = index;
-            break;
+        const is_comment = std.mem.startsWith(u8, std.mem.trimStart(u8, line, " \t"), "#");
+        const continues = !is_comment and std.mem.endsWith(u8, line, "\\");
+        if (!is_comment) {
+            const text = if (continues) line[0 .. line.len - 1] else line;
+            try current.appendSlice(allocator, text);
+            if (continues) try current.append(allocator, ' ');
+        }
+        if (continues) continue;
+        if (current.items.len != 0) {
+            const owned = try allocator.dupe(u8, current.items);
+            errdefer allocator.free(owned);
+            try logical.append(allocator, owned);
+            current.clearRetainingCapacity();
         }
     }
-    return .{ .start = first, .end = end };
+    if (current.items.len != 0) {
+        const owned = try allocator.dupe(u8, current.items);
+        errdefer allocator.free(owned);
+        try logical.append(allocator, owned);
+    }
+    return logical.toOwnedSlice(allocator);
 }
 
-fn validateOsMatrix(job: []const []const u8) ReleaseFailure!void {
-    var row: ?[]const u8 = null;
-    var count: usize = 0;
-    for (job) |raw| {
-        const line = std.mem.trimEnd(u8, raw, "\r");
-        if (std.mem.startsWith(u8, line, "        os: [")) {
-            count += 1;
-            row = line;
+fn anyLineContains(lines: []const []const u8, needle: []const u8) bool {
+    for (lines) |line| {
+        if (std.mem.find(u8, line, needle) != null) return true;
+    }
+    return false;
+}
+
+fn validateReleaseLines(lines: []const []const u8) ReleaseFailure!void {
+    var host_verify = false;
+    var container_verify = false;
+    var bench_lines: usize = 0;
+    var bench_advisory = false;
+    var create_lines: usize = 0;
+    var create_drafts: usize = 0;
+    for (lines) |line| {
+        const trimmed = std.mem.trimStart(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "bash scripts/verify.sh --release")) host_verify = true;
+        if (std.mem.find(u8, line, "container run") != null and
+            std.mem.find(u8, line, "--arch amd64") != null and
+            std.mem.find(u8, line, "scripts/verify.sh --release") != null) container_verify = true;
+        if (std.mem.find(u8, line, "zig build bench-check") != null) {
+            bench_lines += 1;
+            bench_advisory = std.mem.find(u8, line, "||") != null;
+        }
+        if (std.mem.find(u8, line, "gh release create") != null) {
+            create_lines += 1;
+            if (std.mem.find(u8, line, "--draft") != null) create_drafts += 1;
         }
     }
-    if (count != 1) return error.InvalidOsMatrix;
-    const line = row.?;
-    const open = std.mem.findScalar(u8, line, '[') orelse return error.InvalidOsMatrix;
-    const close = std.mem.findScalarLast(u8, line, ']') orelse return error.InvalidOsMatrix;
-    if (close <= open) return error.InvalidOsMatrix;
-    var values = std.mem.splitScalar(u8, line[open + 1 .. close], ',');
-    while (values.next()) |raw| {
-        const value = std.mem.trim(u8, raw, " \t'\"");
-        if (std.mem.eql(u8, value, "macos-latest")) return;
+    if (!host_verify) return error.MissingHostVerify;
+    if (!container_verify) return error.MissingContainerVerify;
+    if (bench_lines != 1) return error.InvalidBenchmarkStepCount;
+    if (!bench_advisory) return error.BenchmarkMustBeAdvisory;
+    if (!anyLineContains(lines, "zig build smoke-getting-started")) return error.MissingSmokeGettingStarted;
+    if (!anyLineContains(lines, "zig build release-check")) return error.MissingReleaseCheck;
+    for ([_][]const u8{ "x86_64-linux-gnu", "aarch64-linux-gnu", "aarch64-macos-none" }) |target| {
+        if (!anyLineContains(lines, target)) return error.MissingReleaseTarget;
     }
-    return error.MissingMacos;
+    if (anyLineContains(lines, "x86_64-macos-none")) return error.IntelMacosTarget;
+    // At least one create line, and no create line without --draft: a script
+    // that never creates a release has nothing to publish.
+    if (create_lines == 0 or create_drafts != create_lines) return error.ReleaseNotDraft;
 }
 
-fn validateBenchmarkStep(job: []const []const u8) ReleaseFailure!void {
-    var step_start: ?usize = null;
-    var step_end: usize = 0;
-    var matches: usize = 0;
-    var index: usize = 0;
-    while (index < job.len) : (index += 1) {
-        if (!std.mem.startsWith(u8, job[index], "      - ")) continue;
-        var end = index + 1;
-        while (end < job.len and !std.mem.startsWith(u8, job[end], "      - ")) : (end += 1) {}
-        var contains_run = false;
-        for (job[index..end]) |raw| {
-            if (lineEquals(raw, "        run: zig build bench-check")) contains_run = true;
-        }
-        if (contains_run) {
-            matches += 1;
-            step_start = index;
-            step_end = end;
-        }
-        index = end - 1;
+fn validateReleaseScript(allocator: std.mem.Allocator, source: []const u8) (ReleaseFailure || std.mem.Allocator.Error)!void {
+    const lines = try normalizeScript(allocator, source);
+    defer {
+        for (lines) |line| allocator.free(line);
+        allocator.free(lines);
     }
-    if (matches != 1) return error.InvalidBenchmarkStepCount;
-    const step = job[step_start.?..step_end];
-    var condition = false;
-    var advisory = false;
-    for (step) |raw| {
-        condition = condition or lineEquals(raw, "        if: ${{ matrix.os == 'macos-latest' }}");
-        advisory = advisory or lineEquals(raw, "        continue-on-error: true");
-    }
-    if (!condition) return error.InvalidBenchmarkCondition;
-    if (!advisory) return error.BenchmarkMustBeAdvisory;
+    try validateReleaseLines(lines);
 }
 
-fn validateReleaseWorkflow(source: []const u8) ReleaseFailure!void {
-    var lines_list: std.ArrayList([]const u8) = .empty;
-    defer lines_list.deinit(std.heap.smp_allocator);
-    var lines = std.mem.splitScalar(u8, source, '\n');
-    while (lines.next()) |line| lines_list.append(std.heap.smp_allocator, line) catch
-        return error.InvalidBenchmarkStepCount;
-    const range = try findTestJob(lines_list.items);
-    const job = lines_list.items[range.start..range.end];
-    try validateOsMatrix(job);
-    try validateBenchmarkStep(job);
-}
-
-fn expectReleaseFailure(source: []const u8, expected: ReleaseFailure) !void {
-    validateReleaseWorkflow(source) catch |actual| {
+fn expectReleaseFailure(allocator: std.mem.Allocator, source: []const u8, expected: ReleaseFailure) !void {
+    validateReleaseScript(allocator, source) catch |actual| {
         if (actual == expected) return;
         return error.NegativeFixtureChanged;
     };
     return error.NegativeFixturePassed;
 }
 
-const unnamed_blocking_fixture =
-    \\jobs:
-    \\  test:
-    \\    strategy:
-    \\      matrix:
-    \\        os: [macos-latest, ubuntu-latest]
-    \\    steps:
-    \\      - name: Earlier advisory step
-    \\        continue-on-error: true
-    \\        run: true
-    \\      - id: benchmark
-    \\        if: ${{ matrix.os == 'macos-latest' }}
-    \\        run: zig build bench-check
+const container_block =
+    \\container run --rm --arch amd64 --rosetta \
+    \\  -v "$repo":/src:ro "$image" \
+    \\  bash -c "git clone -q /src /work && cd /work && bash scripts/verify.sh --release"
 ;
 
-const disabled_fixture =
-    \\jobs:
-    \\  test:
-    \\    strategy:
-    \\      matrix:
-    \\        os: [macos-latest, ubuntu-latest]
-    \\    steps:
-    \\      - name: Disabled benchmark
-    \\        if: false
-    \\        continue-on-error: true
-    \\        run: zig build bench-check
+/// The smallest script that satisfies every rule. Each negative case below is
+/// this text plus one edit.
+const positive_fixture =
+    \\#!/usr/bin/env bash
+    \\# A comment naming x86_64-macos-none is not a target.
+    \\bash scripts/verify.sh --release
+    \\zig build smoke-getting-started
+    \\zig build bench-check || echo "warning: advisory bench-check missed"
+    \\zig build release-check -- --json
+    \\targets=(
+    \\  "x86_64-linux-gnu:linux:x86_64"
+    \\  "aarch64-linux-gnu:linux:aarch64"
+    \\  "aarch64-macos-none:macos:aarch64"
+    \\)
+++ "\n" ++ container_block ++ "\n" ++
+    \\gh release create "$tag" --draft --verify-tag
 ;
 
-const ubuntu_only_fixture =
-    \\jobs:
-    \\  test:
-    \\    strategy:
-    \\      matrix:
-    \\        os: [ubuntu-latest]
-    \\    steps:
-    \\      - name: Advisory benchmark
-    \\        if: ${{ matrix.os == 'macos-latest' }}
-    \\        continue-on-error: true
-    \\        run: zig build bench-check
-;
+const NegativeCase = struct {
+    name: []const u8,
+    from: []const u8,
+    to: []const u8,
+    expected: ReleaseFailure,
+};
+
+const negative_cases = [_]NegativeCase{
+    .{ .name = "host verify commented out", .from = "\nbash scripts/verify.sh --release\n", .to = "\n# bash scripts/verify.sh --release\n", .expected = error.MissingHostVerify },
+    .{ .name = "host verify absent", .from = "\nbash scripts/verify.sh --release\n", .to = "\n", .expected = error.MissingHostVerify },
+    .{ .name = "host verify without the release flag", .from = "\nbash scripts/verify.sh --release\n", .to = "\nbash scripts/verify.sh\n", .expected = error.MissingHostVerify },
+    .{ .name = "container verify only in a comment", .from = container_block, .to = "# container run --rm --arch amd64 bash -c \"bash scripts/verify.sh --release\"", .expected = error.MissingContainerVerify },
+    .{ .name = "container verify on arm64", .from = "--arch amd64", .to = "--arch arm64", .expected = error.MissingContainerVerify },
+    .{ .name = "container verify without the release flag", .from = "scripts/verify.sh --release\"", .to = "scripts/verify.sh\"", .expected = error.MissingContainerVerify },
+    .{ .name = "benchmark absent", .from = "zig build bench-check || echo \"warning: advisory bench-check missed\"\n", .to = "", .expected = error.InvalidBenchmarkStepCount },
+    .{ .name = "benchmark only in a comment", .from = "zig build bench-check ||", .to = "# zig build bench-check ||", .expected = error.InvalidBenchmarkStepCount },
+    .{ .name = "benchmark twice", .from = "zig build bench-check || echo \"warning: advisory bench-check missed\"\n", .to = "zig build bench-check || true\nzig build bench-check || true\n", .expected = error.InvalidBenchmarkStepCount },
+    .{ .name = "benchmark blocks the release", .from = " || echo \"warning: advisory bench-check missed\"", .to = "", .expected = error.BenchmarkMustBeAdvisory },
+    .{ .name = "smoke absent", .from = "zig build smoke-getting-started\n", .to = "", .expected = error.MissingSmokeGettingStarted },
+    .{ .name = "smoke only in a comment", .from = "zig build smoke-getting-started\n", .to = "# zig build smoke-getting-started\n", .expected = error.MissingSmokeGettingStarted },
+    .{ .name = "release check absent", .from = "zig build release-check -- --json\n", .to = "", .expected = error.MissingReleaseCheck },
+    .{ .name = "x86_64 linux target absent", .from = "x86_64-linux-gnu", .to = "x86_64-linux-musl", .expected = error.MissingReleaseTarget },
+    .{ .name = "aarch64 linux target absent", .from = "aarch64-linux-gnu", .to = "aarch64-linux-musl", .expected = error.MissingReleaseTarget },
+    .{ .name = "aarch64 macos target absent", .from = "aarch64-macos-none", .to = "aarch64-macos-gnu", .expected = error.MissingReleaseTarget },
+    .{ .name = "intel macos target added", .from = "  \"aarch64-macos-none:macos:aarch64\"\n", .to = "  \"aarch64-macos-none:macos:aarch64\"\n  \"x86_64-macos-none:macos:x86_64\"\n", .expected = error.IntelMacosTarget },
+    .{ .name = "release is not a draft", .from = " --draft", .to = "", .expected = error.ReleaseNotDraft },
+    .{ .name = "release never created", .from = "gh release create \"$tag\" --draft --verify-tag", .to = "echo release", .expected = error.ReleaseNotDraft },
+    .{ .name = "second create is not a draft", .from = "gh release create \"$tag\" --draft --verify-tag", .to = "gh release create \"$tag\" --draft --verify-tag\ngh release create \"$tag\"", .expected = error.ReleaseNotDraft },
+};
+
+fn expectNegativeCase(allocator: std.mem.Allocator, case: NegativeCase) !void {
+    const mutated = try std.mem.replaceOwned(u8, allocator, positive_fixture, case.from, case.to);
+    defer allocator.free(mutated);
+    // The edit must change the text, or the case would re-test the positive fixture.
+    if (std.mem.eql(u8, mutated, positive_fixture)) {
+        std.debug.print("release workflow: negative case '{s}' does not change the fixture\n", .{case.name});
+        return error.NegativeFixtureUnchanged;
+    }
+    expectReleaseFailure(allocator, mutated, case.expected) catch |failure| {
+        std.debug.print("release workflow: negative case '{s}' did not produce {s}\n", .{ case.name, @errorName(case.expected) });
+        return failure;
+    };
+}
+
+/// Run the positive fixture and every negative case, and require that every
+/// rule has a case. A rule nothing exercises refuses nothing.
+fn runFixtureCases(allocator: std.mem.Allocator) !void {
+    try validateReleaseScript(allocator, positive_fixture);
+    for (negative_cases) |case| try expectNegativeCase(allocator, case);
+    inline for (@typeInfo(ReleaseFailure).error_set.?) |member| {
+        var covered = false;
+        for (negative_cases) |case| {
+            if (std.mem.eql(u8, @errorName(case.expected), member.name)) covered = true;
+        }
+        if (!covered) {
+            std.debug.print("release workflow: rule {s} has no negative case\n", .{member.name});
+            return error.UncoveredReleaseRule;
+        }
+    }
+}
 
 fn runReleaseWorkflow(io: std.Io, allocator: std.mem.Allocator, path: []const u8) !void {
-    try expectReleaseFailure(unnamed_blocking_fixture, error.BenchmarkMustBeAdvisory);
-    try expectReleaseFailure(disabled_fixture, error.InvalidBenchmarkCondition);
-    try expectReleaseFailure(ubuntu_only_fixture, error.MissingMacos);
+    try runFixtureCases(allocator);
     const source = try readFile(io, allocator, path);
     defer allocator.free(source);
-    validateReleaseWorkflow(source) catch |failure| {
-        std.debug.print("{s}\n", .{releaseMessage(failure)});
-        return error.ReleaseWorkflowFailed;
+    validateReleaseScript(allocator, source) catch |failure| switch (failure) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |refusal| {
+            std.debug.print("{s}\n", .{releaseMessage(refusal)});
+            return error.ReleaseWorkflowFailed;
+        },
     };
 }
 
@@ -452,16 +500,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
             }
             std.process.exit(1);
         };
-        try writeStdout(io, "release workflow: advisory benchmark gate OK\n");
+        try writeStdout(io, "release script: verify, container, advisory benchmark, target, and draft gates OK\n");
         return;
     }
     usage();
 }
 
-test "release workflow negative fixtures preserve each refusal" {
-    try expectReleaseFailure(unnamed_blocking_fixture, error.BenchmarkMustBeAdvisory);
-    try expectReleaseFailure(disabled_fixture, error.InvalidBenchmarkCondition);
-    try expectReleaseFailure(ubuntu_only_fixture, error.MissingMacos);
+test "release script negative cases preserve each refusal and cover every rule" {
+    try runFixtureCases(std.testing.allocator);
 }
 
 test "complete schema-2 envelope requires every identity field" {
@@ -615,50 +661,41 @@ test "negotiation validator accepts one shape and refuses broken fields" {
     try std.testing.expectError(error.InvalidFields, validateNegotiation(extra.value));
 }
 
-const good_workflow_fixture =
-    \\jobs:
-    \\  test:
-    \\    strategy:
-    \\      matrix:
-    \\        os: [macos-latest, ubuntu-latest]
-    \\    steps:
-    \\      - name: Advisory benchmark
-    \\        if: ${{ matrix.os == 'macos-latest' }}
-    \\        continue-on-error: true
-    \\        run: zig build bench-check
-;
-
-test "release workflow accepts the advisory macos benchmark shape" {
-    try validateReleaseWorkflow(good_workflow_fixture);
+test "release script accepts the positive fixture" {
+    try validateReleaseScript(std.testing.allocator, positive_fixture);
 }
 
-test "release workflow refuses a missing job, a doubled matrix row, and a wrong step count" {
-    try expectReleaseFailure("jobs:\n  build:\n    steps: []\n", error.MissingTestJob);
-    const two_rows =
-        \\jobs:
-        \\  test:
-        \\    strategy:
-        \\      matrix:
-        \\        os: [macos-latest]
-        \\        os: [macos-latest]
-    ;
-    try expectReleaseFailure(two_rows, error.InvalidOsMatrix);
-    const no_step =
-        \\jobs:
-        \\  test:
-        \\    strategy:
-        \\      matrix:
-        \\        os: [macos-latest]
-        \\    steps:
-        \\      - run: true
-    ;
-    try expectReleaseFailure(no_step, error.InvalidBenchmarkStepCount);
-    const two_steps = good_workflow_fixture ++
-        \\
-        \\      - name: Second benchmark
-        \\        if: ${{ matrix.os == 'macos-latest' }}
-        \\        continue-on-error: true
-        \\        run: zig build bench-check
-    ;
-    try expectReleaseFailure(two_steps, error.InvalidBenchmarkStepCount);
+test "release script ignores a comment that names the Intel macOS target" {
+    // The positive fixture already carries one; this adds a second, indented.
+    try validateReleaseScript(std.testing.allocator, positive_fixture ++ "\n    # drop x86_64-macos-none\n");
+}
+
+test "release script joins a continued line before it applies a rule" {
+    // The container rule needs `container run`, the arch, and the verifier on
+    // one logical line. The positive fixture spreads them over three physical
+    // lines, so it passes only if the continuation join works.
+    try validateReleaseScript(std.testing.allocator, positive_fixture);
+    const lines = try normalizeScript(std.testing.allocator, container_block);
+    defer {
+        for (lines) |line| std.testing.allocator.free(line);
+        std.testing.allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 1), lines.len);
+}
+
+test "release script comment inside a continuation ends the logical line" {
+    const source = "bash scripts/verify.sh --release\n" ++
+        "container run --arch amd64 \\\n" ++
+        "# scripts/verify.sh --release\n";
+    const lines = try normalizeScript(std.testing.allocator, source);
+    defer {
+        for (lines) |line| std.testing.allocator.free(line);
+        std.testing.allocator.free(lines);
+    }
+    try std.testing.expectEqual(@as(usize, 2), lines.len);
+    try std.testing.expect(std.mem.find(u8, lines[1], "scripts/verify.sh") == null);
+}
+
+test "release script gate refuses the empty script" {
+    try expectReleaseFailure(std.testing.allocator, "", error.MissingHostVerify);
 }

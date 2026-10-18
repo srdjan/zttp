@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check the positive release workflow and three load-bearing negative fixtures.
+# Check scripts/release.sh against the release-script rules and their negative fixtures.
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ if [[ $# -eq 1 ]]; then
     echo "release workflow: $1 is not executable" >&2
     exit 1
   }
-  exec "$1" release-workflow .github/workflows/release.yml
+  exec "$1" release-workflow scripts/release.sh
 fi
 if [[ $# -ne 0 ]]; then
   echo "usage: bash scripts/test-release-workflow.sh [repo-gate]" >&2
@@ -22,4 +22,4 @@ zig build-exe tooling/repo_gate.zig \
   -femit-bin="$work/repo-gate" \
   --cache-dir "$work/cache" \
   --global-cache-dir "$work/global-cache"
-"$work/repo-gate" release-workflow .github/workflows/release.yml
+"$work/repo-gate" release-workflow scripts/release.sh

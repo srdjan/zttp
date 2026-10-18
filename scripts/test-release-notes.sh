@@ -6,9 +6,9 @@ root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT HUP INT TERM
 
-grep -Fq "sh scripts/render-release-notes.sh \"\$GITHUB_REF_NAME\" release-notes.md" \
-    "$root/.github/workflows/release.yml"
-grep -Fq 'body_path: release-notes.md' "$root/.github/workflows/release.yml"
+# shellcheck disable=SC2016  # the literal $tag is the text under test
+grep -Fq 'sh scripts/render-release-notes.sh "$tag"' "$root/scripts/release.sh"
+grep -Fq -- '--notes-file' "$root/scripts/release.sh"
 
 mkdir -p "$work/scripts"
 cp "$root/scripts/render-release-notes.sh" "$work/scripts/"

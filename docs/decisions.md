@@ -85,3 +85,18 @@ A persistent read returns data from a separate write. Commit `f87f97aa` added th
 - Gate: none
 
 The former repair mapped stripped positions onto original source. Commit `da7b7ddf` removed the unsafe repair on this date.
+
+## Release process
+
+### D-009 Releases are verified and built locally
+
+- Status: standing
+- Decided: 2026-10-18
+- Binds: scripts/release.sh, tooling/repo_gate.zig, tooling/release_check.zig, build/step_coverage.zig
+- Gate: zig build test-release-workflow
+
+GitHub's macOS runner hit the 30-minute job limit in the v0.22.3 release run. The verifier step ran 29m45s before cancellation.
+
+The owner now verifies, builds, smoke-tests, and publishes each release with `scripts/release.sh` on an Apple Silicon Mac. Linux runs inside Apple's `container` CLI.
+
+Two choices follow from this. First (D9), releases publish no Intel macOS binary (`x86_64-macos-none`). Second (D12), `.github/workflows/ci.yml` and `.github/workflows/release.yml` are deleted, so no workflow builds or tests the repository. The `proof-gate.yml` workflow stays, because `docs/proofs-and-receipts.md` documents it as a template users copy.

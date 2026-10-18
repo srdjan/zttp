@@ -444,8 +444,8 @@
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "checks release workflow invariants",
-      "requiredWhen": "after release workflow changes"
+      "does": "checks release script invariants",
+      "requiredWhen": "after release script changes"
     },
     {
       "task": "test-proof-swallow",

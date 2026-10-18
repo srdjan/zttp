@@ -127,7 +127,7 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-production-branch-metric` | tests and runs the production branch metric | after branch metric changes | not measured |
 | `zig build test-kernel-safety` | checks acceptance-kernel runtime safety under release optimization | after kernel guards or build modes change | not measured |
 | `zig build test-module-boundary` | checks consumer access to zts internals | after imports across the zts boundary change | not measured |
-| `zig build test-release-workflow` | checks release workflow invariants | after release workflow changes | not measured |
+| `zig build test-release-workflow` | checks release script invariants | after release script changes | not measured |
 | `zig build test-proof-swallow` | checks proof analysis for unreviewed discarded errors | after proof pipeline error handling changes | not measured |
 | `zig build test-zts-layering` | checks that zts tiers import only lower tiers | after zts imports or tier assignments change | not measured |
 | `zig build test-convergence-emitter` | checks the convergence marker producer and consumer | after convergence evidence changes | not measured |

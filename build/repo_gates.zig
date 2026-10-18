@@ -59,7 +59,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     kernel_safety.step.dependOn(&run_kernel_safety_index_probe.step);
 
     const module_boundary = ctx.addGate(&.{ "/bin/bash", "scripts/test-module-boundary.sh" }, "test-module-boundary", "Check consumer reach into zts internals against the allowlist");
-    const release_workflow = ctx.addGate(&.{ "/bin/bash", "scripts/test-release-workflow.sh" }, "test-release-workflow", "Check release workflow invariants");
+    const release_workflow = ctx.addGate(&.{ "/bin/bash", "scripts/test-release-workflow.sh" }, "test-release-workflow", "Check release script invariants");
     release_workflow.run.addArtifactArg(tools.repo_gate_exe);
     const proof_swallow = ctx.addGate(&.{ "/bin/bash", "scripts/check-proof-swallow.sh" }, "test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
     const zts_layering = ctx.addGate(&.{ "/bin/bash", "scripts/check-zts-layering.sh" }, "test-zts-layering", "Check zts tier assignments import only downward");
