@@ -271,6 +271,9 @@ const BindingState = struct {
     /// For result bindings: the function name (e.g. "jwtVerify").
     /// Borrowed from module binding registry string - always valid.
     source_func: ?[]const u8 = null,
+    /// The declared name. A closure reads the binding through an upvalue
+    /// reference, which names it by this atom and not by scope and slot.
+    name_atom: u16 = 0,
 
     fn key(self: BindingState) u32 {
         return bindingKey(self.scope_id, self.slot);
@@ -845,6 +848,7 @@ pub const HandlerVerifier = struct {
                     .ref_count = 0,
                     .decl_node = node,
                     .name_idx = 0,
+                    .name_atom = decl.binding.name_atom,
                 }) catch self.markAllocationFailure();
 
                 // Check if the init expression is a call to a result-producing function
@@ -1380,8 +1384,22 @@ pub const HandlerVerifier = struct {
     // -----------------------------------------------------------------------
 
     fn reportUnusedVariables(self: *HandlerVerifier) void {
+        // The walk does not enter nested function bodies, so a binding read only
+        // by a closure counted no reference. Every upvalue reference in the
+        // program names its binding by atom; a binding whose name some closure
+        // captures is not reported. Two bindings that share a name can hide a
+        // warning this way, and never raise one.
+        var captured = std.StaticBitSet(1 << 16).initEmpty();
+        for (0..self.ir_view.nodeCount()) |i| {
+            const idx: NodeIndex = @intCast(i);
+            if ((self.ir_view.getTag(idx) orelse continue) != .identifier) continue;
+            const ref = self.ir_view.getBinding(idx) orelse continue;
+            if (ref.kind == .upvalue) captured.set(ref.name_atom);
+        }
+
         for (self.all_bindings.items) |binding| {
             if (binding.ref_count > 0) continue;
+            if (binding.name_atom != 0 and captured.isSet(binding.name_atom)) continue;
 
             // Skip special bindings (slot 0 is typically the module scope)
             if (binding.slot == 0) continue;
@@ -2131,6 +2149,30 @@ test "a binding read only through an object spread is not reported unused" {
         \\function handler(req) {
         \\  const base = { host: "localhost", port: 80 };
         \\  return Response.json({ ...base, port: 8080 });
+        \\}
+    ));
+}
+
+test "a binding read only by a closure is not reported unused" {
+    // The walk does not enter the arrow, and the arrow reads `y` through an
+    // upvalue reference, so `y` counted no reference.
+    try std.testing.expectEqual(@as(u32, 0), try countUnusedVariableWarnings(
+        \\function handler(req) {
+        \\  let saved = () => "clean";
+        \\  if (req.method === "GET") {
+        \\    const y = "kept";
+        \\    saved = () => y;
+        \\  }
+        \\  return Response.text(saved());
+        \\}
+    ));
+    // A binding nothing reads is still reported beside a captured one.
+    try std.testing.expectEqual(@as(u32, 1), try countUnusedVariableWarnings(
+        \\function handler(req) {
+        \\  const y = "kept";
+        \\  const unused = "never read";
+        \\  const read = () => y;
+        \\  return Response.text(read());
         \\}
     ));
 }
