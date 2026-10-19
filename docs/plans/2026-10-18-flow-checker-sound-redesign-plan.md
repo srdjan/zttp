@@ -382,3 +382,63 @@ an explicit review.
 R10 (policy-hash pins). The pin destinations are the files that the
 regeneration and drift checks enforce (nine tracked files hold the current
 hash), not a fixed list of eleven.
+
+## Round 3 revisions, 2026-10-19
+
+The third round (Codex astra, P2 to P9 only) found no new construct whose
+rule misses explicit flow. It found policy and precision gaps. These sections
+override earlier text where they differ.
+
+R11 (declassification is a stated policy). `mask(secret, 4)` sends four bytes
+of the secret, which R1 counts as carrying it. Declassification stays only as
+an explicit, bounded exception in the property-to-sink matrix: which export,
+which labels it removes, the bound on what it discloses, and the literal-bound
+condition that exists today. D14 decides whether `mask` keeps that exception.
+
+R12 (defenses are per sink). The matrix states, for each property and each
+sink, which defense the sink requires. Passing a validator is not a sink
+defense by itself: `schema_checked` does not make a string safe as a URL, a
+header, or HTML. `Response.json` and `rawJson` do not remove secret or
+credential provenance, and neither is HTML escaping. Where no defense exists
+for a sink (for example a request-chosen egress URL), `injection_safe` is not
+proven for that flow.
+
+R13 (defense lattice). A defense holds for a value only if it holds for every
+alternative at a join and every contributor in a combination. Bottom
+(unreachable) holds every defense; a clean literal holds a defense only if the
+sink's rule says literals are safe. Structural validation evidence (for
+example from `validateObject`, which returns the same object) is bound to the
+validated heap cells and is removed by any possible write to them, including
+writes through `top`. Paired tests cover an unchanged and a mutated validated
+object.
+
+R14 (field-sensitive cells). Each allocation site has one cell per known
+property name plus one summary cell for unknown names. A static read
+(`headers.accept`) reads its own cell and the summary cell; a dynamic read,
+serialization, or enumeration reads every cell. R4's request and headers
+containers use the same cells, so `accept` does not take `authorization`'s
+credential label. Locations reachable from module roots persist (R7); only
+locations shown to be request-local reset.
+
+R15 (phase dependencies). New order: P2 builds the location scheme, cells,
+and the evaluator core with heap reads and writes; P3 loops; P4 calls,
+captures, and recursion; P5 operation-edge rules (R3) and callbacks; P6
+defenses (R2, R12, R13); P7 request contents and sinks (R4); P8 persistence
+(R7) and imported summaries; P9 switch. Each phase states the conservative
+behavior of every operation that a later phase owns (clear every flow
+property), and has direct abstract-state tests before P7 adds sinks.
+
+R16 (precision is part of the switch). Before P2 starts, freeze a set of
+representative handlers (the examples, the codegen corpus handlers, and
+handwritten authenticated handlers) with the properties each must prove.
+P9 requires those expectations, the R3 edge tests, the defense transition
+tests, and the persistence tests. Every difference from the old checker,
+including a newly unproven property, needs a written disposition before the
+switch.
+
+## Decision for the owner: D14 (mask)
+
+Option A (recommended): keep `mask` as the only declassification exception,
+bounded to a literal count, listed in the matrix and documented as disclosing
+up to that many bytes. Option B: remove the exception; `mask` keeps the
+labels, so a masked secret in a response or log is refused.
