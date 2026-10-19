@@ -20,6 +20,14 @@ pub const ScopeId = u16;
 /// Sentinel value for "no scope"
 pub const null_scope: ScopeId = std.math.maxInt(ScopeId);
 
+/// The first extra word of a pattern or import node: the node's own kind in
+/// the low byte and the binding kind above it. The binding kind once sat in
+/// bits 29 to 31 of the packed binding, over the top of a 16-bit scope, so a
+/// scope at 8192 or above read back truncated and with a corrupted kind.
+fn patternKindWord(kind: anytype, binding_kind: BindingRef.BindingKind) u32 {
+    return @as(u32, @intFromEnum(kind)) | (@as(u32, @intFromEnum(binding_kind)) << 8);
+}
+
 const ListRef = struct {
     start: NodeIndex,
     count: u16,
@@ -1219,10 +1227,9 @@ pub const IRStore = struct {
                     break :blk self.addNode(node.tag, loc, .{ .a = arr.elements_start, .b = b_val });
                 }
                 const p = node.data.pattern_elem;
-                const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot |
-                    (@as(u32, @intFromEnum(p.binding.kind)) << 29);
+                const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot;
                 const extra_start = try self.addExtra(&.{
-                    @intFromEnum(p.kind),
+                    patternKindWord(p.kind, p.binding.kind),
                     binding_packed,
                     p.key,
                     p.key_atom,
@@ -1242,10 +1249,9 @@ pub const IRStore = struct {
             },
             .import_specifier => blk: {
                 const i = node.data.import_spec;
-                const binding_packed = (@as(u32, i.local_binding.scope_id & 0x1FFF) << 16) | i.local_binding.slot |
-                    (@as(u32, @intFromEnum(i.local_binding.kind)) << 29);
+                const binding_packed = (@as(u32, i.local_binding.scope_id) << 16) | i.local_binding.slot;
                 const extra_start = try self.addExtra(&.{
-                    @intFromEnum(i.kind),
+                    patternKindWord(i.kind, i.local_binding.kind),
                     i.imported_atom,
                     binding_packed,
                 });
@@ -1295,10 +1301,9 @@ pub const IRStore = struct {
             // --- Pattern default ---
             .pattern_default => blk: {
                 const p = node.data.pattern_elem;
-                const binding_packed = (@as(u32, p.binding.scope_id & 0x1FFF) << 16) | p.binding.slot |
-                    (@as(u32, @intFromEnum(p.binding.kind)) << 29);
+                const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot;
                 const extra_start = try self.addExtra(&.{
-                    @intFromEnum(p.kind),
+                    patternKindWord(p.kind, p.binding.kind),
                     binding_packed,
                     p.key,
                     p.key_atom,
@@ -1310,10 +1315,9 @@ pub const IRStore = struct {
             // --- Import/Export variants ---
             .import_default, .import_namespace => blk: {
                 const i = node.data.import_spec;
-                const binding_packed = (@as(u32, i.local_binding.scope_id & 0x1FFF) << 16) | i.local_binding.slot |
-                    (@as(u32, @intFromEnum(i.local_binding.kind)) << 29);
+                const binding_packed = (@as(u32, i.local_binding.scope_id) << 16) | i.local_binding.slot;
                 const extra_start = try self.addExtra(&.{
-                    @intFromEnum(i.kind),
+                    patternKindWord(i.kind, i.local_binding.kind),
                     i.imported_atom,
                     binding_packed,
                 });
@@ -1479,6 +1483,40 @@ test "IRStore identifier binding" {
     try std.testing.expectEqual(@as(u16, 3), unpacked.slot);
     try std.testing.expectEqual(@as(u16, 17), unpacked.name_atom);
     try std.testing.expectEqual(BindingRef.BindingKind.upvalue, unpacked.kind);
+}
+
+test "pattern and import bindings keep a scope at 8192 and above" {
+    // The binding kind sat in bits 29 to 31 of the packed binding, over the
+    // top three bits of the scope, so these read back as scope 808 with a
+    // corrupted kind.
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
+    const binding = BindingRef{ .scope_id = 9000, .slot = 7, .name_atom = 0, .kind = .argument };
+
+    const elem: Node.PatternElem = .{ .kind = .simple, .binding = binding, .key = null_node, .key_atom = 0, .default_value = null_node };
+    const param = try store.add(.{ .tag = .pattern_element, .loc = loc, .data = .{ .pattern_elem = elem } });
+    const defaulted = try store.add(.{ .tag = .pattern_default, .loc = loc, .data = .{ .pattern_elem = elem } });
+    var local = binding;
+    local.kind = .local;
+    const spec: Node.ImportSpec = .{ .kind = .namespace, .imported_atom = 4, .local_binding = local };
+    const import = try store.add(.{ .tag = .import_specifier, .loc = loc, .data = .{ .import_spec = spec } });
+
+    const view = IrView.fromIRStore(&store, &constants);
+    for ([_]NodeIndex{ param, defaulted }) |idx| {
+        const read = view.getPatternElem(idx) orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(@as(ScopeId, 9000), read.binding.scope_id);
+        try std.testing.expectEqual(@as(u16, 7), read.binding.slot);
+        try std.testing.expectEqual(BindingRef.BindingKind.argument, read.binding.kind);
+        try std.testing.expectEqual(Node.PatternElem.PatternKind.simple, read.kind);
+    }
+    const read_import = view.getImportSpec(import) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(ScopeId, 9000), read_import.local_binding.scope_id);
+    try std.testing.expectEqual(BindingRef.BindingKind.local, read_import.local_binding.kind);
+    try std.testing.expectEqual(Node.ImportSpec.ImportKind.namespace, read_import.kind);
+    try std.testing.expectEqual(@as(u16, 4), read_import.imported_atom);
 }
 
 test "IRStore extra data" {
@@ -2338,10 +2376,10 @@ pub const IrView = struct {
                     .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
                     .imported_atom = @truncate(extra[extra_start + 1]),
                     .local_binding = .{
-                        .scope_id = @truncate((binding_packed >> 16) & 0x1FFF),
+                        .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
                         .name_atom = ir.bindingName(idx),
-                        .kind = @enumFromInt(@as(u3, @truncate(binding_packed >> 29))),
+                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start] >> 8))),
                     },
                 };
             },
@@ -2400,10 +2438,10 @@ pub const IrView = struct {
                 break :blk .{
                     .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
                     .binding = .{
-                        .scope_id = @truncate((binding_packed >> 16) & 0x1FFF),
+                        .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
                         .name_atom = ir.bindingName(idx),
-                        .kind = @enumFromInt(@as(u3, @truncate(binding_packed >> 29))),
+                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start] >> 8))),
                     },
                     .key = extra[extra_start + 2],
                     .key_atom = @truncate(extra[extra_start + 3]),
