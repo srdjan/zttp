@@ -147,6 +147,12 @@ and `examples` in `packages/tools/src/pipeline_mutation_tests.zig`. Each
 mutant must give a result or a listed error, diagnostic positions inside the
 mutant, and identical output on a second run. `ZTTP_FUZZ_ITERATIONS` sets the
 mutants per input there, and the default is 4.
+`test-precompile` also runs the false-proof fixtures in
+`packages/tools/src/flow_false_proofs.zig`. Each fixture is a leaking handler
+that claims a security property, and that property must stay unproven. A second
+table lists the fixtures the flow checker still proves falsely. A test holds
+that table equal to the observed set, so a fix edits the table in the same
+change.
 
 `test-zts` also runs the failure-severity census, in
 `packages/zts/src/severity_census.zig`. It generates one probe handler per
