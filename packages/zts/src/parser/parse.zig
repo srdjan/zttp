@@ -3765,6 +3765,11 @@ pub const Parser = struct {
         const scope_id = try self.scopes.pushScope(.function);
         const was_in_function = self.in_function;
         self.in_function = true;
+        // A loop outside the function is not a target for `break` or
+        // `continue` inside it: code generation starts the body with an
+        // empty loop stack, so an accepted `break` would be a silent no-op.
+        const was_in_loop = self.in_loop;
+        self.in_loop = false;
 
         // Error returns while parsing parameters or the body would otherwise
         // leave `in_function` set and the function scope pushed. An enclosing
@@ -3776,6 +3781,7 @@ pub const Parser = struct {
         var scope_active = true;
         errdefer if (scope_active) {
             self.in_function = was_in_function;
+            self.in_loop = was_in_loop;
             self.scopes.popScope();
         };
 
@@ -3807,6 +3813,7 @@ pub const Parser = struct {
         }
 
         self.in_function = was_in_function;
+        self.in_loop = was_in_loop;
         self.scopes.popScope();
         scope_active = false;
 
@@ -5974,6 +5981,9 @@ pub const Parser = struct {
         const scope_id = try self.scopes.pushScope(.function);
         const was_in_function = self.in_function;
         self.in_function = true;
+        // See parseFunctionBody for why `in_loop` is cleared.
+        const was_in_loop = self.in_loop;
+        self.in_loop = false;
 
         // See parseFunctionBody: without this, an error while parsing the
         // parameter list or body leaves the scope stack unbalanced and the
@@ -5981,6 +5991,7 @@ pub const Parser = struct {
         var scope_active = true;
         errdefer if (scope_active) {
             self.in_function = was_in_function;
+            self.in_loop = was_in_loop;
             self.scopes.popScope();
         };
 
@@ -6051,6 +6062,7 @@ pub const Parser = struct {
         }
 
         self.in_function = was_in_function;
+        self.in_loop = was_in_loop;
         self.scopes.popScope();
         scope_active = false;
 
@@ -8273,6 +8285,40 @@ test "a bare return with no semicolon is refused, with the insertion repair" {
     const errors = parser.getErrors();
     try std.testing.expect(errors.len >= 1);
     try std.testing.expectEqual(error_mod.ErrorKind.missing_semicolon, errors[0].kind);
+}
+
+test "break and continue in a function nested in a loop are refused" {
+    // Code generation gives each function body an empty loop stack, so a
+    // `break` that names the enclosing function's loop compiled to nothing
+    // and the statements after it ran.
+    const refused = [_][]const u8{
+        "function f(xs) { for (const x of xs) { const g = () => { break; }; } }",
+        "function f(xs) { for (const x of xs) { const g = () => { continue; }; } }",
+        "function f(xs) { for (const x of xs) { function g() { break; } } }",
+        "function f(xs) { for (const x of xs) { const g = (y) => { if (y) { continue; } return y; }; } }",
+    };
+    for (refused) |source| {
+        var parser = try Parser.init(std.testing.allocator, source);
+        defer parser.deinit();
+        _ = parser.parse() catch 0;
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len >= 1);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "outside of loop") != null);
+    }
+
+    // The loop flag comes back after the nested function, so the outer
+    // loop's own `break` and `continue` still parse.
+    const accepted = [_][]const u8{
+        "function f(xs) { for (const x of xs) { const g = () => 1; break; } }",
+        "function f(xs) { for (const x of xs) { function g() { return 1; } continue; } }",
+        "function f(xs) { for (const x of xs) { const g = () => { for (const y of xs) { break; } return 1; }; continue; } }",
+    };
+    for (accepted) |source| {
+        var parser = try Parser.init(std.testing.allocator, source);
+        defer parser.deinit();
+        _ = try parser.parse();
+        try std.testing.expect(!parser.hasErrors());
+    }
 }
 
 test "the compatibility mode still parses what insertion accepted" {
