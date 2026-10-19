@@ -1,7 +1,8 @@
-//! Flow evaluator, phases P2 to P5a: the abstract domain, the location scheme,
+//! Flow evaluator, phases P2 to P5b: the abstract domain, the location scheme,
 //! the field-sensitive heap, an evaluator for expressions and statements,
-//! `for...of` loops (P3), calls with captured bindings and recursion (P4), and
-//! the builtin globals with the operations that take no callback (P5a).
+//! `for...of` loops (P3), calls with captured bindings and recursion (P4), the
+//! builtin globals with the operations that take no callback (P5a), and the
+//! calls of imported virtual-module exports (P5b).
 //!
 //! This is the shadow of the checker that will replace the label walk in
 //! `flow_checker.zig`. Nothing in the pipeline, the CLI, or any verdict reads
@@ -927,11 +928,21 @@ pub const CaptureTable = struct {
     }
 };
 
+/// An imported virtual-module export: the module, the export, and the atom
+/// that the module exports it under.
+const ModuleExport = struct {
+    binding: *const mb.ModuleBinding,
+    func: *const mb.FunctionBinding,
+    imported: u16,
+};
+
 /// What the module level binds. A global read may resolve to a function in
-/// `functions`. A name in `bound` is declared, imported, or assigned at the
-/// module level, so it replaces a builtin global of the same name.
+/// `functions`, or to an imported export in `exports`. A name in `bound` is
+/// declared, imported, or assigned at the module level, so it replaces a
+/// builtin global of the same name.
 const ModuleNames = struct {
     functions: std.AutoHashMapUnmanaged(u16, NodeIndex),
+    exports: std.AutoHashMapUnmanaged(u16, ModuleExport),
     bound: std.AutoHashMapUnmanaged(u16, void),
 };
 
@@ -1243,6 +1254,17 @@ pub const FlowInterp = struct {
         return names.bound.contains(atom);
     }
 
+    /// The virtual-module export that a module-level name resolves to, or
+    /// null. A name resolves when exactly one declaration binds it, that
+    /// declaration is an import specifier from a `zttp:` path whose module
+    /// exports the imported name, and no assignment targets the name. An
+    /// import from a user module, or of a name with no export, stays module
+    /// state (P8).
+    fn moduleExport(self: *FlowInterp, atom: u16) Error!?ModuleExport {
+        const names = try self.moduleNames();
+        return names.exports.get(atom);
+    }
+
     fn moduleNames(self: *FlowInterp) Error!ModuleNames {
         if (self.module_names) |names| return names;
         const built = try self.buildModuleNames();
@@ -1272,6 +1294,8 @@ pub const FlowInterp = struct {
         var declared: std.AutoHashMapUnmanaged(u16, Declared) = .empty;
         var assigned: std.AutoHashMapUnmanaged(u16, void) = .empty;
         var direct: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+        const Imported = struct { module: []const u8, atom: u16 };
+        var imported: std.AutoHashMapUnmanaged(u16, Imported) = .empty;
 
         var i: usize = 0;
         while (i < view.nodeCount()) : (i += 1) {
@@ -1281,6 +1305,20 @@ pub const FlowInterp = struct {
                 .var_decl, .function_decl => {
                     const vd = view.getVarDecl(idx) orelse continue;
                     if (vd.binding.kind == .global) try self.countDeclaration(&declared, vd.binding.name_atom, idx);
+                },
+                // A named specifier maps its local name to the module path and
+                // the exported name. The declaration count below decides
+                // whether the local name still resolves to that export.
+                .import_decl => {
+                    const decl = view.getImportDecl(idx) orelse continue;
+                    const module = view.getString(decl.module_idx) orelse continue;
+                    var k: u8 = 0;
+                    while (k < decl.specifiers_count) : (k += 1) {
+                        const spec_idx = view.getListIndex(decl.specifiers_start, k);
+                        const spec = view.getImportSpec(spec_idx) orelse continue;
+                        if (spec.kind != .named or spec.local_binding.kind != .global) continue;
+                        try imported.put(arena, spec.local_binding.name_atom, .{ .module = module, .atom = spec.imported_atom });
+                    }
                 },
                 // An import or a pattern binding that binds a module name
                 // counts as a declaration and is never a function.
@@ -1340,12 +1378,27 @@ pub const FlowInterp = struct {
             if (is_function) try resolved.put(arena, atom, vd.init);
         }
 
+        var exports: std.AutoHashMapUnmanaged(u16, ModuleExport) = .empty;
+        var import_it = imported.iterator();
+        while (import_it.next()) |entry| {
+            const atom = entry.key_ptr.*;
+            const found = declared.get(atom) orelse continue;
+            if (found.count != 1 or assigned.contains(atom)) continue;
+            const name = self.nameOfAtom(entry.value_ptr.atom) orelse continue;
+            const resolved_export = engine.builtin_modules.findExport(entry.value_ptr.module, name) orelse continue;
+            try exports.put(arena, atom, .{
+                .binding = resolved_export.binding,
+                .func = resolved_export.func,
+                .imported = entry.value_ptr.atom,
+            });
+        }
+
         var bound: std.AutoHashMapUnmanaged(u16, void) = .empty;
         var declared_it = declared.keyIterator();
         while (declared_it.next()) |atom| try bound.put(arena, atom.*, {});
         var assigned_it = assigned.keyIterator();
         while (assigned_it.next()) |atom| try bound.put(arena, atom.*, {});
-        return .{ .functions = resolved, .bound = bound };
+        return .{ .functions = resolved, .exports = exports, .bound = bound };
     }
 
     // --- calls (P4) ---
@@ -1399,6 +1452,10 @@ pub const FlowInterp = struct {
         if (callee_tag == .member_access or callee_tag == .optional_chain or callee_tag == .computed_access) {
             return self.evalPropertyCall(node, c, callee_tag, st);
         }
+
+        // A call of an imported export is evaluated before its callee, which
+        // is a native function that no body stands behind.
+        if (try self.exportCallee(c.callee)) |resolved| return self.evalExportCall(node, c, resolved, st);
 
         // A call of a builtin global function uses its row and never reads
         // the callee.
@@ -1852,6 +1909,196 @@ pub const FlowInterp = struct {
     /// is shared by every request, so a write into one belongs to P8.
     fn recordSharedWrite(self: *FlowInterp, node: NodeIndex, r: Value) Error!void {
         if (hasBuiltinSite(r)) try self.record(node, .call, .p8);
+    }
+
+    // --- virtual-module exports (P5b) ---
+
+    /// The export that a callee identifier names, or null. A local binding of
+    /// the same name has its own binding kind and never reaches the lookup.
+    fn exportCallee(self: *FlowInterp, callee: NodeIndex) Error!?ModuleExport {
+        if ((self.ir_view.getTag(callee) orelse return null) != .identifier) return null;
+        const binding = self.ir_view.getBinding(callee) orelse return null;
+        if (binding.kind != .global) return null;
+        return self.moduleExport(binding.name_atom);
+    }
+
+    /// Whether an export's result differs between runs of the same request:
+    /// the module is stateful and the export reads, or its capabilities
+    /// include a clock or a random source. `flow_checker.zig` applies the same
+    /// test. An explicit empty capability list does not inherit the module's.
+    fn readsVaryingSource(resolved: ModuleExport) bool {
+        if (resolved.binding.stateful and resolved.func.effect == .read) return true;
+        const caps = resolved.func.required_capabilities orelse resolved.binding.required_capabilities;
+        for (caps) |cap| {
+            if (cap == .clock or cap == .random) return true;
+        }
+        return false;
+    }
+
+    /// Whether `haystack` holds `needle`, ignoring ASCII case.
+    fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
+        if (needle.len > haystack.len) return false;
+        var start: usize = 0;
+        while (start + needle.len <= haystack.len) : (start += 1) {
+            if (std.ascii.eqlIgnoreCase(haystack[start .. start + needle.len], needle)) return true;
+        }
+        return false;
+    }
+
+    /// The labels an export declares for its result. `env` with a literal
+    /// name keeps `secret` when the name looks like a credential and gives
+    /// `config` otherwise, as `flow_checker.zig` refines it. A name that is
+    /// not a literal keeps the declared labels.
+    fn declaredLabels(self: *const FlowInterp, resolved: ModuleExport, c: ir.Node.CallExpr) LabelSet {
+        const declared = resolved.func.return_labels;
+        if (!std.mem.eql(u8, resolved.func.name, "env") or c.args_count == 0) return declared;
+        const arg = self.ir_view.getListIndex(c.args_start, 0);
+        if ((self.ir_view.getTag(arg) orelse return declared) != .lit_string) return declared;
+        const string_idx = self.ir_view.getStringIdx(arg) orelse return declared;
+        const name = self.ir_view.getString(string_idx) orelse return declared;
+        const sensitive = [_][]const u8{ "SECRET", "PASSWORD", "PASSWD", "KEY", "TOKEN", "PRIVATE", "CREDENTIAL", "AUTH" };
+        for (sensitive) |pattern| {
+            if (containsIgnoreCase(name, pattern)) return declared;
+        }
+        return .{ .config = true };
+    }
+
+    /// Whether an export's declassification holds at this call (D14): the
+    /// bounding argument is a numeric literal, or is omitted so that the
+    /// export's own default bounds it, and what the call reads holds no
+    /// object and no function, which a declassified summary could not keep.
+    fn declassifies(self: *const FlowInterp, resolved: ModuleExport, c: ir.Node.CallExpr, read: Value) bool {
+        const bound = resolved.func.declassify_bound_arg orelse return false;
+        if (read.origins.len > 0 or read.callables.len > 0 or read.origins_top or read.callables_top) return false;
+        if (bound >= c.args_count) return true;
+        const arg = self.ir_view.getListIndex(c.args_start, bound);
+        const tag = self.ir_view.getTag(arg) orelse return false;
+        return tag == .lit_int or tag == .lit_float;
+    }
+
+    /// A call of an imported export. The binding says what the result is
+    /// labelled, and nothing more: it cannot say which argument is a callback
+    /// or which one the result aliases. So the call reads everything the
+    /// arguments reach (`R`), runs every function in `R` as a callback of
+    /// unknown shape, and returns a container that may be, or hold, any of it.
+    fn evalExportCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, st: *State) Error!Value {
+        const arena = self.mem();
+        const args = try self.evalArgs(c, st);
+        if (args.has_spread) return Value.top;
+
+        const read = try self.reach(st, args.values);
+        // The labels an export declassifies leave what it read, not what it
+        // declares, and they leave the summary too, so no later read of the
+        // result restores them.
+        const declassified = self.declassifies(resolved, c, read);
+        const input = if (declassified) read.labels.without(resolved.func.declassifies) else read.labels;
+        var labels = LabelSet.mergeValues(input, self.declaredLabels(resolved, c));
+        if (readsVaryingSource(resolved)) labels.nondeterministic = true;
+        const held = if (declassified) Value.labelled(labels) else read;
+
+        // Each function the arguments reach may be called, and a function that
+        // the analysis cannot name may be anything.
+        if (read.callables_top) try self.record(node, .call, .unknown_callee);
+        const results = if (read.callables.len > 0)
+            try self.runCallbackLoop(node, read, .{ .presumed = args.values }, st)
+        else
+            null;
+
+        var contents: std.ArrayList(Value) = .empty;
+        try contents.append(arena, held);
+        if (results) |passed| try contents.append(arena, passed);
+        const is_fetch = std.mem.eql(u8, resolved.binding.specifier, "zttp:fetch") and
+            (std.mem.eql(u8, resolved.func.name, "fetch") or std.mem.eql(u8, resolved.func.name, "fetchWithRetry"));
+        const site_kind: SiteKind = if (is_fetch) .native else .allocated_any;
+        const container = try self.allocate(st, site_kind, node, contents.items, labels);
+
+        // The result keeps every origin, callable, and flag of what the call
+        // read and of what the callbacks returned: an export can hand back an
+        // argument, a value stored in one, or a callback result.
+        var shown = held;
+        shown.labels = labels;
+        var out = try joinValue(arena, shown, container);
+        if (results) |passed| out = try joinValue(arena, out, passed);
+
+        // No native export writes into an argument today. The write keeps a
+        // future one sound, at the cost of mixing the containers of one call.
+        try self.writeValue(st, read, .{ .dynamic = Value.clean }, out);
+        return out;
+    }
+
+    /// What a callback loop passes on each pass.
+    const LoopParams = union(enum) {
+        /// A presumed call: every parameter of the callee is everything that
+        /// these arguments reach in the loop head, joined with the results so
+        /// far.
+        presumed: []const Value,
+    };
+
+    /// The number of parameters of the function at `func_node`, or 0 when the
+    /// node is no function (`invoke` records that case).
+    fn paramCount(self: *const FlowInterp, func_node: NodeIndex) usize {
+        const tag = self.ir_view.getTag(func_node) orelse return 0;
+        if (tag != .function_expr and tag != .arrow_function) return 0;
+        const function = self.ir_view.getFunction(func_node) orelse return 0;
+        return function.params_count;
+    }
+
+    /// The arguments of one pass for the callback at `func_node`.
+    fn loopArgs(self: *FlowInterp, params: LoopParams, func_node: NodeIndex, head: *const State, results: ?Value) Error![]const Value {
+        const arena = self.mem();
+        switch (params) {
+            .presumed => |args| {
+                const every = try joinOpt(arena, try self.reach(head, args), results) orelse Value.clean;
+                const vector = try arena.alloc(Value, self.paramCount(func_node));
+                @memset(vector, every);
+                return vector;
+            },
+        }
+    }
+
+    /// A callback loop: run every function of `f` as a callback until the loop
+    /// head and the result set stop changing, and return the result set (null
+    /// when no callback completes).
+    ///
+    /// The head starts as the state before the loop and includes it at the end,
+    /// because a callback can run zero times. Each pass computes the arguments
+    /// from the head, so a callback that writes what a later pass reads is seen.
+    /// A callback runs as a P4 callee from the head, and the join of every
+    /// callee state is the next head (`heap` and `top_cell` only, because the
+    /// caller's bindings are out of scope for a callback). Each callee value
+    /// joins the result set with the labels of `f`: a callback chosen through
+    /// a labelled value is selected by that value. Convergence is checked
+    /// before the cap, so a loop that converges on the last permitted pass has
+    /// converged, and the cap records `fixpoint_limit`.
+    fn runCallbackLoop(self: *FlowInterp, node: NodeIndex, f: Value, params: LoopParams, st: *State) Error!?Value {
+        const arena = self.mem();
+        const cap = @max(self.max_loop_passes, 1);
+        var head = try self.heapState(st);
+        var results: ?Value = null;
+        var pass: u32 = 0;
+        while (true) : (pass +|= 1) {
+            var next = head;
+            var next_results = results;
+            for (f.callables) |func_node| {
+                const args = try self.loopArgs(params, func_node, &head, results);
+                const summary = try self.invoke(func_node, args, &head);
+                next = try joinStates(arena, next, summary.state);
+                if (summary.value) |returned| {
+                    next_results = try joinOpt(arena, next_results, withLabels(returned, f.labels));
+                }
+            }
+            if (stateEql(next, head) and optValueEql(next_results, results)) break;
+            head = next;
+            results = next_results;
+            if (pass +| 1 >= cap) {
+                try self.record(node, .call, .fixpoint_limit);
+                break;
+            }
+        }
+        // The caller goes on mutating its own maps, so it gets a copy.
+        st.heap = try head.heap.clone(arena);
+        st.top_cell = head.top_cell;
+        return results;
     }
 
     // --- reach (P5) ---
@@ -2345,6 +2592,10 @@ pub const FlowInterp = struct {
             // state that P8 owns. An undeclared global that the module level
             // never binds is a builtin.
             .global, .undeclared_global => {
+                // An export that is not a callee is its native function value.
+                if (binding.kind == .global) {
+                    if (try self.moduleExport(binding.name_atom)) |resolved| return self.nativeFunction(resolved.imported);
+                }
                 if (try self.moduleFunction(binding.name_atom)) |func_node| {
                     const site: SiteKey = .{ .kind = .function, .node = func_node, .context = 0 };
                     return self.siteValue(site, func_node);
@@ -4788,6 +5039,271 @@ test "census C1: every registered builtin has a row and every row names a builti
         if (row.rule == .no_rule) row.reason = "";
     }
     try testing.expectError(error.RowWithoutReason, censusBuiltins(ctx, silent));
+}
+
+// --- P5b: the calls of virtual-module exports ---
+
+const user_input_value = Value.labelled(.{ .user_input = true });
+
+/// Run `f` and require a resolved result whose returned `secret` flag is
+/// `expected`. Other labels may be present.
+fn expectSecretBit(source: []const u8, params: []const Value, expected: bool) !void {
+    const r = try analyzeSource(source, "f", params);
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expectEqual(expected, r.returnedLabels().secret);
+}
+
+// P5 specification test 27.
+test "an identity export carries the secret of its argument" {
+    const text = "import { unescapeHtml } from \"zttp:text\"; ";
+    try expectSecret(text ++ "function f(s) { return unescapeHtml(s); }", &.{secret_value}, true);
+    try expectSecret(text ++ "function f(s) { return unescapeHtml(\"c\"); }", &.{secret_value}, false);
+
+    // The local name may differ from the exported one.
+    const alias = "import { unescapeHtml as plain } from \"zttp:text\"; ";
+    try expectSecret(alias ++ "function f(s) { return plain(s); }", &.{secret_value}, true);
+
+    // A local binding of the same name is the local function, not the export.
+    try expectSecret(
+        text ++ "function f(s) { const unescapeHtml = (x) => \"c\"; return unescapeHtml(s); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+// P5 specification test 28.
+test "an export that answers a fact about its argument carries a nested secret" {
+    const collections = "import { dictHas } from \"zttp:collections\"; ";
+    try expectSecret(collections ++ "function f(s) { return dictHas({ x: s }, \"x\"); }", &.{secret_value}, true);
+    try expectSecret(collections ++ "function f(s) { return dictHas({ x: \"c\" }, \"x\"); }", &.{secret_value}, false);
+}
+
+// P5 specification test 29.
+test "mask declassifies under a literal bound and an argument that holds no object" {
+    const text = "import { mask } from \"zttp:text\"; ";
+    inline for (.{
+        "function f(s) { return mask(s, 4); }",
+        "function f(s) { return String(mask(s, 4)); }",
+        "function f(s) { return mask(s); }",
+    }) |body| {
+        const r = try analyzeSource(text ++ body, "f", &.{secret_value});
+        defer r.deinit();
+        try testing.expect(!r.result.cleared);
+        try testing.expect(!r.returnedLabels().secret);
+        try testing.expect(r.returnedLabels().internal);
+    }
+
+    // A bound that is not a literal keeps the secret, and so does an
+    // argument that holds an object, whose cells a declassified summary
+    // would drop.
+    try expectSecretBit(text ++ "function f(s, n) { return mask(s, n); }", &.{ secret_value, Value.clean }, true);
+    try expectSecretBit(text ++ "function f(s, n) { return String(mask(s, n)); }", &.{ secret_value, Value.clean }, true);
+    try expectSecretBit(text ++ "function f(s) { return mask({ x: s }, 4); }", &.{secret_value}, true);
+}
+
+// P5 specification test 30.
+test "env keeps secret for a credential name and gives config for any other" {
+    const env = "import { env } from \"zttp:env\"; ";
+    try expectLabels(env ++ "function f() { return env(\"API_KEY\"); }", &.{}, secret);
+    try expectLabels(env ++ "function f() { return env(\"db_password\"); }", &.{}, secret);
+    try expectLabels(env ++ "function f() { return env(\"PORT\"); }", &.{}, .{ .config = true });
+    // A name that is not a literal may be any variable.
+    try expectLabels(env ++ "function f(n) { return env(n); }", &.{Value.clean}, secret);
+}
+
+// P5 specification test 31.
+test "an export result aliases the container passed to it" {
+    const validate = "import { validateObject } from \"zttp:validate\"; ";
+    const write = validate ++ "function f(s) { const o = { x: \"c\" }; const r = validateObject(\"n\", o); r.x = s; return o.x; }";
+    try expectSecret(write, &.{secret_value}, true);
+    const clean = validate ++ "function f(s) { const o = { x: \"c\" }; const r = validateObject(\"n\", o); r.x = \"c\"; return o.x; }";
+    try expectSecret(clean, &.{secret_value}, false);
+}
+
+// P5 specification test 32.
+test "an export hands back a function stored in its argument" {
+    const collections = "import { dictEmpty, dictSet, dictGet } from \"zttp:collections\"; ";
+    const stored = collections ++
+        "function f(s) { const g = () => s; const h = dictGet(dictSet(dictEmpty(), \"k\", g), \"k\"); return h(); }";
+    try expectSecret(stored, &.{secret_value}, true);
+    const clean = collections ++
+        "function f(s) { const g = () => \"c\"; const h = dictGet(dictSet(dictEmpty(), \"k\", g), \"k\"); return h(); }";
+    try expectSecret(clean, &.{secret_value}, false);
+}
+
+// P5 specification test 33.
+test "routerMatch returns a route handler that runs" {
+    const router = "import { routerMatch } from \"zttp:router\"; ";
+    const routed = router ++
+        "function f(s, req) { const routes = { \"GET /x\": () => s }; const m = routerMatch(routes, req); const h = m.handler; return h(); }";
+    try expectSecretBit(routed, &.{ secret_value, Value.clean }, true);
+    const clean = router ++
+        "function f(s, req) { const routes = { \"GET /x\": () => \"c\" }; const m = routerMatch(routes, req); const h = m.handler; return h(); }";
+    try expectSecretBit(clean, &.{ secret_value, Value.clean }, false);
+}
+
+// P5 specification test 34.
+test "a state reader carries unknown and a clock or random export is nondeterministic" {
+    const cache = "import { cacheGet } from \"zttp:cache\"; ";
+    const read = try analyzeSource(cache ++ "function f() { return cacheGet(\"ns\", \"k\"); }", "f", &.{});
+    defer read.deinit();
+    try testing.expect(!read.result.cleared);
+    try testing.expect(read.returnedLabels().unknown);
+
+    // The capability half: `uuid` declares a random source.
+    const id = "import { uuid } from \"zttp:id\"; ";
+    try expectLabels(id ++ "function f() { return uuid(); }", &.{}, .{ .internal = true, .nondeterministic = true });
+
+    // The stateful half: `sqlOne` reads a stateful module and declares no
+    // clock or random source.
+    const sql = try analyzeSource("import { sqlOne } from \"zttp:sql\"; function f() { return sqlOne(\"q\"); }", "f", &.{});
+    defer sql.deinit();
+    try testing.expect(sql.returnedLabels().nondeterministic);
+}
+
+// P5 specification test 35.
+test "a validating export keeps the user input it was given" {
+    const validate = "import { validateObject } from \"zttp:validate\"; ";
+    const checked = try analyzeSource(validate ++ "function f(u) { return validateObject(\"n\", u); }", "f", &.{user_input_value});
+    defer checked.deinit();
+    try testing.expect(!checked.result.cleared);
+    try testing.expect(checked.returnedLabels().user_input);
+    try testing.expect(!checked.returnedLabels().validated);
+
+    // The contrast: with nothing tainted, the declared label is all it has.
+    try expectLabels(validate ++ "function f(u) { return validateObject(\"n\", {}); }", &.{user_input_value}, .{ .validated = true });
+}
+
+// P5 specification test 36.
+test "an export with no precise row runs the closures it was given" {
+    const collections = "import { dictEmpty, dictMapValues } from \"zttp:collections\"; ";
+    try expectSecret(collections ++ "function f(s) { return dictMapValues(dictEmpty(), () => s); }", &.{secret_value}, true);
+    try expectSecret(collections ++ "function f(s) { return dictMapValues(dictEmpty(), () => \"c\"); }", &.{secret_value}, false);
+
+    // A function that the analysis cannot name may be anything.
+    const unknown: Value = .{ .callables_top = true };
+    const open = try analyzeSource(collections ++ "function f(g) { return dictMapValues(dictEmpty(), g); }", "f", &.{unknown});
+    defer open.deinit();
+    try expectUnresolved(open.result, .call, .unknown_callee);
+}
+
+// P5 specification test 37.
+test "a presumed call keeps the flags of what its callbacks returned" {
+    const collections = "import { dictEmpty, dictFold } from \"zttp:collections\"; ";
+    const source = collections ++ "function f(s) { return dictFold(dictEmpty(), () => Number, 0)(s); }";
+    const r = try analyzeSource(source, "f", &.{secret_value});
+    defer r.deinit();
+    try expectUnresolved(r.result, .call, .unknown_callee);
+}
+
+// P5 specification test 38.
+test "a container nested in an export result has a location" {
+    const collections = "import { dictEmpty, dictSet } from \"zttp:collections\"; ";
+    const nested = collections ++
+        "function f(s) { const r = dictSet(dictEmpty(), \"k\", \"c\"); const q = r[\"k\"]; q[\"x\"] = s; return r[\"k\"][\"x\"]; }";
+    try expectSecret(nested, &.{secret_value}, true);
+    const clean = collections ++
+        "function f(s) { const r = dictSet(dictEmpty(), \"k\", \"c\"); const q = r[\"k\"]; q[\"x\"] = \"c\"; return r[\"k\"][\"x\"]; }";
+    try expectSecret(clean, &.{secret_value}, false);
+
+    // The argument is a parameter that holds no object, so only the call's own
+    // site can give `q` a location.
+    const own_site = collections ++
+        "function f(s, d) { const r = dictSet(d, \"k\", \"c\"); const q = r[\"k\"]; q[\"x\"] = s; return r[\"k\"][\"x\"]; }";
+    try expectSecret(own_site, &.{ secret_value, Value.clean }, true);
+    const own_clean = collections ++
+        "function f(s, d) { const r = dictSet(d, \"k\", \"c\"); const q = r[\"k\"]; q[\"x\"] = \"c\"; return r[\"k\"][\"x\"]; }";
+    try expectSecret(own_clean, &.{ secret_value, Value.clean }, false);
+
+    const inner = try analyzeSource(
+        collections ++ "function f(s, d) { const r = dictSet(d, \"k\", \"c\"); return r[\"k\"]; }",
+        "f",
+        &.{ secret_value, Value.clean },
+    );
+    defer inner.deinit();
+    const q = inner.result.returned.?;
+    try testing.expect(q.origins.len > 0);
+    try testing.expect(!q.origins_top);
+}
+
+// P5 specification test 39.
+test "an import from a user module is module state" {
+    const r = try analyzeSource("import { helper } from \"./other.ts\"; function f(s) { return helper(s); }", "f", &.{secret_value});
+    defer r.deinit();
+    try expectUnresolved(r.result, .identifier, .p8);
+
+    // An import of a name that the module does not export is module state too.
+    const missing = try analyzeSource("import { noSuchExport } from \"zttp:text\"; function f(s) { return noSuchExport(s); }", "f", &.{secret_value});
+    defer missing.deinit();
+    try expectUnresolved(missing.result, .identifier, .p8);
+}
+
+test "an export read as a value is a native function value" {
+    const collections = "import { dictHas } from \"zttp:collections\"; ";
+    const value = try analyzeSource(collections ++ "function f() { return dictHas; }", "f", &.{});
+    defer value.deinit();
+    try testing.expect(!value.result.cleared);
+    const held = value.result.returned.?;
+    try testing.expect(held.callables_top);
+    try testing.expectEqual(@as(usize, 1), held.origins.len);
+    try testing.expectEqual(SiteKind.builtin, held.origins[0].kind);
+
+    // A call through the alias may reach any function.
+    const alias = try analyzeSource(collections ++ "function f(s) { const g = dictHas; return g({ x: s }, \"x\"); }", "f", &.{secret_value});
+    defer alias.deinit();
+    try expectUnresolved(alias.result, .call, .unknown_callee);
+}
+
+test "a fetch result is a native container" {
+    const fetch = "import { fetch } from \"zttp:fetch\"; ";
+    const r = try analyzeSource(fetch ++ "function f(s) { return fetch(s); }", "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    const held = r.result.returned.?;
+    try testing.expect(held.labels.secret);
+    try testing.expect(held.labels.external);
+    var native = false;
+    for (held.origins) |site| native = native or site.kind == .native;
+    try testing.expect(native);
+
+    // A method call on it has no rule, as on a `Response` result.
+    const call = try analyzeSource(fetch ++ "function f(s) { return fetch(s).text(); }", "f", &.{secret_value});
+    defer call.deinit();
+    try expectUnresolved(call.result, .call, .no_operation_rule);
+}
+
+test "a presumed callback loop runs again until its parameters stop growing" {
+    // The first pass passes clean parameters and returns the secret. The
+    // second passes that secret to the callback, which stores it.
+    const collections = "import { dictEmpty, dictSet } from \"zttp:collections\"; ";
+    const source = collections ++
+        "function f(s) { const o = { v: \"c\" }; const g = (x) => { o.v = x; return s; }; dictSet(dictEmpty(), \"k\", g); return o.v; }";
+    try expectSecret(source, &.{secret_value}, true);
+    const clean = collections ++
+        "function f(s) { const o = { v: \"c\" }; const g = (x) => { o.v = x; return \"c\"; }; dictSet(dictEmpty(), \"k\", g); return o.v; }";
+    try expectSecret(clean, &.{secret_value}, false);
+
+    // A cap below the need records the limit, and a cap equal to it converges.
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    var needed: u32 = 0;
+    var cap: u32 = 1;
+    while (cap <= 16) : (cap += 1) {
+        h.interp.max_loop_passes = cap;
+        const result = try h.analyze("f", &.{secret_value});
+        var limited = false;
+        for (result.unresolved) |entry| limited = limited or entry.owner == .fixpoint_limit;
+        if (!limited) {
+            needed = cap;
+            break;
+        }
+    }
+    try testing.expect(needed >= 2);
+    h.interp.max_loop_passes = needed - 1;
+    try expectUnresolved(try h.analyze("f", &.{secret_value}), .call, .fixpoint_limit);
+    h.interp.max_loop_passes = needed;
+    try testing.expect(!(try h.analyze("f", &.{secret_value})).cleared);
 }
 
 // --- the tag census ---
