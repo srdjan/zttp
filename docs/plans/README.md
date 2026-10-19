@@ -6,7 +6,8 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Flow checker redesign](2026-10-18-flow-checker-sound-redesign-plan.md) | Draft 2026-10-18, revised after one Codex astra validation round; D9 to D12 decided 2026-10-19; revised after the second validation round | Owner chose Decision 8 Option A (plan the redesign); no implementation authority |
+| [Flow checker redesign](2026-10-18-flow-checker-sound-redesign-plan.md) | Draft 2026-10-18, revised after one Codex astra validation round; D9 to D12 decided 2026-10-19; revised after the second validation round | Owner chose Decision 8 Option A; P0 and P1 approved (D13); R16 and P2 approved 2026-10-19 |
+| [R16 freeze and P2 evaluator core](2026-10-19-flow-interp-p2-r16-spec.md) | Specification 2026-10-19, revised after one Codex astra validation round | Owner approved R16 and P2 on 2026-10-19 |
 | [Fail-closed guard for flow checker writes](2026-10-18-callback-iteration-writes-plan.md) | Superseded 2026-10-18 before implementation; records the observed false proofs F1 to F6 | Superseded by the redesign plan |
 | [Weak test assertion census](2026-10-17-weak-assertion-census-plan.md) | Complete 2026-10-17; 576 rows classified, 127 weak assertions fixed with sabotage evidence; results in the [worklog](2026-10-17-weak-assertion-census-worklog.md) | Owner set the goal to finish Item 4 (the census) |
 | [Reset implementation](2026-10-14-reset-implementation-plan.md) | U1–U20 committed locally; final gate and benchmark limits are in the [worklog](2026-10-15-reset-worklog.md) | Owner reviewed the plan and authorized implementation with subagents and Astra verification |
