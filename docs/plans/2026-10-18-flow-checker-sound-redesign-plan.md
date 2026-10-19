@@ -293,3 +293,10 @@ ships when P9 passes. Option B: no release until P9.
 - Witness and counterexample output (`counterexample.solve`) depends on the
   walk order and the constraint stack. P7 must keep the witness format, and
   the contract goldens show any change.
+
+## Owner decisions, 2026-10-19
+
+The owner answered "as recommended": D9 Option A (explicit flow only), D10
+Option A (new `flow_interp.zig` with a differential baseline), D11 Option A
+(P1 in the next patch release; the redesign when P9 passes), D12 Option A (a
+second validation round before implementation approval).
