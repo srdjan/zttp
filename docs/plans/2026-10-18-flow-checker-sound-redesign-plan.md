@@ -442,3 +442,15 @@ Option A (recommended): keep `mask` as the only declassification exception,
 bounded to a literal count, listed in the matrix and documented as disclosing
 up to that many bytes. Option B: remove the exception; `mask` keeps the
 labels, so a masked secret in a response or log is refused.
+
+## Owner decisions, 2026-10-19 (D13 to D15)
+
+D13 Option A: P0 and P1 are approved for implementation as local commits.
+D14 Option A: `mask` stays the only declassification exception, bounded to a
+literal count, listed in the matrix, and documented as disclosing up to that
+many bytes. D15 Option B: the owner approved a DeepSeek re-record of the
+codegen corpus, so main stays green after P1 moves the policy hash.
+
+Review of P1 found one more false proof: the response helpers read `status`
+from their second argument and the runtime sends it, but the checker read only
+the first argument. A separate commit after P1 closes it, with four fixtures.
