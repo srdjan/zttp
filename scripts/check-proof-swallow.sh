@@ -56,6 +56,7 @@ proof_files=(
   packages/zts/src/effect_inference.zig
   packages/zts/src/fault_coverage.zig
   packages/zts/src/flow_checker.zig
+  packages/zts/src/flow_interp.zig
   packages/zts/src/function_specs.zig
   packages/zts/src/handler_contract.zig
   packages/zts/src/handler_verifier.zig
