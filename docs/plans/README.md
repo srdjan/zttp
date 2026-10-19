@@ -6,6 +6,8 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Flow checker redesign](2026-10-18-flow-checker-sound-redesign-plan.md) | Draft 2026-10-18, revised after one Codex astra validation round; decisions D9 to D11 open | Owner chose Decision 8 Option A (plan the redesign); no implementation authority |
+| [Fail-closed guard for flow checker writes](2026-10-18-callback-iteration-writes-plan.md) | Superseded 2026-10-18 before implementation; records the observed false proofs F1 to F6 | Superseded by the redesign plan |
 | [Weak test assertion census](2026-10-17-weak-assertion-census-plan.md) | Complete 2026-10-17; 576 rows classified, 127 weak assertions fixed with sabotage evidence; results in the [worklog](2026-10-17-weak-assertion-census-worklog.md) | Owner set the goal to finish Item 4 (the census) |
 | [Reset implementation](2026-10-14-reset-implementation-plan.md) | U1–U20 committed locally; final gate and benchmark limits are in the [worklog](2026-10-15-reset-worklog.md) | Owner reviewed the plan and authorized implementation with subagents and Astra verification |
 | [Zig agent spine](2026-10-14-agent-spine-plan.md) | Complete 2026-10-14; full local gate passed, with evidence in the [worklog](2026-10-14-agent-spine-worklog.md) | Owner selected Option A and approved the full local gate |
