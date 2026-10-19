@@ -49,7 +49,7 @@ pub const Fixture = struct {
 
 /// The count of fixtures at the time this file was written. The floor makes a
 /// deleted fixture a test failure instead of a silent loss.
-const minimum_fixtures: usize = 32;
+const minimum_fixtures: usize = 36;
 
 pub const fixtures = [_]Fixture{
     // -- A `let` reassigned in an `if` or `else` branch.
@@ -382,6 +382,49 @@ pub const fixtures = [_]Fixture{
     \\  return Response.rawJson(body);
     \\}
     },
+    // -- A response status computed from a secret.
+    // runtime: `zttp serve` sent status 211 for an 11-byte SECRET_KEY.
+    .{ .name = "status_from_secret_length_json", .property = .no_secret_leakage, .source =
+    \\import { env } from "zttp:env";
+    \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  const secret: string = env("SECRET_KEY") ?? "";
+    \\  return Response.json({ ok: true }, { status: 200 + secret.length });
+    \\}
+    },
+    // runtime: none. `Response.rawJson` reads `status` the same way as `Response.json`.
+    .{ .name = "status_from_secret_length_raw_json", .property = .no_secret_leakage, .source =
+    \\import { env } from "zttp:env";
+    \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  const secret: string = env("SECRET_KEY") ?? "";
+    \\  return Response.rawJson("{}", { status: 200 + secret.length });
+    \\}
+    },
+    // runtime: none. The same status built in a helper that returns the Response.
+    .{ .name = "status_from_secret_length_in_helper", .property = .no_secret_leakage, .source =
+    \\import { env } from "zttp:env";
+    \\function reply(n: number): Response {
+    \\  return Response.text("ok", { status: 200 + n });
+    \\}
+    \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  const secret: string = env("SECRET_KEY") ?? "";
+    \\  return reply(secret.length);
+    \\}
+    },
+    // runtime: none. The same status in a route that `routerMatch` dispatches.
+    .{ .name = "status_from_secret_length_in_route", .property = .no_secret_leakage, .source =
+    \\import { env } from "zttp:env";
+    \\import { routerMatch } from "zttp:router";
+    \\function leak(req: Request): Response {
+    \\  const secret: string = env("SECRET_KEY") ?? "";
+    \\  return Response.json({ ok: true }, { status: 200 + secret.length });
+    \\}
+    \\const routes = { "GET /leak": leak };
+    \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  const found = routerMatch(routes, req);
+    \\  if (found === undefined) { return Response.json({ error: "not found" }); }
+    \\  return found.handler(req);
+    \\}
+    },
 };
 
 /// Clean contrasts. Each handler is the same shape as a fixture above with no
@@ -404,6 +447,14 @@ pub const contrasts = [_]Fixture{
     \\  const region: string = env("REGION") ?? "";
     \\  const body: string = JSON.stringify({ k: region });
     \\  return Response.rawJson(body);
+    \\}
+    },
+    // runtime: none.
+    .{ .name = "status_literal_clean_contrast", .property = .no_secret_leakage, .source =
+    \\import { env } from "zttp:env";
+    \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  const region: string = env("REGION") ?? "";
+    \\  return Response.json({ region: region }, { status: 404 });
     \\}
     },
 };

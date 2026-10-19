@@ -77,8 +77,9 @@ pub const Severity = enum {
 /// contributor laundering raw input in an aggregate or call result. 4 accounts
 /// for writes that can replace elements while an array callback runs. 5 marks
 /// the results of cacheIncr, cacheStats, cacheDelete, rateReset, and sqlExec as
-/// unknown, and checks fetchWithRetry as an egress sink and Response.rawJson as
-/// a response helper.
+/// unknown. It checks fetchWithRetry as an egress sink and Response.rawJson as
+/// a response helper. It treats the second argument of every response helper
+/// as a response sink, because the runtime sends the status it reads there.
 pub const flow_analyzer_version: u32 = 5;
 
 pub const DiagnosticKind = enum {
@@ -2989,12 +2990,14 @@ pub const FlowChecker = struct {
         // any assignment through the object binding.
         if (self.literalObjectMethodLabels(call_data.callee, call_data)) |labels| return labels;
 
-        // Response helpers transmit only their first argument. The runtime
-        // currently reads the second argument for status and ignores custom
-        // headers, so a callee summary must use the same sink surface.
+        // Response helpers transmit their first argument as the body and read
+        // `status` from the second, so both are on the sink surface. A callee
+        // summary must use the same surface as the handler's response check.
         if (self.route_summary_depth > 0 and self.isResponseHelper(call_data.callee)) {
             if (call_data.args_count == 0) return LabelSet.empty;
-            return self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 0));
+            const body = self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 0));
+            if (call_data.args_count == 1) return body;
+            return LabelSet.mergeValues(body, self.inferLabels(self.ir_view.getListIndex(call_data.args_start, 1)));
         }
 
         // Known intrinsic calls carry receiver and argument labels. Unknown
@@ -3854,14 +3857,17 @@ pub const FlowChecker = struct {
                 const call_data = self.ir_view.getCall(node) orelse return false;
                 if (!self.isResponseHelper(call_data.callee)) return false;
 
-                // Only the first argument is sink-checked, and that matches
-                // what leaves the process: `Response.json/text/html` read the
-                // second argument for `status` alone (see `http.zig`), so a
-                // value placed in `{ headers: ... }` is dropped rather than
-                // transmitted. If those helpers ever honor custom headers, the
-                // init argument becomes a response sink and has to be checked
-                // here in the same change - otherwise a secret in a header
-                // would discharge no_secret_leakage.
+                // The helpers read `status` from the second argument (see
+                // `http.zig`), and the status code leaves the process, so a
+                // labelled value anywhere in that argument is a response leak:
+                // `{ status: 200 + secret.length }` was observed sending 211
+                // for an 11-byte secret. The check covers the whole argument,
+                // so a value in `{ headers: ... }`, which the runtime drops
+                // today, is refused too.
+                if (call_data.args_count > 1) {
+                    const init_arg = self.ir_view.getListIndex(call_data.args_start, 1);
+                    self.checkSinkLabels(self.inferLabels(init_arg), node, .response);
+                }
                 if (call_data.args_count > 0) {
                     const data_arg = self.ir_view.getListIndex(call_data.args_start, 0);
                     const labels = self.inferLabels(data_arg);
