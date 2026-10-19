@@ -109,7 +109,11 @@ planned to close them.
 | A request that is selected by a ternary, such as `cond ? req : req`, before its `authorization` header is read | `no_credential_leak` |
 | A secret stored with `cacheSet` and read back with `cacheIncr` | `no_secret_leakage` |
 | A callback that is selected by an expression, such as `forEach(cond ? f : g)` | `no_secret_leakage` |
-| An `assert` whose message is a secret: a failed assert returns the message as the response body | `no_secret_leakage` |
+| An `assert` whose message is a secret, in the handler or in a helper it calls: a failed assert returns the message, which becomes the response body | `no_secret_leakage` |
+| `unescapeHtml(escapeHtml(req.url))` sent with `Response.html` | `injection_safe` |
+| `Array.from(secret, f)`, where `f` logs each character | `no_secret_leakage` |
+| A request taken back out of an array, for example `[req].pop()`, before its `authorization` header is read | `no_credential_leak` |
+| `Response.json(req.headers)`, which sends every request header, `Authorization` included | `no_credential_leak` |
 
 The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as
