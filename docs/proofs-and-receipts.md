@@ -115,11 +115,16 @@ planned to close them.
 | A request taken back out of an array, for example `[req].pop()`, before its `authorization` header is read | `no_credential_leak` |
 | `Response.json(req.headers)`, which sends every request header, `Authorization` included | `no_credential_leak` |
 | A response status computed from a secret, such as `Response.json(data, { status: 200 + secret.length })` | `no_secret_leakage` |
+| A failed `assert cond;` without a message: the runtime answered with the last value on the stack, such as a local that holds a secret | `no_secret_leakage` |
+| `let b;` without an initializer in a block after another block that held a secret: `b` read the secret from the reused slot | `no_secret_leakage` |
 
 The `cacheIncr` and response-status rows are fixed after v0.22.3. The same
 change also marks the results of `cacheDelete`, `cacheStats`, `rateReset`, and
 `sqlExec` as unknown.
-Each row has a permanent fixture in `packages/tools/src/flow_false_proofs.zig`.
+The two runtime rows are fixed after v0.22.3 in code generation: the analysis
+was right about the program, and the runtime did not run it as written.
+`packages/runtime/src/server_test.zig` holds their regression tests. Each
+other row has a permanent fixture in `packages/tools/src/flow_false_proofs.zig`.
 
 The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as

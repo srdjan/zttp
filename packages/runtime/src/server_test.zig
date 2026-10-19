@@ -208,6 +208,52 @@ test "assert guard rejection short-circuits with the guard response" {
     try std.testing.expectEqualStrings("method not allowed", resp.body);
 }
 
+test "a failed assert without a message answers without the frame's values" {
+    // `halt` returns the stack top. Before the fix a failed bare assert sent
+    // whatever the frame left there, here the local `s`, as a 200 body.
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{},
+        "function handler(req) { const s = 'held-in-a-local'; assert req.method === 'POST'; return Response.text(s.length > 0 ? 'ok' : 'empty'); }",
+        "<server-test>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+
+    var req = try getRequest(allocator, "/"); // GET -> assert fails
+    defer req.deinit(allocator);
+
+    var resp = try pool.executeHandler(req.asView());
+    defer resp.deinit();
+    try std.testing.expect(resp.status != 200);
+    try std.testing.expect(std.mem.indexOf(u8, resp.body, "held-in-a-local") == null);
+}
+
+test "let without an initializer reads undefined, not a reused slot" {
+    // Sibling blocks share local slots. Before the fix `let b;` emitted no
+    // store, so `b` read the value the first block left in the shared slot.
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{},
+        "function handler(req) { if (req.method === 'GET') { const a = 'held-in-a-slot'; } if (req.method === 'GET') { let b; return Response.text(b ?? 'none'); } return Response.text('end'); }",
+        "<server-test>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+
+    var req = try getRequest(allocator, "/");
+    defer req.deinit(allocator);
+
+    var resp = try pool.executeHandler(req.asView());
+    defer resp.deinit();
+    try std.testing.expectEqual(@as(u16, 200), resp.status);
+    try std.testing.expectEqualStrings("none", resp.body);
+}
+
 test "B6: handler returning a non-Response primitive yields 500, not silent empty 200" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(

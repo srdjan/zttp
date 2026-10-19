@@ -1790,7 +1790,17 @@ pub const CodeGen = struct {
     // ============ Statement Emission ============
 
     fn emitVarDecl(self: *CodeGen, decl: Node.VarDecl) !void {
-        if (decl.init == null_node) return;
+        if (decl.init == null_node) {
+            // `let b;` must read `undefined`. Sibling blocks reuse local slots
+            // (`scope.zig`), so without this store `b` reads whatever an
+            // earlier block left in its slot: a secret held there reached the
+            // response body while the flow checker, which reads `b` as
+            // `undefined`, proved no_secret_leakage.
+            try self.emit(.push_undefined);
+            self.pushStack(1);
+            try self.emitSetBinding(decl.binding);
+            return;
+        }
         try self.emitNode(decl.init);
         try self.emitSetBinding(decl.binding);
     }
@@ -1979,7 +1989,14 @@ pub const CodeGen = struct {
             try self.emitNode(assert.error_expr);
             try self.emit(.ret);
         } else {
+            // `halt` returns the stack top, which here is whatever the frame
+            // left there: a local holding a secret became the response body.
+            // Push `undefined` so a failed assert without a message returns
+            // no value, and the request fails instead of answering with it.
+            try self.emit(.push_undefined);
+            self.pushStack(1);
             try self.emit(.halt);
+            self.popStack(1);
         }
 
         try self.placeLabel(skip_label);
