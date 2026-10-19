@@ -827,7 +827,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // The Phase 3 recording first failed at ZTS203, then reached green.
+        // The policy-5 recording first failed at ZTS056, then reached green.
         .expect_first_attempt_green = false,
     },
     .{
@@ -862,7 +862,7 @@ const record_corpus = [_]RecordCase{
         // meant to measure. Asking for raw claims and accepting a confirmation
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
         .expect_committed_intent_pass = true,
     },
     .{
@@ -1043,7 +1043,8 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = true,
+        // The policy-5 recording first trips ZTS500, then reaches green.
+        .expect_first_attempt_green = false,
     },
 
     // ---------------------------------------------------------------------
@@ -2524,7 +2525,7 @@ fn coverageBaseline(
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
         !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
         return null;
-    return &.{"ZTS502"};
+    return &.{"ZTS500"};
 }
 
 /// Sorted code slice for stable JSON evidence.
