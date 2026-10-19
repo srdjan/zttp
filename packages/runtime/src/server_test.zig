@@ -254,6 +254,31 @@ test "let without an initializer reads undefined, not a reused slot" {
     try std.testing.expectEqualStrings("none", resp.body);
 }
 
+test "a closure that escapes a block keeps its binding, not a reused slot" {
+    // A closed block gave its slots to later bindings even when a closure
+    // still held an open upvalue on one, so the closure read the later value.
+    // The loop form reaches the same state through `break`, which jumps past
+    // the per-iteration close at the back edge.
+    const allocator = std.heap.c_allocator;
+    const sources = [_][]const u8{
+        "function handler(req) { let saved = () => 'clean'; if (req.method === 'GET') { const y = 'kept'; saved = () => y; } const other = 'reused'; return Response.text([saved(), other].join('|')); }",
+        "function handler(req) { let saved = () => 'clean'; const xs = ['kept']; for (const x of xs) { saved = () => x; break; } const other = 'reused'; return Response.text([saved(), other].join('|')); }",
+        "function handler(req) { let saved = () => 'clean'; if (req.method === 'GET') { if (req.method === 'GET') { const y = 'kept'; saved = () => y; } } const other = 'reused'; return Response.text([saved(), other].join('|')); }",
+    };
+    for (sources) |source| {
+        var pool = try HandlerPool.init(allocator, .{}, source, "<server-test>", 1, 0);
+        defer pool.deinit();
+
+        var req = try getRequest(allocator, "/");
+        defer req.deinit(allocator);
+
+        var resp = try pool.executeHandler(req.asView());
+        defer resp.deinit();
+        try std.testing.expectEqual(@as(u16, 200), resp.status);
+        try std.testing.expectEqualStrings("kept|reused", resp.body);
+    }
+}
+
 test "B6: handler returning a non-Response primitive yields 500, not silent empty 200" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(

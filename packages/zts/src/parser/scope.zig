@@ -84,6 +84,12 @@ pub const Scope = struct {
     /// Current local slot for next declaration
     current_local_slot: u8,
 
+    /// A closure captures a binding in this scope or in a nested block scope
+    /// of the same function. Such a scope keeps its slots after it closes: the
+    /// open upvalue still points at the frame slot, so a later binding that
+    /// reused the slot would change the value the closure reads.
+    holds_capture: bool,
+
     pub fn init(id: ScopeId, parent: ?ScopeId, kind: ScopeKind, enclosing_fn: ScopeId) Scope {
         return .{
             .id = id,
@@ -94,6 +100,7 @@ pub const Scope = struct {
             .enclosing_function = enclosing_fn,
             .max_local_count = 0,
             .current_local_slot = 0,
+            .holds_capture = false,
         };
     }
 
@@ -192,6 +199,13 @@ pub const ScopeAnalyzer = struct {
                 if (scope.max_local_count > parent.max_local_count) {
                     parent.max_local_count = scope.max_local_count;
                 }
+                // Captured slots stay reserved; see `holds_capture`.
+                if (scope.holds_capture) {
+                    if (scope.current_local_slot > parent.current_local_slot) {
+                        parent.current_local_slot = scope.current_local_slot;
+                    }
+                    parent.holds_capture = true;
+                }
             }
             self.current_scope = parent_id;
         }
@@ -280,6 +294,7 @@ pub const ScopeAnalyzer = struct {
                 if (crossed_function) {
                     // We need to create an upvalue chain
                     binding.is_captured = true;
+                    scope.holds_capture = true;
                     const upvalue_slot = try self.createUpvalueChain(
                         current_function_scope,
                         scope_id,
