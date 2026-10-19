@@ -109,6 +109,7 @@ planned to close them.
 | A request that is selected by a ternary, such as `cond ? req : req`, before its `authorization` header is read | `no_credential_leak` |
 | A secret stored with `cacheSet` and read back with `cacheIncr` | `no_secret_leakage` |
 | A callback that is selected by an expression, such as `forEach(cond ? f : g)` | `no_secret_leakage` |
+| An `assert` whose message is a secret: a failed assert returns the message as the response body | `no_secret_leakage` |
 
 The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as
