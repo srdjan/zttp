@@ -153,6 +153,18 @@ that claims a security property, and that property must stay unproven. A second
 table lists the fixtures the flow checker still proves falsely. A test holds
 that table equal to the observed set, so a fix edits the table in the same
 change.
+`test-precompile` also runs the precision expectations in
+`packages/tools/src/flow_precision_expectations.zig` (plan R16). The file lists
+48 representative handlers: the `examples/` handlers, a fixed copy of the 13
+DeepSeek codegen handlers, and four handwritten authenticated handlers. Each
+entry names the flow properties that the old checker proves on it. Each
+property must still hold. A property that the old checker leaves unproven has
+no expectation, so a more precise checker may prove more. The test reads each
+handler by repository-relative path and runs it through the typed pipeline.
+Two frozen constants pin the entry count and the total of expected properties.
+A table of old-checker misses is empty today, and a test holds it equal to the
+observed misses. The new flow interpreter must meet every expectation with no
+exemption before it replaces the old checker.
 
 `test-zts` also runs the failure-severity census, in
 `packages/zts/src/severity_census.zig`. It generates one probe handler per
