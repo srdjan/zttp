@@ -1,6 +1,7 @@
-//! Flow evaluator, phases P2 to P4: the abstract domain, the location scheme,
+//! Flow evaluator, phases P2 to P5a: the abstract domain, the location scheme,
 //! the field-sensitive heap, an evaluator for expressions and statements,
-//! `for...of` loops (P3), and calls with captured bindings and recursion (P4).
+//! `for...of` loops (P3), calls with captured bindings and recursion (P4), and
+//! the builtin globals with the operations that take no callback (P5a).
 //!
 //! This is the shadow of the checker that will replace the label walk in
 //! `flow_checker.zig`. Nothing in the pipeline, the CLI, or any verdict reads
@@ -8,8 +9,9 @@
 //! design is in `docs/plans/2026-10-18-flow-checker-sound-redesign-plan.md`
 //! (rounds 2 and 3 override its earlier text). The contracts are
 //! `docs/plans/2026-10-19-flow-interp-p2-r16-spec.md`,
-//! `docs/plans/2026-10-19-flow-interp-p3-spec.md`, and
-//! `docs/plans/2026-10-19-flow-interp-p4-spec.md`.
+//! `docs/plans/2026-10-19-flow-interp-p3-spec.md`,
+//! `docs/plans/2026-10-19-flow-interp-p4-spec.md`, and
+//! `docs/plans/2026-10-19-flow-interp-p5-spec.md`.
 //!
 //! The old checker keeps one label set per binding and loses what a value
 //! points at, so a write through an alias reaches nothing the reader can see.
@@ -32,6 +34,7 @@ const object = engine.object;
 const atom_table = engine.atom_table;
 const mb = engine.module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
+const known_globals = @import("zts-base").known_globals;
 
 const NodeIndex = ir.NodeIndex;
 const NodeTag = ir.NodeTag;
@@ -72,7 +75,26 @@ pub const SiteKind = enum(u8) {
     /// the binding, and the cell is the site's `summary`. No value points at
     /// a capture site, so a read through an unnamed object never sees one.
     capture,
+    /// An array that a builtin returns. `node` is the call node, and the site
+    /// stands for every container the call makes, nested ones included.
+    allocated_array,
+    /// A container that may be an array, a record, a Dict, Bytes, or a native
+    /// Result (`JSON.parse`, the request readers, `range`, `h`, and the result
+    /// of an export). `node` is the call node.
+    allocated_any,
+    /// A container that holds native methods (the result of a `Response`
+    /// static, of a fetch). `node` is the call node.
+    native,
+    /// The shared runtime objects reached under one name: a namespace, a
+    /// global function, a namespace member, a prototype method read as a
+    /// value. `node` holds the atom of that name, and `any_builtin` stands for
+    /// all of them. Every request in one runtime shares these objects.
+    builtin,
 };
+
+/// The atom of the `builtin` site that stands for every shared runtime object.
+/// Atom 0 is `null`, which no property read reaches by name.
+const any_builtin: u16 = 0;
 
 /// An allocation site. `context` is 0 until a later phase separates the
 /// callers of one function.
@@ -213,6 +235,28 @@ fn withLabels(v: Value, labels: LabelSet) Value {
     var out = v;
     out.labels = LabelSet.mergeValues(v.labels, labels);
     return out;
+}
+
+/// The union of two values that an operation reads together: the labels
+/// combine with `mergeValues`, the origins and callables are unions, and the
+/// `top` flags are ORed.
+fn unionValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
+    var out = try withNative(arena, a, b);
+    out.labels = LabelSet.mergeValues(a.labels, b.labels);
+    return out;
+}
+
+/// `v` with the origins, callables, and flags of `native` added. The labels
+/// of `v` stay as they are: a native function value carries none, and a join
+/// of labels would drop the `validated` bit of `v`.
+fn withNative(arena: std.mem.Allocator, v: Value, native: Value) Error!Value {
+    return .{
+        .labels = v.labels,
+        .origins = try mergeSorted(SiteKey, arena, v.origins, native.origins, SiteKey.order),
+        .origins_top = v.origins_top or native.origins_top,
+        .callables = try mergeSorted(NodeIndex, arena, v.callables, native.callables, nodeOrder),
+        .callables_top = v.callables_top or native.callables_top,
+    };
 }
 
 const NamedMap = std.AutoHashMapUnmanaged(u16, Value);
@@ -472,7 +516,7 @@ fn canonicalSlice(
 // ---------------------------------------------------------------------------
 
 /// The phase that will resolve a construct this phase leaves unresolved.
-pub const Phase = enum { p5, p6, p7, p8 };
+pub const Phase = enum { p6, p7, p8 };
 
 /// How the evaluators treat one `NodeTag`. P9 requires that no tag is `later`.
 pub const TagPlan = union(enum) {
@@ -508,9 +552,12 @@ pub const TagPlan = union(enum) {
 ///   no activation in this analysis created.
 /// - `budget_limit`: the root analysis reached `max_steps`.
 /// - `refused_by_strict`: the strict checker refuses the construct (call-site
-///   spread, ZTS616).
+///   spread, ZTS616, or a global the strict checker does not know).
+/// - `no_operation_rule`: an operation that has no transfer rule: a builtin
+///   method whose rule a later phase adds, a call that the runtime fails with
+///   `NotCallable`, or a native method of an object the analysis does not
+///   model (R3).
 pub const Owner = enum {
-    p5,
     p6,
     p7,
     p8,
@@ -521,6 +568,7 @@ pub const Owner = enum {
     capture_unseeded,
     budget_limit,
     refused_by_strict,
+    no_operation_rule,
     refused_by_parser,
     not_produced,
 };
@@ -562,7 +610,6 @@ pub const FunctionResult = struct {
 
 fn ownerOfPhase(phase: Phase) Owner {
     return switch (phase) {
-        .p5 => .p5,
         .p6 => .p6,
         .p7 => .p7,
         .p8 => .p8,
@@ -666,13 +713,153 @@ pub fn tagPlan(tag: NodeTag) TagPlan {
 }
 
 // ---------------------------------------------------------------------------
+// Builtin operations (P5a)
+// ---------------------------------------------------------------------------
+
+/// How the evaluator transfers labels, origins, and writes through one builtin
+/// operation. The names state what the operation does to the heap and to its
+/// result; `applyRule` holds the transfer for each.
+const Rule = enum {
+    /// A string method that returns a primitive.
+    string_scalar,
+    /// `split`: a fresh array of pieces.
+    string_split,
+    /// `push` and `unshift`: write each argument into the receiver.
+    array_push,
+    /// `pop` and `shift`: an element of the receiver.
+    array_pop,
+    array_splice,
+    /// `indexOf`, `includes`, and `join`: a primitive that reads the elements.
+    array_scalar,
+    /// `slice` and `toReversed`: a fresh array of the elements.
+    array_copy,
+    /// `toSorted`: a copy without a comparator. A comparator is a callback.
+    array_to_sorted,
+    array_concat,
+    /// A primitive computed from the arguments alone.
+    deep_scalar,
+    /// A primitive that differs between runs (a clock or random read).
+    nondeterministic,
+    /// `JSON.parse` and the request readers: a container built from the
+    /// arguments.
+    parsed,
+    object_keys,
+    object_values,
+    object_entries,
+    array_of,
+    /// A `Response` static: a container that holds native methods.
+    response_static,
+    range,
+    /// `hole()`: the call never returns.
+    hole,
+    /// The operation has no rule, and the row says why.
+    no_rule,
+};
+
+/// One builtin operation. `scope` is `global` for a global function, the
+/// namespace name for a namespace member, and `String.prototype`,
+/// `Array.prototype`, or `Result.prototype` for a method of a prototype.
+const OperationRow = struct {
+    scope: []const u8,
+    name: []const u8,
+    rule: Rule,
+    /// Why the operation has no rule. Set for `no_rule` rows only.
+    reason: []const u8 = "",
+};
+
+const callback_reason = "takes a callback, and a later phase adds the rule";
+const result_reason = "a Result method is not modeled";
+
+fn rowsOf(
+    comptime scope: []const u8,
+    comptime rule: Rule,
+    comptime reason: []const u8,
+    comptime names: []const []const u8,
+) [names.len]OperationRow {
+    var rows: [names.len]OperationRow = undefined;
+    for (names, 0..) |name, i| {
+        rows[i] = .{ .scope = scope, .name = name, .rule = rule, .reason = reason };
+    }
+    return rows;
+}
+
+/// The operation table. The census (C1) checks it against the registered
+/// builtins in both directions.
+const operation_rows =
+    rowsOf("String.prototype", .string_scalar, "", &.{
+        "charAt",      "charCodeAt", "indexOf",   "lastIndexOf", "startsWith",
+        "endsWith",    "includes",   "slice",     "substring",   "toLowerCase",
+        "toUpperCase", "trim",       "trimStart", "trimEnd",     "repeat",
+        "padStart",    "padEnd",     "concat",    "replace",     "replaceAll",
+    }) ++
+    rowsOf("String.prototype", .string_split, "", &.{"split"}) ++
+    rowsOf("Array.prototype", .array_push, "", &.{ "push", "unshift" }) ++
+    rowsOf("Array.prototype", .array_pop, "", &.{ "pop", "shift" }) ++
+    rowsOf("Array.prototype", .array_splice, "", &.{"splice"}) ++
+    rowsOf("Array.prototype", .array_scalar, "", &.{ "indexOf", "includes", "join" }) ++
+    rowsOf("Array.prototype", .array_copy, "", &.{ "slice", "toReversed" }) ++
+    rowsOf("Array.prototype", .array_to_sorted, "", &.{"toSorted"}) ++
+    rowsOf("Array.prototype", .array_concat, "", &.{"concat"}) ++
+    rowsOf("Array.prototype", .no_rule, callback_reason, &.{
+        "map", "filter", "reduce", "forEach", "every", "some", "find", "findIndex",
+    }) ++
+    rowsOf("Result.prototype", .no_rule, result_reason, &.{
+        "isOk", "isErr", "unwrap", "unwrapOr", "unwrapErr", "map", "mapErr", "andThen", "match",
+    }) ++
+    rowsOf("Math", .deep_scalar, "", &.{
+        "abs", "floor", "ceil", "round", "min", "max", "pow", "trunc", "sqrt", "sin", "cos", "tan", "log", "exp",
+    }) ++
+    rowsOf("Math", .nondeterministic, "", &.{"random"}) ++
+    rowsOf("JSON", .parsed, "", &.{ "parse", "tryParse" }) ++
+    rowsOf("JSON", .deep_scalar, "", &.{"stringify"}) ++
+    rowsOf("Object", .object_keys, "", &.{"keys"}) ++
+    rowsOf("Object", .object_values, "", &.{"values"}) ++
+    rowsOf("Object", .object_entries, "", &.{"entries"}) ++
+    rowsOf("Object", .deep_scalar, "", &.{"hasOwn"}) ++
+    rowsOf("Number", .deep_scalar, "", &.{ "isInteger", "isNaN", "isFinite", "parseFloat", "parseInt" }) ++
+    rowsOf("Response", .response_static, "", &.{ "json", "text", "html", "redirect", "rawJson" }) ++
+    rowsOf("Date", .nondeterministic, "", &.{"now"}) ++
+    rowsOf("Array", .deep_scalar, "", &.{"isArray"}) ++
+    rowsOf("Array", .array_of, "", &.{"of"}) ++
+    rowsOf("Array", .no_rule, callback_reason, &.{"from"}) ++
+    rowsOf("String", .deep_scalar, "", &.{"fromCharCode"}) ++
+    rowsOf("global", .deep_scalar, "", &.{ "String", "Number", "parseFloat", "parseInt", "isDict", "isBytes" }) ++
+    rowsOf("global", .range, "", &.{"range"}) ++
+    rowsOf("global", .parsed, "", &.{ "requestBody", "requestText", "requestJson" }) ++
+    rowsOf("global", .hole, "", &.{"hole"}) ++
+    rowsOf("global", .no_rule, callback_reason, &.{ "h", "renderToString" });
+
+/// The builtin objects whose members are the `Math`-style namespace rows.
+const namespace_names = [_][]const u8{ "Array", "Date", "JSON", "Math", "Number", "Object", "Response", "String" };
+
+/// The namespaces that are also functions, so a read of the name may be called.
+const callable_namespaces = [_][]const u8{ "Number", "Response", "String" };
+
+fn nameIn(names: []const []const u8, name: []const u8) bool {
+    for (names) |candidate| {
+        if (std.mem.eql(u8, candidate, name)) return true;
+    }
+    return false;
+}
+
+fn findRow(rows: []const OperationRow, scope: []const u8, name: []const u8) ?OperationRow {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.scope, scope) and std.mem.eql(u8, row.name, name)) return row;
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
 // The evaluator
 // ---------------------------------------------------------------------------
 
-/// A property key after evaluation: a name the analysis knows, or a value it
-/// does not (the key's labels then travel with the access).
+/// A property key after evaluation: a name the analysis knows, a numeric
+/// literal, or a value it does not know (the key's labels then travel with the
+/// access). A numeric literal reads like a dynamic key but cannot name a
+/// method, because no method name is numeric.
 const Key = union(enum) {
     name: u16,
+    index,
     dynamic: Value,
 };
 
@@ -740,6 +927,14 @@ pub const CaptureTable = struct {
     }
 };
 
+/// What the module level binds. A global read may resolve to a function in
+/// `functions`. A name in `bound` is declared, imported, or assigned at the
+/// module level, so it replaces a builtin global of the same name.
+const ModuleNames = struct {
+    functions: std.AutoHashMapUnmanaged(u16, NodeIndex),
+    bound: std.AutoHashMapUnmanaged(u16, void),
+};
+
 /// The result of one call, or of one pass over a function body: the join of
 /// every normal completion's value (null when none is reachable) and the join
 /// of their states. The state carries `heap` and `top_cell` only, because the
@@ -782,9 +977,8 @@ pub const FlowInterp = struct {
     loop_frames: std.ArrayList(LoopFrame) = .empty,
     /// The function bodies being analyzed for a call, innermost last.
     activations: std.ArrayList(Activation) = .empty,
-    /// The module-level functions a global read may resolve to, by atom.
-    /// Built on first use.
-    module_functions: ?std.AutoHashMapUnmanaged(u16, NodeIndex) = null,
+    /// The module-level names, by atom. Built on first use.
+    module_names: ?ModuleNames = null,
     /// The pass cap of one loop. It is a fail-closed exit and not the
     /// termination argument: the loop head only grows over finite components.
     /// A value below 1 is treated as 1.
@@ -1030,15 +1224,6 @@ pub const FlowInterp = struct {
         return table.source(binding.scope_id, binding.slot);
     }
 
-    /// A value read from a property or a pattern field. The receiver can be a
-    /// string, an array, or another builtin value after a join, and the read
-    /// can then return a builtin method, so the result may be any function.
-    fn propertyRead(v: Value) Value {
-        var out = v;
-        out.callables_top = true;
-        return out;
-    }
-
     // --- module-level functions (P4) ---
 
     /// The function a module-level name resolves to, or null. A name resolves
@@ -1047,12 +1232,22 @@ pub const FlowInterp = struct {
     /// (so module initialization runs it before any request), and no
     /// assignment targets the name. Anything else stays module state (P8).
     fn moduleFunction(self: *FlowInterp, atom: u16) Error!?NodeIndex {
-        const table = self.module_functions orelse blk: {
-            const built = try self.buildModuleFunctions();
-            self.module_functions = built;
-            break :blk built;
-        };
-        return table.get(atom);
+        const names = try self.moduleNames();
+        return names.functions.get(atom);
+    }
+
+    /// Whether the module level declares, imports, or assigns `atom`. Such a
+    /// name replaces a builtin global of the same name at runtime.
+    fn moduleBinds(self: *FlowInterp, atom: u16) Error!bool {
+        const names = try self.moduleNames();
+        return names.bound.contains(atom);
+    }
+
+    fn moduleNames(self: *FlowInterp) Error!ModuleNames {
+        if (self.module_names) |names| return names;
+        const built = try self.buildModuleNames();
+        self.module_names = built;
+        return built;
     }
 
     const Declared = struct { count: u32, decl: NodeIndex };
@@ -1071,7 +1266,7 @@ pub const FlowInterp = struct {
         }
     }
 
-    fn buildModuleFunctions(self: *FlowInterp) Error!std.AutoHashMapUnmanaged(u16, NodeIndex) {
+    fn buildModuleNames(self: *FlowInterp) Error!ModuleNames {
         const arena = self.mem();
         const view = self.ir_view;
         var declared: std.AutoHashMapUnmanaged(u16, Declared) = .empty;
@@ -1144,7 +1339,13 @@ pub const FlowInterp = struct {
             };
             if (is_function) try resolved.put(arena, atom, vd.init);
         }
-        return resolved;
+
+        var bound: std.AutoHashMapUnmanaged(u16, void) = .empty;
+        var declared_it = declared.keyIterator();
+        while (declared_it.next()) |atom| try bound.put(arena, atom.*, {});
+        var assigned_it = assigned.keyIterator();
+        while (assigned_it.next()) |atom| try bound.put(arena, atom.*, {});
+        return .{ .functions = resolved, .bound = bound };
     }
 
     // --- calls (P4) ---
@@ -1164,12 +1365,12 @@ pub const FlowInterp = struct {
         return .{ .heap = try st.heap.clone(self.mem()), .top_cell = st.top_cell };
     }
 
-    fn evalCall(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
-        const arena = self.mem();
-        const c = self.ir_view.getCall(node) orelse return self.missing(node);
-        const callee_tag = self.ir_view.getTag(c.callee) orelse .stmt_list;
-        const callee = try self.eval(c.callee, st);
+    /// The argument values of a call, in source order, and whether one of them
+    /// is a call-site spread.
+    const CallArgs = struct { values: []const Value, has_spread: bool };
 
+    fn evalArgs(self: *FlowInterp, c: ir.Node.CallExpr, st: *State) Error!CallArgs {
+        const arena = self.mem();
         var args: std.ArrayList(Value) = .empty;
         var has_spread = false;
         var i: u16 = 0;
@@ -1185,41 +1386,525 @@ pub const FlowInterp = struct {
             }
             try args.append(arena, try self.eval(arg, st));
         }
+        return .{ .values = args.items, .has_spread = has_spread };
+    }
+
+    fn evalCall(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
+        const c = self.ir_view.getCall(node) orelse return self.missing(node);
+        const callee_tag = self.ir_view.getTag(c.callee) orelse .stmt_list;
 
         // The runtime dispatches a call through a property to a builtin method
         // of a string, an array, or another builtin value, and a value cannot
-        // exclude a primitive alternative after a join. P5 owns these.
-        const by_property = callee_tag == .member_access or callee_tag == .optional_chain or callee_tag == .computed_access;
-        if (by_property) try self.record(node, .call, .p5);
-        if (by_property or has_spread) return Value.top;
+        // exclude a primitive alternative after a join.
+        if (callee_tag == .member_access or callee_tag == .optional_chain or callee_tag == .computed_access) {
+            return self.evalPropertyCall(node, c, callee_tag, st);
+        }
+
+        // A call of a builtin global function uses its row and never reads
+        // the callee.
+        if (try self.globalFunction(c.callee)) |global| {
+            const args = try self.evalArgs(c, st);
+            if (args.has_spread) return Value.top;
+            return self.applyRule(st, node, global.row.rule, try self.nativeFunction(global.atom), args.values);
+        }
+
+        const callee = try self.eval(c.callee, st);
+        const args = try self.evalArgs(c, st);
+        if (args.has_spread) return Value.top;
 
         if (callee.callables_top) {
             try self.record(node, .call, .unknown_callee);
             return Value.top;
         }
-        // The runtime fails with `NotCallable`, unless the value is a builtin
-        // function, which P5 decides.
+        // The runtime fails with `NotCallable`.
         if (callee.callables.len == 0) {
-            try self.record(node, .call, .p5);
+            try self.record(node, .call, .no_operation_rule);
             return Value.top;
         }
 
         // Which callee runs is control flow, so every one of them does and the
         // results join. A result chosen through a labelled callee carries its
         // labels, as a read through a labelled key does.
+        const joined = try self.runCallables(callee.callables, args.values, st);
+        return self.takeSummary(st, joined, callee.labels);
+    }
+
+    /// Run every function of `callables` from `st` and join the summaries.
+    fn runCallables(self: *FlowInterp, callables: []const NodeIndex, args: []const Value, st: *const State) Error!Summary {
         var joined = Summary.bottom;
-        for (callee.callables) |func_node| {
-            joined = try joinSummary(arena, joined, try self.invoke(func_node, args.items, st));
+        for (callables) |func_node| {
+            joined = try joinSummary(self.mem(), joined, try self.invoke(func_node, args, st));
         }
+        return joined;
+    }
+
+    /// Continue the caller from the joined summary of a call: its heap, and its
+    /// value with `labels` added. A summary with no reachable completion
+    /// leaves the caller unreachable.
+    fn takeSummary(self: *FlowInterp, st: *State, joined: Summary, labels: LabelSet) Error!Value {
         if (!joined.state.reachable) {
             // No completion is reachable. The bindings stay readable for the
             // dead code that follows in the same expression.
             st.reachable = false;
             return Value.clean;
         }
-        st.heap = try joined.state.heap.clone(arena);
+        st.heap = try joined.state.heap.clone(self.mem());
         st.top_cell = joined.state.top_cell;
-        return withLabels(joined.value orelse Value.clean, callee.labels);
+        return withLabels(joined.value orelse Value.clean, labels);
+    }
+
+    // --- builtin globals and operations (P5a) ---
+
+    /// The name behind an atom: a predefined one, or one the table interned.
+    fn nameOfAtom(self: *const FlowInterp, atom: u16) ?[]const u8 {
+        const named: object.Atom = @enumFromInt(atom);
+        if (named.toPredefinedName()) |name| return name;
+        const table = self.atoms orelse return null;
+        return table.getName(named);
+    }
+
+    fn builtinSite(atom: u16) SiteKey {
+        return .{ .kind = .builtin, .node = atom, .context = 0 };
+    }
+
+    /// The native function value of a static name: it has a location, and it
+    /// may be called.
+    fn nativeFunction(self: *FlowInterp, atom: u16) Error!Value {
+        return .{
+            .origins = try self.mem().dupe(SiteKey, &.{builtinSite(atom)}),
+            .callables_top = true,
+        };
+    }
+
+    /// The native value of an access whose name is not known: any shared
+    /// runtime object, and any function.
+    fn anyNative(self: *FlowInterp) Error!Value {
+        return .{
+            .origins = try self.mem().dupe(SiteKey, &.{builtinSite(any_builtin)}),
+            .origins_top = true,
+            .callables_top = true,
+        };
+    }
+
+    /// A value may be an array when it points at an array literal or at an
+    /// array that a builtin made, or at anything.
+    fn mayBeArray(self: *const FlowInterp, v: Value) bool {
+        if (v.origins_top) return true;
+        for (v.origins) |site| {
+            switch (site.kind) {
+                .allocated_array, .allocated_any => return true,
+                .literal => {
+                    if ((self.ir_view.getTag(site.node) orelse continue) == .array_literal) return true;
+                },
+                .function, .request, .headers, .capture, .native, .builtin => {},
+            }
+        }
+        return false;
+    }
+
+    /// A native Result comes from a builtin that returns an `allocated_any`
+    /// container. An array that a builtin returns is not one.
+    fn mayBeResult(v: Value) bool {
+        if (v.origins_top) return true;
+        for (v.origins) |site| {
+            if (site.kind == .allocated_any) return true;
+        }
+        return false;
+    }
+
+    /// A value may hold native methods when it points at a shared runtime
+    /// object, a native container, or the request or its headers.
+    fn mayHoldNative(v: Value) bool {
+        if (v.origins_top) return true;
+        for (v.origins) |site| {
+            switch (site.kind) {
+                .builtin, .native, .request, .headers => return true,
+                .literal, .function, .capture, .allocated_array, .allocated_any => {},
+            }
+        }
+        return false;
+    }
+
+    /// Whether the value points at a `builtin` or `native` site, whose
+    /// properties are the methods of a native object.
+    fn hasNativeSite(v: Value) bool {
+        for (v.origins) |site| {
+            if (site.kind == .builtin or site.kind == .native) return true;
+        }
+        return false;
+    }
+
+    fn hasBuiltinSite(v: Value) bool {
+        for (v.origins) |site| {
+            if (site.kind == .builtin) return true;
+        }
+        return false;
+    }
+
+    /// The native value that a read of `key` through `o` adds to the cells it
+    /// sees, or null. A name adds its own native function when it names a
+    /// method the receiver may have. A key that is not a literal may name any
+    /// method. A numeric literal names none, but still reads the properties of
+    /// a native site.
+    fn implicitNative(self: *FlowInterp, o: Value, key: Key) Error!?Value {
+        switch (key) {
+            .name => |atom| {
+                // A name this table cannot spell may be any method.
+                const text = self.nameOfAtom(atom) orelse return try self.anyNative();
+                const method = findRow(&operation_rows, "String.prototype", text) != null or
+                    (findRow(&operation_rows, "Array.prototype", text) != null and self.mayBeArray(o)) or
+                    (findRow(&operation_rows, "Result.prototype", text) != null and mayBeResult(o)) or
+                    mayHoldNative(o);
+                if (!method) return null;
+                return try self.nativeFunction(atom);
+            },
+            .dynamic => return try self.anyNative(),
+            .index => {
+                if (hasNativeSite(o)) return try self.anyNative();
+                return null;
+            },
+        }
+    }
+
+    /// A scan reads elements, and the properties of a native site as well.
+    fn scanNative(self: *FlowInterp, v: Value, o: Value) Error!Value {
+        if (!hasNativeSite(o)) return v;
+        return withNative(self.mem(), v, try self.anyNative());
+    }
+
+    /// The row of a builtin global function that an identifier names, or null.
+    /// A name that the module level declares or assigns is the user's.
+    fn globalFunction(self: *FlowInterp, callee: NodeIndex) Error!?struct { row: OperationRow, atom: u16 } {
+        if ((self.ir_view.getTag(callee) orelse return null) != .identifier) return null;
+        const binding = self.ir_view.getBinding(callee) orelse return null;
+        if (binding.kind != .undeclared_global) return null;
+        if (try self.moduleBinds(binding.name_atom)) return null;
+        const name = self.nameOfAtom(binding.name_atom) orelse return null;
+        const row = findRow(&operation_rows, "global", name) orelse return null;
+        return .{ .row = row, .atom = binding.name_atom };
+    }
+
+    /// The value of an undeclared global that no module declaration replaces.
+    fn builtinGlobal(self: *FlowInterp, node: NodeIndex, atom: u16) Error!Value {
+        const name = self.nameOfAtom(atom) orelse {
+            try self.record(node, .identifier, .refused_by_strict);
+            return Value.top;
+        };
+        if (nameIn(&namespace_names, name)) {
+            var namespace = Value{ .origins = try self.mem().dupe(SiteKey, &.{builtinSite(atom)}) };
+            namespace.callables_top = nameIn(&callable_namespaces, name);
+            return namespace;
+        }
+        if (findRow(&operation_rows, "global", name) != null) return self.nativeFunction(atom);
+        // The strict checker accepts the other known globals, and no rule
+        // models them. Any other name it refuses.
+        const known = nameIn(&known_globals.names, name);
+        try self.record(node, .identifier, if (known) .no_operation_rule else .refused_by_strict);
+        return Value.top;
+    }
+
+    /// The condition of `tryEmitMathBuiltin` in `parser/codegen.zig`: these
+    /// calls compile to an opcode, and the code generator does not read the
+    /// receiver, so a user `Math` never runs.
+    fn isMathOpcode(self: *const FlowInterp, callee_tag: NodeTag, m: ir.Node.MemberExpr, args_count: u8) bool {
+        if (callee_tag != .member_access and callee_tag != .optional_chain) return false;
+        if ((self.ir_view.getTag(m.object) orelse return false) != .identifier) return false;
+        const binding = self.ir_view.getBinding(m.object) orelse return false;
+        if (binding.kind != .global and binding.kind != .undeclared_global) return false;
+        if (binding.name_atom != @intFromEnum(object.Atom.Math)) return false;
+        if (args_count == 1) {
+            return m.property == @intFromEnum(object.Atom.floor) or
+                m.property == @intFromEnum(object.Atom.ceil) or
+                m.property == @intFromEnum(object.Atom.round) or
+                m.property == @intFromEnum(object.Atom.abs);
+        }
+        if (args_count == 2) {
+            return m.property == @intFromEnum(object.Atom.min) or m.property == @intFromEnum(object.Atom.max);
+        }
+        return false;
+    }
+
+    /// A call through a property: `r.name(args)`, `r?.name(args)`, or
+    /// `r["name"](args)`. An optional call skips the read, the arguments, and
+    /// the call when the receiver is nullish, so the state after the receiver
+    /// joins the state after the call.
+    fn evalPropertyCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, callee_tag: NodeTag, st: *State) Error!Value {
+        const arena = self.mem();
+        const m = self.ir_view.getMember(c.callee) orelse return self.missing(node);
+        self.noteVisited(callee_tag);
+
+        if (self.isMathOpcode(callee_tag, m, c.args_count)) {
+            const args = try self.evalArgs(c, st);
+            if (args.has_spread) return Value.top;
+            return Value.labelled(try self.deepLabels(st, args.values));
+        }
+
+        const receiver = try self.eval(m.object, st);
+        const key: Key = if (callee_tag == .computed_access)
+            try self.evalKey(m.computed, st)
+        else
+            .{ .name = m.property };
+        const skipped: ?State = if (callee_tag == .optional_chain) try cloneState(arena, st.*) else null;
+
+        const value = try self.dispatchPropertyCall(node, c, receiver, key, st);
+        if (skipped) |skip| {
+            st.* = try joinStates(arena, skip, st.*);
+            return joinValue(arena, value, Value.clean);
+        }
+        return value;
+    }
+
+    /// The candidates of a call `r.name(args)`: the user functions stored
+    /// under the name, then each builtin operation the receiver may reach
+    /// under it. Every candidate runs from the state after the arguments, and
+    /// the results and states join.
+    fn dispatchPropertyCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, r: Value, key: Key, st: *State) Error!Value {
+        const arena = self.mem();
+        const args = try self.evalArgs(c, st);
+        if (args.has_spread) return Value.top;
+
+        // A computed key that is a string literal is a static name, and the
+        // runtime reads the same property. Any other key may name a method.
+        const atom = switch (key) {
+            .name => |name| name,
+            .index, .dynamic => {
+                try self.record(node, .call, .unknown_callee);
+                return Value.top;
+            },
+        };
+        const text = self.nameOfAtom(atom) orelse {
+            try self.record(node, .call, .unknown_callee);
+            return Value.top;
+        };
+        if (r.origins_top) {
+            try self.record(node, .call, .unknown_callee);
+            return Value.top;
+        }
+
+        const user = try self.storedRead(st, r, key);
+        if (user.callables_top) {
+            try self.record(node, .call, .unknown_callee);
+            return Value.top;
+        }
+
+        var joined = Summary.bottom;
+        var candidates: usize = 0;
+        if (user.callables.len > 0) {
+            joined = try self.runCallables(user.callables, args.values, st);
+            candidates += 1;
+        }
+        if (findRow(&operation_rows, "String.prototype", text)) |row| {
+            joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+            candidates += 1;
+        }
+        if (self.mayBeArray(r)) {
+            if (findRow(&operation_rows, "Array.prototype", text)) |row| {
+                joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                candidates += 1;
+            }
+        }
+        if (mayBeResult(r)) {
+            if (findRow(&operation_rows, "Result.prototype", text)) |row| {
+                joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                candidates += 1;
+            }
+        }
+        for (r.origins) |site| {
+            switch (site.kind) {
+                .builtin => {
+                    // Only a namespace has member rows. Any other shared
+                    // object has no rule.
+                    const scope = self.nameOfAtom(@truncate(site.node)) orelse "";
+                    const found = if (nameIn(&namespace_names, scope)) findRow(&operation_rows, scope, text) else null;
+                    const row = found orelse OperationRow{ .scope = scope, .name = text, .rule = .no_rule, .reason = "no member row" };
+                    joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                    candidates += 1;
+                },
+                .native => {
+                    const row: OperationRow = .{ .scope = "native", .name = text, .rule = .no_rule, .reason = "a native method" };
+                    joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                    candidates += 1;
+                },
+                // The contents of the request and its headers belong to P7.
+                .request, .headers => {
+                    try self.record(node, .call, .p7);
+                    joined = try joinSummary(arena, joined, .{ .value = Value.top, .state = try self.heapState(st) });
+                    candidates += 1;
+                },
+                .literal, .function, .capture, .allocated_array, .allocated_any => {},
+            }
+        }
+
+        // The runtime fails with `NotCallable`.
+        if (candidates == 0) {
+            try self.record(node, .call, .no_operation_rule);
+            return Value.top;
+        }
+        return self.takeSummary(st, joined, user.labels);
+    }
+
+    /// Apply one builtin row to a copy of the heap and return its summary.
+    fn candidate(self: *FlowInterp, node: NodeIndex, st: *const State, row: OperationRow, r: Value, args: []const Value) Error!Summary {
+        var copy = try self.heapState(st);
+        const value = try self.applyRule(&copy, node, row.rule, r, args);
+        return .{ .value = value, .state = heapOnly(copy) };
+    }
+
+    /// The labels of everything `vs` can reach.
+    fn deepLabels(self: *FlowInterp, st: *const State, vs: []const Value) Error!LabelSet {
+        return (try self.reach(st, vs)).labels;
+    }
+
+    /// The argument at `index`, or `clean` when the call passes none.
+    fn argAt(args: []const Value, index: usize) Value {
+        return if (index < args.len) args[index] else Value.clean;
+    }
+
+    /// A container that a builtin makes at the call `node`. The site holds
+    /// `contents` and its own self value, so a nested container has a
+    /// location and a write to it lands in the site. The result is the self
+    /// value with `labels`.
+    fn allocate(self: *FlowInterp, st: *State, kind: SiteKind, node: NodeIndex, contents: []const Value, labels: LabelSet) Error!Value {
+        const site: SiteKey = .{ .kind = kind, .node = node, .context = 0 };
+        const self_value = try self.siteValue(site, null);
+        for (contents) |content| try self.weakWriteSite(st, site, null, content);
+        try self.weakWriteSite(st, site, null, self_value);
+        var out = self_value;
+        out.labels = labels;
+        return out;
+    }
+
+    /// The transfer of one builtin operation. `r` is the receiver, `args` the
+    /// argument values, and `st` the state the operation runs in. `L` is the
+    /// labels of the receiver and of everything the arguments reach.
+    fn applyRule(self: *FlowInterp, st: *State, node: NodeIndex, rule: Rule, r: Value, args: []const Value) Error!Value {
+        const arg_labels = try self.deepLabels(st, args);
+        const labels = LabelSet.mergeValues(r.labels, arg_labels);
+        switch (rule) {
+            .string_scalar => return Value.labelled(labels),
+            .string_split => return self.allocate(st, .allocated_array, node, &.{Value.labelled(labels)}, labels),
+            .array_push => {
+                try self.recordSharedWrite(node, r);
+                for (args) |arg| try self.writeValue(st, r, .{ .dynamic = Value.clean }, arg);
+                return Value.labelled(LabelSet.mergeValues(labels, try self.deepLabels(st, &.{r})));
+            },
+            .array_pop => return self.readAll(st.*, r),
+            .array_splice => {
+                const removed = try self.readAll(st.*, r);
+                try self.recordSharedWrite(node, r);
+                // The selectors decide which elements go, so their labels
+                // reach what stays, and the items from argument 2 are pushed.
+                const selectors = LabelSet.mergeValues(argAt(args, 0).labels, argAt(args, 1).labels);
+                try self.writeValue(st, r, .{ .dynamic = Value.clean }, Value.labelled(selectors));
+                if (args.len > 2) {
+                    for (args[2..]) |item| try self.writeValue(st, r, .{ .dynamic = Value.clean }, item);
+                }
+                return self.allocate(st, .allocated_array, node, &.{removed}, labels);
+            },
+            .array_scalar => return Value.labelled(LabelSet.mergeValues(labels, try self.deepLabels(st, &.{r}))),
+            .array_copy => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, labels),
+            .array_to_sorted => {
+                // A comparator is a callback, and a later phase adds its rule.
+                if (args.len > 0) return self.noRule(node);
+                return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, labels);
+            },
+            .array_concat => {
+                var contents: std.ArrayList(Value) = .empty;
+                try contents.append(self.mem(), try self.readAll(st.*, r));
+                for (args) |arg| {
+                    try contents.append(self.mem(), arg);
+                    try contents.append(self.mem(), try self.readAll(st.*, arg));
+                }
+                return self.allocate(st, .allocated_array, node, contents.items, labels);
+            },
+            .deep_scalar => return Value.labelled(arg_labels),
+            .nondeterministic => return Value.labelled(.{ .nondeterministic = true }),
+            .parsed, .range => return self.allocate(st, .allocated_any, node, &.{Value.labelled(arg_labels)}, arg_labels),
+            .object_keys => return self.allocate(st, .allocated_array, node, &.{Value.labelled(arg_labels)}, labels),
+            .object_values => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, argAt(args, 0))}, labels),
+            .object_entries => return self.allocate(
+                st,
+                .allocated_array,
+                node,
+                &.{ try self.readAll(st.*, argAt(args, 0)), Value.labelled(arg_labels) },
+                labels,
+            ),
+            .array_of => return self.allocate(st, .allocated_array, node, args, labels),
+            .response_static => return self.allocate(st, .native, node, &.{try self.reach(st, args)}, arg_labels),
+            .hole => {
+                // The call never returns, as a P4 call whose callee has no
+                // completion. The bindings stay readable for the rest of the
+                // expression.
+                st.reachable = false;
+                return Value.clean;
+            },
+            .no_rule => return self.noRule(node),
+        }
+    }
+
+    /// An operation with no rule: unresolved, and anything.
+    fn noRule(self: *FlowInterp, node: NodeIndex) Error!Value {
+        try self.record(node, .call, .no_operation_rule);
+        return Value.top;
+    }
+
+    /// A write into the receiver of an array method. A shared runtime object
+    /// is shared by every request, so a write into one belongs to P8.
+    fn recordSharedWrite(self: *FlowInterp, node: NodeIndex, r: Value) Error!void {
+        if (hasBuiltinSite(r)) try self.record(node, .call, .p8);
+    }
+
+    // --- reach (P5) ---
+
+    /// The state of one `reach` walk: the join so far, the sites already
+    /// queued, and whether the walk has swept the whole heap.
+    const Reach = struct {
+        joined: Value = .{},
+        seen: std.AutoHashMapUnmanaged(SiteKey, void) = .empty,
+        queue: std.ArrayList(SiteKey) = .empty,
+        swept: bool = false,
+    };
+
+    fn reachValue(self: *FlowInterp, walk: *Reach, v: Value) Error!void {
+        walk.joined = try unionValue(self.mem(), walk.joined, v);
+        for (v.origins) |site| try self.reachSite(walk, site);
+    }
+
+    /// A capture cell is not an object, so no walk follows one.
+    fn reachSite(self: *FlowInterp, walk: *Reach, site: SiteKey) Error!void {
+        if (site.kind == .capture) return;
+        const slot = try walk.seen.getOrPut(self.mem(), site);
+        if (slot.found_existing) return;
+        try walk.queue.append(self.mem(), site);
+    }
+
+    fn reachCells(self: *FlowInterp, walk: *Reach, cells: Cells) Error!void {
+        var it = cells.named.valueIterator();
+        while (it.next()) |v| try self.reachValue(walk, v.*);
+        if (cells.summary) |summary| try self.reachValue(walk, summary);
+    }
+
+    /// The join of every value reachable from `vs`: the values, every cell of
+    /// every origin they name, transitively, the cells of unnamed writes, and
+    /// the native value of each `builtin` and `native` origin. A value that
+    /// may point anywhere reaches every cell of the heap.
+    fn reach(self: *FlowInterp, st: *const State, vs: []const Value) Error!Value {
+        var walk: Reach = .{};
+        for (vs) |v| try self.reachValue(&walk, v);
+        try self.reachCells(&walk, st.top_cell);
+        var next: usize = 0;
+        while (true) {
+            while (next < walk.queue.items.len) : (next += 1) {
+                const site = walk.queue.items[next];
+                if (st.heap.get(site)) |cells| try self.reachCells(&walk, cells);
+                if (site.kind == .builtin or site.kind == .native) try self.reachValue(&walk, try self.anyNative());
+            }
+            if (!walk.joined.origins_top or walk.swept) break;
+            walk.swept = true;
+            var it = st.heap.keyIterator();
+            while (it.next()) |site| try self.reachSite(&walk, site.*);
+        }
+        return walk.joined;
     }
 
     /// Run `func_node` with `args` from the caller's state `st`. A function that
@@ -1419,11 +2104,16 @@ pub const FlowInterp = struct {
     /// An absent cell is a reachable `undefined`, so a read that sees nothing
     /// yields `clean`. The receiver and key labels join the result: a property
     /// of a labelled value, and a selection by a labelled key, carry the label
-    /// (R1).
-    fn readValue(self: *FlowInterp, st: *const State, o: Value, key: Key) Error!Value {
+    /// (R1). This is the stored content only: a method that the runtime finds
+    /// on a prototype is not in any cell.
+    fn storedRead(self: *FlowInterp, st: *const State, o: Value, key: Key) Error!Value {
         return switch (key) {
             .name => |n| blk: {
                 const seen = try self.visible(st, o, n);
+                break :blk withLabels(seen orelse Value.clean, o.labels);
+            },
+            .index => blk: {
+                const seen = try self.visible(st, o, null);
                 break :blk withLabels(seen orelse Value.clean, o.labels);
             },
             .dynamic => |k| blk: {
@@ -1434,10 +2124,21 @@ pub const FlowInterp = struct {
         };
     }
 
-    /// Every cell a dynamic read of `o` can see, with `o`'s labels on the
-    /// result. This is what a spread copies and what the tests inspect.
+    /// The stored content of a read, with the native function that the runtime
+    /// may find under the key (`implicitNative`).
+    fn readValue(self: *FlowInterp, st: *const State, o: Value, key: Key) Error!Value {
+        const stored = try self.storedRead(st, o, key);
+        const native = (try self.implicitNative(o, key)) orelse return stored;
+        return withNative(self.mem(), stored, native);
+    }
+
+    /// Every cell a scan of `o` can see, with `o`'s labels on the result. This
+    /// is what a spread copies and what the tests inspect. A scan reads
+    /// elements and does not go through the computed-read rule, but it also
+    /// sees the properties of a native site.
     pub fn readAll(self: *FlowInterp, state: State, o: Value) Error!Value {
-        return self.readValue(&state, o, .{ .dynamic = Value.clean });
+        const stored = try self.storedRead(&state, o, .index);
+        return self.scanNative(stored, o);
     }
 
     /// The cells a spread of `o` copies, as one cell set.
@@ -1454,6 +2155,9 @@ pub const FlowInterp = struct {
                 if (entry.key_ptr.kind == .capture) continue;
                 out = try joinCells(arena, out, entry.value_ptr.*);
             }
+        }
+        if (hasNativeSite(o)) {
+            out = try joinCells(arena, out, .{ .summary = try self.anyNative() });
         }
         return out;
     }
@@ -1474,6 +2178,7 @@ pub const FlowInterp = struct {
         var name: ?u16 = null;
         switch (key) {
             .name => |n| name = n,
+            .index => {},
             .dynamic => |k| labels = LabelSet.mergeValues(labels, k.labels),
         }
         // The combined set replaces `v`'s labels. `withLabels` would merge it
@@ -1531,7 +2236,7 @@ pub const FlowInterp = struct {
             .member_access => {
                 const m = self.ir_view.getMember(node) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
-                return propertyRead(try self.readValue(st, o, .{ .name = m.property }));
+                return self.readValue(st, o, .{ .name = m.property });
             },
             .optional_chain => {
                 // The receiver is evaluated on both paths and a read changes
@@ -1540,13 +2245,13 @@ pub const FlowInterp = struct {
                 const m = self.ir_view.getMember(node) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
                 const read = try self.readValue(st, o, .{ .name = m.property });
-                return propertyRead(try joinValue(self.mem(), read, Value.clean));
+                return joinValue(self.mem(), read, Value.clean);
             },
             .computed_access => {
                 const m = self.ir_view.getMember(node) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
                 const key = try self.evalKey(m.computed, st);
-                return propertyRead(try self.readValue(st, o, key));
+                return self.readValue(st, o, key);
             },
             .assignment => return self.evalAssignment(node, st),
             .array_literal => return self.evalArray(node, st),
@@ -1637,11 +2342,15 @@ pub const FlowInterp = struct {
                 return captureValue(st, key);
             },
             // A module function is a fixed value; any other module name is
-            // state that P8 owns.
+            // state that P8 owns. An undeclared global that the module level
+            // never binds is a builtin.
             .global, .undeclared_global => {
                 if (try self.moduleFunction(binding.name_atom)) |func_node| {
                     const site: SiteKey = .{ .kind = .function, .node = func_node, .context = 0 };
                     return self.siteValue(site, func_node);
+                }
+                if (binding.kind == .undeclared_global and !try self.moduleBinds(binding.name_atom)) {
+                    return self.builtinGlobal(node, binding.name_atom);
                 }
                 try self.record(node, .identifier, .p8);
                 return Value.top;
@@ -1671,10 +2380,13 @@ pub const FlowInterp = struct {
         }
     }
 
-    /// Evaluate a computed key once. A string literal is a static name.
+    /// Evaluate a computed key once. A string literal is a static name, and a
+    /// numeric literal names an element.
     fn evalKey(self: *FlowInterp, key_node: NodeIndex, st: *State) Error!Key {
         const value = try self.eval(key_node, st);
         if (try self.literalKey(key_node)) |name| return .{ .name = name };
+        const tag = self.ir_view.getTag(key_node) orelse return .{ .dynamic = value };
+        if (tag == .lit_int or tag == .lit_float) return .index;
         return .{ .dynamic = value };
     }
 
@@ -1743,13 +2455,13 @@ pub const FlowInterp = struct {
                 const m = self.ir_view.getMember(asg.target) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
                 const key: Key = .{ .name = m.property };
-                return self.assignThrough(st, o, key, asg);
+                return self.assignThrough(node, st, o, key, asg);
             },
             .computed_access => {
                 const m = self.ir_view.getMember(asg.target) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
                 const key = try self.evalKey(m.computed, st);
-                return self.assignThrough(st, o, key, asg);
+                return self.assignThrough(node, st, o, key, asg);
             },
             // The restricted profile has no other assignment target.
             else => {
@@ -1760,12 +2472,14 @@ pub const FlowInterp = struct {
         }
     }
 
-    fn assignThrough(self: *FlowInterp, st: *State, o: Value, key: Key, asg: ir.Node.AssignExpr) Error!Value {
+    fn assignThrough(self: *FlowInterp, node: NodeIndex, st: *State, o: Value, key: Key, asg: ir.Node.AssignExpr) Error!Value {
         const assigned = if (asg.op) |op| blk: {
             const old = try self.readValue(st, o, key);
             break :blk try self.compoundValue(op, old, asg.value, st);
         } else try self.eval(asg.value, st);
         try self.writeValue(st, o, key, assigned);
+        // A shared runtime object is shared by every request.
+        if (hasBuiltinSite(o)) try self.record(node, .assignment, .p8);
         return assigned;
     }
 
@@ -1878,7 +2592,7 @@ pub const FlowInterp = struct {
                                 try self.record(prop_idx, .object_property, .refused_by_parser);
                                 continue;
                             };
-                            const field = propertyRead(try self.readValue(st, disc, .{ .name = name }));
+                            const field = try self.readValue(st, disc, .{ .name = name });
                             try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), field);
                         },
                         // A nested record or array pattern binds below the
@@ -2415,9 +3129,16 @@ test "receiver and key labels travel with a read and a write" {
     try expectSecret(read_labelled_key, &.{secret_value}, true);
     try expectSecret(read_labelled_key, &.{Value.clean}, false);
 
+    // The read at a labelled key may return a method of `table` (the key may
+    // name one), a function object that every request shares. So the write
+    // through it is a P8 write, and the label still reaches `a.x`.
     const write_through_key = "function f(s) { const a = {}; const table = [a]; table[s].x = \"X\"; return a.x; }";
-    try expectSecret(write_through_key, &.{secret_value}, true);
-    try expectSecret(write_through_key, &.{Value.clean}, false);
+    inline for (.{ secret_value, Value.clean }, .{ true, false }) |seed, leaks| {
+        const r = try analyzeSource(write_through_key, "f", &.{seed});
+        defer r.deinit();
+        try expectUnresolved(r.result, .assignment, .p8);
+        try testing.expectEqual(leaks, r.returnedLabels().secret);
+    }
 
     // A write at a labelled key stores the key's label in the cell it picks.
     const write_at_key = "function f(s) { const t = [\"a\"]; t[s] = \"X\"; return t[0]; }";
@@ -2536,8 +3257,9 @@ test "a function declaration binds in statement order" {
     try testing.expect(before.result.returned.?.labels.unknown);
     try testing.expectEqual(NodeTag.identifier, before.result.unresolved[0].tag);
     // The parser resolves a name only to an earlier declaration, so the read of
-    // `g` is a read of a module-level name, which P8 owns.
-    try testing.expectEqual(Owner.p8, before.result.unresolved[0].owner);
+    // `g` is an undeclared global when it is parsed. The module level never
+    // binds `g`, and `g` is no builtin, so the strict checker refuses it.
+    try testing.expectEqual(Owner.refused_by_strict, before.result.unresolved[0].owner);
 }
 
 test "a local read with no declaration behind it is unresolved" {
@@ -2572,11 +3294,11 @@ fn expectUnresolved(result: FunctionResult, tag: NodeTag, owner: Owner) !void {
 }
 
 test "a call, an upvalue read, and a nested pattern clear the result with their owner" {
-    // A callee with no function in it is the runtime's `NotCallable` or a
-    // builtin, which P5 decides.
+    // A callee with no function in it is the runtime's `NotCallable`, which
+    // has no operation rule.
     const call = try analyzeSource("function f(g) { return g(1); }", "f", &.{Value.clean});
     defer call.deinit();
-    try expectUnresolved(call.result, .call, .p5);
+    try expectUnresolved(call.result, .call, .no_operation_rule);
     try testing.expect(call.result.returned.?.labels.unknown);
 
     // Without a capture table no closure read has a cell to read.
@@ -3377,30 +4099,19 @@ test "a known callable joined with an unknown one is an unknown callee" {
     );
 }
 
-test "a call through a property is P5's" {
+test "a call through a property dispatches to the stored function or the builtin" {
+    // A callback method has no rule in P5a. P5c replaces the row.
     const array_method = try analyzeSource(
         "function f(s) { const a = [() => \"c\"]; return a.map(() => s)[0]; }",
         "f",
         &.{secret_value},
     );
     defer array_method.deinit();
-    try expectUnresolved(array_method.result, .call, .p5);
+    try expectUnresolved(array_method.result, .call, .no_operation_rule);
 
-    const object_method = try analyzeSource(
-        "function f(s) { const o = { m: () => \"c\" }; return o.m(); }",
-        "f",
-        &.{secret_value},
-    );
-    defer object_method.deinit();
-    try expectUnresolved(object_method.result, .call, .p5);
-
-    const computed = try analyzeSource(
-        "function f(s) { const o = { m: () => \"c\" }; return o[\"m\"](); }",
-        "f",
-        &.{secret_value},
-    );
-    defer computed.deinit();
-    try expectUnresolved(computed.result, .call, .p5);
+    // A function stored in a property runs, by name and by literal key.
+    try expectSecret("function f(s) { const o = { m: () => \"c\" }; return o.m(); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { const o = { m: () => \"c\" }; return o[\"m\"](); }", &.{secret_value}, false);
 
     // The contrast: the same function called through a name resolves.
     try expectSecret("function f(s) { const m = () => \"c\"; return m(); }", &.{secret_value}, false);
@@ -3423,10 +4134,10 @@ test "a method read into a variable is an unknown callee" {
     );
 }
 
-test "a call with no callable is P5's" {
+test "a call with no callable has no operation rule" {
     const empty = try analyzeSource("function f(x) { return x(1); }", "f", &.{Value.clean});
     defer empty.deinit();
-    try expectUnresolved(empty.result, .call, .p5);
+    try expectUnresolved(empty.result, .call, .no_operation_rule);
 
     try expectSecret("function f(x) { function id(y) { return y; } return id(1); }", &.{Value.clean}, false);
 }
@@ -3571,6 +4282,512 @@ test "a capture cell is not an object and a read through an unnamed origin skips
         &.{ origins_top, secret_value },
         true,
     );
+}
+
+// --- builtin globals and operations (P5a) ---
+//
+// These sources are internal evaluator fixtures. `s` is seeded secret. Each
+// secret test has a contrast in which a literal replaces the secret, so the
+// result is clean. Test 25 of the P5 specification is reserved: it belongs to
+// P5c, because `map` is the only name that `Array.prototype` and
+// `Result.prototype` share and P5a refuses it.
+
+/// Run `f` and require a result whose `returned` carries exactly the labels in
+/// `expected`, with the result resolved.
+fn expectLabels(source: []const u8, params: []const Value, expected: LabelSet) !void {
+    const r = try analyzeSource(source, "f", params);
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expectEqual(@as(u16, @bitCast(expected)), @as(u16, @bitCast(r.returnedLabels())));
+}
+
+// P5 specification test 1.
+test "a user method runs through a property call" {
+    try expectSecret("function f(s) { const o = { m: () => s }; return o.m(); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const o = { m: () => \"c\" }; return o.m(); }", &.{secret_value}, false);
+}
+
+// P5 specification test 2.
+test "the string candidate runs beside a user method" {
+    try expectSecret("function f(s) { const o = { slice: () => \"c\" }; return o.slice(s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const o = { slice: () => \"c\" }; return o.slice(\"d\"); }", &.{secret_value}, false);
+}
+
+// P5 specification test 3.
+test "a string method carries its receiver and its arguments" {
+    try expectSecret("function f(s) { return \"a\".concat(s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return \"a\".concat(\"b\"); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return s.slice(1); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return s.slice(1); }", &.{Value.clean}, false);
+}
+
+// P5 specification test 4.
+test "split makes an array of labelled pieces" {
+    try expectSecret("function f(s) { const p = s.split(\",\"); return p[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const p = \"a,b\".split(\",\"); return p[0]; }", &.{secret_value}, false);
+}
+
+// P5 specification test 5.
+test "push writes its argument into the receiver" {
+    try expectSecret("function f(s) { const xs = []; xs.push(s); return xs[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const xs = []; xs.push(\"c\"); return xs[0]; }", &.{secret_value}, false);
+    try expectSecret("function f(s) { const xs = []; xs.unshift(s); return xs[0]; }", &.{secret_value}, true);
+}
+
+// P5 specification test 6.
+test "pop returns an element of the receiver" {
+    try expectSecret("function f(s) { return [s].pop(); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].pop(); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return [s].shift(); }", &.{secret_value}, true);
+    // An element in a named cell is not in the summary that a read of `pop`
+    // itself sees, so only the rule can return it.
+    try expectSecret("function f(s) { const a = []; a[\"0\"] = s; return a.pop(); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = []; a[\"0\"] = \"c\"; return a.pop(); }", &.{secret_value}, false);
+}
+
+// P5 specification test 7.
+test "splice writes its selectors and its items and returns the removed elements" {
+    // The labelled selector decides which element stays at index 0.
+    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(s, 1); return a[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(0, 1); return a[0]; }", &.{secret_value}, false);
+    // An item from argument 2 on is written.
+    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(0, 1, s); return a[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = [\"A\", \"B\"]; a.splice(0, 1, \"C\"); return a[0]; }", &.{secret_value}, false);
+    // The removed elements come back in a fresh array.
+    try expectSecret("function f(s) { return [s].splice(0, 1)[0]; }", &.{secret_value}, true);
+}
+
+// P5 specification test 8.
+test "join, indexOf, and includes read the elements of the receiver" {
+    try expectSecret("function f(s) { return [s].join(\",\"); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [s].indexOf(\"x\"); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [s].includes(\"x\"); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].join(\",\"); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return [\"c\"].indexOf(\"x\"); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return [\"c\"].includes(\"x\"); }", &.{secret_value}, false);
+    // The same with the element in a named cell.
+    try expectSecret("function f(s) { const a = []; a[\"0\"] = s; return a.join(\",\"); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = []; a[\"0\"] = s; return a.indexOf(\"x\"); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = []; a[\"0\"] = \"c\"; return a.join(\",\"); }", &.{secret_value}, false);
+}
+
+// P5 specification test 9.
+test "concat copies the elements of an array argument" {
+    const source = "function f(s) { const g = () => s; const a = [].concat([g]); const h = a[\"0\"]; return h(); }";
+    try expectSecret(source, &.{secret_value}, true);
+    const clean = "function f(s) { const g = () => \"c\"; const a = [].concat([g]); const h = a[\"0\"]; return h(); }";
+    try expectSecret(clean, &.{secret_value}, false);
+}
+
+// P5 specification test 10.
+test "JSON and a nested container carry their labels and keep a location" {
+    try expectSecret("function f(s) { return JSON.stringify({ x: s }); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return JSON.stringify({ x: 1 }); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return JSON.parse(s).x; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return JSON.parse(\"{}\").x; }", &.{secret_value}, false);
+
+    // The nested container has a location, so a write to it lands in the site.
+    const nested = "function f(s) { const p = JSON.parse(\"[[1]]\"); const q = p[\"0\"]; q[\"0\"] = s; return p[\"0\"][\"0\"]; }";
+    try expectSecret(nested, &.{secret_value}, true);
+    const clean_nested = "function f(s) { const p = JSON.parse(\"[[1]]\"); const q = p[\"0\"]; q[\"0\"] = \"c\"; return p[\"0\"][\"0\"]; }";
+    try expectSecret(clean_nested, &.{secret_value}, false);
+
+    const inner = try analyzeSource("function f(s) { const p = JSON.parse(\"[[1]]\"); const q = p[\"0\"]; return q; }", "f", &.{secret_value});
+    defer inner.deinit();
+    const q = inner.result.returned.?;
+    try testing.expect(q.origins.len > 0);
+    try testing.expect(!q.origins_top);
+}
+
+// P5 specification test 11.
+test "Object.keys, values, and entries carry what the object holds" {
+    try expectSecret("function f(s) { const o = {}; o[s] = \"x\"; return Object.keys(o)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const o = {}; o[\"k\"] = \"x\"; return Object.keys(o)[0]; }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return Object.values({ x: s })[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return Object.values({ x: \"c\" })[0]; }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return Object.entries({ x: s })[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return Object.entries({ x: \"c\" })[0]; }", &.{secret_value}, false);
+}
+
+// P5 specification test 12.
+test "a spread of a native function keeps the implicit native value" {
+    const r = try analyzeSource("function f(s) { const o = { ...Response }; const g = o.json; return g(); }", "f", &.{secret_value});
+    defer r.deinit();
+    try expectUnresolved(r.result, .call, .unknown_callee);
+
+    // The contrast: a spread of a plain object has no native method.
+    try expectSecret("function f(s) { const o = { ...{ a: \"c\" } }; return o.a; }", &.{secret_value}, false);
+}
+
+// P5 specification test 13.
+test "a call on a receiver of unknown origin is an unknown callee" {
+    const unnamed: Value = .{ .origins_top = true };
+    const r = try analyzeSource("function f(p) { return p.foo(); }", "f", &.{unnamed});
+    defer r.deinit();
+    try expectUnresolved(r.result, .call, .unknown_callee);
+}
+
+// P5 specification test 14.
+test "a call through a dynamic method key is an unknown callee" {
+    const r = try analyzeSource("function f(o, k) { return o[k](); }", "f", &.{ Value.clean, Value.clean });
+    defer r.deinit();
+    try expectUnresolved(r.result, .call, .unknown_callee);
+
+    // A numeric literal names no method either.
+    const index = try analyzeSource("function f(o) { return o[0](); }", "f", &.{Value.clean});
+    defer index.deinit();
+    try expectUnresolved(index.result, .call, .unknown_callee);
+}
+
+// P5 specification test 15.
+test "an optional call keeps the state of the skip path" {
+    try expectSecret(
+        "function f(s) { let x = s; const o = { slice: () => \"c\" }; o?.slice((x = \"c\")); return x; }",
+        &.{secret_value},
+        true,
+    );
+    // The contrast: the same call without the optional chain always assigns.
+    try expectSecret(
+        "function f(s) { let x = s; const o = { slice: () => \"c\" }; o.slice((x = \"c\")); return x; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+// P5 specification test 16.
+test "a write to a shared runtime object is a P8 write" {
+    const math = try analyzeSource("function f(s) { Math.x = s; return 1; }", "f", &.{secret_value});
+    defer math.deinit();
+    try expectUnresolved(math.result, .assignment, .p8);
+
+    const alias = try analyzeSource("function f(s) { const g = parseInt; g.x = s; return 1; }", "f", &.{secret_value});
+    defer alias.deinit();
+    try expectUnresolved(alias.result, .assignment, .p8);
+
+    // The contrast: a write to a local object is resolved.
+    try expectSecret("function f(s) { const o = {}; o.x = s; return 1; }", &.{secret_value}, false);
+}
+
+// P5 specification test 17.
+test "an unknown global is refused by the strict checker" {
+    const r = try analyzeSource("function f(s) { return foo; }", "f", &.{secret_value});
+    defer r.deinit();
+    try expectUnresolved(r.result, .identifier, .refused_by_strict);
+
+    // A known global that no rule models has no operation rule.
+    const boolean = try analyzeSource("function f(s) { return Boolean; }", "f", &.{secret_value});
+    defer boolean.deinit();
+    try expectUnresolved(boolean.result, .identifier, .no_operation_rule);
+}
+
+// P5 specification test 18.
+test "hole never returns" {
+    const r = try analyzeSource("function f(s) { return hole() + s; }", "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expect(r.result.returned == null);
+    try testing.expectEqual(@as(usize, 0), r.result.completions.len);
+    try testing.expect(!r.result.exit.reachable);
+
+    // The contrast: an ordinary call lets the caller go on.
+    try expectSecret("function f(s) { return parseInt(\"1\") + s; }", &.{secret_value}, true);
+}
+
+// P5 specification test 19.
+test "clock and random reads carry nondeterministic" {
+    const nondeterministic: LabelSet = .{ .nondeterministic = true };
+    try expectLabels("function f(s) { return Math.random(); }", &.{secret_value}, nondeterministic);
+    try expectLabels("function f(s) { return Date.now(); }", &.{secret_value}, nondeterministic);
+    try expectLabels("function f(s) { return Math.pow(2, 3); }", &.{secret_value}, .empty);
+}
+
+// P5 specification test 20.
+test "a callback method has no operation rule until P5c" {
+    const sources = [_][]const u8{
+        "function f(s) { return [s].map((x) => x); }",
+        "function f(s) { return [s].filter((x) => x); }",
+        "function f(s) { return [s].forEach((x) => x); }",
+        "function f(s) { return [s].reduce((a, x) => x, \"c\"); }",
+        "function f(s) { return [s].every((x) => x); }",
+        "function f(s) { return [s].some((x) => x); }",
+        "function f(s) { return [s].find((x) => x); }",
+        "function f(s) { return [s].findIndex((x) => x); }",
+        "function f(s) { return [s].toSorted((a, b) => 0); }",
+        "function f(s) { return Array.from([s], (x) => x); }",
+        "function f(s) { return h(\"div\", {}, s); }",
+        "function f(s) { return renderToString(s); }",
+        "function f(s) { return JSON.parse(s).map((x) => x); }",
+        "function f(s) { return JSON.parse(s).andThen((x) => x); }",
+    };
+    inline for (sources) |source| {
+        const r = try analyzeSource(source, "f", &.{secret_value});
+        defer r.deinit();
+        try expectUnresolved(r.result, .call, .no_operation_rule);
+    }
+
+    // The contrast: a sort with no comparator has a rule.
+    try expectSecret("function f(s) { return [s].toSorted()[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].toSorted()[0]; }", &.{secret_value}, false);
+}
+
+// P5 specification test 21.
+test "a property read adds a native function only where the runtime may find one" {
+    // An object literal's own field is not a method.
+    const own = try analyzeSource("function f() { const o = { handler: () => 1 }; return o.handler; }", "f", &.{});
+    defer own.deinit();
+    try testing.expect(!own.result.returned.?.callables_top);
+    try testing.expectEqual(@as(usize, 1), own.result.returned.?.callables.len);
+
+    // A name that String.prototype holds may be a method of a joined value.
+    const method = try analyzeSource("function f() { const o = { handler: () => 1 }; return o.slice; }", "f", &.{});
+    defer method.deinit();
+    try testing.expect(method.result.returned.?.callables_top);
+
+    // A stored callables_top survives a read of any name.
+    const unknown_function: Value = .{ .callables_top = true };
+    const stored = try analyzeSource("function f(g) { const o = { handler: g }; return o.handler; }", "f", &.{unknown_function});
+    defer stored.deinit();
+    try testing.expect(stored.result.returned.?.callables_top);
+
+    // A name that no builtin holds, on a receiver that holds no native
+    // method, reads nothing but the stored content.
+    const other = try analyzeSource("function f() { const o = { handler: () => 1 }; return o.other; }", "f", &.{});
+    defer other.deinit();
+    try testing.expect(!other.result.returned.?.callables_top);
+    try testing.expectEqual(@as(usize, 0), other.result.returned.?.callables.len);
+
+    // A key that is not a literal may name a method.
+    const dynamic = try analyzeSource("function f(k) { const o = { handler: () => 1 }; return o[k]; }", "f", &.{Value.clean});
+    defer dynamic.deinit();
+    try testing.expect(dynamic.result.returned.?.callables_top);
+
+    // A numeric literal names no method.
+    const indexed = try analyzeSource("function f() { const o = [() => 1]; return o[0]; }", "f", &.{});
+    defer indexed.deinit();
+    try testing.expect(!indexed.result.returned.?.callables_top);
+}
+
+// P5 specification test 22.
+test "a user Math does not replace a call that compiles to an opcode" {
+    const user_math = "const Math = { floor: (x) => \"c\" }; ";
+    try expectSecret(user_math ++ "function f(s) { return Math.floor(s); }", &.{secret_value}, true);
+    try expectSecret(user_math ++ "function f(s) { return Math.floor(\"d\"); }", &.{secret_value}, false);
+    try expectSecret(user_math ++ "function f(s) { return Math.max(s, 1); }", &.{secret_value}, true);
+}
+
+// P5 specification test 23.
+test "a method call on a Response result has no operation rule" {
+    const r = try analyzeSource("function f(s) { return Response.json(s).text(); }", "f", &.{secret_value});
+    defer r.deinit();
+    try expectUnresolved(r.result, .call, .no_operation_rule);
+
+    // The static call itself has a rule, and its result carries the argument.
+    try expectSecret("function f(s) { return Response.json(s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return Response.json(\"c\"); }", &.{secret_value}, false);
+}
+
+test "reach sees the cells of a write through an unnamed target" {
+    // `p` may be any object, so the write lands in `top_cell`. `o.inner` is
+    // `p`, and serializing `o` reaches what was written through it.
+    const unnamed: Value = .{ .origins_top = true };
+    try expectSecret(
+        "function f(p, s) { p.x = s; const o = { inner: p }; return JSON.stringify(o); }",
+        &.{ unnamed, secret_value },
+        true,
+    );
+    try expectSecret(
+        "function f(p, s) { p.x = \"c\"; const o = { inner: p }; return JSON.stringify(o); }",
+        &.{ unnamed, secret_value },
+        false,
+    );
+}
+
+// P5 specification test 24.
+test "a call of a builtin namespace member stays resolved and clean" {
+    try expectSecret("function f(s) { return JSON.stringify({ x: 1 }); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return Number.isInteger(1); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return String.fromCharCode(65); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return Array.isArray([s]); }", &.{secret_value}, true);
+}
+
+test "a builtin global function uses its row" {
+    try expectSecret("function f(s) { return parseInt(s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return parseInt(\"1\"); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return String(s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return Number(\"1\"); }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return isDict(s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return range(s)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return range(3)[0]; }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return requestJson(s)[\"x\"]; }", &.{secret_value}, true);
+
+    // A module declaration of the same name replaces the builtin.
+    const own = try analyzeSource("function parseInt(x) { return \"c\"; } function f(s) { return parseInt(s); }", "f", &.{secret_value});
+    defer own.deinit();
+    try testing.expect(!own.result.cleared);
+    try testing.expect(own.returnedLabels().isEmpty());
+
+    // Response is a function too: a direct call may reach any function.
+    const response = try analyzeSource("function f(s) { return Response(s); }", "f", &.{secret_value});
+    defer response.deinit();
+    try expectUnresolved(response.result, .call, .unknown_callee);
+
+    // A namespace that is not a function has no operation rule when called.
+    const json = try analyzeSource("function f(s) { return JSON(s); }", "f", &.{secret_value});
+    defer json.deinit();
+    try expectUnresolved(json.result, .call, .no_operation_rule);
+}
+
+/// What `censusBuiltins` found: the known globals that exist, the callable
+/// properties it enumerated, and the rows it matched.
+const BuiltinCensus = struct { globals: usize, properties: usize, rows: usize };
+
+const BuiltinCensusError = error{
+    /// A callable global has neither a row nor a callable-namespace entry.
+    GlobalWithoutRow,
+    /// A global row names a global that is missing or not callable.
+    RowWithoutGlobal,
+    /// A callable property has no row.
+    PropertyWithoutRow,
+    /// A row names no callable property.
+    RowWithoutProperty,
+    /// A callable property has no name.
+    UnnamedProperty,
+    /// A `no_rule` row states no reason.
+    RowWithoutReason,
+};
+
+/// Check `rows` against the builtins registered in `ctx`, in both directions.
+fn censusBuiltins(ctx: *engine.context.Context, rows: []const OperationRow) (BuiltinCensusError || std.mem.Allocator.Error)!BuiltinCensus {
+    const used = try testing.allocator.alloc(bool, rows.len);
+    defer testing.allocator.free(used);
+    @memset(used, false);
+    var globals: usize = 0;
+    var properties: usize = 0;
+
+    // Globals: every callable known global is a global-function row or a
+    // callable namespace, and every global row names a callable global.
+    for (known_globals.names) |name| {
+        const atom = try ctx.atoms.intern(name);
+        const value = ctx.getGlobal(atom) orelse continue;
+        globals += 1;
+        if (!value.isCallable()) continue;
+        const row_index = rowIndex(rows, "global", name);
+        if (row_index == null and !nameIn(&callable_namespaces, name)) return error.GlobalWithoutRow;
+        if (row_index) |i| used[i] = true;
+    }
+    for (rows, used) |row, was_used| {
+        if (std.mem.eql(u8, row.scope, "global") and !was_used) return error.RowWithoutGlobal;
+    }
+
+    // Properties: every callable own property of a namespace and of the three
+    // prototypes has a row, and every row names one.
+    const pool = ctx.hidden_class_pool orelse return error.PropertyWithoutRow;
+    const prototypes = [_]struct { scope: []const u8, object: ?*object.JSObject }{
+        .{ .scope = "Array.prototype", .object = ctx.array_prototype },
+        .{ .scope = "String.prototype", .object = ctx.string_prototype },
+        .{ .scope = "Result.prototype", .object = ctx.result_prototype },
+    };
+    for (prototypes) |prototype| {
+        const holder = prototype.object orelse continue;
+        properties += try censusProperties(ctx, pool, rows, used, prototype.scope, holder);
+    }
+    for (namespace_names) |name| {
+        const value = ctx.getGlobal(try ctx.atoms.intern(name)) orelse continue;
+        if (!value.isObject()) continue;
+        properties += try censusProperties(ctx, pool, rows, used, name, value.toPtr(object.JSObject));
+    }
+
+    var matched: usize = 0;
+    for (rows, used) |row, was_used| {
+        if (!was_used) return error.RowWithoutProperty;
+        if (row.rule == .no_rule and row.reason.len == 0) return error.RowWithoutReason;
+        matched += 1;
+    }
+    return .{ .globals = globals, .properties = properties, .rows = matched };
+}
+
+fn rowIndex(rows: []const OperationRow, scope: []const u8, name: []const u8) ?usize {
+    for (rows, 0..) |row, i| {
+        if (std.mem.eql(u8, row.scope, scope) and std.mem.eql(u8, row.name, name)) return i;
+    }
+    return null;
+}
+
+/// The callable own properties of `holder`, each marked in `used`.
+fn censusProperties(
+    ctx: *engine.context.Context,
+    pool: *const object.HiddenClassPool,
+    rows: []const OperationRow,
+    used: []bool,
+    scope: []const u8,
+    holder: *object.JSObject,
+) (BuiltinCensusError || std.mem.Allocator.Error)!usize {
+    var count: usize = 0;
+    var it = holder.propertyIterator(pool);
+    while (it.next()) |entry| {
+        if (!entry.value.isCallable()) continue;
+        count += 1;
+        const name = ctx.atoms.getName(entry.atom) orelse return error.UnnamedProperty;
+        const i = rowIndex(rows, scope, name) orelse return error.PropertyWithoutRow;
+        used[i] = true;
+    }
+    return count;
+}
+
+// P5 specification test 26.
+test "census C1: every registered builtin has a row and every row names a builtin" {
+    var arena_owner = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_owner.deinit();
+    const allocator = arena_owner.allocator();
+    var gc_state = try engine.gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    const ctx = try engine.context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try engine.builtins.initBuiltins(ctx);
+
+    const counts = try censusBuiltins(ctx, &operation_rows);
+    std.debug.print(
+        "flow_interp builtin census: {d} known globals found, {d} callable properties, {d} rows\n",
+        .{ counts.globals, counts.properties, counts.rows },
+    );
+    // A floor on the input: a census that enumerated nothing would pass.
+    try testing.expect(counts.globals >= 19);
+    try testing.expect(counts.properties >= 87);
+    try testing.expectEqual(operation_rows.len, counts.rows);
+    // Every property belongs to one row, and a global function has a row of
+    // its own, so the rows cover the properties and the global functions.
+    try testing.expect(counts.rows >= counts.properties);
+
+    // A probe that removes one row must fail. `String` and `Number` are also
+    // callable namespaces, so removing their global row leaves a census that
+    // still holds; every other row is tested.
+    for (operation_rows, 0..) |row, skipped| {
+        const global_namespace = std.mem.eql(u8, row.scope, "global") and nameIn(&callable_namespaces, row.name);
+        if (global_namespace) continue;
+        const without = try allocator.alloc(OperationRow, operation_rows.len - 1);
+        @memcpy(without[0..skipped], operation_rows[0..skipped]);
+        @memcpy(without[skipped..], operation_rows[skipped + 1 ..]);
+        // A global function without a row is a callable global with no row.
+        const expected = if (std.mem.eql(u8, row.scope, "global")) error.GlobalWithoutRow else error.PropertyWithoutRow;
+        try testing.expectError(expected, censusBuiltins(ctx, without));
+    }
+
+    // A row that names nothing registered fails the other direction.
+    const extra = try allocator.alloc(OperationRow, operation_rows.len + 1);
+    @memcpy(extra[0..operation_rows.len], &operation_rows);
+    extra[operation_rows.len] = .{ .scope = "Math", .name = "noSuchMember", .rule = .deep_scalar };
+    try testing.expectError(error.RowWithoutProperty, censusBuiltins(ctx, extra));
+
+    // A global row for a name that is not a global fails too.
+    extra[operation_rows.len] = .{ .scope = "global", .name = "noSuchGlobal", .rule = .deep_scalar };
+    try testing.expectError(error.RowWithoutGlobal, censusBuiltins(ctx, extra));
+
+    // A row with no rule states its reason.
+    const silent = try allocator.dupe(OperationRow, &operation_rows);
+    for (silent) |*row| {
+        if (row.rule == .no_rule) row.reason = "";
+    }
+    try testing.expectError(error.RowWithoutReason, censusBuiltins(ctx, silent));
 }
 
 // --- the tag census ---
@@ -3719,7 +4936,7 @@ test "tagPlan agrees with eval and exec for every tag" {
         try testing.expect(tagPlan(tag) == .handled);
     }
     std.debug.print(
-        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p5={d} p6={d} p7={d} p8={d}) refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
-        .{ tag_count, handled, later, by_phase[0], by_phase[1], by_phase[2], by_phase[3], refused, refused_strict, not_produced },
+        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p6={d} p7={d} p8={d}) refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
+        .{ tag_count, handled, later, by_phase[0], by_phase[1], by_phase[2], refused, refused_strict, not_produced },
     );
 }
