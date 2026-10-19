@@ -87,6 +87,33 @@ A call through a value the compiler cannot resolve, such as
 `retry_safe` unproven. The compiler cannot see what
 that call reaches, so it does not claim that the call is safe.
 
+### Known Limits of the Security Chips
+
+The security chips are not sound proofs in v0.22.3 and earlier. On
+2026-10-18, the analyzer accepted a declared capsule for each handler shape
+below, and the handler leaked when it ran under `zttp serve`, or the shape
+uses the same mechanism as one that leaked. Do not rely on a security chip for
+a handler that contains one of these shapes. A flow-checker redesign is
+planned to close them.
+
+| Shape | Chip that is proven but false |
+|---|---|
+| A `let` that is reassigned in an `if` or `else` branch, where one branch holds raw input | `injection_safe` |
+| A `let` that carries a value from one `for...of` iteration to the next | `injection_safe` |
+| A `push`, `unshift`, or `splice` that is not a statement of its own, for example in an initializer or an `if` condition | `injection_safe` |
+| A write through an alias of an array: another variable, an object field, or the array parameter of a callback | `injection_safe` |
+| A write into a later element of the array that a `forEach`, `some`, `every`, `findIndex`, or `reduce` callback iterates | `injection_safe`, `no_secret_leakage` |
+| A `reduce` callback that logs its accumulator, where the initial value is a secret | `no_secret_leakage` |
+| A callback passed to `dictMapValues` or `dictFold` that logs a value from a dict that holds a secret | `no_secret_leakage` |
+| A helper that is called in an `if` condition and logs a secret | `no_secret_leakage` |
+| A request that is selected by a ternary, such as `cond ? req : req`, before its `authorization` header is read | `no_credential_leak` |
+| A secret stored with `cacheSet` and read back with `cacheIncr` | `no_secret_leakage` |
+| A callback that is selected by an expression, such as `forEach(cond ? f : g)` | `no_secret_leakage` |
+
+The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
+`idempotent`) were not part of this check. Treat that as unmeasured, not as
+proven.
+
 ### Reading A Failing Chip
 
 When a save demotes a property that was proven on the previous save, the card
