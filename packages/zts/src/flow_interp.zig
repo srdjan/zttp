@@ -317,12 +317,112 @@ fn joinStates(arena: std.mem.Allocator, a: State, b: State) Error!State {
     };
 }
 
+// --- equality, for the loop fixpoint ---
+
+fn sliceEql(
+    comptime T: type,
+    a: []const T,
+    b: []const T,
+    comptime order: fn (T, T) std.math.Order,
+) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (order(x, y) != .eq) return false;
+    }
+    return true;
+}
+
+/// Two values are equal when every part is: all label bits, both `top` flags,
+/// and the sorted, duplicate-free slices element by element. The slices are
+/// canonical because every constructor and every join keeps them sorted, and
+/// `analyzeFunction` canonicalizes the parameters it is given.
+fn valueEql(a: Value, b: Value) bool {
+    const a_bits: u16 = @bitCast(a.labels);
+    const b_bits: u16 = @bitCast(b.labels);
+    return a_bits == b_bits and
+        a.origins_top == b.origins_top and
+        a.callables_top == b.callables_top and
+        sliceEql(SiteKey, a.origins, b.origins, SiteKey.order) and
+        sliceEql(NodeIndex, a.callables, b.callables, nodeOrder);
+}
+
+/// Bottom equals only bottom.
+fn optValueEql(a: ?Value, b: ?Value) bool {
+    const x = a orelse return b == null;
+    const y = b orelse return false;
+    return valueEql(x, y);
+}
+
+/// Equality of two maps from a key to a value by the count and keyed lookup,
+/// never by insertion order.
+fn valueMapEql(a: anytype, b: @TypeOf(a)) bool {
+    if (a.count() != b.count()) return false;
+    var it = a.iterator();
+    while (it.next()) |entry| {
+        const other = b.get(entry.key_ptr.*) orelse return false;
+        if (!valueEql(entry.value_ptr.*, other)) return false;
+    }
+    return true;
+}
+
+fn cellsEql(a: Cells, b: Cells) bool {
+    return valueMapEql(a.named, b.named) and optValueEql(a.summary, b.summary);
+}
+
+/// Whether two states are the same abstract state. Two unreachable states are
+/// equal. The summaries take part: a loop can change only a summary on a later
+/// pass, and a comparison that skipped it would stop the loop too early.
+fn stateEql(a: State, b: State) bool {
+    if (a.reachable != b.reachable) return false;
+    if (!a.reachable) return true;
+    if (!valueMapEql(a.env, b.env)) return false;
+    if (a.heap.count() != b.heap.count()) return false;
+    var it = a.heap.iterator();
+    while (it.next()) |entry| {
+        const other = b.heap.get(entry.key_ptr.*) orelse return false;
+        if (!cellsEql(entry.value_ptr.*, other)) return false;
+    }
+    return cellsEql(a.top_cell, b.top_cell);
+}
+
+/// A copy of `v` whose slices live in `arena`, sorted and without duplicates.
+/// The caller of `analyzeFunction` may pass slices from its own stack in any
+/// order, and equality assumes the canonical form.
+fn canonicalValue(arena: std.mem.Allocator, v: Value) Error!Value {
+    var out = v;
+    out.origins = try canonicalSlice(SiteKey, arena, v.origins, SiteKey.order);
+    out.callables = try canonicalSlice(NodeIndex, arena, v.callables, nodeOrder);
+    return out;
+}
+
+fn canonicalSlice(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    items: []const T,
+    comptime order: fn (T, T) std.math.Order,
+) Error![]const T {
+    const copy = try arena.dupe(T, items);
+    const Less = struct {
+        fn lessThan(_: void, x: T, y: T) bool {
+            return order(x, y) == .lt;
+        }
+    };
+    std.mem.sort(T, copy, {}, Less.lessThan);
+    var n: usize = 0;
+    for (copy) |item| {
+        if (n > 0 and order(copy[n - 1], item) == .eq) continue;
+        copy[n] = item;
+        n += 1;
+    }
+    return copy[0..n];
+}
+
 // ---------------------------------------------------------------------------
 // Results and the tag census
 // ---------------------------------------------------------------------------
 
 /// The phase that will resolve a construct this phase leaves unresolved.
-pub const Phase = enum { p3, p4, p5, p6, p7, p8 };
+pub const Phase = enum { p4, p5, p6, p7, p8 };
 
 /// How the evaluators treat one `NodeTag`. P9 requires that no tag is `later`.
 pub const TagPlan = union(enum) {
@@ -339,8 +439,9 @@ pub const TagPlan = union(enum) {
 };
 
 /// Why a construct is unresolved: the phase that owns it, or the reason that
-/// no phase does.
-pub const Owner = enum { p3, p4, p5, p6, p7, p8, refused_by_parser, not_produced };
+/// no phase does. `fixpoint_limit` marks a loop that reached `max_loop_passes`
+/// before its head stopped changing.
+pub const Owner = enum { p4, p5, p6, p7, p8, fixpoint_limit, refused_by_parser, not_produced };
 
 pub const Unresolved = struct {
     node: NodeIndex,
@@ -379,7 +480,6 @@ pub const FunctionResult = struct {
 
 fn ownerOfPhase(phase: Phase) Owner {
     return switch (phase) {
-        .p3 => .p3,
         .p4 => .p4,
         .p5 => .p5,
         .p6 => .p6,
@@ -435,12 +535,13 @@ pub fn tagPlan(tag: NodeTag) TagPlan {
         .block,
         .function_decl,
         .pattern_element,
+        .for_of_stmt,
+        .break_stmt,
+        .continue_stmt,
         => .handled,
 
         // A call and a call-site spread need callee summaries.
         .call, .spread => .{ .later = .p4 },
-        // `break` and `continue` appear only inside a loop body.
-        .for_of_stmt, .break_stmt, .continue_stmt => .{ .later = .p3 },
         .array_pattern => .{ .later = .p6 },
 
         .await_expr,
@@ -491,12 +592,28 @@ const Key = union(enum) {
     dynamic: Value,
 };
 
+/// The states that leave the body of one `for...of` through `break` and
+/// `continue`. Each is a clone, so no map is shared with a state that
+/// execution mutates later.
+const LoopFrame = struct {
+    breaks: std.ArrayList(State) = .empty,
+    continues: std.ArrayList(State) = .empty,
+};
+
 pub const FlowInterp = struct {
     arena: std.heap.ArenaAllocator,
     ir_view: IrView,
     atoms: ?*atom_table.AtomTable,
     completions: std.ArrayList(Completion) = .empty,
     unresolved_list: std.ArrayList(Unresolved) = .empty,
+    /// The enclosing loops, innermost last. A `break` or `continue` acts on the
+    /// last one. The parser clears the loop flag at each function boundary, so
+    /// neither crosses into a nested function.
+    loop_frames: std.ArrayList(LoopFrame) = .empty,
+    /// The pass cap of one loop. It is a fail-closed exit and not the
+    /// termination argument: the loop head only grows over finite components.
+    /// A value below 1 is treated as 1.
+    max_loop_passes: u32 = 256,
     /// How often each tag reached `eval`, `exec`, or a parent rule that reads
     /// it through an accessor. The census test reads this to prove that its
     /// corpus reached every handled tag. It counts across calls.
@@ -532,6 +649,7 @@ pub const FlowInterp = struct {
     pub fn analyzeFunction(self: *FlowInterp, func: NodeIndex, params: []const Value) Error!FunctionResult {
         self.completions = .empty;
         self.unresolved_list = .empty;
+        self.loop_frames = .empty;
         var st: State = .{};
 
         // The accessors read payload words, so the tag is checked first: a
@@ -556,7 +674,9 @@ pub const FlowInterp = struct {
                 continue;
             };
             self.noteVisited(param_tag);
-            var value = if (i < params.len) params[i] else Value.clean;
+            // The slices of a parameter belong to the caller and may be
+            // unsorted, so the analysis keeps its own canonical copy.
+            var value = if (i < params.len) try canonicalValue(self.mem(), params[i]) else Value.clean;
             // A default value joins the passed one: the caller may omit it.
             if (param_tag == .pattern_element) {
                 if (self.ir_view.getPatternElem(param_idx)) |elem| {
@@ -1265,18 +1385,18 @@ pub const FlowInterp = struct {
             .match_type_test,
             => _ = try self.eval(node, st),
 
-            // Loops (P3), the forms the parser refuses, and the structural
-            // tags that a parent reads through its accessor.
+            .for_of_stmt => try self.execForOf(node, st),
+            .break_stmt, .continue_stmt => try self.leaveLoop(node, tag, st),
+
+            // The forms the parser refuses, and the structural tags that a
+            // parent reads through its accessor.
             .for_stmt,
-            .for_of_stmt,
             .for_in_stmt,
             .while_stmt,
             .do_while_stmt,
             .switch_stmt,
             .case_clause,
             .throw_stmt,
-            .break_stmt,
-            .continue_stmt,
             .try_stmt,
             .labeled_stmt,
             .array_pattern,
@@ -1297,6 +1417,88 @@ pub const FlowInterp = struct {
             .stmt_list,
             => try self.record(node, tag, ownerOf(tag)),
         }
+    }
+
+    /// `break` or `continue`: park a clone of the current state in the
+    /// innermost loop frame and make the current state bottom. With no frame
+    /// the parser would have refused the statement, so a synthetic node is
+    /// unresolved.
+    fn leaveLoop(self: *FlowInterp, node: NodeIndex, tag: NodeTag, st: *State) Error!void {
+        if (self.loop_frames.items.len == 0) {
+            try self.record(node, tag, .refused_by_parser);
+            st.* = State.bottom;
+            return;
+        }
+        const arena = self.mem();
+        const parked = try cloneState(arena, st.*);
+        const frame = &self.loop_frames.items[self.loop_frames.items.len - 1];
+        switch (tag) {
+            .break_stmt => try frame.breaks.append(arena, parked),
+            .continue_stmt => try frame.continues.append(arena, parked),
+            else => try self.record(node, tag, .not_produced),
+        }
+        st.* = State.bottom;
+    }
+
+    /// A `for...of` loop as a fixpoint over the loop head.
+    ///
+    /// The iterable is evaluated once, as code generation does. Pass `k` binds
+    /// the loop variable to every cell the iterable shows in `head_k` (an
+    /// earlier iteration can write an element a later one reads), runs the body
+    /// on a clone, and joins the result into `head_{k+1}` together with every
+    /// `continue` state of the pass. The join keeps `head_k`, so the heads
+    /// ascend, and every component is finite for a program, so they stop. The
+    /// equality check runs before the cap check, so a loop that converges on
+    /// the last permitted pass has converged.
+    ///
+    /// The state after the loop is the final head, which stands for leaving
+    /// when the index reaches the length after zero or more iterations, joined
+    /// with every `break` state. Completions and unresolved entries from every
+    /// pass are kept.
+    fn execForOf(self: *FlowInterp, node: NodeIndex, st: *State) Error!void {
+        const arena = self.mem();
+        const loop = self.ir_view.getForIter(node) orelse {
+            _ = try self.missing(node);
+            return;
+        };
+        // The parser builds every `for_of_stmt` with `is_for_in` false and
+        // refuses `for-in`, whose iteration yields keys and not elements.
+        if (loop.is_for_in) {
+            try self.record(node, .for_in_stmt, .refused_by_parser);
+            return;
+        }
+        const iterable = try self.eval(loop.iterable, st);
+        const cap = @max(self.max_loop_passes, 1);
+
+        var head = st.*;
+        var breaks: std.ArrayList(State) = .empty;
+        var pass: u32 = 0;
+        while (true) : (pass +|= 1) {
+            var body = try cloneState(arena, head);
+            const element = try self.readAll(head, iterable);
+            try self.bindDeclared(&body, loop.binding, element, node, .for_of_stmt);
+
+            const depth = self.loop_frames.items.len;
+            try self.loop_frames.append(arena, .{});
+            try self.exec(loop.body, &body);
+            const frame = self.loop_frames.items[depth];
+            self.loop_frames.shrinkRetainingCapacity(depth);
+
+            try breaks.appendSlice(arena, frame.breaks.items);
+            var next = try joinStates(arena, head, body);
+            for (frame.continues.items) |parked| next = try joinStates(arena, next, parked);
+
+            if (stateEql(next, head)) break;
+            head = next;
+            if (pass +| 1 >= cap) {
+                try self.record(node, .for_of_stmt, .fixpoint_limit);
+                break;
+            }
+        }
+
+        var exit = head;
+        for (breaks.items) |parked| exit = try joinStates(arena, exit, parked);
+        st.* = exit;
     }
 
     /// A strong update of a declared binding. Only function-local bindings
@@ -1688,15 +1890,11 @@ fn expectUnresolved(result: FunctionResult, tag: NodeTag, owner: Owner) !void {
     return error.UnresolvedEntryNotFound;
 }
 
-test "a call, a for-of, an upvalue read, and a nested pattern clear the result with their owner" {
+test "a call, an upvalue read, and a nested pattern clear the result with their owner" {
     const call = try analyzeSource("function f(g) { return g(1); }", "f", &.{Value.clean});
     defer call.deinit();
     try expectUnresolved(call.result, .call, .p4);
     try testing.expect(call.result.returned.?.labels.unknown);
-
-    const loop = try analyzeSource("function f(xs) { for (const x of xs) { } return 1; }", "f", &.{Value.clean});
-    defer loop.deinit();
-    try expectUnresolved(loop.result, .for_of_stmt, .p3);
 
     const upvalue = try analyzeSource(
         "function outer() { const k = 1; function inner() { return k; } return inner; }",
@@ -1750,6 +1948,347 @@ test "a binding declared without an initializer is clean" {
     try testing.expect(r.returnedLabels().isEmpty());
 }
 
+// --- loops (P3) ---
+//
+// These sources are internal evaluator fixtures, not checked modules: several
+// mutate the array they iterate, which the strict checker refuses.
+
+const xs_secret = [_]Value{ Value.clean, secret_value };
+
+test "a loop-carried value needs a second pass" {
+    const body = "{ out[0] = r; r = s; }";
+    const carried = "function f(xs, s) { let r = \"c\"; const out = [\"x\"]; for (const v of xs) " ++ body ++ " return out[0]; }";
+    const clean = "function f(xs, s) { let r = \"c\"; const out = [\"x\"]; for (const v of xs) { out[0] = r; r = \"d\"; } return out[0]; }";
+    try expectSecret(carried, &xs_secret, true);
+    try expectSecret(clean, &xs_secret, false);
+}
+
+test "a write to a later element of the iterated array reaches the next iteration" {
+    try expectSecret(
+        "function f(s) { const a = [\"x\", \"y\"]; let r = \"c\"; for (const v of a) { r = v; a[1] = s; } return r; }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { const a = [\"x\", \"y\"]; let r = \"c\"; for (const v of a) { r = v; a[1] = \"z\"; } return r; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a loop may run zero times" {
+    try expectSecret("function f(xs, s) { let r = s; for (const v of xs) { r = \"c\"; } return r; }", &xs_secret, true);
+    try expectSecret("function f(xs, s) { let r = \"d\"; for (const v of xs) { r = \"c\"; } return r; }", &xs_secret, false);
+}
+
+test "break reaches the exit and code after it is dead" {
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; for (const v of xs) { if (v) { r = s; break; } r = \"d\"; } return r; }",
+        &xs_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; for (const v of xs) { if (v) { r = \"d\"; break; } r = \"d\"; } return r; }",
+        &xs_secret,
+        false,
+    );
+    try expectSecret("function f(xs, s) { let r = \"c\"; for (const v of xs) { break; r = s; } return r; }", &xs_secret, false);
+}
+
+test "continue reaches the head and skips the rest of the body" {
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; const o = {}; for (const v of xs) { o.x = r; if (v) { r = s; continue; } } return o.x; }",
+        &xs_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; const o = {}; for (const v of xs) { o.x = r; if (v) { r = \"d\"; continue; } } return o.x; }",
+        &xs_secret,
+        false,
+    );
+    try expectSecret("function f(xs, s) { let r = \"c\"; for (const v of xs) { continue; r = s; } return r; }", &xs_secret, false);
+}
+
+test "a return in the first pass carries the element" {
+    try expectSecret("function f(s) { const a = [s]; for (const v of a) { return v; } return \"c\"; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = [\"x\"]; for (const v of a) { return v; } return \"c\"; }", &.{secret_value}, false);
+}
+
+test "a return in a later pass is kept with the first pass's completion" {
+    const returns = "function f(s) { let r = \"c\"; for (const stop of [false, true]) { if (stop) { return r; } r = s; } return \"c\"; }";
+    const r = try analyzeSource(returns, "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expect(r.returnedLabels().secret);
+    // The first pass returns the clean `r` and the second the joined one:
+    // both stay, ahead of the final return.
+    try testing.expectEqual(@as(usize, 3), r.result.completions.len);
+    try testing.expect(r.result.completions[0].value.?.labels.isEmpty());
+    try testing.expect(r.result.completions[1].value.?.labels.secret);
+
+    try expectSecret(
+        "function f(s) { let r = \"c\"; for (const stop of [false, true]) { if (stop) { return r; } r = \"d\"; } return \"c\"; }",
+        &.{secret_value},
+        false,
+    );
+
+    // The same through an assert message.
+    const asserts = "function f(s) { let r = \"c\"; for (const stop of [false, true]) { assert !stop, r; r = s; } return \"c\"; }";
+    const a = try analyzeSource(asserts, "f", &.{secret_value});
+    defer a.deinit();
+    try testing.expect(!a.result.cleared);
+    try testing.expectEqual(@as(usize, 3), a.result.completions.len);
+    try testing.expectEqual(CompletionKind.assert_message, a.result.completions[0].kind);
+    try testing.expect(a.result.completions[0].value.?.labels.isEmpty());
+    try testing.expect(a.result.completions[1].value.?.labels.secret);
+    try testing.expect(a.returnedLabels().secret);
+
+    const clean_asserts = "function f(s) { let r = \"c\"; for (const stop of [false, true]) { assert !stop, r; r = \"d\"; } return \"c\"; }";
+    const c = try analyzeSource(clean_asserts, "f", &.{secret_value});
+    defer c.deinit();
+    try testing.expect(!c.result.cleared);
+    try testing.expect(c.returnedLabels().isEmpty());
+}
+
+test "a labelled primitive iterable labels the loop variable" {
+    const source = "function f(s) { let r = \"c\"; for (const ch of s) { r = ch; } return r; }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(source, &.{Value.clean}, false);
+}
+
+test "break and continue act on the innermost loop only" {
+    // The inner break leaves the inner loop, and the outer loop runs again.
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; let t = \"c\"; for (const a of xs) { r = t; for (const b of xs) { t = s; break; } } return r; }",
+        &xs_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; let t = \"c\"; for (const a of xs) { r = t; for (const b of xs) { t = \"d\"; break; } } return r; }",
+        &xs_secret,
+        false,
+    );
+    // The inner continue stays in the inner loop.
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; for (const a of xs) { let u = \"c\"; for (const b of xs) { r = u; u = s; continue; } } return r; }",
+        &xs_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(xs, s) { let r = \"c\"; for (const a of xs) { let u = \"c\"; for (const b of xs) { r = u; u = \"d\"; continue; } } return r; }",
+        &xs_secret,
+        false,
+    );
+    // An inner break or continue does not feed the outer loop's own exit or
+    // head: `x` is overwritten after the inner loop on every path.
+    try expectSecret(
+        "function f(xs, s) { let x = \"c\"; for (const a of xs) { x = s; for (const b of xs) { break; } x = \"d\"; } return x; }",
+        &xs_secret,
+        false,
+    );
+    try expectSecret(
+        "function f(xs, s) { let x = \"c\"; for (const a of xs) { x = s; for (const b of xs) { continue; } x = \"d\"; } return x; }",
+        &xs_secret,
+        false,
+    );
+}
+
+test "the loop variable keeps the origins of the element" {
+    const source = "function f(s) { const item = { x: \"c\" }; for (const v of [item]) { v.x = s; return item.x; } return \"c\"; }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(
+        "function f(s) { const item = { x: \"c\" }; for (const v of [item]) { v.x = \"d\"; return item.x; } return \"c\"; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a change that reaches only a heap summary keeps the loop running" {
+    const source = "function f(s) { const a = [\"c\"]; const b = [\"c\"]; const c = [\"c\"]; for (const v of [\"c\", \"c\", \"c\"]) { a[0] = b[0]; b[0] = c[0]; c[0] = s; } return a[0]; }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(
+        "function f(s) { const a = [\"c\"]; const b = [\"c\"]; const c = [\"c\"]; for (const v of [\"c\", \"c\", \"c\"]) { a[0] = b[0]; b[0] = c[0]; c[0] = \"d\"; } return a[0]; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a change that reaches only the origins keeps the loop running" {
+    const source = "function f(s) { const p = { x: \"c\" }; const q = { x: s }; let m = p; let n = p; for (const v of [\"c\", \"c\"]) { m = n; n = q; } return m.x; }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(
+        "function f(s) { const p = { x: \"c\" }; const q = { x: \"d\" }; let m = p; let n = p; for (const v of [\"c\", \"c\"]) { m = n; n = q; } return m.x; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "the iterable is evaluated once" {
+    try expectSecret(
+        "function f(s) { let a = [\"c\"]; let r = \"c\"; for (const v of a) { r = v; a = [s]; } return r; }",
+        &.{secret_value},
+        false,
+    );
+    try expectSecret(
+        "function f(s) { let a = [\"c\"]; let r = \"c\"; for (const v of a) { r = v; a[0] = s; } return r; }",
+        &.{secret_value},
+        true,
+    );
+}
+
+test "a loop that reaches the pass cap clears the result" {
+    const source = "function f(xs, s) { let r = \"c\"; const out = [\"x\"]; for (const v of xs) { out[0] = r; r = s; } return out[0]; }";
+
+    const capped = try Harness.create(testing.allocator, source);
+    defer capped.destroy();
+    capped.interp.max_loop_passes = 1;
+    const one = try capped.analyze("f", &xs_secret);
+    try expectUnresolved(one, .for_of_stmt, .fixpoint_limit);
+    try testing.expect(one.cleared);
+
+    // A cap below 1 is treated as 1.
+    const zero = try Harness.create(testing.allocator, source);
+    defer zero.destroy();
+    zero.interp.max_loop_passes = 0;
+    try expectUnresolved(try zero.analyze("f", &xs_secret), .for_of_stmt, .fixpoint_limit);
+
+    // The loop needs three passes: two change the head, the third confirms it.
+    // Convergence on the last permitted pass is convergence.
+    const short = try Harness.create(testing.allocator, source);
+    defer short.destroy();
+    short.interp.max_loop_passes = 2;
+    try expectUnresolved(try short.analyze("f", &xs_secret), .for_of_stmt, .fixpoint_limit);
+
+    const exact = try Harness.create(testing.allocator, source);
+    defer exact.destroy();
+    exact.interp.max_loop_passes = 3;
+    const three = try exact.analyze("f", &xs_secret);
+    try testing.expect(!three.cleared);
+    try testing.expectEqual(@as(usize, 0), three.unresolved.len);
+
+    const roomy = try analyzeSource(source, "f", &xs_secret);
+    defer roomy.deinit();
+    try testing.expect(!roomy.result.cleared);
+    try testing.expectEqual(@as(usize, 0), roomy.result.unresolved.len);
+    try testing.expect(roomy.returnedLabels().secret);
+}
+
+test "a break or continue with no loop frame is unresolved" {
+    inline for (.{ NodeTag.break_stmt, NodeTag.continue_stmt }) |tag| {
+        var store = ir.IRStore.init(testing.allocator);
+        defer store.deinit();
+        var constants = ir.ConstantPool.init(testing.allocator);
+        defer constants.deinit();
+        _ = try store.addNode(tag, .{ .line = 1, .column = 1, .offset = 0 }, .{ .a = 0, .b = 0 });
+        var interp = FlowInterp.init(testing.allocator, IrView.fromIRStore(&store, &constants), null);
+        defer interp.deinit();
+        var st: State = .{};
+        try interp.exec(0, &st);
+        try testing.expect(!st.reachable);
+        const result = try interp.finish(st);
+        try expectUnresolved(result, tag, .refused_by_parser);
+    }
+}
+
+test "a change that reaches only the top cell keeps the loop running" {
+    // `p` stands for an object of unknown origin, so its writes land in the
+    // top cell. Every read also sees the top cell, so the loop variable would
+    // change one pass after it. Iterating the labelled `s` makes it secret from
+    // the first pass without a heap site that `p` could alias, so the second
+    // pass changes only `top_cell.a`.
+    const p: Value = .{ .origins_top = true };
+    try expectSecret(
+        "function f(p, s) { for (const v of s) { p.a = p.b; p.b = s; } return p.a; }",
+        &.{ p, secret_value },
+        true,
+    );
+    try expectSecret(
+        "function f(p, s) { for (const v of s) { p.a = p.b; p.b = \"d\"; } return p.a; }",
+        &.{ p, secret_value },
+        false,
+    );
+}
+
+test "a for_of_stmt marked for-in is refused" {
+    var store = ir.IRStore.init(testing.allocator);
+    defer store.deinit();
+    var constants = ir.ConstantPool.init(testing.allocator);
+    defer constants.deinit();
+    // [binding, iterable, flags, body] with flag bit 0 set: a for-in. The
+    // guard runs before the iterable and the body are read.
+    const extra = try store.addExtra(&.{ 0, 0, 1, 0 });
+    const node = try store.addNode(.for_of_stmt, .{ .line = 1, .column = 1, .offset = 0 }, .{ .a = extra, .b = 0 });
+    var interp = FlowInterp.init(testing.allocator, IrView.fromIRStore(&store, &constants), null);
+    defer interp.deinit();
+    var st: State = .{};
+    try interp.exec(node, &st);
+    const result = try interp.finish(st);
+    try expectUnresolved(result, .for_in_stmt, .refused_by_parser);
+}
+
+test "parameter values are canonicalized and copied" {
+    const a: SiteKey = .{ .kind = .request, .node = 1, .context = 0 };
+    const b: SiteKey = .{ .kind = .request, .node = 2, .context = 0 };
+    const source = "function f(p) { return p; }";
+
+    const ordered = [_]SiteKey{ a, b };
+    const first = try analyzeSource(source, "f", &.{.{ .origins = &ordered, .callables = &.{ 3, 7 } }});
+    defer first.deinit();
+
+    // The same set, reversed and with duplicates.
+    const shuffled = [_]SiteKey{ b, a, b, a };
+    const second = try analyzeSource(source, "f", &.{.{ .origins = &shuffled, .callables = &.{ 7, 3, 7 } }});
+    defer second.deinit();
+    try testing.expect(valueEql(first.result.returned.?, second.result.returned.?));
+    try testing.expectEqual(@as(usize, 2), second.result.returned.?.origins.len);
+    try testing.expectEqual(@as(usize, 2), second.result.returned.?.callables.len);
+
+    // A different set is a different value.
+    const only_a = [_]SiteKey{a};
+    const third = try analyzeSource(source, "f", &.{.{ .origins = &only_a, .callables = &.{ 3, 7 } }});
+    defer third.deinit();
+    try testing.expect(!valueEql(first.result.returned.?, third.result.returned.?));
+
+    // The result survives the caller's slice.
+    const owned = try testing.allocator.dupe(SiteKey, &shuffled);
+    const owned_callables = try testing.allocator.dupe(NodeIndex, &.{ 7, 3 });
+    const kept = try analyzeSource(source, "f", &.{.{ .origins = owned, .callables = owned_callables }});
+    defer kept.deinit();
+    @memset(owned, .{ .kind = .headers, .node = 99, .context = 9 });
+    @memset(owned_callables, 99);
+    testing.allocator.free(owned);
+    testing.allocator.free(owned_callables);
+    try testing.expect(valueEql(first.result.returned.?, kept.result.returned.?));
+}
+
+test "state equality ignores insertion order and tells bottom from a reachable state" {
+    var arena_owner = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_owner.deinit();
+    const arena = arena_owner.allocator();
+
+    var x: State = .{};
+    try x.env.put(arena, 1, Value.clean);
+    try x.env.put(arena, 2, secret_value);
+    var y: State = .{};
+    try y.env.put(arena, 2, secret_value);
+    try y.env.put(arena, 1, Value.clean);
+    try testing.expect(stateEql(x, y));
+
+    try y.env.put(arena, 2, Value.clean);
+    try testing.expect(!stateEql(x, y));
+
+    const site: SiteKey = .{ .kind = .literal, .node = 5, .context = 0 };
+    var with_summary: State = .{};
+    try with_summary.heap.put(arena, site, .{ .summary = Value.clean });
+    var without_summary: State = .{};
+    try without_summary.heap.put(arena, site, .{});
+    try testing.expect(!stateEql(with_summary, without_summary));
+    try testing.expect(stateEql(with_summary, with_summary));
+
+    try testing.expect(stateEql(State.bottom, State.bottom));
+    try testing.expect(!stateEql(State.bottom, State{}));
+}
+
 // --- the tag census ---
 
 /// What a corpus run saw: which tags reached an evaluator, and which tags
@@ -1779,13 +2318,13 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { assert p, \"no\"; assert q; return 1; }",
     "function f(p, q) { return match (p) { when { kind: \"a\", text }: text when \"x\": q when string: q default: 0 }; }",
     "function f(p, q) { p; return; }",
+    "function f(p, q) { let r = p; for (const v of q) { if (v) { r = v; break; } if (r) { continue; } r = q; } return r; }",
 };
 
 /// Sources that hold a construct a later phase owns.
 const unresolved_corpus = [_][]const u8{
     "function f(g) { return g(1); }",
     "function f(g, xs) { return g(...xs); }",
-    "function f(xs) { for (const x of xs) { } return 1; }",
     "function f(x) { return match (x) { when [_, _]: 1 default: 0 }; }",
 };
 
@@ -1878,8 +2417,16 @@ test "tagPlan agrees with eval and exec for every tag" {
     }
     try testing.expectEqual(tag_count, handled + later + refused + not_produced);
     try testing.expect(handled > 0 and later > 0 and refused > 0 and not_produced > 0);
+    // After P3 only the call-shaped tags and the array pattern are left.
+    try testing.expectEqual(@as(usize, 3), later);
+    inline for (.{ NodeTag.call, NodeTag.spread, NodeTag.array_pattern }) |tag| {
+        try testing.expect(tagPlan(tag) == .later);
+    }
+    inline for (.{ NodeTag.for_of_stmt, NodeTag.break_stmt, NodeTag.continue_stmt }) |tag| {
+        try testing.expect(tagPlan(tag) == .handled);
+    }
     std.debug.print(
-        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p3={d} p4={d} p5={d} p6={d} p7={d} p8={d}) refused_by_parser={d} not_produced={d}\n",
-        .{ tag_count, handled, later, by_phase[0], by_phase[1], by_phase[2], by_phase[3], by_phase[4], by_phase[5], refused, not_produced },
+        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p4={d} p5={d} p6={d} p7={d} p8={d}) refused_by_parser={d} not_produced={d}\n",
+        .{ tag_count, handled, later, by_phase[0], by_phase[1], by_phase[2], by_phase[3], by_phase[4], refused, not_produced },
     );
 }
