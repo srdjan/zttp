@@ -143,7 +143,7 @@ replaces `walkStmt`.
 | assignment to a binding | strong update of `env`, or a weak update when the binding is a captured location |
 | compound assignment (if the IR can hold one) | read the target, `mergeValues` with the value, write the target |
 | assignment to a member or element | for each origin `o` of the target object: `heap[o] = join(heap[o], value)`; `top` origin writes the `top` cell; computed key labels join into the written value |
-| `push`, `unshift`, `splice`, `pop`, `shift`, and the other mutating names | as a member write of every argument into the receiver's origins; result labels from the receiver's cells |
+| `push`, `unshift`, `splice`, `pop`, `shift`, and the other mutating names | arguments written into the receiver's cells as member writes; `pop` and `shift` return the full `V` of the receiver's cells (carriers, callables, origins); `splice` returns a fresh site holding those values |
 | call of a local function | inline the body with parameters bound, and restore the caller's bindings afterwards (labels too, which today are not restored); the caller's state is the join of the callee's completion states; the value is the join of its return values; recursion and cycles through callbacks share one bounded worklist |
 | call of a callable set | join over every member; `top` member: unresolved (clear every flow property) |
 | call of an imported export with a summary | apply the summary, including its parameter heap writes and return aliasing (P8) |
@@ -154,10 +154,10 @@ replaces `walkStmt`.
 | `if` | condition evaluated; then and else executed in copies of `S`; the fallthrough state is the join of the branches that fall through; a branch that ends adds its state to `completions` |
 | `for...of` | iterable evaluated; loop variable = join of the iterable's cells; `S_head = join(S_in, S_after_body)` until stable |
 | `return` | `returned = join(returned, value)`; the path ends; at the handler root, the response sink is checked on the value |
-| `assert` | condition evaluated; the message evaluated in a copy of the state, which becomes a completion with the message as its value (a response completion at the handler root, checked by the response sink) |
+| `assert` | condition evaluated; the message evaluated in a copy of the state; a failed assert with a message is a `return` of the message from the containing function (in a helper, the caller receives it; at the handler root, the response sink checks it); an assert without a message is a halt completion |
 | string methods (`split`, `slice`, `substring`, `trim`, `replace`, and the rest of `isStringMethod`) | result labels are the receiver's and the arguments' labels; `split` returns a fresh site holding them |
 | Result constructors, combinators, and extractors (the free functions in `zttp:result` and the Result methods) | a Result value is a container whose cells hold the `ok` and `err` payloads; combinators keep the untouched payload (`mapResult(err(secret), f)` keeps the secret) and run callbacks as below |
-| `Array.from(source, f)` | elements from the source's cells; `f` as an array-method callback |
+| `Array.from(source, f)` | elements from the source's cells, or, for a string source, characters carrying the string's labels; `f` as an array-method callback with that element value |
 | var declaration | strong update of `env` with the initializer value |
 | function declaration or expression | a callable value; its body runs only when called |
 | any other tag | clear every flow property |
@@ -300,3 +300,85 @@ The owner answered "as recommended": D9 Option A (explicit flow only), D10
 Option A (new `flow_interp.zig` with a differential baseline), D11 Option A
 (P1 in the next patch release; the redesign when P9 passes), D12 Option A (a
 second validation round before implementation approval).
+
+## Round 2 revisions, 2026-10-19
+
+The second round (two Codex astra reviews; Fable was out of credits) found
+gaps in the argument. Five of its examples leaked under `zttp serve` on
+2026-10-19 and are now in the known-limits table (`e1b01ef3`):
+`unescapeHtml(escapeHtml(req.url))`, `Array.from(secret, f)`,
+`[req].pop()` before reading `authorization`, a failed `assert` in a helper,
+and `Response.json(req.headers)`. These sections override earlier text where
+they differ.
+
+R1 (operational claim). PROVEN(P) implies that no reachable execution
+produces a forbidden explicit-flow event for P. An event is a value carrying a
+label that P forbids arriving at a sink that P names. "Carrying" includes
+every value computed from a labelled value: a computed key
+(`["a", "b"][secret.length % 2]`), a comparison result, a length. One
+property-to-sink matrix, generated from the checker's own table, is the
+single source; `docs/proofs-and-receipts.md` is rendered from it and states
+that control and termination channels are excluded (D9). The current docs say
+`injection_safe` covers SQL and HTML sinks, while the checker covers HTML and
+egress; the matrix resolves that difference before P9.
+
+R2 (defenses separate from provenance). `validated` is replaced by
+sink-specific defense facts (for example `html_escaped`, `schema_checked`)
+that sit beside the provenance labels instead of clearing them. Each
+operation states whether it preserves, establishes, or removes each defense.
+`unescapeHtml` removes `html_escaped`; `replace`, `replaceAll`, and any
+operation that can reintroduce markup characters remove it unless the rule
+proves otherwise; `escapeHtml` establishes it. The sink checks provenance and
+the defense together.
+
+R3 (operation-edge matrix). The operation census covers every runtime
+registration (array, string, JSON, Object, Number, Math, Date, Error, global
+functions, Result runtime methods) and every virtual-module export, and marks
+which ones the typed profile admits. For each admitted operation it states,
+per argument and callback position: what is read, what is written, what is
+allocated, what is returned (full `V`), and the callback parameter vector
+(for example `toSorted` passes two elements; `reduce` without an initial value
+starts with a receiver element). An operation with no row clears every flow
+property. Heap-to-scalar operations (`JSON.stringify`, `join`, `Object.keys`
+and the like) read every reachable cell. Sabotage removes one edge at a time
+and requires a test to fail.
+
+R4 (request and headers contents). A request and its `headers` are synthetic
+containers with labelled cells (`authorization` carries `credential`; every
+header and field carries `user_input`). Serialization, enumeration, and
+dynamic reads go through those cells.
+
+R5 (module metadata). Bindings that exempt computed facts from
+`derives_from_args` (`timingSafeEqual`, `verifyWebhookSignature`,
+`bytesLength`, `dictHas`, and `nanoid`'s length argument) get dependency
+summaries under R1, or a policy exception listed in the matrix. `rateCheck`
+and `schemaDrop` are classified against stored state.
+
+R6 (finite abstract locations). Capture locations, allocation sites, and
+call contexts are bounded: a location is a static site plus a bounded
+context. Completion slots hold `env x heap` snapshots, not full states, so
+the state is not recursive. Captured locations survive calls; only callee
+frame bindings are restored. With weak updates and joins, every fixpoint
+ascends a finite lattice. The pass cap remains a fail-closed exit, not the
+termination argument.
+
+R7 (persistence by reachability). The outer fixpoint over handler
+invocations starts from module bindings and follows every reachable location,
+object, and closure, wherever it was allocated. Persistent scalars count:
+the arena-escape check rejects arena pointers only, so request-derived numbers
+and booleans can persist. Request-local state is reset between iterations.
+
+R8 (fixtures that cannot be weakened). Each P0 fixture's expectation is fixed
+in the fixture itself, independent of the table of current false proofs; a
+change to an expectation needs a reason in the commit. The expectation is
+"the property is not proven"; refused or unproven are both accepted unless the
+fixture names a diagnostic.
+
+R9 (no production change before P9). P2 to P8 run in shadow only. P8 may
+remove unsupported claims from multi-module builds; it may not select the new
+interpreter. P1 may only keep or remove proofs; any proof that P1 adds needs
+an explicit review.
+
+R10 (policy-hash pins). The pin destinations are the files that the
+regeneration and drift checks enforce (nine tracked files hold the current
+hash), not a fixed list of eleven.
