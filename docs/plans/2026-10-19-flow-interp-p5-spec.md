@@ -115,8 +115,8 @@ Cited from two code maps and two Codex reviews of 2026-10-19. Paths are under
   their headers have `get`, `set`, `append`, `has`, and `delete`
   (`packages/runtime/src/handler_instance.zig` 413,
   `packages/runtime/src/runtime_http.zig` 52, 211, 353).
-- `o["m"](...)` compiles to a property read and a plain `call` with `this`
-  undefined, not `call_method` (`codegen.zig` 1117). `o?.[k]()` and `g?.()`
+- A call whose callee is `o["m"]` compiles to a property read and a plain
+  `call` with `this` undefined, not `call_method` (`codegen.zig` 1117). `o?.[k]()` and `g?.()`
   are refused (`parse.zig` 5315). A computed record key is refused (5800).
 - An optional call is `call(optional_chain(r, m), args)`. Code generation
   tests `r` before the property read, the arguments, and the call
