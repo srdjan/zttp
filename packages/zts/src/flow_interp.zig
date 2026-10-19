@@ -1,12 +1,15 @@
-//! Flow evaluator, phase P2: the abstract domain, the location scheme, the
-//! field-sensitive heap, and an evaluator for expressions without calls.
+//! Flow evaluator, phases P2 to P4: the abstract domain, the location scheme,
+//! the field-sensitive heap, an evaluator for expressions and statements,
+//! `for...of` loops (P3), and calls with captured bindings and recursion (P4).
 //!
 //! This is the shadow of the checker that will replace the label walk in
 //! `flow_checker.zig`. Nothing in the pipeline, the CLI, or any verdict reads
 //! it, so `flow_analyzer_version` and the policy hash stay where they are. The
 //! design is in `docs/plans/2026-10-18-flow-checker-sound-redesign-plan.md`
-//! (rounds 2 and 3 override its earlier text) and the contract for this phase
-//! is `docs/plans/2026-10-19-flow-interp-p2-r16-spec.md`.
+//! (rounds 2 and 3 override its earlier text). The contracts are
+//! `docs/plans/2026-10-19-flow-interp-p2-r16-spec.md`,
+//! `docs/plans/2026-10-19-flow-interp-p3-spec.md`, and
+//! `docs/plans/2026-10-19-flow-interp-p4-spec.md`.
 //!
 //! The old checker keeps one label set per binding and loses what a value
 //! points at, so a write through an alias reaches nothing the reader can see.
@@ -40,8 +43,15 @@ const packBindingKey = bool_checker_mod.packBindingKey;
 
 const tag_count = @typeInfo(NodeTag).@"enum".fields.len;
 
-/// Every allocation is an arena allocation, so the only failure is memory.
-pub const Error = std.mem.Allocator.Error;
+/// The default for `FlowInterp.max_steps`.
+const default_max_steps: u32 = 100_000;
+
+/// Every allocation is an arena allocation, so the only failures are memory
+/// and the step budget. `analyzeFunction` turns the second into a cleared
+/// result, so it never reaches a caller of the public entry point.
+pub const Error = std.mem.Allocator.Error || error{BudgetExhausted};
+
+const ScopeAnalyzer = engine.parser.ScopeAnalyzer;
 
 // ---------------------------------------------------------------------------
 // Domain
@@ -58,6 +68,10 @@ pub const SiteKind = enum(u8) {
     /// them and the key type does not change shape later.
     request,
     headers,
+    /// The cell of a captured binding. `node` holds the packed source key of
+    /// the binding, and the cell is the site's `summary`. No value points at
+    /// a capture site, so a read through an unnamed object never sees one.
+    capture,
 };
 
 /// An allocation site. `context` is 0 until a later phase separates the
@@ -385,6 +399,42 @@ fn stateEql(a: State, b: State) bool {
     return cellsEql(a.top_cell, b.top_cell);
 }
 
+/// The state of a callee as its caller sees it: the heap and the cells of
+/// unnamed writes. The maps are shared with `s`, so the result is read-only.
+fn heapOnly(s: State) State {
+    return .{ .reachable = s.reachable, .heap = s.heap, .top_cell = s.top_cell };
+}
+
+fn joinSummary(arena: std.mem.Allocator, a: Summary, b: Summary) Error!Summary {
+    return .{
+        .value = try joinOpt(arena, a.value, b.value),
+        .state = try joinStates(arena, a.state, b.state),
+    };
+}
+
+fn summaryEql(a: Summary, b: Summary) bool {
+    return optValueEql(a.value, b.value) and stateEql(a.state, b.state);
+}
+
+/// Argument lists that are both fitted to one function have the same length.
+fn joinArgs(arena: std.mem.Allocator, a: []const Value, b: []const Value) Error![]const Value {
+    const out = try arena.alloc(Value, @max(a.len, b.len));
+    for (out, 0..) |*slot, i| {
+        const x = if (i < a.len) a[i] else Value.clean;
+        const y = if (i < b.len) b[i] else Value.clean;
+        slot.* = try joinValue(arena, x, y);
+    }
+    return out;
+}
+
+fn argsEql(a: []const Value, b: []const Value) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (!valueEql(x, y)) return false;
+    }
+    return true;
+}
+
 /// A copy of `v` whose slices live in `arena`, sorted and without duplicates.
 /// The caller of `analyzeFunction` may pass slices from its own stack in any
 /// order, and equality assumes the canonical form.
@@ -422,7 +472,7 @@ fn canonicalSlice(
 // ---------------------------------------------------------------------------
 
 /// The phase that will resolve a construct this phase leaves unresolved.
-pub const Phase = enum { p4, p5, p6, p7, p8 };
+pub const Phase = enum { p5, p6, p7, p8 };
 
 /// How the evaluators treat one `NodeTag`. P9 requires that no tag is `later`.
 pub const TagPlan = union(enum) {
@@ -433,15 +483,47 @@ pub const TagPlan = union(enum) {
     /// The restricted profile refuses the construct, so no accepted program
     /// holds it.
     refused_by_parser,
+    /// The parser accepts the construct and the strict checker refuses it, so
+    /// no checked module holds it. The runtime does not evaluate it as the
+    /// source reads, so the evaluator does not follow it either.
+    refused_by_strict,
     /// The parser produces no such node, or produces it only where a parent
     /// rule reads it through an accessor, so it is never an evaluation target.
     not_produced,
 };
 
 /// Why a construct is unresolved: the phase that owns it, or the reason that
-/// no phase does. `fixpoint_limit` marks a loop that reached `max_loop_passes`
-/// before its head stopped changing.
-pub const Owner = enum { p4, p5, p6, p7, p8, fixpoint_limit, refused_by_parser, not_produced };
+/// no phase does.
+///
+/// - `fixpoint_limit`: a loop reached `max_loop_passes`, or a recursive
+///   function reached `max_recursion_passes`, before its summary stopped
+///   changing.
+/// - `read_before_declaration`: a local read ran before its declaration, so
+///   the slot holds something this evaluator never saw.
+/// - `unknown_callee`: a call whose callee may be a function this analysis
+///   cannot name (a value read from a property, or a join with `top`).
+/// - `capture_unplaced`: a closure read a captured binding and no capture
+///   table was given, so the binding's cell is unknown.
+/// - `capture_unseeded`: the analyzed function itself captures bindings that
+///   no activation in this analysis created.
+/// - `budget_limit`: the root analysis reached `max_steps`.
+/// - `refused_by_strict`: the strict checker refuses the construct (call-site
+///   spread, ZTS616).
+pub const Owner = enum {
+    p5,
+    p6,
+    p7,
+    p8,
+    fixpoint_limit,
+    read_before_declaration,
+    unknown_callee,
+    capture_unplaced,
+    capture_unseeded,
+    budget_limit,
+    refused_by_strict,
+    refused_by_parser,
+    not_produced,
+};
 
 pub const Unresolved = struct {
     node: NodeIndex,
@@ -480,7 +562,6 @@ pub const FunctionResult = struct {
 
 fn ownerOfPhase(phase: Phase) Owner {
     return switch (phase) {
-        .p4 => .p4,
         .p5 => .p5,
         .p6 => .p6,
         .p7 => .p7,
@@ -495,6 +576,7 @@ fn ownerOf(tag: NodeTag) Owner {
     return switch (tagPlan(tag)) {
         .later => |phase| ownerOfPhase(phase),
         .refused_by_parser => .refused_by_parser,
+        .refused_by_strict => .refused_by_strict,
         .handled, .not_produced => .not_produced,
     };
 }
@@ -538,10 +620,12 @@ pub fn tagPlan(tag: NodeTag) TagPlan {
         .for_of_stmt,
         .break_stmt,
         .continue_stmt,
+        .call,
         => .handled,
 
-        // A call and a call-site spread need callee summaries.
-        .call, .spread => .{ .later = .p4 },
+        // A spread inside an array or object literal is read by the literal's
+        // rule. A call-site spread is the case this plan names.
+        .spread => .refused_by_strict,
         .array_pattern => .{ .later = .p6 },
 
         .await_expr,
@@ -600,20 +684,121 @@ const LoopFrame = struct {
     continues: std.ArrayList(State) = .empty,
 };
 
+/// Where each upvalue of each function scope comes from, read from the
+/// parser's scope analysis. The analyzer records for every upvalue the exact
+/// declaring binding (`source_scope_id`, `source_slot`), so the table agrees
+/// with the parser for a duplicate declaration in one scope and for an
+/// unbraced conditional declaration, which a scan by name does not.
+pub const CaptureTable = struct {
+    allocator: std.mem.Allocator,
+    /// `by_scope[function_scope][upvalue_slot]` is the packed key of the
+    /// binding that upvalue names.
+    by_scope: []const []const u32,
+    /// Every source key. A binding in this set lives in a capture cell.
+    captured: std.AutoHashMapUnmanaged(u32, void),
+
+    pub fn init(allocator: std.mem.Allocator, scopes: *const ScopeAnalyzer) std.mem.Allocator.Error!CaptureTable {
+        const by_scope = try allocator.alloc([]const u32, scopes.scopes.items.len);
+        var built: usize = 0;
+        errdefer {
+            for (by_scope[0..built]) |keys| allocator.free(keys);
+            allocator.free(by_scope);
+        }
+        var captured: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        errdefer captured.deinit(allocator);
+        for (scopes.scopes.items, 0..) |scope, i| {
+            const keys = try allocator.alloc(u32, scope.upvalues.items.len);
+            by_scope[i] = keys;
+            built += 1;
+            for (scope.upvalues.items, keys) |upvalue, *key| {
+                key.* = packBindingKey(upvalue.source_scope_id, upvalue.source_slot);
+                try captured.put(allocator, key.*, {});
+            }
+        }
+        return .{ .allocator = allocator, .by_scope = by_scope, .captured = captured };
+    }
+
+    pub fn deinit(self: *CaptureTable) void {
+        for (self.by_scope) |keys| self.allocator.free(keys);
+        self.allocator.free(self.by_scope);
+        self.captured.deinit(self.allocator);
+    }
+
+    /// The source key of upvalue `slot` of `function_scope`, or null when the
+    /// table does not know that upvalue.
+    fn source(self: *const CaptureTable, function_scope: u16, slot: u16) ?u32 {
+        if (function_scope >= self.by_scope.len) return null;
+        const keys = self.by_scope[function_scope];
+        if (slot >= keys.len) return null;
+        return keys[slot];
+    }
+
+    /// The source keys of every upvalue of `function_scope`.
+    fn upvalues(self: *const CaptureTable, function_scope: u16) []const u32 {
+        if (function_scope >= self.by_scope.len) return &.{};
+        return self.by_scope[function_scope];
+    }
+};
+
+/// The result of one call, or of one pass over a function body: the join of
+/// every normal completion's value (null when none is reachable) and the join
+/// of their states. The state carries `heap` and `top_cell` only, because the
+/// callee's bindings are out of scope for the caller.
+const Summary = struct {
+    value: ?Value,
+    state: State,
+
+    const bottom: Summary = .{ .value = null, .state = State.bottom };
+};
+
+/// One function body that is being analyzed for a call. `entry_*` is the
+/// input of the current pass. `pending_*` joins that input with the input of
+/// every recursive call made during the pass. `summary` is the result of the
+/// last finished pass.
+const Activation = struct {
+    func: NodeIndex,
+    entry_args: []const Value,
+    entry: State,
+    pending_args: []const Value,
+    pending: State,
+    summary: Summary,
+    /// A recursive call read or fed this record during the current pass.
+    used: bool,
+};
+
 pub const FlowInterp = struct {
     arena: std.heap.ArenaAllocator,
     ir_view: IrView,
     atoms: ?*atom_table.AtomTable,
+    /// Where each upvalue comes from. Without it every upvalue read is
+    /// unresolved (`capture_unplaced`) and no binding is placed in a cell.
+    captures: ?*const CaptureTable = null,
     completions: std.ArrayList(Completion) = .empty,
     unresolved_list: std.ArrayList(Unresolved) = .empty,
     /// The enclosing loops, innermost last. A `break` or `continue` acts on the
     /// last one. The parser clears the loop flag at each function boundary, so
-    /// neither crosses into a nested function.
+    /// neither crosses into a nested function. A call gives the callee an empty
+    /// stack and restores this one afterwards.
     loop_frames: std.ArrayList(LoopFrame) = .empty,
+    /// The function bodies being analyzed for a call, innermost last.
+    activations: std.ArrayList(Activation) = .empty,
+    /// The module-level functions a global read may resolve to, by atom.
+    /// Built on first use.
+    module_functions: ?std.AutoHashMapUnmanaged(u16, NodeIndex) = null,
     /// The pass cap of one loop. It is a fail-closed exit and not the
     /// termination argument: the loop head only grows over finite components.
     /// A value below 1 is treated as 1.
     max_loop_passes: u32 = 256,
+    /// The pass cap of one recursive function, with the same meaning. A value
+    /// below 1 is treated as 1.
+    max_recursion_passes: u32 = 64,
+    /// The cap on `eval` and `exec` visits for one root analysis, across every
+    /// call and pass. It is fail-closed: reaching it clears the result.
+    max_steps: u32 = default_max_steps,
+    /// The visits counted so far in the current root analysis.
+    steps: u32 = 0,
+    /// The most passes any recursive function needed in the last analysis.
+    recursion_passes_peak: u32 = 0,
     /// How often each tag reached `eval`, `exec`, or a parent rule that reads
     /// it through an accessor. The census test reads this to prove that its
     /// corpus reached every handled tag. It counts across calls.
@@ -646,10 +831,42 @@ pub const FlowInterp = struct {
     /// Analyze one function body with its parameters bound to `params`
     /// (missing entries are `clean`). The result lives in the arena. `func`
     /// is a function expression, an arrow function, or a function declaration.
-    pub fn analyzeFunction(self: *FlowInterp, func: NodeIndex, params: []const Value) Error!FunctionResult {
+    ///
+    /// The step budget, the activation stack, and the loop stack belong to one
+    /// root, so each call starts them afresh. A root that reaches `max_steps`
+    /// returns a cleared result with no completion kept as normal.
+    pub fn analyzeFunction(self: *FlowInterp, func: NodeIndex, params: []const Value) std.mem.Allocator.Error!FunctionResult {
+        if (self.analyzeRoot(func, params)) |result| {
+            return result;
+        } else |err| switch (err) {
+            error.BudgetExhausted => return self.budgetResult(),
+            error.OutOfMemory => return error.OutOfMemory,
+        }
+    }
+
+    /// The result of a root that reached `max_steps`: cleared, with the
+    /// unresolved entries recorded so far, and no value or state to trust.
+    fn budgetResult(self: *FlowInterp) std.mem.Allocator.Error!FunctionResult {
+        const unresolved = try self.unresolved_list.toOwnedSlice(self.mem());
+        self.completions = .empty;
+        self.loop_frames = .empty;
+        self.activations = .empty;
+        return .{
+            .returned = Value.top,
+            .exit = .{},
+            .completions = &.{},
+            .cleared = true,
+            .unresolved = unresolved,
+        };
+    }
+
+    fn analyzeRoot(self: *FlowInterp, func: NodeIndex, params: []const Value) Error!FunctionResult {
         self.completions = .empty;
         self.unresolved_list = .empty;
         self.loop_frames = .empty;
+        self.activations = .empty;
+        self.steps = 0;
+        self.recursion_passes_peak = 0;
         var st: State = .{};
 
         // The accessors read payload words, so the tag is checked first: a
@@ -665,6 +882,25 @@ pub const FlowInterp = struct {
             return self.finish(State.bottom);
         };
 
+        // The analyzed function is a root, not a closure created by an
+        // activation in this analysis, so nothing placed the cells of the
+        // bindings it captures. Each one may hold anything.
+        if (self.captures) |table| {
+            const sources = table.upvalues(function.scope_id);
+            if (sources.len > 0) {
+                try self.record(func, func_tag, .capture_unseeded);
+                for (sources) |key| try self.weakWriteCapture(&st, key, Value.top);
+            }
+        }
+
+        try self.bindParams(function, params, &st);
+        try self.exec(function.body, &st);
+        return self.finish(st);
+    }
+
+    /// Bind parameter `i` to `params[i]`, canonicalized, joined with the
+    /// default value when the IR has one. A missing argument is `clean`.
+    fn bindParams(self: *FlowInterp, function: ir.Node.FunctionExpr, params: []const Value, st: *State) Error!void {
         var i: usize = 0;
         while (i < function.params_count) : (i += 1) {
             const param_idx = self.ir_view.getListIndex(function.params_start, @intCast(i));
@@ -681,16 +917,13 @@ pub const FlowInterp = struct {
             if (param_tag == .pattern_element) {
                 if (self.ir_view.getPatternElem(param_idx)) |elem| {
                     if (elem.default_value != null_node) {
-                        const fallback = try self.eval(elem.default_value, &st);
+                        const fallback = try self.eval(elem.default_value, st);
                         value = try joinValue(self.mem(), value, fallback);
                     }
                 }
             }
-            try st.env.put(self.mem(), packBindingKey(binding.scope_id, binding.slot), value);
+            try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), value);
         }
-
-        try self.exec(function.body, &st);
-        return self.finish(st);
     }
 
     fn finish(self: *FlowInterp, fallthrough: State) Error!FunctionResult {
@@ -734,6 +967,387 @@ pub const FlowInterp = struct {
     fn missing(self: *FlowInterp, node: NodeIndex) Error!Value {
         try self.record(node, .stmt_list, .not_produced);
         return Value.top;
+    }
+
+    /// Count one `eval` or `exec` visit against the budget. Exhaustion is
+    /// recorded here and unwinds to `analyzeFunction`.
+    fn tick(self: *FlowInterp, node: NodeIndex, tag: NodeTag) Error!void {
+        self.steps +|= 1;
+        if (self.steps > self.max_steps) {
+            try self.record(node, tag, .budget_limit);
+            return error.BudgetExhausted;
+        }
+    }
+
+    // --- bindings and capture cells (P4) ---
+
+    fn isCaptured(self: *const FlowInterp, key: u32) bool {
+        const table = self.captures orelse return false;
+        return table.captured.contains(key);
+    }
+
+    fn captureSite(key: u32) SiteKey {
+        return .{ .kind = .capture, .node = key, .context = 0 };
+    }
+
+    /// The content of a capture cell. A cell nothing wrote stands for the
+    /// runtime's `undefined`, which is `clean`: a closure is created after the
+    /// declaration it reads, in the activation that declared it.
+    fn captureValue(st: *const State, key: u32) Value {
+        const cells = st.heap.get(captureSite(key)) orelse return Value.clean;
+        return cells.summary orelse Value.clean;
+    }
+
+    /// Every write to a captured binding is weak. One cell stands for every
+    /// activation of the declaring function and every loop iteration, so a
+    /// strong write by one of them would hide what another stored.
+    fn weakWriteCapture(self: *FlowInterp, st: *State, key: u32, v: Value) Error!void {
+        try self.weakWriteSite(st, captureSite(key), null, v);
+    }
+
+    /// Store `v` in the binding `key` of the running function: a weak write to
+    /// its capture cell when a closure captures it, else a strong update of
+    /// `env`.
+    fn storeLocal(self: *FlowInterp, st: *State, key: u32, v: Value) Error!void {
+        if (self.isCaptured(key)) {
+            try self.weakWriteCapture(st, key, v);
+        } else {
+            try st.env.put(self.mem(), key, v);
+        }
+    }
+
+    /// The value of the binding `key`, or null when it is a function-local
+    /// binding that no declaration has run for.
+    fn loadLocal(self: *const FlowInterp, st: *const State, key: u32) ?Value {
+        if (self.isCaptured(key)) return captureValue(st, key);
+        return st.env.get(key);
+    }
+
+    /// The source key of an upvalue reference, or null when no capture table
+    /// places it.
+    fn upvalueKey(self: *const FlowInterp, binding: ir.BindingRef) ?u32 {
+        const table = self.captures orelse return null;
+        return table.source(binding.scope_id, binding.slot);
+    }
+
+    /// A value read from a property or a pattern field. The receiver can be a
+    /// string, an array, or another builtin value after a join, and the read
+    /// can then return a builtin method, so the result may be any function.
+    fn propertyRead(v: Value) Value {
+        var out = v;
+        out.callables_top = true;
+        return out;
+    }
+
+    // --- module-level functions (P4) ---
+
+    /// The function a module-level name resolves to, or null. A name resolves
+    /// when exactly one declaration in the program binds it, that declaration
+    /// is a function declaration or a `const` arrow function at the top level
+    /// (so module initialization runs it before any request), and no
+    /// assignment targets the name. Anything else stays module state (P8).
+    fn moduleFunction(self: *FlowInterp, atom: u16) Error!?NodeIndex {
+        const table = self.module_functions orelse blk: {
+            const built = try self.buildModuleFunctions();
+            self.module_functions = built;
+            break :blk built;
+        };
+        return table.get(atom);
+    }
+
+    const Declared = struct { count: u32, decl: NodeIndex };
+
+    fn countDeclaration(
+        self: *FlowInterp,
+        declared: *std.AutoHashMapUnmanaged(u16, Declared),
+        atom: u16,
+        decl: NodeIndex,
+    ) Error!void {
+        const slot = try declared.getOrPut(self.mem(), atom);
+        if (slot.found_existing) {
+            slot.value_ptr.count += 1;
+        } else {
+            slot.value_ptr.* = .{ .count = 1, .decl = decl };
+        }
+    }
+
+    fn buildModuleFunctions(self: *FlowInterp) Error!std.AutoHashMapUnmanaged(u16, NodeIndex) {
+        const arena = self.mem();
+        const view = self.ir_view;
+        var declared: std.AutoHashMapUnmanaged(u16, Declared) = .empty;
+        var assigned: std.AutoHashMapUnmanaged(u16, void) = .empty;
+        var direct: std.AutoHashMapUnmanaged(NodeIndex, void) = .empty;
+
+        var i: usize = 0;
+        while (i < view.nodeCount()) : (i += 1) {
+            const idx: NodeIndex = @intCast(i);
+            const tag = view.getTag(idx) orelse continue;
+            switch (tag) {
+                .var_decl, .function_decl => {
+                    const vd = view.getVarDecl(idx) orelse continue;
+                    if (vd.binding.kind == .global) try self.countDeclaration(&declared, vd.binding.name_atom, idx);
+                },
+                // An import or a pattern binding that binds a module name
+                // counts as a declaration and is never a function.
+                .import_specifier, .import_default, .import_namespace => {
+                    const spec = view.getImportSpec(idx) orelse continue;
+                    if (spec.local_binding.kind == .global) {
+                        try self.countDeclaration(&declared, spec.local_binding.name_atom, null_node);
+                    }
+                },
+                .pattern_element => {
+                    const elem = view.getPatternElem(idx) orelse continue;
+                    if (elem.binding.kind == .global) {
+                        try self.countDeclaration(&declared, elem.binding.name_atom, null_node);
+                    }
+                },
+                .assignment => {
+                    const asg = view.getAssignment(idx) orelse continue;
+                    if ((view.getTag(asg.target) orelse continue) != .identifier) continue;
+                    const binding = view.getBinding(asg.target) orelse continue;
+                    if (binding.kind == .global or binding.kind == .undeclared_global) {
+                        try assigned.put(arena, binding.name_atom, {});
+                    }
+                },
+                .program => {
+                    const block = view.getBlock(idx) orelse continue;
+                    var k: u16 = 0;
+                    while (k < block.stmts_count) : (k += 1) {
+                        const stmt = view.getListIndex(block.stmts_start, k);
+                        try direct.put(arena, stmt, {});
+                        if ((view.getTag(stmt) orelse continue) != .export_decl) continue;
+                        const export_decl = view.getExportDecl(stmt) orelse continue;
+                        if (export_decl.declaration != null_node) try direct.put(arena, export_decl.declaration, {});
+                    }
+                },
+                // exhaustive: every other tag neither declares a module name
+                // nor assigns one, and holds no program body.
+                else => {},
+            }
+        }
+
+        var resolved: std.AutoHashMapUnmanaged(u16, NodeIndex) = .empty;
+        var it = declared.iterator();
+        while (it.next()) |entry| {
+            const atom = entry.key_ptr.*;
+            const found = entry.value_ptr.*;
+            if (found.count != 1 or found.decl == null_node) continue;
+            if (assigned.contains(atom) or !direct.contains(found.decl)) continue;
+            const vd = view.getVarDecl(found.decl) orelse continue;
+            const init_tag = view.getTag(vd.init) orelse continue;
+            const is_function = switch ((view.getTag(found.decl) orelse continue)) {
+                .function_decl => init_tag == .function_expr or init_tag == .arrow_function,
+                .var_decl => vd.kind == .@"const" and init_tag == .arrow_function,
+                // exhaustive: only a function declaration and a `const` arrow
+                // are counted as declarations above, so no other tag arrives.
+                else => false,
+            };
+            if (is_function) try resolved.put(arena, atom, vd.init);
+        }
+        return resolved;
+    }
+
+    // --- calls (P4) ---
+
+    /// `args` as the exact list of a callee's parameters: surplus arguments are
+    /// dropped (the callee cannot read them) and missing ones are `clean`.
+    fn fitArgs(self: *FlowInterp, function: ir.Node.FunctionExpr, args: []const Value) Error![]const Value {
+        const fitted = try self.mem().alloc(Value, function.params_count);
+        for (fitted, 0..) |*slot, i| slot.* = if (i < args.len) args[i] else Value.clean;
+        return fitted;
+    }
+
+    /// The state a callee starts from and a summary carries: the heap and the
+    /// cells of unnamed writes, and no bindings. The heap is copied, because
+    /// the caller goes on mutating its own maps.
+    fn heapState(self: *FlowInterp, st: *const State) Error!State {
+        return .{ .heap = try st.heap.clone(self.mem()), .top_cell = st.top_cell };
+    }
+
+    fn evalCall(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
+        const arena = self.mem();
+        const c = self.ir_view.getCall(node) orelse return self.missing(node);
+        const callee_tag = self.ir_view.getTag(c.callee) orelse .stmt_list;
+        const callee = try self.eval(c.callee, st);
+
+        var args: std.ArrayList(Value) = .empty;
+        var has_spread = false;
+        var i: u16 = 0;
+        while (i < c.args_count) : (i += 1) {
+            const arg = self.ir_view.getListIndex(c.args_start, i);
+            if ((self.ir_view.getTag(arg) orelse .stmt_list) == .spread) {
+                // The runtime does not evaluate the operand (it pushes
+                // `undefined`) and the strict checker refuses the call.
+                self.noteVisited(.spread);
+                try self.record(arg, .spread, .refused_by_strict);
+                has_spread = true;
+                continue;
+            }
+            try args.append(arena, try self.eval(arg, st));
+        }
+
+        // The runtime dispatches a call through a property to a builtin method
+        // of a string, an array, or another builtin value, and a value cannot
+        // exclude a primitive alternative after a join. P5 owns these.
+        const by_property = callee_tag == .member_access or callee_tag == .optional_chain or callee_tag == .computed_access;
+        if (by_property) try self.record(node, .call, .p5);
+        if (by_property or has_spread) return Value.top;
+
+        if (callee.callables_top) {
+            try self.record(node, .call, .unknown_callee);
+            return Value.top;
+        }
+        // The runtime fails with `NotCallable`, unless the value is a builtin
+        // function, which P5 decides.
+        if (callee.callables.len == 0) {
+            try self.record(node, .call, .p5);
+            return Value.top;
+        }
+
+        // Which callee runs is control flow, so every one of them does and the
+        // results join. A result chosen through a labelled callee carries its
+        // labels, as a read through a labelled key does.
+        var joined = Summary.bottom;
+        for (callee.callables) |func_node| {
+            joined = try joinSummary(arena, joined, try self.invoke(func_node, args.items, st));
+        }
+        if (!joined.state.reachable) {
+            // No completion is reachable. The bindings stay readable for the
+            // dead code that follows in the same expression.
+            st.reachable = false;
+            return Value.clean;
+        }
+        st.heap = try joined.state.heap.clone(arena);
+        st.top_cell = joined.state.top_cell;
+        return withLabels(joined.value orelse Value.clean, callee.labels);
+    }
+
+    /// Run `func_node` with `args` from the caller's state `st`. A function that
+    /// is already being analyzed is a recursive call and uses that
+    /// activation's summary.
+    fn invoke(self: *FlowInterp, func_node: NodeIndex, args: []const Value, st: *const State) Error!Summary {
+        const tag = self.ir_view.getTag(func_node) orelse .stmt_list;
+        const function = (if (tag == .function_expr or tag == .arrow_function)
+            self.ir_view.getFunction(func_node)
+        else
+            null) orelse {
+            _ = try self.missing(func_node);
+            return .{ .value = Value.top, .state = try self.heapState(st) };
+        };
+        const fitted = try self.fitArgs(function, args);
+        var i = self.activations.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.activations.items[i].func == func_node) return self.recurse(i, fitted, st);
+        }
+        return self.runActivation(func_node, tag, function, fitted, st);
+    }
+
+    /// A call of a function that is being analyzed. The call feeds its
+    /// arguments and heap into the activation's pending input and returns the
+    /// summary of the finished passes, with the caller's heap joined in. While
+    /// no pass has finished, the summary is bottom and so is the state after
+    /// the call: the activation is rerun when its summary grows.
+    fn recurse(self: *FlowInterp, index: usize, args: []const Value, st: *const State) Error!Summary {
+        const arena = self.mem();
+        // Shares the caller's maps by reference. `joinStates` copies them.
+        const caller: State = .{ .heap = st.heap, .top_cell = st.top_cell };
+        const record_ptr = &self.activations.items[index];
+        record_ptr.used = true;
+        record_ptr.pending_args = try joinArgs(arena, record_ptr.pending_args, args);
+        record_ptr.pending = try joinStates(arena, record_ptr.pending, caller);
+        const summary = record_ptr.summary;
+        if (!summary.state.reachable) return Summary.bottom;
+        return .{ .value = summary.value, .state = try joinStates(arena, caller, summary.state) };
+    }
+
+    /// Analyze the body of `func_node` for a call, once or as a fixpoint when
+    /// a call inside it reaches the function again. Pass `k` runs the body from
+    /// `entry`. When a recursive call fed the record, the pass ends by
+    /// comparing the pending input with `entry` and the joined summary with the
+    /// previous one: if either grew, the body runs again from the pending
+    /// input. Convergence is checked before the cap, as for a loop.
+    fn runActivation(
+        self: *FlowInterp,
+        func_node: NodeIndex,
+        tag: NodeTag,
+        function: ir.Node.FunctionExpr,
+        args: []const Value,
+        st: *const State,
+    ) Error!Summary {
+        const arena = self.mem();
+        const entry = try self.heapState(st);
+        const depth = self.activations.items.len;
+        try self.activations.append(arena, .{
+            .func = func_node,
+            .entry_args = args,
+            .entry = entry,
+            .pending_args = args,
+            .pending = entry,
+            .summary = Summary.bottom,
+            .used = false,
+        });
+        defer self.activations.shrinkRetainingCapacity(depth);
+
+        const cap = @max(self.max_recursion_passes, 1);
+        var pass: u32 = 0;
+        while (true) {
+            pass +|= 1;
+            self.activations.items[depth].used = false;
+            const input = self.activations.items[depth];
+            const result = try self.runBody(function, input.entry_args, input.entry);
+
+            // The body can grow the stack, so the record is read again.
+            const record_ptr = &self.activations.items[depth];
+            if (!record_ptr.used) {
+                record_ptr.summary = result;
+                return result;
+            }
+            self.recursion_passes_peak = @max(self.recursion_passes_peak, pass);
+            const changed = !argsEql(record_ptr.pending_args, record_ptr.entry_args) or
+                !stateEql(record_ptr.pending, record_ptr.entry) or
+                !summaryEql(result, record_ptr.summary);
+            record_ptr.summary = result;
+            if (!changed) return result;
+            record_ptr.entry_args = record_ptr.pending_args;
+            record_ptr.entry = record_ptr.pending;
+            if (pass >= cap) {
+                try self.record(func_node, tag, .fixpoint_limit);
+                return result;
+            }
+        }
+    }
+
+    /// One pass over a callee body: a fresh environment holding the
+    /// parameters, the heap and unnamed cells of `entry`, and no loop frames.
+    /// The callee's completions are its own: a return, a failed assert, and the
+    /// fallthrough are normal completions that return to the caller.
+    fn runBody(self: *FlowInterp, function: ir.Node.FunctionExpr, args: []const Value, entry: State) Error!Summary {
+        var st: State = .{ .heap = try entry.heap.clone(self.mem()), .top_cell = entry.top_cell };
+        const saved_completions = self.completions;
+        const saved_loops = self.loop_frames;
+        self.completions = .empty;
+        self.loop_frames = .empty;
+        defer {
+            self.completions = saved_completions;
+            self.loop_frames = saved_loops;
+        }
+        try self.bindParams(function, args, &st);
+        try self.exec(function.body, &st);
+        return self.summarize(st);
+    }
+
+    /// The join of the running callee's completions and its fallthrough.
+    fn summarize(self: *FlowInterp, fallthrough: State) Error!Summary {
+        const arena = self.mem();
+        var out = Summary.bottom;
+        for (self.completions.items) |completion| {
+            out = try joinSummary(arena, out, .{ .value = completion.value, .state = heapOnly(completion.state) });
+        }
+        if (fallthrough.reachable) {
+            out = try joinSummary(arena, out, .{ .value = Value.clean, .state = heapOnly(fallthrough) });
+        }
+        return out;
     }
 
     // --- names ---
@@ -792,8 +1406,12 @@ pub const FlowInterp = struct {
         }
         acc = try self.absorb(acc, st.top_cell, name);
         if (o.origins_top) {
-            var it = st.heap.valueIterator();
-            while (it.next()) |cells| acc = try self.absorb(acc, cells.*, null);
+            // A capture cell is not an object, so no value points at it.
+            var it = st.heap.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.kind == .capture) continue;
+                acc = try self.absorb(acc, entry.value_ptr.*, null);
+            }
         }
         return acc;
     }
@@ -831,8 +1449,11 @@ pub const FlowInterp = struct {
         }
         out = try joinCells(arena, out, st.top_cell);
         if (o.origins_top) {
-            var it = st.heap.valueIterator();
-            while (it.next()) |cells| out = try joinCells(arena, out, cells.*);
+            var it = st.heap.iterator();
+            while (it.next()) |entry| {
+                if (entry.key_ptr.kind == .capture) continue;
+                out = try joinCells(arena, out, entry.value_ptr.*);
+            }
         }
         return out;
     }
@@ -888,6 +1509,7 @@ pub const FlowInterp = struct {
     pub fn eval(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
         const tag = self.ir_view.getTag(node) orelse return self.missing(node);
         self.noteVisited(tag);
+        try self.tick(node, tag);
         switch (tag) {
             .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null, .lit_undefined => return Value.clean,
             .identifier => return self.evalIdentifier(node, st),
@@ -909,7 +1531,7 @@ pub const FlowInterp = struct {
             .member_access => {
                 const m = self.ir_view.getMember(node) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
-                return self.readValue(st, o, .{ .name = m.property });
+                return propertyRead(try self.readValue(st, o, .{ .name = m.property }));
             },
             .optional_chain => {
                 // The receiver is evaluated on both paths and a read changes
@@ -918,33 +1540,24 @@ pub const FlowInterp = struct {
                 const m = self.ir_view.getMember(node) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
                 const read = try self.readValue(st, o, .{ .name = m.property });
-                return joinValue(self.mem(), read, Value.clean);
+                return propertyRead(try joinValue(self.mem(), read, Value.clean));
             },
             .computed_access => {
                 const m = self.ir_view.getMember(node) orelse return self.missing(node);
                 const o = try self.eval(m.object, st);
                 const key = try self.evalKey(m.computed, st);
-                return self.readValue(st, o, key);
+                return propertyRead(try self.readValue(st, o, key));
             },
             .assignment => return self.evalAssignment(node, st),
             .array_literal => return self.evalArray(node, st),
             .object_literal => return self.evalObject(node, st),
             .function_expr, .arrow_function => {
-                // The body is not executed. P4 owns calls, so a function value
-                // is only a name for its body and a mutable object.
+                // The body is not executed here. A call runs it, so a function
+                // value is a name for its body and a mutable object.
                 const site: SiteKey = .{ .kind = .function, .node = node, .context = 0 };
                 return self.siteValue(site, node);
             },
-            .call => {
-                const c = self.ir_view.getCall(node) orelse return self.missing(node);
-                _ = try self.eval(c.callee, st);
-                var i: u16 = 0;
-                while (i < c.args_count) : (i += 1) {
-                    _ = try self.eval(self.ir_view.getListIndex(c.args_start, i), st);
-                }
-                try self.record(node, .call, .p4);
-                return Value.top;
-            },
+            .call => return self.evalCall(node, st),
             .match_expr => return self.evalMatch(node, st),
 
             // The parser produces none of these, or produces them only inside
@@ -1007,19 +1620,29 @@ pub const FlowInterp = struct {
         const binding = self.ir_view.getBinding(node) orelse return self.missing(node);
         switch (binding.kind) {
             .local, .argument => {
-                if (st.env.get(packBindingKey(binding.scope_id, binding.slot))) |v| return v;
+                if (self.loadLocal(st, packBindingKey(binding.scope_id, binding.slot))) |v| return v;
                 // Read before its declaration ran. The runtime does not hoist
                 // a function declaration, so the slot holds something this
                 // evaluator never saw.
-                try self.record(node, .identifier, .p4);
+                try self.record(node, .identifier, .read_before_declaration);
                 return Value.top;
             },
-            // P4 owns captures and P8 owns module state.
+            // A closure reads the cell of the binding the parser's scope
+            // analysis names. Without a table there is no cell to read.
             .upvalue => {
-                try self.record(node, .identifier, .p4);
-                return Value.top;
+                const key = self.upvalueKey(binding) orelse {
+                    try self.record(node, .identifier, .capture_unplaced);
+                    return Value.top;
+                };
+                return captureValue(st, key);
             },
+            // A module function is a fixed value; any other module name is
+            // state that P8 owns.
             .global, .undeclared_global => {
+                if (try self.moduleFunction(binding.name_atom)) |func_node| {
+                    const site: SiteKey = .{ .kind = .function, .node = func_node, .context = 0 };
+                    return self.siteValue(site, func_node);
+                }
                 try self.record(node, .identifier, .p8);
                 return Value.top;
             },
@@ -1082,19 +1705,33 @@ pub const FlowInterp = struct {
                     .local, .argument => {
                         const key = packBindingKey(binding.scope_id, binding.slot);
                         const assigned = if (asg.op) |op| blk: {
-                            const old = st.env.get(key) orelse old_blk: {
-                                try self.record(asg.target, .identifier, .p4);
+                            const old = self.loadLocal(st, key) orelse old_blk: {
+                                try self.record(asg.target, .identifier, .read_before_declaration);
                                 break :old_blk Value.top;
                             };
                             break :blk try self.compoundValue(op, old, asg.value, st);
                         } else try self.eval(asg.value, st);
-                        try st.env.put(self.mem(), key, assigned);
+                        try self.storeLocal(st, key, assigned);
                         return assigned;
                     },
-                    // P4 owns captured bindings and P8 owns module state.
-                    .upvalue, .global, .undeclared_global => {
+                    // A closure writes the cell of the captured binding, weakly.
+                    .upvalue => {
+                        const key = self.upvalueKey(binding) orelse {
+                            const assigned = try self.eval(asg.value, st);
+                            try self.record(node, .assignment, .capture_unplaced);
+                            return assigned;
+                        };
+                        const assigned = if (asg.op) |op|
+                            try self.compoundValue(op, captureValue(st, key), asg.value, st)
+                        else
+                            try self.eval(asg.value, st);
+                        try self.weakWriteCapture(st, key, assigned);
+                        return assigned;
+                    },
+                    // Module state belongs to P8.
+                    .global, .undeclared_global => {
                         const assigned = try self.eval(asg.value, st);
-                        try self.record(node, .assignment, if (binding.kind == .upvalue) .p4 else .p8);
+                        try self.record(node, .assignment, .p8);
                         return assigned;
                     },
                 }
@@ -1241,8 +1878,8 @@ pub const FlowInterp = struct {
                                 try self.record(prop_idx, .object_property, .refused_by_parser);
                                 continue;
                             };
-                            const field = try self.readValue(st, disc, .{ .name = name });
-                            try st.env.put(self.mem(), packBindingKey(binding.scope_id, binding.slot), field);
+                            const field = propertyRead(try self.readValue(st, disc, .{ .name = name }));
+                            try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), field);
                         },
                         // A nested record or array pattern binds below the
                         // first level, which P2 does not follow.
@@ -1274,6 +1911,7 @@ pub const FlowInterp = struct {
             return;
         };
         self.noteVisited(tag);
+        try self.tick(node, tag);
         switch (tag) {
             .block => {
                 const b = self.ir_view.getBlock(node) orelse {
@@ -1328,6 +1966,9 @@ pub const FlowInterp = struct {
                     try self.eval(expr, st)
                 else
                     Value.clean;
+                // A call in the expression that never returns leaves nothing
+                // to return.
+                if (!st.reachable) return;
                 try self.completions.append(self.mem(), .{ .kind = .returned, .value = v, .state = st.* });
                 st.* = State.bottom;
             },
@@ -1337,6 +1978,7 @@ pub const FlowInterp = struct {
                     return;
                 };
                 _ = try self.eval(s.condition, st);
+                if (!st.reachable) return;
                 // The assert held on the path that continues, so the original
                 // state goes on. The failure is a completion of its own.
                 var failed = try cloneState(self.mem(), st.*);
@@ -1344,6 +1986,7 @@ pub const FlowInterp = struct {
                     try self.completions.append(self.mem(), .{ .kind = .halt, .value = Value.clean, .state = failed });
                 } else {
                     const message = try self.eval(s.error_expr, &failed);
+                    if (!failed.reachable) return;
                     try self.completions.append(self.mem(), .{ .kind = .assert_message, .value = message, .state = failed });
                 }
             },
@@ -1501,8 +2144,9 @@ pub const FlowInterp = struct {
         st.* = exit;
     }
 
-    /// A strong update of a declared binding. Only function-local bindings
-    /// live in `env`; a declaration of any other kind belongs to module state.
+    /// A strong update of a declared binding, or a weak write to its capture
+    /// cell when a closure captures it. Only function-local bindings are
+    /// stored; a declaration of any other kind belongs to module state.
     fn bindDeclared(
         self: *FlowInterp,
         st: *State,
@@ -1512,7 +2156,7 @@ pub const FlowInterp = struct {
         tag: NodeTag,
     ) Error!void {
         switch (binding.kind) {
-            .local, .argument => try st.env.put(self.mem(), packBindingKey(binding.scope_id, binding.slot), v),
+            .local, .argument => try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), v),
             .upvalue, .global, .undeclared_global => try self.record(node, tag, .p8),
         }
     }
@@ -1533,9 +2177,16 @@ const Harness = struct {
     allocator: std.mem.Allocator,
     parser: JsParser,
     atoms: atom_table.AtomTable,
+    captures: ?CaptureTable,
     interp: FlowInterp,
 
     fn create(allocator: std.mem.Allocator, source: []const u8) !*Harness {
+        return createWith(allocator, source, true);
+    }
+
+    /// With `place_captures` false the evaluator gets no capture table, as a
+    /// caller that has not wired the parser's scope analysis would.
+    fn createWith(allocator: std.mem.Allocator, source: []const u8, place_captures: bool) !*Harness {
         const h = try allocator.create(Harness);
         errdefer allocator.destroy(h);
         h.allocator = allocator;
@@ -1545,14 +2196,18 @@ const Harness = struct {
         errdefer h.parser.deinit();
         h.parser.setAtomTable(&h.atoms);
         _ = try h.parser.parse();
+        h.captures = if (place_captures) try CaptureTable.init(allocator, &h.parser.scopes) else null;
+        errdefer if (h.captures) |*table| table.deinit();
         const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
         h.interp = FlowInterp.init(allocator, view, &h.atoms);
+        if (h.captures) |*table| h.interp.captures = table;
         return h;
     }
 
     fn destroy(h: *Harness) void {
         const allocator = h.allocator;
         h.interp.deinit();
+        if (h.captures) |*table| table.deinit();
         h.parser.deinit();
         h.atoms.deinit();
         allocator.destroy(h);
@@ -1880,6 +2535,32 @@ test "a function declaration binds in statement order" {
     try testing.expect(before.result.cleared);
     try testing.expect(before.result.returned.?.labels.unknown);
     try testing.expectEqual(NodeTag.identifier, before.result.unresolved[0].tag);
+    // The parser resolves a name only to an earlier declaration, so the read of
+    // `g` is a read of a module-level name, which P8 owns.
+    try testing.expectEqual(Owner.p8, before.result.unresolved[0].owner);
+}
+
+test "a local read with no declaration behind it is unresolved" {
+    var store = ir.IRStore.init(testing.allocator);
+    defer store.deinit();
+    var constants = ir.ConstantPool.init(testing.allocator);
+    defer constants.deinit();
+    const binding: ir.BindingRef = .{ .scope_id = 3, .slot = 1, .name_atom = 0, .kind = .local };
+    const node = try store.addIdentifier(.{ .line = 1, .column = 1, .offset = 0 }, binding);
+    var interp = FlowInterp.init(testing.allocator, IrView.fromIRStore(&store, &constants), null);
+    defer interp.deinit();
+
+    var st: State = .{};
+    const unseen = try interp.eval(node, &st);
+    try testing.expect(unseen.labels.unknown);
+    try expectUnresolved(try interp.finish(st), .identifier, .read_before_declaration);
+
+    // The contrast: a binding that a declaration stored reads as stored.
+    var declared: State = .{};
+    try declared.env.put(interp.mem(), packBindingKey(3, 1), Value.clean);
+    const seen = try interp.eval(node, &declared);
+    try testing.expect(seen.labels.isEmpty());
+    try testing.expectEqual(@as(usize, 0), interp.unresolved_list.items.len);
 }
 
 fn expectUnresolved(result: FunctionResult, tag: NodeTag, owner: Owner) !void {
@@ -1891,18 +2572,23 @@ fn expectUnresolved(result: FunctionResult, tag: NodeTag, owner: Owner) !void {
 }
 
 test "a call, an upvalue read, and a nested pattern clear the result with their owner" {
+    // A callee with no function in it is the runtime's `NotCallable` or a
+    // builtin, which P5 decides.
     const call = try analyzeSource("function f(g) { return g(1); }", "f", &.{Value.clean});
     defer call.deinit();
-    try expectUnresolved(call.result, .call, .p4);
+    try expectUnresolved(call.result, .call, .p5);
     try testing.expect(call.result.returned.?.labels.unknown);
 
-    const upvalue = try analyzeSource(
-        "function outer() { const k = 1; function inner() { return k; } return inner; }",
-        "inner",
-        &.{},
-    );
+    // Without a capture table no closure read has a cell to read.
+    const closure = "function outer() { const k = 1; function inner() { return k; } return inner; }";
+    const unplaced = try Harness.createWith(testing.allocator, closure, false);
+    defer unplaced.destroy();
+    try expectUnresolved(try unplaced.analyze("inner", &.{}), .identifier, .capture_unplaced);
+
+    // With one, the analyzed function is a root whose captures nothing seeded.
+    const upvalue = try analyzeSource(closure, "inner", &.{});
     defer upvalue.deinit();
-    try expectUnresolved(upvalue.result, .identifier, .p4);
+    try expectUnresolved(upvalue.result, .function_decl, .capture_unseeded);
 
     const nested = try analyzeSource(
         "function f(x) { return match (x) { when { a: { b: v } }: v default: 0 }; }",
@@ -1912,10 +2598,14 @@ test "a call, an upvalue read, and a nested pattern clear the result with their 
     defer nested.deinit();
     try expectUnresolved(nested.result, .match_pattern, .p6);
 
-    // The contrast: the same shapes without the construct stay resolved.
+    // The contrast: the same shapes without the construct stay resolved, and
+    // the whole of `outer` creates the capture it reads.
     const plain = try analyzeSource("function f(x) { return x; }", "f", &.{Value.clean});
     defer plain.deinit();
     try testing.expect(!plain.result.cleared);
+    const whole = try analyzeSource(closure, "outer", &.{});
+    defer whole.deinit();
+    try testing.expect(!whole.result.cleared);
 }
 
 test "match arms join and a record pattern binding reads its own field" {
@@ -2289,6 +2979,600 @@ test "state equality ignores insertion order and tells bottom from a reachable s
     try testing.expect(!stateEql(State.bottom, State{}));
 }
 
+// --- calls and captures (P4) ---
+//
+// These sources are internal evaluator fixtures. `s` is seeded secret and any
+// other parameter clean, unless a test says otherwise. Each test has a clean
+// contrast in which a literal replaces the secret.
+
+const c_secret = [_]Value{ Value.clean, secret_value };
+
+test "a local call returns the callee's value" {
+    try expectSecret("function f(s) { function id(x) { return x; } return id(s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { function id(x) { return x; } return id(\"c\"); }", &.{secret_value}, false);
+}
+
+test "a call joins every return of the callee" {
+    try expectSecret(
+        "function f(c, s) { function g(c) { if (c) { return \"c\"; } return s; } return g(c); }",
+        &c_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(c, s) { function g(c) { if (c) { return \"c\"; } return \"d\"; } return g(c); }",
+        &c_secret,
+        false,
+    );
+    // The first return alone would be clean, and so would the last alone.
+    try expectSecret(
+        "function f(c, s) { function g(c) { if (c) { return s; } return \"c\"; } return g(c); }",
+        &c_secret,
+        true,
+    );
+}
+
+test "a callee's write through its argument reaches the caller's object" {
+    try expectSecret(
+        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = s; return 0; } w(o); return o.x; }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = \"d\"; return 0; } w(o); return o.x; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a callee that never returns leaves no returned value and an unreachable exit" {
+    const r = try analyzeSource(
+        "function f(s) { function spin() { return spin(); } spin(); return s; }",
+        "f",
+        &.{secret_value},
+    );
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expect(r.result.returned == null);
+    try testing.expect(!r.result.exit.reachable);
+    try testing.expectEqual(@as(usize, 0), r.result.completions.len);
+
+    // The contrast: a callee that returns lets the caller go on.
+    try expectSecret("function f(s) { function spin() { return 1; } spin(); return s; }", &.{secret_value}, true);
+
+    // A `return` whose own expression holds the call returns nothing either.
+    const inline_call = try analyzeSource(
+        "function f(s) { function spin() { return spin(); } return spin() + s; }",
+        "f",
+        &.{secret_value},
+    );
+    defer inline_call.deinit();
+    try testing.expect(!inline_call.result.cleared);
+    try testing.expect(inline_call.result.returned == null);
+    try testing.expectEqual(@as(usize, 0), inline_call.result.completions.len);
+}
+
+test "a callee that falls off its end returns to the caller" {
+    try expectSecret(
+        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = s; } w(o); return o.x; }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { const o = { x: \"c\" }; function w(t) { t.x = \"d\"; } w(o); return o.x; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a helper assert returns its message to the caller and not to the root" {
+    try expectSecret("function f(c, s) { function g() { assert c, s; return \"c\"; } return g(); }", &c_secret, true);
+    try expectSecret("function f(c, s) { function g() { assert c, \"m\"; return \"c\"; } return g(); }", &c_secret, false);
+
+    // The root's own completions do not include the helper's failed assert.
+    const helper_only = try analyzeSource(
+        "function f(c, s) { function g() { assert c, s; return \"c\"; } g(); return \"ok\"; }",
+        "f",
+        &c_secret,
+    );
+    defer helper_only.deinit();
+    try testing.expect(!helper_only.result.cleared);
+    try testing.expect(helper_only.returnedLabels().isEmpty());
+    try testing.expectEqual(@as(usize, 1), helper_only.result.completions.len);
+
+    // A bare assert in a helper returns `undefined`, which is clean.
+    try expectSecret("function f(c, s) { function g() { assert c; return s; } return g(); }", &c_secret, true);
+    try expectSecret("function f(c, s) { function g() { assert c; return \"c\"; } return g(); }", &c_secret, false);
+}
+
+test "a callable set runs every function in both node orders" {
+    try expectSecret(
+        "function f(c, s) { const a = () => \"c\"; const b = () => s; return (c ? a : b)(); }",
+        &c_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(c, s) { const b = () => s; const a = () => \"c\"; return (c ? a : b)(); }",
+        &c_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(c, s) { const a = () => \"c\"; const b = () => \"d\"; return (c ? a : b)(); }",
+        &c_secret,
+        false,
+    );
+}
+
+test "a capture written after the closure is read through the cell" {
+    try expectSecret("function f(s) { let r = \"c\"; const g = () => r; r = s; return g(); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { let r = \"c\"; const g = () => r; r = \"d\"; return g(); }", &.{secret_value}, false);
+}
+
+test "a closure writes the owner's binding" {
+    try expectSecret(
+        "function f(s) { let r = \"c\"; const w = () => { r = s; return 1; }; w(); return r; }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { let r = \"c\"; const w = () => { r = \"d\"; return 1; }; w(); return r; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "two activations of a captured const share one weak cell" {
+    try expectSecret(
+        "function f(s) { function mk(v) { const x = v; return () => x; } const a = mk(s); const b = mk(\"c\"); return a(); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { function mk(v) { const x = v; return () => x; } const a = mk(\"d\"); const b = mk(\"c\"); return a(); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "two activations of a captured parameter share one weak cell" {
+    try expectSecret(
+        "function f(s) { function mk(v) { return () => v; } const a = mk(s); mk(\"c\"); return a(); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { function mk(v) { return () => v; } const a = mk(\"d\"); mk(\"c\"); return a(); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a captured match binding lives in its cell" {
+    try expectSecret(
+        "function f(s) { return match ({ text: s }) { when { text }: (() => text)() default: \"c\" }; }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { return match ({ text: \"d\" }) { when { text }: (() => text)() default: \"c\" }; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a captured loop variable is read by a later activation's loop" {
+    const carried = "function f(s) { let first = () => \"c\"; let seen = \"c\"; function mk(xs) { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; } first = mk([s]); mk([\"c\"]); return seen; }";
+    const clean = "function f(s) { let first = () => \"c\"; let seen = \"c\"; function mk(xs) { let last = () => \"c\"; for (const v of xs) { seen = first(); last = () => v; } return last; } first = mk([\"d\"]); mk([\"c\"]); return seen; }";
+    try expectSecret(carried, &.{secret_value}, true);
+    try expectSecret(clean, &.{secret_value}, false);
+}
+
+test "a capture follows the parser's binding, not the name" {
+    // The parser binds a read to the first declaration of a name.
+    try expectSecret("function f(s) { let x = s; let x = \"c\"; return (() => x)(); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { let x = \"c\"; let x = s; return (() => x)(); }", &.{secret_value}, false);
+
+    // An unbraced conditional declaration is a second binding of `x` in the
+    // function scope. The closure reads the first, which holds "c", so the
+    // secret written to the second never reaches it. A scan by name would join
+    // the two.
+    try expectSecret(
+        "function f(c, s) { let x = \"c\"; if (c) let x = s; return (() => x)(); }",
+        &c_secret,
+        false,
+    );
+    try expectSecret(
+        "function f(c, s) { let x = s; if (c) let x = \"c\"; return (() => x)(); }",
+        &c_secret,
+        true,
+    );
+}
+
+test "a module-level function resolves only when it is the single fixed declaration" {
+    const definition = "function help(x) { return x; } ";
+    try expectSecret(definition ++ "function f(s) { return help(s); }", &.{secret_value}, true);
+    try expectSecret(definition ++ "function f(s) { return help(\"c\"); }", &.{secret_value}, false);
+    // A forward read is an undeclared global when it is parsed.
+    try expectSecret("function f(s) { return help(s); } " ++ definition, &.{secret_value}, true);
+    try expectSecret("const help = (x) => x; function f(s) { return help(s); }", &.{secret_value}, true);
+    try expectSecret("export function help(x) { return x; } function f(s) { return help(s); }", &.{secret_value}, true);
+
+    // A second declaration of the name replaces the first at runtime.
+    const second = try analyzeSource(
+        definition ++ "let help = (x) => \"c\"; function f(s) { return help(s); }",
+        "f",
+        &.{secret_value},
+    );
+    defer second.deinit();
+    try expectUnresolved(second.result, .identifier, .p8);
+
+    // An assignment in another function may replace it.
+    const assigned = try analyzeSource(
+        definition ++ "function g() { help = (x) => \"c\"; return 0; } function f(s) { return help(s); }",
+        "f",
+        &.{secret_value},
+    );
+    defer assigned.deinit();
+    try expectUnresolved(assigned.result, .identifier, .p8);
+
+    // An unbraced declaration under an `if` runs only when the condition holds.
+    const conditional = try analyzeSource(
+        "if (false) function help(x) { return \"c\"; } function f(s) { return help(s); }",
+        "f",
+        &.{secret_value},
+    );
+    defer conditional.deinit();
+    try expectUnresolved(conditional.result, .identifier, .p8);
+
+    // A `let` arrow is not a fixed function.
+    const mutable = try analyzeSource("let help = (x) => x; function f(s) { return help(s); }", "f", &.{secret_value});
+    defer mutable.deinit();
+    try expectUnresolved(mutable.result, .identifier, .p8);
+}
+
+test "a recursive call feeds its arguments into the entry" {
+    const source = "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, s); } return r(false, \"c\"); }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(
+        "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, \"d\"); } return r(false, \"c\"); }",
+        &.{secret_value},
+        false,
+    );
+    // The entry keeps the first call's input: a recursive call that passes a
+    // clean value does not replace the secret the first call passed.
+    try expectSecret(
+        "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, \"c\"); } return r(false, s); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, \"c\"); } return r(false, \"d\"); }",
+        &.{secret_value},
+        false,
+    );
+    // The same when the result of the recursive call is not returned, so the
+    // earlier summary cannot carry the first call's input to the last pass.
+    try expectSecret(
+        "function f(s) { function r(n, acc) { if (n) { return acc; } r(true, \"c\"); return acc; } return r(false, s); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { function r(n, acc) { if (n) { return acc; } r(true, \"c\"); return acc; } return r(false, \"d\"); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+// The write sits in the branch that the recursive call does not take, so only
+// the summary's heap shows it after the call. Three places hold the written
+// value: a seeded unnamed origin, a local object, and a captured binding.
+test "a recursive call returns the summary's write through a seeded parameter" {
+    const origins_top: Value = .{ .origins_top = true };
+    try expectSecret(
+        "function f(p, s) { function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(p, false, \"c\", s); }",
+        &.{ origins_top, secret_value },
+        true,
+    );
+    try expectSecret(
+        "function f(p, s) { function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(p, false, \"c\", \"d\"); }",
+        &.{ origins_top, secret_value },
+        false,
+    );
+}
+
+test "a recursive call returns the summary's write through a local object" {
+    try expectSecret(
+        "function f(s) { const o = { out: \"c\" }; function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(o, false, \"c\", s); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { const o = { out: \"c\" }; function r(p, n, x, y) { if (n) { p.out = x; return 0; } r(p, true, y, y); return p.out; } return r(o, false, \"c\", \"d\"); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a recursive call returns the summary's write through a captured binding" {
+    try expectSecret(
+        "function f(s) { let out = \"c\"; function r(n, x, y) { if (n) { out = x; return 0; } r(true, y, y); return out; } return r(false, \"c\", s); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { let out = \"c\"; function r(n, x, y) { if (n) { out = x; return 0; } r(true, y, y); return out; } return r(false, \"c\", \"d\"); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a capture written in one recursive pass is read in a later one" {
+    try expectSecret(
+        "function f(s) { let r = \"c\"; function rec(n) { const out = r; if (n) { return out; } r = s; return rec(true); } return rec(false); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { let r = \"c\"; function rec(n) { const out = r; if (n) { return out; } r = \"d\"; return rec(true); } return rec(false); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "mutual recursion through a captured binding converges" {
+    try expectSecret(
+        "function f(s) { let b; function a(n, x) { if (n) { return x; } return b(true, s); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { let b; function a(n, x) { if (n) { return x; } return b(true, \"d\"); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "recursion through a callable set converges" {
+    try expectSecret(
+        "function f(c, s) { let g = (n, x) => \"c\"; function a(n, x) { if (n) { return x; } return g(true, s); } g = c ? a : g; return g(false, \"c\"); }",
+        &c_secret,
+        true,
+    );
+    try expectSecret(
+        "function f(c, s) { let g = (n, x) => \"c\"; function a(n, x) { if (n) { return x; } return g(true, \"d\"); } g = c ? a : g; return g(false, \"c\"); }",
+        &c_secret,
+        false,
+    );
+}
+
+test "recursion inside a loop with break and continue after it" {
+    try expectSecret(
+        "function f(s) { function r(n, x) { if (n) { return x; } return r(true, s); } let out = \"c\"; for (const v of [false, true]) { out = r(false, \"c\"); if (v) { break; } continue; } return out; }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { function r(n, x) { if (n) { return x; } return r(true, \"d\"); } let out = \"c\"; for (const v of [false, true]) { out = r(false, \"c\"); if (v) { break; } continue; } return out; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+test "a labelled callee labels the call's value" {
+    try expectSecret("function f(s) { const a = () => \"c\"; const g = s || a; return g(); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = () => \"c\"; const g = \"d\" || a; return g(); }", &.{secret_value}, false);
+}
+
+test "a known callable joined with an unknown one is an unknown callee" {
+    const source = "function f(c, g) { const h = c ? (() => \"c\") : g; return h(); }";
+    const unknown = try analyzeSource(source, "f", &.{ Value.clean, Value.top });
+    defer unknown.deinit();
+    try expectUnresolved(unknown.result, .call, .unknown_callee);
+
+    // The contrast: the same join with a known function resolves.
+    try expectSecret(
+        "function f(c, g) { const k = () => \"d\"; const h = c ? (() => \"c\") : k; return h(); }",
+        &.{ Value.clean, Value.clean },
+        false,
+    );
+}
+
+test "a call through a property is P5's" {
+    const array_method = try analyzeSource(
+        "function f(s) { const a = [() => \"c\"]; return a.map(() => s)[0]; }",
+        "f",
+        &.{secret_value},
+    );
+    defer array_method.deinit();
+    try expectUnresolved(array_method.result, .call, .p5);
+
+    const object_method = try analyzeSource(
+        "function f(s) { const o = { m: () => \"c\" }; return o.m(); }",
+        "f",
+        &.{secret_value},
+    );
+    defer object_method.deinit();
+    try expectUnresolved(object_method.result, .call, .p5);
+
+    const computed = try analyzeSource(
+        "function f(s) { const o = { m: () => \"c\" }; return o[\"m\"](); }",
+        "f",
+        &.{secret_value},
+    );
+    defer computed.deinit();
+    try expectUnresolved(computed.result, .call, .p5);
+
+    // The contrast: the same function called through a name resolves.
+    try expectSecret("function f(s) { const m = () => \"c\"; return m(); }", &.{secret_value}, false);
+}
+
+test "a method read into a variable is an unknown callee" {
+    const extracted = try analyzeSource(
+        "function f(c, s) { const x = c ? { slice: () => \"c\" } : s; const g = x.slice; return g(); }",
+        "f",
+        &c_secret,
+    );
+    defer extracted.deinit();
+    try expectUnresolved(extracted.result, .call, .unknown_callee);
+
+    // The contrast: a function held in a variable resolves.
+    try expectSecret(
+        "function f(c, s) { const x = c ? () => \"c\" : () => \"d\"; const g = x; return g(); }",
+        &c_secret,
+        false,
+    );
+}
+
+test "a call with no callable is P5's" {
+    const empty = try analyzeSource("function f(x) { return x(1); }", "f", &.{Value.clean});
+    defer empty.deinit();
+    try expectUnresolved(empty.result, .call, .p5);
+
+    try expectSecret("function f(x) { function id(y) { return y; } return id(1); }", &.{Value.clean}, false);
+}
+
+test "call-site spread is refused by the strict checker" {
+    const spread = try analyzeSource("function f(g, xs) { return g(...xs); }", "f", &.{ Value.clean, Value.clean });
+    defer spread.deinit();
+    try expectUnresolved(spread.result, .spread, .refused_by_strict);
+
+    // The same call with a local callee is refused too, and a plain argument
+    // to that callee is not.
+    const local = try analyzeSource(
+        "function f(xs) { function id(y) { return y; } return id(...xs); }",
+        "f",
+        &.{Value.clean},
+    );
+    defer local.deinit();
+    try expectUnresolved(local.result, .spread, .refused_by_strict);
+    try expectSecret("function f(xs) { function id(y) { return y; } return id(xs); }", &.{Value.clean}, false);
+}
+
+test "a nested root seeds the cells of the bindings it captures with top" {
+    const source = "function outer(s) { function inner(c) { if (c) { s = \"c\"; } return s; } return inner; }";
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    const result = try h.analyze("inner", &.{Value.clean});
+    try expectUnresolved(result, .function_decl, .capture_unseeded);
+    try testing.expect(result.returned.?.labels.unknown);
+
+    // The record is made once, however many captures the root has.
+    var seeded: usize = 0;
+    for (result.unresolved) |entry| {
+        if (entry.owner == .capture_unseeded) seeded += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), seeded);
+
+    // The contrast: the function that declares the capture seeds it itself.
+    const whole = try h.analyze("outer", &.{secret_value});
+    try testing.expect(!whole.cleared);
+}
+
+test "the step budget is per root and fails closed" {
+    const source = "function id(x) { return x; } function f(s) { let r = \"c\"; for (const v of [s, s]) { r = id(v); r = id(r); } return r; } function g(s) { return id(s); }";
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+
+    const whole = try h.analyze("f", &.{secret_value});
+    try testing.expect(!whole.cleared);
+    try testing.expect(whole.returned.?.labels.secret);
+    const needed = h.interp.steps;
+    try testing.expect(needed > 0);
+
+    h.interp.max_steps = needed - 1;
+    const starved = try h.analyze("f", &.{secret_value});
+    try testing.expect(starved.cleared);
+    var budget_entries: usize = 0;
+    for (starved.unresolved) |entry| {
+        if (entry.owner == .budget_limit) budget_entries += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), budget_entries);
+    try testing.expect(starved.returned.?.labels.unknown);
+    try testing.expectEqual(@as(usize, 0), starved.completions.len);
+
+    // The counter restarts with the next root, and the smaller root fits.
+    const small = try h.analyze("g", &.{secret_value});
+    try testing.expect(!small.cleared);
+    try testing.expect(valueEql(small.returned.?, secret_value));
+    try testing.expect(h.interp.steps < needed - 1);
+
+    // The limit itself is enough.
+    h.interp.max_steps = needed;
+    const exact = try h.analyze("f", &.{secret_value});
+    try testing.expect(!exact.cleared);
+}
+
+test "calls that double at every level exhaust the default budget and fail closed" {
+    const levels = 24;
+    const source = comptime blk: {
+        var text: []const u8 = "function f(s) { function g0(x) { return x; } ";
+        for (1..levels) |i| {
+            text = text ++ std.fmt.comptimePrint("function g{d}(x) {{ return g{d}(x) + g{d}(x); }} ", .{ i, i - 1, i - 1 });
+        }
+        break :blk text ++ std.fmt.comptimePrint("return g{d}(s); }}", .{levels - 1});
+    };
+    const r = try analyzeSource(source, "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(r.result.cleared);
+    try testing.expect(r.harness.interp.steps > default_max_steps);
+    var budget_entries: usize = 0;
+    for (r.result.unresolved) |entry| {
+        if (entry.owner == .budget_limit) budget_entries += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), budget_entries);
+}
+
+test "the recursion cap clears the result and convergence beats the cap" {
+    const source = "function f(s) { function r(n, acc) { if (n) { return acc; } return r(true, s); } return r(false, \"c\"); }";
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    const roomy = try h.analyze("f", &.{secret_value});
+    try testing.expect(!roomy.cleared);
+    try testing.expect(roomy.returned.?.labels.secret);
+    const passes = h.interp.recursion_passes_peak;
+    try testing.expect(passes >= 2);
+
+    const capped = try Harness.create(testing.allocator, source);
+    defer capped.destroy();
+    capped.interp.max_recursion_passes = 1;
+    try expectUnresolved(try capped.analyze("f", &.{secret_value}), .function_expr, .fixpoint_limit);
+
+    // A cap below 1 is treated as 1.
+    const zero = try Harness.create(testing.allocator, source);
+    defer zero.destroy();
+    zero.interp.max_recursion_passes = 0;
+    try expectUnresolved(try zero.analyze("f", &.{secret_value}), .function_expr, .fixpoint_limit);
+
+    const short = try Harness.create(testing.allocator, source);
+    defer short.destroy();
+    short.interp.max_recursion_passes = passes - 1;
+    try expectUnresolved(try short.analyze("f", &.{secret_value}), .function_expr, .fixpoint_limit);
+
+    // Convergence on the last permitted pass is convergence.
+    const exact = try Harness.create(testing.allocator, source);
+    defer exact.destroy();
+    exact.interp.max_recursion_passes = passes;
+    const converged = try exact.analyze("f", &.{secret_value});
+    try testing.expect(!converged.cleared);
+    try testing.expect(converged.returned.?.labels.secret);
+}
+
+test "a capture cell is not an object and a read through an unnamed origin skips it" {
+    // `p` stands for any object. The captured `r` holds the secret, and a
+    // read of `p.x` must not see it: no value points at a capture cell.
+    const origins_top: Value = .{ .origins_top = true };
+    try expectSecret(
+        "function f(p, s) { let r = s; const g = () => r; return p.x; }",
+        &.{ origins_top, secret_value },
+        false,
+    );
+    try expectSecret(
+        "function f(p, s) { let r = s; const g = () => r; return g(); }",
+        &.{ origins_top, secret_value },
+        true,
+    );
+}
+
 // --- the tag census ---
 
 /// What a corpus run saw: which tags reached an evaluator, and which tags
@@ -2319,6 +3603,12 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { return match (p) { when { kind: \"a\", text }: text when \"x\": q when string: q default: 0 }; }",
     "function f(p, q) { p; return; }",
     "function f(p, q) { let r = p; for (const v of q) { if (v) { r = v; break; } if (r) { continue; } r = q; } return r; }",
+    // Calls: a local callee, a captured binding read and written through a
+    // closure, recursion, a callable set, and a module-level function.
+    "function f(p, q) { function id(x) { return x; } const g = (a) => id(a); let r = p; const w = () => { r = q; return r; }; return g(w()); }",
+    "function f(p, q) { function rec(n) { if (n) { return 1; } return rec(true); } return rec(p); }",
+    "function f(p, q) { const a = () => p; const b = () => q; return (p ? a : b)(); }",
+    "function help(x) { return x; } function f(p, q) { return help(p); }",
 };
 
 /// Sources that hold a construct a later phase owns.
@@ -2363,7 +3653,6 @@ test "tagPlan agrees with eval and exec for every tag" {
         const plan = tagPlan(tag);
         const index = @intFromEnum(tag);
         if (plan != .handled and census.unresolved[index] == 0) {
-            if (tag == .call) return error.CallNeedsACorpusSource;
             var store = ir.IRStore.init(testing.allocator);
             defer store.deinit();
             var constants = ir.ConstantPool.init(testing.allocator);
@@ -2385,6 +3674,7 @@ test "tagPlan agrees with eval and exec for every tag" {
     var handled: usize = 0;
     var later: usize = 0;
     var refused: usize = 0;
+    var refused_strict: usize = 0;
     var not_produced: usize = 0;
     var by_phase = [_]usize{0} ** @typeInfo(Phase).@"enum".fields.len;
     inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
@@ -2409,24 +3699,27 @@ test "tagPlan agrees with eval and exec for every tag" {
                 refused += 1;
                 try testing.expect(census.unresolved[index] > 0);
             },
+            .refused_by_strict => {
+                refused_strict += 1;
+                try testing.expect(census.unresolved[index] > 0);
+            },
             .not_produced => {
                 not_produced += 1;
                 try testing.expect(census.unresolved[index] > 0);
             },
         }
     }
-    try testing.expectEqual(tag_count, handled + later + refused + not_produced);
-    try testing.expect(handled > 0 and later > 0 and refused > 0 and not_produced > 0);
-    // After P3 only the call-shaped tags and the array pattern are left.
-    try testing.expectEqual(@as(usize, 3), later);
-    inline for (.{ NodeTag.call, NodeTag.spread, NodeTag.array_pattern }) |tag| {
-        try testing.expect(tagPlan(tag) == .later);
-    }
-    inline for (.{ NodeTag.for_of_stmt, NodeTag.break_stmt, NodeTag.continue_stmt }) |tag| {
+    try testing.expectEqual(tag_count, handled + later + refused + refused_strict + not_produced);
+    try testing.expect(handled > 0 and later > 0 and refused > 0 and refused_strict > 0 and not_produced > 0);
+    // After P4 only the array pattern is left.
+    try testing.expectEqual(@as(usize, 1), later);
+    try testing.expect(tagPlan(.array_pattern) == .later);
+    try testing.expect(tagPlan(.spread) == .refused_by_strict);
+    inline for (.{ NodeTag.for_of_stmt, NodeTag.break_stmt, NodeTag.continue_stmt, NodeTag.call }) |tag| {
         try testing.expect(tagPlan(tag) == .handled);
     }
     std.debug.print(
-        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p4={d} p5={d} p6={d} p7={d} p8={d}) refused_by_parser={d} not_produced={d}\n",
-        .{ tag_count, handled, later, by_phase[0], by_phase[1], by_phase[2], by_phase[3], by_phase[4], refused, not_produced },
+        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p5={d} p6={d} p7={d} p8={d}) refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
+        .{ tag_count, handled, later, by_phase[0], by_phase[1], by_phase[2], by_phase[3], refused, refused_strict, not_produced },
     );
 }
