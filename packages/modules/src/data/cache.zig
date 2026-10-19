@@ -87,6 +87,11 @@ pub const binding = sdk.ModuleBinding{
             .required_arg_count = 2,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
             .laws = &.{.idempotent_call},
+            // The boolean says whether a separate `cacheSet` left an entry
+            // under this key, which this call holds no reference to. Same
+            // `.unknown` claim as `cacheGet`; `derives_from_args` would be a
+            // no-op for the reason given there.
+            .return_labels = .{ .internal = true, .unknown = true },
         },
         .{
             .name = "cacheIncr",
@@ -102,6 +107,10 @@ pub const binding = sdk.ModuleBinding{
             .param_names = &.{ "namespace", "key", "delta", "ttlSeconds" },
             .required_arg_count = 2,
             .contract_extractions = &.{.{ .category = .cache_namespace }},
+            // The number is the stored value parsed as an integer plus
+            // `delta`: `store.get` returns what a separate `cacheSet` wrote.
+            // Same `.unknown` claim as `cacheGet`.
+            .return_labels = .{ .internal = true, .unknown = true },
         },
         .{
             .name = "cacheStats",
@@ -117,6 +126,11 @@ pub const binding = sdk.ModuleBinding{
             .returns = .object,
             .param_types = &.{.string},
             .param_names = &.{"namespace"},
+            // The counters and the byte total are sums over entries that
+            // separate `cacheSet` calls wrote, so the byte total carries the
+            // length of every stored value. Same `.unknown` claim as
+            // `cacheGet`.
+            .return_labels = .{ .internal = true, .unknown = true },
         },
     },
 };

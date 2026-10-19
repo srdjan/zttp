@@ -75,8 +75,11 @@ pub const Severity = enum {
 /// constants, unresolved calls, recursion, cross-file helpers, and credential
 /// reads through a passed request were fixed. 3 prevents validation from one
 /// contributor laundering raw input in an aggregate or call result. 4 accounts
-/// for writes that can replace elements while an array callback runs.
-pub const flow_analyzer_version: u32 = 4;
+/// for writes that can replace elements while an array callback runs. 5 marks
+/// the results of cacheIncr, cacheStats, cacheDelete, rateReset, and sqlExec as
+/// unknown, and checks fetchWithRetry as an egress sink and Response.rawJson as
+/// a response helper.
+pub const flow_analyzer_version: u32 = 5;
 
 pub const DiagnosticKind = enum {
     secret_in_response, // {secret} data in Response body/headers
@@ -4137,7 +4140,10 @@ pub const FlowChecker = struct {
         if (self.ir_view.getTag(callee) != .identifier) return false;
         const binding = self.bindingAt(callee) orelse return false;
         const meta = self.moduleMeta(binding) orelse return false;
-        return std.mem.eql(u8, meta.func, "fetch");
+        // `fetchWithRetry(url, init, retry)` takes the same url and init as
+        // `fetch` and sends them the same way; the third argument only sets
+        // the retry policy and reaches no sink.
+        return std.mem.eql(u8, meta.func, "fetch") or std.mem.eql(u8, meta.func, "fetchWithRetry");
     }
 
     /// Apply the egress-URL and egress-body sink checks for a call with the URL
@@ -4531,7 +4537,7 @@ pub const FlowChecker = struct {
     }
 
     fn isResponseHelper(self: *const FlowChecker, callee: NodeIndex) bool {
-        return self.isGlobalMethodCall(callee, "Response", &.{ "json", "text", "html", "redirect" });
+        return self.isGlobalMethodCall(callee, "Response", &.{ "json", "text", "html", "redirect", "rawJson" });
     }
 
     fn isConsoleCall(self: *const FlowChecker, callee: NodeIndex) bool {
@@ -9995,6 +10001,70 @@ test "a sql row set read is not proven clean" {
         \\import { sqlMany } from "zttp:sql";
         \\function handler(req) {
         \\  return Response.json({ rows: sqlMany("listUsers") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a secret written to the cache and read back by cacheIncr is not proven clean" {
+    // The same shape as `cacheGet`: the number is the stored value parsed
+    // back, and the call holds no reference to what wrote it. The control
+    // above returns the secret directly and is refused, so a `false` here
+    // does not mean the harness refuses everything.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { cacheSet, cacheIncr } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", env("API_SECRET"));
+        \\  return Response.json({ v: cacheIncr("ns", "k", 0) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a secret written to the cache and probed by cacheDelete is not proven clean" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { cacheSet, cacheDelete } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", env("API_SECRET"));
+        \\  return Response.json({ v: cacheDelete("ns", "k") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a secret written to the cache and measured by cacheStats is not proven clean" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { cacheSet, cacheStats } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", env("API_SECRET"));
+        \\  return Response.json({ v: cacheStats("ns") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a rate-limit key reset result is not proven clean" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { rateCheck, rateReset } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  const seen = rateCheck(env("API_SECRET"), 10, 60);
+        \\  return Response.json({ v: rateReset("k") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a sql write result is not proven clean" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { sqlExec } from "zttp:sql";
+        \\function handler(req) {
+        \\  const saved = sqlExec("saveSecret", { v: env("API_SECRET") });
+        \\  return Response.json({ v: sqlExec("purge") });
         \\}
     ;
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));

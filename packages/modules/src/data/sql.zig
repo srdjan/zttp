@@ -106,6 +106,11 @@ pub const binding = sdk.ModuleBinding{
             .param_types = &.{ .string, .object },
             .param_names = &.{ "name", "params" },
             .required_arg_count = 1,
+            // `rowsAffected` and `lastInsertRowId` come from the database, so
+            // a statement that selects or filters on stored rows reports a
+            // count of values a separate `sqlExec` wrote. Same `.unknown`
+            // claim as `sqlOne`.
+            .return_labels = .{ .internal = true, .unknown = true },
         },
     },
 };

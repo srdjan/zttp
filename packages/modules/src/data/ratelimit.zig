@@ -48,6 +48,13 @@ pub const binding = sdk.ModuleBinding{
             .param_types = &.{.string},
             .param_names = &.{"key"},
             .effect = .write,
+            // `true` says an earlier `rateCheck` left a window under this key,
+            // so the answer reflects cross-call state that this call holds no
+            // reference to, keyed by a string a separate call supplied. The
+            // flow redesign plan P1 declares `.unknown`, which clears the flow
+            // properties. `rateCheck` is left unchanged and is classified
+            // under plan item R5.
+            .return_labels = .{ .internal = true, .unknown = true },
         },
     },
 };

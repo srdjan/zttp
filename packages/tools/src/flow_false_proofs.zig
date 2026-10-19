@@ -437,13 +437,6 @@ const false_proofs = [_][]const u8{
     "assert_message_secret_in_helper",
     "unescape_after_escape_html",
     "array_from_callback_logs_secret",
-    "cache_incr_reads_stored_secret",
-    "cache_delete_reads_stored_secret",
-    "cache_stats_reads_stored_secret",
-    "rate_reset_reads_secret_key_state",
-    "sql_exec_reads_stored_secret",
-    "fetch_with_retry_secret_in_url",
-    "fetch_with_retry_secret_in_body",
 };
 
 fn inFalseProofTable(name: []const u8) bool {

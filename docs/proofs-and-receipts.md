@@ -115,6 +115,10 @@ planned to close them.
 | A request taken back out of an array, for example `[req].pop()`, before its `authorization` header is read | `no_credential_leak` |
 | `Response.json(req.headers)`, which sends every request header, `Authorization` included | `no_credential_leak` |
 
+The `cacheIncr` row is fixed after v0.22.3. The same change also marks the
+results of `cacheDelete`, `cacheStats`, `rateReset`, and `sqlExec` as unknown.
+Each row has a permanent fixture in `packages/tools/src/flow_false_proofs.zig`.
+
 The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as
 proven.
