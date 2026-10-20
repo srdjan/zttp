@@ -158,6 +158,11 @@ An operation entitled to clear one named Data label, because performing it is wh
 
 The entitlement is per-label and never general. A Declassifier still carries every other label its input held: a validated secret is a secret, an escaped secret is a secret, and a recorded secret is a secret. Conflating "this operation clears a label" with "this operation clears the labels" is the recurring way a disclosure Property comes to be proven over a value that discloses.
 
+### Defense
+A fact beside a value's Data labels that records a sanitizer the request-derived part of the value passed, such as HTML escaping or schema validation, so that a Sink can accept request data that holds the defense it requires. A Defense never removes a label: escaped request text still came from the request.
+
+A Defense claims only what its sanitizer enforces. HTML escaping claims that every request character was escaped and none was turned back into markup; it does not claim which author characters request data selects through a position, a count, or an order. A wider claim needs one more rule for every selection channel and never converges, so the channels a Defense leaves out are stated limits beside implicit flow. A value assembled from parts keeps a Defense only when every request-derived part holds it, and an operation that makes or reinterprets characters removes it.
+
 ### Sink
 A position where a value leaves the program, such as a response body, a log, or an outbound request. Sinks are where Data labels are judged: a label arriving at a Sink is what costs a Property, and each Sink decides a different set of Properties, since a value reaching a log is not the same disclosure as one reaching a client.
 
