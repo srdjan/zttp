@@ -58,8 +58,12 @@ pub const WitnessConstraint = union(enum) {
     req_method_not: []const u8,
     req_url: []const u8,
     req_url_not: []const u8,
+    req_path: []const u8,
+    req_path_not: []const u8,
     stub_truthy: StubInfo,
     stub_falsy: StubInfo,
+    stub_present: StubInfo,
+    stub_absent: StubInfo,
     result_ok: StubInfo,
     result_not_ok: StubInfo,
     status_is: StatusTest,
@@ -73,8 +77,12 @@ pub fn negate(c: WitnessConstraint) ?WitnessConstraint {
         .req_method_not => |value| .{ .req_method = value },
         .req_url => |value| .{ .req_url_not = value },
         .req_url_not => |value| .{ .req_url = value },
+        .req_path => |value| .{ .req_path_not = value },
+        .req_path_not => |value| .{ .req_path = value },
         .stub_truthy => |info| .{ .stub_falsy = info },
         .stub_falsy => |info| .{ .stub_truthy = info },
+        .stub_present => |info| .{ .stub_absent = info },
+        .stub_absent => |info| .{ .stub_present = info },
         .result_ok => |info| .{ .result_not_ok = info },
         .result_not_ok => |info| .{ .result_ok = info },
         .status_is => |t| .{ .status_is = .{ .stub = t.stub, .comparison = t.comparison, .expect = !t.expect } },
@@ -234,7 +242,7 @@ pub fn solve(
     allocator: std.mem.Allocator,
     input: WitnessInput,
 ) error{OutOfMemory}!CounterexampleWitness {
-    const request = solveRequest(input.constraints);
+    const request = solveRequest(input.constraints, input.property == .no_credential_leakage);
     const io_stubs = try solveStubs(allocator, input.constraints, input.io_calls);
     return .{
         .property = input.property,
@@ -248,18 +256,30 @@ pub fn solve(
     };
 }
 
-fn solveRequest(constraints: []const WitnessConstraint) ConcreteRequest {
+fn solveRequest(constraints: []const WitnessConstraint, credential_input: bool) ConcreteRequest {
     var method: []const u8 = "GET";
     var url: []const u8 = "/";
-    var has_auth = false;
+    // An unconstrained credential leak can read Authorization directly,
+    // without a parseBearer call that would otherwise request this header.
+    var has_auth = credential_input;
+    var path: ?[]const u8 = null;
+    var url_constrained = false;
 
     for (constraints) |c| {
         switch (c) {
             .req_method => |m| method = m,
             .req_method_not => |m| method = alternateMethod(m),
-            .req_url => |u| url = u,
-            .req_url_not => |u| url = alternateUrl(u),
-            .stub_truthy => |info| {
+            .req_url => |u| {
+                url = u;
+                url_constrained = true;
+            },
+            .req_url_not => |u| {
+                url = alternateUrl(u);
+                url_constrained = true;
+            },
+            .req_path => |value| path = value,
+            .req_path_not => |value| path = alternateUrl(value),
+            .stub_truthy, .stub_present => |info| {
                 // The parseBearer import is the canonical signal that the
                 // handler expects an Authorization header. Any witness that
                 // needs parseBearer to return truthy must drive the request
@@ -269,6 +289,11 @@ fn solveRequest(constraints: []const WitnessConstraint) ConcreteRequest {
             else => {},
         }
     }
+    // A full URL is the stronger candidate spelling. The new flow evidence
+    // consumer rechecks every path predicate against its query-free path.
+    if (!url_constrained) if (path) |value| {
+        url = value;
+    };
 
     return .{
         .method = method,
@@ -293,14 +318,14 @@ fn solveStubs(
 
     for (constraints) |c| {
         switch (c) {
-            .stub_truthy => |info| try putStubOverride(
+            .stub_truthy, .stub_present => |info| try putStubOverride(
                 allocator,
                 &call_overrides,
                 &func_overrides,
                 info,
                 stubValue(info.returns, true),
             ),
-            .stub_falsy => |info| try putStubOverride(
+            .stub_falsy, .stub_absent => |info| try putStubOverride(
                 allocator,
                 &call_overrides,
                 &func_overrides,
@@ -536,6 +561,22 @@ test "solve produces default GET / request with no constraints" {
     try std.testing.expectEqualStrings("GET", witness.request.method);
     try std.testing.expectEqualStrings("/", witness.request.url);
     try std.testing.expect(!witness.request.has_auth_header);
+    try std.testing.expectEqual(@as(usize, 0), witness.io_stubs.len);
+}
+
+test "a credential witness supplies authorization without a bearer parser" {
+    const allocator = std.testing.allocator;
+    var witness = try solve(allocator, .{
+        .property = .no_credential_leakage,
+        .origin = .{ .line = 1, .column = 1 },
+        .sink = .{ .line = 2, .column = 1 },
+        .summary = "request authorization reaches the response",
+        .constraints = &.{.{ .req_method = "POST" }},
+        .io_calls = &.{},
+    });
+    defer witness.deinit(allocator);
+    try std.testing.expectEqualStrings("POST", witness.request.method);
+    try std.testing.expect(witness.request.has_auth_header);
     try std.testing.expectEqual(@as(usize, 0), witness.io_stubs.len);
 }
 

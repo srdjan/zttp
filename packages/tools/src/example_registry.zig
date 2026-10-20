@@ -498,8 +498,6 @@ pub const module_examples = [_]ModuleExample{
         \\  | "no_secret_leakage"
         \\  | "no_credential_leakage"
         \\  | "input_validated"
-        \\  | "pii_contained"
-        \\  | "injection_safe"
         \\  | "canonical"
         \\  | "cost_bounded"
         \\> {

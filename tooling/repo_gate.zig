@@ -4,6 +4,7 @@
 //! This command owns structured JSON and release-script validation.
 
 const std = @import("std");
+const script_routes = @import("script_routes.zig");
 
 const max_input_bytes = 16 * 1024 * 1024;
 
@@ -23,10 +24,10 @@ fn releaseMessage(failure: ReleaseFailure) []const u8 {
     return switch (failure) {
         error.MissingHostVerify => "release script: missing a `bash scripts/verify.sh --release` host gate",
         error.MissingContainerVerify => "release script: missing a `container run --arch arm64` line that runs `scripts/verify.sh --release`; Rosetta cannot run the gate",
-        error.InvalidBenchmarkStepCount => "release script: expected exactly one zig build bench-check line",
+        error.InvalidBenchmarkStepCount => "release script: expected exactly one bash scripts/verify.sh --release-route bench-check line",
         error.BenchmarkMustBeAdvisory => "release script: machine-local bench-check must be advisory (`||`)",
-        error.MissingSmokeGettingStarted => "release script: missing `zig build smoke-getting-started`",
-        error.MissingReleaseCheck => "release script: missing `zig build release-check`",
+        error.MissingSmokeGettingStarted => "release script: missing `bash scripts/verify.sh --release-route smoke-getting-started`",
+        error.MissingReleaseCheck => "release script: missing `bash scripts/verify.sh --release-route release-check`",
         error.MissingReleaseTarget => "release script: a release target (x86_64-linux-gnu, aarch64-linux-gnu, aarch64-macos-none) is missing",
         error.IntelMacosTarget => "release script: x86_64-macos-none must not be built; no Intel macOS binary is published",
         error.ReleaseNotDraft => "release script: every `gh release create` must create a draft (`--draft`)",
@@ -285,6 +286,11 @@ fn anyLineContains(lines: []const []const u8, needle: []const u8) bool {
     return false;
 }
 
+fn anyCommandStarts(lines: []const []const u8, command: []const u8) bool {
+    for (lines) |line| if (std.mem.startsWith(u8, std.mem.trimStart(u8, line, " \t"), command)) return true;
+    return false;
+}
+
 fn validateReleaseLines(lines: []const []const u8) ReleaseFailure!void {
     var host_verify = false;
     var container_verify = false;
@@ -294,11 +300,11 @@ fn validateReleaseLines(lines: []const []const u8) ReleaseFailure!void {
     var create_drafts: usize = 0;
     for (lines) |line| {
         const trimmed = std.mem.trimStart(u8, line, " \t");
-        if (std.mem.startsWith(u8, trimmed, "bash scripts/verify.sh --release")) host_verify = true;
+        if (std.mem.eql(u8, trimmed, "bash scripts/verify.sh --release")) host_verify = true;
         if (std.mem.find(u8, line, "container run") != null and
             std.mem.find(u8, line, "--arch arm64") != null and
             std.mem.find(u8, line, "scripts/verify.sh --release") != null) container_verify = true;
-        if (std.mem.find(u8, line, "zig build bench-check") != null) {
+        if (std.mem.startsWith(u8, trimmed, "bash scripts/verify.sh --release-route bench-check")) {
             bench_lines += 1;
             bench_advisory = std.mem.find(u8, line, "||") != null;
         }
@@ -311,8 +317,8 @@ fn validateReleaseLines(lines: []const []const u8) ReleaseFailure!void {
     if (!container_verify) return error.MissingContainerVerify;
     if (bench_lines != 1) return error.InvalidBenchmarkStepCount;
     if (!bench_advisory) return error.BenchmarkMustBeAdvisory;
-    if (!anyLineContains(lines, "zig build smoke-getting-started")) return error.MissingSmokeGettingStarted;
-    if (!anyLineContains(lines, "zig build release-check")) return error.MissingReleaseCheck;
+    if (!anyCommandStarts(lines, "bash scripts/verify.sh --release-route smoke-getting-started")) return error.MissingSmokeGettingStarted;
+    if (!anyCommandStarts(lines, "bash scripts/verify.sh --release-route release-check")) return error.MissingReleaseCheck;
     for ([_][]const u8{ "x86_64-linux-gnu", "aarch64-linux-gnu", "aarch64-macos-none" }) |target| {
         if (!anyLineContains(lines, target)) return error.MissingReleaseTarget;
     }
@@ -351,9 +357,9 @@ const positive_fixture =
     \\#!/usr/bin/env bash
     \\# A comment naming x86_64-macos-none is not a target.
     \\bash scripts/verify.sh --release
-    \\zig build smoke-getting-started
-    \\zig build bench-check || echo "warning: advisory bench-check missed"
-    \\zig build release-check -- --json
+    \\bash scripts/verify.sh --release-route smoke-getting-started
+    \\bash scripts/verify.sh --release-route bench-check || echo "warning: advisory bench-check missed"
+    \\bash scripts/verify.sh --release-route release-check
     \\targets=(
     \\  "x86_64-linux-gnu:linux:x86_64"
     \\  "aarch64-linux-gnu:linux:aarch64"
@@ -377,13 +383,14 @@ const negative_cases = [_]NegativeCase{
     .{ .name = "container verify only in a comment", .from = container_block, .to = "# container run --rm --arch arm64 bash -c \"bash scripts/verify.sh --release\"", .expected = error.MissingContainerVerify },
     .{ .name = "container verify under Rosetta", .from = "--arch arm64", .to = "--arch amd64 --rosetta", .expected = error.MissingContainerVerify },
     .{ .name = "container verify without the release flag", .from = "scripts/verify.sh --release\"", .to = "scripts/verify.sh\"", .expected = error.MissingContainerVerify },
-    .{ .name = "benchmark absent", .from = "zig build bench-check || echo \"warning: advisory bench-check missed\"\n", .to = "", .expected = error.InvalidBenchmarkStepCount },
-    .{ .name = "benchmark only in a comment", .from = "zig build bench-check ||", .to = "# zig build bench-check ||", .expected = error.InvalidBenchmarkStepCount },
-    .{ .name = "benchmark twice", .from = "zig build bench-check || echo \"warning: advisory bench-check missed\"\n", .to = "zig build bench-check || true\nzig build bench-check || true\n", .expected = error.InvalidBenchmarkStepCount },
+    .{ .name = "benchmark absent", .from = "bash scripts/verify.sh --release-route bench-check || echo \"warning: advisory bench-check missed\"\n", .to = "", .expected = error.InvalidBenchmarkStepCount },
+    .{ .name = "benchmark only in a comment", .from = "bash scripts/verify.sh --release-route bench-check ||", .to = "# bash scripts/verify.sh --release-route bench-check ||", .expected = error.InvalidBenchmarkStepCount },
+    .{ .name = "benchmark twice", .from = "bash scripts/verify.sh --release-route bench-check || echo \"warning: advisory bench-check missed\"\n", .to = "bash scripts/verify.sh --release-route bench-check || true\nbash scripts/verify.sh --release-route bench-check || true\n", .expected = error.InvalidBenchmarkStepCount },
     .{ .name = "benchmark blocks the release", .from = " || echo \"warning: advisory bench-check missed\"", .to = "", .expected = error.BenchmarkMustBeAdvisory },
-    .{ .name = "smoke absent", .from = "zig build smoke-getting-started\n", .to = "", .expected = error.MissingSmokeGettingStarted },
-    .{ .name = "smoke only in a comment", .from = "zig build smoke-getting-started\n", .to = "# zig build smoke-getting-started\n", .expected = error.MissingSmokeGettingStarted },
-    .{ .name = "release check absent", .from = "zig build release-check -- --json\n", .to = "", .expected = error.MissingReleaseCheck },
+    .{ .name = "smoke absent", .from = "bash scripts/verify.sh --release-route smoke-getting-started\n", .to = "", .expected = error.MissingSmokeGettingStarted },
+    .{ .name = "smoke only in a retained label", .from = "bash scripts/verify.sh --release-route smoke-getting-started\n", .to = "echo 'bash scripts/verify.sh --release-route smoke-getting-started'\n# bash scripts/verify.sh --release-route smoke-getting-started\n", .expected = error.MissingSmokeGettingStarted },
+    .{ .name = "smoke only in a comment", .from = "bash scripts/verify.sh --release-route smoke-getting-started\n", .to = "# bash scripts/verify.sh --release-route smoke-getting-started\n", .expected = error.MissingSmokeGettingStarted },
+    .{ .name = "release check absent", .from = "bash scripts/verify.sh --release-route release-check\n", .to = "", .expected = error.MissingReleaseCheck },
     .{ .name = "x86_64 linux target absent", .from = "x86_64-linux-gnu", .to = "x86_64-linux-musl", .expected = error.MissingReleaseTarget },
     .{ .name = "aarch64 linux target absent", .from = "aarch64-linux-gnu", .to = "aarch64-linux-musl", .expected = error.MissingReleaseTarget },
     .{ .name = "aarch64 macos target absent", .from = "aarch64-macos-none", .to = "aarch64-macos-gnu", .expected = error.MissingReleaseTarget },
@@ -439,7 +446,7 @@ fn runReleaseWorkflow(io: std.Io, allocator: std.mem.Allocator, path: []const u8
 
 fn writeStdout(io: std.Io, bytes: []const u8) !void {
     var buffer: [4096]u8 = undefined;
-    var writer = std.Io.File.stdout().writer(io, &buffer);
+    var writer = std.Io.File.stdout().writerStreaming(io, &buffer);
     try writer.interface.writeAll(bytes);
     try writer.interface.flush();
 }
@@ -465,6 +472,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
         allocator.free(args);
     }
     if (args.len < 2) usage();
+
+    if (std.mem.eql(u8, args[1], "script-reachability")) {
+        if (args.len != 5) usage();
+        const inventory = try readFile(io, allocator, args[2]);
+        defer allocator.free(inventory);
+        const routes = try readFile(io, allocator, args[3]);
+        defer allocator.free(routes);
+        const allow = try readFile(io, allocator, args[4]);
+        defer allocator.free(allow);
+        var report = try script_routes.audit(allocator, inventory, routes, allow);
+        defer report.deinit(allocator);
+        if (report.checked < 20 or routes.len == 0 or report.manual == 0)
+            std.process.fatal("script reachability: inventory, executable routes or manual declarations below floor", .{});
+        if (report.violations != 0)
+            std.process.fatal("script reachability: {d} problem(s)\n{s}", .{ report.violations, report.details.items });
+        std.debug.print("script reachability: OK ({d} scripts, {d} manual)\n", .{ report.checked, report.manual });
+        return;
+    }
 
     if (std.mem.eql(u8, args[1], "agent-envelope")) {
         if (args.len != 4) usage();
@@ -504,6 +529,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     usage();
+}
+
+test "script route rejection probes are collected" {
+    std.testing.refAllDecls(script_routes);
 }
 
 test "release script negative cases preserve each refusal and cover every rule" {

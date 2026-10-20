@@ -15,27 +15,60 @@ pub const EffectClass = enum {
     read,
     write,
     none,
+
+    pub fn toString(self: EffectClass) []const u8 {
+        return @tagName(self);
+    }
 };
 
 pub const ReturnKind = enum {
+    /// Plain value types - no caller-side check required
     boolean,
     number,
     string,
     object,
     undefined,
     unknown,
+
+    /// Optional types - verifier requires narrowing before use
     optional_string,
     optional_object,
-    /// `number | undefined`.
+    /// `number | undefined`. The shape `byteAt` answers with, and the only
+    /// optional the vocabulary was missing: declaring it `.unknown` would have
+    /// been the checker knowing less than spec 6.3 states.
     optional_number,
+
+    /// Result type ({ok, value, error}) - verifier requires .ok check
     result,
-    /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: the
-    /// binding surface cannot spell a module export's type parameters, so a
-    /// declared `dict` is `Dict<unknown, unknown>` to the checker.
+
+    /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: a binding
+    /// cannot spell an export's type parameters, so a declared `dict` reaches
+    /// the checker as `Dict<unknown, unknown>`.
     dict,
+
     /// `Bytes` (spec 6.3). Not coarse: `Bytes` takes no type parameters, so
     /// the kind names the type exactly.
     bytes,
+
+    /// Lowercase JS-facing type name for signature advertisement (e.g. in
+    /// `zts modules --json`). Maps the verifier-oriented tags onto the
+    /// shapes a handler author actually sees at the call site.
+    pub fn jsTypeName(self: ReturnKind) []const u8 {
+        return switch (self) {
+            .boolean => "boolean",
+            .number => "number",
+            .string => "string",
+            .object => "object",
+            .undefined => "undefined",
+            .unknown => "unknown",
+            .optional_string => "string?",
+            .optional_object => "object?",
+            .optional_number => "number?",
+            .result => "Result",
+            .dict => "Dict",
+            .bytes => "Bytes",
+        };
+    }
 };
 
 /// A signature spelled in source text, one entry per parameter plus the
@@ -85,9 +118,9 @@ pub const DataLabel = enum(u4) {
     unknown,
 };
 
-/// The provenance labels an extension can declare on a return value. Mirrors
-/// the analyzer's own set field for field; the adapter maps them across by name
-/// rather than by bit pattern, so the two widths need not agree.
+/// The provenance labels an extension can declare on a return value. The
+/// analyzer keeps additional private facts, so the adapter maps declared labels
+/// by name and never interprets this set's reserved bits as analyzer facts.
 ///
 /// `unknown` is the one label that is not a data-sensitivity class. It is the
 /// claim that provenance could not be followed, and the analyzer assigns it
@@ -205,10 +238,9 @@ pub const FunctionBinding = struct {
     /// the slot that takes a registered query name - which compiles, and fails
     /// at runtime. `sqlMany(name, params)` is the whole fix for that case.
     ///
-    /// Empty means undeclared, which `validateBindings` permits only while the
-    /// roster is being filled. When present the length must equal
-    /// `param_types`, so a parameter added without a name is a compile error
-    /// rather than a silently shortened list.
+    /// The length must equal `param_types`, so a parameter added without a
+    /// name is a compile error rather than a silently shortened list. Both
+    /// lists are empty only for a zero-parameter export.
     param_names: []const []const u8 = &.{},
     /// Argument positions whose type must be JSON-encodable, checked by the
     /// same rule `Response.json` runs. An export that serializes an argument
@@ -305,6 +337,19 @@ pub const ModuleBinding = struct {
 };
 
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
+    validateBindingMetadata(bindings);
+    for (bindings) |binding| {
+        for (binding.exports) |f| {
+            if (f.param_names.len != f.param_types.len) {
+                @compileError("every parameter must be named: param_names is not parallel to param_types on " ++ binding.specifier ++ "." ++ f.name);
+            }
+        }
+    }
+}
+
+/// Checks metadata shared by SDK and engine records. Implementation pointers,
+/// analyzer-only labels, signatures and laws keep their boundary-specific checks.
+pub fn validateBindingMetadata(comptime bindings: anytype) void {
     // Raised from the 5000 default because the O(n*m) duplicate-name
     // and specifier checks exceed it once the full builtin roster
     // (20+ modules) is validated in one call.
@@ -327,19 +372,6 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
         }
         for (binding.exports) |f| {
-            // Equality, not "empty or parallel". While the roster was being
-            // filled, an unnamed export was permitted - and that permission is
-            // the shape AGENTS.md warns about, because partial coverage looks
-            // exactly like full coverage from here. Now every parameter must be
-            // named: a zero-parameter export satisfies this with two empty
-            // lists, and a parameter added later without a name is a compile
-            // error at the binding rather than a gap in what discovery says.
-            //
-            // Checked before the capability `orelse continue` below, so an
-            // export that inherits its module's set is still checked here.
-            if (f.param_names.len != f.param_types.len) {
-                @compileError("every parameter must be named: param_names is not parallel to param_types on " ++ binding.specifier ++ "." ++ f.name);
-            }
             const export_caps = f.required_capabilities orelse continue;
             if (findDuplicateRequiredCapability(export_caps)) |capability| {
                 @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' on " ++ binding.specifier ++ "." ++ f.name);
@@ -378,7 +410,7 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
     }
 }
 
-fn findDuplicateRequiredCapability(comptime capabilities: []const ModuleCapability) ?ModuleCapability {
+pub fn findDuplicateRequiredCapability(comptime capabilities: []const ModuleCapability) ?ModuleCapability {
     for (capabilities, 0..) |capability, i| {
         for (capabilities[i + 1 ..]) |other| {
             if (capability == other) return capability;

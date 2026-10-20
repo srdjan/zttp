@@ -23,6 +23,12 @@ const release_verify_commands = [_][]const u8{
     "zig build bench-check",
     "zig build release-check",
 };
+const release_script_commands = [_][]const u8{
+    "bash scripts/verify.sh --release",
+    "bash scripts/verify.sh --release-route smoke-getting-started",
+    "bash scripts/verify.sh --release-route bench-check",
+    "bash scripts/verify.sh --release-route release-check",
+};
 
 const build_gate_markers = [_][]const u8{
     "smoke-v1",
@@ -39,30 +45,7 @@ const build_gate_markers = [_][]const u8{
     "test-examples",
 };
 
-// `test-docs-drift`, `test-doc-links` and `test-examples` are dependencies of
-// `zig build test` and are asserted against the build sources in
-// `build_gate_markers`. The verifier must carry every other repository gate
-// explicitly as a `verify.sh` line.
-const verify_script_markers = [_][]const u8{
-    "zig build test",
-    "zig build test-zruntime",
-    "zig build -Doptimize=ReleaseFast",
-    "zig build smoke-v1",
-    "zig build test-panic-isolation",
-    "bash scripts/check-normalize-idempotent.sh",
-    "bash scripts/check-idiom-table.sh",
-    "bash scripts/check-canonical-style.sh",
-    "bash scripts/check-grammar-drift.sh",
-    "bash scripts/check-decision-registry.sh",
-    "bash scripts/check-meta-drift.sh",
-    "bash scripts/check-agent-determinism.sh",
-    "bash scripts/test-install-archive-safety.sh",
-    "bash scripts/check-semantics-spec.sh",
-    "zts module-spec-render --check",
-    "zts meta --json",
-    "zig build release-provenance",
-    "zig fmt --check build.zig build/ packages/",
-};
+// The stable shell entry point delegates to the shared native route driver.
 
 // The local release script creates the GitHub release. The passport asserts it
 // still does, so a script that verifies and builds but never publishes fails.
@@ -661,12 +644,22 @@ fn hasPendingReceiptBackedMeasurementNote(haystack: []const u8) bool {
         std.mem.indexOf(u8, haystack, "pending\nreceipt-backed measurement") != null;
 }
 
+fn shellInvokes(source: []const u8, command: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        if (!std.mem.startsWith(u8, line, command)) continue;
+        if (line.len == command.len or line[command.len] == ' ') return true;
+    }
+    return false;
+}
+
 fn releaseGateRequirementsPresent(build_zig: []const u8, release_sh: []const u8, verify_sh: []const u8) bool {
-    return containsAll(build_zig, &build_gate_markers) and
-        containsAll(release_sh, &release_verify_commands) and
-        std.mem.indexOf(u8, release_sh, release_only_verify_marker) != null and
-        std.mem.indexOf(u8, release_sh, release_publish_marker) != null and
-        containsAll(verify_sh, &verify_script_markers);
+    if (!containsAll(build_zig, &build_gate_markers)) return false;
+    for (release_script_commands) |command| if (!shellInvokes(release_sh, command)) return false;
+    return shellInvokes(release_sh, release_only_verify_marker) and
+        shellInvokes(release_sh, release_publish_marker) and
+        shellInvokes(verify_sh, "exec zig build verify --");
 }
 
 fn hasReleaseVerifyCommand(command: []const u8) bool {
@@ -697,18 +690,9 @@ test "release gate requirements require semantics and doctor wiring" {
         "test-examples";
     const release_sh =
         "bash scripts/verify.sh --release\n" ++
-        "zig build smoke-getting-started\n" ++
-        "zig build bench-check\nzig build release-check\ngh release create\n";
-    const verify_sh =
-        "zig build test\nzig build test-zruntime\n" ++
-        "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
-        "bash scripts/test-install-archive-safety.sh\n" ++
-        "bash scripts/check-normalize-idempotent.sh\nbash scripts/check-idiom-table.sh\n" ++
-        "bash scripts/check-canonical-style.sh\nbash scripts/check-grammar-drift.sh\n" ++
-        "bash scripts/check-decision-registry.sh\nbash scripts/check-meta-drift.sh\n" ++
-        "bash scripts/check-agent-determinism.sh\nbash scripts/check-semantics-spec.sh\n" ++
-        "zts module-spec-render --check\nzts meta --json\n" ++
-        "zig build release-provenance\nzig fmt --check build.zig build/ packages/\n";
+        "bash scripts/verify.sh --release-route smoke-getting-started\n" ++
+        "bash scripts/verify.sh --release-route bench-check\nbash scripts/verify.sh --release-route release-check\ngh release create\n";
+    const verify_sh = "exec zig build verify -- \"$@\"\n";
 
     try std.testing.expect(releaseGateRequirementsPresent(build_zig, release_sh, verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, "zig build test\n", verify_sh));
@@ -720,16 +704,16 @@ test "release gate requirements require semantics and doctor wiring" {
     // the passport would still report every gate wired.
     const per_commit_release_sh =
         "bash scripts/verify.sh\n" ++
-        "zig build smoke-getting-started\n" ++
-        "zig build bench-check\nzig build release-check\ngh release create\n";
+        "bash scripts/verify.sh --release-route smoke-getting-started\n" ++
+        "bash scripts/verify.sh --release-route bench-check\nbash scripts/verify.sh --release-route release-check\ngh release create\n";
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, per_commit_release_sh, verify_sh));
 
     // A script that verifies and builds but never creates the release has
     // nothing to publish.
     const never_publishes =
         "bash scripts/verify.sh --release\n" ++
-        "zig build smoke-getting-started\n" ++
-        "zig build bench-check\nzig build release-check\n";
+        "bash scripts/verify.sh --release-route smoke-getting-started\n" ++
+        "bash scripts/verify.sh --release-route bench-check\nbash scripts/verify.sh --release-route release-check\n";
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, never_publishes, verify_sh));
 }
 
@@ -996,35 +980,15 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
     try tmp.dir.writeFile(io, .{ .sub_path = "scripts/check-semantics-spec.sh", .data = "#!/bin/sh\n" });
     try tmp.dir.writeFile(io, .{
         .sub_path = "scripts/verify.sh",
-        .data =
-        \\zig build test
-        \\zig build test-zruntime
-        \\zig build test-docs-drift test-doc-links
-        \\zig build -Doptimize=ReleaseFast
-        \\zig build smoke-v1
-        \\zig build test-panic-isolation
-        \\bash scripts/check-normalize-idempotent.sh
-        \\bash scripts/check-idiom-table.sh
-        \\bash scripts/check-canonical-style.sh
-        \\bash scripts/check-grammar-drift.sh
-        \\bash scripts/check-decision-registry.sh
-        \\bash scripts/check-meta-drift.sh
-        \\bash scripts/check-agent-determinism.sh
-        \\bash scripts/test-install-archive-safety.sh
-        \\bash scripts/check-semantics-spec.sh
-        \\zts module-spec-render --check
-        \\zts meta --json
-        \\zig build release-provenance
-        \\zig fmt --check build.zig build/ packages/
-        ,
+        .data = "exec zig build verify -- \"$@\"\n",
     });
     try tmp.dir.writeFile(io, .{
         .sub_path = "scripts/release.sh",
         .data =
         \\bash scripts/verify.sh --release
-        \\zig build smoke-getting-started
-        \\zig build bench-check
-        \\zig build release-check
+        \\bash scripts/verify.sh --release-route smoke-getting-started
+        \\bash scripts/verify.sh --release-route bench-check
+        \\bash scripts/verify.sh --release-route release-check
         \\gh release create
         ,
     });

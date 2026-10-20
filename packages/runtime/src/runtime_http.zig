@@ -953,6 +953,144 @@ fn outboundBody(method: std.http.Method, body: ?[]const u8) ?[]const u8 {
 const FetchDeadline = @import("fetch_deadline.zig").FetchDeadline;
 const OutboundIo = @import("outbound_io.zig").OutboundIo;
 
+/// The public adapters own validation and serialization. This native exchange
+/// owns every transport resource and returns response bytes detached from std's
+/// connection buffers.
+const ExchangeInput = struct {
+    uri: std.Uri,
+    host: std.Io.net.HostName,
+    method: std.http.Method,
+    body: ?[]const u8,
+    headers: []const std.http.Header,
+    max_response_bytes: usize,
+};
+
+const ExchangeFailure = struct {
+    code: []const u8 = undefined,
+    details: []const u8 = undefined,
+
+    fn set(self: *ExchangeFailure, code: []const u8, details: []const u8) error{OutboundExchangeFailed} {
+        self.* = .{ .code = code, .details = details };
+        return error.OutboundExchangeFailed;
+    }
+};
+
+const OwnedExchange = struct {
+    head: OwnedResponseHead,
+    body: []u8,
+    status: u16,
+    ok: bool,
+
+    fn deinit(self: *OwnedExchange, allocator: std.mem.Allocator) void {
+        self.head.deinit(allocator);
+        allocator.free(self.body);
+    }
+};
+
+fn outboundExchange(rt: *HandlerInstance, input: ExchangeInput, failure: *ExchangeFailure) !OwnedExchange {
+    const allocator = rt.allocator;
+    const backend = &rt.outbound_io_backend.?;
+    var client = std.http.Client{
+        .allocator = allocator,
+        .io = backend.io(),
+    };
+    defer client.deinit();
+
+    const protocol = std.http.Client.Protocol.fromUri(input.uri) orelse {
+        return failure.set("InvalidUrl", "unsupported URI scheme");
+    };
+    bootstrapClientTls(&client, protocol) catch {
+        return failure.set("ConnectFailed", "CertificateBundleLoadFailure");
+    };
+    const port: u16 = input.uri.port orelse switch (protocol) {
+        .plain => 80,
+        .tls => 443,
+    };
+    var target: ResolvedTarget = .{};
+    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, rt.ctx.policy_generation, input.host, port, &target)) {
+        .allowed => {},
+        .denied => |details| return failure.set("AddressScopeNotAllowed", details),
+        .unresolved => |details| return failure.set("ConnectFailed", details),
+    }
+
+    // One budget for connect, handshake, and exchange, starting after name
+    // resolution. The backend arms the watchdog when the connect succeeds.
+    const fetch_timeout_ms = effectiveOutboundTimeoutMs(rt);
+    var deadline: FetchDeadline = .{ .timeout_ms = fetch_timeout_ms, .io = client.io };
+    backend.beginFetch(&deadline) catch |err| return failure.set("DeadlineUnavailable", @errorName(err));
+    // Declared after the client's deinit defer, so the watchdog is joined
+    // before the client closes any connection.
+    defer backend.endFetch();
+
+    const connection = client.connectTcpOptions(.{
+        // Connect to the address that passed, name the destination for TLS.
+        .host = target.hostName(),
+        .port = port,
+        .protocol = protocol,
+        .proxied_host = input.host,
+        .proxied_port = port,
+    }) catch |err| {
+        return failure.set(deadline.connectFailCode(err), @errorName(err));
+    };
+    if (!deadline.isArmed()) {
+        client.connection_pool.release(connection, client.io);
+        return failure.set("DeadlineUnavailable", "connection has no watchdog");
+    }
+
+    var req = client.request(input.method, input.uri, .{
+        .redirect_behavior = .unhandled,
+        .keep_alive = false,
+        .connection = connection,
+        // Prefer an identity body (see readResponseBody); we decode anyway.
+        .headers = .{ .accept_encoding = .omit },
+        .extra_headers = input.headers,
+    }) catch |err| {
+        client.connection_pool.release(connection, client.io);
+        return failure.set("RequestInitFailed", @errorName(err));
+    };
+    defer req.deinit();
+
+    if (outboundBody(input.method, input.body)) |payload| {
+        req.transfer_encoding = .{ .content_length = payload.len };
+        var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
+            return failure.set(deadline.failCode("RequestSendFailed"), @errorName(err));
+        };
+        request_body.writer.writeAll(payload) catch |err| {
+            return failure.set(deadline.failCode("RequestSendFailed"), @errorName(err));
+        };
+        request_body.end() catch |err| {
+            return failure.set(deadline.failCode("RequestSendFailed"), @errorName(err));
+        };
+        req.connection.?.flush() catch |err| {
+            return failure.set(deadline.failCode("RequestSendFailed"), @errorName(err));
+        };
+    } else {
+        req.sendBodiless() catch |err| {
+            return failure.set(deadline.failCode("RequestSendFailed"), @errorName(err));
+        };
+    }
+
+    var response = req.receiveHead(&.{}) catch |err|
+        return failure.set(deadline.failCode("ResponseHeadFailed"), @errorName(err));
+    const status = @intFromEnum(response.head.status);
+    var owned_head = try snapshotResponseHead(allocator, response.head);
+    errdefer owned_head.deinit(allocator);
+
+    const response_body = readResponseBody(&response, allocator, input.max_response_bytes) catch |err| switch (err) {
+        error.StreamTooLong => return failure.set("ResponseTooLarge", "response exceeded max_response_bytes"),
+        else => return failure.set(deadline.failCode("ResponseReadFailed"), @errorName(err)),
+    };
+    errdefer allocator.free(response_body);
+
+    // A connection-close body terminated by the watchdog's shutdown reads as
+    // a clean EOF; reject it instead of returning a truncated response.
+    if (deadline.expired()) {
+        return failure.set("TimedOut", "exceeded outbound_timeout_ms");
+    }
+
+    return .{ .head = owned_head, .body = response_body, .status = status, .ok = response.head.status.class() != .server_error and response.head.status.class() != .client_error };
+}
+
 fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     if (!rt.config.outbound_http_enabled) {
         return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
@@ -980,107 +1118,22 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     };
     defer options.deinit(rt.allocator);
 
-    const backend = &rt.outbound_io_backend.?;
-    var client = std.http.Client{
-        .allocator = rt.allocator,
-        .io = backend.io(),
+    var failure: ExchangeFailure = .{};
+    var exchange = outboundExchange(rt, .{
+        .uri = uri,
+        .host = host,
+        .method = options.method,
+        .body = options.body,
+        .headers = options.headers.items,
+        .max_response_bytes = options.max_response_bytes,
+    }, &failure) catch |err| switch (err) {
+        error.OutboundExchangeFailed => return createFetchErrorResponse(rt, failure.code, failure.details),
+        else => return err,
     };
-    defer client.deinit();
+    defer exchange.deinit(rt.allocator);
 
-    const protocol = std.http.Client.Protocol.fromUri(uri) orelse {
-        return createFetchErrorResponse(rt, "InvalidUrl", "unsupported URI scheme");
-    };
-    bootstrapClientTls(&client, protocol) catch {
-        return createFetchErrorResponse(rt, "ConnectFailed", "CertificateBundleLoadFailure");
-    };
-    const port: u16 = uri.port orelse switch (protocol) {
-        .plain => 80,
-        .tls => 443,
-    };
-    var target: ResolvedTarget = .{};
-    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, rt.ctx.policy_generation, host, port, &target)) {
-        .allowed => {},
-        .denied => |details| return createFetchErrorResponse(rt, "AddressScopeNotAllowed", details),
-        .unresolved => |details| return createFetchErrorResponse(rt, "ConnectFailed", details),
-    }
-
-    // One budget for connect, handshake, and exchange, starting after name
-    // resolution. The backend arms the watchdog when the connect succeeds.
-    const fetch_timeout_ms = effectiveOutboundTimeoutMs(rt);
-    var deadline: FetchDeadline = .{ .timeout_ms = fetch_timeout_ms, .io = client.io };
-    backend.beginFetch(&deadline) catch |err| return createFetchErrorResponse(rt, "DeadlineUnavailable", @errorName(err));
-    // Declared after the client's deinit defer, so the watchdog is joined
-    // before the client closes any connection.
-    defer backend.endFetch();
-
-    const connection = client.connectTcpOptions(.{
-        // Connect to the address that passed, name the destination for TLS.
-        .host = target.hostName(),
-        .port = port,
-        .protocol = protocol,
-        .proxied_host = host,
-        .proxied_port = port,
-    }) catch |err| {
-        return createFetchErrorResponse(rt, deadline.connectFailCode(err), @errorName(err));
-    };
-    if (!deadline.isArmed()) {
-        client.connection_pool.release(connection, client.io);
-        return createFetchErrorResponse(rt, "DeadlineUnavailable", "connection has no watchdog");
-    }
-
-    var req = client.request(options.method, uri, .{
-        .redirect_behavior = .unhandled,
-        .keep_alive = false,
-        .connection = connection,
-        // Prefer an identity body (see readResponseBody); we decode anyway.
-        .headers = .{ .accept_encoding = .omit },
-        .extra_headers = options.headers.items,
-    }) catch |err| {
-        client.connection_pool.release(connection, client.io);
-        return createFetchErrorResponse(rt, "RequestInitFailed", @errorName(err));
-    };
-    defer req.deinit();
-
-    if (outboundBody(options.method, options.body)) |payload| {
-        req.transfer_encoding = .{ .content_length = payload.len };
-        var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
-            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-        request_body.writer.writeAll(payload) catch |err| {
-            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-        request_body.end() catch |err| {
-            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-        req.connection.?.flush() catch |err| {
-            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-    } else {
-        req.sendBodiless() catch |err| {
-            return createFetchErrorResponse(rt, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-    }
-
-    var response = req.receiveHead(&.{}) catch |err|
-        return createFetchErrorResponse(rt, deadline.failCode("ResponseHeadFailed"), @errorName(err));
-    const status = @intFromEnum(response.head.status);
-    var owned_head = try snapshotResponseHead(rt.allocator, response.head);
-    defer owned_head.deinit(rt.allocator);
-
-    const response_body = readResponseBody(&response, rt.allocator, options.max_response_bytes) catch |err| switch (err) {
-        error.StreamTooLong => return createFetchErrorResponse(rt, "ResponseTooLarge", "response exceeded max_response_bytes"),
-        else => return createFetchErrorResponse(rt, deadline.failCode("ResponseReadFailed"), @errorName(err)),
-    };
-    defer rt.allocator.free(response_body);
-
-    // A connection-close body terminated by the watchdog's shutdown reads as
-    // a clean EOF; reject it instead of returning a truncated response.
-    if (deadline.expired()) {
-        return createFetchErrorResponse(rt, "TimedOut", "exceeded outbound_timeout_ms");
-    }
-
-    const created = try createFetchResponse(rt, status, owned_head.reason, response_body, owned_head.contentType());
-    for (owned_head.headers.items) |header| {
+    const created = try createFetchResponse(rt, exchange.status, exchange.head.reason, exchange.body, exchange.head.contentType());
+    for (exchange.head.headers.items) |header| {
         const key_atom = try getHeaderAtom(rt.ctx, header.name);
         const value_str = try rt.ctx.createString(header.value);
         try rt.ctx.setPropertyChecked(created.headers, key_atom, value_str);
@@ -1385,11 +1438,6 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
         break :blk cfg_max;
     };
 
-    var owned_header_slices = std.array_list.Managed([]u8).init(a);
-    defer {
-        for (owned_header_slices.items) |s| a.free(s);
-        owned_header_slices.deinit();
-    }
     var headers = std.array_list.Managed(std.http.Header).init(a);
     defer headers.deinit();
 
@@ -1402,136 +1450,48 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
             if (entry.value_ptr.* != .string) {
                 return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header values must be strings");
             }
-            const name = try a.dupe(u8, entry.key_ptr.*);
-            errdefer a.free(name);
-            const value = try a.dupe(u8, entry.value_ptr.string);
-            errdefer a.free(value);
+            // The parsed JSON outlives the synchronous exchange and request
+            // teardown, so these slices need no second owner.
+            const name = entry.key_ptr.*;
+            const value = entry.value_ptr.string;
             if (name.len == 0) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name must be non-empty");
             if (std.mem.indexOfAny(u8, name, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header name contains newline");
             if (std.mem.indexOfAny(u8, value, "\r\n") != null) return try httpRequestErrorJsonAlloc(a, "InvalidHeaders", "header value contains newline");
 
-            try owned_header_slices.append(name);
-            try owned_header_slices.append(value);
             try headers.append(.{ .name = name, .value = value });
         }
     }
 
-    const backend = &rt.outbound_io_backend.?;
-    var client = std.http.Client{
-        .allocator = a,
-        .io = backend.io(),
+    var failure: ExchangeFailure = .{};
+    var exchange = outboundExchange(rt, .{
+        .uri = uri,
+        .host = host,
+        .method = method,
+        .body = body,
+        .headers = headers.items,
+        .max_response_bytes = max_response_bytes,
+    }, &failure) catch |err| switch (err) {
+        error.OutboundExchangeFailed => return httpRequestErrorJsonAlloc(a, failure.code, failure.details),
+        else => return err,
     };
-    defer client.deinit();
-
-    const protocol = std.http.Client.Protocol.fromUri(uri) orelse {
-        return try httpRequestErrorJsonAlloc(a, "InvalidUrl", "unsupported URI scheme");
-    };
-    bootstrapClientTls(&client, protocol) catch {
-        return try httpRequestErrorJsonAlloc(a, "ConnectFailed", "CertificateBundleLoadFailure");
-    };
-    const port: u16 = uri.port orelse switch (protocol) {
-        .plain => 80,
-        .tls => 443,
-    };
-    var target: ResolvedTarget = .{};
-    switch (resolvedScopeDecision(client.io, &rt.ctx.capability_policy, rt.ctx.policy_generation, host, port, &target)) {
-        .allowed => {},
-        .denied => |details| return try httpRequestErrorJsonAlloc(a, "AddressScopeNotAllowed", details),
-        .unresolved => |details| return try httpRequestErrorJsonAlloc(a, "ConnectFailed", details),
-    }
-
-    // One budget for connect, handshake, and exchange, starting after name
-    // resolution. The backend arms the watchdog when the connect succeeds.
-    var deadline: FetchDeadline = .{ .timeout_ms = effectiveOutboundTimeoutMs(rt), .io = client.io };
-    backend.beginFetch(&deadline) catch |err| return try httpRequestErrorJsonAlloc(a, "DeadlineUnavailable", @errorName(err));
-    // Declared after the client's deinit defer, so the watchdog is joined
-    // before the client closes any connection.
-    defer backend.endFetch();
-
-    const connection = client.connectTcpOptions(.{
-        // Connect to the address that passed, name the destination for TLS.
-        .host = target.hostName(),
-        .port = port,
-        .protocol = protocol,
-        .proxied_host = host,
-        .proxied_port = port,
-    }) catch |err| {
-        return try httpRequestErrorJsonAlloc(a, deadline.connectFailCode(err), @errorName(err));
-    };
-    if (!deadline.isArmed()) {
-        client.connection_pool.release(connection, client.io);
-        return try httpRequestErrorJsonAlloc(a, "DeadlineUnavailable", "connection has no watchdog");
-    }
-
-    var req = client.request(method, uri, .{
-        .redirect_behavior = .unhandled,
-        .keep_alive = false,
-        .connection = connection,
-        // Prefer an identity body (see readResponseBody); we decode anyway.
-        .headers = .{ .accept_encoding = .omit },
-        .extra_headers = headers.items,
-    }) catch |err| {
-        client.connection_pool.release(connection, client.io);
-        return try httpRequestErrorJsonAlloc(a, "RequestInitFailed", @errorName(err));
-    };
-    defer req.deinit();
-
-    if (outboundBody(method, body)) |payload| {
-        req.transfer_encoding = .{ .content_length = payload.len };
-        var request_body = req.sendBodyUnflushed(&.{}) catch |err| {
-            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-        request_body.writer.writeAll(payload) catch |err| {
-            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-        request_body.end() catch |err| {
-            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-        req.connection.?.flush() catch |err| {
-            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-    } else {
-        req.sendBodiless() catch |err| {
-            return try httpRequestErrorJsonAlloc(a, deadline.failCode("RequestSendFailed"), @errorName(err));
-        };
-    }
-
-    var response = req.receiveHead(&.{}) catch |err| {
-        return try httpRequestErrorJsonAlloc(a, deadline.failCode("ResponseHeadFailed"), @errorName(err));
-    };
-    const status = @intFromEnum(response.head.status);
-    const ok = response.head.status.class() != .server_error and response.head.status.class() != .client_error;
-    var owned_head = try snapshotResponseHead(a, response.head);
-    defer owned_head.deinit(a);
-
-    const response_body = readResponseBody(&response, a, max_response_bytes) catch |err| switch (err) {
-        error.StreamTooLong => return try httpRequestErrorJsonAlloc(a, "ResponseTooLarge", "response exceeded max_response_bytes"),
-        else => return try httpRequestErrorJsonAlloc(a, deadline.failCode("ResponseReadFailed"), @errorName(err)),
-    };
-    defer a.free(response_body);
-
-    // A connection-close body terminated by the watchdog's shutdown reads as
-    // a clean EOF; reject it instead of returning a truncated response.
-    if (deadline.expired()) {
-        return try httpRequestErrorJsonAlloc(a, "TimedOut", "exceeded outbound_timeout_ms");
-    }
+    defer exchange.deinit(a);
 
     var aw: std.Io.Writer.Allocating = .init(a);
     defer aw.deinit();
     var stream: std.json.Stringify = .{ .writer = &aw.writer };
     try stream.beginObject();
     try stream.objectField("ok");
-    try stream.write(ok);
+    try stream.write(exchange.ok);
     try stream.objectField("status");
-    try stream.write(status);
+    try stream.write(exchange.status);
     try stream.objectField("reason");
-    try stream.write(owned_head.reason);
-    if (owned_head.contentType()) |ct| {
+    try stream.write(exchange.head.reason);
+    if (exchange.head.contentType()) |ct| {
         try stream.objectField("content_type");
         try stream.write(ct);
     }
     try stream.objectField("body");
-    try stream.write(response_body);
+    try stream.write(exchange.body);
     try stream.endObject();
     return try aw.toOwnedSlice();
 }
@@ -1576,6 +1536,42 @@ pub fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, det
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "JSON HTTP header refusal releases parsed headers under allocation failure" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const rt = try HandlerInstance.init(arena.allocator(), .{ .outbound_http_enabled = true });
+    defer rt.deinit();
+    rt.ctx.capability_policy = .{ .egress = .{ .enabled = true, .values = &.{"http://127.0.0.1:1"} } };
+
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator, runtime: *HandlerInstance, input: zq.JSValue, expected: []const u8) !void {
+            const original_allocator = runtime.allocator;
+            runtime.allocator = allocator;
+            defer runtime.allocator = original_allocator;
+            const result = httpRequestResultJsonAlloc(runtime, &.{input}) catch |err| switch (err) {
+                // JSON serialization exposes allocator exhaustion as a writer
+                // failure; keep the allocation-failure harness informed.
+                error.WriteFailed => return error.OutOfMemory,
+                else => return err,
+            };
+            defer allocator.free(result);
+            var parsed = try std.json.parseFromSlice(std.json.Value, allocator, result, .{});
+            defer parsed.deinit();
+            try testing.expectEqualStrings("InvalidHeaders", parsed.value.object.get("error").?.string);
+            try testing.expectEqualStrings(expected, parsed.value.object.get("details").?.string);
+        }
+    };
+    const cases = .{
+        .{ "{\"x-first\":\"kept\",\"\":\"invalid\"}", "header name must be non-empty" },
+        .{ "{\"x-first\":\"kept\",\"bad\\rname\":\"invalid\"}", "header name contains newline" },
+        .{ "{\"x-first\":\"kept\",\"x-last\":\"bad\\nvalue\"}", "header value contains newline" },
+    };
+    inline for (cases) |case| {
+        const input = try rt.ctx.createString("{\"url\":\"http://127.0.0.1:1\",\"headers\":" ++ case[0] ++ "}");
+        try testing.checkAllAllocationFailures(testing.allocator, Probe.run, .{ rt, input, case[1] });
+    }
+}
 
 test "header splitting copies every pair and reports the count" {
     const Hdr = struct { key: []const u8, value: []const u8 };

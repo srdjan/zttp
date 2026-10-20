@@ -5169,7 +5169,9 @@ test "verify answers only the properties it was asked about" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\import { env } from "zttp:env";
         \\function handler(req: Request): Response {
-        \\  return Response.json({ k: env("SECRET") ?? "none" });
+        \\  const secret = env("SECRET");
+        \\  if (secret === undefined) return Response.json({ ok: true });
+        \\  return Response.json({ k: secret });
         \\}
         \\
     });

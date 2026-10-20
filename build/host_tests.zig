@@ -116,7 +116,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
             .tools => ctx.tools_dep,
             .pi => ctx.pi_dep,
         };
-        const tests = b.addTest(.{
+        const tests = ctx.addTest(.{
             .filters = if (root.standin_only) &.{"stand-in"} else ctx.test_filters,
             .root_module = b.createModule(.{
                 .root_source_file = owner_dep.path(root.src),
@@ -136,7 +136,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
         }
         if (root.standin_only) tests.root_module.addOptions("standin_range_doc", standin_range_doc);
         if (root.standin_only) tests.root_module.addOptions("unseeded_rules", unseeded_rules);
-        host_test_runs[i] = b.addRunArtifact(tests);
+        host_test_runs[i] = ctx.addRunTest(tests);
         if (root.needs_install) {
             host_test_runs[i].step.dependOn(b.getInstallStep());
         }
@@ -152,7 +152,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
 
     // Explicit real-model gate. It is intentionally absent from the aggregate
     // test step because zttp never manages the developer's MLX server.
-    const mlx_e2e_tests = b.addTest(.{
+    const mlx_e2e_tests = ctx.addTest(.{
         .filters = &.{"local MLX expert flow"},
         .root_module = b.createModule(.{
             .root_source_file = ctx.pi_host_dep.path("src/mlx_e2e_test.zig"),
@@ -168,7 +168,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
     mlx_e2e_tests.root_module.addImport("zts", ctx.zts_host_mod);
     mlx_e2e_tests.root_module.addImport("project_config", ctx.project_config_mod);
     mlx_e2e_tests.root_module.addImport("zts_cli", ctx.pi_zts_cli_host_mod);
-    const run_mlx_e2e_tests = b.addRunArtifact(mlx_e2e_tests);
+    const run_mlx_e2e_tests = ctx.addRunTest(mlx_e2e_tests);
     const mlx_e2e_step = b.step("test-expert-mlx-e2e", "Run the real local MLX expert flow");
     mlx_e2e_step.dependOn(&run_mlx_e2e_tests.step);
 

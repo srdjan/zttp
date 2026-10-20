@@ -77,6 +77,7 @@ pub fn run(
 
     var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
+    checker.scopes = &js_parser.scopes;
     _ = checker.check(handler_fn) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,
@@ -154,8 +155,20 @@ fn writeConstraint(writer: *std.Io.Writer, c: counterexample.WitnessConstraint) 
             try writeJsonString(writer, value);
             try writer.writeAll("}");
         },
+        .req_path => |value| {
+            try writer.writeAll("{\"kind\":\"req_path\",\"value\":");
+            try writeJsonString(writer, value);
+            try writer.writeAll("}");
+        },
+        .req_path_not => |value| {
+            try writer.writeAll("{\"kind\":\"req_path_not\",\"value\":");
+            try writeJsonString(writer, value);
+            try writer.writeAll("}");
+        },
         .stub_truthy => |info| try writeStubConstraint(writer, "stub_truthy", info),
         .stub_falsy => |info| try writeStubConstraint(writer, "stub_falsy", info),
+        .stub_present => |info| try writeStubConstraint(writer, "stub_present", info),
+        .stub_absent => |info| try writeStubConstraint(writer, "stub_absent", info),
         .result_ok => |info| try writeStubConstraint(writer, "result_ok", info),
         .result_not_ok => |info| try writeStubConstraint(writer, "result_not_ok", info),
         .status_is => |t| {

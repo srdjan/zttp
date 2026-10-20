@@ -99,6 +99,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(spine.check_step);
     test_step.dependOn(spine.test_step);
     const coverage_step = step_coverage.register(b);
+    step_coverage.attachScriptCensus(b, test_step, proofs.script_reachability, tools.repo_gate_exe);
     agent_spine.attachTaskCensus(b, spine);
     step_coverage.add(b, test_step, coverage_step);
+    if (ctx.test_filters.len != 0) {
+        // An aggregate with filtered roots cannot establish its advertised
+        // invariants. Retain useful filtering only on explicitly named suites.
+        test_step.dependencies.clearRetainingCapacity();
+        test_step.dependOn(&b.addFail("test rejects -Dtest-filter; use a named test suite for developer selection").step);
+        @import("build/test_selection.zig").attach(b, ctx.test_selections.items);
+    }
 }

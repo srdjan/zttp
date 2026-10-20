@@ -5,8 +5,8 @@
 suite. This document says which steps each one runs, which steps `zig build
 test` deliberately leaves out, and why.
 
-`bash scripts/verify.sh --release` adds one step the per-commit gate does not
-run: `zig build release-provenance`, which checks that `docs/coverage.json` and
+`bash scripts/verify.sh --release` adds curated release-note checks and
+`zig build release-provenance`, which checks that `docs/coverage.json` and
 `docs/convergence.json` were published from a clean source commit the tree still
 matches apart from generated evidence. Every ordinary source commit fails that
 check until the corpus is replayed and both pages republished, so it belongs to
@@ -162,9 +162,49 @@ property must still hold. A property that the old checker leaves unproven has
 no expectation, so a more precise checker may prove more. The test reads each
 handler by repository-relative path and runs it through the typed pipeline.
 Two frozen constants pin the entry count and the total of expected properties.
+The owner corrected two legacy weather-egress expectations under the strict
+egress policy: `pii_contained` and `injection_safe` are omitted, while
+`input_validated` remains required. The current floor is 214 expected bits.
 A table of old-checker misses is empty today, and a test holds it equal to the
 observed misses. The new flow interpreter must meet every expectation with no
 exemption before it replaces the old checker.
+
+`zig build flow-shadow-diff > /tmp/flow-shadow.jsonl` runs the repository-only
+P9 differential report. It compares all five properties for those 48 handlers,
+including the frozen 214 required bits, plus all 38 false-proof fixtures and
+four clean contrasts. Each JSONL property row reports the production and shadow
+status as `PROVEN`, `REFUSED`, `UNPROVEN`, or `NO_VERDICT`; diagnostics and every
+unresolved source tag are separate records. A refused property needs a diagnostic
+for that property. Missing analysis is `NO_VERDICT` and fails the run. A
+contradiction between a proved property and its diagnostic also fails the run.
+Any frozen expectation miss, unresolved operation, source error, or corpus floor change
+fails after the complete report. Status differences are reported even when the
+fixed expectation permits them. This step is explicitly manual while the shadow
+interpreter is incomplete; it supplies P9 evidence without changing production
+CHECK. `test-flow-shadow-diff` tests report classification and corpus floors and
+also runs under `test-flow-census`; those helper tests do not establish precision.
+
+Add `-- --census --diagnostic-corpus --codegen` to append the actual generated
+734-probe flow census, all 182 diagnostic corpus sources, and the active codegen
+workspaces. The census keeps its own semantic expectations, including the
+difference between a witnessed refusal and an unproven property. Codegen follows
+all 29 committed active-generation descriptors across both providers, verifies
+the declared expected-workspace file digests, analyzes the 18 existing handler
+roots with their helpers and schema, and explicitly records the 11 workspaces
+without a handler. No recordings or goldens are rewritten. Each flag can also
+run separately; the original 90 cases and frozen floors run in every mode.
+
+Corpus inputs stopped by production parsing, boolean/type/strict checks, or
+without a handler receive a `flow_not_applicable` record with stages, blocker
+counts, and the shared production-prefix diagnostics. The shadow never runs
+flow past that boundary. Unexpected admission or source errors still fail. Flow
+diagnostic differences compare full code, severity, text, file, source location,
+suggestion, and repair intent as a multiset, preserving repeated diagnostics.
+Every difference is emitted and fails the evidence run. Module graph records
+identify retained paths, revisions, initialization order, and completeness;
+unresolved operations and sink events carry their source module and location.
+Production proof-trace JSON is retained when available. Shadow witnesses and
+defended paths remain pending until its report provides them.
 
 `test-zts` also runs the failure-severity census, in
 `packages/zts/src/severity_census.zig`. It generates one probe handler per
@@ -289,39 +329,39 @@ would re-enter the build graph - and `zig build test` depends on it, so
 its suite count, because a run that lost its calls printed "Suites: 0 total, 0
 passed, 0 failed" and exited 0.
 
-The general form of that mistake now has its own gate.
-`scripts/check-script-reachability.sh` asserts that every script under
-`scripts/` is invoked by `build.zig` or `build/`, another script, or a workflow - or carries a row
-in `scripts/manual-scripts.allow` saying why a developer runs it by hand. It
-found `scripts/test-zruntime.sh`, which invoked `zig test` on
-`packages/runtime/src/zruntime.zig`, a file deleted in the monorepo
-restructure, and which nothing had called since; the real path is
-`zig build test-zruntime`. The manual allowlist names scripts that require
-operator action and explains each exception.
+The general form now has an execution-route gate.
+`scripts/check-script-reachability.sh` receives a census of scripts executed
+by covered build Run steps and the canonical driver. It compares these with
+the NUL-delimited tracked script inventory. Other scripts require a reason in
+`scripts/manual-scripts.allow`; stale rows fail. Copied fixture scripts do not
+authorize running their live publication commands. The gate bounds direct
+execution routes; it does not infer arbitrary shell control flow.
 
-The build-step form of the same question is `zig build test-step-coverage`,
-which lives in `build/step_coverage.zig` because only a build can answer it. A named step is
-not what the aggregate step depends on: `test_step.dependOn(&run_server_tests
-.step)` names the Run step, and `b.step("test-server", ...)` names a separate
-top-level step over the same Run, so "is `test-server` reachable from `test`"
-is the wrong question. The gate walks the real dependency graph instead.
-It asks whether another entry point runs every step in each closure.
-An entry point is `zig build test` or a step that `scripts/verify.sh`,
-`scripts/release.sh`, or a workflow invokes.
-For five shell gates, the entry point can invoke the same script directly. The workflow
-directory is read when it exists, so a workflow added later becomes a
-coverage source without anyone remembering this gate. The OK line counts the
-steps that only `scripts/release.sh` runs: they are covered at release and not
-on every commit.
+`zig build test-step-coverage` walks the live dependency graph and asks whether
+every named task's work is reached by aggregate `test`, an executable command
+in `tooling/verification_routes.zig`, or a row in `scripts/manual-steps.allow`.
+The same route data drives the native sequential verifier behind
+`scripts/verify.sh`. Labels, comments, and filename mentions supply no coverage.
+Release-only routes remain separate from per-commit routes, and the two runtime
+test roots still run in separate processes. Both allowlists ratchet in both
+directions. Input floors reject an empty inventory, route set, or declaration
+set. Native rejection probes remove execution while retaining explanatory text.
+The zts source census includes tracked and untracked nonignored source files,
+so a new module is checked before staging; ignored generated files stay out.
 
-`scripts/manual-steps.allow` declares the manual build steps. Both directions
-are enforced. A row for an automated step fails the same gate.
+`-Dtest-filter` remains a developer aid for named suites. Each selected test
+runner records its collected test count, including custom runners. The named
+suite rejects a zero total across its test artifacts; unrelated roots may
+collect zero tests when another root matches. Aggregate
+`test` rejects filtering because a subset cannot establish the aggregate's
+invariants. Native probes check a matching selection, an unmatched selection,
+and a filtered aggregate by process exit status and the expected diagnostic.
+Acceptance evidence always comes from unfiltered suites.
 
-Four floors sit under it, because a coverage check over an empty input reports
-that everything is covered: `scripts/verify.sh` and `scripts/release.sh` must
-each be non-empty and name at least one `zig build` invocation, the covered
-closure must be plausibly large, and the allowlist must parse at least one row.
-Each was verified by breaking it.
+The verifier runs proof-checker purity, diagnostic producers, proof-ratchet
+drift and residual guards through aggregate `test` once. Meta drift and agent
+determinism receive the current build's `repo-gate` and analyzer artifacts;
+they do not rebuild helpers in temporary cold caches in the canonical path.
 
 It also runs seven registry-drift and determinism gates, most of which need the
 built binary. `scripts/verify.sh` runs the same seven:

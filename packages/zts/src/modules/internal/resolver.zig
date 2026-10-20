@@ -16,22 +16,7 @@ const module_specifier = @import("zts-base").module_specifier;
 /// Effect classification for virtual module functions.
 /// Used by the contract builder to derive handler-level properties
 /// (pure, read_only, retry_safe) at compile time.
-pub const EffectClass = enum {
-    /// Does not modify external state
-    read,
-    /// Modifies external state
-    write,
-    /// Compile-time only, no runtime effect (e.g. guard)
-    none,
-
-    pub fn toString(self: EffectClass) []const u8 {
-        return switch (self) {
-            .read => "read",
-            .write => "write",
-            .none => "none",
-        };
-    }
-};
+pub const EffectClass = @import("zttp-sdk").EffectClass;
 
 /// A single exported function from a virtual module.
 pub const ModuleExport = struct {

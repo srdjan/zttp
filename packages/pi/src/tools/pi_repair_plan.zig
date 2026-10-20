@@ -150,6 +150,7 @@ pub fn planFromSource(
 
     var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
+    checker.scopes = &js_parser.scopes;
     _ = try checker.check(handler_fn);
 
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);

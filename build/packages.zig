@@ -76,12 +76,12 @@ pub fn add(ctx: Context) Result {
             });
             root.addIncludePath(zts_dep.path("deps/sqlite"));
         }
-        const tests = b.addTest(.{
+        const tests = ctx.addTest(.{
             .name = entry.name,
             .filters = test_filters,
             .root_module = root,
         });
-        zts_test_step.dependOn(&b.addRunArtifact(tests).step);
+        zts_test_step.dependOn(&ctx.addRunTest(tests).step);
     }
 
     const sdk_test_shim_mod = b.createModule(.{
@@ -92,7 +92,7 @@ pub fn add(ctx: Context) Result {
             .{ .name = "zttp-sdk", .module = zttp_sdk_dep.module("zttp-sdk") },
         },
     });
-    const sdk_tests = b.addTest(.{
+    const sdk_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = zttp_sdk_dep.path("src/test_root.zig"),
@@ -104,11 +104,11 @@ pub fn add(ctx: Context) Result {
             },
         }),
     });
-    const run_sdk_tests = b.addRunArtifact(sdk_tests);
+    const run_sdk_tests = ctx.addRunTest(sdk_tests);
     const sdk_test_step = b.step("test-sdk", "Run zttp-sdk tests");
     sdk_test_step.dependOn(&run_sdk_tests.step);
 
-    const modules_tests = b.addTest(.{
+    const modules_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = zttp_modules_dep.path("src/test_root.zig"),
@@ -121,7 +121,7 @@ pub fn add(ctx: Context) Result {
             },
         }),
     });
-    const run_modules_tests = b.addRunArtifact(modules_tests);
+    const run_modules_tests = ctx.addRunTest(modules_tests);
     const modules_test_step = b.step("test-modules", "Run zttp-modules tests");
     modules_test_step.dependOn(&run_modules_tests.step);
 
@@ -130,7 +130,7 @@ pub fn add(ctx: Context) Result {
     // own: the package is a leaf, and `scripts/check-proof-checker.sh` fails
     // when that stops being true. Context.zig states why a release build keeps
     // runtime safety in it.
-    const proof_checker_tests = b.addTest(.{
+    const proof_checker_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = ctx.proof_checker_dep.path("src/test_root.zig"),
@@ -138,7 +138,7 @@ pub fn add(ctx: Context) Result {
             .optimize = optimize,
         }),
     });
-    const run_proof_checker_tests = b.addRunArtifact(proof_checker_tests);
+    const run_proof_checker_tests = ctx.addRunTest(proof_checker_tests);
     const proof_checker_test_step = b.step("test-proof-checker", "Run the consumer acceptance kernel tests");
     proof_checker_test_step.dependOn(&run_proof_checker_tests.step);
 

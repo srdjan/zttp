@@ -29,7 +29,8 @@
 //! have exposed it did not exist yet to be tried.
 //!
 //! Usage:
-//!   coverage-union <corpus-version> <source-tree-hash> [code ...]
+//!   coverage-union <corpus-version> <source-tree-hash> [code ... | --measured-zero]
+//! `--measured-zero` records an explicit empty observation, unlike no pending input.
 //!
 //! Prints one `[coverage-union] {json}` line on stdout.
 
@@ -95,6 +96,7 @@ pub const Failure = error{
     FirstRunWithoutCodes,
     FirstRunWithUnreadableHistory,
     SourceTreeSetConflict,
+    InvalidZeroObservation,
 };
 
 /// The message each refusal prints. Kept beside the error set so a new member
@@ -102,16 +104,17 @@ pub const Failure = error{
 /// can require every one of them to be exercised.
 pub fn failureMessage(failure: Failure) []const u8 {
     return switch (failure) {
-        error.UsageMissingVersion => "usage: coverage-union <corpus-version> <source-tree-hash> [code ...]",
+        error.UsageMissingVersion => "usage: coverage-union <corpus-version> <source-tree-hash> [code ... | --measured-zero]",
         error.VersionNotHex => "corpus version must be 64 lowercase hex characters",
         error.SourceTreeHashNotHex => "source tree hash must be 40 or 64 lowercase hex characters",
         error.ShallowClone => "shallow clone: the history this union is computed from is truncated",
         error.NoCoverageHistory => "no commit in this history touches docs/coverage.json; there is nothing to union",
         error.NoParsedBlob => "no coverage.json blob in history parsed",
         error.NoTrippedList => "no entry for this corpus carries a tripped list",
-        error.FirstRunWithoutCodes => "this identity has no published run and no pending codes were given; that would publish an empty set as an observation",
+        error.FirstRunWithoutCodes => "this identity has no published run and no pending observation was given; use --measured-zero for an observed empty set",
         error.FirstRunWithUnreadableHistory => "no readable published run carries this identity, but some coverage.json blob in history could not be read; it may have been one, so this cannot be reported as a first publication",
         error.SourceTreeSetConflict => "the pending tripped set differs from the published set for the same source tree hash",
+        error.InvalidZeroObservation => "--measured-zero must be the only pending argument",
     };
 }
 
@@ -279,6 +282,9 @@ pub fn compute(
 ) !Union {
     if (!isCorpusVersion(version)) return error.VersionNotHex;
     if (!isSourceTreeHash(source_tree_hash)) return error.SourceTreeHashNotHex;
+    const measured_zero = pending.len == 1 and std.mem.eql(u8, pending[0], "--measured-zero");
+    for (pending) |code| if (std.mem.eql(u8, code, "--measured-zero") and !measured_zero)
+        return error.InvalidZeroObservation;
 
     var shallow = try runGit(allocator, io, root, &.{ "git", "rev-parse", "--is-shallow-repository" });
     defer shallow.deinit(allocator);
@@ -299,12 +305,12 @@ pub fn compute(
     const published = try publishedSets(arena, io, root, version, &parsed_any, &unreadable);
     if (!parsed_any) return error.NoParsedBlob;
 
-    const pending_set = try sortedUnique(arena, pending);
+    const pending_set = try sortedUnique(arena, if (measured_zero) &.{} else pending);
 
     var sets: std.ArrayList(CodeSet) = .empty;
     for (published.items) |recorded| try sets.append(arena, recorded.set);
     if (published.items.len == 0) {
-        if (pending_set.len == 0) return error.FirstRunWithoutCodes;
+        if (pending_set.len == 0 and !measured_zero) return error.FirstRunWithoutCodes;
         // The first-publication path claims that nothing of this identity was
         // ever published. A blob that could not be read carries no readable
         // identity, so it may have been exactly that run, and the claim would
@@ -313,7 +319,7 @@ pub fn compute(
         // answer is a refusal that says which commit to look at.
         if (unreadable != 0) return error.FirstRunWithUnreadableHistory;
         try sets.append(arena, .{ .codes = pending_set });
-    } else if (pending_set.len != 0) {
+    } else if (pending_set.len != 0 or measured_zero) {
         const pending_code_set = CodeSet{ .codes = pending_set };
         var already_published = false;
         for (published.items) |recorded| {
@@ -440,6 +446,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         error.NoTrippedList,
         error.FirstRunWithoutCodes,
         error.SourceTreeSetConflict,
+        error.InvalidZeroObservation,
         => |failure| fail(&stderr_writer.interface, failure),
         else => return err,
     };
@@ -571,6 +578,45 @@ test "a first pending run contributes every aggregate statistic" {
     try testing.expectEqual(@as(usize, 3), result.codes.len);
     try testing.expectEqualStrings("ZTS400", result.codes[0]);
     try testing.expectEqualStrings("ZTS501", result.codes[2]);
+}
+
+test "an explicit first zero observation differs from omitted pending input" {
+    var backend = testIo();
+    defer backend.deinit();
+    const io = backend.io();
+    var fixture = try Fixture.init(io);
+    defer fixture.deinit();
+    try fixture.publish(io, version_b, &.{"ZTS400"}, null);
+    try testing.expectError(error.FirstRunWithoutCodes, compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{}));
+    try testing.expectError(error.InvalidZeroObservation, compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{ "--measured-zero", "ZTS400" }));
+    var result = try compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{"--measured-zero"});
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 1), result.observations);
+    try testing.expectEqual(@as(usize, 1), result.distinct_sets);
+    try testing.expectEqual(@as(usize, 0), result.smallest_set);
+    try testing.expectEqual(@as(usize, 0), result.largest_set);
+    try testing.expectEqual(@as(usize, 0), result.codes.len);
+}
+
+test "zero pending observations retain history counts and source conflicts" {
+    var backend = testIo();
+    defer backend.deinit();
+    const io = backend.io();
+    var fixture = try Fixture.init(io);
+    defer fixture.deinit();
+    try fixture.publish(io, version_a, &.{ "ZTS400", "ZTS500" }, source_tree_a);
+    try testing.expectError(error.SourceTreeSetConflict, compute(testing.allocator, io, fixture.root, version_a, source_tree_a, &.{"--measured-zero"}));
+    var result = try compute(testing.allocator, io, fixture.root, version_a, source_tree_b, &.{"--measured-zero"});
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), result.observations);
+    try testing.expectEqual(@as(usize, 2), result.distinct_sets);
+    try testing.expectEqual(@as(usize, 0), result.smallest_set);
+    try testing.expectEqual(@as(usize, 2), result.largest_set);
+    try testing.expectEqual(@as(usize, 2), result.codes.len);
+    try fixture.publish(io, version_a, &.{}, source_tree_b);
+    var repeated = try compute(testing.allocator, io, fixture.root, version_a, source_tree_b, &.{"--measured-zero"});
+    defer repeated.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 2), repeated.observations);
 }
 
 test "a new pending set contributes every aggregate statistic" {
@@ -749,7 +795,7 @@ test "every refusal carries a message and each reachable one is probed" {
     );
 
     // FirstRunWithoutCodes: history exists under another identity and the
-    // pending run named nothing, so counting it would publish an empty set.
+    // pending run supplied no observation, including no explicit measured zero.
     try fixture.publish(io, version_b, &.{"ZTS400"}, null);
     try testing.expectError(
         error.FirstRunWithoutCodes,

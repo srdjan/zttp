@@ -56,11 +56,11 @@ pub fn addRuntimeBench(ctx: Context, test_step: *std.Build.Step) *std.Build.Step
     bench_record_cmd.has_side_effects = true;
     const bench_record_step = b.step("bench-record", "Record a five-run benchmark baseline from clean committed source");
     bench_record_step.dependOn(&bench_record_cmd.step);
-    const benchmark_tool_tests = b.addTest(.{
+    const benchmark_tool_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = benchmark_tool_mod,
     });
-    const bench_diff_test_cmd = b.addRunArtifact(benchmark_tool_tests);
+    const bench_diff_test_cmd = ctx.addRunTest(benchmark_tool_tests);
     const bench_diff_test_step = b.step("test-bench-diff", "Run benchmark sampling and comparison tests");
     bench_diff_test_step.dependOn(&bench_diff_test_cmd.step);
     test_step.dependOn(bench_diff_test_step);
@@ -88,11 +88,11 @@ pub fn addCompileBench(ctx: Context, test_step: *std.Build.Step, bench_exe: *std
     const compile_bench_step = b.step("compile-bench", "Run compile-time microbenchmarks");
     compile_bench_step.dependOn(&compile_bench_cmd.step);
 
-    const compile_bench_tests = b.addTest(.{
+    const compile_bench_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = ctx.runtime_dep.module("compile_benchmark"),
     });
-    const run_compile_bench_tests = b.addRunArtifact(compile_bench_tests);
+    const run_compile_bench_tests = ctx.addRunTest(compile_bench_tests);
     const compile_bench_test_step = b.step("test-compile-bench", "Run compile-time microbench harness tests");
     compile_bench_test_step.dependOn(&run_compile_bench_tests.step);
     test_step.dependOn(&run_compile_bench_tests.step);

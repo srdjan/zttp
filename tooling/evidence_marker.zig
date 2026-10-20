@@ -244,7 +244,7 @@ fn validateConvergence(object: std.json.ObjectMap) Failure!void {
 
 fn validateCoverage(object: std.json.ObjectMap) Failure!void {
     const total = positiveIntegerField(object, "rulesTotal") orelse return error.InvalidCoverageEvidence;
-    const tripped_count = positiveIntegerField(object, "rulesTripped") orelse return error.InvalidCoverageEvidence;
+    const tripped_count = std.math.cast(usize, integerField(object, "rulesTripped") orelse return error.InvalidCoverageEvidence) orelse return error.InvalidCoverageEvidence;
     const tripped = try validatedCodeArray(object, "tripped");
     const untripped = try validatedCodeArray(object, "untripped");
     const off_registry = try validatedCodeArray(object, "offRegistry");
@@ -594,9 +594,29 @@ fn probeCoverageGuards() !void {
     try expectCoverageMutation("rulesTotal", "0");
     try expectCoverageMutation("rulesTripped", "0");
     try expectCoverageMutation("rulesTripped", "1");
+    try expectCoverageMutation("rulesTripped", "-1");
     try expectCoverageMutation("tripped", "[\"ZTS001\",\"ZTS001\"]");
     try expectCoverageMutation("untripped", "[\"ZTS002\"]");
     try expectCoverageMutation("offRegistry", "[\"ZTS001\"]");
+}
+
+test "zero coverage retains complete corpus and complete rule partition" {
+    const a = std.testing.allocator;
+    const encoded = try coverageFixture(a);
+    defer a.free(encoded);
+    var parsed = try parseFixture(a, encoded);
+    defer parsed.deinit();
+    const all = try std.json.parseFromSlice(std.json.Value, a, "[\"ZTS001\",\"ZTS002\",\"ZTS003\"]", .{});
+    defer all.deinit();
+    parsed.value.object.getPtr("rulesTripped").?.* = .{ .integer = 0 };
+    parsed.value.object.getPtr("tripped").?.* = .{ .array = std.json.Array.init(a) };
+    parsed.value.object.getPtr("untripped").?.* = all.value;
+    try validate(parsed.value, .coverage);
+    parsed.value.object.getPtr("completedCases").?.* = .{ .integer = 12 };
+    try std.testing.expectError(error.InvalidCommonEvidence, validate(parsed.value, .coverage));
+    parsed.value.object.getPtr("completedCases").?.* = .{ .integer = 13 };
+    parsed.value.object.getPtr("untripped").?.* = .{ .array = std.json.Array.init(a) };
+    try std.testing.expectError(error.InvalidCoverageEvidence, validate(parsed.value, .coverage));
 }
 
 test "native marker probe suites complete" {

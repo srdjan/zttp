@@ -17,7 +17,7 @@ pub fn addUnit(ctx: Context) UnitRuns {
     const runtime_dep = ctx.runtime_dep;
 
     // Tests
-    const unit_tests = b.addTest(.{
+    const unit_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = runtime_dep.module("runtime_main_tests"),
     });
@@ -30,11 +30,11 @@ pub fn addUnit(ctx: Context) UnitRuns {
     // `zig build test-zruntime` is the only step that runs that root, and
     // `scripts/verify.sh` runs it separately.
     Context.attachEmbeddedHandlerStub(unit_tests, runtime_dep, ctx.zts_mod);
-    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const run_unit_tests = ctx.addRunTest(unit_tests);
 
     // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
     // dependencies (deploy, pi_app wiring, zts_cli delegation).
-    const cli_tests = b.addTest(.{
+    const cli_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = runtime_dep.module("cli_main_tests"),
         .test_runner = .{
@@ -43,7 +43,7 @@ pub fn addUnit(ctx: Context) UnitRuns {
         },
     });
     Context.attachEmbeddedHandlerStub(cli_tests, runtime_dep, ctx.zts_mod);
-    const run_cli_tests = b.addRunArtifact(cli_tests);
+    const run_cli_tests = ctx.addRunTest(cli_tests);
     const cli_test_step = b.step("test-cli", "Run developer CLI unit tests");
     cli_test_step.dependOn(&run_cli_tests.step);
 
@@ -57,12 +57,12 @@ pub fn addIntegration(ctx: Context, bins: artifacts.Binaries, test_step: *std.Bu
     const runtime_dep = ctx.runtime_dep;
 
     // ZRuntime tests (native Zig runtime)
-    const zruntime_tests = b.addTest(.{
+    const zruntime_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = runtime_dep.module("zruntime"),
     });
     Context.attachEmbeddedHandlerStub(zruntime_tests, runtime_dep, ctx.zts_mod);
-    const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
+    const run_zruntime_tests = ctx.addRunTest(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
     // Deliberately not a dependency of `zig build test`: this root holds the
@@ -73,12 +73,12 @@ pub fn addIntegration(ctx: Context, bins: artifacts.Binaries, test_step: *std.Bu
     // test-server: server/runtime facade integration suite (Phase 0b gate).
     // Tests through public entry points (Server.init/deinit, HandlerPool
     // execute*, RuntimeConfig) — never interpreter/JIT internals.
-    const server_tests = b.addTest(.{
+    const server_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = runtime_dep.module("server_tests"),
     });
     Context.attachEmbeddedHandlerStub(server_tests, runtime_dep, ctx.zts_mod);
-    const run_server_tests = b.addRunArtifact(server_tests);
+    const run_server_tests = ctx.addRunTest(server_tests);
     const server_test_step = b.step("test-server", "Run server/runtime facade integration tests");
     server_test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_server_tests.step);

@@ -760,6 +760,38 @@
       "approval": "none",
       "does": "runs agent-spine behavior tests and rejection probes",
       "requiredWhen": "after agent-spine policy or tooling changes"
+    },
+    {
+      "task": "verify",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "runs the full local gate in separate sequential processes",
+      "requiredWhen": "before the full local verification gate is claimed"
+    },
+    {
+      "task": "test-agent-determinism",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks complete agent envelopes are deterministic",
+      "requiredWhen": "after agent wire or transport changes"
+    },
+    {
+      "task": "flow-shadow-diff",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "compares every frozen precision and P0 property with the shadow evaluator",
+      "requiredWhen": "while closing P9 precision and unresolved constructs"
+    },
+    {
+      "task": "test-flow-shadow-diff",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "tests shadow verdict classification and frozen corpus floors",
+      "requiredWhen": "after shadow differential harness changes"
     }
   ]
 }

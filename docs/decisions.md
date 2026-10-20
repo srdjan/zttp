@@ -66,11 +66,18 @@ The consumer must derive its verdict without producer authority. Commit `f2ecf5f
 
 The imported flow and fault traversals have different stopping rules. Their reader paths, calls, order, and revision selection remain compatibility inputs.
 
+Owner amendment, 2026-10-20: relative imports without a file extension resolve
+to `.ts` using the compiler's pure path-selection rule. This narrowly extends
+previously unresolved extensionless imports; already explicit paths remain
+unchanged. Resolution uses no filesystem existence probes. The selected path
+is read through the caller's revision reader, and flow and fault retain their
+separate traversals, read order, repeated reads, and revision selection.
+
 ### D-007 Persistent reads carry unknown provenance
 
 - Status: standing
 - Decided: 2026-09-08
-- Binds: packages/zttp-sdk/src/binding.zig, packages/modules, packages/zts/src/flow_checker.zig
+- Binds: packages/zttp-sdk/src/binding.zig, packages/modules, packages/zts/src/flow_checker.zig, packages/zts/src/flow_interp.zig
 - Gate: zig build test-zts
 
 A persistent read returns data from a separate write. Commit `f87f97aa` added the `unknown` binding rule on this date.

@@ -160,4 +160,8 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-step-coverage` | checks that every build step has an execution route | after build task or aggregate changes | not measured |
 | `zig build check-spine` | checks the installed agent spine against the live repository graph | before any repository change is complete | not measured |
 | `zig build test-spine` | runs agent-spine behavior tests and rejection probes | after agent-spine policy or tooling changes | not measured |
+| `zig build verify` | runs the full local gate in separate sequential processes | before the full local verification gate is claimed | not measured |
+| `zig build test-agent-determinism` | checks complete agent envelopes are deterministic | after agent wire or transport changes | not measured |
+| `zig build flow-shadow-diff` | compares every frozen precision and P0 property with the shadow evaluator | while closing P9 precision and unresolved constructs | not measured |
+| `zig build test-flow-shadow-diff` | tests shadow verdict classification and frozen corpus floors | after shadow differential harness changes | not measured |
 <!-- end generated: gates -->

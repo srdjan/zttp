@@ -112,6 +112,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     // The drift gate must inspect this build's executable, not a possibly
     // stale installation left in zig-out by an earlier invocation.
     gates.meta_drift.addFileArg(zts_exe.getEmittedBin());
+    gates.agent_determinism.addFileArg(zts_exe.getEmittedBin());
 
     // Strip debug info from the three installed binaries when -Dstrip is set.
     // scripts/release.sh passes -Dstrip so shipped tarballs stay small; local

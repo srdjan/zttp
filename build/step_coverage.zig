@@ -1,29 +1,9 @@
-//! Step coverage: every top-level step's work must be run by something.
-//!
-//! This walks the real dependency graph, not the source. A named step is not
-//! what `test` depends on - `test_step.dependOn(&run_server_tests.step)`
-//! names the Run step, and `b.step("test-server", ...)` names a separate
-//! top-level step over the same Run - so "is test-server reachable from
-//! test" is the wrong question. The right one is whether each top-level
-//! step's dependency closure is covered, and only the graph can answer it.
-//!
-//! A step counts as run when `zig build test` reaches it, when
-//! scripts/verify.sh, scripts/release.sh, or a workflow under
-//! .github/workflows invokes the step that reaches it, or when one of those
-//! runs the same shell gate the step wraps - five steps are covered only by
-//! that last route. Anything left must carry a row in
-//! scripts/manual-steps.allow saying why a human asks for it.
-//!
-//! scripts/release.sh is the release gate. A step only that script runs is
-//! covered at release and not on every commit; the OK line counts those.
-//!
-//! scripts/test-examples.sh is why this exists: it was documented as
-//! outside `zig build test` and run only from verify.sh, and 56 example
-//! suites went unrun while `zig build test` reported a pass.
-//!
-//! It must run last, after every top-level step exists.
-
+//! Every live build task must have executable work covered by the aggregate,
+//! the shared sequential verification routes, or a stated manual reason.
+//! The graph supplies task identity; verification_routes supplies executable
+//! external argv. Comments, labels and command fragments grant no coverage.
 const std = @import("std");
+const routes = @import("../tooling/verification_routes.zig");
 
 /// Register before the task census snapshots the complete graph.
 pub fn register(b: *std.Build) *std.Build.Step {
@@ -33,56 +13,16 @@ pub fn register(b: *std.Build) *std.Build.Step {
 const StepSet = std.AutoHashMap(*std.Build.Step, void);
 
 pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.Build.Step) void {
-    const verify_src = @embedFile("../scripts/verify.sh");
-    const release_src = @embedFile("../scripts/release.sh");
-    // Floor on this gate's own input. With no coverage text every step reads
-    // as manual and the allowlist would have to name all of them; with a
-    // truncated read, steps quietly become "uncovered".
-    if (verify_src.len == 0 or std.mem.indexOf(u8, verify_src, "zig build ") == null) {
-        @panic("step coverage: scripts/verify.sh is empty or names no `zig build` invocation; the scan is broken");
-    }
-    if (release_src.len == 0 or std.mem.indexOf(u8, release_src, "zig build ") == null) {
-        @panic("step coverage: scripts/release.sh is empty or names no `zig build` invocation; the scan is broken");
-    }
-    // Sources that run on every commit or in CI. The release script is added
-    // after, so a step only it runs can be counted apart.
-    const base_sources = blk: {
-        var acc: std.ArrayList(u8) = .empty;
-        acc.appendSlice(b.allocator, verify_src) catch @panic("OOM");
-        // Read the workflow directory rather than embedding a fixed list,
-        // so a workflow added later is a coverage source without anyone
-        // having to remember this gate. The directory may be absent: the
-        // repository runs no build or test workflow.
-        var wf = b.build_root.handle.openDir(b.graph.io, ".github/workflows", .{ .iterate = true }) catch |err| switch (err) {
-            error.FileNotFound => break :blk acc.items,
-            else => @panic("step coverage: cannot open .github/workflows"),
-        };
-        defer wf.close(b.graph.io);
-        var it = wf.iterate();
-        while (it.next(b.graph.io) catch @panic("step coverage: cannot iterate .github/workflows")) |entry| {
-            if (entry.kind != .file) continue;
-            if (!std.mem.endsWith(u8, entry.name, ".yml")) continue;
-            const text = wf.readFileAlloc(b.graph.io, entry.name, b.allocator, .unlimited) catch
-                @panic("step coverage: cannot read a workflow file");
-            acc.appendSlice(b.allocator, text) catch @panic("OOM");
-            acc.append(b.allocator, '\n') catch @panic("OOM");
-        }
-        break :blk acc.items;
-    };
-    const coverage_sources = std.mem.concat(b.allocator, u8, &.{ base_sources, "\n", release_src }) catch @panic("OOM");
-
+    routes.validate(&routes.routes) catch @panic("invalid executable verification routes");
     var base_covered = StepSet.init(b.allocator);
     var covered = StepSet.init(b.allocator);
-    var name_buf: [128]u8 = undefined;
     collectReachable(test_step, &base_covered);
     collectReachable(test_step, &covered);
-    for (b.top_level_steps.values()) |tls| {
-        if (verifyInvokes(base_sources, tls.step.name, &name_buf)) {
-            collectReachable(&tls.step, &base_covered);
-        }
-        if (verifyInvokes(coverage_sources, tls.step.name, &name_buf)) {
-            collectReachable(&tls.step, &covered);
-        }
+    for (routes.routes) |route| {
+        const name = routes.buildTask(route.argv) orelse continue;
+        const tls = b.top_level_steps.get(name) orelse @panic("verification route names no live build task");
+        if (!route.release_only and !route.release_pipeline) collectReachable(&tls.step, &base_covered);
+        collectReachable(&tls.step, &covered);
     }
     if (covered.count() < 50) {
         @panic("step coverage: the covered closure is implausibly small; the graph walk is broken");
@@ -102,7 +42,7 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.B
         collectReachable(&tls.step, &own);
         // A step that only wraps a shell gate is run when something runs that
         // script, whichever Run step instance does it.
-        const unrun = unrunCount(&own, &covered, coverage_sources);
+        const unrun = unrunCount(&own, &covered, true);
         if (unrun > 0 and !declared_manual) {
             report.print(b.allocator, "  {s}: {d} of {d} dependency steps are run by nothing\n", .{ tls.step.name, unrun, own.count() }) catch @panic("OOM");
             violations += 1;
@@ -111,7 +51,7 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.B
             report.print(b.allocator, "  {s}: listed in scripts/manual-steps.allow, but something runs it now - delete the row\n", .{tls.step.name}) catch @panic("OOM");
             violations += 1;
         }
-        if (unrun == 0 and unrunCount(&own, &base_covered, base_sources) > 0) release_only += 1;
+        if (unrun == 0 and unrunCount(&own, &base_covered, false) > 0) release_only += 1;
     }
 
     // A row naming a step that no longer exists is a claim about nothing.
@@ -144,7 +84,7 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.B
 
 /// Count the steps in `own` that nothing in `covered` runs and whose wrapped
 /// script, if any, is not named in `sources`.
-fn unrunCount(own: *StepSet, covered: *StepSet, sources: []const u8) usize {
+fn unrunCount(own: *StepSet, covered: *StepSet, release: bool) usize {
     var unrun: usize = 0;
     var it = own.keyIterator();
     while (it.next()) |entry| {
@@ -152,7 +92,13 @@ fn unrunCount(own: *StepSet, covered: *StepSet, sources: []const u8) usize {
         if (dep.id == .top_level) continue;
         if (covered.contains(dep)) continue;
         if (runStepScript(dep)) |script| {
-            if (std.mem.indexOf(u8, sources, script) != null) continue;
+            var executed = false;
+            for (routes.routes) |route| {
+                if ((route.release_only or route.release_pipeline) and !release) continue;
+                const path = routes.script(route.argv) orelse continue;
+                if (std.mem.eql(u8, path, script)) executed = true;
+            }
+            if (executed) continue;
         }
         unrun += 1;
     }
@@ -175,33 +121,45 @@ fn collectReachable(
 /// some of those scripts directly rather than through `zig build <step>`. The
 /// work is done either way, so the coverage question is about the script, not
 /// about which Run step instance executed it.
-fn runStepScript(step: *std.Build.Step) ?[]const u8 {
+pub fn runStepScript(step: *std.Build.Step) ?[]const u8 {
     const run = step.cast(std.Build.Step.Run) orelse return null;
-    for (run.argv.items) |arg| {
-        switch (arg) {
-            .bytes => |text| {
-                if (std.mem.startsWith(u8, text, "scripts/") and
-                    std.mem.endsWith(u8, text, ".sh")) return text;
-            },
-            else => {},
-        }
+    var argv: [2][]const u8 = undefined;
+    var count: usize = 0;
+    for (run.argv.items[0..@min(2, run.argv.items.len)]) |arg| {
+        argv[count] = switch (arg) {
+            .bytes => |text| text,
+            else => return null,
+        };
+        count += 1;
     }
-    return null;
+    return routes.script(argv[0..count]);
 }
 
-/// True when a coverage source runs `zig build <name>`.
-fn verifyInvokes(verify_src: []const u8, name: []const u8, buf: []u8) bool {
-    const needle = std.fmt.bufPrint(buf, "zig build {s}", .{name}) catch return false;
-    var rest = verify_src;
-    while (std.mem.indexOf(u8, rest, needle)) |idx| {
-        // The name must not be a prefix of a longer step name: `zig build test`
-        // must not answer for `zig build test-zruntime`.
-        const after = rest[idx + needle.len ..];
-        const terminated = after.len == 0 or after[0] == ' ' or after[0] == '\n' or after[0] == '\r';
-        if (terminated) return true;
-        rest = after;
+/// A script route is an executable argv in the covered graph or the driver.
+/// The shell wrapper receives this census; source comments are never scanned.
+pub fn attachScriptCensus(b: *std.Build, test_step: *std.Build.Step, run: *std.Build.Step.Run, repo_gate: *std.Build.Step.Compile) void {
+    var covered = StepSet.init(b.allocator);
+    collectReachable(test_step, &covered);
+    for (routes.routes) |route| {
+        if (routes.buildTask(route.argv)) |name| collectReachable(&b.top_level_steps.get(name).?.step, &covered);
     }
-    return false;
+    var paths = std.StringHashMap(void).init(b.allocator);
+    var it = covered.keyIterator();
+    while (it.next()) |entry| {
+        if (runStepScript(entry.*)) |path| paths.put(path, {}) catch @panic("OOM");
+    }
+    for (routes.routes) |route| {
+        if (routes.script(route.argv)) |path| paths.put(path, {}) catch @panic("OOM");
+    }
+    var census: std.ArrayList(u8) = .empty;
+    var names = paths.keyIterator();
+    while (names.next()) |path| {
+        census.appendSlice(b.allocator, path.*) catch @panic("OOM");
+        census.append(b.allocator, 0) catch @panic("OOM");
+    }
+    const generated = b.addWriteFiles();
+    run.addArtifactArg(repo_gate);
+    run.addFileArg(generated.add("script-execution-routes.txt", census.items));
 }
 
 /// True when `allow_src` has a row whose first field is `name`.

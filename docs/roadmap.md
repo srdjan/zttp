@@ -9,6 +9,12 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 
 ## Milestones
 
+The owner selected all eight items in the [hardening and pruning plan](plans/2026-10-20-hardening-pruning-plan.md)
+on 2026-10-20. Its ownership fixes, executable verification routes, transport
+and binding consolidation, and remaining compiler/flow convergence precede
+further feature work. The existing flow redesign remains the authority for
+its semantic phases and cutover criteria.
+
 The [reset implementation plan](plans/2026-10-14-reset-implementation-plan.md) owns the active reset design, phase order, and acceptance.
 The owner approved implementation on 2026-10-15.
 The [reset worklog](plans/2026-10-15-reset-worklog.md) records current work and verification evidence.

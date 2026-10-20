@@ -1,6 +1,6 @@
 //! Native ZTS import graph report and tier-layering gate.
 //!
-//! The command reads tracked paths through `git ls-files -z`. It reads the five
+//! The command reads tracked and untracked nonignored paths through Git. It reads the five
 //! build module names and roots from `build/packages.zig` during each run.
 
 const std = @import("std");
@@ -115,12 +115,14 @@ fn deriveBuildRoots(source: []const u8) ![tier_count]BuildRoot {
     return roots;
 }
 
-fn gitTrackedZig(
+fn gitSourceZig(
     io: std.Io,
     allocator: std.mem.Allocator,
+    cwd: std.process.Child.Cwd,
 ) ![]u8 {
     const result = try std.process.run(allocator, io, .{
-        .argv = &.{ "git", "ls-files", "-z", "--", "packages/zts" },
+        .argv = &.{ "git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "packages/zts" },
+        .cwd = cwd,
         .stdout_limit = .limited(4 * 1024 * 1024),
         .stderr_limit = .limited(256 * 1024),
     });
@@ -140,6 +142,24 @@ fn gitTrackedZig(
 
 fn lessPath(_: void, lhs: []const u8, rhs: []const u8) bool {
     return std.mem.order(u8, lhs, rhs) == .lt;
+}
+
+test "source census includes an unstaged module and excludes ignored files" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const init = try std.process.run(allocator, io, .{ .argv = &.{ "git", "init", "-q" }, .cwd = .{ .dir = tmp.dir } });
+    defer allocator.free(init.stdout);
+    defer allocator.free(init.stderr);
+    try std.testing.expect(init.term == .exited and init.term.exited == 0);
+    try tmp.dir.createDirPath(io, "packages/zts/src");
+    try tmp.dir.writeFile(io, .{ .sub_path = ".gitignore", .data = "packages/zts/src/ignored.zig\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "packages/zts/src/new module.zig", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "packages/zts/src/ignored.zig", .data = "" });
+    const listing = try gitSourceZig(io, allocator, .{ .dir = tmp.dir });
+    defer allocator.free(listing);
+    try std.testing.expectEqualStrings("packages/zts/src/new module.zig\x00", listing);
 }
 
 fn trackedFiles(allocator: std.mem.Allocator, listing: []u8) ![]File {
@@ -272,7 +292,7 @@ fn scanFile(
 }
 
 fn loadGraph(io: std.Io, allocator: std.mem.Allocator, roots: [tier_count]BuildRoot) !Graph {
-    const listing = try gitTrackedZig(io, allocator);
+    const listing = try gitSourceZig(io, allocator, .inherit);
     errdefer allocator.free(listing);
     const files = try trackedFiles(allocator, listing);
     errdefer {
@@ -328,7 +348,7 @@ fn parseManifest(
         const index = pathIndex(files, full_path) orelse {
             if (errors == 0) std.debug.print("zts layering: the manifest does not match the tree:\n", .{});
             errors += 1;
-            std.debug.print("  {s}:{d}: names no tracked file: {s}\n", .{ manifest_path, line_number, relative.? });
+            std.debug.print("  {s}:{d}: names no source file: {s}\n", .{ manifest_path, line_number, relative.? });
             continue;
         };
         if (files[index].tier) |present| {
@@ -347,7 +367,7 @@ fn parseManifest(
         }
     }
     if (errors != 0) {
-        std.debug.print("Every tracked file needs exactly one row, and every row needs a file.\n", .{});
+        std.debug.print("Every source file needs exactly one row, and every row needs a file.\n", .{});
         return error.ManifestMismatch;
     }
 }
@@ -785,7 +805,7 @@ fn reportImportGraph(allocator: std.mem.Allocator, graph: *Graph, writer: *std.I
     var unresolved_count: usize = 0;
     for (graph.files) |file| unresolved_count += file.unresolved.items.len;
     if (unresolved_count != 0) {
-        try writer.writeAll("\nrelative imports that resolve to no tracked file:\n");
+        try writer.writeAll("\nrelative imports that resolve to no source file:\n");
         for (graph.files) |file| {
             if (file.unresolved.items.len == 0) continue;
             std.mem.sort([]u8, file.unresolved.items, {}, struct {
@@ -841,7 +861,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer graph.deinit(allocator);
 
     var output_buffer: [64 * 1024]u8 = undefined;
-    var output = std.Io.File.stdout().writer(io, &output_buffer);
+    var output = std.Io.File.stdout().writerStreaming(io, &output_buffer);
     if (std.mem.eql(u8, command, "layering")) {
         reportLayering(io, allocator, &graph, roots, &output.interface) catch |failure| {
             std.debug.print("zts layering: failed: {s}\n", .{@errorName(failure)});

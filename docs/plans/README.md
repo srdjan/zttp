@@ -6,6 +6,8 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Hardening and pruning](2026-10-20-hardening-pruning-plan.md) | Eight audit findings selected; ordered implementation in progress, 2026-10-20 | Owner selected all findings with "all of them" |
+| [P7 request contents and sink evidence](2026-10-20-flow-interp-p7-spec.md) | Active version 7 evaluator, sink evidence and imported snapshots implemented; final acceptance pending | Included in the owner's approval of all hardening and pruning units |
 | [Flow checker redesign](2026-10-18-flow-checker-sound-redesign-plan.md) | Draft 2026-10-18, revised after one Codex astra validation round; D9 to D12 decided 2026-10-19; revised after the second validation round | Owner chose Decision 8 Option A; P0 and P1 approved (D13); R16 and P2 approved 2026-10-19 |
 | [R16 freeze and P2 evaluator core](2026-10-19-flow-interp-p2-r16-spec.md) | Specification 2026-10-19, revised after one Codex astra validation round | Owner approved R16 and P2 on 2026-10-19 |
 | [P3 loops](2026-10-19-flow-interp-p3-spec.md) | Specification 2026-10-19, revised after one Codex astra fact and argument round | Owner approved P3 on 2026-10-19 (D17 A) |

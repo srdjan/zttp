@@ -1,6 +1,7 @@
 ---
 title: A proxy signal carried a proof it never claimed
 date: 2026-08-02
+last_updated: 2026-10-20
 category: logic-errors
 module: ZigTS flow checker determinism inference
 problem_type: logic_error
@@ -25,6 +26,10 @@ tags:
   - fail-open
   - proof-boundary
   - compiler-analysis
+binds:
+  - packages/zts/src/flow_checker.zig
+  - packages/zts/src/flow_interp.zig
+proves: zig build test-zts
 ---
 
 # A proxy signal carried a proof it never claimed
@@ -64,6 +69,13 @@ function handler(req: Request): Response {
 **Reaching for `stateful` alone.** `zttp:validate` is `stateful = true`, and its state is a schema registry the handler compiles from literals inside its own run. Demoting `validateJson` would put a false negative on the most common validation path in the language, which is the failure mode the determinism rule had already been rewritten once to avoid (`docs/roadmap.md` item 2b).
 
 ## Solution
+
+**2026-10-20, analyzer v7.** The production implementation is now
+`readsVaryingSource` in `packages/zts/src/flow_interp.zig#FlowInterp`. It keeps
+the stateful-read and clock/random capability tests shown below.
+`finishHandlerReport` costs `deterministic` when nondeterministic or unknown
+data reaches the returned response. The old function name and snippet record
+the original fix; `flow_checker.zig` retains its regression tests.
 
 `stateful` plus a `.read` effect is the test for "another request could have written what this returns" (`packages/zts/src/flow_checker.zig`):
 

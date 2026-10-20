@@ -1,7 +1,7 @@
 ---
 title: A dispatched route was never walked, so its leak proved clean
 date: 2026-09-28
-last_updated: 2026-09-28
+last_updated: 2026-10-20
 category: security-issues
 module: packages/zts/src/flow_checker.zig (analysis roots and calls through zttp:router routerMatch)
 problem_type: security_issue
@@ -28,6 +28,7 @@ tags:
   - soundness
 binds:
   - packages/zts/src/flow_checker.zig
+  - packages/zts/src/flow_interp.zig
   - packages/zts/src/route_resolution.zig
   - packages/modules/src/http/router.zig
 proves: zig build test-zts
@@ -68,7 +69,17 @@ function handler(req) {
 
 ## Solution
 
-The fix has three parts and one wiring change.
+**2026-10-20, analyzer v7.** Production now follows route callable identities
+through `packages/zts/src/flow_interp.zig#FlowInterp`. Its `routerMatch` transfer
+in `evalExportValues` returns the possible handlers and route parameters without
+invoking a route or copying the request into the result. `evalCall` and `invoke`
+then analyze the dispatched handler with the actual argument values, including
+the full request passed as its first argument. Unknown callees clear the report.
+Route choice follows the stated limit on implicit control flow (D9). The
+separate route-root scan and type-based fallback below describe the original
+walker fix; the regression tests remain in `flow_checker.zig`.
+
+The original fix had three parts and one wiring change.
 
 **Route functions are analysis roots.** `scanRouteFunctionRoots` (`packages/zts/src/flow_checker.zig`) finds every call to the imported `routerMatch` and resolves the functions in its literal route table. The table is an object literal, or a module binding that an object literal initializes. `check` (`packages/zts/src/flow_checker.zig`) walks the handler, and then walks each route function as its own root. The route's request parameter carries `user_input`, and each root starts with clean witness state.
 

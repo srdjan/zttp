@@ -9,6 +9,7 @@
 //! Split out of module_binding.zig, which re-exports every name here.
 
 const std = @import("std");
+const sdk = @import("zttp-sdk");
 const object = @import("../object.zig");
 const value = @import("../value.zig");
 const resolver = @import("../modules/internal/resolver.zig");
@@ -28,55 +29,7 @@ pub const EffectClass = resolver.EffectClass;
 
 /// Unified return type for verification, type checking, and bool checking.
 /// Each consumer maps this to its own internal representation.
-pub const ReturnKind = enum {
-    /// Plain value types - no caller-side check required
-    boolean,
-    number,
-    string,
-    object,
-    undefined,
-    unknown,
-
-    /// Optional types - verifier requires narrowing before use
-    optional_string,
-    optional_object,
-    /// `number | undefined`. The shape `byteAt` answers with, and the only
-    /// optional the vocabulary was missing: declaring it `.unknown` would have
-    /// been the checker knowing less than spec 6.3 states.
-    optional_number,
-
-    /// Result type ({ok, value, error}) - verifier requires .ok check
-    result,
-
-    /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: a binding
-    /// cannot spell an export's type parameters, so a declared `dict` reaches
-    /// the checker as `Dict<unknown, unknown>`.
-    dict,
-
-    /// `Bytes` (spec 6.3). Not coarse: `Bytes` takes no type parameters, so
-    /// the kind names the type exactly.
-    bytes,
-
-    /// Lowercase JS-facing type name for signature advertisement (e.g. in
-    /// `zts modules --json`). Maps the verifier-oriented tags onto the
-    /// shapes a handler author actually sees at the call site.
-    pub fn jsTypeName(self: ReturnKind) []const u8 {
-        return switch (self) {
-            .boolean => "boolean",
-            .number => "number",
-            .string => "string",
-            .object => "object",
-            .undefined => "undefined",
-            .unknown => "unknown",
-            .optional_string => "string?",
-            .optional_object => "object?",
-            .optional_number => "number?",
-            .result => "Result",
-            .dict => "Dict",
-            .bytes => "Bytes",
-        };
-    }
-};
+pub const ReturnKind = sdk.ReturnKind;
 
 /// A signature spelled in source text, one entry per parameter plus the return.
 ///
@@ -91,12 +44,7 @@ pub const ReturnKind = enum {
 /// gate runs the whole pipeline over every export, so a declared signature is
 /// covered by construction, and its "no fallback to `unknown`" assertion is
 /// what stops a mistyped signature from degrading quietly.
-pub const DeclaredSignature = struct {
-    /// One entry per declared parameter, in order. Must be `arg_count` long.
-    params: []const []const u8,
-    /// The return type as source text.
-    returns: []const u8,
-};
+pub const DeclaredSignature = sdk.binding.DeclaredSignature;
 
 // -------------------------------------------------------------------------
 // Failure severity classification
@@ -116,18 +64,7 @@ pub const DeclaredSignature = struct {
 /// (`severity_census.zig`) lists the `none` exports that return `false` or
 /// `undefined` on failure (`setCookie`, `base64Decode`, `schemaCompile`, and
 /// others), each with the reason it has no severity.
-pub const FailureSeverity = enum {
-    /// Auth or validation failure - 2xx on failure path is a warning.
-    critical,
-    /// Cache miss, missing env, route not matched - 2xx is fine.
-    expected,
-    /// External network failure (`fetch`) - 2xx is informational. The site
-    /// stays covered, and the trace reports it in `upstreamFallbackSites`.
-    upstream,
-    /// The checker does not count this function. Some `none` exports can still
-    /// fail with `false` or `undefined`; see the census above.
-    none,
-};
+pub const FailureSeverity = sdk.FailureSeverity;
 
 // -------------------------------------------------------------------------
 // Data provenance labels
@@ -136,21 +73,11 @@ pub const FailureSeverity = enum {
 /// Classification of data sensitivity for compile-time information flow analysis.
 /// The flow checker tracks these labels through the handler's data flow graph,
 /// proving that sensitive data never reaches unauthorized sinks.
-pub const DataLabel = enum(u4) {
-    secret, // env vars with sensitive names (PASSWORD, KEY, TOKEN, SECRET, PRIVATE)
-    credential, // auth tokens, JWT payloads, bearer tokens
-    user_input, // request body, headers, query params, path params
-    config, // non-secret env configuration
-    internal, // cache values, internal state
-    external, // data from fetchSync responses
-    validated, // data that passed through validation
-    nondeterministic, // derived from a clock or RNG read: differs between runs
-    unknown, // provenance the checker could not follow: proves nothing
-};
+pub const DataLabel = sdk.DataLabel;
 
 /// Bitset of data provenance labels. Value aggregation uses `mergeValues`;
 /// `merge` only unions facts about the same value or declared label sets.
-/// Compact enough (2 bytes) to store per-node in the flow checker's label map.
+/// Compact enough (2 bytes) to carry in each abstract flow value.
 pub const LabelSet = packed struct(u16) {
     secret: bool = false,
     credential: bool = false,
@@ -168,14 +95,7 @@ pub const LabelSet = packed struct(u16) {
     /// claim that a value carries nothing: a sink that this reaches cannot
     /// prove the properties it governs, so they are cleared rather than held.
     unknown: bool = false,
-    /// A fact the flow checker derives, never one a binding or a manifest
-    /// declares: the value is, or contains, an HTML response built from
-    /// unvalidated user input. It travels with the labels so that a callee's
-    /// `Response.html(userInput)` is reported only when that value reaches the
-    /// handler's response (plan unit F4), and so that every place the label walk
-    /// follows a value also follows this fact.
-    unsafe_html: bool = false,
-    _reserved: u6 = 0,
+    _reserved: u7 = 0,
 
     pub const empty: LabelSet = .{};
 
@@ -253,53 +173,16 @@ pub const LabelSet = packed struct(u16) {
 // -------------------------------------------------------------------------
 
 /// Category for extracted literals in the contract JSON.
-pub const ContractCategory = enum {
-    env,
-    cache_namespace,
-    sql_registration,
-    schema_compile,
-    request_schema,
-    route_pattern,
-    cookie_name,
-    cors_origin,
-    rate_limit_key,
-    fetch_host,
-    /// Partner-declared category. The actual tag string lives on
-    /// `ContractExtraction.extension_category` and is emitted under
-    /// `contract.json` at `extensions.<specifier>.categories`.
-    extension_specific,
-};
+pub const ContractCategory = sdk.ContractCategory;
 
 /// Transform applied to extracted literal before storing.
-pub const ContractTransform = enum {
-    /// Extract hostname from URL string.
-    extract_host,
-    /// No transform, use raw literal.
-    identity,
-};
+pub const ContractTransform = sdk.ContractTransform;
 
 /// Declarative rule for extracting a literal from a function argument.
-pub const ContractExtraction = struct {
-    /// Which argument position holds the literal (0-indexed).
-    arg_position: u8 = 0,
-    /// What category this literal belongs to in the contract.
-    category: ContractCategory,
-    /// Optional transform applied to the raw string.
-    transform: ?ContractTransform = null,
-    /// When true, the call sets a boolean flag rather than extracting a literal.
-    flag_only: bool = false,
-    /// Partner-declared category tag. Only meaningful when
-    /// `category == .extension_specific`. Borrowed reference for
-    /// comptime built-in declarations; owned for manifest-derived rules
-    /// (the owning store frees it).
-    extension_category: ?[]const u8 = null,
-};
+pub const ContractExtraction = sdk.ContractExtraction;
 
 /// Boolean flags set on the contract when a function is imported or called.
-pub const ContractFlags = struct {
-    sets_bearer_auth: bool = false,
-    sets_jwt_auth: bool = false,
-};
+pub const ContractFlags = sdk.ContractFlags;
 
 // -------------------------------------------------------------------------
 // Algebraic laws
@@ -312,12 +195,7 @@ pub const ContractFlags = struct {
 /// rewrite is valid regardless of surrounding context. Conditional laws
 /// (commutation, reordering) are explicitly deferred until side-condition
 /// machinery exists.
-pub const LawKind = enum {
-    pure,
-    idempotent_call,
-    inverse_of,
-    absorbing,
-};
+pub const LawKind = sdk.LawKind;
 
 /// An algebraic equation attached to a `FunctionBinding`.
 ///
@@ -330,35 +208,12 @@ pub const LawKind = enum {
 ///   a dangling reference is a compile error.
 /// - `.absorbing`: when an argument matches `AbsorbingPattern.argument_shape`,
 ///   the call is known to produce the fixed `residue` and can be folded.
-pub const Law = union(LawKind) {
-    pure: void,
-    idempotent_call: void,
-    inverse_of: []const u8,
-    absorbing: AbsorbingPattern,
-};
+pub const Law = sdk.Law;
 
 /// Describes a recognizable argument shape and the residue the function
 /// produces when that shape appears. Used for dead-branch pruning during
 /// path canonicalization (e.g. `jwtVerify("")` is always `.err`).
-pub const AbsorbingPattern = struct {
-    /// Which argument position the pattern matches on (0-indexed).
-    arg_position: u8 = 0,
-    /// The shape the argument must have for the residue to apply.
-    argument_shape: ArgumentShape,
-    /// The fixed residue produced when the shape matches.
-    residue: Residue,
-
-    pub const ArgumentShape = enum {
-        empty_string_literal,
-        undefined_literal,
-    };
-
-    pub const Residue = enum {
-        result_err,
-        returns_undefined,
-        returns_false,
-    };
-};
+pub const AbsorbingPattern = sdk.AbsorbingPattern;
 
 // -------------------------------------------------------------------------
 // Function binding
@@ -574,44 +429,12 @@ pub const ModuleBinding = struct {
 ///   - function bindings missing both func and module_func
 pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
     @setEvalBranchQuota(10000);
-    // Check specifier format and state consistency per module
+    sdk.binding.validateBindingMetadata(bindings);
+    // Analyzer-specific invariants stay beside the engine binding records.
     for (bindings) |b| {
-        const builtin_prefix = std.mem.startsWith(u8, b.specifier, "zttp:");
-        const extension_prefix = std.mem.startsWith(u8, b.specifier, "zttp-ext:");
-        if (!builtin_prefix and !extension_prefix) {
-            @compileError("module specifier must start with 'zttp:' or 'zttp-ext:': " ++ b.specifier);
-        }
-        // state_init and state_deinit must be set together or not at all
-        if (b.state_init != null and b.state_deinit == null) {
-            @compileError("module has state_init but missing state_deinit: " ++ b.specifier);
-        }
-        if (b.state_init == null and b.state_deinit != null) {
-            @compileError("module has state_deinit but missing state_init: " ++ b.specifier);
-        }
-        if (findDuplicateRequiredCapability(b.required_capabilities)) |capability| {
-            @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ b.specifier);
-        }
         for (b.exports) |f| {
             if (f.func == null and f.module_func == null) {
                 @compileError("function binding missing both func and module_func: " ++ f.name);
-            }
-            if (f.required_capabilities) |export_caps| {
-                if (findDuplicateRequiredCapability(export_caps)) |capability| {
-                    @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' on " ++ b.specifier ++ "." ++ f.name);
-                }
-                // An export may narrow its module's authority, never widen it.
-                // Without this a tightening pass could hand a function a
-                // capability its module never declared, and the module set is
-                // what the runtime actually grants.
-                for (export_caps) |cap| {
-                    var found = false;
-                    for (b.required_capabilities) |mod_cap| {
-                        if (mod_cap == cap) found = true;
-                    }
-                    if (!found) {
-                        @compileError("capability '" ++ @tagName(cap) ++ "' on " ++ b.specifier ++ "." ++ f.name ++ " is not declared by the module; an export may narrow its module's set, never widen it");
-                    }
-                }
             }
             // `param_types` is what the type checker enforces at the call site,
             // so an under-declared list silently drops the diagnostic for that
@@ -722,26 +545,6 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             }
         }
     }
-    // Check unique specifiers
-    for (bindings, 0..) |a, i| {
-        for (bindings[i + 1 ..]) |b| {
-            if (std.mem.eql(u8, a.specifier, b.specifier)) {
-                @compileError("duplicate module specifier: " ++ a.specifier);
-            }
-        }
-    }
-    // Check unique function names within each module. Different modules may
-    // export the same name because all proof metadata lookups must be keyed by
-    // (specifier, export_name).
-    for (bindings) |a| {
-        for (a.exports, 0..) |af, afi| {
-            for (a.exports[afi + 1 ..]) |af2| {
-                if (std.mem.eql(u8, af.name, af2.name)) {
-                    @compileError("duplicate function name within " ++ a.specifier ++ ": " ++ af.name);
-                }
-            }
-        }
-    }
     // Resolve .inverse_of references. The target name must refer to an
     // existing function somewhere in the registry, and the target must
     // declare the symmetric inverse so `g(f(x)) = x` and `f(g(x)) = x`
@@ -767,14 +570,7 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
     }
 }
 
-pub fn findDuplicateRequiredCapability(comptime caps: []const ModuleCapability) ?ModuleCapability {
-    for (caps, 0..) |capability, i| {
-        for (caps[i + 1 ..]) |other| {
-            if (capability == other) return capability;
-        }
-    }
-    return null;
-}
+pub const findDuplicateRequiredCapability = sdk.binding.findDuplicateRequiredCapability;
 
 /// Return the first duplicated law *kind* within a single function's laws
 /// list. Duplicates are always a spec error: laws are unconditionally sound

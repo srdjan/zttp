@@ -26,6 +26,8 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
 
+    base_mod.addImport("zttp-sdk", sdk_dep.module("zttp-sdk"));
+
     // `zts-contracts` is data and serialization: what a contract and its
     // receipts are, never how they are produced. Both `zts` (which holds them
     // at run time) and `zts-compiler` (which produces them at build time)

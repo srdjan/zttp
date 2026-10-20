@@ -1,21 +1,11 @@
-//! Flow evaluator, phases P2 to P6: the abstract domain, the location scheme,
-//! the field-sensitive heap, an evaluator for expressions and statements,
-//! `for...of` loops (P3), calls with captured bindings and recursion (P4), the
-//! builtin globals with the operations that take no callback (P5a), the calls
-//! of imported virtual-module exports (P5b), the callbacks of array methods,
-//! `Array.from`, and seven exports (P5c), nested patterns in `match` (P6a),
-//! and the defense facts with their sources and sink requirements (P6b).
+//! Heap-aware flow evaluator: finite values and origins, field-sensitive heaps,
+//! closures, recursion, native operations, request contents, persistent module
+//! roots and conditional witness evidence. `flow_checker.zig` supplies the
+//! compatibility facade; this evaluator establishes its verdicts.
 //!
-//! This is the shadow of the checker that will replace the label walk in
-//! `flow_checker.zig`. Nothing in the pipeline, the CLI, or any verdict reads
-//! it, so `flow_analyzer_version` and the policy hash stay where they are. The
-//! design is in `docs/plans/2026-10-18-flow-checker-sound-redesign-plan.md`
-//! (rounds 2 and 3 override its earlier text). The contracts are
-//! `docs/plans/2026-10-19-flow-interp-p2-r16-spec.md`,
-//! `docs/plans/2026-10-19-flow-interp-p3-spec.md`,
-//! `docs/plans/2026-10-19-flow-interp-p4-spec.md`,
-//! `docs/plans/2026-10-19-flow-interp-p5-spec.md`, and
-//! `docs/plans/2026-10-20-flow-interp-p6-spec.md`.
+//! Semantic authority: `docs/plans/2026-10-18-flow-checker-sound-redesign-plan.md`
+//! (round 3), the phase specifications P2–P6, and
+//! `docs/plans/2026-10-20-flow-interp-p7-spec.md`.
 //!
 //! The old checker keeps one label set per binding and loses what a value
 //! points at, so a write through an alias reaches nothing the reader can see.
@@ -41,6 +31,10 @@ const atom_table = engine.atom_table;
 const mb = engine.module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
 const known_globals = @import("zts-base").known_globals;
+const report_types = @import("flow_report.zig");
+const flow_evidence = @import("flow_evidence.zig");
+const counterexample = @import("counterexample.zig");
+const path_generator = @import("path_generator.zig");
 
 const NodeIndex = ir.NodeIndex;
 const NodeTag = ir.NodeTag;
@@ -72,15 +66,27 @@ pub const SiteKind = enum(u8) {
     /// A function object. Functions are mutable at runtime (`object.zig`
     /// 1753), so `g.x = secret` has to land somewhere a later `g.x` can read.
     function,
-    /// The request and its headers. P2 never creates these. P7 models R4 as
-    /// synthetic containers, and the kinds exist now so that a seed can name
-    /// them and the key type does not change shape later.
+    /// The synthetic request and headers contents seeded at handler entry.
+    /// Their named cells and summary use the same read/write rules as any
+    /// other container (R4, R14).
     request,
     headers,
+    /// The mutable request query object. Its values are strings or numbers,
+    /// but the object itself may receive arbitrary later writes.
+    query,
+    /// Helper-created responses and their mutable header objects. Their
+    /// methods see their own fields, rather than arbitrary runtime state.
+    response,
+    response_headers,
+    router_result,
+    router_params,
     /// The cell of a captured binding. `node` holds the packed source key of
     /// the binding, and the cell is the site's `summary`. No value points at
     /// a capture site, so a read through an unnamed object never sees one.
     capture,
+    /// A runtime global slot. Its name is shared across modules, and its
+    /// scalar value as well as objects reachable from it persist across calls.
+    module_binding,
     /// An array that a builtin returns. `node` is the call node, and the site
     /// stands for every container the call makes, nested ones included.
     allocated_array,
@@ -108,18 +114,57 @@ pub const SiteKey = struct {
     kind: SiteKind,
     node: NodeIndex,
     context: u16,
+    /// One syntactic caller separates allocations returned by two calls of
+    /// the same helper. Module globals, captures and shared builtins use 0.
+    call: NodeIndex = 0,
 
     fn order(a: SiteKey, b: SiteKey) std.math.Order {
         const by_kind = std.math.order(@intFromEnum(a.kind), @intFromEnum(b.kind));
         if (by_kind != .eq) return by_kind;
         const by_node = std.math.order(a.node, b.node);
         if (by_node != .eq) return by_node;
-        return std.math.order(a.context, b.context);
+        const by_context = std.math.order(a.context, b.context);
+        if (by_context != .eq) return by_context;
+        return std.math.order(a.call, b.call);
     }
 };
 
 fn nodeOrder(a: NodeIndex, b: NodeIndex) std.math.Order {
     return std.math.order(a, b);
+}
+
+const watched_top: u8 = 15;
+const SiteVersion = struct {
+    site: SiteKey,
+    generation: u8,
+    fn order(a: SiteVersion, b: SiteVersion) std.math.Order {
+        const site = SiteKey.order(a.site, b.site);
+        return if (site != .eq) site else std.math.order(a.generation, b.generation);
+    }
+};
+const SchemaView = struct {
+    sites: []const SiteVersion,
+    top_generation: u8,
+    guard: ?flow_evidence.Guard = null,
+};
+
+fn sameSchema(a: ?SchemaView, b: ?SchemaView) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return left.top_generation == right.top_generation and sameGuard(left.guard, right.guard) and sliceEql(SiteVersion, left.sites, right.sites, SiteVersion.order);
+}
+
+fn mergeSchema(a: ?SchemaView, b: ?SchemaView) ?SchemaView {
+    var left = a orelse return null;
+    const right = b orelse return null;
+    if (left.top_generation != right.top_generation or !sliceEql(SiteVersion, left.sites, right.sites, SiteVersion.order)) return null;
+    left.guard = flow_evidence.commonGuard(left.guard, right.guard, true, true);
+    return left;
+}
+
+fn sameGuard(a: ?flow_evidence.Guard, b: ?flow_evidence.Guard) bool {
+    const left = a orelse return b == null;
+    return left.eql(b orelse return false);
 }
 
 /// A fact about request data that a sink may accept in place of a clean
@@ -185,6 +230,9 @@ pub const Defenses = packed struct(u8) {
 pub const Flow = struct {
     labels: LabelSet = .empty,
     defenses: Defenses = .{},
+    schema_guard: ?flow_evidence.Guard = null,
+    html_guard: ?flow_evidence.Guard = null,
+    witness_complete: bool = true,
 
     pub fn exposed(self: Flow) bool {
         return self.labels.user_input or self.labels.unknown;
@@ -192,8 +240,13 @@ pub const Flow = struct {
 
     /// The same flow with no defenses when it is not exposed.
     pub fn canonical(self: Flow) Flow {
-        if (self.exposed()) return self;
-        return .{ .labels = self.labels };
+        if (self.exposed()) {
+            var out = self;
+            if (!out.defenses.schema_checked) out.schema_guard = null;
+            if (!out.defenses.html_escaped) out.html_guard = null;
+            return out;
+        }
+        return .{ .labels = self.labels, .witness_complete = self.witness_complete };
     }
 };
 
@@ -212,6 +265,9 @@ fn combineFlows(a: Flow, b: Flow) Flow {
     const flow: Flow = .{
         .labels = LabelSet.mergeValues(a.labels, b.labels),
         .defenses = combineDefenses(a, b),
+        .schema_guard = flow_evidence.commonGuard(a.schema_guard, b.schema_guard, a.exposed(), b.exposed()),
+        .html_guard = flow_evidence.commonGuard(a.html_guard, b.html_guard, a.exposed(), b.exposed()),
+        .witness_complete = a.witness_complete and b.witness_complete,
     };
     return flow.canonical();
 }
@@ -233,7 +289,7 @@ pub const DefenseEdge = enum {
             .drop_html => out.defenses.html_escaped = false,
             .drop_all => out.defenses = .{},
         }
-        return out;
+        return out.canonical();
     }
 };
 
@@ -245,8 +301,14 @@ pub const DefenseEdge = enum {
 /// can share values safely.
 pub const Value = struct {
     labels: LabelSet = .empty,
+    /// The value is a literal HTTP content type: true permits HTML, false is
+    /// known not to select HTML, null is unknown. Transformations forget it;
+    /// copies preserve it and alternatives retain it only when they agree.
+    html_type: ?bool = null,
     /// Canonical: empty unless the labels hold `user_input` or `unknown`.
     defenses: Defenses = .{},
+    schema_guard: ?flow_evidence.Guard = null,
+    html_guard: ?flow_evidence.Guard = null,
     /// Sorted and deduplicated.
     origins: []const SiteKey = &.{},
     /// The value may point at an object this analysis cannot name.
@@ -254,9 +316,18 @@ pub const Value = struct {
     /// Function-expression nodes, sorted and deduplicated.
     callables: []const NodeIndex = &.{},
     callables_top: bool = false,
+    /// Evidence only: this value's callable selection was not widened by an
+    /// absent field, imprecise index, or a different alternative.
+    callee_exact: bool = true,
+    witness_complete: bool = true,
+    native_export: ?ModuleExport = null,
+    schema_view: ?SchemaView = null,
+    request_field: ?flow_evidence.RequestField = null,
+    io_origin: ?flow_evidence.Origin = null,
+    io_view: ?SchemaView = null,
 
     /// A primitive that carries nothing.
-    pub const clean: Value = .{};
+    pub const clean: Value = .{ .html_type = false };
 
     /// What the analysis could not follow: carries `unknown`, may point at
     /// anything, and may be any function.
@@ -273,11 +344,11 @@ pub const Value = struct {
     /// A primitive with this flow, made canonical.
     pub fn flowing(of: Flow) Value {
         const canonical = of.canonical();
-        return .{ .labels = canonical.labels, .defenses = canonical.defenses };
+        return .{ .labels = canonical.labels, .defenses = canonical.defenses, .schema_guard = canonical.schema_guard, .html_guard = canonical.html_guard, .witness_complete = canonical.witness_complete };
     }
 
     pub fn flow(self: Value) Flow {
-        return .{ .labels = self.labels, .defenses = self.defenses };
+        return (Flow{ .labels = self.labels, .defenses = self.defenses, .schema_guard = self.schema_guard, .html_guard = self.html_guard, .witness_complete = self.witness_complete }).canonical();
     }
 };
 
@@ -349,14 +420,27 @@ fn joinValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
     const flow: Flow = (Flow{
         .labels = LabelSet.mergeConditional(a.labels, b.labels),
         .defenses = combineDefenses(a.flow(), b.flow()),
+        .schema_guard = flow_evidence.commonGuard(a.schema_guard, b.schema_guard, a.flow().exposed(), b.flow().exposed()),
+        .html_guard = flow_evidence.commonGuard(a.html_guard, b.html_guard, a.flow().exposed(), b.flow().exposed()),
+        .witness_complete = a.witness_complete and b.witness_complete,
     }).canonical();
     return .{
         .labels = flow.labels,
+        .html_type = if (a.html_type == b.html_type) a.html_type else null,
+        .native_export = if (sameExport(a.native_export, b.native_export)) a.native_export else null,
+        .schema_view = mergeSchema(a.schema_view, b.schema_view),
+        .request_field = if (a.request_field == b.request_field) a.request_field else null,
+        .io_origin = if (sameOrigin(a.io_origin, b.io_origin)) a.io_origin else null,
+        .io_view = if (sameSchema(a.io_view, b.io_view)) a.io_view else null,
         .defenses = flow.defenses,
+        .schema_guard = flow.schema_guard,
+        .html_guard = flow.html_guard,
+        .witness_complete = flow.witness_complete,
         .origins = try mergeSorted(SiteKey, arena, a.origins, b.origins, SiteKey.order),
         .origins_top = a.origins_top or b.origins_top,
         .callables = try mergeSorted(NodeIndex, arena, a.callables, b.callables, nodeOrder),
         .callables_top = a.callables_top or b.callables_top,
+        .callee_exact = a.callee_exact and b.callee_exact and std.mem.eql(NodeIndex, a.callables, b.callables) and sameExport(a.native_export, b.native_export),
     };
 }
 
@@ -375,6 +459,10 @@ fn withFlow(v: Value, source: Flow) Value {
     const flow = combineFlows(v.flow(), source);
     out.labels = flow.labels;
     out.defenses = flow.defenses;
+    out.schema_guard = flow.schema_guard;
+    out.html_guard = flow.html_guard;
+    out.witness_complete = flow.witness_complete and source.witness_complete;
+    if (source.exposed() and !source.defenses.schema_checked) out.schema_view = null;
     return out;
 }
 
@@ -383,6 +471,12 @@ fn withFlow(v: Value, source: Flow) Value {
 fn withoutDefenses(v: Value) Value {
     var out = v;
     out.defenses = .{};
+    out.schema_guard = null;
+    out.html_guard = null;
+    out.schema_view = null;
+    out.request_field = null;
+    out.io_origin = null;
+    out.io_view = null;
     return out;
 }
 
@@ -394,6 +488,15 @@ fn unionValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
     const flow = combineFlows(a.flow(), b.flow());
     out.labels = flow.labels;
     out.defenses = flow.defenses;
+    out.schema_guard = flow.schema_guard;
+    out.html_guard = flow.html_guard;
+    out.html_type = if (a.html_type == b.html_type) a.html_type else null;
+    out.native_export = if (sameExport(a.native_export, b.native_export)) a.native_export else null;
+    out.schema_view = mergeSchema(a.schema_view, b.schema_view);
+    out.request_field = if (a.request_field == b.request_field) a.request_field else null;
+    out.io_origin = if (sameOrigin(a.io_origin, b.io_origin)) a.io_origin else null;
+    out.io_view = if (sameSchema(a.io_view, b.io_view)) a.io_view else null;
+    out.witness_complete = flow.witness_complete;
     return out;
 }
 
@@ -403,11 +506,21 @@ fn unionValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
 fn withNative(arena: std.mem.Allocator, v: Value, native: Value) Error!Value {
     return .{
         .labels = v.labels,
+        .html_type = v.html_type,
+        .native_export = v.native_export,
+        .schema_view = v.schema_view,
+        .request_field = v.request_field,
+        .io_origin = v.io_origin,
+        .io_view = v.io_view,
         .defenses = v.defenses,
+        .schema_guard = v.schema_guard,
+        .html_guard = v.html_guard,
+        .witness_complete = v.witness_complete,
         .origins = try mergeSorted(SiteKey, arena, v.origins, native.origins, SiteKey.order),
         .origins_top = v.origins_top or native.origins_top,
         .callables = try mergeSorted(NodeIndex, arena, v.callables, native.callables, nodeOrder),
         .callables_top = v.callables_top or native.callables_top,
+        .callee_exact = v.callee_exact and native.callee_exact and std.mem.eql(NodeIndex, v.callables, native.callables) and sameExport(v.native_export, native.native_export),
     };
 }
 
@@ -423,6 +536,16 @@ const NamedMap = std.AutoHashMapUnmanaged(u16, Value);
 pub const Cells = struct {
     named: NamedMap = .empty,
     summary: ?Value = null,
+    /// The response may have an HTML content type. Weak format writes only
+    /// establish this fact; an original HTML format never becomes forgotten.
+    html_possible: bool = false,
+    /// Only locations checked by an object validator need write generations.
+    /// Saturation disables that view, so repeated writes remain a finite
+    /// abstract domain instead of growing an unbounded validation epoch.
+    watched: bool = false,
+    generation: u8 = 0,
+    request_fields: u3 = 7,
+    written: bool = false,
 };
 
 /// The union of two cell sets. A name on one side only keeps its value: the
@@ -439,13 +562,17 @@ fn joinCells(arena: std.mem.Allocator, a: Cells, b: Cells) Error!Cells {
         else
             entry.value_ptr.*;
     }
-    return .{ .named = named, .summary = try joinOpt(arena, a.summary, b.summary) };
+    return .{ .named = named, .summary = try joinOpt(arena, a.summary, b.summary), .html_possible = a.html_possible or b.html_possible, .watched = a.watched or b.watched, .generation = @max(a.generation, b.generation), .request_fields = a.request_fields & b.request_fields, .written = a.written or b.written };
 }
 
 /// A weak update: join `v` into the cell `name`, or into the summary when
 /// `name` is null. One site stands for every object it creates, so the old
 /// content may still be live and a write never removes a label.
 fn weakWriteCells(arena: std.mem.Allocator, cells: Cells, name: ?u16, v: Value) Error!Cells {
+    const preserved: u3 = if (name) |n|
+        if (n == @intFromEnum(object.Atom.method)) 6 else if (n == @intFromEnum(object.Atom.url)) 5 else if (n == @intFromEnum(object.Atom.path)) 3 else 7
+    else
+        0;
     if (name) |n| {
         var named = try cells.named.clone(arena);
         const slot = try named.getOrPut(arena, n);
@@ -453,16 +580,38 @@ fn weakWriteCells(arena: std.mem.Allocator, cells: Cells, name: ?u16, v: Value) 
             try joinValue(arena, slot.value_ptr.*, v)
         else
             v;
-        return .{ .named = named, .summary = cells.summary };
+        return .{ .named = named, .summary = cells.summary, .html_possible = cells.html_possible, .watched = cells.watched, .generation = if (cells.watched) @min(cells.generation +| 1, watched_top) else cells.generation, .request_fields = cells.request_fields & preserved, .written = true };
     }
     return .{
         .named = cells.named,
         .summary = (try joinOpt(arena, cells.summary, v)),
+        .html_possible = cells.html_possible,
+        .watched = cells.watched,
+        .generation = if (cells.watched) @min(cells.generation +| 1, watched_top) else cells.generation,
+        .request_fields = cells.request_fields & preserved,
+        .written = true,
     };
 }
 
 const EnvMap = std.AutoHashMapUnmanaged(u32, Value);
 const HeapMap = std.AutoHashMapUnmanaged(SiteKey, Cells);
+
+const PathEvidence = struct {
+    complete: bool = true,
+    constraints: []const counterexample.WitnessConstraint = &.{},
+    io_calls: []const counterexample.TrackedIoCall = &.{},
+};
+
+fn sameOrigin(a: ?flow_evidence.Origin, b: ?flow_evidence.Origin) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return left.call_index == right.call_index and left.returns == right.returns and left.ok_record == right.ok_record and std.mem.eql(u8, left.module, right.module) and std.mem.eql(u8, left.func, right.func);
+}
+
+fn samePath(a: PathEvidence, b: PathEvidence) bool {
+    return a.complete and b.complete and a.constraints.len == b.constraints.len and a.io_calls.len == b.io_calls.len and
+        (a.constraints.len == 0 or a.constraints.ptr == b.constraints.ptr) and (a.io_calls.len == 0 or a.io_calls.ptr == b.io_calls.ptr);
+}
 
 /// The abstract machine state: the bindings of the function, the heap, and the
 /// cells that writes through an unnamed target land in. A state is reachable
@@ -479,6 +628,7 @@ pub const State = struct {
     /// Writes whose target origin is `top`. A read through any receiver sees
     /// them, because the unnamed object might be that receiver.
     top_cell: Cells = .{},
+    path: PathEvidence = .{},
 
     pub const bottom: State = .{ .reachable = false };
 };
@@ -489,6 +639,7 @@ fn cloneState(arena: std.mem.Allocator, s: State) Error!State {
         .env = try s.env.clone(arena),
         .heap = try s.heap.clone(arena),
         .top_cell = s.top_cell,
+        .path = s.path,
     };
 }
 
@@ -525,6 +676,7 @@ fn joinStates(arena: std.mem.Allocator, a: State, b: State) Error!State {
         .env = env,
         .heap = heap,
         .top_cell = try joinCells(arena, a.top_cell, b.top_cell),
+        .path = if (samePath(a.path, b.path)) a.path else .{ .complete = false },
     };
 }
 
@@ -553,9 +705,10 @@ fn valueEql(a: Value, b: Value) bool {
     const a_defenses: u8 = @bitCast(a.defenses);
     const b_defenses: u8 = @bitCast(b.defenses);
     return a_bits == b_bits and
+        a.html_type == b.html_type and sameExport(a.native_export, b.native_export) and sameSchema(a.schema_view, b.schema_view) and a.request_field == b.request_field and sameOrigin(a.io_origin, b.io_origin) and sameSchema(a.io_view, b.io_view) and sameGuard(a.flow().schema_guard, b.flow().schema_guard) and sameGuard(a.flow().html_guard, b.flow().html_guard) and
         a_defenses == b_defenses and
         a.origins_top == b.origins_top and
-        a.callables_top == b.callables_top and
+        a.callables_top == b.callables_top and a.callee_exact == b.callee_exact and a.witness_complete == b.witness_complete and
         sliceEql(SiteKey, a.origins, b.origins, SiteKey.order) and
         sliceEql(NodeIndex, a.callables, b.callables, nodeOrder);
 }
@@ -580,7 +733,7 @@ fn valueMapEql(a: anytype, b: @TypeOf(a)) bool {
 }
 
 fn cellsEql(a: Cells, b: Cells) bool {
-    return valueMapEql(a.named, b.named) and optValueEql(a.summary, b.summary);
+    return a.written == b.written and a.html_possible == b.html_possible and a.watched == b.watched and a.generation == b.generation and a.request_fields == b.request_fields and valueMapEql(a.named, b.named) and optValueEql(a.summary, b.summary);
 }
 
 /// Whether two states are the same abstract state. Two unreachable states are
@@ -602,7 +755,7 @@ fn stateEql(a: State, b: State) bool {
 /// The state of a callee as its caller sees it: the heap and the cells of
 /// unnamed writes. The maps are shared with `s`, so the result is read-only.
 fn heapOnly(s: State) State {
-    return .{ .reachable = s.reachable, .heap = s.heap, .top_cell = s.top_cell };
+    return .{ .reachable = s.reachable, .heap = s.heap, .top_cell = s.top_cell, .path = s.path };
 }
 
 fn joinSummary(arena: std.mem.Allocator, a: Summary, b: Summary) Error!Summary {
@@ -640,7 +793,10 @@ fn argsEql(a: []const Value, b: []const Value) bool {
 /// order, and equality assumes the canonical form.
 fn canonicalValue(arena: std.mem.Allocator, v: Value) Error!Value {
     var out = v;
-    out.defenses = v.flow().canonical().defenses;
+    const canonical = v.flow().canonical();
+    out.defenses = canonical.defenses;
+    out.schema_guard = canonical.schema_guard;
+    out.html_guard = canonical.html_guard;
     out.origins = try canonicalSlice(SiteKey, arena, v.origins, SiteKey.order);
     out.callables = try canonicalSlice(NodeIndex, arena, v.callables, nodeOrder);
     return out;
@@ -733,6 +889,7 @@ pub const Unresolved = struct {
     node: NodeIndex,
     tag: NodeTag,
     owner: Owner,
+    module: ModuleId = 0,
 };
 
 pub const CompletionKind = enum {
@@ -746,6 +903,7 @@ pub const CompletionKind = enum {
 
 pub const Completion = struct {
     kind: CompletionKind,
+    node: NodeIndex = null_node,
     value: ?Value,
     state: State,
 };
@@ -762,6 +920,26 @@ pub const FunctionResult = struct {
     /// cleared, and `returned` and `exit` carry no guarantee.
     cleared: bool,
     unresolved: []const Unresolved,
+};
+
+pub const SinkEvent = struct {
+    node: NodeIndex,
+    source_node: NodeIndex = null_node,
+    module: ModuleId = 0,
+    callsite: ?NodeIndex = null,
+    sink: InputSink,
+    reached: Flow,
+    path: PathEvidence = .{},
+};
+
+/// Unsupported constructs clear every property. Sink
+/// diagnostics have no witness until an executable path can be established.
+pub const HandlerReport = struct {
+    evaluation: FunctionResult,
+    properties: report_types.FlowProperties,
+    diagnostics: []const report_types.Diagnostic,
+    events: []const SinkEvent,
+    defended_paths: []const report_types.DefendedPath = &.{},
 };
 
 fn ownerOfPhase(phase: Phase) Owner {
@@ -923,9 +1101,18 @@ const Rule = enum {
     array_of,
     /// A `Response` static: a container that holds native methods.
     response_static,
+    fetch_sync,
+    log,
     range,
     /// `hole()`: the call never returns.
     hole,
+    /// Runtime-installed request and headers prototype methods (P7b).
+    request_text,
+    request_json,
+    header_get,
+    header_has,
+    header_write,
+    header_delete,
     /// The operation has no rule, and the row says why.
     no_rule,
 };
@@ -1016,6 +1203,7 @@ const operation_rows =
     rowsOf("Object", .deep_scalar, .keep, "", &.{"hasOwn"}) ++
     rowsOf("Number", .deep_scalar, .keep, "", &.{ "isInteger", "isNaN", "isFinite", "parseFloat", "parseInt" }) ++
     rowsOf("Response", .response_static, .keep, "", &.{ "json", "text", "html", "redirect", "rawJson" }) ++
+    rowsOf("console", .log, .keep, "", &.{"log"}) ++
     rowsOf("Date", .nondeterministic, .keep, "", &.{"now"}) ++
     rowsOf("Array", .deep_scalar, .keep, "", &.{"isArray"}) ++
     rowsOf("Array", .array_of, .keep, "", &.{"of"}) ++
@@ -1023,13 +1211,27 @@ const operation_rows =
     rowsOf("String", .deep_scalar, .drop_all, "", &.{"fromCharCode"}) ++
     rowsOf("global", .deep_scalar, .keep, "", &.{ "String", "Number", "parseFloat", "parseInt", "isDict", "isBytes" }) ++
     rowsOf("global", .range, .keep, "", &.{"range"}) ++
-    rowsOf("global", .parsed, .drop_all, "", &.{ "requestBody", "requestText", "requestJson" }) ++
+    rowsOf("global", .request_json, .drop_all, "", &.{ "requestBody", "requestText", "requestJson" }) ++
     rowsOf("global", .hole, .keep, "", &.{"hole"}) ++
     rowsOf("global", .vnode, .keep, "", &.{"h"}) ++
     rowsOf("global", .render, .drop_html, "", &.{"renderToString"});
 
+/// These methods are installed by HandlerInstance, outside the engine builtin
+/// registry. Keep their read/write edges explicit and census their registration
+/// roster separately from the engine operations.
+const runtime_prototype_rows =
+    rowsOf("Request.prototype", .request_text, .drop_all, "", &.{"text"}) ++
+    rowsOf("Request.prototype", .request_json, .drop_all, "", &.{"json"}) ++
+    rowsOf("Headers.prototype", .header_get, .keep, "", &.{"get"}) ++
+    rowsOf("Headers.prototype", .header_has, .keep, "", &.{"has"}) ++
+    rowsOf("Headers.prototype", .header_write, .keep, "", &.{ "set", "append" }) ++
+    rowsOf("Headers.prototype", .header_delete, .keep, "", &.{"delete"});
+
+// HandlerInstance installs this global separately from engine builtins.
+const runtime_global_rows = rowsOf("global", .fetch_sync, .keep, "", &.{"fetchSync"});
+
 /// The builtin objects whose members are the `Math`-style namespace rows.
-const namespace_names = [_][]const u8{ "Array", "Date", "JSON", "Math", "Number", "Object", "Response", "String" };
+const namespace_names = [_][]const u8{ "Array", "Date", "JSON", "Math", "Number", "Object", "Response", "String", "console" };
 
 /// The namespaces that are also functions, so a read of the name may be called.
 const callable_namespaces = [_][]const u8{ "Number", "Response", "String" };
@@ -1130,7 +1332,7 @@ const defense_sources = [_]DefenseSource{
     .{
         .specifier = "zttp:validate",
         .name = "validateObject",
-        .reason = "returns the object it was given, and defense evidence for an object is deferred (R13)",
+        .reason = "returns an alias; schema evidence is attached by the generation-bound checked-view transfer, not this unconditional table",
     },
     .{
         .specifier = "zttp:decode",
@@ -1326,11 +1528,45 @@ pub const CaptureTable = struct {
 
 /// An imported virtual-module export: the module, the export, and the atom
 /// that the module exports it under.
+pub const ModuleId = u16;
+
+pub const FunctionRef = struct {
+    module: ModuleId,
+    node: NodeIndex,
+};
+
+pub const ImportTarget = struct {
+    binding_key: u32,
+    target: FunctionRef,
+};
+
+/// Borrowed accepted source snapshots. The owner retains every parser, atom
+/// table and capture table through the complete invocation/persistence pass.
+/// IDs come from a checked finite table; paths and revisions identify modules.
+pub const ModuleView = struct {
+    id: ModuleId,
+    path: []const u8,
+    revision: [32]u8,
+    root: NodeIndex,
+    ir_view: IrView,
+    atoms: *atom_table.AtomTable,
+    captures: *const CaptureTable,
+    imports: []const ImportTarget,
+};
+
 const ModuleExport = struct {
     binding: *const mb.ModuleBinding,
     func: *const mb.FunctionBinding,
     imported: u16,
 };
+
+fn sameExport(a: ?ModuleExport, b: ?ModuleExport) bool {
+    if (a) |left| {
+        const right = b orelse return false;
+        return left.binding == right.binding and left.func == right.func;
+    }
+    return b == null;
+}
 
 /// What the module level binds. A global read may resolve to a function in
 /// `functions`, or to an imported export in `exports`. A name in `bound` is
@@ -1377,6 +1613,7 @@ pub const FlowInterp = struct {
     captures: ?*const CaptureTable = null,
     completions: std.ArrayList(Completion) = .empty,
     unresolved_list: std.ArrayList(Unresolved) = .empty,
+    sink_events: std.ArrayList(SinkEvent) = .empty,
     /// The enclosing loops, innermost last. A `break` or `continue` acts on the
     /// last one. The parser clears the loop flag at each function boundary, so
     /// neither crosses into a nested function. A call gives the callee an empty
@@ -1386,6 +1623,19 @@ pub const FlowInterp = struct {
     activations: std.ArrayList(Activation) = .empty,
     /// The module-level names, by atom. Built on first use.
     module_names: ?ModuleNames = null,
+    modules: []const ModuleView = &.{},
+    initialization_order: []const ModuleId = &.{},
+    modules_complete: bool = true,
+    active_module: ModuleId = 0,
+    module_offsets: []NodeIndex = &.{},
+    module_name_cache: []?ModuleNames = &.{},
+    root_callsite: ?NodeIndex = null,
+    root_entry_node: NodeIndex = 0,
+    current_call_node: NodeIndex = 0,
+    allocation_context: NodeIndex = 0,
+    observed_sources: LabelSet = .empty,
+    persistent_globals: bool = false,
+    max_persistence_passes: u32 = 64,
     /// The pass cap of one loop. It is a fail-closed exit and not the
     /// termination argument: the loop head only grows over finite components.
     /// A value below 1 is treated as 1.
@@ -1421,6 +1671,186 @@ pub const FlowInterp = struct {
         return self.arena.allocator();
     }
 
+    const SourceContext = struct {
+        id: ModuleId,
+        view: IrView,
+        atoms: ?*atom_table.AtomTable,
+        captures: ?*const CaptureTable,
+        names: ?ModuleNames,
+    };
+
+    fn enterModule(self: *FlowInterp, id: ModuleId) SourceContext {
+        const saved: SourceContext = .{ .id = self.active_module, .view = self.ir_view, .atoms = self.atoms, .captures = self.captures, .names = self.module_names };
+        if (self.modules.len == 0) return saved;
+        const source = self.modules[id];
+        self.active_module = id;
+        self.ir_view = source.ir_view;
+        self.atoms = source.atoms;
+        self.captures = source.captures;
+        self.module_names = self.module_name_cache[id];
+        return saved;
+    }
+
+    fn leaveModule(self: *FlowInterp, saved: SourceContext) void {
+        if (self.module_name_cache.len != 0) self.module_name_cache[self.active_module] = self.module_names;
+        self.active_module = saved.id;
+        self.ir_view = saved.view;
+        self.atoms = saved.atoms;
+        self.captures = saved.captures;
+        self.module_names = saved.names;
+    }
+
+    fn prepareModules(self: *FlowInterp, root_func: NodeIndex) Error!bool {
+        if (self.modules.len == 0) return true;
+        if (self.modules.len > std.math.maxInt(ModuleId) or self.initialization_order.len != self.modules.len) {
+            try self.record(root_func, .function_expr, .p8);
+            return false;
+        }
+        self.module_offsets = try self.mem().alloc(NodeIndex, self.modules.len);
+        self.module_name_cache = try self.mem().alloc(?ModuleNames, self.modules.len);
+        @memset(self.module_name_cache, null);
+        var next: u64 = 0;
+        for (self.modules, 0..) |source, id| {
+            if (source.id != id or next + source.ir_view.nodeCount() >= null_node) {
+                try self.record(root_func, .function_expr, .p8);
+                return false;
+            }
+            self.module_offsets[id] = @intCast(next);
+            next += source.ir_view.nodeCount();
+        }
+        const initialized = try self.mem().alloc(bool, self.modules.len);
+        @memset(initialized, false);
+        for (self.initialization_order) |id| {
+            if (id >= self.modules.len or initialized[id]) {
+                try self.record(root_func, .function_expr, .p8);
+                return false;
+            }
+            initialized[id] = true;
+        }
+        if (!self.modules_complete) try self.record(root_func, .function_expr, .p8);
+        return true;
+    }
+
+    fn functionHandle(self: *const FlowInterp, node: NodeIndex) NodeIndex {
+        return if (self.module_offsets.len == 0) node else self.module_offsets[self.active_module] + node;
+    }
+
+    fn functionRef(self: *const FlowInterp, handle: NodeIndex) ?FunctionRef {
+        if (self.modules.len == 0) return .{ .module = 0, .node = handle };
+        for (self.modules, self.module_offsets) |source, offset| {
+            if (handle >= offset and handle - offset < source.ir_view.nodeCount()) return .{ .module = source.id, .node = handle - offset };
+        }
+        return null;
+    }
+
+    fn sourceView(self: *const FlowInterp, id: ModuleId) IrView {
+        return if (self.modules.len == 0) self.ir_view else self.modules[id].ir_view;
+    }
+
+    fn heapAtom(self: *FlowInterp, local: u16) Error!u16 {
+        if (self.modules.len == 0 or self.active_module == 0) return local;
+        const name = self.nameOfAtom(local) orelse {
+            try self.record(0, .identifier, .p8);
+            return 0;
+        };
+        return @intCast(@intFromEnum(try self.modules[0].atoms.intern(name)));
+    }
+
+    fn heapName(self: *const FlowInterp, canonical: u16) ?[]const u8 {
+        if (self.modules.len == 0) return self.nameOfAtom(canonical);
+        return self.modules[0].atoms.getName(@enumFromInt(canonical));
+    }
+
+    fn localHeapAtom(self: *FlowInterp, canonical: u16) Error!u16 {
+        if (self.modules.len == 0 or self.active_module == 0) return canonical;
+        return self.atomOf(self.heapName(canonical) orelse "", 0);
+    }
+
+    fn knownHeapAtom(self: *const FlowInterp, local: u16) ?u16 {
+        if (self.modules.len == 0 or self.active_module == 0) return local;
+        const name = self.nameOfAtom(local) orelse return null;
+        if (object.lookupPredefinedAtom(name)) |atom| return @intCast(@intFromEnum(atom));
+        const atom = self.modules[0].atoms.strings.get(name) orelse return null;
+        return @intCast(@intFromEnum(atom));
+    }
+
+    const EvidenceLookup = struct {
+        interp: *FlowInterp,
+        state: *const State,
+
+        fn requestField(raw: *anyopaque, node: NodeIndex) ?flow_evidence.RequestField {
+            const lookup: *EvidenceLookup = @ptrCast(@alignCast(raw));
+            return (lookup.interp.evidenceValue(lookup.state, node, 0) orelse return null).request_field;
+        }
+
+        fn ioOrigin(raw: *anyopaque, node: NodeIndex) ?flow_evidence.Origin {
+            const lookup: *EvidenceLookup = @ptrCast(@alignCast(raw));
+            const value = lookup.interp.evidenceValue(lookup.state, node, 0) orelse return null;
+            if (value.origins_top) return null;
+            if (value.origins.len > 0) {
+                const view = value.io_view orelse return null;
+                if (!schemaValid(lookup.state, view)) return null;
+            }
+            return value.io_origin;
+        }
+    };
+
+    /// Read provenance already present in the state. Predicate extraction
+    /// must never evaluate an expression again or invent another I/O call.
+    fn evidenceValue(self: *FlowInterp, st: *const State, node: NodeIndex, depth: u16) ?Value {
+        if (depth >= 64) return null;
+        switch (self.ir_view.getTag(node) orelse return null) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return null;
+                return switch (binding.kind) {
+                    .local, .argument => self.loadLocal(st, packBindingKey(binding.scope_id, binding.slot)),
+                    .upvalue => self.captureValue(st, self.upvalueKey(binding) orelse return null),
+                    .global, .undeclared_global => (st.heap.get(globalSite(self.knownHeapAtom(binding.name_atom) orelse return null)) orelse return null).summary,
+                };
+            },
+            .member_access => {
+                const member = self.ir_view.getMember(node) orelse return null;
+                const receiver = self.evidenceValue(st, member.object, depth + 1) orelse return null;
+                if (exactRequestField(st, receiver, member.property)) |field| return .{ .request_field = field };
+                if (receiver.origins_top) return null;
+                const name = self.knownHeapAtom(member.property) orelse return null;
+                var found: ?Value = null;
+                for (receiver.origins) |site| {
+                    const cells = st.heap.get(site) orelse return null;
+                    if (!cells.named.contains(name)) return null;
+                    for ([_]?Value{ cells.named.get(name), cells.summary }) |possible| if (possible) |value| {
+                        if (found) |prior| {
+                            if (!valueEql(prior, value)) return null;
+                        } else found = value;
+                    };
+                }
+                for ([_]?Value{ st.top_cell.named.get(name), st.top_cell.summary }) |possible| if (possible) |value| {
+                    if (found) |prior| {
+                        if (!valueEql(prior, value)) return null;
+                    } else found = value;
+                };
+                return found;
+            },
+            // exhaustive: unsupported evidence expressions provide no exact
+            // provenance; their branch capsule is declined, never a proof.
+            else => return null,
+        }
+    }
+
+    fn branchEvidence(self: *FlowInterp, st: *State, condition_node: NodeIndex, negated: bool) Error!void {
+        if (!st.path.complete) return;
+        var lookup: EvidenceLookup = .{ .interp = self, .state = st };
+        const predicate = try flow_evidence.condition(self.mem(), .{ .ir_view = self.ir_view, .userdata = &lookup, .requestField = EvidenceLookup.requestField, .ioOrigin = EvidenceLookup.ioOrigin }, condition_node, negated);
+        if (!predicate.complete) {
+            st.path.complete = false;
+            return;
+        }
+        const joined = try self.mem().alloc(counterexample.WitnessConstraint, st.path.constraints.len + predicate.constraints.len);
+        @memcpy(joined[0..st.path.constraints.len], st.path.constraints);
+        @memcpy(joined[st.path.constraints.len..], predicate.constraints);
+        st.path.constraints = joined;
+    }
+
     pub fn tagVisits(self: *const FlowInterp, tag: NodeTag) u32 {
         return self.visits[@intFromEnum(tag)];
     }
@@ -1437,7 +1867,272 @@ pub const FlowInterp = struct {
     /// root, so each call starts them afresh. A root that reaches `max_steps`
     /// returns a cleared result with no completion kept as normal.
     pub fn analyzeFunction(self: *FlowInterp, func: NodeIndex, params: []const Value) std.mem.Allocator.Error!FunctionResult {
-        if (self.analyzeRoot(func, params)) |result| {
+        return self.analyzeWithEntry(func, params, .{});
+    }
+
+    /// Analyze a handler with its first parameter bound to the request's
+    /// field-sensitive contents. The origins carry request identity through
+    /// the ordinary heap, joins and call summaries; no parallel carrier map
+    /// is needed. The report entry point applies the sink policy to this result.
+    pub fn analyzeHandler(self: *FlowInterp, func: NodeIndex) std.mem.Allocator.Error!FunctionResult {
+        self.persistent_globals = true;
+        defer self.persistent_globals = false;
+        if (self.analyzePersistentHandler(func)) |result| return result else |err| return switch (err) {
+            error.BudgetExhausted => self.budgetResult(),
+            error.OutOfMemory => error.OutOfMemory,
+        };
+    }
+
+    fn analyzePersistentHandler(self: *FlowInterp, func: NodeIndex) Error!FunctionResult {
+        self.root_entry_node = func;
+        self.completions = .empty;
+        self.unresolved_list = .empty;
+        self.sink_events = .empty;
+        self.loop_frames = .empty;
+        self.activations = .empty;
+        self.steps = 0;
+        self.recursion_passes_peak = 0;
+        self.observed_sources = .empty;
+        var persistent: State = .{};
+        var root: ?NodeIndex = null;
+        for (0..self.ir_view.nodeCount()) |i| {
+            const node: NodeIndex = @intCast(i);
+            if (self.ir_view.getTag(node) == .program) root = node;
+        }
+        if (!try self.prepareModules(func)) return self.finish(State.bottom);
+        if (self.modules.len > 0) {
+            for (self.initialization_order) |id| {
+                const saved = self.enterModule(id);
+                defer self.leaveModule(saved);
+                try self.initializeModule(self.modules[id].root, &persistent);
+                if (!persistent.reachable) break;
+            }
+        } else if (root) |program| try self.initializeModule(program, &persistent);
+        // Initializers can halt too. Their effects and sinks remain visible;
+        // no handler invocation runs after an unconditional halt.
+        if (!persistent.reachable) return self.finish(State.bottom);
+        const initial_path = persistent.path;
+        persistent = try self.projectPersistent(persistent);
+        const function = self.ir_view.getFunction(func) orelse self.ir_view.getFunctionOfDecl(func) orelse {
+            _ = try self.missing(func);
+            return self.finish(State.bottom);
+        };
+        var all_completions: std.ArrayList(Completion) = .empty;
+        var all_exit = State.bottom;
+        var all_returned: ?Value = null;
+        var pass: u32 = 0;
+        while (true) : (pass += 1) {
+            var entry = try cloneState(self.mem(), persistent);
+            entry.path = if (pass == 0) initial_path else .{ .complete = false };
+            // HandlerInstance refreshes a named handler from the shared
+            // global cell. A replaced or ambiguous entry is not this body.
+            for (0..self.ir_view.nodeCount()) |i| {
+                const declaration_node: NodeIndex = @intCast(i);
+                const declaration_tag = self.ir_view.getTag(declaration_node) orelse continue;
+                if (declaration_tag != .var_decl and declaration_tag != .function_decl) continue;
+                const declaration = self.ir_view.getVarDecl(declaration_node) orelse continue;
+                if ((declaration_node != func and declaration.init != func) or declaration.binding.kind != .global) continue;
+                const selected = (try self.loadGlobal(&entry, declaration.binding.name_atom)) orelse Value.top;
+                if (selected.callables_top or selected.callables.len != 1 or selected.callables[0] != self.functionHandle(declaration.init)) try self.record(func, .function_expr, .p8);
+            }
+            const request = try self.seedRequest(func, &entry);
+            self.completions = .empty;
+            try self.bindParams(function, &.{request}, &entry);
+            try self.exec(function.body, &entry);
+            var exit = entry;
+            for (self.completions.items) |completion| {
+                exit = try joinStates(self.mem(), exit, completion.state);
+                all_returned = try joinOpt(self.mem(), all_returned, completion.value);
+            }
+            if (entry.reachable) all_returned = try joinOpt(self.mem(), all_returned, Value.clean);
+            try all_completions.appendSlice(self.mem(), self.completions.items);
+            all_exit = try joinStates(self.mem(), all_exit, exit);
+            const next = try joinStates(self.mem(), persistent, try self.projectPersistent(exit));
+            if (stateEql(next, persistent)) break;
+            persistent = next;
+            if (pass + 1 >= @max(self.max_persistence_passes, 1)) {
+                try self.record(func, .function_expr, .fixpoint_limit);
+                break;
+            }
+        }
+        self.completions = .empty;
+        const unresolved = try self.unresolved_list.toOwnedSlice(self.mem());
+        return .{ .returned = all_returned, .exit = all_exit, .completions = try all_completions.toOwnedSlice(self.mem()), .cleared = unresolved.len != 0, .unresolved = unresolved };
+    }
+
+    fn initializeModule(self: *FlowInterp, root: NodeIndex, st: *State) Error!void {
+        const saved_completions = self.completions;
+        self.completions = .empty;
+        defer self.completions = saved_completions;
+        const block = self.ir_view.getBlock(root) orelse {
+            _ = try self.missing(root);
+            return;
+        };
+        var i: u16 = 0;
+        while (i < block.stmts_count and st.reachable) : (i += 1) {
+            const node = self.ir_view.getListIndex(block.stmts_start, i);
+            switch (self.ir_view.getTag(node) orelse .stmt_list) {
+                .export_decl => {
+                    const declaration = self.ir_view.getExportDecl(node) orelse {
+                        _ = try self.missing(node);
+                        continue;
+                    };
+                    if (declaration.declaration != null_node) try self.exec(declaration.declaration, st);
+                    if (declaration.from_module_idx != 0) try self.record(node, .export_decl, .p8);
+                },
+                .export_default => if (self.ir_view.getOptValue(node)) |value| {
+                    _ = try self.eval(value, st);
+                },
+                .import_decl => {
+                    const declaration = self.ir_view.getImportDecl(node) orelse continue;
+                    const name = self.ir_view.getString(declaration.module_idx) orelse "";
+                    if (std.mem.startsWith(u8, name, "zttp:")) {
+                        var k: u8 = 0;
+                        while (k < declaration.specifiers_count) : (k += 1) {
+                            const spec = self.ir_view.getImportSpec(self.ir_view.getListIndex(declaration.specifiers_start, k)) orelse continue;
+                            const resolved = self.importedExport(name, spec.imported_atom) orelse {
+                                try self.record(node, .import_decl, .p8);
+                                continue;
+                            };
+                            try self.storeGlobal(st, spec.local_binding.name_atom, try self.exportValue(resolved));
+                        }
+                    } else {
+                        if (self.modules.len == 0) {
+                            try self.record(node, .import_decl, .p8);
+                            continue;
+                        }
+                        var k: u8 = 0;
+                        while (k < declaration.specifiers_count) : (k += 1) {
+                            const spec = self.ir_view.getImportSpec(self.ir_view.getListIndex(declaration.specifiers_start, k)) orelse continue;
+                            const key = packBindingKey(spec.local_binding.scope_id, spec.local_binding.slot);
+                            var copied: ?Value = null;
+                            for (self.modules[self.active_module].imports) |target| {
+                                if (target.binding_key != key or target.target.module >= self.modules.len) continue;
+                                const source = self.modules[target.target.module];
+                                for (0..source.ir_view.nodeCount()) |n| {
+                                    const declaration_node: NodeIndex = @intCast(n);
+                                    const tag = source.ir_view.getTag(declaration_node) orelse continue;
+                                    if (tag != .var_decl and tag != .function_decl) continue;
+                                    const variable = source.ir_view.getVarDecl(declaration_node) orelse continue;
+                                    if (variable.init != target.target.node) continue;
+                                    const saved = self.enterModule(source.id);
+                                    copied = try self.loadGlobal(st, variable.binding.name_atom);
+                                    self.leaveModule(saved);
+                                }
+                            }
+                            if (copied == null) try self.record(node, .import_decl, .p8);
+                            try self.storeGlobal(st, spec.local_binding.name_atom, copied orelse Value.top);
+                        }
+                    }
+                },
+                else => try self.exec(node, st),
+            }
+        }
+        // Module `.ret` discards its value but preserves its heap. A failed
+        // initializer assertion can therefore update globals subsequently
+        // read by the selected handler and by later modules.
+        for (self.completions.items) |completion| st.* = try joinStates(self.mem(), st.*, completion.state);
+    }
+
+    fn globalSite(atom: u16) SiteKey {
+        return .{ .kind = .module_binding, .node = atom, .context = 0 };
+    }
+
+    fn loadGlobal(self: *FlowInterp, st: *const State, atom: u16) Error!?Value {
+        return (st.heap.get(globalSite(try self.heapAtom(atom))) orelse return null).summary;
+    }
+
+    fn storeGlobal(self: *FlowInterp, st: *State, atom: u16, value: Value) Error!void {
+        try st.heap.put(self.mem(), globalSite(try self.heapAtom(atom)), .{ .summary = value });
+    }
+
+    /// Retain runtime roots and their object/capture edges, not request-local
+    /// bindings or allocations. Callable capture edges matter even for a
+    /// closure whose value has no object origin reaching the captured value.
+    fn projectPersistent(self: *FlowInterp, st: State) Error!State {
+        if (!st.reachable) return State.bottom;
+        var out: State = .{ .top_cell = st.top_cell };
+        var pending: std.ArrayList(SiteKey) = .empty;
+        var it = st.heap.keyIterator();
+        while (it.next()) |site| if (site.kind == .module_binding or site.kind == .builtin) try pending.append(self.mem(), site.*);
+        var pos: usize = 0;
+        while (pos < pending.items.len) : (pos += 1) {
+            const site = pending.items[pos];
+            if (out.heap.contains(site)) continue;
+            const cells = st.heap.get(site) orelse continue;
+            try out.heap.put(self.mem(), site, cells);
+            var values = cells.named.valueIterator();
+            while (values.next()) |value| try self.persistentEdges(st, value.*, &pending);
+            if (cells.summary) |value| try self.persistentEdges(st, value, &pending);
+        }
+        // Unknown writes may have targeted a persistent object even when no
+        // named root currently refers to the allocation.
+        var top_values = st.top_cell.named.valueIterator();
+        while (top_values.next()) |value| try self.persistentEdges(st, value.*, &pending);
+        if (st.top_cell.summary) |value| try self.persistentEdges(st, value, &pending);
+        while (pos < pending.items.len) : (pos += 1) {
+            const site = pending.items[pos];
+            if (out.heap.contains(site)) continue;
+            const cells = st.heap.get(site) orelse continue;
+            try out.heap.put(self.mem(), site, cells);
+            var values = cells.named.valueIterator();
+            while (values.next()) |value| try self.persistentEdges(st, value.*, &pending);
+            if (cells.summary) |value| try self.persistentEdges(st, value, &pending);
+        }
+        return out;
+    }
+
+    fn persistentEdges(self: *FlowInterp, st: State, value: Value, pending: *std.ArrayList(SiteKey)) Error!void {
+        try pending.appendSlice(self.mem(), value.origins);
+        var only_native = value.origins.len > 0;
+        for (value.origins) |site| only_native = only_native and site.kind == .builtin;
+        if (value.origins_top or (value.callables_top and value.native_export == null and !only_native)) {
+            var it = st.heap.keyIterator();
+            while (it.next()) |site| try pending.append(self.mem(), site.*);
+        }
+        for (value.callables) |handle| {
+            const ref = self.functionRef(handle) orelse continue;
+            const saved = self.enterModule(ref.module);
+            defer self.leaveModule(saved);
+            const table = self.captures orelse continue;
+            const function = self.ir_view.getFunction(ref.node) orelse continue;
+            for (table.upvalues(function.scope_id)) |key| try pending.append(self.mem(), self.captureSite(key));
+        }
+    }
+
+    pub fn analyzeHandlerReport(self: *FlowInterp, func: NodeIndex) Error!HandlerReport {
+        const result = try self.analyzeHandler(func);
+        return self.finishHandlerReport(result);
+    }
+
+    pub fn returnedFlow(self: *FlowInterp, result: FunctionResult) Error!Flow {
+        var flow = try self.deepFlow(&result.exit, &.{result.returned orelse Value.clean});
+        if (result.cleared) flow.labels.unknown = true;
+        return flow;
+    }
+
+    fn seedRequest(self: *FlowInterp, func: NodeIndex, entry: *State) Error!Value {
+        const arena = self.mem();
+        const request_site: SiteKey = .{ .kind = .request, .node = func, .context = self.active_module };
+        const headers_site: SiteKey = .{ .kind = .headers, .node = func, .context = self.active_module };
+        const query_site: SiteKey = .{ .kind = .query, .node = func, .context = self.active_module };
+        const headers: Value = .{ .origins = try arena.dupe(SiteKey, &.{headers_site}) };
+        const query: Value = .{ .origins = try arena.dupe(SiteKey, &.{query_site}) };
+        const request: Value = .{ .origins = try arena.dupe(SiteKey, &.{request_site}) };
+        const input = Value.labelled(.{ .user_input = true });
+        var request_cells: Cells = .{ .summary = input };
+        var headers_cells: Cells = .{ .summary = input };
+        try request_cells.named.put(arena, @intFromEnum(object.Atom.headers), headers);
+        try request_cells.named.put(arena, @intFromEnum(object.Atom.query), query);
+        try headers_cells.named.put(arena, @intFromEnum(object.Atom.authorization), Value.labelled(.{ .user_input = true, .credential = true }));
+        try entry.heap.put(arena, request_site, try joinCells(arena, entry.heap.get(request_site) orelse .{}, request_cells));
+        try entry.heap.put(arena, headers_site, try joinCells(arena, entry.heap.get(headers_site) orelse .{}, headers_cells));
+        try entry.heap.put(arena, query_site, try joinCells(arena, entry.heap.get(query_site) orelse .{}, .{ .summary = input }));
+        return request;
+    }
+
+    fn analyzeWithEntry(self: *FlowInterp, func: NodeIndex, params: []const Value, entry: State) std.mem.Allocator.Error!FunctionResult {
+        if (self.analyzeRoot(func, params, entry)) |result| {
             return result;
         } else |err| switch (err) {
             error.BudgetExhausted => return self.budgetResult(),
@@ -1461,14 +2156,16 @@ pub const FlowInterp = struct {
         };
     }
 
-    fn analyzeRoot(self: *FlowInterp, func: NodeIndex, params: []const Value) Error!FunctionResult {
+    fn analyzeRoot(self: *FlowInterp, func: NodeIndex, params: []const Value, entry: State) Error!FunctionResult {
         self.completions = .empty;
         self.unresolved_list = .empty;
+        self.sink_events = .empty;
         self.loop_frames = .empty;
         self.activations = .empty;
         self.steps = 0;
         self.recursion_passes_peak = 0;
-        var st: State = .{};
+        self.observed_sources = .empty;
+        var st = entry;
 
         // The accessors read payload words, so the tag is checked first: a
         // node of any other tag would be decoded as a function.
@@ -1518,6 +2215,9 @@ pub const FlowInterp = struct {
             if (param_tag == .pattern_element) {
                 if (self.ir_view.getPatternElem(param_idx)) |elem| {
                     if (elem.default_value != null_node) {
+                        // The abstract join does not prove that the optional
+                        // fallback executes on a concrete invocation.
+                        st.path = .{ .complete = false };
                         const fallback = try self.eval(elem.default_value, st);
                         value = try joinValue(self.mem(), value, fallback);
                     }
@@ -1550,10 +2250,268 @@ pub const FlowInterp = struct {
         };
     }
 
+    fn observeSink(self: *FlowInterp, node: NodeIndex, st: *const State, sink: InputSink, reached: Flow) Error!void {
+        const callsite = if (self.activations.items.len > 0) self.root_callsite else null;
+        for (self.sink_events.items) |*event| {
+            if (event.source_node == node and event.module == self.active_module and event.callsite == callsite and event.sink == sink and samePath(event.path, st.path)) {
+                event.reached = combineFlows(event.reached, reached);
+                return;
+            }
+        }
+        try self.sink_events.append(self.mem(), .{ .node = if (self.active_module == 0) node else self.root_callsite orelse self.root_entry_node, .source_node = node, .module = self.active_module, .callsite = callsite, .sink = sink, .reached = reached, .path = st.path });
+    }
+
+    fn observeEgress(self: *FlowInterp, node: NodeIndex, st: *const State, args: []const Value) Error!void {
+        try self.observeSink(node, st, .egress_url, try self.deepFlow(st, &.{argAt(args, 0)}));
+        if (args.len < 2) return;
+        const options = args[1];
+        if (options.origins_top) {
+            try self.observeSink(node, st, .egress_opaque, try self.deepFlow(st, &.{options}));
+            return;
+        }
+        inline for (.{
+            .{ object.Atom.query, InputSink.egress_url },
+            .{ object.Atom.body, InputSink.egress_body },
+            .{ object.Atom.headers, InputSink.egress_headers },
+        }) |field| {
+            const held = try self.storedRead(st, options, .{ .name = @intFromEnum(field[0]) });
+            try self.observeSink(node, st, field[1], try self.deepFlow(st, &.{held}));
+        }
+    }
+
+    fn makeResponse(self: *FlowInterp, st: *State, node: NodeIndex, row: OperationRow, args: []const Value) Error!Value {
+        const site: SiteKey = .{ .kind = .response, .node = node, .context = self.active_module, .call = self.allocation_context };
+        const header_site: SiteKey = .{ .kind = .response_headers, .node = node, .context = self.active_module, .call = self.allocation_context };
+        const response = try self.siteValue(site, null);
+        const headers = try self.siteValue(header_site, null);
+        var cells = st.heap.get(site) orelse Cells{};
+        cells.html_possible = cells.html_possible or std.mem.eql(u8, row.name, "html");
+        try st.heap.put(self.mem(), site, cells);
+
+        var body_flow = try self.deepFlow(st, &.{argAt(args, 0)});
+        if (std.mem.eql(u8, row.name, "json")) body_flow = DefenseEdge.drop_html.apply(body_flow);
+        const redirect = std.mem.eql(u8, row.name, "redirect");
+        const body = if (redirect) Value.clean else Value.flowing(body_flow);
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.body), body);
+        const status = if (redirect)
+            argAt(args, 1)
+        else if (args.len < 2)
+            Value.clean
+        else
+            try self.storedRead(st, argAt(args, 1), .{ .name = @intFromEnum(object.Atom.status) });
+        const status_value = Value.flowing(try self.deepFlow(st, &.{status}));
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.status), status_value);
+        try self.weakWriteSite(st, site, try self.atomOf("statusText", 0), status_value);
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.ok), status_value);
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.headers), headers);
+        if (redirect) {
+            try self.weakWriteSite(st, header_site, try self.atomOf("Location", 0), Value.flowing(body_flow));
+        } else {
+            try self.weakWriteSite(st, header_site, @intFromEnum(object.Atom.@"content-type"), .{ .html_type = std.mem.eql(u8, row.name, "html") });
+        }
+        // Helper init.headers is discarded by the runtime. Only status is
+        // consumed; copied response-header fields remain mutable afterwards.
+        return response;
+    }
+
+    /// Fetch reads a fresh upstream response. Its arguments have already
+    /// crossed their egress sinks; the result's source is the declared host
+    /// read, not the caller's request object or its credential-bearing cells.
+    fn makeFetchResponse(self: *FlowInterp, st: *State, node: NodeIndex, resolved: ModuleExport) Error!Value {
+        const site: SiteKey = .{ .kind = .response, .node = node, .context = self.active_module, .call = self.allocation_context };
+        const header_site: SiteKey = .{ .kind = .response_headers, .node = node, .context = self.active_module, .call = self.allocation_context };
+        const response = try self.siteValue(site, null);
+        const headers = try self.siteValue(header_site, null);
+        const source = Value.labelled(resolved.func.return_labels.without(.{ .validated = true }));
+        var cells = st.heap.get(site) orelse Cells{};
+        cells.html_possible = true;
+        try st.heap.put(self.mem(), site, cells);
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.body), source);
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.status), source);
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.ok), source);
+        try self.weakWriteSite(st, site, try self.atomOf("statusText", 0), source);
+        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.headers), headers);
+        try self.weakWriteSite(st, header_site, null, source);
+        return response;
+    }
+
+    fn observeResponse(self: *FlowInterp, node: NodeIndex, st: *const State, returned: Value) Error!void {
+        var container = false;
+        var unknown_shape = returned.origins_top;
+        var html = false;
+        var structural = false;
+        for (returned.origins) |site| {
+            switch (site.kind) {
+                .response => {
+                    container = true;
+                    if (st.heap.get(site)) |cells| html = html or cells.html_possible;
+                },
+                .literal, .function, .request, .headers, .query, .response_headers, .router_result, .router_params, .allocated_array => {
+                    container = true;
+                    structural = true;
+                },
+                .allocated_any, .native, .builtin, .capture, .module_binding => unknown_shape = true,
+            }
+        }
+        if (unknown_shape or !container) {
+            const reached = try self.deepFlow(st, &.{returned});
+            try self.observeSink(node, st, .response_other, reached);
+            if (unknown_shape) try self.observeSink(node, st, .response_html, reached);
+            return;
+        }
+        const body = try self.storedRead(st, returned, .{ .name = @intFromEnum(object.Atom.body) });
+        const status = try self.storedRead(st, returned, .{ .name = @intFromEnum(object.Atom.status) });
+        const headers = try self.storedRead(st, returned, .{ .name = @intFromEnum(object.Atom.headers) });
+        try self.observeSink(node, st, .response_other, try self.deepFlow(st, &.{ body, status, headers }));
+        // A structural response's header values can choose HTML. Without a
+        // known format we check its current body against the HTML requirement.
+        if (structural and (try self.visible(st, returned, @intFromEnum(object.Atom.headers))) != null) {
+            const content_type = try self.readHeader(st, headers, .{ .name = @intFromEnum(object.Atom.@"content-type") });
+            html = html or content_type.html_type != false;
+        }
+        if (st.top_cell.summary != null or st.top_cell.named.contains(@intFromEnum(object.Atom.headers)) or
+            st.top_cell.named.contains(@intFromEnum(object.Atom.@"content-type"))) html = true;
+        if (html) try self.observeSink(node, st, .response_html, try self.deepFlow(st, &.{body}));
+    }
+
+    fn finishHandlerReport(self: *FlowInterp, result: FunctionResult) Error!HandlerReport {
+        for (result.completions) |completion| {
+            if (completion.value) |v| {
+                try self.observeResponse(completion.node, &completion.state, v);
+            }
+        }
+        var properties: report_types.FlowProperties = .{};
+        var diagnostics: std.ArrayList(report_types.Diagnostic) = .empty;
+        for (self.sink_events.items) |event| {
+            const labels = event.reached.labels;
+            if (labels.secret or labels.unknown) properties.no_secret_leakage = false;
+            if (labels.credential or labels.unknown) properties.no_credential_leakage = false;
+            if (event.sink == .response_other and (labels.nondeterministic or labels.unknown)) properties.deterministic = false;
+            if (!inputAccepted(event.reached, event.sink, .input_validated)) properties.input_validated = false;
+            if (!inputAccepted(event.reached, event.sink, .injection_safe)) properties.injection_safe = false;
+            if (!inputAccepted(event.reached, event.sink, .pii_contained)) properties.pii_contained = false;
+
+            // The HTML event decides injection only; the ordinary response
+            // event already reports secret and credential provenance.
+            if (event.sink != .response_html) {
+                if (labels.secret) try self.addReportDiagnostic(&diagnostics, try self.reportDiagnostic(event, .secret, result.cleared));
+                if (labels.credential) try self.addReportDiagnostic(&diagnostics, try self.reportDiagnostic(event, .credential, result.cleared));
+            }
+            const unsafe_input = if (event.sink == .response_html)
+                !inputAccepted(event.reached, event.sink, .injection_safe)
+            else
+                !inputAccepted(event.reached, event.sink, .input_validated);
+            // Unknown provenance is an unproven property, not a constructed
+            // counterexample. In particular, an unknown HTML body must not
+            // borrow a different response field's user-input label.
+            if (labels.user_input and !labels.unknown and unsafe_input) {
+                try self.addReportDiagnostic(&diagnostics, try self.reportDiagnostic(event, .input, result.cleared));
+            }
+        }
+        if (result.cleared) properties = .{
+            .no_secret_leakage = false,
+            .no_credential_leakage = false,
+            .input_validated = false,
+            .pii_contained = false,
+            .injection_safe = false,
+            .deterministic = false,
+        };
+        var defended: std.ArrayList(report_types.DefendedPath) = .empty;
+        if (!result.cleared) {
+            inline for (std.meta.fields(InputProperty)) |field| {
+                const property: InputProperty = @enumFromInt(field.value);
+                if (@field(properties, field.name)) {
+                    var exposed = false;
+                    for (self.sink_events.items) |event| {
+                        if (!event.reached.exposed()) continue;
+                        switch (requirement(event.sink, property)) {
+                            .not_governed => continue,
+                            .no_defense => {
+                                exposed = true;
+                            },
+                            .defense => |defense| {
+                                exposed = true;
+                                const guard = switch (defense) {
+                                    .schema_checked => event.reached.schema_guard,
+                                    .html_escaped => event.reached.html_guard,
+                                } orelse continue;
+                                const guard_loc = self.sourceView(guard.module).getLoc(guard.node);
+                                const sink_loc = self.sourceView(event.module).getLoc(event.source_node);
+                                try defended.append(self.mem(), .{
+                                    .property = @field(counterexample.PropertyTag, field.name),
+                                    .safe_form = .validated,
+                                    .guard_func = guard.func,
+                                    .guard_line = if (guard_loc) |loc| loc.line else 0,
+                                    .sink_label = sinkLabel(event.sink),
+                                    .sink_line = if (sink_loc) |loc| loc.line else 0,
+                                });
+                            },
+                        }
+                    }
+                    if (!exposed and self.observed_sources.user_input) try defended.append(self.mem(), .{ .property = @field(counterexample.PropertyTag, field.name), .safe_form = .never_reached });
+                }
+            }
+            if (properties.no_secret_leakage and self.observed_sources.secret) try defended.append(self.mem(), .{ .property = .no_secret_leakage, .safe_form = .never_reached });
+            if (properties.no_credential_leakage and self.observed_sources.credential) try defended.append(self.mem(), .{ .property = .no_credential_leakage, .safe_form = .never_reached });
+        }
+        return .{
+            .evaluation = result,
+            .properties = properties,
+            .diagnostics = try diagnostics.toOwnedSlice(self.mem()),
+            .events = try self.sink_events.toOwnedSlice(self.mem()),
+            .defended_paths = try defended.toOwnedSlice(self.mem()),
+        };
+    }
+
+    fn sinkLabel(sink: InputSink) []const u8 {
+        return switch (sink) {
+            .response_html => "Response.html",
+            .response_other, .response_init => "Response",
+            .log => "console.log",
+            .egress_url => "fetchSync URL",
+            .egress_body => "fetchSync body",
+            .egress_headers => "fetchSync headers",
+            .egress_opaque => "fetchSync options",
+        };
+    }
+
+    fn addReportDiagnostic(self: *FlowInterp, diagnostics: *std.ArrayList(report_types.Diagnostic), value: report_types.Diagnostic) Error!void {
+        for (diagnostics.items) |*prior| {
+            if (prior.node == value.node and prior.kind == value.kind and std.mem.eql(u8, prior.message, value.message)) {
+                if (prior.witness == null and value.witness != null) {
+                    prior.witness = value.witness;
+                    prior.help = value.help;
+                }
+                return;
+            }
+        }
+        try diagnostics.append(self.mem(), value);
+    }
+
+    fn reportDiagnostic(self: *FlowInterp, event: SinkEvent, label: DiagnosticLabel, cleared: bool) Error!report_types.Diagnostic {
+        var diagnostic = sinkDiagnostic(event, label);
+        const source_view = self.sourceView(event.module);
+        const loc = source_view.getLoc(event.source_node);
+        if (event.module != 0 and event.module < self.modules.len) {
+            diagnostic.help = try std.fmt.allocPrint(self.mem(), "{s} (in {s}:{d}:{d})", .{ diagnostic.help orelse "", self.modules[event.module].path, if (loc) |at| at.line else 0, if (loc) |at| at.column else 0 });
+        }
+        if (event.callsite) |callsite| if (self.sourceView(0).getLoc(callsite)) |at| {
+            diagnostic.help = try std.fmt.allocPrint(self.mem(), "{s} (reached through the call at line {d}, column {d})", .{ diagnostic.help orelse "", at.line, at.column });
+        };
+        if (!cleared and event.path.complete and event.reached.witness_complete and !event.reached.labels.unknown) {
+            const property = report_types.propertyTagForKind(diagnostic.kind) orelse return diagnostic;
+            const position: counterexample.SourceSpan = .{ .line = if (loc) |at| at.line else 0, .column = if (loc) |at| at.column else 0 };
+            var solved = try counterexample.solve(self.mem(), .{ .property = property, .origin = position, .sink = position, .summary = diagnostic.message, .constraints = event.path.constraints, .io_calls = event.path.io_calls });
+            defer solved.deinit(self.mem());
+            if (try flow_evidence.candidateSatisfies(self.mem(), event.path.constraints, solved)) diagnostic.witness = .{ .path_constraints = event.path.constraints, .io_calls = event.path.io_calls };
+        }
+        return diagnostic;
+    }
+
     // --- unresolved records ---
 
     fn record(self: *FlowInterp, node: NodeIndex, tag: NodeTag, owner: Owner) Error!void {
-        try self.unresolved_list.append(self.mem(), .{ .node = node, .tag = tag, .owner = owner });
+        try self.unresolved_list.append(self.mem(), .{ .node = node, .tag = tag, .owner = owner, .module = self.active_module });
     }
 
     /// An unresolved expression: the analysis could not follow it, so the
@@ -1587,15 +2545,15 @@ pub const FlowInterp = struct {
         return table.captured.contains(key);
     }
 
-    fn captureSite(key: u32) SiteKey {
-        return .{ .kind = .capture, .node = key, .context = 0 };
+    fn captureSite(self: *const FlowInterp, key: u32) SiteKey {
+        return .{ .kind = .capture, .node = key, .context = self.active_module };
     }
 
     /// The content of a capture cell. A cell nothing wrote stands for the
     /// runtime's `undefined`, which is `clean`: a closure is created after the
     /// declaration it reads, in the activation that declared it.
-    fn captureValue(st: *const State, key: u32) Value {
-        const cells = st.heap.get(captureSite(key)) orelse return Value.clean;
+    fn captureValue(self: *const FlowInterp, st: *const State, key: u32) Value {
+        const cells = st.heap.get(self.captureSite(key)) orelse return Value.clean;
         return cells.summary orelse Value.clean;
     }
 
@@ -1603,7 +2561,7 @@ pub const FlowInterp = struct {
     /// activation of the declaring function and every loop iteration, so a
     /// strong write by one of them would hide what another stored.
     fn weakWriteCapture(self: *FlowInterp, st: *State, key: u32, v: Value) Error!void {
-        try self.weakWriteSite(st, captureSite(key), null, v);
+        try self.weakWriteSite(st, self.captureSite(key), null, v);
     }
 
     /// Store `v` in the binding `key` of the running function: a weak write to
@@ -1620,7 +2578,7 @@ pub const FlowInterp = struct {
     /// The value of the binding `key`, or null when it is a function-local
     /// binding that no declaration has run for.
     fn loadLocal(self: *const FlowInterp, st: *const State, key: u32) ?Value {
-        if (self.isCaptured(key)) return captureValue(st, key);
+        if (self.isCaptured(key)) return self.captureValue(st, key);
         return st.env.get(key);
     }
 
@@ -1780,13 +2738,8 @@ pub const FlowInterp = struct {
             const atom = entry.key_ptr.*;
             const found = declared.get(atom) orelse continue;
             if (found.count != 1 or assigned.contains(atom)) continue;
-            const name = self.nameOfAtom(entry.value_ptr.atom) orelse continue;
-            const resolved_export = engine.builtin_modules.findExport(entry.value_ptr.module, name) orelse continue;
-            try exports.put(arena, atom, .{
-                .binding = resolved_export.binding,
-                .func = resolved_export.func,
-                .imported = entry.value_ptr.atom,
-            });
+            const resolved_export = self.importedExport(entry.value_ptr.module, entry.value_ptr.atom) orelse continue;
+            try exports.put(arena, atom, resolved_export);
         }
 
         var bound: std.AutoHashMapUnmanaged(u16, void) = .empty;
@@ -1811,7 +2764,7 @@ pub const FlowInterp = struct {
     /// cells of unnamed writes, and no bindings. The heap is copied, because
     /// the caller goes on mutating its own maps.
     fn heapState(self: *FlowInterp, st: *const State) Error!State {
-        return .{ .heap = try st.heap.clone(self.mem()), .top_cell = st.top_cell };
+        return .{ .heap = try st.heap.clone(self.mem()), .top_cell = st.top_cell, .path = st.path };
     }
 
     /// The argument values of a call, in source order, and whether one of them
@@ -1839,6 +2792,12 @@ pub const FlowInterp = struct {
     }
 
     fn evalCall(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
+        const previous_call_node = self.current_call_node;
+        self.current_call_node = self.functionHandle(node);
+        defer self.current_call_node = previous_call_node;
+        const previous_callsite = self.root_callsite;
+        if (self.active_module == 0 and self.activations.items.len == 0) self.root_callsite = node;
+        defer self.root_callsite = previous_callsite;
         const c = self.ir_view.getCall(node) orelse return self.missing(node);
         const callee_tag = self.ir_view.getTag(c.callee) orelse .stmt_list;
 
@@ -1851,17 +2810,21 @@ pub const FlowInterp = struct {
 
         // A call of an imported export is evaluated before its callee, which
         // is a native function that no body stands behind.
-        if (try self.exportCallee(c.callee)) |resolved| return self.evalExportCall(node, c, resolved, st);
+        const callee_binding = if (callee_tag == .identifier) self.ir_view.getBinding(c.callee) else null;
+        const overwritten = if (callee_binding) |binding| self.persistent_globals and (try self.loadGlobal(st, binding.name_atom)) != null else false;
+        if (!overwritten) if (try self.exportCallee(c.callee)) |resolved| return self.evalExportCall(node, c, resolved, st);
 
         // A call of a builtin global function uses its row and never reads
         // the callee.
-        if (try self.globalFunction(c.callee)) |global| {
+        if (if (overwritten) null else try self.globalFunction(c.callee)) |global| {
             const args = try self.evalArgs(c, st);
             if (args.has_spread) return Value.top;
             return self.applyRule(st, node, global.row, try self.nativeFunction(global.atom), args.values);
         }
 
         const callee = try self.eval(c.callee, st);
+        if (!callee.callee_exact) st.path = .{ .complete = false };
+        if (callee.native_export) |resolved| return self.evalExportCall(node, c, resolved, st);
         const args = try self.evalArgs(c, st);
         if (args.has_spread) return Value.top;
 
@@ -1885,8 +2848,10 @@ pub const FlowInterp = struct {
     /// Run every function of `callables` from `st` and join the summaries.
     fn runCallables(self: *FlowInterp, callables: []const NodeIndex, args: []const Value, st: *const State) Error!Summary {
         var joined = Summary.bottom;
+        var entry = st.*;
+        if (callables.len != 1) entry.path = .{ .complete = false };
         for (callables) |func_node| {
-            joined = try joinSummary(self.mem(), joined, try self.invoke(func_node, args, st));
+            joined = try joinSummary(self.mem(), joined, try self.invoke(func_node, args, &entry));
         }
         return joined;
     }
@@ -1903,6 +2868,7 @@ pub const FlowInterp = struct {
         }
         st.heap = try joined.state.heap.clone(self.mem());
         st.top_cell = joined.state.top_cell;
+        st.path = joined.state.path;
         return withFlow(joined.value orelse Value.clean, flow);
     }
 
@@ -1916,6 +2882,22 @@ pub const FlowInterp = struct {
         return table.getName(named);
     }
 
+    /// A standalone parser uses string-pool indexes for dynamic names. The
+    /// imported module's finite export roster can disambiguate such an index
+    /// from a predefined atom; two different matching exports remain unknown.
+    fn importedExport(self: *const FlowInterp, specifier: []const u8, atom: u16) ?ModuleExport {
+        var found: ?ModuleExport = null;
+        if (self.nameOfAtom(atom)) |name| if (engine.builtin_modules.findExport(specifier, name)) |resolved| {
+            found = .{ .binding = resolved.binding, .func = resolved.func, .imported = atom };
+        };
+        if (self.atoms == null) if (self.ir_view.getString(atom)) |name| if (engine.builtin_modules.findExport(specifier, name)) |resolved| {
+            const candidate_export: ModuleExport = .{ .binding = resolved.binding, .func = resolved.func, .imported = atom };
+            if (found) |prior| if (!sameExport(prior, candidate_export)) return null;
+            found = candidate_export;
+        };
+        return found;
+    }
+
     fn builtinSite(atom: u16) SiteKey {
         return .{ .kind = .builtin, .node = atom, .context = 0 };
     }
@@ -1924,9 +2906,15 @@ pub const FlowInterp = struct {
     /// may be called.
     fn nativeFunction(self: *FlowInterp, atom: u16) Error!Value {
         return .{
-            .origins = try self.mem().dupe(SiteKey, &.{builtinSite(atom)}),
+            .origins = try self.mem().dupe(SiteKey, &.{builtinSite(try self.heapAtom(atom))}),
             .callables_top = true,
         };
+    }
+
+    fn exportValue(self: *FlowInterp, resolved: ModuleExport) Error!Value {
+        var value = try self.nativeFunction(resolved.imported);
+        value.native_export = resolved;
+        return value;
     }
 
     /// The native value of an access whose name is not known: any shared
@@ -1947,9 +2935,9 @@ pub const FlowInterp = struct {
             switch (site.kind) {
                 .allocated_array, .allocated_any => return true,
                 .literal => {
-                    if ((self.ir_view.getTag(site.node) orelse continue) == .array_literal) return true;
+                    if ((self.sourceView(site.context).getTag(site.node) orelse continue) == .array_literal) return true;
                 },
-                .function, .request, .headers, .capture, .native, .builtin => {},
+                .function, .request, .headers, .query, .response, .response_headers, .router_result, .router_params, .capture, .module_binding, .native, .builtin => {},
             }
         }
         return false;
@@ -1965,14 +2953,15 @@ pub const FlowInterp = struct {
         return false;
     }
 
-    /// A value may hold native methods when it points at a shared runtime
-    /// object, a native container, or the request or its headers.
+    /// A value may hold arbitrary native methods when it points at a shared
+    /// runtime object or a native container. Request and headers prototypes
+    /// have an explicit method roster, so data fields stay ordinary values.
     fn mayHoldNative(v: Value) bool {
         if (v.origins_top) return true;
         for (v.origins) |site| {
             switch (site.kind) {
-                .builtin, .native, .request, .headers => return true,
-                .literal, .function, .capture, .allocated_array, .allocated_any => {},
+                .builtin, .native => return true,
+                .literal, .function, .capture, .module_binding, .allocated_array, .allocated_any, .request, .headers, .query, .response, .response_headers, .router_result, .router_params => {},
             }
         }
         return false;
@@ -2007,7 +2996,7 @@ pub const FlowInterp = struct {
                 const method = findRow(&operation_rows, "String.prototype", text) != null or
                     (findRow(&operation_rows, "Array.prototype", text) != null and self.mayBeArray(o)) or
                     (findRow(&operation_rows, "Result.prototype", text) != null and mayBeResult(o)) or
-                    mayHoldNative(o);
+                    mayHoldNative(o) or requestNative(o, text);
                 if (!method) return null;
                 return try self.nativeFunction(atom);
             },
@@ -2033,7 +3022,7 @@ pub const FlowInterp = struct {
         if (binding.kind != .undeclared_global) return null;
         if (try self.moduleBinds(binding.name_atom)) return null;
         const name = self.nameOfAtom(binding.name_atom) orelse return null;
-        const row = findRow(&operation_rows, "global", name) orelse return null;
+        const row = findRow(&operation_rows, "global", name) orelse findRow(&runtime_global_rows, "global", name) orelse return null;
         return .{ .row = row, .atom = binding.name_atom };
     }
 
@@ -2048,7 +3037,7 @@ pub const FlowInterp = struct {
             namespace.callables_top = nameIn(&callable_namespaces, name);
             return namespace;
         }
-        if (findRow(&operation_rows, "global", name) != null) return self.nativeFunction(atom);
+        if (findRow(&operation_rows, "global", name) != null or findRow(&runtime_global_rows, "global", name) != null) return self.nativeFunction(atom);
         // The strict checker accepts the other known globals, and no rule
         // models them. Any other name it refuses.
         const known = nameIn(&known_globals.names, name);
@@ -2098,6 +3087,7 @@ pub const FlowInterp = struct {
         else
             .{ .name = m.property };
         const skipped: ?State = if (callee_tag == .optional_chain) try cloneState(arena, st.*) else null;
+        if (skipped != null) st.path.complete = false;
 
         const value = try self.dispatchPropertyCall(node, c, receiver, key, st);
         if (skipped) |skip| {
@@ -2135,30 +3125,53 @@ pub const FlowInterp = struct {
         }
 
         const user = try self.storedRead(st, r, key);
+        const heap_name = try self.heapAtom(atom);
+        for (r.origins) |site| {
+            if (st.heap.get(site)) |cells| if (cells.named.get(heap_name)) |own| {
+                // Runtime getProperty checks an own slot before prototypes.
+                // A possible non-callable override cannot silently fall back
+                // to the builtin method and certify its normal return.
+                if (own.callables.len == 0 and !own.callables_top and own.native_export == null) return self.noRule(node);
+            };
+        }
         if (user.callables_top) {
             try self.record(node, .call, .unknown_callee);
             return Value.top;
         }
 
+        // Decide ambiguity before any candidate can emit or merge a sink.
+        // Clearing newly appended events afterwards misses an existing event
+        // that a speculative candidate enlarged.
+        var possible: usize = @intFromBool(user.callables.len > 0);
+        possible += @intFromBool(findRow(&operation_rows, "String.prototype", text) != null);
+        possible += @intFromBool(self.mayBeArray(r) and findRow(&operation_rows, "Array.prototype", text) != null);
+        possible += @intFromBool(mayBeResult(r) and findRow(&operation_rows, "Result.prototype", text) != null);
+        for (r.origins) |site| switch (site.kind) {
+            .builtin, .native, .request, .headers, .response, .response_headers => possible += 1,
+            .literal, .function, .capture, .module_binding, .allocated_array, .allocated_any, .query, .router_result, .router_params => {},
+        };
+        var dispatch_entry = st.*;
+        if (possible != 1 or !r.callee_exact or (user.callables.len > 0 and !user.callee_exact)) dispatch_entry.path = .{ .complete = false };
+        const candidate_entry = &dispatch_entry;
         var joined = Summary.bottom;
         var candidates: usize = 0;
         if (user.callables.len > 0) {
-            joined = try self.runCallables(user.callables, args.values, st);
+            joined = try self.runCallables(user.callables, args.values, candidate_entry);
             candidates += 1;
         }
         if (findRow(&operation_rows, "String.prototype", text)) |row| {
-            joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+            joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
             candidates += 1;
         }
         if (self.mayBeArray(r)) {
             if (findRow(&operation_rows, "Array.prototype", text)) |row| {
-                joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
                 candidates += 1;
             }
         }
         if (mayBeResult(r)) {
             if (findRow(&operation_rows, "Result.prototype", text)) |row| {
-                joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
                 candidates += 1;
             }
         }
@@ -2167,24 +3180,28 @@ pub const FlowInterp = struct {
                 .builtin => {
                     // Only a namespace has member rows. Any other shared
                     // object has no rule.
-                    const scope = self.nameOfAtom(@truncate(site.node)) orelse "";
+                    const scope = self.heapName(@truncate(site.node)) orelse "";
                     const found = if (nameIn(&namespace_names, scope)) findRow(&operation_rows, scope, text) else null;
                     const row = found orelse OperationRow{ .scope = scope, .name = text, .rule = .no_rule, .defense = .keep, .reason = "no member row" };
-                    joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                    joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
                     candidates += 1;
                 },
                 .native => {
                     const row: OperationRow = .{ .scope = "native", .name = text, .rule = .no_rule, .defense = .keep, .reason = "a native method" };
-                    joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
+                    joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
                     candidates += 1;
                 },
-                // The contents of the request and its headers belong to P7.
-                .request, .headers => {
-                    try self.record(node, .call, .p7);
-                    joined = try joinSummary(arena, joined, .{ .value = Value.top, .state = try self.heapState(st) });
+                .request, .headers, .response, .response_headers => {
+                    const scope = if (site.kind == .request or site.kind == .response) "Request.prototype" else "Headers.prototype";
+                    if (findRow(&runtime_prototype_rows, scope, text)) |row| {
+                        joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
+                    } else {
+                        try self.record(node, .call, .p7);
+                        joined = try joinSummary(arena, joined, .{ .value = Value.top, .state = try self.heapState(candidate_entry) });
+                    }
                     candidates += 1;
                 },
-                .literal, .function, .capture, .allocated_array, .allocated_any => {},
+                .literal, .function, .capture, .module_binding, .allocated_array, .allocated_any, .query, .router_result, .router_params => {},
             }
         }
 
@@ -2223,7 +3240,7 @@ pub const FlowInterp = struct {
     /// location and a write to it lands in the site. The result is the self
     /// value with `flow`.
     fn allocate(self: *FlowInterp, st: *State, kind: SiteKind, node: NodeIndex, contents: []const Value, flow: Flow) Error!Value {
-        const site: SiteKey = .{ .kind = kind, .node = node, .context = 0 };
+        const site: SiteKey = .{ .kind = kind, .node = node, .context = self.active_module, .call = self.allocation_context };
         const self_value = try self.siteValue(site, null);
         for (contents) |content| try self.weakWriteSite(st, site, null, content);
         try self.weakWriteSite(st, site, null, self_value);
@@ -2231,6 +3248,9 @@ pub const FlowInterp = struct {
         const canonical = flow.canonical();
         out.labels = canonical.labels;
         out.defenses = canonical.defenses;
+        out.schema_guard = canonical.schema_guard;
+        out.html_guard = canonical.html_guard;
+        out.witness_complete = canonical.witness_complete;
         return out;
     }
 
@@ -2339,7 +3359,28 @@ pub const FlowInterp = struct {
                 flow,
             ),
             .array_of => return self.allocate(st, .allocated_array, node, args, flow),
-            .response_static => return self.allocate(st, .native, node, &.{try self.reach(st, args)}, arg_flow),
+            .response_static => return self.makeResponse(st, node, row, args),
+            .fetch_sync => {
+                var origin: ?flow_evidence.Origin = null;
+                if (st.path.complete) {
+                    const index: u32 = @intCast(st.path.io_calls.len);
+                    const calls = try self.mem().alloc(counterexample.TrackedIoCall, st.path.io_calls.len + 1);
+                    @memcpy(calls[0..st.path.io_calls.len], st.path.io_calls);
+                    calls[index] = .{ .module = "http", .func = "fetchSync", .returns = .object };
+                    st.path.io_calls = calls;
+                    origin = .{ .module = "http", .func = "fetchSync", .returns = .object, .call_index = index, .ok_record = true };
+                }
+                try self.observeEgress(node, st, args);
+                const source = engine.builtin_modules.findExport("zttp:fetch", "fetch") orelse return self.noRule(node);
+                var response = try self.makeFetchResponse(st, node, .{ .binding = source.binding, .func = source.func, .imported = 0 });
+                response.io_origin = origin;
+                if (origin != null) response.io_view = try self.watchSchema(st, response);
+                return response;
+            },
+            .log => {
+                try self.observeSink(node, st, .log, reached);
+                return Value.clean;
+            },
             .vnode => return self.allocate(st, .allocated_any, node, &.{try self.reach(st, args)}, arg_flow),
             .render => {
                 // A component runs later and writes `props`, which this
@@ -2355,6 +3396,27 @@ pub const FlowInterp = struct {
                 st.reachable = false;
                 return Value.clean;
             },
+            .request_text, .request_json => {
+                const request = if (std.mem.eql(u8, row.scope, "global")) argAt(args, 0) else r;
+                const body = try self.storedRead(st, request, .{ .name = @intFromEnum(object.Atom.body) });
+                const body_flow = row.defense.apply((try self.deepFlow(st, &.{body})));
+                if (row.rule == .request_text) return Value.flowing(body_flow);
+                return self.allocate(st, .allocated_any, node, &.{Value.flowing(body_flow)}, body_flow);
+            },
+            .header_get, .header_has, .header_delete => {
+                const header_key = try self.prototypeKey(node, argAt(args, 0));
+                const read = try self.readHeader(st, r, header_key);
+                if (row.rule == .header_get) return read;
+                // has/delete return a boolean derived from the selected field.
+                // A weak allocation site cannot forget earlier header values.
+                return Value.flowing(read.flow());
+            },
+            .header_write => {
+                const header_key = try self.prototypeKey(node, argAt(args, 0));
+                try self.writeHeader(st, r, header_key, argAt(args, 1));
+                // Both set and append return undefined, independently of input.
+                return Value.clean;
+            },
             .no_rule => return self.noRule(node),
         }
     }
@@ -2368,7 +3430,7 @@ pub const FlowInterp = struct {
     /// A write into the receiver of an array method. A shared runtime object
     /// is shared by every request, so a write into one belongs to P8.
     fn recordSharedWrite(self: *FlowInterp, node: NodeIndex, r: Value) Error!void {
-        if (hasBuiltinSite(r)) try self.record(node, .call, .p8);
+        if (hasBuiltinSite(r) and !self.persistent_globals) try self.record(node, .call, .p8);
     }
 
     // --- virtual-module exports (P5b) ---
@@ -2454,9 +3516,86 @@ pub const FlowInterp = struct {
     /// results lose their defenses in every case, because an export may
     /// transform them or choose among them. Nothing here removes a label.
     fn evalExportCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, st: *State) Error!Value {
-        const arena = self.mem();
         const args = try self.evalArgs(c, st);
         if (args.has_spread) return Value.top;
+        self.observed_sources = LabelSet.mergeValues(self.observed_sources, self.declaredLabels(resolved, c));
+        var origin: ?flow_evidence.Origin = null;
+        // Replay-pure exports run for real. Stubbing them would erase
+        // callback I/O and the runtime brands of native Dict/Bytes values.
+        if (st.path.complete and resolved.func.traceable and !resolved.func.replay_pure) {
+            const index: u32 = @intCast(st.path.io_calls.len);
+            const calls = try self.mem().alloc(counterexample.TrackedIoCall, st.path.io_calls.len + 1);
+            @memcpy(calls[0..st.path.io_calls.len], st.path.io_calls);
+            calls[index] = .{ .module = resolved.binding.name, .func = resolved.func.name, .returns = resolved.func.returns };
+            st.path.io_calls = calls;
+            origin = .{ .module = resolved.binding.name, .func = resolved.func.name, .returns = resolved.func.returns, .call_index = index, .ok_record = try path_generator.isOkRecordExport(self.mem(), resolved.func) };
+        }
+        var result = try self.evalExportValues(node, c, resolved, args.values, st);
+        result.io_origin = origin;
+        if (resolved.func.replay_pure and resolved.func.returns == .result and resolved.func.failure_severity != .none) result.witness_complete = false;
+        if (origin != null and result.origins.len > 0) result.io_view = try self.watchSchema(st, result);
+        return result;
+    }
+
+    fn evalExportValues(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, values: []const Value, st: *State) Error!Value {
+        const arena = self.mem();
+        const args: CallArgs = .{ .values = values, .has_spread = false };
+
+        if (std.mem.eql(u8, resolved.binding.specifier, "zttp:collections")) {
+            if (std.mem.eql(u8, resolved.func.name, "dictEntries")) {
+                const read = withoutDefenses(try self.reach(st, args.values));
+                // The runtime makes arrays of [key,value] pairs. Entry values
+                // are data; these constructors never invoke them as callbacks.
+                return self.allocate(st, .allocated_array, node, &.{read}, read.flow());
+            }
+            if (std.mem.eql(u8, resolved.func.name, "dictFromEntries")) {
+                const read = withoutDefenses(try self.reach(st, args.values));
+                const dict_site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context };
+                const result_site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
+                try self.weakWriteSite(st, dict_site, null, read);
+                const dict = try self.siteValue(dict_site, null);
+                try self.weakWriteSite(st, result_site, @intFromEnum(object.Atom.value), dict);
+                try self.weakWriteSite(st, result_site, @intFromEnum(object.Atom.ok), Value.flowing(read.flow()));
+                try self.weakWriteSite(st, result_site, try self.atomOf("error", 0), Value.flowing(read.flow()));
+                return self.siteValue(result_site, null);
+            }
+        }
+
+        if (std.mem.eql(u8, resolved.binding.specifier, "zttp:validate") and std.mem.eql(u8, resolved.func.name, "validateObject")) {
+            var payload = argAt(args.values, 1);
+            payload.schema_view = try self.watchSchema(st, payload);
+            if (payload.schema_view) |*view| view.guard = .{ .module = self.active_module, .node = node, .func = resolved.func.name };
+            const site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
+            try self.weakWriteSite(st, site, @intFromEnum(object.Atom.value), payload);
+            const flow = try self.deepFlow(st, &.{argAt(args.values, 1)});
+            try self.weakWriteSite(st, site, @intFromEnum(object.Atom.ok), Value.flowing(.{ .labels = flow.labels }));
+            try self.weakWriteSite(st, site, try self.atomOf("error", 0), Value.flowing(.{ .labels = flow.labels }));
+            return self.siteValue(site, null);
+        }
+
+        if (std.mem.eql(u8, resolved.binding.specifier, "zttp:router") and std.mem.eql(u8, resolved.func.name, "routerMatch")) {
+            const routes = argAt(args.values, 0);
+            const handler = try self.storedRead(st, routes, .index);
+            if (handler.callables_top or routes.origins_top) try self.record(node, .call, .unknown_callee);
+            const match_site: SiteKey = .{ .kind = .router_result, .node = node, .context = self.active_module, .call = self.allocation_context };
+            const params_site: SiteKey = .{ .kind = .router_params, .node = node, .context = self.active_module, .call = self.allocation_context };
+            const params = try self.siteValue(params_site, null);
+            try self.weakWriteSite(st, params_site, null, Value.labelled(.{ .user_input = true }));
+            try self.weakWriteSite(st, match_site, try self.atomOf("handler", 0), handler);
+            try self.weakWriteSite(st, match_site, try self.atomOf("params", 0), params);
+            // The method/path choose a handler; routerMatch invokes none and
+            // does not copy the request into its wrapper or callback value.
+            return self.siteValue(match_site, null);
+        }
+        if (std.mem.eql(u8, resolved.binding.specifier, "zttp:log")) {
+            try self.observeSink(node, st, .log, try self.deepFlow(st, args.values));
+        }
+        if (std.mem.eql(u8, resolved.binding.specifier, "zttp:fetch") and
+            (std.mem.eql(u8, resolved.func.name, "fetch") or std.mem.eql(u8, resolved.func.name, "fetchWithRetry")))
+        {
+            try self.observeEgress(node, st, args.values);
+            return self.makeFetchResponse(st, node, resolved);
+        }
 
         const read = try self.reach(st, args.values);
         // The labels an export declassifies leave what it read, not what it
@@ -2471,9 +3610,13 @@ pub const FlowInterp = struct {
         // with no origin, callable, or flag.
         var held = if (declassified) Value.labelled(labels) else read;
         held.defenses = .{};
+        held.schema_guard = null;
+        held.html_guard = null;
         if (findDefenseSource(&defense_sources, resolved.binding.specifier, resolved.func.name)) |source| {
             if (!source.establishes.isEmpty()) {
-                held = Value.flowing(.{ .labels = labels, .defenses = source.outcome(read.defenses) });
+                held = Value.flowing(.{ .labels = labels, .defenses = source.outcome(read.defenses), .witness_complete = read.witness_complete });
+                held.schema_guard = if (source.establishes.schema_checked) .{ .module = self.active_module, .node = node, .func = resolved.func.name } else if (source.keeps.schema_checked) read.schema_guard else null;
+                held.html_guard = if (source.establishes.html_escaped) .{ .module = self.active_module, .node = node, .func = resolved.func.name } else if (source.keeps.html_escaped) read.html_guard else null;
             }
         }
 
@@ -2491,13 +3634,22 @@ pub const FlowInterp = struct {
         }
         if (results) |passed| results = withoutDefenses(passed);
 
+        // The declared primitive return shape cannot carry object aliases or
+        // callbacks. Retaining an invented container here made an env string
+        // fail mask's primitive-input bound and polluted unrelated callers.
+        switch (resolved.func.returns) {
+            .boolean, .number, .string, .undefined, .optional_string, .optional_number => {
+                var primitive: Flow = .{ .labels = labels, .defenses = held.defenses, .schema_guard = held.schema_guard, .html_guard = held.html_guard, .witness_complete = held.witness_complete };
+                if (results) |passed| primitive = combineFlows(primitive, try self.deepFlow(st, &.{passed}));
+                return Value.flowing(primitive);
+            },
+            .object, .unknown, .optional_object, .result, .dict, .bytes => {},
+        }
+
         var contents: std.ArrayList(Value) = .empty;
         try contents.append(arena, held);
         if (results) |passed| try contents.append(arena, passed);
-        const is_fetch = std.mem.eql(u8, resolved.binding.specifier, "zttp:fetch") and
-            (std.mem.eql(u8, resolved.func.name, "fetch") or std.mem.eql(u8, resolved.func.name, "fetchWithRetry"));
-        const site_kind: SiteKind = if (is_fetch) .native else .allocated_any;
-        const container = try self.allocate(st, site_kind, node, contents.items, .{ .labels = labels, .defenses = held.defenses });
+        const container = try self.allocate(st, .allocated_any, node, contents.items, .{ .labels = labels, .defenses = held.defenses, .schema_guard = held.schema_guard, .html_guard = held.html_guard, .witness_complete = held.witness_complete });
 
         // The result keeps every origin, callable, and flag of what the call
         // read and of what the callbacks returned: an export can hand back an
@@ -2547,9 +3699,11 @@ pub const FlowInterp = struct {
     /// The number of parameters of the function at `func_node`, or 0 when the
     /// node is no function (`invoke` records that case).
     fn paramCount(self: *const FlowInterp, func_node: NodeIndex) usize {
-        const tag = self.ir_view.getTag(func_node) orelse return 0;
+        const ref = self.functionRef(func_node) orelse return 0;
+        const view = self.sourceView(ref.module);
+        const tag = view.getTag(ref.node) orelse return 0;
         if (tag != .function_expr and tag != .arrow_function) return 0;
-        const function = self.ir_view.getFunction(func_node) orelse return 0;
+        const function = view.getFunction(ref.node) orelse return 0;
         return function.params_count;
     }
 
@@ -2646,6 +3800,7 @@ pub const FlowInterp = struct {
         const arena = self.mem();
         const cap = @max(self.max_loop_passes, 1);
         var head = try self.heapState(st);
+        head.path.complete = false;
         var results: ?Value = null;
         var pass: u32 = 0;
         while (true) : (pass +|= 1) {
@@ -2670,6 +3825,7 @@ pub const FlowInterp = struct {
         // The caller goes on mutating its own maps, so it gets a copy.
         st.heap = try head.heap.clone(arena);
         st.top_cell = head.top_cell;
+        st.path = head.path;
         return results;
     }
 
@@ -2678,6 +3834,7 @@ pub const FlowInterp = struct {
     /// The state of one `reach` walk: the join so far, the sites already
     /// queued, and whether the walk has swept the whole heap.
     const Reach = struct {
+        state: *const State,
         joined: Value = .{},
         seen: std.AutoHashMapUnmanaged(SiteKey, void) = .empty,
         queue: std.ArrayList(SiteKey) = .empty,
@@ -2685,6 +3842,19 @@ pub const FlowInterp = struct {
     };
 
     fn reachValue(self: *FlowInterp, walk: *Reach, v: Value) Error!void {
+        if (v.schema_view) |view| {
+            if (schemaValid(walk.state, view)) {
+                var raw = v;
+                raw.schema_view = null;
+                var checked = try self.reach(walk.state, &.{raw});
+                if (checked.flow().exposed()) {
+                    checked.defenses.schema_checked = true;
+                    checked.schema_guard = view.guard;
+                }
+                walk.joined = try unionValue(self.mem(), walk.joined, checked);
+                return;
+            }
+        }
         walk.joined = try unionValue(self.mem(), walk.joined, v);
         for (v.origins) |site| try self.reachSite(walk, site);
     }
@@ -2708,7 +3878,7 @@ pub const FlowInterp = struct {
     /// the native value of each `builtin` and `native` origin. A value that
     /// may point anywhere reaches every cell of the heap.
     fn reach(self: *FlowInterp, st: *const State, vs: []const Value) Error!Value {
-        var walk: Reach = .{};
+        var walk: Reach = .{ .state = st };
         for (vs) |v| try self.reachValue(&walk, v);
         try self.reachCells(&walk, st.top_cell);
         var next: usize = 0;
@@ -2730,12 +3900,21 @@ pub const FlowInterp = struct {
     /// is already being analyzed is a recursive call and uses that
     /// activation's summary.
     fn invoke(self: *FlowInterp, func_node: NodeIndex, args: []const Value, st: *const State) Error!Summary {
-        const tag = self.ir_view.getTag(func_node) orelse .stmt_list;
+        const previous_allocation = self.allocation_context;
+        self.allocation_context = self.current_call_node;
+        defer self.allocation_context = previous_allocation;
+        const ref = self.functionRef(func_node) orelse {
+            try self.record(0, .call, .unknown_callee);
+            return .{ .value = Value.top, .state = try self.heapState(st) };
+        };
+        const saved = self.enterModule(ref.module);
+        defer self.leaveModule(saved);
+        const tag = self.ir_view.getTag(ref.node) orelse .stmt_list;
         const function = (if (tag == .function_expr or tag == .arrow_function)
-            self.ir_view.getFunction(func_node)
+            self.ir_view.getFunction(ref.node)
         else
             null) orelse {
-            _ = try self.missing(func_node);
+            _ = try self.missing(ref.node);
             return .{ .value = Value.top, .state = try self.heapState(st) };
         };
         const fitted = try self.fitArgs(function, args);
@@ -2755,7 +3934,7 @@ pub const FlowInterp = struct {
     fn recurse(self: *FlowInterp, index: usize, args: []const Value, st: *const State) Error!Summary {
         const arena = self.mem();
         // Shares the caller's maps by reference. `joinStates` copies them.
-        const caller: State = .{ .heap = st.heap, .top_cell = st.top_cell };
+        const caller: State = .{ .heap = st.heap, .top_cell = st.top_cell, .path = .{ .complete = false } };
         const record_ptr = &self.activations.items[index];
         record_ptr.used = true;
         record_ptr.pending_args = try joinArgs(arena, record_ptr.pending_args, args);
@@ -2816,7 +3995,8 @@ pub const FlowInterp = struct {
             record_ptr.entry_args = record_ptr.pending_args;
             record_ptr.entry = record_ptr.pending;
             if (pass >= cap) {
-                try self.record(func_node, tag, .fixpoint_limit);
+                const ref = self.functionRef(func_node) orelse unreachable;
+                try self.record(ref.node, tag, .fixpoint_limit);
                 return result;
             }
         }
@@ -2827,7 +4007,7 @@ pub const FlowInterp = struct {
     /// The callee's completions are its own: a return, a failed assert, and the
     /// fallthrough are normal completions that return to the caller.
     fn runBody(self: *FlowInterp, function: ir.Node.FunctionExpr, args: []const Value, entry: State) Error!Summary {
-        var st: State = .{ .heap = try entry.heap.clone(self.mem()), .top_cell = entry.top_cell };
+        var st: State = .{ .heap = try entry.heap.clone(self.mem()), .top_cell = entry.top_cell, .path = entry.path };
         const saved_completions = self.completions;
         const saved_loops = self.loop_frames;
         self.completions = .empty;
@@ -2879,7 +4059,7 @@ pub const FlowInterp = struct {
         const arena = self.mem();
         return .{
             .origins = try arena.dupe(SiteKey, &.{site}),
-            .callables = if (callable) |node| try arena.dupe(NodeIndex, &.{node}) else &.{},
+            .callables = if (callable) |node| try arena.dupe(NodeIndex, &.{self.functionHandle(node)}) else &.{},
         };
     }
 
@@ -2904,11 +4084,12 @@ pub const FlowInterp = struct {
     /// see `top_cell`, because the unnamed object a write went to might be `o`,
     /// and both see every site's cells when `o` may point anywhere.
     fn visible(self: *FlowInterp, st: *const State, o: Value, name: ?u16) Error!?Value {
+        const canonical = if (name) |n| try self.heapAtom(n) else null;
         var acc: ?Value = null;
         for (o.origins) |site| {
-            if (st.heap.get(site)) |cells| acc = try self.absorb(acc, cells, name);
+            if (st.heap.get(site)) |cells| acc = try self.absorb(acc, cells, canonical);
         }
-        acc = try self.absorb(acc, st.top_cell, name);
+        acc = try self.absorb(acc, st.top_cell, canonical);
         if (o.origins_top) {
             // A capture cell is not an object, so no value points at it.
             var it = st.heap.iterator();
@@ -2927,25 +4108,227 @@ pub const FlowInterp = struct {
     /// the stored content only: a method that the runtime finds on a prototype
     /// is not in any cell.
     fn storedRead(self: *FlowInterp, st: *const State, o: Value, key: Key) Error!Value {
-        return switch (key) {
-            .name => |n| blk: {
-                const seen = try self.visible(st, o, n);
-                break :blk withFlow(seen orelse Value.clean, o.flow());
-            },
-            .index => blk: {
-                const seen = try self.visible(st, o, null);
-                break :blk withFlow(seen orelse Value.clean, o.flow());
-            },
-            .dynamic => |k| blk: {
-                const seen = try self.visible(st, o, null);
-                break :blk withFlow(seen orelse Value.clean, combineFlows(o.flow(), k.flow()));
-            },
+        const seen = try self.visible(st, o, if (key == .name) key.name else null);
+        var read = seen orelse Value.clean;
+        var receiver_flow = o.flow();
+        if (o.schema_view) |view| {
+            if (schemaValid(st, view)) {
+                if (read.origins.len > 0 or read.origins_top) {
+                    read.schema_view = view;
+                } else if (read.flow().exposed()) {
+                    read.defenses.schema_checked = true;
+                    read.schema_guard = view.guard;
+                }
+                if (receiver_flow.exposed()) {
+                    receiver_flow.defenses.schema_checked = true;
+                    receiver_flow.schema_guard = view.guard;
+                }
+            }
+        }
+        // Selection is a separate data contributor (R1). A validator of the
+        // object never vouches for a later raw computed key.
+        read = withFlow(read, receiver_flow);
+        if (key == .dynamic) read = withFlow(read, key.dynamic.flow());
+        if (read.schema_view != null) {
+            read.defenses.schema_checked = false;
+            read.schema_guard = null;
+        }
+        var exact = key == .name and !o.origins_top and o.origins.len > 0;
+        const canonical_name = if (key == .name) try self.heapAtom(key.name) else null;
+        var selected: ?Value = null;
+        if (exact) for (o.origins) |site| {
+            const cells = st.heap.get(site) orelse {
+                exact = false;
+                break;
+            };
+            const named = cells.named.get(canonical_name.?) orelse {
+                exact = false;
+                break;
+            };
+            if (selected) |prior| {
+                if (!valueEql(prior, named)) exact = false;
+            } else selected = named;
+            if (cells.summary) |summary| {
+                if (!valueEql(named, summary)) exact = false;
+            }
         };
+        if (selected) |named| {
+            for ([_]?Value{ st.top_cell.summary, if (canonical_name) |name| st.top_cell.named.get(name) else null }) |possible| if (possible) |value| {
+                if (!valueEql(named, value)) exact = false;
+            };
+        }
+        if (!exact) {
+            read.callee_exact = false;
+            read.io_origin = null;
+            read.io_view = null;
+            read.request_field = null;
+            read.witness_complete = false;
+        }
+        // These are known runtime source slots rather than an arbitrary
+        // possibly absent property. Their replay request supplies the value.
+        if (!o.origins_top and o.origins.len > 0 and key == .name and !st.top_cell.written) {
+            var pristine_source = true;
+            for (o.origins) |site| {
+                const cells = st.heap.get(site) orelse {
+                    pristine_source = false;
+                    break;
+                };
+                const request_field = site.kind == .request and (key.name == @intFromEnum(object.Atom.url) or key.name == @intFromEnum(object.Atom.path) or key.name == @intFromEnum(object.Atom.method) or key.name == @intFromEnum(object.Atom.body) or key.name == @intFromEnum(object.Atom.headers) or key.name == @intFromEnum(object.Atom.query));
+                const authorization = site.kind == .headers and key.name == @intFromEnum(object.Atom.authorization);
+                pristine_source = pristine_source and !cells.written and (request_field or authorization);
+            }
+            if (pristine_source) read.witness_complete = o.witness_complete;
+        }
+        if (key == .name) if (exactRequestField(st, o, key.name)) |field| {
+            read.request_field = field;
+        };
+        self.observed_sources = LabelSet.mergeValues(self.observed_sources, read.labels);
+        return read;
+    }
+
+    fn exactRequestField(st: *const State, receiver: Value, name: u16) ?flow_evidence.RequestField {
+        if (receiver.origins_top or receiver.origins.len == 0) return null;
+        const field: flow_evidence.RequestField = if (name == @intFromEnum(object.Atom.method)) .method else if (name == @intFromEnum(object.Atom.url)) .url else if (name == @intFromEnum(object.Atom.path)) .path else return null;
+        const mask: u3 = @as(u3, 1) << @intCast(@intFromEnum(field));
+        if (st.top_cell.request_fields & mask == 0) return null;
+        for (receiver.origins) |site| {
+            if (site.kind != .request) return null;
+            const cells = st.heap.get(site) orelse return null;
+            if (cells.request_fields & mask == 0) return null;
+        }
+        return field;
+    }
+
+    fn schemaValid(st: *const State, view: SchemaView) bool {
+        if (st.top_cell.generation == watched_top or st.top_cell.generation != view.top_generation) return false;
+        for (view.sites) |version| {
+            const cells = st.heap.get(version.site) orelse return false;
+            if (cells.generation == watched_top or cells.generation != version.generation) return false;
+        }
+        return true;
+    }
+
+    fn watchSchema(self: *FlowInterp, st: *State, root: Value) Error!?SchemaView {
+        var queue: std.ArrayList(Value) = .empty;
+        var seen: std.AutoHashMapUnmanaged(SiteKey, void) = .empty;
+        var versions: std.ArrayList(SiteVersion) = .empty;
+        try queue.append(self.mem(), root);
+        var top_values = st.top_cell.named.valueIterator();
+        while (top_values.next()) |value| try queue.append(self.mem(), value.*);
+        if (st.top_cell.summary) |value| try queue.append(self.mem(), value);
+        var next: usize = 0;
+        while (next < queue.items.len) : (next += 1) {
+            const value = queue.items[next];
+            if (value.origins_top) return null;
+            for (value.origins) |site| {
+                if (seen.contains(site)) continue;
+                try seen.put(self.mem(), site, {});
+                var cells = st.heap.get(site) orelse Cells{};
+                if (cells.generation == watched_top) return null;
+                cells.watched = true;
+                try st.heap.put(self.mem(), site, cells);
+                try versions.append(self.mem(), .{ .site = site, .generation = cells.generation });
+                var fields = cells.named.valueIterator();
+                while (fields.next()) |field| try queue.append(self.mem(), field.*);
+                if (cells.summary) |summary| try queue.append(self.mem(), summary);
+            }
+        }
+        if (st.top_cell.generation == watched_top) return null;
+        st.top_cell.watched = true;
+        return .{ .sites = try canonicalSlice(SiteVersion, self.mem(), versions.items, SiteVersion.order), .top_generation = st.top_cell.generation };
+    }
+
+    /// Only prototype methods are callable candidates on the synthetic request
+    /// objects. A field such as `headers` or `accept` is data, not an arbitrary
+    /// native function. Only the explicit prototype roster supplies method rules.
+    fn requestNative(o: Value, text: []const u8) bool {
+        for (o.origins) |site| {
+            if ((site.kind == .request or site.kind == .response) and findRow(&runtime_prototype_rows, "Request.prototype", text) != null) return true;
+            if ((site.kind == .headers or site.kind == .response_headers) and findRow(&runtime_prototype_rows, "Headers.prototype", text) != null) return true;
+        }
+        return false;
+    }
+
+    /// The first argument of a runtime prototype method is a property name.
+    /// A literal keeps field precision; any other expression may select every
+    /// field and carries its own flow as a computed key.
+    fn prototypeKey(self: *FlowInterp, node: NodeIndex, value: Value) Error!Key {
+        const call = self.ir_view.getCall(node) orelse return .{ .dynamic = value };
+        if (call.args_count > 0) {
+            const key_node = self.ir_view.getListIndex(call.args_start, 0);
+            if (try self.literalKey(key_node)) |atom| return .{ .name = atom };
+        }
+        return .{ .dynamic = value };
+    }
+
+    /// Headers.get/has/delete compare names without regard to ASCII case,
+    /// including properties assigned directly under a mixed-case name.
+    fn readHeader(self: *FlowInterp, st: *const State, receiver: Value, key: Key) Error!Value {
+        var read = try self.storedRead(st, receiver, key);
+        if (key == .name) {
+            const name = self.nameOfAtom(key.name) orelse return read;
+            for (receiver.origins) |site| {
+                if (st.heap.get(site)) |cells| {
+                    var it = cells.named.iterator();
+                    while (it.next()) |entry| {
+                        const property_name = self.heapName(entry.key_ptr.*) orelse continue;
+                        if (std.ascii.eqlIgnoreCase(name, property_name)) read = try unionValue(self.mem(), read, entry.value_ptr.*);
+                    }
+                }
+            }
+            var top_it = st.top_cell.named.iterator();
+            while (top_it.next()) |entry| {
+                const property_name = self.heapName(entry.key_ptr.*) orelse continue;
+                if (std.ascii.eqlIgnoreCase(name, property_name)) read = try unionValue(self.mem(), read, entry.value_ptr.*);
+            }
+        }
+        return withFlow(read, receiver.flow());
+    }
+
+    /// A header setter updates an existing case-insensitive name or creates
+    /// a lower-case name. Weak writes keep both possibilities at this site.
+    fn writeHeader(self: *FlowInterp, st: *State, receiver: Value, key: Key, value: Value) Error!void {
+        if (key == .name) {
+            if (self.nameOfAtom(key.name)) |name| {
+                const lower = try std.ascii.allocLowerString(self.mem(), name);
+                const canonical = try self.atomOf(lower, 0);
+                // Reads through top see every site, so conservatively write a
+                // dynamic name there rather than choosing one alias.
+                if (receiver.origins_top) {
+                    try self.writeValue(st, receiver, .{ .dynamic = Value.clean }, value);
+                    return;
+                }
+                for (receiver.origins) |site| {
+                    if (st.heap.get(site)) |cells| {
+                        var it = cells.named.keyIterator();
+                        while (it.next()) |atom| {
+                            const property_name = self.heapName(atom.*) orelse continue;
+                            if (std.ascii.eqlIgnoreCase(name, property_name)) {
+                                const target: Value = .{ .origins = try self.mem().dupe(SiteKey, &.{site}) };
+                                try self.writeValue(st, withFlow(target, receiver.flow()), .{ .name = try self.localHeapAtom(atom.*) }, value);
+                            }
+                        }
+                    }
+                }
+                try self.writeValue(st, receiver, .{ .name = canonical }, value);
+                return;
+            }
+        }
+        try self.writeValue(st, receiver, key, value);
     }
 
     /// The stored content of a read, with the native function that the runtime
     /// may find under the key (`implicitNative`).
     fn readValue(self: *FlowInterp, st: *const State, o: Value, key: Key) Error!Value {
+        if (key == .name and key.name == @intFromEnum(object.Atom.length) and !o.origins_top and o.origins.len > 0) {
+            var arrays = true;
+            for (o.origins) |site| arrays = arrays and (site.kind == .allocated_array or (site.kind == .literal and self.sourceView(site.context).getTag(site.node) == .array_literal));
+            if (arrays) {
+                // Length is a scalar structure read, not an index-insensitive
+                // choice of an element or its callable/object provenance.
+                return Value.flowing(try self.deepFlow(st, &.{o}));
+            }
+        }
         const stored = try self.storedRead(st, o, key);
         const native = (try self.implicitNative(o, key)) orelse return stored;
         return withNative(self.mem(), stored, native);
@@ -2984,7 +4367,32 @@ pub const FlowInterp = struct {
     fn weakWriteSite(self: *FlowInterp, st: *State, site: SiteKey, name: ?u16, v: Value) Error!void {
         const arena = self.mem();
         const current = st.heap.get(site) orelse Cells{};
-        try st.heap.put(arena, site, try weakWriteCells(arena, current, name, v));
+        try st.heap.put(arena, site, try weakWriteCells(arena, current, if (name) |n| try self.heapAtom(n) else null, v));
+    }
+
+    fn noteResponseFormatWrite(self: *FlowInterp, st: *State, receiver: Value, key: Key) Error!void {
+        for (receiver.origins) |site| {
+            var parent = site;
+            const may_change = switch (site.kind) {
+                .response => switch (key) {
+                    .name => |name| name == @intFromEnum(object.Atom.headers),
+                    .index, .dynamic => true,
+                },
+                .response_headers => blk: {
+                    parent.kind = .response;
+                    break :blk switch (key) {
+                        .name => |name| if (self.nameOfAtom(name)) |text| std.ascii.eqlIgnoreCase(text, "content-type") else true,
+                        .index, .dynamic => true,
+                    };
+                },
+                .literal, .function, .request, .headers, .query, .router_result, .router_params, .capture, .module_binding, .allocated_array, .allocated_any, .native, .builtin => false,
+            };
+            if (may_change) {
+                var cells = st.heap.get(parent) orelse Cells{};
+                cells.html_possible = true;
+                try st.heap.put(self.mem(), parent, cells);
+            }
+        }
     }
 
     /// A write of `v` to `o.name` or `o[k]`. The stored value carries the
@@ -2994,6 +4402,7 @@ pub const FlowInterp = struct {
     /// update, and a write through an unnamed target lands in `top_cell`. The
     /// expression value of the assignment is `v`, not the stored value.
     fn writeValue(self: *FlowInterp, st: *State, o: Value, key: Key, v: Value) Error!void {
+        try self.noteResponseFormatWrite(st, o, key);
         var flow = combineFlows(v.flow(), o.flow());
         var name: ?u16 = null;
         switch (key) {
@@ -3006,8 +4415,11 @@ pub const FlowInterp = struct {
         var stored = v;
         stored.labels = flow.labels;
         stored.defenses = flow.defenses;
+        stored.schema_guard = flow.schema_guard;
+        stored.html_guard = flow.html_guard;
+        stored.witness_complete = flow.witness_complete;
         for (o.origins) |site| try self.weakWriteSite(st, site, name, stored);
-        if (o.origins_top) st.top_cell = try weakWriteCells(self.mem(), st.top_cell, name, stored);
+        if (o.origins_top) st.top_cell = try weakWriteCells(self.mem(), st.top_cell, if (name) |n| try self.heapAtom(n) else null, stored);
     }
 
     /// Copy the cells `src` shows to a dynamic read into `site`. Each copied
@@ -3018,7 +4430,7 @@ pub const FlowInterp = struct {
         const view = try self.snapshotCells(st, src);
         var it = view.named.iterator();
         while (it.next()) |entry| {
-            const name: ?u16 = if (keep_names) entry.key_ptr.* else null;
+            const name: ?u16 = if (keep_names) try self.localHeapAtom(entry.key_ptr.*) else null;
             try self.weakWriteSite(st, site, name, withFlow(entry.value_ptr.*, src.flow()));
         }
         if (view.summary) |summary| {
@@ -3036,7 +4448,11 @@ pub const FlowInterp = struct {
         self.noteVisited(tag);
         try self.tick(node, tag);
         switch (tag) {
-            .lit_int, .lit_float, .lit_string, .lit_bool, .lit_null, .lit_undefined => return Value.clean,
+            .lit_string => {
+                const text = self.ir_view.getString(self.ir_view.getStringIdx(node) orelse return self.missing(node)) orelse return self.missing(node);
+                return .{ .html_type = containsIgnoreCase(text, "text/html") or containsIgnoreCase(text, "application/xhtml+xml") };
+            },
+            .lit_int, .lit_float, .lit_bool, .lit_null, .lit_undefined => return Value.clean,
             .identifier => return self.evalIdentifier(node, st),
             .binary_op => return self.evalBinary(node, st),
             .unary_op => {
@@ -3045,6 +4461,7 @@ pub const FlowInterp = struct {
                 return Value.flowing(operand.flow());
             },
             .ternary => {
+                st.path.complete = false;
                 const t = self.ir_view.getTernary(node) orelse return self.missing(node);
                 _ = try self.eval(t.condition, st);
                 var then_state = try cloneState(self.mem(), st.*);
@@ -3059,6 +4476,7 @@ pub const FlowInterp = struct {
                 return self.readValue(st, o, .{ .name = m.property });
             },
             .optional_chain => {
+                st.path.complete = false;
                 // The receiver is evaluated on both paths and a read changes
                 // no state, so the join of the states before and after the
                 // read is the state after the receiver.
@@ -3079,7 +4497,7 @@ pub const FlowInterp = struct {
             .function_expr, .arrow_function => {
                 // The body is not executed here. A call runs it, so a function
                 // value is a name for its body and a mutable object.
-                const site: SiteKey = .{ .kind = .function, .node = node, .context = 0 };
+                const site: SiteKey = .{ .kind = .function, .node = node, .context = self.active_module, .call = self.allocation_context };
                 return self.siteValue(site, node);
             },
             .call => return self.evalCall(node, st),
@@ -3159,18 +4577,26 @@ pub const FlowInterp = struct {
                     try self.record(node, .identifier, .capture_unplaced);
                     return Value.top;
                 };
-                return captureValue(st, key);
+                return self.captureValue(st, key);
             },
             // A module function is a fixed value; any other module name is
             // state that P8 owns. An undeclared global that the module level
             // never binds is a builtin.
             .global, .undeclared_global => {
+                if (self.persistent_globals) {
+                    if ((try self.loadGlobal(st, binding.name_atom))) |value| return value;
+                    if (try self.moduleExport(binding.name_atom)) |resolved| return self.exportValue(resolved);
+                    if (try self.moduleBinds(binding.name_atom)) {
+                        try self.record(node, .identifier, .read_before_declaration);
+                        return Value.top;
+                    }
+                }
                 // An export that is not a callee is its native function value.
                 if (binding.kind == .global) {
-                    if (try self.moduleExport(binding.name_atom)) |resolved| return self.nativeFunction(resolved.imported);
+                    if (try self.moduleExport(binding.name_atom)) |resolved| return self.exportValue(resolved);
                 }
                 if (try self.moduleFunction(binding.name_atom)) |func_node| {
-                    const site: SiteKey = .{ .kind = .function, .node = func_node, .context = 0 };
+                    const site: SiteKey = .{ .kind = .function, .node = func_node, .context = self.active_module, .call = self.allocation_context };
                     return self.siteValue(site, func_node);
                 }
                 if (binding.kind == .undeclared_global and !try self.moduleBinds(binding.name_atom)) {
@@ -3189,10 +4615,19 @@ pub const FlowInterp = struct {
                 // The right operand runs only on some paths, so it runs in a
                 // copy and its writes join with the paths that skip it.
                 const left = try self.eval(bin.left, st);
+                const entry_path = st.path;
                 var right_state = try cloneState(self.mem(), st.*);
+                if (bin.op == .nullish) right_state.path.complete = false else try self.branchEvidence(&right_state, bin.left, bin.op == .or_op);
                 const right = try self.eval(bin.right, &right_state);
+                const unchanged = stateEql(st.*, right_state) and entry_path.io_calls.len == right_state.path.io_calls.len and
+                    (entry_path.io_calls.len == 0 or entry_path.io_calls.ptr == right_state.path.io_calls.ptr);
                 st.* = try joinStates(self.mem(), st.*, right_state);
-                return joinValue(self.mem(), left, right);
+                // Pure predicate evaluation adds no conditional state or I/O.
+                // The enclosing branch can then constrain the whole AND/OR.
+                if (unchanged) st.path = entry_path;
+                var selected = try joinValue(self.mem(), left, right);
+                selected.witness_complete = false;
+                return selected;
             },
             else => {
                 // Left, then right, as code generation does. The result of an
@@ -3220,6 +4655,7 @@ pub const FlowInterp = struct {
         switch (op) {
             .and_op, .or_op, .nullish => {
                 var right_state = try cloneState(self.mem(), st.*);
+                right_state.path.complete = false;
                 const rhs = try self.eval(rhs_node, &right_state);
                 st.* = try joinStates(self.mem(), st.*, right_state);
                 return joinValue(self.mem(), old, rhs);
@@ -3258,7 +4694,7 @@ pub const FlowInterp = struct {
                             return assigned;
                         };
                         const assigned = if (asg.op) |op|
-                            try self.compoundValue(op, captureValue(st, key), asg.value, st)
+                            try self.compoundValue(op, self.captureValue(st, key), asg.value, st)
                         else
                             try self.eval(asg.value, st);
                         try self.weakWriteCapture(st, key, assigned);
@@ -3266,8 +4702,11 @@ pub const FlowInterp = struct {
                     },
                     // Module state belongs to P8.
                     .global, .undeclared_global => {
-                        const assigned = try self.eval(asg.value, st);
-                        try self.record(node, .assignment, .p8);
+                        const assigned = if (asg.op) |op|
+                            try self.compoundValue(op, (try self.loadGlobal(st, binding.name_atom)) orelse Value.top, asg.value, st)
+                        else
+                            try self.eval(asg.value, st);
+                        if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, assigned) else try self.record(node, .assignment, .p8);
                         return assigned;
                     },
                 }
@@ -3303,13 +4742,13 @@ pub const FlowInterp = struct {
         } else try self.eval(asg.value, st);
         try self.writeValue(st, o, key, assigned);
         // A shared runtime object is shared by every request.
-        if (hasBuiltinSite(o)) try self.record(node, .assignment, .p8);
+        if (hasBuiltinSite(o) and !self.persistent_globals) try self.record(node, .assignment, .p8);
         return assigned;
     }
 
     fn evalArray(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
         const arr = self.ir_view.getArray(node) orelse return self.missing(node);
-        const site: SiteKey = .{ .kind = .literal, .node = node, .context = 0 };
+        const site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context };
         var i: u16 = 0;
         while (i < arr.elements_count) : (i += 1) {
             const element = self.ir_view.getListIndex(arr.elements_start, i);
@@ -3328,7 +4767,7 @@ pub const FlowInterp = struct {
 
     fn evalObject(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
         const obj = self.ir_view.getObject(node) orelse return self.missing(node);
-        const site: SiteKey = .{ .kind = .literal, .node = node, .context = 0 };
+        const site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context };
         var i: u16 = 0;
         while (i < obj.properties_count) : (i += 1) {
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
@@ -3361,6 +4800,7 @@ pub const FlowInterp = struct {
     }
 
     fn evalMatch(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
+        st.path.complete = false;
         const m = self.ir_view.getMatchExpr(node) orelse return self.missing(node);
         const disc = try self.eval(m.discriminant, st);
         const arena = self.mem();
@@ -3515,7 +4955,9 @@ pub const FlowInterp = struct {
                 };
                 _ = try self.eval(s.condition, st);
                 var then_state = try cloneState(self.mem(), st.*);
+                try self.branchEvidence(&then_state, s.condition, false);
                 try self.exec(s.then_branch, &then_state);
+                try self.branchEvidence(st, s.condition, true);
                 if (s.else_branch != null_node) try self.exec(s.else_branch, st);
                 st.* = try joinStates(self.mem(), then_state, st.*);
             },
@@ -3527,7 +4969,7 @@ pub const FlowInterp = struct {
                 // A call in the expression that never returns leaves nothing
                 // to return.
                 if (!st.reachable) return;
-                try self.completions.append(self.mem(), .{ .kind = .returned, .value = v, .state = st.* });
+                try self.completions.append(self.mem(), .{ .kind = .returned, .node = self.ir_view.getOptValue(node) orelse node, .value = v, .state = st.* });
                 st.* = State.bottom;
             },
             .assert_stmt => {
@@ -3540,12 +4982,14 @@ pub const FlowInterp = struct {
                 // The assert held on the path that continues, so the original
                 // state goes on. The failure is a completion of its own.
                 var failed = try cloneState(self.mem(), st.*);
+                try self.branchEvidence(&failed, s.condition, true);
+                try self.branchEvidence(st, s.condition, false);
                 if (s.error_expr == null_node) {
-                    try self.completions.append(self.mem(), .{ .kind = .halt, .value = Value.clean, .state = failed });
+                    try self.completions.append(self.mem(), .{ .kind = .halt, .node = node, .value = Value.clean, .state = failed });
                 } else {
                     const message = try self.eval(s.error_expr, &failed);
                     if (!failed.reachable) return;
-                    try self.completions.append(self.mem(), .{ .kind = .assert_message, .value = message, .state = failed });
+                    try self.completions.append(self.mem(), .{ .kind = .assert_message, .node = node, .value = message, .state = failed });
                 }
             },
 
@@ -3657,6 +5101,7 @@ pub const FlowInterp = struct {
     /// with every `break` state. Completions and unresolved entries from every
     /// pass are kept.
     fn execForOf(self: *FlowInterp, node: NodeIndex, st: *State) Error!void {
+        st.path.complete = false;
         const arena = self.mem();
         const loop = self.ir_view.getForIter(node) orelse {
             _ = try self.missing(node);
@@ -3715,10 +5160,100 @@ pub const FlowInterp = struct {
     ) Error!void {
         switch (binding.kind) {
             .local, .argument => try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), v),
-            .upvalue, .global, .undeclared_global => try self.record(node, tag, .p8),
+            .global, .undeclared_global => if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, v) else try self.record(node, tag, .p8),
+            .upvalue => try self.record(node, tag, .p8),
         }
     }
 };
+
+const DiagnosticLabel = enum { secret, credential, input };
+
+fn sinkDiagnostic(event: SinkEvent, label: DiagnosticLabel) report_types.Diagnostic {
+    const response = event.sink == .response_html or event.sink == .response_other or event.sink == .response_init;
+    const log = event.sink == .log;
+    const url = event.sink == .egress_url or event.sink == .egress_headers;
+    const message = switch (event.sink) {
+        .response_html, .response_other, .response_init => switch (label) {
+            .secret => "secret data flows into response body",
+            .credential => "credential data flows into response body",
+            .input => "unvalidated user input in Response.html (potential XSS)",
+        },
+        .log => switch (label) {
+            .secret => "secret data flows into console output",
+            .credential => "credential data flows into console output",
+            .input => "unvalidated user input in console output",
+        },
+        .egress_url => switch (label) {
+            .secret => "secret data flows into fetchSync URL",
+            .credential => "credential data flows into fetchSync URL",
+            .input => "unvalidated user input flows into fetchSync URL",
+        },
+        .egress_body => switch (label) {
+            .secret => "secret data flows into fetchSync request body",
+            .credential => "credential data flows into fetchSync request body",
+            .input => "unvalidated user input flows into fetchSync body",
+        },
+        .egress_headers => switch (label) {
+            .secret => "secret data flows into fetchSync request headers",
+            .credential => "credential data flows into fetchSync request headers",
+            .input => "unvalidated user input flows into fetchSync request headers",
+        },
+        .egress_opaque => switch (label) {
+            .secret => "secret data flows into a fetch options object",
+            .credential => "credential data flows into a fetch options object",
+            .input => "unvalidated user input flows into a fetch options object",
+        },
+    };
+    const help = switch (event.sink) {
+        .response_html, .response_other, .response_init => switch (label) {
+            .secret => "env vars with sensitive names (SECRET, PASSWORD, KEY, TOKEN) must not appear in responses",
+            .credential => "auth tokens and JWT payloads should not be returned to clients",
+            .input => "escape the input with escapeHtml() from zttp:text",
+        },
+        .log => switch (label) {
+            .secret => "env vars with sensitive names must not be logged",
+            .credential => "auth tokens and JWTs must not be logged",
+            .input => "validate user input before logging",
+        },
+        .egress_url => switch (label) {
+            .secret => "secrets in URLs are logged by proxies and CDNs; pass secrets in headers or body instead",
+            .credential => "pass auth tokens in headers, not URLs",
+            .input => "validate user input before using it in an egress URL to avoid SSRF / request forgery",
+        },
+        .egress_body => switch (label) {
+            .secret => "do not send env secrets to external services",
+            .credential => "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
+            .input => "pass user input through validateJson() or validateObject() before sending to external services",
+        },
+        .egress_headers => switch (label) {
+            .secret => "do not send env secrets to external services, even in headers",
+            .credential => "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
+            .input => "validate user input before placing it in an egress header to avoid header injection / request forgery",
+        },
+        .egress_opaque => switch (label) {
+            .secret => "build the options object at the call site so each field can be checked, and do not send env secrets to external services",
+            .credential => "build the options object at the call site and avoid forwarding caller auth tokens to third parties",
+            .input => "validate user input before sending it to an external service",
+        },
+    };
+    var diagnostic: report_types.Diagnostic = .{
+        .node = event.node,
+        .kind = .unvalidated_input_in_egress,
+        .severity = if (label == .secret or (label == .credential and log)) .err else .warning,
+        .message = message,
+        .help = help,
+    };
+    switch (label) {
+        .secret => {
+            if (response) diagnostic.kind = .secret_in_response else if (log) diagnostic.kind = .secret_in_log else if (url) diagnostic.kind = .secret_in_egress_url else diagnostic.kind = .secret_in_egress_body;
+        },
+        .credential => {
+            if (response) diagnostic.kind = .credential_in_response else if (log) diagnostic.kind = .credential_in_log else if (url) diagnostic.kind = .credential_in_egress_url else diagnostic.kind = .credential_in_egress_body;
+        },
+        .input => {},
+    }
+    return diagnostic;
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -3728,6 +5263,21 @@ const testing = std.testing;
 const JsParser = engine.parser.JsParser;
 
 const secret: LabelSet = .{ .secret = true };
+
+test "response diagnostic guidance follows the exposed label" {
+    const cases = .{
+        .{ DiagnosticLabel.secret, "secret data flows into response body", "env vars with sensitive names (SECRET, PASSWORD, KEY, TOKEN) must not appear in responses" },
+        .{ DiagnosticLabel.credential, "credential data flows into response body", "auth tokens and JWT payloads should not be returned to clients" },
+        .{ DiagnosticLabel.input, "unvalidated user input in Response.html (potential XSS)", "escape the input with escapeHtml() from zttp:text" },
+    };
+    inline for (.{ InputSink.response_html, InputSink.response_other, InputSink.response_init }) |sink| {
+        inline for (cases) |case| {
+            const diagnostic = sinkDiagnostic(.{ .node = 0, .sink = sink, .reached = .{} }, case[0]);
+            try testing.expectEqualStrings(case[1], diagnostic.message);
+            try testing.expectEqualStrings(case[2], diagnostic.help.?);
+        }
+    }
+}
 
 /// A parsed source and the evaluator over it. The parser keeps a pointer to
 /// the atom table, so the harness is heap allocated and never moves.
@@ -5475,14 +7025,15 @@ test "a user Math does not replace a call that compiles to an opcode" {
 }
 
 // P5 specification test 23.
-test "a method call on a Response result has no operation rule" {
-    const r = try analyzeSource("function f(s) { return Response.json(s).text(); }", "f", &.{secret_value});
-    defer r.deinit();
-    try expectUnresolved(r.result, .call, .no_operation_rule);
-
-    // The static call itself has a rule, and its result carries the argument.
-    try expectSecret("function f(s) { return Response.json(s); }", &.{secret_value}, true);
-    try expectSecret("function f(s) { return Response.json(\"c\"); }", &.{secret_value}, false);
+test "Response body methods preserve body provenance" {
+    try expectSecret("function f(s) { return Response.json(s).text(); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return Response.json(\"public\").text(); }", &.{secret_value}, false);
+    const tainted = try probe("function f(s) { return Response.json(s); }", &.{secret_value});
+    try testing.expect(!tainted.cleared);
+    try testing.expect(tainted.deep.labels.secret);
+    const clean = try probe("function f(s) { return Response.json(\"c\"); }", &.{secret_value});
+    try testing.expect(!clean.cleared);
+    try testing.expect(!clean.deep.labels.secret);
 }
 
 test "reach sees the cells of a write through an unnamed target" {
@@ -5781,10 +7332,12 @@ test "env keeps secret for a credential name and gives config for any other" {
 // P5 specification test 31.
 test "an export result aliases the container passed to it" {
     const validate = "import { validateObject } from \"zttp:validate\"; ";
-    const write = validate ++ "function f(s) { const o = { x: \"c\" }; const r = validateObject(\"n\", o); r.x = s; return o.x; }";
+    const write = validate ++ "function f(s) { const o = { x: \"c\" }; const r = validateObject(\"n\", o); r.value.x = s; return o.x; }";
     try expectSecret(write, &.{secret_value}, true);
-    const clean = validate ++ "function f(s) { const o = { x: \"c\" }; const r = validateObject(\"n\", o); r.x = \"c\"; return o.x; }";
+    const clean = validate ++ "function f(s) { const o = { x: \"c\" }; const r = validateObject(\"n\", o); r.value.x = \"c\"; return o.x; }";
     try expectSecret(clean, &.{secret_value}, false);
+    const wrapper = validate ++ "function f(s) { const o = { x: \"c\" }; const r = validateObject(\"n\", o); r.x = s; return o.x; }";
+    try expectSecret(wrapper, &.{secret_value}, false);
 }
 
 // P5 specification test 32.
@@ -5834,8 +7387,9 @@ test "a validating export keeps the user input it was given" {
     const checked = try analyzeSource(validate ++ "function f(u) { return validateObject(\"n\", u); }", "f", &.{user_input_value});
     defer checked.deinit();
     try testing.expect(!checked.result.cleared);
-    try testing.expect(checked.returnedLabels().user_input);
-    try testing.expect(!checked.returnedLabels().validated);
+    const deep = try checked.harness.interp.deepFlow(&checked.result.exit, &.{checked.result.returned.?});
+    try testing.expect(deep.labels.user_input);
+    try testing.expect(!deep.labels.validated);
 
     // The contrast: with nothing tainted the result carries nothing, because
     // no value carries `validated` (P6).
@@ -5917,28 +7471,33 @@ test "an export read as a value is a native function value" {
     try testing.expectEqual(@as(usize, 1), held.origins.len);
     try testing.expectEqual(SiteKind.builtin, held.origins[0].kind);
 
-    // A call through the alias may reach any function.
+    // Copying the exact imported function preserves its export identity.
     const alias = try analyzeSource(collections ++ "function f(s) { const g = dictHas; return g({ x: s }, \"x\"); }", "f", &.{secret_value});
     defer alias.deinit();
-    try expectUnresolved(alias.result, .call, .unknown_callee);
+    try testing.expect(!alias.result.cleared);
+    try testing.expect(alias.result.returned.?.labels.secret);
 }
 
-test "a fetch result is a native container" {
+test "fetch results have their declared upstream source and precise body methods" {
     const fetch = "import { fetch } from \"zttp:fetch\"; ";
     const r = try analyzeSource(fetch ++ "function f(s) { return fetch(s); }", "f", &.{secret_value});
     defer r.deinit();
     try testing.expect(!r.result.cleared);
-    const held = r.result.returned.?;
-    try testing.expect(held.labels.secret);
-    try testing.expect(held.labels.external);
-    var native = false;
-    for (held.origins) |site| native = native or site.kind == .native;
-    try testing.expect(native);
-
-    // A method call on it has no rule, as on a `Response` result.
+    const reached = try r.harness.interp.deepFlow(&r.result.exit, &.{r.result.returned.?});
+    try testing.expect(reached.labels.external);
+    try testing.expect(!reached.labels.secret);
+    var response = false;
+    for (r.result.returned.?.origins) |site| response = response or site.kind == .response;
+    try testing.expect(response);
     const call = try analyzeSource(fetch ++ "function f(s) { return fetch(s).text(); }", "f", &.{secret_value});
     defer call.deinit();
-    try expectUnresolved(call.result, .call, .no_operation_rule);
+    try testing.expect(!call.result.cleared);
+    try testing.expect(call.returnedLabels().external);
+    try testing.expect(!call.returnedLabels().secret);
+    const report = try probeReport(fetch ++ "import { env } from \"zttp:env\"; function handler(req) { return fetch(env(\"SECRET_KEY\")); }");
+    try testing.expect(!report.cleared);
+    try testing.expect(!report.properties.no_secret_leakage);
+    try testing.expectEqual(report_types.DiagnosticKind.secret_in_egress_url, report.first_kind.?);
 }
 
 test "a presumed callback loop runs again until its parameters stop growing" {
@@ -6702,8 +8261,6 @@ test "a row without a defense establishes nothing" {
     const params = [_]Value{user_input_value};
     const auth = "import { jwtVerify } from \"zttp:auth\"; ";
     const sources = [_][]const u8{
-        validate_import ++ "function f(u) { return validateObject(\"n\", u); }",
-        validate_import ++ "function f(u) { return validateObject(\"n\", { k: u }); }",
         decode_import ++ "function f(u) { return decodeQuery(\"n\", { k: u }); }",
         auth ++ "function f(u) { return jwtVerify(u, \"k\"); }",
     };
@@ -6712,6 +8269,15 @@ test "a row without a defense establishes nothing" {
         try expectDeepDefenses(source, &params, no_defenses);
         // An escaped argument does not survive either.
         try expectDefenses(source, &.{exposedSeed(both_defenses)}, no_defenses);
+    }
+    // P8 gives only Result.value a checked view. The complete Result also
+    // carries the unchecked ok/error observations and has no blanket defense.
+    for ([_][]const u8{
+        validate_import ++ "function f(u) { return validateObject(\"n\", u); }",
+        validate_import ++ "function f(u) { return validateObject(\"n\", { k: u }); }",
+    }) |source| {
+        try expectDeepDefenses(source, &params, no_defenses);
+        try expectDeepDefenses(source, &.{exposedSeed(both_defenses)}, no_defenses);
     }
     const r = try analyzeSource(auth ++ "function f(u) { return jwtVerify(u, \"k\"); }", "f", &params);
     defer r.deinit();
@@ -7291,4 +8857,820 @@ test "tagPlan agrees with eval and exec for every tag" {
         "flow_interp tagPlan: {d} tags, handled={d} later={d} (p7={d} p8={d}) refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
         .{ tag_count, handled, later, by_phase[0], by_phase[1], refused, refused_strict, not_produced },
     );
+}
+
+/// Run the shadow handler entry point and inspect the full value the handler
+/// returns. No production property or diagnostic is derived by this probe.
+fn probeHandler(source: []const u8) !Probe {
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    const result = try h.interp.analyzeHandler(try h.find("handler"));
+    const returned = result.returned orelse return error.NoReturnedValue;
+    return .{
+        .cleared = result.cleared,
+        .surface = returned.flow(),
+        .deep = try h.interp.deepFlow(&result.exit, &.{returned}),
+        .origins = returned.origins.len,
+    };
+}
+
+fn expectHandlerInput(source: []const u8, credential: bool) !void {
+    const p = try probeHandler(source);
+    try testing.expect(!p.cleared);
+    try testing.expect(p.deep.labels.user_input);
+    try testing.expectEqual(credential, p.deep.labels.credential);
+    try testing.expect(!p.deep.labels.unknown);
+}
+
+test "handler request cells distinguish authorization from ordinary fields" {
+    try expectHandlerInput("function handler(req) { return req.headers.authorization; }", true);
+    try expectHandlerInput("function handler(req) { return req.headers[\"authorization\"]; }", true);
+    for ([_][]const u8{ "url", "path", "method", "body", "query" }) |name| {
+        const source = try std.fmt.allocPrint(testing.allocator, "function handler(req) {{ return req.{s}; }}", .{name});
+        defer testing.allocator.free(source);
+        try expectHandlerInput(source, false);
+    }
+    try expectHandlerInput("function handler(req) { return req.headers.accept; }", false);
+    try expectHandlerInput("function handler(req) { return req.headers[\"accept\"]; }", false);
+    try expectHandlerInput("function handler(req) { return req.query.name; }", false);
+    try expectHandlerInput("function handler(req) { return req.headers[req.url]; }", true);
+}
+
+test "request and headers serialization reads credential cells" {
+    try expectHandlerInput("function handler(req) { return JSON.stringify(req.headers); }", true);
+    try expectHandlerInput("function handler(req) { return JSON.stringify(req); }", true);
+    try expectHandlerInput("function handler(req) { return JSON.stringify({ nested: [req.headers] }); }", true);
+    try expectHandlerInput("function handler(req) { return JSON.stringify({ accept: req.headers.accept }); }", false);
+    try expectHandlerInput("function handler(req) { return JSON.stringify(Object.values(req.headers)); }", true);
+    try expectHandlerInput("function handler(req) { return JSON.stringify(Object.entries(req.headers)); }", true);
+    try expectHandlerInput("function handler(req) { return Object.keys(req.headers).join(\",\"); }", true);
+}
+
+test "request identity follows joins cells returns and callbacks" {
+    try expectHandlerInput("function handler(req) { const r = req.url ? req : { headers: { authorization: \"public\" } }; return r.headers.authorization; }", true);
+    try expectHandlerInput("function handler(req) { const box = { nested: [req] }; return box.nested[0].headers.authorization; }", true);
+    try expectHandlerInput("function identity(r) { return r; } function handler(req) { return identity(req).headers.authorization; }", true);
+    try expectHandlerInput("function handler(req) { return [req].pop().headers.authorization; }", true);
+    try expectHandlerInput("function handler(req) { return [req].map((r) => r.headers.authorization).join(\",\"); }", true);
+    try expectHandlerInput("function handler(req) { return [req].map((r) => r.headers.accept).join(\",\"); }", false);
+    try expectHandlerInput("function handler(req) { const box = { h: req.headers }; return box.h.authorization; }", true);
+    try expectHandlerInput("function handler(req) { const r = { ...req }; return r.headers.authorization; }", true);
+    try expectHandlerInput("function handler(req) { return match (req) { when { headers: h }: h.authorization default: \"public\" }; }", true);
+    try expectHandlerInput("function handler(req) { return match (req) { when { headers: h }: h.accept default: \"public\" }; }", false);
+}
+
+test "synthetic request sites use ordinary weak alias writes" {
+    const secret_write = try probeHandler(
+        \\import { env } from "zttp:env";
+        \\function handler(req) { const h = req.headers; h.accept = env("SECRET_KEY"); return req.headers.accept; }
+    );
+    try testing.expect(!secret_write.cleared);
+    try testing.expect(secret_write.deep.labels.secret);
+    try testing.expect(secret_write.deep.labels.user_input);
+    try testing.expect(!secret_write.deep.labels.credential);
+
+    const dynamic_write = try probeHandler(
+        \\import { env } from "zttp:env";
+        \\function handler(req) { const h = req.headers; h[req.url] = env("SECRET_KEY"); return req.headers.accept; }
+    );
+    try testing.expect(!dynamic_write.cleared);
+    try testing.expect(dynamic_write.deep.labels.secret);
+    try expectHandlerInput("function handler(req) { req.headers.authorization = \"public\"; return req.headers.authorization; }", true);
+    try expectHandlerInput("function handler(req) { req.headers.accept = \"public\"; return req.headers.accept; }", false);
+}
+
+test "query contents retain writes through static and dynamic aliases" {
+    for ([_][]const u8{
+        "function handler(req) { const q = req.query; q.value = env(\"SECRET_KEY\"); return req.query.value; }",
+        "function handler(req) { const q = req.query; q[req.url] = env(\"SECRET_KEY\"); return req.query.value; }",
+        "function handler(req) { req.query.value = env(\"SECRET_KEY\"); return JSON.stringify(req); }",
+    }) |body| {
+        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; {s}", .{body});
+        defer testing.allocator.free(source);
+        const p = try probeHandler(source);
+        try testing.expect(!p.cleared);
+        try testing.expect(p.deep.labels.secret);
+        try testing.expect(p.deep.labels.user_input);
+    }
+    try expectHandlerInput("function handler(req) { req.query.value = \"public\"; return req.query.value; }", false);
+}
+
+test "handler entry resets request cells and leaves explicit parameters unchanged" {
+    const h = try Harness.create(testing.allocator,
+        \\import { env } from "zttp:env";
+        \\function handler(req) { return req.headers.authorization; }
+        \\function mutate(req) { req.headers.accept = env("SECRET_KEY"); return req.headers.accept; }
+        \\function read(req) { return req.headers.accept; }
+    );
+    defer h.destroy();
+    const mutate = try h.interp.analyzeHandler(try h.find("mutate"));
+    try testing.expect(!mutate.cleared);
+    try testing.expect((try h.interp.deepFlow(&mutate.exit, &.{mutate.returned.?})).labels.secret);
+    const read = try h.interp.analyzeHandler(try h.find("read"));
+    try testing.expect(!read.cleared);
+    const labels = (try h.interp.deepFlow(&read.exit, &.{read.returned.?})).labels;
+    try testing.expect(labels.user_input);
+    try testing.expect(!labels.secret);
+    try testing.expect(!labels.credential);
+
+    const plain = try h.analyze("handler", &.{Value.clean});
+    try testing.expect(!plain.cleared);
+    try testing.expect((try h.interp.deepFlow(&plain.exit, &.{plain.returned.?})).labels.isEmpty());
+    const request = try h.interp.analyzeHandler(try h.find("handler"));
+    try testing.expect(!request.cleared);
+    try testing.expect((try h.interp.deepFlow(&request.exit, &.{request.returned.?})).labels.credential);
+}
+
+test "request and headers prototype methods have explicit read and write edges" {
+    try expectHandlerInput("function handler(req) { return req.text(); }", false);
+    try expectHandlerInput("function handler(req) { return req.json().value; }", false);
+    try expectHandlerInput("function handler(req) { return req.headers.get(\"AUTHORIZATION\"); }", true);
+    try expectHandlerInput("function handler(req) { return req.headers.has(\"authorization\"); }", true);
+    try expectHandlerInput("function handler(req) { req.headers.set(\"accept\", \"public\"); return req.headers.accept; }", false);
+    try expectHandlerInput("function handler(req) { req.headers.append(\"accept\", \"public\"); return req.headers.accept; }", false);
+    try expectHandlerInput("function handler(req) { req.headers.delete(\"authorization\"); return req.headers.authorization; }", true);
+    try expectHandlerInput("function handler(req) { return req.headers.get(req.url); }", true);
+    try expectHandlerInput("function handler(req) { return req.headers.get(\"accept\"); }", false);
+    try expectHandlerInput("function handler(req) { return req.headers.has(\"accept\"); }", false);
+    try expectHandlerInput("function handler(req) { return req.headers.delete(\"authorization\"); }", true);
+
+    for ([_][]const u8{
+        "function handler(req) { req.headers.set(\"X-Test\", env(\"SECRET_KEY\")); return req.headers[\"x-test\"]; }",
+        "function handler(req) { req.headers[\"X-Test\"] = \"public\"; req.headers.set(\"x-test\", env(\"SECRET_KEY\")); return req.headers[\"X-Test\"]; }",
+        "function handler(req) { req.headers[\"X-Test\"] = env(\"SECRET_KEY\"); return req.headers.get(\"x-test\"); }",
+        "function handler(req) { req.headers.append(\"X-Test\", env(\"SECRET_KEY\")); return req.headers.get(\"X-TEST\"); }",
+        "function handler(req) { req.body = env(\"SECRET_KEY\"); return req.text(); }",
+        "function handler(req) { req.body = env(\"SECRET_KEY\"); return req.json().value; }",
+    }) |body| {
+        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; {s}", .{body});
+        defer testing.allocator.free(source);
+        const p = try probeHandler(source);
+        try testing.expect(!p.cleared);
+        try testing.expect(p.deep.labels.secret);
+    }
+    const unknown = try probeHandler("function handler(req) { return req.headers.unsupported(); }");
+    try testing.expect(unknown.cleared);
+}
+
+/// This census bounds literal runtime prototype registrations. Runtime
+/// constructors use addDynamicMethod with a fixed receiver and literal name;
+/// it does not attempt to parse arbitrary Zig registration code.
+fn censusRuntimePrototypes(source: []const u8, rows: []const OperationRow) !usize {
+    const arena = testing.allocator;
+    const seen = try arena.alloc(bool, rows.len);
+    defer arena.free(seen);
+    @memset(seen, false);
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r");
+        const scope: []const u8 = if (std.mem.startsWith(u8, line, "try self.addDynamicMethod(request_proto, \""))
+            "Request.prototype"
+        else if (std.mem.startsWith(u8, line, "try self.addDynamicMethod(headers_proto, \""))
+            "Headers.prototype"
+        else
+            continue;
+        const start = (std.mem.indexOfScalar(u8, line, '"') orelse return error.MissingMethodName) + 1;
+        const end = std.mem.indexOfScalarPos(u8, line, start, '"') orelse return error.MissingMethodName;
+        const at = rowIndex(rows, scope, line[start..end]) orelse return error.PrototypeWithoutRow;
+        if (seen[at]) return error.DuplicatePrototypeMethod;
+        seen[at] = true;
+        count += 1;
+    }
+    if (count == 0) return error.NoPrototypeMethods;
+    for (seen) |found| if (!found) return error.RowWithoutPrototype;
+    return count;
+}
+
+test "runtime request prototype registration and transfer rows agree" {
+    const source = try engine.file_io.readFile(testing.allocator, "packages/runtime/src/handler_instance.zig", 1 << 20);
+    defer testing.allocator.free(source);
+    const checked = try censusRuntimePrototypes(source, &runtime_prototype_rows);
+    try testing.expectEqual(@as(usize, 7), checked);
+    try testing.expectEqual(runtime_prototype_rows.len, checked);
+    try testing.expectError(error.NoPrototypeMethods, censusRuntimePrototypes("", &runtime_prototype_rows));
+    try testing.expectError(error.RowWithoutPrototype, censusRuntimePrototypes("try self.addDynamicMethod(request_proto, \"text\", native, 0);", &runtime_prototype_rows));
+    try testing.expectError(error.PrototypeWithoutRow, censusRuntimePrototypes("try self.addDynamicMethod(headers_proto, \"unknown\", native, 0);", &runtime_prototype_rows));
+    for (runtime_prototype_rows, 0..) |_, removed| {
+        var rows: [runtime_prototype_rows.len - 1]OperationRow = undefined;
+        @memcpy(rows[0..removed], runtime_prototype_rows[0..removed]);
+        @memcpy(rows[removed..], runtime_prototype_rows[removed + 1 ..]);
+        try testing.expectError(error.PrototypeWithoutRow, censusRuntimePrototypes(source, &rows));
+    }
+}
+
+const ReportProbe = struct {
+    properties: report_types.FlowProperties,
+    cleared: bool,
+    diagnostics: usize,
+    events: usize,
+    first_kind: ?report_types.DiagnosticKind,
+};
+
+fn probeReport(source: []const u8) !ReportProbe {
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    const result = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    if (result.evaluation.cleared) for (result.diagnostics) |diagnostic| {
+        try testing.expect(diagnostic.witness == null);
+    };
+    return .{
+        .properties = result.properties,
+        .cleared = result.evaluation.cleared,
+        .diagnostics = result.diagnostics.len,
+        .events = result.events.len,
+        .first_kind = if (result.diagnostics.len > 0) result.diagnostics[0].kind else null,
+    };
+}
+
+test "global request readers inspect the body without authorization provenance" {
+    try expectHandlerInput("function handler(req) { return requestBody(req); }", false);
+    try expectHandlerInput("function handler(req) { return requestText(req).value; }", false);
+    try expectHandlerInput("function handler(req) { return requestJson(req).value; }", false);
+    for ([_][]const u8{ "requestBody", "requestText", "requestJson" }) |reader| {
+        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; function handler(req) {{ req.body = env(\"SECRET_KEY\"); return {s}(req); }}", .{reader});
+        defer testing.allocator.free(source);
+        const p = try probeHandler(source);
+        try testing.expect(!p.cleared);
+        try testing.expect(p.deep.labels.secret);
+        try testing.expect(!p.deep.labels.credential);
+    }
+}
+
+test "shadow handler reports root response provenance and unknown distinctly" {
+    const leaked = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return Response.json({ value: env(\"SECRET_KEY\") }); }");
+    try testing.expect(!leaked.cleared);
+    try testing.expect(!leaked.properties.no_secret_leakage);
+    try testing.expectEqual(report_types.DiagnosticKind.secret_in_response, leaked.first_kind.?);
+    const credential = try probeReport("function handler(req) { return Response.json(req.headers); }");
+    try testing.expect(!credential.cleared);
+    try testing.expect(!credential.properties.no_credential_leakage);
+    const safe_field = try probeReport("function handler(req) { return Response.json({ accept: req.headers.accept }); }");
+    try testing.expect(!safe_field.cleared);
+    try testing.expect(safe_field.properties.no_credential_leakage);
+    try testing.expectEqual(@as(usize, 0), safe_field.diagnostics);
+    const unknown = try probeReport("import { cacheGet } from \"zttp:cache\"; function handler(req) { return cacheGet(\"n\", \"k\"); }");
+    try testing.expect(!unknown.properties.no_secret_leakage);
+    try testing.expectEqual(@as(usize, 0), unknown.diagnostics);
+}
+
+test "HTML construction reports injection only when returned to the handler caller" {
+    const escaped = try probeReport(text_import ++ "function handler(req) { return Response.html(escapeHtml(req.url)); }");
+    try testing.expect(!escaped.cleared);
+    try testing.expect(escaped.properties.injection_safe);
+    const raw = try probeReport("function handler(req) { return Response.html(req.url); }");
+    try testing.expect(!raw.cleared);
+    try testing.expect(!raw.properties.injection_safe);
+    const decoded = try probeReport(text_import ++ "function handler(req) { return Response.html(unescapeHtml(escapeHtml(req.url))); }");
+    try testing.expect(!decoded.properties.injection_safe);
+    const discarded = try probeReport("function make(r) { return Response.html(r.url); } function handler(req) { make(req); return Response.text(\"public\"); }");
+    try testing.expect(!discarded.cleared);
+    try testing.expect(discarded.properties.injection_safe);
+    try testing.expectEqual(@as(usize, 0), discarded.diagnostics);
+    const returned = try probeReport("function make(r) { return Response.html(r.url); } function handler(req) { return make(req); }");
+    try testing.expect(!returned.cleared);
+    try testing.expect(!returned.properties.injection_safe);
+}
+
+test "assertion messages become root response completions through helper calls" {
+    const direct = try probeReport("import { env } from \"zttp:env\"; function handler(req) { assert req.url, env(\"SECRET_KEY\"); return \"public\"; }");
+    try testing.expect(!direct.cleared);
+    try testing.expect(!direct.properties.no_secret_leakage);
+    const helper = try probeReport("import { env } from \"zttp:env\"; function f(r) { assert r.url, env(\"SECRET_KEY\"); return \"public\"; } function handler(req) { return f(req); }");
+    try testing.expect(!helper.cleared);
+    try testing.expect(!helper.properties.no_secret_leakage);
+    const contained = try probeReport("import { env } from \"zttp:env\"; function f(r) { assert r.url, env(\"SECRET_KEY\"); return \"public\"; } function handler(req) { f(req); return \"public\"; }");
+    try testing.expect(!contained.cleared);
+    try testing.expect(contained.properties.no_secret_leakage);
+}
+
+test "log sink observations occur during conditions and callbacks" {
+    const direct = try probeReport("import { env } from \"zttp:env\"; function handler(req) { console.log(env(\"SECRET_KEY\")); return \"public\"; }");
+    try testing.expect(!direct.cleared);
+    try testing.expect(!direct.properties.no_secret_leakage);
+    try testing.expectEqual(report_types.DiagnosticKind.secret_in_log, direct.first_kind.?);
+    const in_condition = try probeReport("function f(r) { console.log(r.headers.authorization); return true; } function handler(req) { if (f(req)) return \"a\"; return \"b\"; }");
+    try testing.expect(!in_condition.cleared);
+    try testing.expect(!in_condition.properties.no_credential_leakage);
+    const callback = try probeReport("function handler(req) { [req].forEach((r) => console.log(r.headers.authorization)); return \"public\"; }");
+    try testing.expect(!callback.cleared);
+    try testing.expect(!callback.properties.no_credential_leakage);
+    const virtual_log = try probeReport("import { logInfo } from \"zttp:log\"; function handler(req) { logInfo(\"audit\", { value: req.headers.authorization }); return \"public\"; }");
+    try testing.expect(!virtual_log.cleared);
+    try testing.expect(!virtual_log.properties.no_credential_leakage);
+}
+
+test "egress observations use field-specific defenses and current heap contents" {
+    const fetch_import = "import { fetch } from \"zttp:fetch\"; ";
+    const raw = try probeReport(fetch_import ++ "function handler(req) { fetch(\"https://example.com\", { body: req.body }); return \"public\"; }");
+    try testing.expect(!raw.cleared);
+    try testing.expect(!raw.properties.input_validated);
+    try testing.expect(!raw.properties.injection_safe);
+    try testing.expect(!raw.properties.pii_contained);
+    try testing.expect(raw.properties.no_credential_leakage);
+    const checked = try probeReport(fetch_import ++ validate_import ++ "function handler(req) { const result = validateJson(\"s\", req.body); fetch(\"https://example.com\", { body: result.value }); return \"public\"; }");
+    try testing.expect(!checked.cleared);
+    try testing.expect(checked.properties.input_validated);
+    try testing.expect(checked.properties.injection_safe);
+    try testing.expect(!checked.properties.pii_contained);
+    const header = try probeReport(fetch_import ++ "function handler(req) { const init = { headers: { authorization: req.headers.authorization } }; fetch(\"https://example.com\", init); return \"public\"; }");
+    try testing.expect(!header.cleared);
+    try testing.expect(!header.properties.no_credential_leakage);
+    const before_write = try probeReport("import { env } from \"zttp:env\"; function handler(req) { const box = { value: \"public\" }; console.log(box.value); box.value = env(\"SECRET_KEY\"); return \"public\"; }");
+    try testing.expect(!before_write.cleared);
+    try testing.expect(before_write.properties.no_secret_leakage);
+}
+
+test "unknown calls clear the complete shadow report and clock values affect response only" {
+    const unknown = try probeReport("function handler(req) { return missing(req); }");
+    try testing.expect(unknown.cleared);
+    inline for (@typeInfo(report_types.FlowProperties).@"struct".fields) |field| try testing.expect(!@field(unknown.properties, field.name));
+    const response = try probeReport("function handler(req) { return Date.now(); }");
+    try testing.expect(!response.cleared);
+    try testing.expect(!response.properties.deterministic);
+    const log = try probeReport("function handler(req) { console.log(Date.now()); return \"public\"; }");
+    try testing.expect(!log.cleared);
+    try testing.expect(log.properties.deterministic);
+}
+
+test "response HTML checks read mutable body and current possible format" {
+    for ([_][]const u8{
+        "function handler(req) { const r = Response.html(\"public\"); r.body = req.url; return r; }",
+        "function handler(req) { const r = Response.text(req.url); r.headers[\"content-type\"] = \"text/html\"; return r; }",
+        "function handler(req) { const r = Response.text(req.url); r.headers.set(\"Content-Type\", \"text/html\"); return r; }",
+        "function handler(req) { const r = Response.text(req.url); r.headers = { \"content-type\": \"text/html\" }; return r; }",
+        "function handler(req) { return { body: req.url, status: 200, statusText: \"OK\", ok: true, headers: { \"content-type\": \"text/html\" } }; }",
+    }) |source| {
+        const p = try probeReport(source);
+        try testing.expect(!p.cleared);
+        try testing.expect(!p.properties.injection_safe);
+    }
+    for ([_][]const u8{
+        "function handler(req) { return Response.text(req.url); }",
+        "function handler(req) { return Response.html(\"public\"); }",
+        "function handler(req) { const r = Response.html(\"public\"); r.body = escapeHtml(req.url); return r; }",
+        "function handler(req) { const r = Response.text(escapeHtml(req.url)); r.headers.set(\"content-type\", \"text/html\"); return r; }",
+        "function handler(req) { return { body: escapeHtml(req.url), status: 200, headers: { \"content-type\": \"text/html\" } }; }",
+    }) |body| {
+        const source = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ text_import, body });
+        defer testing.allocator.free(source);
+        const p = try probeReport(source);
+        try testing.expect(!p.cleared);
+        try testing.expect(p.properties.injection_safe);
+    }
+}
+
+test "helper responses transmit status and ignore init header fields" {
+    const ignored = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return Response.text(\"public\", { headers: { authorization: env(\"SECRET_KEY\") } }); }");
+    try testing.expect(!ignored.cleared);
+    try testing.expect(ignored.properties.no_secret_leakage);
+    for ([_][]const u8{
+        "function handler(req) { return Response.text(\"public\", { status: 200 + env(\"SECRET_KEY\").length }); }",
+        "function handler(req) { const r = Response.text(\"public\"); r.headers.authorization = env(\"SECRET_KEY\"); return r; }",
+        "function handler(req) { return { body: \"public\", status: 200, headers: { authorization: env(\"SECRET_KEY\") } }; }",
+        "function handler(req) { const r = Response.text(\"public\", { status: 200 + env(\"SECRET_KEY\").length }); return r.statusText; }",
+        "function handler(req) { const r = Response.text(\"public\", { status: 200 + env(\"SECRET_KEY\").length }); return r.ok; }",
+    }) |body| {
+        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; {s}", .{body});
+        defer testing.allocator.free(source);
+        const p = try probeReport(source);
+        try testing.expect(!p.cleared);
+        try testing.expect(!p.properties.no_secret_leakage);
+    }
+}
+
+test "literal non HTML content types retain structural response precision" {
+    const safe = try probeReport("function handler(req) { return { body: req.url, status: 200, headers: { \"Content-Type\": \"application/json\" } }; }");
+    try testing.expect(!safe.cleared);
+    try testing.expect(safe.properties.injection_safe);
+    const mixed_case_html = try probeReport("function handler(req) { return { body: req.url, status: 200, headers: { \"Content-Type\": \"text/html\" } }; }");
+    try testing.expect(!mixed_case_html.cleared);
+    try testing.expect(!mixed_case_html.properties.injection_safe);
+    const joined = try probeReport("function handler(req) { const content = req.url ? \"application/json\" : \"text/html\"; return { body: req.url, status: 200, headers: { \"content-type\": content } }; }");
+    try testing.expect(!joined.cleared);
+    try testing.expect(!joined.properties.injection_safe);
+    const synthesized = try probeReport("function handler(req) { const content = \"text/\" + \"html\"; return { body: req.url, status: 200, headers: { \"content-type\": content } }; }");
+    try testing.expect(!synthesized.cleared);
+    try testing.expect(!synthesized.properties.injection_safe);
+}
+
+test "persistent module roots retain scalar and alias writes across requests" {
+    for ([_][]const u8{
+        "let prior = 0; function handler(req) { const old = prior; prior = req.url.length; return Response.html(String(old)); }",
+        "let prior = false; function handler(req) { const old = prior; prior = req.url.length > 0; return Response.html(String(old)); }",
+        "const shared = { value: \"public\" }; function handler(req) { const old = shared.value; shared.value = req.headers.authorization; return old; }",
+        "let shared = { value: \"public\" }; function handler(req) { const old = shared.value; shared = { value: req.headers.authorization }; return old; }",
+        "let saved = () => \"public\"; function make(value) { return () => value; } function handler(req) { const old = saved(); saved = make(req.headers.authorization); return old; }",
+    }) |source| {
+        const result = try probeReport(source);
+        try testing.expect(!result.cleared);
+        try testing.expect(!result.properties.injection_safe or !result.properties.no_credential_leakage);
+    }
+}
+
+test "request local scalars reset and persistent initialization runs in source order" {
+    const local = try probeReport("function handler(req) { let prior = 0; const old = prior; prior = req.url.length; return Response.html(String(old)); }");
+    try testing.expect(!local.cleared);
+    try testing.expect(local.properties.injection_safe);
+    const initialized = try probeReport("import { env } from \"zttp:env\"; const secret = env(\"SECRET_KEY\"); function handler(req) { return secret; }");
+    try testing.expect(!initialized.cleared);
+    try testing.expect(!initialized.properties.no_secret_leakage);
+    const before = try probeReport("const value = later(); function later() { return \"public\"; } function handler(req) { return value; }");
+    try testing.expect(before.cleared);
+}
+
+test "persistent heap includes writes before assertion and the pass cap fails closed" {
+    const asserted = try probeReport("let prior = \"public\"; function handler(req) { const old = prior; prior = req.headers.authorization; assert req.method === \"POST\", old; return \"public\"; }");
+    try testing.expect(!asserted.cleared);
+    try testing.expect(!asserted.properties.no_credential_leakage);
+    const h = try Harness.create(testing.allocator, "let prior = \"public\"; function handler(req) { const old = prior; prior = req.headers.authorization; return old; }");
+    defer h.destroy();
+    h.interp.max_persistence_passes = 1;
+    const capped = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(capped.evaluation.cleared);
+    try testing.expect(!capped.properties.no_credential_leakage);
+}
+
+test "initializer assertion return preserves heap but discards its response value" {
+    const poisoned = try probeReport("import { env } from \"zttp:env\"; let saved = \"public\"; function handler(req) { return saved; } function poison() { saved = env(\"SECRET_KEY\"); return \"blocked\"; } assert false, poison();");
+    try testing.expect(!poisoned.cleared);
+    try testing.expect(!poisoned.properties.no_secret_leakage);
+    const discarded = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return \"public\"; } assert false, env(\"SECRET_KEY\");");
+    try testing.expect(!discarded.cleared);
+    try testing.expect(discarded.properties.no_secret_leakage);
+}
+
+fn moduleRoot(view: IrView) !NodeIndex {
+    for (0..view.nodeCount()) |index| {
+        const node: NodeIndex = @intCast(index);
+        if (view.getTag(node) == .program) return node;
+    }
+    return error.ProgramNotFound;
+}
+
+fn probeImported(root_source: []const u8, helper_source: []const u8, imported: []const u8, exported: []const u8) !struct { properties: report_types.FlowProperties, cleared: bool } {
+    const root = try Harness.create(testing.allocator, root_source);
+    defer root.destroy();
+    const helper = try Harness.create(testing.allocator, helper_source);
+    defer helper.destroy();
+    var key: ?u32 = null;
+    for (0..root.interp.ir_view.nodeCount()) |index| {
+        const node: NodeIndex = @intCast(index);
+        if (root.interp.ir_view.getTag(node) != .import_specifier) continue;
+        const spec = root.interp.ir_view.getImportSpec(node) orelse continue;
+        if (std.mem.eql(u8, root.nameOf(spec.local_binding.name_atom) orelse "", imported)) key = packBindingKey(spec.local_binding.scope_id, spec.local_binding.slot);
+    }
+    const function_decl = try helper.find(exported);
+    const target = helper.interp.ir_view.getVarDecl(function_decl).?.init;
+    const edges = [_]ImportTarget{.{ .binding_key = key orelse return error.ImportNotFound, .target = .{ .module = 1, .node = target } }};
+    const modules = [_]ModuleView{
+        .{ .id = 0, .path = "/handler.ts", .revision = @splat(0), .root = try moduleRoot(root.interp.ir_view), .ir_view = root.interp.ir_view, .atoms = &root.atoms, .captures = &root.captures.?, .imports = &edges },
+        .{ .id = 1, .path = "/helper.ts", .revision = @splat(1), .root = try moduleRoot(helper.interp.ir_view), .ir_view = helper.interp.ir_view, .atoms = &helper.atoms, .captures = &helper.captures.?, .imports = &.{} },
+    };
+    root.interp.modules = &modules;
+    root.interp.initialization_order = &.{ 1, 0 };
+    const result = try root.interp.analyzeHandlerReport(try root.find("handler"));
+    return .{ .properties = result.properties, .cleared = result.evaluation.cleared };
+}
+
+test "imported functions preserve same object aliases and property spelling across atom tables" {
+    const mutated = try probeImported(
+        "import { mutate } from \"./helper.ts\"; function handler(req) { const box = { unusual: \"public\" }; mutate(box, box, req.headers.authorization); return box.unusual; }",
+        "const different = \"first dynamic atom\"; export function mutate(a, b, value) { a.unusual = value; return b.unusual; }",
+        "mutate",
+        "mutate",
+    );
+    try testing.expect(!mutated.cleared);
+    try testing.expect(!mutated.properties.no_credential_leakage);
+    const unchanged = try probeImported(
+        "import { identity } from \"./helper.ts\"; function handler(req) { return identity(req).headers.accept; }",
+        "export function identity(req) { return req; }",
+        "identity",
+        "identity",
+    );
+    try testing.expect(!unchanged.cleared);
+    try testing.expect(unchanged.properties.no_credential_leakage);
+    const credential = try probeImported(
+        "import { identity } from \"./helper.ts\"; function handler(req) { return identity(req.headers).authorization; }",
+        "export function identity(headers) { return headers; }",
+        "identity",
+        "identity",
+    );
+    try testing.expect(!credential.cleared);
+    try testing.expect(!credential.properties.no_credential_leakage);
+}
+
+test "imported bindings copy current shared globals and returned closures retain captures" {
+    const overwritten = try probeImported(
+        "import { published as copied } from \"./helper.ts\"; function handler(req) { return copied(req); }",
+        "import { env } from \"zttp:env\"; export function published(req) { return \"public\"; } function leak(req) { return env(\"SECRET_KEY\"); } published = leak;",
+        "copied",
+        "published",
+    );
+    try testing.expect(!overwritten.cleared);
+    try testing.expect(!overwritten.properties.no_secret_leakage);
+    const closure = try probeImported(
+        "import { make } from \"./helper.ts\"; let saved = () => \"public\"; function handler(req) { const result = saved(); saved = make(req.headers.authorization); return result; }",
+        "export function make(value) { return () => value; }",
+        "make",
+        "make",
+    );
+    try testing.expect(!closure.cleared);
+    try testing.expect(!closure.properties.no_credential_leakage);
+    const collision = try probeImported(
+        "import { read } from \"./helper.ts\"; const shared = \"public\"; function handler(req) { shared = req.headers.authorization; return read(); }",
+        "const shared = \"public\"; export function read() { return shared; }",
+        "read",
+        "read",
+    );
+    try testing.expect(!collision.cleared);
+    try testing.expect(!collision.properties.no_credential_leakage);
+}
+
+test "routerMatch keeps handler identity and passes the original request explicitly" {
+    const clean = try probeReport("import { routerMatch } from \"zttp:router\"; function publicRoute(req) { return Response.text(\"public\"); } const routes = { \"GET /\": publicRoute }; function handler(req) { const found = routerMatch(routes, req); if (found) { req.params = found.params; return found.handler(req); } return Response.text(\"missing\"); }");
+    try testing.expect(!clean.cleared);
+    inline for (@typeInfo(report_types.FlowProperties).@"struct".fields) |field| try testing.expect(@field(clean.properties, field.name));
+    const leaked = try probeReport("import { routerMatch } from \"zttp:router\"; function privateRoute(req) { return req.headers.authorization; } const routes = { \"GET /\": privateRoute }; function handler(req) { const found = routerMatch(routes, req); if (found) return found.handler(req); return \"missing\"; }");
+    try testing.expect(!leaked.cleared);
+    try testing.expect(!leaked.properties.no_credential_leakage);
+    const discarded = try probeReport("import { routerMatch } from \"zttp:router\"; import { env } from \"zttp:env\"; function privateRoute(req) { console.log(env(\"SECRET_KEY\")); return req.headers.authorization; } const routes = { \"GET /\": privateRoute }; function handler(req) { routerMatch(routes, req); return \"public\"; }");
+    try testing.expect(!discarded.cleared);
+    try testing.expect(discarded.properties.no_secret_leakage);
+    try testing.expect(discarded.properties.no_credential_leakage);
+}
+
+test "object validation guards one view and alias writes invalidate that view" {
+    const prefix = "import { validateObject } from \"zttp:validate\"; import { fetch } from \"zttp:fetch\"; ";
+    const clean = try probeReport(prefix ++ "function handler(req) { const raw = { city: req.query.city }; const checked = validateObject(\"city\", raw); fetch(\"https://example.com\", { query: { city: checked.value.city } }); return \"public\"; }");
+    try testing.expect(!clean.cleared);
+    try testing.expect(clean.properties.input_validated);
+    try testing.expect(!clean.properties.injection_safe);
+    try testing.expect(!clean.properties.pii_contained);
+    const unchanged_alias = try probeReport(prefix ++ "function identity(x) { return x; } function handler(req) { const raw = { city: req.query.city }; const checked = validateObject(\"city\", raw); const alias = identity(checked.value); fetch(\"https://example.com\", { body: alias }); return \"public\"; }");
+    try testing.expect(!unchanged_alias.cleared);
+    try testing.expect(unchanged_alias.properties.input_validated);
+    for ([_][]const u8{
+        "raw.city = req.url;",
+        "raw[req.url] = req.url;",
+        "const alias = checked.value; alias.city = req.url;",
+    }) |write| {
+        const source = try std.fmt.allocPrint(testing.allocator, "{s} function handler(req) {{ const raw = {{ city: req.query.city }}; const checked = validateObject(\"city\", raw); {s} fetch(\"https://example.com\", {{ body: checked.value }}); return \"public\"; }}", .{ prefix, write });
+        defer testing.allocator.free(source);
+        const changed = try probeReport(source);
+        try testing.expect(!changed.cleared);
+        try testing.expect(!changed.properties.input_validated);
+    }
+    const raw_alias = try probeReport(prefix ++ "function handler(req) { const raw = { city: req.query.city }; validateObject(\"city\", raw); fetch(\"https://example.com\", { body: raw }); return \"public\"; }");
+    try testing.expect(!raw_alias.cleared);
+    try testing.expect(!raw_alias.properties.input_validated);
+}
+
+test "copied validated primitives survive later alias writes and generations saturate" {
+    const p = try probeReport("import { validateObject } from \"zttp:validate\"; import { fetch } from \"zttp:fetch\"; function handler(req) { const raw = { city: req.query.city }; const checked = validateObject(\"city\", raw); const copied = checked.value.city; raw.city = req.url; fetch(\"https://example.com\", { body: copied }); return \"public\"; }");
+    try testing.expect(!p.cleared);
+    try testing.expect(p.properties.input_validated);
+    const h = try Harness.create(testing.allocator, "function f() { return 1; }");
+    defer h.destroy();
+    var state: State = .{};
+    const site: SiteKey = .{ .kind = .literal, .node = 1, .context = 0 };
+    const value = try h.interp.siteValue(site, null);
+    try h.interp.weakWriteSite(&state, site, null, Value.labelled(.{ .user_input = true }));
+    const view = (try h.interp.watchSchema(&state, value)).?;
+    try testing.expect(FlowInterp.schemaValid(&state, view));
+    for (0..watched_top + 2) |_| try h.interp.weakWriteSite(&state, site, null, Value.labelled(.{ .user_input = true }));
+    try testing.expect(!FlowInterp.schemaValid(&state, view));
+    try testing.expectEqual(watched_top, state.heap.get(site).?.generation);
+    try testing.expect((try h.interp.watchSchema(&state, value)) == null);
+}
+
+test "object validation never validates a later raw selection key" {
+    const prefix = "import { validateObject } from \"zttp:validate\"; import { fetch } from \"zttp:fetch\"; ";
+    const raw_key = try probeReport(prefix ++ "function handler(req) { const checked = validateObject(\"shape\", { a: \"public\" }); fetch(\"https://example.com\", { body: checked.value[req.query.key] }); return \"public\"; }");
+    try testing.expect(!raw_key.cleared);
+    try testing.expect(!raw_key.properties.input_validated);
+    const literal = try probeReport(prefix ++ "function handler(req) { const checked = validateObject(\"shape\", { a: req.body }); fetch(\"https://example.com\", { body: checked.value.a }); return \"public\"; }");
+    try testing.expect(!literal.cleared);
+    try testing.expect(literal.properties.input_validated);
+}
+
+test "object-valued selection cannot revalidate a raw key through a schema view" {
+    const p = try probeReport("import { validateObject } from \"zttp:validate\"; import { fetch } from \"zttp:fetch\"; function handler(req) { const checked = validateObject(\"shape\", { a: { city: \"public\" } }); const selected = checked.value[req.query.key]; fetch(\"https://example.com\", { body: selected }); return \"public\"; }");
+    try testing.expect(!p.cleared);
+    try testing.expect(!p.properties.input_validated);
+}
+
+test "Dict entry reconstruction returns native arrays without invoking entry values" {
+    const p = try probeReport("import { dictEntries, dictFromEntries } from \"zttp:collections\"; function handler(req) { const built = dictFromEntries([[\"a\", 1], [\"b\", 2]]); if (!built.ok) return Response.json({error:\"bad\"}); const d = built.value; if (!isDict(d)) return Response.json({error:\"not-dict\"}); const doubled = dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2])); return Response.json({ok:doubled.ok}); }");
+    try testing.expect(!p.cleared);
+    try testing.expect(p.properties.no_credential_leakage);
+    try testing.expect(p.properties.no_secret_leakage);
+    const stored = try probeReport("import { dictEntries, dictFromEntries } from \"zttp:collections\"; import { env } from \"zttp:env\"; function leak() { console.log(env(\"SECRET_KEY\")); return \"secret\"; } function handler(req) { dictEntries(dictFromEntries([[\"a\", leak]]).value); return \"public\"; }");
+    try testing.expect(!stored.cleared);
+    try testing.expect(stored.properties.no_secret_leakage);
+}
+
+test "a non source callback export strips a checked object view" {
+    const p = try probeReport("import { validateObject } from \"zttp:validate\"; import { ok, mapResult } from \"zttp:result\"; import { fetch } from \"zttp:fetch\"; function handler(req) { const checked = validateObject(\"shape\", { city: req.url }); const mapped = mapResult(ok(\"public\"), () => checked.value); fetch(\"https://example.com\", { body: mapped.value }); return \"public\"; }");
+    try testing.expect(!p.cleared);
+    try testing.expect(!p.properties.input_validated);
+}
+
+test "schema watching follows existing values reached through unknown target writes" {
+    const h = try Harness.create(testing.allocator, "function f() { return 1; }");
+    defer h.destroy();
+    var state: State = .{};
+    const root_site: SiteKey = .{ .kind = .literal, .node = 1, .context = 0 };
+    const child_site: SiteKey = .{ .kind = .literal, .node = 2, .context = 0 };
+    const root = try h.interp.siteValue(root_site, null);
+    const child = try h.interp.siteValue(child_site, null);
+    try h.interp.weakWriteSite(&state, child_site, null, Value.labelled(.{ .user_input = true }));
+    state.top_cell.summary = child;
+    const view = (try h.interp.watchSchema(&state, root)).?;
+    try testing.expect(FlowInterp.schemaValid(&state, view));
+    try h.interp.weakWriteSite(&state, child_site, null, Value.labelled(.{ .user_input = true }));
+    try testing.expect(!FlowInterp.schemaValid(&state, view));
+}
+
+test "witness keeps module initialization and sibling I O in replay order" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; const setup = env(\"REGION\"); function handler(req) { const unused = env(\"MODE\"); return Response.text(env(\"API_TOKEN\")); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.evaluation.cleared);
+    try testing.expect(!report.properties.no_secret_leakage);
+    var found = false;
+    for (report.diagnostics) |diagnostic| if (diagnostic.witness) |witness| {
+        found = true;
+        try testing.expectEqual(@as(usize, 3), witness.io_calls.len);
+        for (witness.io_calls) |call| try testing.expectEqualStrings("env", call.func);
+    };
+    try testing.expect(found);
+}
+
+test "short circuit sink witness constrains the request before its I O" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; import { fetch } from \"zttp:fetch\"; function handler(req) { const ignored = req.path === \"/leak\" && fetch(env(\"API_TOKEN\")).ok; return Response.text(\"public\"); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    var found = false;
+    for (report.diagnostics) |diagnostic| if (diagnostic.witness) |witness| {
+        found = true;
+        try testing.expect(witness.path_constraints.len > 0);
+        var solved = try counterexample.solve(testing.allocator, .{ .property = .no_secret_leakage, .origin = .{ .line = 1, .column = 1 }, .sink = .{ .line = 1, .column = 1 }, .summary = diagnostic.message, .constraints = witness.path_constraints, .io_calls = witness.io_calls });
+        defer solved.deinit(testing.allocator);
+        try testing.expectEqualStrings("/leak", solved.request.url);
+    };
+    try testing.expect(found);
+}
+
+test "imprecise request selection never supplies exact witness provenance" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { const fields = [req.path]; const p = fields[req.url.length + 1]; if (p === \"/leak\") console.log(env(\"API_TOKEN\")); return \"public\"; }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.properties.no_secret_leakage);
+    for (report.diagnostics) |diagnostic| try testing.expect(diagnostic.witness == null);
+}
+
+test "replay pure native constructors are omitted from synthetic I O" {
+    const h = try Harness.create(testing.allocator, "import { bytesFromOctets, bytesLength } from \"zttp:bytes\"; import { dictFromEntries, dictEntries } from \"zttp:collections\"; import { env } from \"zttp:env\"; function handler(req) { const n = bytesLength(bytesFromOctets([1,2]).value); const entries = dictEntries(dictFromEntries([[\"a\",n]]).value); return env(\"API_TOKEN\"); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.evaluation.cleared);
+    var found = false;
+    for (report.diagnostics) |diagnostic| if (diagnostic.witness) |witness| {
+        found = true;
+        try testing.expectEqual(@as(usize, 1), witness.io_calls.len);
+        try testing.expectEqualStrings("env", witness.io_calls[0].func);
+    };
+    try testing.expect(found);
+}
+
+test "guard cards follow a common guard and decline conflicting guard names" {
+    const prefix = "import { escapeHtml } from \"zttp:text\"; ";
+    const h = try Harness.create(testing.allocator, prefix ++ "function identity(x) { return x; } function handler(req) { const safe = escapeHtml(req.url); return Response.html(identity(safe)); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(report.properties.injection_safe);
+    var found = false;
+    for (report.defended_paths) |path| if (path.property == .injection_safe and path.safe_form == .validated) {
+        found = true;
+        try testing.expectEqualStrings("escapeHtml", path.guard_func.?);
+    };
+    try testing.expect(found);
+    const other = try Harness.create(testing.allocator, prefix ++ "function handler(req) { let safe = escapeHtml(req.url); if (req.method === \"POST\") safe = escapeHtml(req.body); return Response.html(safe); }");
+    defer other.destroy();
+    const joined = try other.interp.analyzeHandlerReport(try other.find("handler"));
+    try testing.expect(joined.properties.injection_safe);
+    for (joined.defended_paths) |path| if (path.property == .injection_safe) try testing.expect(path.safe_form != .validated);
+}
+
+test "real fetchSync global observes egress and returns an upstream response" {
+    const h = try Harness.create(testing.allocator, "function handler(req) { const upstream = fetchSync(\"https://example.com\", {body:req.body}); return Response.text(upstream.body); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.evaluation.cleared);
+    try testing.expect(!report.properties.input_validated);
+    var found = false;
+    for (report.events) |event| if (event.sink == .egress_body) {
+        found = true;
+        try testing.expect(event.reached.labels.user_input);
+    };
+    try testing.expect(found);
+    const source = try engine.file_io.readFile(testing.allocator, "packages/runtime/src/handler_instance.zig", 1 << 20);
+    defer testing.allocator.free(source);
+    try testing.expect(std.mem.indexOf(u8, source, "intern(\"fetchSync\")") != null);
+    try testing.expect(std.mem.indexOf(u8, source, "makeReplayStub(\"http\", \"fetchSync\")") != null);
+    try testing.expectEqual(@as(usize, 1), runtime_global_rows.len);
+}
+
+test "ambiguous callable selection never witnesses an unselected internal sink" {
+    for ([_][]const u8{
+        "[() => { console.log(env(\"API_TOKEN\")); return \"bad\"; }, () => \"public\"]",
+        "[() => { console.log(env(\"API_TOKEN\")); return \"bad\"; }, undefined]",
+    }) |options| {
+        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; function handler(req) {{ const options = {s}; const f = options[1]; f(); return \"public\"; }}", .{options});
+        defer testing.allocator.free(source);
+        const h = try Harness.create(testing.allocator, source);
+        defer h.destroy();
+        const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+        try testing.expect(!report.evaluation.cleared);
+        try testing.expect(!report.properties.no_secret_leakage);
+        try testing.expect(report.diagnostics.len > 0);
+        for (report.diagnostics) |diagnostic| try testing.expect(diagnostic.witness == null);
+    }
+}
+
+test "a replaced root handler cannot prove the stale lexical body" {
+    const p = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return \"public\"; } function replacement(req) { return env(\"API_TOKEN\"); } handler = replacement;");
+    try testing.expect(p.cleared);
+    try testing.expect(!p.properties.no_secret_leakage);
+}
+
+test "speculative method sinks cannot enlarge an earlier complete event" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; const secret = env(\"API_TOKEN\"); function f(x) { console.log(x); return \"public\"; } function handler(req) { f(\"public\"); const items = [{trim:f}, \"public\"]; const obj = items[1]; obj.trim(secret); return \"public\"; }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.evaluation.cleared);
+    try testing.expect(!report.properties.no_secret_leakage);
+    for (report.diagnostics) |diagnostic| try testing.expect(diagnostic.witness == null);
+}
+
+test "imprecise data selection cannot supply a concrete leak witness" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { const items = [env(\"API_TOKEN\"), \"public\"]; return Response.text(items[1]); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.evaluation.cleared);
+    try testing.expect(!report.properties.no_secret_leakage);
+    try testing.expect(report.diagnostics.len > 0);
+    for (report.diagnostics) |diagnostic| try testing.expect(diagnostic.witness == null);
+}
+
+test "schema dependent pure Result payload cannot invent a successful replay" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; import { validateJson } from \"zttp:validate\"; function handler(req) { return Response.json(validateJson(\"missing-schema\", env(\"API_TOKEN\")).value); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.evaluation.cleared);
+    try testing.expect(!report.properties.no_secret_leakage);
+    try testing.expect(report.diagnostics.len > 0);
+    for (report.diagnostics) |diagnostic| try testing.expect(diagnostic.witness == null);
+}
+
+test "an unchanged request authorization read retains its replay witness" {
+    const h = try Harness.create(testing.allocator, "function handler(req) { return Response.text(req.headers.authorization); }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.evaluation.cleared);
+    try testing.expect(!report.properties.no_credential_leakage);
+    var found = false;
+    for (report.diagnostics) |diagnostic| if (diagnostic.witness != null) {
+        found = true;
+    };
+    try testing.expect(found);
+}
+
+test "pure AND predicates retain a constrained constructive branch" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { const secret = env(\"API_TOKEN\"); if (req.method === \"POST\" && secret !== undefined) return Response.text(secret); return \"public\"; }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    var found = false;
+    for (report.diagnostics) |diagnostic| if (diagnostic.witness) |witness| {
+        found = true;
+        try testing.expectEqual(@as(usize, 2), witness.path_constraints.len);
+        try testing.expectEqual(@as(usize, 1), witness.io_calls.len);
+    };
+    try testing.expect(found);
+}
+
+test "short circuit writes cannot lend another branch their data witness" {
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { let value = \"public\"; const ignored = req.method === \"POST\" && (value = env(\"API_TOKEN\")); if (req.method !== \"POST\") return Response.text(value); return \"public\"; }");
+    defer h.destroy();
+    const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
+    try testing.expect(!report.properties.no_secret_leakage);
+    for (report.diagnostics) |diagnostic| try testing.expect(diagnostic.witness == null);
+}
+
+test "a noncallable own slot cannot silently use a builtin prototype method" {
+    const p = try probeReport("function handler(req) { const values = ['public']; const alias = values; alias.join = req.callback; return Response.json(values.join()); }");
+    try testing.expect(p.cleared);
+    try testing.expect(!p.properties.no_secret_leakage);
+    try testing.expect(!p.properties.no_credential_leakage);
 }

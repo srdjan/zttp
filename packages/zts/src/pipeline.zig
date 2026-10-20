@@ -147,6 +147,8 @@ pub const ParsedModule = struct {
     root: NodeIndex,
     atoms: ?*AtomTable,
     type_store: ?*const TypeSyntax.Store = null,
+    /// The parser remains owned by the caller through the analysis session.
+    scopes: ?*const @import("zts-engine").parser.ScopeAnalyzer = null,
 
     /// Adopt an already-parsed IR. Transitional: tighter gating belongs to WS5.
     pub fn fromExisting(ir_view: IrView, root: NodeIndex, atoms: ?*AtomTable) ParsedModule {
@@ -411,12 +413,12 @@ pub const CheckedModule = struct {
             resolved.parsed.ir_view,
             resolved.parsed.atoms,
         );
-        flow.facts = opts.module_facts;
+        flow.scopes = resolved.parsed.scopes;
+        flow.modules = opts.flow_modules;
+        flow.initialization_order = opts.flow_initialization_order;
+        flow.modules_complete = opts.flow_modules_complete;
         if (tc_ptr) |tc| flow.setTypeChecker(tc);
         errdefer flow.deinit();
-        for (opts.imported_fn_summaries) |*entry| {
-            flow.setFileFunctionSummary(entry.slot, &entry.summary);
-        }
 
         return .{
             .resolved = resolved,
@@ -478,26 +480,88 @@ pub const CheckedModule = struct {
     }
 };
 
-/// The sink summary of a function imported from another file (plan unit F7).
-pub const ImportedSummary = flow_checker_mod.ImportedSummary;
+pub fn flowImportBindingKey(view: IrView, slot: u16) ?u32 {
+    for (0..view.nodeCount()) |index| {
+        const node: ir_mod.NodeIndex = @intCast(index);
+        switch (view.getTag(node) orelse continue) {
+            .import_specifier, .import_default, .import_namespace => {},
+            else => continue,
+        }
+        const specifier = view.getImportSpec(node) orelse continue;
+        if (specifier.local_binding.slot == slot)
+            return (@as(u32, specifier.local_binding.scope_id) << 16) | slot;
+    }
+    return null;
+}
 
-/// The sink summary of a function imported from another file, paired with the
-/// local binding slot the import produced. The pipeline does no file I/O, so
-/// the caller reads and walks those files and hands the answers in. The flow
-/// checker copies each summary, so the caller keeps ownership of its own.
-pub const ImportedFnSummary = struct {
-    slot: u16,
-    summary: ImportedSummary,
-};
+pub fn flowExportedFunctionNode(view: IrView, atoms: *AtomTable, name: []const u8) ?ir_mod.NodeIndex {
+    for (0..view.nodeCount()) |index| {
+        const node: ir_mod.NodeIndex = @intCast(index);
+        if ((view.getTag(node) orelse continue) != .export_decl) continue;
+        const exported = view.getExportDecl(node) orelse continue;
+        if (exported.declaration == ir_mod.null_node) continue;
+        const tag = view.getTag(exported.declaration) orelse continue;
+        if (tag != .function_decl and tag != .var_decl) continue;
+        const declaration = view.getVarDecl(exported.declaration) orelse continue;
+        const atom: @import("zts-engine").object.Atom = @enumFromInt(declaration.binding.name_atom);
+        const declared_name = atom.toPredefinedName() orelse atoms.getName(atom) orelse continue;
+        if (!std.mem.eql(u8, declared_name, name)) continue;
+        const function_tag = view.getTag(declaration.init) orelse continue;
+        if (function_tag == .function_expr or function_tag == .arrow_function) return declaration.init;
+    }
+    return null;
+}
+
+/// The sink summary of a function imported from another file (plan unit F7).
+// Borrowed source snapshots for the replacement flow evaluator. The I/O-owning
+// tools retain these owners; the compiler never loads a file itself.
+pub const FlowModuleView = @import("flow_interp.zig").ModuleView;
+pub const FlowModuleId = @import("flow_interp.zig").ModuleId;
+pub const FlowFunctionRef = @import("flow_interp.zig").FunctionRef;
+pub const FlowImportTarget = @import("flow_interp.zig").ImportTarget;
+pub const FlowCaptureTable = @import("flow_interp.zig").CaptureTable;
+
+/// Overlay completed flow facts without replacing unrelated contract facts.
+pub fn projectFlowProperties(contract: *HandlerContract, flow: flow_checker_mod.FlowProperties) void {
+    if (contract.properties) |*properties| {
+        properties.no_secret_leakage = flow.no_secret_leakage;
+        properties.no_credential_leakage = flow.no_credential_leakage;
+        properties.input_validated = flow.input_validated;
+        properties.pii_contained = flow.pii_contained;
+        properties.injection_safe = flow.injection_safe;
+        properties.deterministic = properties.deterministic and flow.deterministic;
+        properties.idempotent = properties.deterministic and properties.retry_safe;
+    }
+}
+
+fn projectParsedFlow(allocator: std.mem.Allocator, parsed: ParsedModule, contract: *HandlerContract) !void {
+    var flow = FlowChecker.init(allocator, parsed.ir_view, parsed.atoms);
+    defer flow.deinit();
+    flow.scopes = parsed.scopes;
+    if (handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root)) |handler| {
+        _ = try flow.check(handler);
+        projectFlowProperties(contract, flow.getProperties());
+    } else {
+        projectFlowProperties(contract, .{
+            .no_secret_leakage = false,
+            .no_credential_leakage = false,
+            .input_validated = false,
+            .pii_contained = false,
+            .injection_safe = false,
+            .deterministic = false,
+        });
+    }
+}
 
 pub const CheckOptions = struct {
     /// Shared import index for this compile. Same lifetime rule as
     /// `ResolveOptions.module_facts`. An options struct rather than a fourth
     /// positional parameter so the next addition does not churn every call site.
     module_facts: ?*const ModuleFacts = null,
-    /// Cross-file helper sink summaries. Empty means every such call is treated
-    /// as untraceable, which is the conservative direction, not the neutral one.
-    imported_fn_summaries: []const ImportedFnSummary = &.{},
+    /// Borrow the exact parser snapshots selected by the caller's traversal.
+    flow_modules: []const FlowModuleView = &.{},
+    flow_initialization_order: []const FlowModuleId = &.{},
+    flow_modules_complete: bool = true,
 };
 
 pub fn check(
@@ -1066,7 +1130,7 @@ pub const ModuleAnalysisSession = struct {
                 self.parsed.ir_view,
                 self.parsed.atoms,
             );
-            self.standalone_flow_checker.?.facts = self.completedContractFacts();
+            self.standalone_flow_checker.?.scopes = self.parsed.scopes;
         }
     }
 
@@ -1187,42 +1251,13 @@ pub const ModuleAnalysisSession = struct {
         self: *ModuleAnalysisSession,
         filename: []const u8,
     ) !ContractExtraction {
-        var opts = if (self.profile == .full) ExtractContractOptions{
+        const opts = if (self.profile == .full) ExtractContractOptions{
             .strict = self.full_opts.strict,
             .manifest_registry = self.full_opts.manifest_registry,
         } else self.extraction_opts;
-        opts.source_types = self.source_types;
-        opts.resolved = null;
-        opts.module_facts = self.completedContractFacts();
-        if (self.profile == .contract_only) opts.source_types = .omitted;
-        opts.dispatch = self.contract_context.dispatch;
-        opts.has_default_response = self.contract_context.has_default_response;
-        opts.verification = self.contract_context.verification;
-        opts.imported_effects = self.contract_context.imported_effects;
         const checker = try self.completedTypeChecker();
         try checker.ensureHealthy();
-        const handler_fn = handler_verifier_mod.findHandlerFunction(
-            self.parsed.ir_view,
-            self.parsed.root,
-        );
-        const handler_loc = if (handler_fn) |handler| self.parsed.ir_view.getLoc(handler) else null;
-        const effects = try self.prepareContractEffectFacts(opts, checker.env, handler_fn);
-        var extraction = try buildContractResultOn(
-            self.allocator,
-            self.parsed,
-            filename,
-            opts,
-            checker.env,
-            checker,
-            consumerTypeSource(self.source_types, checker.env),
-            handler_fn,
-            handler_loc,
-            self.completedContractFacts(),
-            effects,
-        );
-        errdefer extraction.deinit(self.allocator);
-        try checker.ensureHealthy();
-        return extraction;
+        return self.extractCheckedResult(filename, opts, checker);
     }
 
     fn extractCustomResult(
@@ -1243,9 +1278,17 @@ pub const ModuleAnalysisSession = struct {
         _ = try self.extraction_opts.type_check(checker, self.parsed.root);
         try self.prepareContractFacts(true);
         try checker.ensureHealthy();
+        return self.extractCheckedResult(filename, self.extraction_opts, checker);
+    }
 
-        var opts = self.extraction_opts;
-        opts.source_types = self.source_types;
+    fn extractCheckedResult(
+        self: *ModuleAnalysisSession,
+        filename: []const u8,
+        base_opts: ExtractContractOptions,
+        checker: *TypeChecker,
+    ) !ContractExtraction {
+        var opts = base_opts;
+        opts.source_types = if (self.profile == .contract_only) .omitted else self.source_types;
         opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
         opts.dispatch = self.contract_context.dispatch;
@@ -1532,7 +1575,8 @@ pub fn extractContract(
     _ = parser_mod.optimizeIR(allocator, &frontend.parser.nodes, &frontend.parser.constants, root) catch {};
     const ir_view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
     try frontend.parser.type_store.validateRuntimeOwners(allocator, ir_view);
-    const parsed = ParsedModule.fromTypedExisting(ir_view, root, &frontend.atoms, &frontend.parser.type_store);
+    var parsed = ParsedModule.fromTypedExisting(ir_view, root, &frontend.atoms, &frontend.parser.type_store);
+    parsed.scopes = &frontend.parser.scopes;
     var contract_opts = opts;
     contract_opts.source_types = opts.source_types orelse .direct;
     if (hasFileImports(ir_view)) {
@@ -1544,7 +1588,10 @@ pub fn extractContract(
     try analysis.initSoundExtraction(allocator, parsed, contract_opts);
     defer analysis.deinit();
     try analysis.complete();
-    return analysis.extractContract(filename);
+    var contract = try analysis.extractContract(filename);
+    errdefer contract.deinit(allocator);
+    try projectParsedFlow(allocator, parsed, &contract);
+    return contract;
 }
 
 /// Extract authority from prepared evaluation while omitting authored signatures and capsules.
@@ -1569,7 +1616,8 @@ pub fn extractPreparedEvalContract(
     _ = parser_mod.optimizeIR(allocator, &parser.nodes, &parser.constants, root) catch {};
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     try parser.type_store.validateRuntimeOwners(allocator, view);
-    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    var parsed = ParsedModule.fromExisting(view, root, &atoms);
+    parsed.scopes = &parser.scopes;
     var options = opts;
     options.source_types = .omitted;
     if (hasFileImports(view)) {
@@ -1580,7 +1628,10 @@ pub fn extractPreparedEvalContract(
     try analysis.initSoundExtraction(allocator, parsed, options);
     defer analysis.deinit();
     try analysis.complete();
-    return analysis.extractContract(filename);
+    var contract = try analysis.extractContract(filename);
+    errdefer contract.deinit(allocator);
+    try projectParsedFlow(allocator, parsed, &contract);
+    return contract;
 }
 
 fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, filename: []const u8, opts: ExtractContractOptions) !HandlerContract {
@@ -1592,7 +1643,8 @@ fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, file
     const root = try parser.parse();
     _ = parser_mod.optimizeIR(allocator, &parser.nodes, &parser.constants, root) catch {};
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+    var parsed = ParsedModule.fromExisting(view, root, &atoms);
+    parsed.scopes = &parser.scopes;
     if (hasFileImports(view)) {
         const read_file = opts.read_file orelse return error.FileImportReaderRequired;
         return extractMultiModuleContract(allocator, source, filename, read_file, &atoms, opts);
@@ -1601,7 +1653,10 @@ fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, file
     try analysis.initSoundExtraction(allocator, parsed, opts);
     defer analysis.deinit();
     try analysis.complete();
-    return analysis.extractContract(filename);
+    var contract = try analysis.extractContract(filename);
+    errdefer contract.deinit(allocator);
+    try projectParsedFlow(allocator, parsed, &contract);
+    return contract;
 }
 
 fn hasFileImports(ir_view: IrView) bool {
@@ -1672,10 +1727,11 @@ fn extractMultiModuleContractWithEntry(
         const module = &graph.module_list.items[graph_idx];
         const is_entry = idx == entry_index;
         const module_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const parsed = if (module.source_profile == .direct)
+        var parsed = if (module.source_profile == .direct)
             ParsedModule.fromTypedExisting(module_view, compiled_module.root, atoms, &js_parser.type_store)
         else
             ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
+        parsed.scopes = &js_parser.scopes;
 
         var module_opts = opts;
         if (is_entry) {
@@ -3388,11 +3444,12 @@ test "extractContract merges capabilities from relative imports" {
     );
 }
 
-test "an injected index is used by all four analyzers instead of private ones" {
+test "the three index consumers reuse an injected index" {
     // The half of C2's gate that cannot pass vacuously. C1 made injection
     // behavior-neutral by construction - an analyzer with no index builds an
     // identical private one - so identical output proves nothing about whether
     // the work is shared. `owned_facts == null` proves it directly.
+    // The flow interpreter resolves bindings directly from its retained IR.
     const allocator = std.testing.allocator;
     const source =
         \\import { env } from "zttp:env";
@@ -3426,8 +3483,6 @@ test "an injected index is used by all four analyzers instead of private ones" {
 
     try std.testing.expectEqual(&facts, checked.verifier.facts.?);
     try std.testing.expect(checked.verifier.owned_facts == null);
-    try std.testing.expectEqual(&facts, checked.flow_checker.facts.?);
-    try std.testing.expect(checked.flow_checker.owned_facts == null);
 }
 
 test "with no injected index each analyzer still builds its own" {
@@ -4665,7 +4720,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "isDict",
         "boolean",
         3327,
-        "39a49bdd2ae14f7a3318e63ca3773d90bd01653c88f51fd250871e9f4eefcd04",
+        "0265f1ed438251e0be60990ca1f6f4b0a8275c4d597db168a06efaa2bf532bf0",
     );
 
     const helper_source =
@@ -4683,7 +4738,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "helper",
         "unknown",
         3331,
-        "058052dffd5c81ae9229806848df221e21e7d994addf77696329fcf779d22950",
+        "9e560e7c8b1d1a1f9dddd6441c5a139092134146f44d560dac2efa7acf8ee8c3",
     );
 
     var source_owner: source_frontend_mod.DirectCheckSource = undefined;
@@ -5322,4 +5377,62 @@ test "prepared evaluation contracts omit authored signatures and capsules" {
     try std.testing.expectEqual(@as(usize, 0), actual.function_effect_capsules.items[0].declared.items.len);
     try std.testing.expect(actual.declared_specs_implicit);
     try std.testing.expectError(error.UnsupportedSourceExtension, extractPreparedEvalContract(std.testing.allocator, source, "inline.ts", .{}));
+}
+
+test "public source contract extraction projects actual flow sinks" {
+    const allocator = testing.allocator;
+    const cases = [_]struct { source: []const u8, secret_safe: bool, injection_safe: bool }{
+        .{ .source = "import { env } from 'zttp:env'; function handler(req: Request): Response { return Response.text(env('API_SECRET') ?? ''); }", .secret_safe = false, .injection_safe = true },
+        .{ .source = "import { env } from 'zttp:env'; function handler(req: Request): Response { const unused = env('API_SECRET'); return Response.text('ok'); }", .secret_safe = true, .injection_safe = true },
+        .{ .source = "function handler(req: Request): Response { return Response.html(req.url); }", .secret_safe = true, .injection_safe = false },
+    };
+    for (cases) |case| {
+        var contract = try extractContract(allocator, case.source, "flow-projection.ts", .{});
+        defer contract.deinit(allocator);
+        try testing.expectEqual(case.secret_safe, contract.properties.?.no_secret_leakage);
+        try testing.expectEqual(case.injection_safe, contract.properties.?.injection_safe);
+    }
+}
+
+fn readFlowProjectionDependency(allocator: std.mem.Allocator, path: []const u8) modules_mod.module_graph.ReadFileError![]const u8 {
+    if (!std.mem.endsWith(u8, path, "dep.ts")) return error.FileNotFound;
+    return allocator.dupe(u8,
+        \\import { env } from "zttp:env";
+        \\export structural SecretText = string;
+        \\export function value(): SecretText { return env("API_SECRET") ?? ""; }
+    );
+}
+
+test "public merged contracts omit flow claims for both clean and leaking imports" {
+    const allocator = testing.allocator;
+    const sources = [_][]const u8{
+        "import { value } from './dep.ts'; function handler(req: Request): Response { return Response.text(value()); }",
+        "import { value } from './dep.ts'; function handler(req: Request): Response { return Response.text('ok'); }",
+    };
+    for (sources) |source| {
+        var contract = try extractContract(allocator, source, "/virtual/flow-projection.ts", .{ .strict = false, .read_file = readFlowProjectionDependency });
+        defer contract.deinit(allocator);
+        // Merged contracts contain capability facts, but no completed proof
+        // profile. Absence cannot be projected as six vacuously true facts.
+        try testing.expect(contract.properties == null);
+        const json = try serializeContractForTest(allocator, &contract);
+        defer allocator.free(json);
+        try testing.expect(std.mem.indexOf(u8, json, "\"properties\": null") != null);
+    }
+}
+
+test "flow projection preserves independent determinism and retry constraints" {
+    var contract = handler_contract_mod.emptyContract(try testing.allocator.dupe(u8, "projection.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.properties = .{ .pure = true, .read_only = true, .stateless = true, .retry_safe = true, .deterministic = false, .has_egress = false };
+    contract.properties.?.deterministic = false;
+    contract.properties.?.retry_safe = true;
+    projectFlowProperties(&contract, .{});
+    try testing.expect(!contract.properties.?.deterministic);
+    try testing.expect(!contract.properties.?.idempotent);
+    contract.properties.?.deterministic = true;
+    contract.properties.?.retry_safe = false;
+    projectFlowProperties(&contract, .{});
+    try testing.expect(contract.properties.?.deterministic);
+    try testing.expect(!contract.properties.?.idempotent);
 }

@@ -301,13 +301,13 @@ step "host gate: release verifier"
 bash scripts/verify.sh --release
 
 step "host gate: Getting Started smoke"
-zig build smoke-getting-started
+bash scripts/verify.sh --release-route smoke-getting-started
 
 step "host gate: advisory benchmark"
-zig build bench-check || echo "warning: advisory bench-check missed; see RELEASE_CHECKLIST.md"
+bash scripts/verify.sh --release-route bench-check || echo "warning: advisory bench-check missed; see RELEASE_CHECKLIST.md"
 
 step "host gate: release passport"
-zig build release-check -- --json
+bash scripts/verify.sh --release-route release-check
 
 if [ -n "${PROOF_LEDGER_PATH:-}" ]; then
   step "host gate: proof ledger replay"

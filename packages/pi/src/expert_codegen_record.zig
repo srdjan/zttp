@@ -862,7 +862,7 @@ const record_corpus = [_]RecordCase{
         // meant to measure. Asking for raw claims and accepting a confirmation
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
         .expect_committed_intent_pass = true,
     },
     .{
@@ -1043,8 +1043,9 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // The policy-5 recording first trips ZTS500, then reaches green.
-        .expect_first_attempt_green = false,
+        // The policy-5 recording first tripped ZTS500; the complete policy-7
+        // recording reaches green on its first attempt.
+        .expect_first_attempt_green = true,
     },
 
     // ---------------------------------------------------------------------
@@ -2517,15 +2518,70 @@ test "record codegen baseline corpus (live, gated)" {
 // veto stack; this is a fidelity check, not a leak test).
 /// Coverage pinned to the complete DeepSeek recording; historical draws remain
 /// in the published coverage union, while this floor names current artifacts.
+const CoverageBaseline = union(enum) {
+    minimum_rules: []const []const u8,
+    measured_zero: struct { cases: usize, off_registry: [2][]const u8 },
+};
+
 fn coverageBaseline(
     provider: agent.Provider,
     model: []const u8,
     headline_input: evidence_identity.HeadlineInputIdentity,
-) ?[]const []const u8 {
+) ?CoverageBaseline {
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
         !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
         return null;
-    return &.{"ZTS500"};
+    return .{ .measured_zero = .{ .cases = 13, .off_registry = .{ "ZTS056", "ZTS203" } } };
+}
+
+const CoverageExecution = struct { declared: usize, replayed: usize, artifacts: usize, models: usize };
+
+fn validateCoverageObservation(
+    allocator: std.mem.Allocator,
+    execution: CoverageExecution,
+    baseline: ?CoverageBaseline,
+    tripped: *const codegen.CodeSet,
+    off_registry: *const codegen.CodeSet,
+) !void {
+    if (execution.declared != 13 or execution.replayed != 13 or
+        execution.artifacts != 13 or execution.models != 13) return error.CoverageCorpusIncomplete;
+    try codegen.calibrateCodeCollector(allocator);
+    if (baseline) |expected| switch (expected) {
+        .minimum_rules => |rules| {
+            if (rules.len == 0) return error.CoverageBaselineEmpty;
+            for (rules) |rule| if (!tripped.contains(rule)) return error.CoverageRatchetMismatch;
+        },
+        .measured_zero => |zero| {
+            if (zero.cases != 13 or zero.off_registry[0].len == 0 or zero.off_registry[1].len == 0 or
+                std.mem.eql(u8, zero.off_registry[0], zero.off_registry[1])) return error.CoverageBaselineEmpty;
+            if (tripped.count() != 0 or off_registry.count() != zero.off_registry.len)
+                return error.CoverageRatchetMismatch;
+            for (zero.off_registry) |code| if (!off_registry.contains(code)) return error.CoverageRatchetMismatch;
+        },
+    };
+}
+
+test "measured zero coverage requires calibration exact corpus and explicit expectation" {
+    const a = testing.allocator;
+    const execution: CoverageExecution = .{ .declared = 13, .replayed = 13, .artifacts = 13, .models = 13 };
+    const baseline: CoverageBaseline = .{ .measured_zero = .{ .cases = 13, .off_registry = .{ "ZTS056", "ZTS203" } } };
+    var tripped: codegen.CodeSet = .empty;
+    defer tripped.deinit(a);
+    var off: codegen.CodeSet = .empty;
+    defer off.deinit(a);
+    try off.put(a, "ZTS056", {});
+    try off.put(a, "ZTS203", {});
+    try validateCoverageObservation(a, execution, baseline, &tripped, &off);
+    inline for (std.meta.fields(CoverageExecution)) |field| {
+        var short = execution;
+        @field(short, field.name) = 12;
+        try testing.expectError(error.CoverageCorpusIncomplete, validateCoverageObservation(a, short, baseline, &tripped, &off));
+    }
+    try testing.expectError(error.CoverageBaselineEmpty, validateCoverageObservation(a, execution, .{ .minimum_rules = &.{} }, &tripped, &off));
+    const empty: codegen.CodeSet = .empty;
+    try testing.expectError(error.CoverageRatchetMismatch, validateCoverageObservation(a, execution, baseline, &tripped, &empty));
+    try tripped.put(a, zts.PolicyCatalog.rules()[0].code, {});
+    try testing.expectError(error.CoverageRatchetMismatch, validateCoverageObservation(a, execution, baseline, &tripped, &off));
 }
 
 /// Sorted code slice for stable JSON evidence.
@@ -3231,22 +3287,18 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         // Floor on the denominator before the ratio means anything: a registry
         // that failed to assemble would publish "0 of 0" as a finished
         // measurement.
-        if (zts.PolicyCatalog.rules().len < 35) {
+        if (zts.PolicyCatalog.rules().len < 59) {
             std.debug.print(
                 "[proof-coverage] the rule registry carries {d} rules; the denominator is not credible\n",
                 .{zts.PolicyCatalog.rules().len},
             );
             return error.RuleRegistryTooSmall;
         }
-        // Floor on the collector. Zero tripped rules over a corpus this size is
-        // a scan that stopped working, not a finding about the corpus.
-        if (tripped.count() == 0) {
-            std.debug.print(
-                "[proof-coverage] no case tripped any registry rule; the collector reads no diagnostics\n",
-                .{},
-            );
-            return error.CoverageCollectorEmpty;
-        }
+        // Calibrate with independent positive/negative transcripts. A real
+        // complete recording may make zero registered-rule mistakes.
+        const baseline = coverageBaseline(replay_provider, published_model, headline_input);
+        try validateCoverageObservation(a, .{ .declared = record_corpus.len, .replayed = passes, .artifacts = flow_backed, .models = models_read }, baseline, &tripped, &off_registry);
+        std.debug.print("[proof-coverage-calibration] 3 diagnostic paths cover all {d} registry rules; negative transcript reports zero\n", .{zts.PolicyCatalog.rules().len});
 
         tripped_sorted = try sortedCodes(a, &tripped);
         off_sorted = try sortedCodes(a, &off_registry);
@@ -3257,29 +3309,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
 
         const on_headline = replay_provider == headline_provider and
             std.mem.eql(u8, published_model, headline_model);
-        if (coverageBaseline(replay_provider, published_model, headline_input)) |baseline| {
-            // Floor on the selected baseline itself. An emptied list makes the
-            // loop below iterate nothing and report a clean ratchet over no
-            // claim at all, which is the shape this repo has been bitten by.
-            if (baseline.len == 0) {
-                std.debug.print(
-                    "[proof-coverage] the {s}/{s} baseline names {d} rules; it cannot ratchet anything\n",
-                    .{ replay_provider.publicName(), published_model, baseline.len },
-                );
-                return error.CoverageBaselineEmpty;
-            }
-
-            var lost: usize = 0;
-            for (baseline) |code| {
-                if (tripped.contains(code)) continue;
-                lost += 1;
-                std.debug.print(
-                    "[proof-coverage] {s} was tripped by the baseline corpus and is not tripped now{s}\n",
-                    .{ code, if (on_headline) "" else " - off-headline provider or model, measured not ratcheted" },
-                );
-            }
-            if (lost > 0 and on_headline) return error.CoverageRatchetMismatch;
-        } else {
+        if (baseline == null) {
             std.debug.print("[proof-coverage] measured baseline for {s}: ", .{headline_input.slice()});
             for (tripped_sorted, 0..) |code, index| {
                 if (index != 0) std.debug.print(",", .{});

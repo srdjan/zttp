@@ -19,6 +19,7 @@ pub const Result = struct {
     evidence_marker: *std.Build.Step.Run,
     docs_drift_step: *std.Build.Step,
     meta_drift: *std.Build.Step.Run,
+    agent_determinism: *std.Build.Step.Run,
     doc_links: *std.Build.Step.Run,
 };
 
@@ -81,6 +82,8 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     // artifacts.zig appends the built `zts` binary to this gate's arguments.
     const meta_drift = ctx.addGate(&.{ "/bin/bash", "scripts/check-meta-drift.sh" }, "test-meta-drift", "Check meta's published registry hashes against their pins");
     meta_drift.run.addArtifactArg(tools.repo_gate_exe);
+    const agent_determinism = ctx.addGate(&.{ "/bin/bash", "scripts/check-agent-determinism.sh" }, "test-agent-determinism", "Check complete agent envelopes are deterministic");
+    agent_determinism.run.addArtifactArg(tools.repo_gate_exe);
     const doc_links = ctx.addGate(&.{ "/bin/bash", "scripts/audit-docs.sh" }, "test-doc-links", "Check docs for broken relative links");
 
     return .{
@@ -93,6 +96,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
         .evidence_marker = evidence_marker.run,
         .docs_drift_step = docs_drift.step,
         .meta_drift = meta_drift.run,
+        .agent_determinism = agent_determinism.run,
         .doc_links = doc_links.run,
     };
 }

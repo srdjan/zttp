@@ -221,6 +221,7 @@ fn evaluateSourceWithTags(
 
     var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
+    checker.scopes = &js_parser.scopes;
     _ = checker.check(handler_fn) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,

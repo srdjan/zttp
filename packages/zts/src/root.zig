@@ -233,12 +233,14 @@ pub fn parsedModuleFromDirectCheck(
     source_owner: *DirectCheckSource,
 ) ?compiler.pipeline.ParsedModule {
     const capabilities = source_owner.acceptedCapabilities() orelse return null;
-    return compiler.pipeline.ParsedModule.fromTypedExisting(
+    var parsed = compiler.pipeline.ParsedModule.fromTypedExisting(
         capabilities.ir_view,
         capabilities.root,
         capabilities.atoms,
         capabilities.type_store,
     );
+    parsed.scopes = &source_owner.parser.scopes;
+    return parsed;
 }
 
 /// Return the borrowed contents of a 1-based source line without its newline.
@@ -930,7 +932,7 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
 
 /// Version information
 pub const version = struct {
-    pub const string = "0.22.3";
+    pub const string = "0.22.4";
 };
 
 /// Create a new standalone context (not pooled)

@@ -76,7 +76,7 @@ pub fn add(ctx: Context) Result {
     // The trusted-boundary ratchet. Rooted at its own file because nothing in
     // the product imports it: it is a corpus plus assertions, and a file no
     // analyzed root reaches contributes no tests.
-    const proof_ratchet_tests = b.addTest(.{
+    const proof_ratchet_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = ctx.runtime_dep.path("src/proof_ratchet.zig"),
@@ -91,13 +91,13 @@ pub fn add(ctx: Context) Result {
             },
         }),
     });
-    const run_proof_ratchet_tests = b.addRunArtifact(proof_ratchet_tests);
+    const run_proof_ratchet_tests = ctx.addRunTest(proof_ratchet_tests);
     const proof_ratchet_step = b.step("test-proof-ratchet", "Check the disclosed trusted boundary against what the kernel re-derives");
     proof_ratchet_step.dependOn(&run_proof_ratchet_tests.step);
 
     // zttp proof-review package tests. Context.zig states why its dependency
     // carries perf_histogram.
-    const proof_review_pkg_tests = b.addTest(.{
+    const proof_review_pkg_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = ctx.proof_review_pkg_dep.path("src/test_root.zig"),
@@ -110,7 +110,7 @@ pub fn add(ctx: Context) Result {
             },
         }),
     });
-    const run_proof_review_pkg_tests = b.addRunArtifact(proof_review_pkg_tests);
+    const run_proof_review_pkg_tests = ctx.addRunTest(proof_review_pkg_tests);
     const proof_review_pkg_test_step = b.step("test-proof-review", "Run zttp proof-review package tests");
     proof_review_pkg_test_step.dependOn(&run_proof_review_pkg_tests.step);
 

@@ -131,6 +131,8 @@ zts-compiler diagnostic_projection.zig
 zts-compiler effect_inference.zig
 zts-compiler fault_coverage.zig
 zts-compiler flow_checker.zig
+zts-compiler flow_report.zig
+zts-compiler flow_evidence.zig
 zts-compiler flow_interp.zig
 zts-compiler function_specs.zig
 zts-compiler grammar_registry.zig

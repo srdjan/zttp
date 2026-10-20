@@ -1,6 +1,7 @@
 ---
 title: An empty label set claimed a value was clean
 date: 2026-08-02
+last_updated: 2026-10-20
 category: security-issues
 module: ZigTS flow checker data-label inference
 problem_type: security_issue
@@ -26,6 +27,7 @@ tags:
   - compiler-analysis
 binds:
   - packages/zts/src/flow_checker.zig
+  - packages/zts/src/flow_interp.zig
   - packages/zts/src/module_binding/types.zig
 proves: zig build test-zts
 ---
@@ -70,6 +72,14 @@ const results = parallel([() => env("SECRET_KEY")]);
 **Fixing one instance and assuming the class was closed.** After the closure arm landed (`packages/zts/src/flow_checker.zig`), the same laundering still worked through `parallel([...])`, because a module export answers with its *declared* return labels and those cannot describe what a caller's callback returns.
 
 ## Solution
+
+**2026-10-20, analyzer v7.** Production now uses the heap-aware interpreter in
+`packages/zts/src/flow_interp.zig#FlowInterp`; `FlowChecker` retains the public
+API and regression tests. The walker functions and snippets below describe the
+original fix. The interpreter follows callable values through `invoke`, runs
+module callbacks through their transfer rules, and reads reachable heap cells
+at sinks through `observeEgress` and `finishHandlerReport`. Unknown values
+widen provenance; unresolved evaluation clears all six flow properties.
 
 Every fix separates "carries nothing" from "could not look".
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Report the tracked relative-import graph inside packages/zts.
+# Report the nonignored working-tree relative-import graph inside packages/zts.
 
 set -euo pipefail
 

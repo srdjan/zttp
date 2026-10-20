@@ -40,7 +40,7 @@ declare -a excluded=(
 # Each entry is "<file>:<enum name>".
 declare -a enums=(
   "packages/zts/src/handler_verifier.zig:DiagnosticKind"
-  "packages/zts/src/flow_checker.zig:DiagnosticKind"
+  "packages/zts/src/flow_report.zig:DiagnosticKind"
 )
 
 # Every tracked .zig file is a candidate producer. `git ls-files -z | xargs -0`

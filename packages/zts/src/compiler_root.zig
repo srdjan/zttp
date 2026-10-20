@@ -21,7 +21,9 @@ pub const bool_checker = @import("bool_checker.zig");
 pub const strict_checker = @import("strict_checker.zig");
 pub const type_checker = @import("type_checker.zig");
 pub const flow_checker = @import("flow_checker.zig");
+pub const flow_report = @import("flow_report.zig");
 pub const flow_interp = @import("flow_interp.zig");
+pub const flow_evidence = @import("flow_evidence.zig");
 pub const handler_verifier = @import("handler_verifier.zig");
 pub const proof_ir = @import("proof_ir.zig");
 

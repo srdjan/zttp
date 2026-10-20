@@ -44,11 +44,11 @@ pub fn add(ctx: Context) Result {
 
     // A probe is code: the gate's own tests hang off the same named step, so a
     // probe that does not compile fails here instead of vanishing.
-    const gate_tests = b.addTest(.{
+    const gate_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = gate_mod,
     });
-    const run_gate_tests = b.addRunArtifact(gate_tests);
+    const run_gate_tests = ctx.addRunTest(gate_tests);
     corpus_step.dependOn(&run_gate_tests.step);
 
     const write = b.addRunArtifact(gate_exe);

@@ -32,8 +32,8 @@ pub fn add(ctx: Context) Result {
     b.step("brief", "Show the rules and gates that govern repository files").dependOn(&brief_run.step);
 
     // This root stays unfiltered: an unmatched filter would run no probes.
-    const tests = b.addTest(.{ .root_module = mod });
-    const run_tests = b.addRunArtifact(tests);
+    const tests = ctx.addTest(.{ .root_module = mod });
+    const run_tests = ctx.addRunTest(tests);
     const test_step = b.step("test-spine", "Run native spine behavior and rejection probes");
     test_step.dependOn(&run_tests.step);
 

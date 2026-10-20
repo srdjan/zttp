@@ -39,12 +39,36 @@ pub fn add(ctx: Context) Result {
 
     // A probe is code: the gate's own tests hang off the same named step, so a
     // probe that does not compile fails here instead of vanishing.
-    const gate_tests = b.addTest(.{
+    const gate_tests = ctx.addTest(.{
         .filters = ctx.test_filters,
         .root_module = gate_mod,
     });
-    const run_gate_tests = b.addRunArtifact(gate_tests);
+    const run_gate_tests = ctx.addRunTest(gate_tests);
     census_step.dependOn(&run_gate_tests.step);
+
+    // P9 evidence stays repository-only and explicit until all frozen
+    // expectations pass. The compiler tier is named only on this artifact;
+    // no production or curated embedding surface gains the shadow evaluator.
+    const shadow_mod = b.createModule(.{
+        .root_source_file = ctx.tools_dep.path("src/flow_shadow_diff.zig"),
+        .target = b.graph.host,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+    });
+    shadow_mod.addImport("zts", ctx.zts_host_mod);
+    shadow_mod.addImport("zts-compiler", ctx.zts_compiler_host_mod);
+    shadow_mod.addImport("zttp_proof_checker", ctx.proofCheckerMod());
+    shadow_mod.addImport("project_config", ctx.project_config_mod);
+    const shadow_exe = b.addExecutable(.{ .name = "flow-shadow-diff", .root_module = shadow_mod });
+    const shadow_run = b.addRunArtifact(shadow_exe);
+    shadow_run.setCwd(b.path("."));
+    shadow_run.has_side_effects = true;
+    if (b.args) |args| shadow_run.addArgs(args);
+    b.step("flow-shadow-diff", "Report every frozen precision and P0 shadow verdict").dependOn(&shadow_run.step);
+    const shadow_tests = ctx.addTest(.{ .root_module = shadow_mod });
+    const run_shadow_tests = ctx.addRunTest(shadow_tests);
+    b.step("test-flow-shadow-diff", "Test shadow classification and frozen corpus floors").dependOn(&run_shadow_tests.step);
+    census_step.dependOn(&run_shadow_tests.step);
 
     return .{ .step = census_step };
 }

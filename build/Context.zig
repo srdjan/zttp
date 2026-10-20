@@ -5,11 +5,13 @@
 
 const std = @import("std");
 const Context = @This();
+const selection = @import("test_selection.zig");
 
 b: *std.Build,
 target: std.Build.ResolvedTarget,
 optimize: std.builtin.OptimizeMode,
 test_filters: []const []const u8,
+test_selections: *std.ArrayList(selection.Run),
 perf_histogram_enabled: bool,
 strip_enabled: bool,
 precompile: PrecompileOptions,
@@ -17,6 +19,7 @@ precompile: PrecompileOptions,
 zts_dep: *std.Build.Dependency,
 zts_mod: *std.Build.Module,
 zts_host_mod: *std.Build.Module,
+zts_compiler_host_mod: *std.Build.Module,
 zts_bench_mod: *std.Build.Module,
 tools_dep: *std.Build.Dependency,
 zts_cli_mod: *std.Build.Module,
@@ -43,6 +46,8 @@ pub const PrecompileOptions = struct {
 pub fn init(b: *std.Build) Context {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const test_selections = b.allocator.create(std.ArrayList(selection.Run)) catch @panic("OOM");
+    test_selections.* = .empty;
 
     // `-Dtest-filter="<substring>"` runs only the matching tests. Zig takes
     // this at compile time, not as a runtime argument to the test binary, so
@@ -164,12 +169,14 @@ pub fn init(b: *std.Build) Context {
         .target = target,
         .optimize = optimize,
         .test_filters = test_filters,
+        .test_selections = test_selections,
         .perf_histogram_enabled = perf_histogram_enabled,
         .strip_enabled = strip_enabled,
         .precompile = precompile,
         .zts_dep = zts_dep,
         .zts_mod = zts_dep.module("zts"),
         .zts_host_mod = zts_host_dep.module("zts"),
+        .zts_compiler_host_mod = zts_host_dep.module("zts-compiler"),
         .zts_bench_mod = zts_bench_dep.module("zts"),
         .tools_dep = tools_dep,
         .zts_cli_mod = tools_dep.module("zts_cli"),
@@ -189,6 +196,40 @@ pub fn init(b: *std.Build) Context {
 /// The acceptance kernel module, a leaf that takes no options.
 pub fn proofCheckerMod(ctx: Context) *std.Build.Module {
     return ctx.proof_checker_dep.module("zttp_proof_checker");
+}
+
+/// Developer filters retain the package runner but must collect real tests.
+pub fn addTest(ctx: Context, original: std.Build.TestOptions) *std.Build.Step.Compile {
+    var options = original;
+    if (ctx.test_filters.len != 0) {
+        options.filters = ctx.test_filters;
+        const selected = original.test_runner orelse std.Build.Step.Compile.TestRunner{
+            .path = .{ .cwd_relative = ctx.b.pathJoin(&.{ ctx.b.graph.zig_lib_directory.path.?, "compiler", "test_runner.zig" }) },
+            .mode = .server,
+        };
+        options.root_module.addImport("selected_test_runner", ctx.b.createModule(.{
+            .root_source_file = selected.path,
+            .target = options.root_module.resolved_target,
+            .optimize = options.root_module.optimize,
+        }));
+        const runner_options = ctx.b.addOptions();
+        runner_options.addOption(bool, "simple", selected.mode == .simple);
+        runner_options.addOption([]const u8, "filter", ctx.test_filters[0]);
+        options.root_module.addOptions("selection_runner_options", runner_options);
+        options.test_runner = .{ .path = ctx.b.path("tooling/nonempty_test_runner.zig"), .mode = selected.mode };
+    }
+    return ctx.b.addTest(options);
+}
+
+pub fn addRunTest(ctx: Context, compile: *std.Build.Step.Compile) *std.Build.Step.Run {
+    const run = ctx.b.addRunArtifact(compile);
+    if (ctx.test_filters.len != 0 and compile.kind == .@"test") {
+        const path = ctx.b.cache_root.join(ctx.b.allocator, &.{ctx.b.fmt("test-selection-{x}.txt", .{@intFromPtr(run)})}) catch @panic("OOM");
+        run.setEnvironmentVariable("ZTTP_TEST_SELECTION_COUNT", path);
+        run.has_side_effects = true;
+        ctx.test_selections.append(ctx.b.allocator, .{ .step = &run.step, .count_path = path }) catch @panic("OOM");
+    }
+    return run;
 }
 
 /// A shell gate: one Run step over a script, exposed as its own named step.

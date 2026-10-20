@@ -8,13 +8,11 @@
 //! A fixture is never deleted and its expectation is never weakened. A change
 //! to an expectation needs a reason in the commit message.
 //!
-//! `false_proofs` is a second, separate table. It names the fixtures the
-//! current checker still proves falsely. Two tests read it:
-//!   * every fixture outside the table must leave its property unproven, so
-//!     a regression in a fixed shape fails;
-//!   * the fixtures whose property holds today must equal the table exactly,
-//!     so a fix to the checker forces a table edit in the same change and the
-//!     table can only shrink.
+//! After the P9 cutover these are permanent regressions: 33 fixtures are
+//! refused, and five persistent-state readers stay unproven because their
+//! stored value is unknown. Neither outcome may become a proof. Exact
+//! verdicts also prevent an unknown value from acquiring a false refusal
+//! diagnostic. The four clean contrasts must remain proven.
 //!
 //! Each fixture runs through the production typed pipeline,
 //! `precompile.runCheckOnlyFromSourceWithOptions`, which the direct flow-test
@@ -37,10 +35,11 @@ const probes = @import("flow_census_probes.zig");
 const Property = probes.Property;
 
 pub const Fixture = struct {
-    /// Unique. The `false_proofs` table names fixtures by this string.
+    /// Unique fixture identity, also used by the shadow differential runner.
     name: []const u8,
     /// The property the fixture must NOT prove.
     property: Property,
+    expected: gate.Observed = .refused,
     source: []const u8,
     /// A SQL schema for a handler that registers `zttp:sql` queries. The check
     /// refuses such a handler without one (`MissingSqlSchema`).
@@ -251,7 +250,7 @@ pub const fixtures = [_]Fixture{
     },
     // -- A secret stored with `cacheSet` and read back with `cacheIncr`.
     // runtime: known-limits row "A secret stored with cacheSet and read back with cacheIncr"
-    .{ .name = "cache_incr_reads_stored_secret", .property = .no_secret_leakage, .source =
+    .{ .name = "cache_incr_reads_stored_secret", .property = .no_secret_leakage, .expected = .unproven, .source =
     \\import { env } from "zttp:env";
     \\import { cacheSet, cacheIncr } from "zttp:cache";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
@@ -316,7 +315,7 @@ pub const fixtures = [_]Fixture{
     },
     // -- P1: the persistent-state readers `cacheDelete`, `cacheStats`, `rateReset`, `sqlExec`.
     // runtime: none. Same mechanism as the confirmed `cacheIncr` row.
-    .{ .name = "cache_delete_reads_stored_secret", .property = .no_secret_leakage, .source =
+    .{ .name = "cache_delete_reads_stored_secret", .property = .no_secret_leakage, .expected = .unproven, .source =
     \\import { env } from "zttp:env";
     \\import { cacheSet, cacheDelete } from "zttp:cache";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
@@ -325,7 +324,7 @@ pub const fixtures = [_]Fixture{
     \\}
     },
     // runtime: none. Same mechanism as the confirmed `cacheIncr` row.
-    .{ .name = "cache_stats_reads_stored_secret", .property = .no_secret_leakage, .source =
+    .{ .name = "cache_stats_reads_stored_secret", .property = .no_secret_leakage, .expected = .unproven, .source =
     \\import { env } from "zttp:env";
     \\import { cacheSet, cacheStats } from "zttp:cache";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
@@ -334,7 +333,7 @@ pub const fixtures = [_]Fixture{
     \\}
     },
     // runtime: none. The key is the stored value; `rateReset` reports whether it was present.
-    .{ .name = "rate_reset_reads_secret_key_state", .property = .no_secret_leakage, .source =
+    .{ .name = "rate_reset_reads_secret_key_state", .property = .no_secret_leakage, .expected = .unproven, .source =
     \\import { env } from "zttp:env";
     \\import { rateCheck, rateReset } from "zttp:ratelimit";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
@@ -343,7 +342,7 @@ pub const fixtures = [_]Fixture{
     \\}
     },
     // runtime: none. A secret bound into one `sqlExec`; a second reports rows affected.
-    .{ .name = "sql_exec_reads_stored_secret", .property = .no_secret_leakage, .sql_schema = "CREATE TABLE t (v TEXT);", .source =
+    .{ .name = "sql_exec_reads_stored_secret", .property = .no_secret_leakage, .expected = .unproven, .sql_schema = "CREATE TABLE t (v TEXT);", .source =
     \\import { env } from "zttp:env";
     \\import { sql, sqlExec } from "zttp:sql";
     \\sql("saveSecret", "INSERT INTO t (v) VALUES (:v)");
@@ -451,7 +450,7 @@ pub const fixtures = [_]Fixture{
 /// refuses every handler of a shape would otherwise pass the fixtures.
 pub const contrasts = [_]Fixture{
     // runtime: none.
-    .{ .name = "fetch_with_retry_clean_contrast", .property = .no_secret_leakage, .source =
+    .{ .name = "fetch_with_retry_clean_contrast", .property = .no_secret_leakage, .expected = .held, .source =
     \\import { env } from "zttp:env";
     \\import { fetchWithRetry } from "zttp:fetch";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
@@ -460,7 +459,7 @@ pub const contrasts = [_]Fixture{
     \\}
     },
     // runtime: none.
-    .{ .name = "raw_json_clean_contrast", .property = .no_secret_leakage, .source =
+    .{ .name = "raw_json_clean_contrast", .property = .no_secret_leakage, .expected = .held, .source =
     \\import { env } from "zttp:env";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const region: string = env("REGION") ?? "";
@@ -469,7 +468,7 @@ pub const contrasts = [_]Fixture{
     \\}
     },
     // runtime: none.
-    .{ .name = "status_literal_clean_contrast", .property = .no_secret_leakage, .source =
+    .{ .name = "status_literal_clean_contrast", .property = .no_secret_leakage, .expected = .held, .source =
     \\import { env } from "zttp:env";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const region: string = env("REGION") ?? "";
@@ -477,54 +476,16 @@ pub const contrasts = [_]Fixture{
     \\}
     },
     // runtime: none.
-    .{ .name = "render_literal_clean_contrast", .property = .injection_safe, .source =
+    .{ .name = "render_literal_clean_contrast", .property = .injection_safe, .expected = .held, .source =
     \\export function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  return Response.html(renderToString(h("p", {}, "ready")));
     \\}
     },
 };
 
-/// The fixtures the current checker still proves falsely: the claimed
-/// property holds and the handler leaks. Each fixture leaves this table in the
-/// same change that makes its expectation hold, and it is never deleted from
-/// `fixtures`. The table can only shrink.
-const false_proofs = [_][]const u8{
-    "branch_assign_raw_then",
-    "branch_assign_raw_initial",
-    "loop_carried_scalar",
-    "push_in_initializer",
-    "push_in_if_condition",
-    "alias_variable_push",
-    "alias_object_field_push",
-    "alias_callback_array_param",
-    "iterated_array_write_foreach_html",
-    "iterated_array_write_some_html",
-    "iterated_array_write_foreach_log",
-    "iterated_array_write_literal_receiver",
-    "reduce_logs_secret_accumulator",
-    "dict_map_values_logs_secret",
-    "dict_fold_logs_secret",
-    "helper_in_if_condition_logs_secret",
-    "ternary_selected_request_credential",
-    "request_popped_from_array_credential",
-    "headers_object_to_json_credential",
-    "callback_selected_by_ternary",
-    "assert_message_secret_in_handler",
-    "assert_message_secret_in_helper",
-    "unescape_after_escape_html",
-    "array_from_callback_logs_secret",
-};
-
-fn inFalseProofTable(name: []const u8) bool {
-    for (false_proofs) |entry| {
-        if (std.mem.eql(u8, entry, name)) return true;
-    }
-    return false;
-}
-
 /// Run one fixture through the typed pipeline and read the verdict for its
 /// property. A fixture that reaches no flow verdict fails the test with the
-/// reason, since a vacuous run would satisfy both tables.
+/// reason, since a vacuous run establishes no semantic regression.
 fn observe(allocator: std.mem.Allocator, fixture: Fixture) !gate.Observed {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -554,7 +515,8 @@ fn observe(allocator: std.mem.Allocator, fixture: Fixture) !gate.Observed {
 }
 
 test "fixture names are unique and the fixture count meets the floor" {
-    try std.testing.expect(fixtures.len >= minimum_fixtures);
+    try std.testing.expectEqual(minimum_fixtures, fixtures.len);
+    try std.testing.expectEqual(@as(usize, 4), contrasts.len);
     for (fixtures, 0..) |a, i| {
         for (fixtures[i + 1 ..]) |b| {
             try std.testing.expect(!std.mem.eql(u8, a.name, b.name));
@@ -562,61 +524,26 @@ test "fixture names are unique and the fixture count meets the floor" {
     }
 }
 
-test "every false-proof table entry names a fixture, once" {
-    try std.testing.expect(false_proofs.len <= fixtures.len);
-    for (false_proofs, 0..) |entry, i| {
-        var found = false;
-        for (fixtures) |fixture| {
-            if (std.mem.eql(u8, fixture.name, entry)) found = true;
-        }
-        if (!found) std.debug.print("false-proof entry {s} names no fixture\n", .{entry});
-        try std.testing.expect(found);
-        for (false_proofs[i + 1 ..]) |other| {
-            try std.testing.expect(!std.mem.eql(u8, entry, other));
-        }
-    }
-}
-
-test "a fixture outside the false-proof table leaves its property unproven" {
+test "permanent unsafe fixtures retain exact refused or unproven verdicts" {
     const allocator = std.testing.allocator;
     var checked: usize = 0;
     for (fixtures) |fixture| {
-        if (inFalseProofTable(fixture.name)) continue;
+        try std.testing.expect(fixture.expected == .refused or fixture.expected == .unproven);
         const observed = try observe(allocator, fixture);
-        if (observed == .held) {
-            std.debug.print("fixture {s} proves {s} and is not in the false-proof table\n", .{ fixture.name, @tagName(fixture.property) });
+        if (observed != fixture.expected) {
+            std.debug.print("fixture {s}: expected {s} for {s}, observed {s}\n", .{ fixture.name, @tagName(fixture.expected), @tagName(fixture.property), @tagName(observed) });
         }
-        try std.testing.expect(observed != .held);
+        try std.testing.expectEqual(fixture.expected, observed);
         checked += 1;
     }
-    try std.testing.expectEqual(fixtures.len - false_proofs.len, checked);
-}
-
-test "the fixtures whose property holds today equal the false-proof table" {
-    const allocator = std.testing.allocator;
-    var held_in_table: usize = 0;
-    var failures: usize = 0;
-    for (fixtures) |fixture| {
-        const observed = try observe(allocator, fixture);
-        const listed = inFalseProofTable(fixture.name);
-        if ((observed == .held) != listed) {
-            failures += 1;
-            if (listed) {
-                std.debug.print("fixture {s} is in the false-proof table and its property no longer holds: remove it\n", .{fixture.name});
-            } else {
-                std.debug.print("fixture {s} proves {s} and is missing from the false-proof table\n", .{ fixture.name, @tagName(fixture.property) });
-            }
-        }
-        if (observed == .held and listed) held_in_table += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 0), failures);
-    try std.testing.expectEqual(false_proofs.len, held_in_table);
+    try std.testing.expectEqual(minimum_fixtures, checked);
 }
 
 test "a clean contrast keeps its property proven" {
     const allocator = std.testing.allocator;
-    try std.testing.expect(contrasts.len >= 2);
+    try std.testing.expectEqual(@as(usize, 4), contrasts.len);
     for (contrasts) |contrast| {
+        try std.testing.expectEqual(gate.Observed.held, contrast.expected);
         const observed = try observe(allocator, contrast);
         if (observed != .held) {
             std.debug.print("contrast {s} no longer proves {s}\n", .{ contrast.name, @tagName(contrast.property) });

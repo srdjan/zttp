@@ -1,7 +1,8 @@
-# Scripts in scripts/ that nothing in the repository invokes, and why that is
-# correct. Enforced in both directions by scripts/check-script-reachability.sh:
-# an unreferenced script with no row here fails, and so does a row for a script
-# that something now invokes, or a row naming a script that no longer exists.
+# Scripts with no direct executable route in the covered build graph or native
+# sequential driver, and the reason each remains a manual interface. The gate
+# checks this direct-route boundary, not arbitrary shell control flow. Fixture
+# copies and nested helper calls can have behavioral tests without authorizing
+# the corresponding live operation as an automated route.
 #
 # One row per (script, reason slug), with the finding above it. A row is a claim
 # that this script is a tool a developer runs by hand, not a gate that was
@@ -34,3 +35,19 @@ update-restrictions-doc.sh regeneration-tool
 # workflow (D-009, D13). The verdict logic it calls, `zttp proofs gate`, is
 # tested in packages/runtime/src/proofs/pr_gate.zig.
 proof-gate.sh user-template
+
+# Stable operator entry points; the native driver owns their executable routes.
+verify.sh canonical-verification-entrypoint
+release.sh release-operation
+# Author-side publication and golden regeneration require deliberate invocation.
+# Fixture tests also exercise publishers, but a copied-script fixture is not a
+# route authorizing live publication in the current working tree.
+update-convergence.sh publication-operation
+update-coverage.sh publication-operation
+update-contract-goldens.sh golden-regeneration
+update-expert-goldens.sh golden-regeneration
+# Standalone helpers also exercised by wrappers or release fixture copies. The
+# graph census proves direct execution only, not arbitrary shell control flow.
+check-module-boundary.sh standalone-boundary-helper-with-wrapper-tests
+render-release-notes.sh standalone-release-renderer-with-fixture-tests
+zts-import-graph.sh import-graph-inspection

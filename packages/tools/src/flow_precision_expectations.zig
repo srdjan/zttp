@@ -1,7 +1,12 @@
 //! Precision expectations for the flow checker (redesign plan R16).
 //!
 //! R16 rule: a representative handler must prove, under any flow checker, every
-//! flow property that the old checker proved on the baseline. A property that
+//! flow property that the old checker proved on the baseline. The owner
+//! corrected two false weather-egress promises on 2026-10-20: sending a
+//! validated city in an external URL cannot prove pii_contained or
+//! injection_safe under the accepted strict sink policy. This is the only
+//! approved change to the frozen expectations; input_validated stays required.
+//! A property that
 //! the old checker left unproven gets no expectation, because a more precise
 //! checker may prove more. The new interpreter (plan P9) may not replace the old
 //! checker until it meets every expectation here with no exemption. Each
@@ -79,7 +84,7 @@ const auth_root = "packages/tools/tests/fixtures/flow_precision/auth/";
 /// Frozen. A change needs a commit message that gives the reason.
 const frozen_entry_count: usize = 48;
 /// Frozen. The total number of expected property bits over all entries.
-const frozen_expected_bits: usize = 216;
+const frozen_expected_bits: usize = 214;
 
 pub const entries = [_]Entry{
     .{ .path = "examples/autoloop/handler.ts", .expect = all_but_secret },
@@ -125,7 +130,9 @@ pub const entries = [_]Entry{
     .{ .path = corpus_root ++ "sibling-helper-holes/handler.ts", .expect = all },
     .{ .path = corpus_root ++ "sql-users/handler.ts", .expect = all_but_secret_credential, .sql_schema_path = corpus_root ++ "sql-users/schema.sql" },
     .{ .path = corpus_root ++ "validate-body/handler.ts", .expect = all },
-    .{ .path = corpus_root ++ "weather-egress/handler.ts", .expect = all },
+    // Owner-approved correction, 2026-10-20: validation does not contain PII
+    // or establish the URL/header injection defense. No miss-table exemption.
+    .{ .path = corpus_root ++ "weather-egress/handler.ts", .expect = Set.initMany(&.{ .no_secret_leakage, .no_credential_leakage, .input_validated }) },
     .{ .path = auth_root ++ "auth_api_key.ts", .expect = all },
     .{ .path = auth_root ++ "auth_bearer_escaped_html.ts", .expect = all },
     .{ .path = auth_root ++ "auth_branch_selected_message.ts", .expect = all },

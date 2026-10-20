@@ -17,15 +17,6 @@
 # argument are the same fact to every consumer.
 packages/zts/src/contract_builder.zig extractSchemaJson catch-return
 
-# Diagnostic prose only. The fallback returns the base message without the
-# parenthesised reason; the diagnostic still fires, with the same kind, at the
-# same node. No analysis result reads this string.
-
-# A fetch URL that std.Uri cannot parse is answered `.unknown`, which makes the
-# response come from "any declared fetch host": every fetch classification then
-# applies by path and reports indeterminate. The swallow widens the labels a
-# value carries; it cannot remove one.
-
 # `ensureHealthy` is the checker's poison check, not an error being dropped:
 # the pool has already recorded a failure, and returning early stops work that
 # would read corrupt types. The poison is surfaced by pipeline.zig, which calls
@@ -104,66 +95,6 @@ packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block
 # failure releases its new key and propagates the allocation error.
 packages/zts/src/fault_coverage.zig parseExternalSeverities catch-multiline
 packages/zts/src/fault_coverage.zig getOrPutEntry catch-block
-
-# FlowChecker.check, exportedReturnLabels and exportedSummary reject allocation poison.
-# These sites record that poison before returning a partial local value. The
-# cross-file summary entry points check the flag before publishing labels.
-packages/zts/src/flow_checker.zig appendRouteFunctionRoot catch-poison
-packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison
-packages/zts/src/flow_checker.zig findHandlerParam catch-poison
-packages/zts/src/flow_checker.zig propagateMutatingMethodTaint catch-poison
-packages/zts/src/flow_checker.zig pushCaptureDecl catch-poison
-packages/zts/src/flow_checker.zig recordBindingValue catch-block
-packages/zts/src/flow_checker.zig recordBindingValue catch-poison
-packages/zts/src/flow_checker.zig recordCapture catch-poison
-packages/zts/src/flow_checker.zig recordContainedSecrets catch-poison
-packages/zts/src/flow_checker.zig recordValidated catch-poison
-packages/zts/src/flow_checker.zig resolveFacts catch-block
-packages/zts/src/flow_checker.zig scanFunctionDecls catch-poison
-packages/zts/src/flow_checker.zig scanImportBindings catch-poison
-packages/zts/src/flow_checker.zig scanImports catch-multiline
-packages/zts/src/flow_checker.zig scanImports catch-poison
-packages/zts/src/flow_checker.zig trackResultBinding catch-poison
-packages/zts/src/flow_checker.zig walkStmt catch-poison
-
-# Route resolution errors set allocation poison or return unknown-route
-# labels; a clean route cannot be inferred from the partial target list.
-packages/zts/src/flow_checker.zig routerDispatchLabels catch-block
-packages/zts/src/flow_checker.zig scanRouteFunctionRoots catch-block
-
-# Binding a function or record to a parameter for one call site allocates a map
-# entry. A failed insert records allocation poison and returns the unresolved
-# labels, which clear the sink properties. A failed restore records poison too,
-# and `check` rejects a checker that carries it, so no verdict leaves the
-# checker after a binding went stale.
-# The fixpoint re-walk binds the widened parameter labels the same way: a failed
-# insert records poison and returns the unresolved labels.
-packages/zts/src/flow_checker.zig enterFunctionFrame catch-block
-packages/zts/src/flow_checker.zig enterFunctionFrame catch-block@2
-packages/zts/src/flow_checker.zig enterFunctionFrame catch-block@3
-packages/zts/src/flow_checker.zig restoreParamValues catch-poison
-
-# Installing and applying a cross-file sink summary allocates a copy of the
-# summary, an entry in the slot map, and the help text that names the imported
-# file. A failed copy or insert records allocation poison and installs nothing,
-# so the call stays unresolved and clears the sink properties, and `check`
-# rejects a checker that carries poison. A failed help text keeps the sink's
-# own help and records poison: the diagnostic and the cleared property still
-# stand, only the pointer into the imported file is lost.
-packages/zts/src/flow_checker.zig importedSinkHelp catch-block
-packages/zts/src/flow_checker.zig importedSinkHelp catch-block@2
-packages/zts/src/flow_checker.zig setFileFunctionSummary catch-block
-packages/zts/src/flow_checker.zig setFileFunctionSummary catch-block@2
-
-# A witness copy or condition allocation error records poison, so no result
-# that lacks the witness can leave the checker as a successful proof. The
-# module-call and diagnostic paths obey the same final poison check.
-packages/zts/src/flow_checker.zig addDiagnostic catch-block
-packages/zts/src/flow_checker.zig pushConditionConstraints catch-block
-packages/zts/src/flow_checker.zig trackModuleCallInit catch-block
-packages/zts/src/flow_checker.zig trackModuleCallInit catch-poison
-
-# Message formatting failure keeps the original diagnostic and its kind.
 
 # HandlerVerifier checks allocation_failed before it returns a verdict. Its
 # fact, import, walk, and diagnostic catches only defer that failure.
@@ -258,19 +189,6 @@ packages/runtime/src/proof_activation.zig certificateCommitments catch-return@3
 packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block@2
 packages/zts/src/contract_builder.zig currentPolicyHashRaw catch-trap
 
-# These further flow catches either mark allocation poison or retain the same
-# diagnostic. Both checker entry points reject poison before publishing proof.
-packages/zts/src/flow_checker.zig addDiagnostic catch-block@2
-packages/zts/src/flow_checker.zig addDiagnostic catch-block@3
-packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison@2
-packages/zts/src/flow_checker.zig applyAssignmentLabels catch-poison@3
-packages/zts/src/flow_checker.zig pushConditionConstraints catch-block@2
-packages/zts/src/flow_checker.zig scanImports catch-multiline@2
-packages/zts/src/flow_checker.zig scanImports catch-poison@2
-packages/zts/src/flow_checker.zig trackResultBinding catch-poison@2
-packages/zts/src/flow_checker.zig walkStmt catch-poison@2
-packages/zts/src/flow_checker.zig walkStmt catch-poison@3
-
 # The extra verifier catches record poison; verify checks it before it returns.
 packages/zts/src/handler_verifier.zig scanImports catch-poison@2
 packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison@2
@@ -298,37 +216,3 @@ packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
 # types. The numbered rows cover separate insertions in the same function.
 packages/zts/src/type_env.zig findNonContractiveAliases catch-poison@2
 packages/zts/src/type_env.zig internName catch-block@2
-
-# A closure's parameter labels (F1): a failed insert marks allocation poison,
-# the same handling as the user-call summary. Both checker entry points reject
-# poison before they publish a proof, so a parameter left unlabelled by the
-# failed insert cannot leave the checker as a successful verdict.
-packages/zts/src/flow_checker.zig closureResultLabelsBound catch-poison
-
-# Diagnostic prose only (F1). The call-chain note on a diagnostic's help text
-# falls back to the plain help when formatting or recording it fails. The
-# diagnostic still fires with the same kind, message, and node, and no analysis
-# result reads the help string.
-packages/zts/src/flow_checker.zig helpWithCallChain catch-return
-packages/zts/src/flow_checker.zig helpWithCallChain catch-block
-
-# The producers of an unsafe-HTML fact (F4): a failed append marks allocation
-# poison. Both checker entry points reject poison before they publish a proof,
-# so the missing producer cannot leave the checker as a successful verdict. The
-# producer only chooses which node a report names; the `unsafe_html` fact that
-# decides the verdict travels in the label set.
-packages/zts/src/flow_checker.zig noteHtmlProducer catch-poison
-
-# The request carrier record (F6): a failed insert marks allocation poison. A
-# missing record would leave a credential read without its label, which is
-# what a verdict must never rest on, but both checker entry points reject
-# poison before they publish a proof, so the checker returns an error instead
-# of a verdict.
-packages/zts/src/flow_checker.zig setCarrier catch-poison
-
-# The ok-record probe in the import scan (F4 of R4): a failed allocation while
-# parsing a return type marks allocation poison and leaves `ok_record` false.
-# Both checker entry points reject poison before they publish a proof. The
-# flag only chooses the stub a counterexample witness gives a `fetch` call, and
-# witnesses decide no verdict.
-packages/zts/src/flow_checker.zig scanImports catch-block

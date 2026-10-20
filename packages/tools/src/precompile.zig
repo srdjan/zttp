@@ -202,7 +202,7 @@ pub const ImportReader = struct {
 
 /// One imported file, read, prepared, parsed, and reduced to its module facts.
 /// Both import walkers (`scanImportedFileTree` for fault coverage and
-/// `importedFunctionSummary` for flow) start here, so a change to how an
+/// `analyzeImportedFunction` for flow) start here, so a change to how an
 /// imported file is loaded is one change.
 ///
 /// Initialize in place with `load`. The parser holds a pointer to `atoms`, so
@@ -250,77 +250,217 @@ const ImportedFile = struct {
     }
 };
 
-/// Sink summaries for every function imported from a sibling file, keyed by the
-/// local binding slot (plan unit F7). Each imported module is read and walked on
-/// its own, and the modules it imports in turn are summarized first, so a sink
-/// two files deep reaches the handler's call.
-///
-/// A failed flow summary stays absent, so the flow checker treats the call as
-/// unresolved. Its effect entry stays present as blocked, so effects also fail
-/// closed without a second file read.
-const ImportedFunctionAnalysis = struct {
-    summary: ?zts.pipeline.ImportedSummary = null,
-    effect: zts.pipeline.ExportEffect = .blocked,
+/// Retains the exact source snapshots observed by CHECK's flow reader. Repeated
+/// reads are deliberately not coalesced: a reader can serve a different nested
+/// dependency revision even when two parent files have identical bytes.
+/// Root parser storage remains borrowed from the caller; every helper parser,
+/// atom table, capture table and import edge stays owned until deinit.
+pub const FlowModuleGraph = struct {
+    const Owned = struct {
+        path: []u8,
+        file: ImportedFile,
+        captures: zts.pipeline.FlowCaptureTable,
+        id: zts.pipeline.FlowModuleId,
+    };
 
-    fn deinit(self: *ImportedFunctionAnalysis, allocator: std.mem.Allocator) void {
-        if (self.summary) |*summary| summary.deinit(allocator);
-        self.summary = null;
+    allocator: std.mem.Allocator,
+    views: std.ArrayList(zts.pipeline.FlowModuleView) = .empty,
+    initialization_order: std.ArrayList(zts.pipeline.FlowModuleId) = .empty,
+    /// Effects computed by this same traversal; using them must not reread
+    /// imports or borrow the independent fault scan's revision selection.
+    imported_effects: std.ArrayList(zts.pipeline.ImportedEffect) = .empty,
+    owned: std.ArrayList(*Owned) = .empty,
+    root_path: []u8,
+    root_captures: *zts.pipeline.FlowCaptureTable,
+    /// A failed load, type check, cycle, depth or finite-ID bound must not turn
+    /// an unvisited module initializer into evidence that it is clean.
+    complete: bool = true,
+
+    fn init(allocator: std.mem.Allocator, parsed: zts.pipeline.ParsedModule, source: []const u8, path: []const u8) !FlowModuleGraph {
+        const atoms = parsed.atoms orelse return error.MissingFlowAtoms;
+        const scopes = parsed.scopes orelse return error.MissingFlowScopes;
+        const resolved = try std.fs.path.resolve(allocator, &.{path});
+        errdefer allocator.free(resolved);
+        const captures = try allocator.create(zts.pipeline.FlowCaptureTable);
+        errdefer allocator.destroy(captures);
+        captures.* = try zts.pipeline.FlowCaptureTable.init(allocator, scopes);
+        errdefer captures.deinit();
+        var graph: FlowModuleGraph = .{ .allocator = allocator, .root_path = resolved, .root_captures = captures };
+        errdefer graph.views.deinit(allocator);
+        var revision: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(source, &revision, .{});
+        try graph.views.append(allocator, .{
+            .id = 0,
+            .path = resolved,
+            .revision = revision,
+            .root = parsed.root,
+            .ir_view = parsed.ir_view,
+            .atoms = atoms,
+            .captures = captures,
+            .imports = &.{},
+        });
+        return graph;
     }
+
+    pub fn deinit(self: *FlowModuleGraph) void {
+        const allocator = self.allocator;
+        for (self.views.items) |view| allocator.free(view.imports);
+        self.views.deinit(allocator);
+        self.initialization_order.deinit(allocator);
+        self.imported_effects.deinit(allocator);
+        for (self.owned.items) |owner| {
+            owner.captures.deinit();
+            owner.file.deinit();
+            allocator.free(owner.path);
+            allocator.destroy(owner);
+        }
+        self.owned.deinit(allocator);
+        self.root_captures.deinit();
+        allocator.destroy(self.root_captures);
+        allocator.free(self.root_path);
+    }
+
+    fn load(self: *FlowModuleGraph, reader: ?ImportReader, path: []const u8) !?*Owned {
+        if (self.views.items.len > std.math.maxInt(zts.pipeline.FlowModuleId)) {
+            self.complete = false;
+            return null;
+        }
+        const allocator = self.allocator;
+        const owner = try allocator.create(Owned);
+        errdefer allocator.destroy(owner);
+        owner.path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owner.path);
+        try owner.file.load(allocator, reader, owner.path);
+        errdefer owner.file.deinit();
+        owner.captures = try zts.pipeline.FlowCaptureTable.init(allocator, &owner.file.source_owner.parser.scopes);
+        errdefer owner.captures.deinit();
+        owner.id = @intCast(self.views.items.len);
+        var revision: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(owner.file.source, &revision, .{});
+        try self.owned.ensureUnusedCapacity(allocator, 1);
+        try self.views.append(allocator, .{
+            .id = owner.id,
+            .path = owner.path,
+            .revision = revision,
+            .root = owner.file.root,
+            .ir_view = owner.file.view,
+            .atoms = &owner.file.source_owner.atoms,
+            .captures = &owner.captures,
+            .imports = &.{},
+        });
+        self.owned.appendAssumeCapacity(owner);
+        return owner;
+    }
+
+    fn finishModule(self: *FlowModuleGraph, id: zts.pipeline.FlowModuleId, targets: []const zts.pipeline.FlowImportTarget) !void {
+        self.views.items[id].imports = try self.allocator.dupe(zts.pipeline.FlowImportTarget, targets);
+        try self.initialization_order.append(self.allocator, id);
+    }
+};
+
+/// Retain the production flow traversal's parser and capture owners. The
+/// fault reader remains independent, and explicit paths keep their read order.
+/// Extensionless imports use the owner-approved compiler `.ts` selection.
+/// A production caller must first pass CHECK's existing root admission,
+/// boolean, type, strict and handler-selection gates. This loader does not
+/// repeat or bypass those gates on the root source.
+pub fn loadFlowModulesForCheck(
+    allocator: std.mem.Allocator,
+    parsed: zts.pipeline.ParsedModule,
+    source: []const u8,
+    facts: *const zts.pipeline.ModuleFacts,
+    handler_path: []const u8,
+    reader: ?ImportReader,
+) !FlowModuleGraph {
+    var graph = try FlowModuleGraph.init(allocator, parsed, source, handler_path);
+    errdefer graph.deinit();
+    var stack: ImportStack = .{};
+    stack.paths[0] = graph.root_path;
+    stack.len = 1;
+    var analyses = try collectImportedAnalyses(allocator, facts, handler_path, &stack, reader, &graph, 0);
+    defer analyses.deinit(allocator);
+    try graph.finishModule(0, analyses.targets.items);
+    graph.imported_effects = analyses.effects;
+    analyses.effects = .empty;
+    return graph;
+}
+
+/// The retained target and effect of one reader-selected imported export.
+const ImportedFunctionAnalysis = struct {
+    effect: zts.pipeline.ExportEffect = .blocked,
+    target: ?zts.pipeline.FlowFunctionRef = null,
 };
 
 const ImportedFunctionAnalyses = struct {
-    flow: std.ArrayList(zts.pipeline.ImportedFnSummary) = .empty,
     effects: std.ArrayList(zts.pipeline.ImportedEffect) = .empty,
+    targets: std.ArrayList(zts.pipeline.FlowImportTarget) = .empty,
 
     fn deinit(self: *ImportedFunctionAnalyses, allocator: std.mem.Allocator) void {
-        for (self.flow.items) |*entry| entry.summary.deinit(allocator);
-        self.flow.deinit(allocator);
         self.effects.deinit(allocator);
+        self.targets.deinit(allocator);
     }
 };
 
-fn collectImportedFnSummaries(
+fn collectImportedAnalyses(
     allocator: std.mem.Allocator,
     facts: *const zts.pipeline.ModuleFacts,
     importer_path: []const u8,
     stack: *ImportStack,
     /// Where each imported file's bytes come from; null is the working tree.
     reader: ?ImportReader,
+    graph: *FlowModuleGraph,
+    importer: zts.pipeline.FlowModuleId,
 ) error{OutOfMemory}!ImportedFunctionAnalyses {
     var out: ImportedFunctionAnalyses = .{};
     errdefer out.deinit(allocator);
     // Browser analysis receives one source buffer and has no filesystem. Keep
     // the conservative empty answer while compiling the POSIX reader entirely
     // out of the freestanding build.
-    if (comptime builtin.target.os.tag == .freestanding) return out;
+    if (comptime builtin.target.os.tag == .freestanding) {
+        for (facts.imports.items) |record| {
+            if (record.resolution != .builtin) graph.complete = false;
+        }
+        return out;
+    }
 
     const base_dir = std.fs.path.dirname(importer_path) orelse ".";
 
     for (facts.imports.items) |rec| {
         if (rec.resolution != .unresolved) continue;
         if (!std.mem.startsWith(u8, rec.module_specifier, "./") and
-            !std.mem.startsWith(u8, rec.module_specifier, "../")) continue;
+            !std.mem.startsWith(u8, rec.module_specifier, "../"))
+        {
+            graph.complete = false;
+            continue;
+        }
 
-        const path = try std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier });
+        const path = try resolveCheckImportPath(allocator, base_dir, rec.module_specifier);
         defer allocator.free(path);
 
-        var imported = try importedFunctionSummary(
+        const imported = try analyzeImportedFunction(
             allocator,
             path,
-            rec.module_specifier,
             rec.imported_name,
             stack,
             reader,
+            graph,
         );
-        defer imported.deinit(allocator);
-        if (imported.summary) |summary| {
-            try out.flow.append(allocator, .{ .slot = rec.slot, .summary = summary });
-            imported.summary = null;
-        }
         try out.effects.append(allocator, .{ .slot = rec.slot, .effect = imported.effect });
+        if (imported.target) |target| {
+            // ImportRecord is slot-keyed, but the interpreter uses the actual
+            // IR binding identity so a local with the same slot cannot match.
+            const view = graph.views.items[importer].ir_view;
+            if (importBindingKey(view, rec.slot)) |key|
+                try out.targets.append(allocator, .{ .binding_key = key, .target = target })
+            else
+                graph.complete = false;
+        }
     }
     return out;
 }
+
+const importBindingKey = zts.pipeline.flowImportBindingKey;
+const importedFunctionNode = zts.pipeline.flowExportedFunctionNode;
 
 /// What the scan of the handler's imported files answered, one entry per
 /// non-builtin import record, keyed by the record's local slot. The entries
@@ -343,13 +483,25 @@ const ImportedFaultScan = struct {
     }
 };
 
+/// Select the compiler's `.ts` default before either independent traversal
+/// reads. Explicit paths keep their existing identity and reader calls.
+fn resolveCheckImportPath(allocator: std.mem.Allocator, base_dir: []const u8, specifier: []const u8) error{OutOfMemory}![]const u8 {
+    const normalized = try std.fs.path.resolve(allocator, &.{ base_dir, specifier });
+    if (std.fs.path.extension(normalized).len != 0) return normalized;
+    defer allocator.free(normalized);
+    return zts.modules.file_resolver.resolve(allocator, normalized, "", null) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => unreachable, // An extensionless path cannot have an unsupported source extension.
+    };
+}
+
 fn isRelativeSpecifier(specifier: []const u8) bool {
     return std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../");
 }
 
 /// Scan the files that the handler imports for failable calls, for fault
 /// coverage (unit F2 of the R4 plan). The polarity is the opposite of
-/// `collectImportedFnSummaries`: for the flow checker a missing entry is the
+/// `collectImportedAnalyses`: for the flow checker a missing entry is the
 /// conservative answer, and here a missing or partial answer would mean
 /// "scanned clean". So this returns one entry for every import record of the
 /// handler that is not a builtin, and every failure to reach a verdict is a
@@ -398,7 +550,7 @@ fn collectImportedFailableCalls(
                 if (!isRelativeSpecifier(rec.module_specifier)) {
                     break :blk .{ .blocked = .{ .file = try out.own(allocator, rec.module_specifier), .reason = .not_relative } };
                 }
-                const path = try std.fs.path.resolve(allocator, &.{ handler_dir, rec.module_specifier });
+                const path = try resolveCheckImportPath(allocator, handler_dir, rec.module_specifier);
                 defer allocator.free(path);
                 if (memo.get(path)) |known| break :blk known;
 
@@ -498,7 +650,7 @@ fn scanImportedFileTree(
         if (!isRelativeSpecifier(rec.module_specifier)) {
             return blocked(try out.own(allocator, rec.module_specifier), .not_relative);
         }
-        const child = try std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier });
+        const child = try resolveCheckImportPath(allocator, base_dir, rec.module_specifier);
         defer allocator.free(child);
         const child_display = try importedFileDisplay(allocator, out, handler_dir, child);
         const result = try scanImportedFileTree(allocator, out, visited, child, child_display, handler_dir, depth + 1, reader);
@@ -510,26 +662,33 @@ fn scanImportedFileTree(
     return .clean;
 }
 
-/// Walk one imported file and answer its independent flow and effect results.
-/// `specifier` is the importer's path spelling for flow diagnostics.
-fn importedFunctionSummary(
+/// Load one imported export and preserve the existing nested read order and
+/// type-failure stopping point. Effects use these same retained snapshots.
+fn analyzeImportedFunction(
     allocator: std.mem.Allocator,
     path: []const u8,
-    specifier: []const u8,
     name: []const u8,
     stack: *ImportStack,
     reader: ?ImportReader,
+    graph: *FlowModuleGraph,
 ) error{OutOfMemory}!ImportedFunctionAnalysis {
     var result: ImportedFunctionAnalysis = .{};
-    errdefer result.deinit(allocator);
-    if (stack.len >= max_import_depth or stack.contains(path)) return result;
+    if (stack.len >= max_import_depth or stack.contains(path)) {
+        graph.complete = false;
+        return result;
+    }
     stack.paths[stack.len] = path;
     stack.len += 1;
     defer stack.len -= 1;
 
-    var file: ImportedFile = undefined;
-    file.load(allocator, reader, path) catch return result;
-    defer file.deinit();
+    const retained_file = (graph.load(reader, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            graph.complete = false;
+            return result;
+        },
+    }) orelse return result;
+    const file = &retained_file.file;
     const view = file.view;
     const module_facts = &file.module_facts;
 
@@ -567,7 +726,7 @@ fn importedFunctionSummary(
     // the old early stop. Effects still inspect the loaded IR with every
     // nested file import blocked, without reading another file.
     var nested: ImportedFunctionAnalyses = if (type_check_clean)
-        try collectImportedFnSummaries(allocator, module_facts, path, stack, reader)
+        try collectImportedAnalyses(allocator, module_facts, path, stack, reader, graph, retained_file.id)
     else
         .{};
     defer nested.deinit(allocator);
@@ -579,21 +738,13 @@ fn importedFunctionSummary(
     }
 
     if (type_check_clean) {
-        var flow = zts.FlowChecker.init(allocator, view, capabilities.atoms);
-        defer flow.deinit();
-        flow.facts = module_facts;
-        if (type_checker) |*checker| flow.setTypeChecker(checker);
-        for (nested.flow.items) |*entry| flow.setFileFunctionSummary(entry.slot, &entry.summary);
-
-        result.summary = flow.exportedSummary(specifier, name) catch null;
-        if (type_checker) |*checker| {
-            checker.ensureHealthy() catch {
-                if (result.summary) |*owned| owned.deinit(allocator);
-                result.summary = null;
-                type_check_clean = false;
-            };
-        }
-    }
+        const id = retained_file.id;
+        try graph.finishModule(id, nested.targets.items);
+        if (importedFunctionNode(view, capabilities.atoms, name)) |function_node|
+            result.target = .{ .module = id, .node = function_node }
+        else
+            graph.complete = false;
+    } else graph.complete = false;
 
     var effects = zts.EffectAnalyzer.init(allocator, view, capabilities.atoms);
     defer effects.deinit();
@@ -1371,10 +1522,11 @@ fn runCheckOnParsedSource(
     ) catch {};
 
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const parsed = if (source_kind.isTyped())
+    var parsed = if (source_kind.isTyped())
         zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.DirectTypeSyntaxUnavailable
     else
         zts.pipeline.ParsedModule.fromExisting(ir_view, root, atoms);
+    parsed.scopes = &js_parser.scopes;
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
@@ -1508,33 +1660,20 @@ fn runCheckOnParsedSource(
 
     if (skip_contract) return result;
 
-    var imported_analyses: ImportedFunctionAnalyses = .{};
-    defer imported_analyses.deinit(allocator);
+    var imported_graph: ?FlowModuleGraph = null;
+    defer if (imported_graph) |*graph| graph.deinit();
     var verify_info: ?VerificationInfo = null;
     if (zts.findHandlerFunction(ir_view, root)) |hf| {
-        // Sink summaries for helpers imported from sibling files. Without them
-        // the flow checker has no body to walk for such a call and has to
-        // treat its value as untraceable, which costs every property the
-        // value's sink decides. With them the importer applies its own
-        // argument labels to the sinks inside each helper.
-        var import_stack: ImportStack = .{};
-        const handler_resolved = std.fs.path.resolve(allocator, &.{handler_path}) catch null;
-        defer if (handler_resolved) |p| allocator.free(p);
-        if (handler_resolved) |p| {
-            import_stack.paths[0] = p;
-            import_stack.len = 1;
-        }
-        imported_analyses = try collectImportedFnSummaries(
-            allocator,
-            try analysis.facts(),
-            handler_path,
-            &import_stack,
-            opts.import_reader,
-        );
+        // Retain exactly the flow/effect reader's snapshots. The fault scan
+        // below still performs its own independent traversal and reads.
+        imported_graph = try loadFlowModulesForCheck(allocator, parsed, source, try analysis.facts(), handler_path, opts.import_reader);
+        const graph = &imported_graph.?;
 
         try analysis.prepareChecked(hf, .{
             .module_facts = try analysis.facts(),
-            .imported_fn_summaries = imported_analyses.flow.items,
+            .flow_modules = graph.views.items,
+            .flow_initialization_order = graph.initialization_order.items,
+            .flow_modules_complete = graph.complete,
         });
         _ = try analysis.runVerifier(hf);
         _ = try analysis.runFlow(hf);
@@ -1610,7 +1749,7 @@ fn runCheckOnParsedSource(
         handler_path,
         .{
             .verification = verify_info,
-            .imported_effects = imported_analyses.effects.items,
+            .imported_effects = if (imported_graph) |*graph| graph.imported_effects.items else &.{},
         },
     );
     if (zts.findHandlerFunction(ir_view, root) != null) {
@@ -2019,8 +2158,6 @@ pub fn compileHandler(
         return err;
     };
 
-    const needs_contract = true; // Always extract for auto-sandboxing
-
     try validateVirtualModuleImports(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
         &atoms,
@@ -2039,7 +2176,6 @@ pub fn compileHandler(
             filename,
             &strings,
             &atoms,
-            needs_contract,
             emit_contract,
             policy,
             sql_schema_path,
@@ -2057,10 +2193,11 @@ pub fn compileHandler(
 
     const ir_view_check = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     if (source_kind.isTyped()) try js_parser.type_store.validateRuntimeOwners(allocator, ir_view_check);
-    const parsed = if (source_kind.isTyped())
+    var parsed = if (source_kind.isTyped())
         zts.pipeline.ParsedModule.fromTypedExisting(ir_view_check, root, &atoms, &js_parser.type_store)
     else
         zts.pipeline.ParsedModule.fromExisting(ir_view_check, root, &atoms);
+    parsed.scopes = &js_parser.scopes;
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
@@ -2351,11 +2488,11 @@ pub fn compileHandler(
     const bytecode_data = try allocator.dupe(u8, serialized);
     errdefer allocator.free(bytecode_data);
 
-    // Build contract if requested or needed for policy validation.
+    // Every compiled handler needs its contract for auto-sandboxing.
     // The contract reads its route table from the pattern analysis.
     var contract: ?HandlerContract = null;
     errdefer if (contract) |*built| built.deinit(allocator);
-    if (needs_contract) {
+    {
         var route_analysis = try analyzeAot(allocator, &js_parser, &atoms, root);
         defer if (route_analysis) |*t| t.deinit(allocator);
 
@@ -2711,7 +2848,6 @@ fn compileMultiModule(
     filename: []const u8,
     strings: *zts.StringTable,
     atoms: *zts.AtomTable,
-    needs_contract: bool,
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
@@ -2795,20 +2931,17 @@ fn compileMultiModule(
 
     if (!builtin.is_test) debugPrint("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
 
-    var contract: ?HandlerContract = null;
-    if (needs_contract) {
-        contract = try buildMultiModuleContract(
-            allocator,
-            &graph,
-            &compile_result,
-            atoms,
-            filename,
-            emit_contract,
-            policy,
-            sql_schema_path,
-            manifest_registry,
-        );
-    }
+    const contract = try buildMultiModuleContract(
+        allocator,
+        &graph,
+        &compile_result,
+        atoms,
+        filename,
+        emit_contract,
+        policy,
+        sql_schema_path,
+        manifest_registry,
+    );
 
     return .{
         .bytecode = entry_bytecode,
@@ -2914,15 +3047,7 @@ fn projectCompletedFlow(
         }
 
         const flow_props = completed.getProperties();
-        if (contract.properties) |*props| {
-            props.no_secret_leakage = flow_props.no_secret_leakage;
-            props.no_credential_leakage = flow_props.no_credential_leakage;
-            props.input_validated = flow_props.input_validated;
-            props.pii_contained = flow_props.pii_contained;
-            props.injection_safe = flow_props.injection_safe;
-            props.deterministic = props.deterministic and flow_props.deterministic;
-            props.idempotent = props.deterministic and props.retry_safe;
-        }
+        zts.pipeline.projectFlowProperties(contract, flow_props);
         if (violations_out) |vout| {
             zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
         }
@@ -3021,7 +3146,8 @@ fn buildMultiModuleContract(
         defer if (temp_aot) |*aot| aot.deinit(allocator);
 
         const module_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const parsed = zts.pipeline.ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
+        var parsed = zts.pipeline.ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
+        parsed.scopes = &js_parser.scopes;
         var module_analysis: zts.pipeline.ModuleAnalysisSession = .{};
         try module_analysis.initContractOnly(
             allocator,
@@ -3893,7 +4019,7 @@ const AllocationImportReader = struct {
 fn checkImportAllocationFixture(allocator: std.mem.Allocator, reader: *AllocationImportReader) !CheckResult {
     const source =
         \\import { helper } from "./lib0.ts";
-        \\function handler(req: Request): Proof<Response, "no_secret_leakage" | "canonical" | "cost_bounded"> {
+        \\function handler(req: Request): Proof<Response, "canonical" | "cost_bounded"> {
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -7141,7 +7267,10 @@ test "an imported helper that logs its secret parameter refuses the call that pa
     // and says where in the imported file the sink is.
     try std.testing.expectEqualStrings("secret data flows into console output", diag.message);
     try std.testing.expectEqual(@as(u32, 5), diag.line);
-    try std.testing.expect(std.mem.indexOf(u8, diag.suggestion orelse "", "./dep.ts") != null);
+    const dependency_path = try std.fs.path.resolve(std.testing.allocator, &.{ std.fs.path.dirname(fixture.handler_path).?, "dep.ts" });
+    defer std.testing.allocator.free(dependency_path);
+    try std.testing.expect(std.mem.indexOf(u8, diag.suggestion orelse "", dependency_path) != null);
+    try std.testing.expect(std.mem.indexOf(u8, diag.suggestion orelse "", ":3:") != null);
 }
 
 test "an imported helper called with a clean literal keeps no_secret_leakage" {
@@ -7510,11 +7639,15 @@ test "router public checks prove clean routes and fail closed on unresolved disp
     try std.testing.expectEqual(@as(u32, 0), unresolved.type_errors);
     try std.testing.expect(!unresolved.exhaustive_returns);
     const unresolved_properties = unresolved.contract.?.properties.?;
+    // The structural verifier still has no exhaustive route facts. Flow can
+    // prove the six properties from the actual clean replacement function.
+    const flow_fields = .{ "deterministic", "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "injection_safe" };
     inline for (checked_fields) |field| {
-        if (@field(unresolved_properties, field)) {
-            std.debug.print("unresolved route still proves {s}\n", .{field});
-            return error.UnresolvedRoutePropertyProven;
-        }
+        const is_flow = comptime blk: {
+            for (flow_fields) |flow_field| if (std.mem.eql(u8, field, flow_field)) break :blk true;
+            break :blk false;
+        };
+        try std.testing.expectEqual(is_flow, @field(unresolved_properties, field));
     }
 }
 
@@ -8067,6 +8200,112 @@ const TracingImportReader = struct {
         return .{ .context = self, .read = read };
     }
 };
+
+test "retained flow modules keep per-read dependency revisions and stable owners" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { outer as first } from "./a.ts";
+        \\import { outer as second } from "./a.ts";
+        \\function handler(req: Request): Response { return Response.text(first() + second()); }
+    ;
+    const parent =
+        \\import { inner } from "./b.ts";
+        \\export function outer(): string { return inner(); }
+    ;
+    const sources = [_][]const u8{
+        parent, "export function inner(): string { return \"first\"; }",
+        parent, "export function inner(): string { return \"second\"; }",
+    };
+    var reader: TracingImportReader = .{ .sources = &sources };
+    defer reader.deinit(allocator);
+    var source_owner: zts.DirectCheckSource = undefined;
+    try source_owner.initInPlace(allocator, allocator, handler_source, "/virtual/handler.ts");
+    defer source_owner.deinit();
+    const parsed = zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.TestUnexpectedResult;
+    var facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
+    defer facts.deinit();
+    var graph = try loadFlowModulesForCheck(allocator, parsed, handler_source, &facts, "/virtual/handler.ts", reader.reader());
+    defer graph.deinit();
+
+    try std.testing.expect(graph.complete);
+    try std.testing.expectEqual(@as(usize, 4), reader.paths.items.len);
+    const paths = [_][]const u8{ "/virtual/a.ts", "/virtual/b.ts", "/virtual/a.ts", "/virtual/b.ts" };
+    for (paths, reader.paths.items) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    try std.testing.expectEqual(@as(usize, 5), graph.views.items.len);
+    try std.testing.expectEqual(@as(usize, 2), graph.imported_effects.items.len);
+    try std.testing.expectEqualSlices(zts.pipeline.FlowModuleId, &.{ 2, 1, 4, 3, 0 }, graph.initialization_order.items);
+    // Identical parent bytes do not identify their reader-selected children.
+    try std.testing.expectEqualSlices(u8, &graph.views.items[1].revision, &graph.views.items[3].revision);
+    try std.testing.expect(!std.mem.eql(u8, &graph.views.items[2].revision, &graph.views.items[4].revision));
+    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 1), graph.views.items[0].imports[0].target.module);
+    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 3), graph.views.items[0].imports[1].target.module);
+    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 2), graph.views.items[1].imports[0].target.module);
+    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 4), graph.views.items[3].imports[0].target.module);
+    // The legacy summary temporaries have been freed. Both independent ASTs,
+    // atom tables and capture tables must still be usable through the graph.
+    for (graph.views.items) |view| {
+        try std.testing.expectEqual(ir.NodeTag.program, view.ir_view.getTag(view.root).?);
+        try std.testing.expect(view.atoms == if (view.id == 0) &source_owner.atoms else &graph.owned.items[view.id - 1].file.source_owner.atoms);
+        for (view.imports) |edge| {
+            const target_view = graph.views.items[edge.target.module];
+            try std.testing.expect(target_view.ir_view.getFunction(edge.target.node) != null);
+        }
+    }
+}
+
+test "retained flow loading borrows a virtual JavaScript parser" {
+    const allocator = std.testing.allocator;
+    const source = "import { greet } from \"./a.ts\"; function handler(req) { return greet(); }";
+    var atoms = zts.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try zts.parser.JsParser.init(allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var parsed = zts.pipeline.ParsedModule.fromExisting(view, root, &atoms);
+    parsed.scopes = &parser.scopes;
+    var facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
+    defer facts.deinit();
+    var reader: TracingImportReader = .{ .sources = &.{"export function greet(): string { return \"hello\"; }"} };
+    defer reader.deinit(allocator);
+    var graph = try loadFlowModulesForCheck(allocator, parsed, source, &facts, "/virtual/<handler>", reader.reader());
+    defer graph.deinit();
+    try std.testing.expect(graph.complete);
+    try std.testing.expectEqual(@as(usize, 1), reader.paths.items.len);
+    try std.testing.expectEqualStrings("/virtual/a.ts", reader.paths.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), graph.views.items.len);
+    try std.testing.expect(graph.views.items[0].atoms == &atoms);
+    try std.testing.expectEqual(view.nodeCount(), graph.views.items[0].ir_view.nodeCount());
+    try std.testing.expectEqual(@as(usize, 1), graph.views.items[0].imports.len);
+}
+
+test "retained flow source loading preserves type-failure early stopping" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { outer } from "./a.ts";
+        \\function handler(req: Request): Response { return Response.text(outer()); }
+    ;
+    const failed_outer =
+        \\import { inner } from "./b.ts";
+        \\export function outer(): string { const value: number = "wrong"; return inner(); }
+    ;
+    var reader: TracingImportReader = .{ .sources = &.{failed_outer} };
+    defer reader.deinit(allocator);
+    var source_owner: zts.DirectCheckSource = undefined;
+    try source_owner.initInPlace(allocator, allocator, handler_source, "/virtual/handler.ts");
+    defer source_owner.deinit();
+    const parsed = zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.TestUnexpectedResult;
+    var facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
+    defer facts.deinit();
+    var graph = try loadFlowModulesForCheck(allocator, parsed, handler_source, &facts, "/virtual/handler.ts", reader.reader());
+    defer graph.deinit();
+    try std.testing.expect(!graph.complete);
+    try std.testing.expectEqual(@as(usize, 1), reader.paths.items.len);
+    try std.testing.expectEqualStrings("/virtual/a.ts", reader.paths.items[0]);
+    try std.testing.expectEqual(@as(usize, 0), graph.views.items[0].imports.len);
+    try std.testing.expectEqualSlices(zts.pipeline.FlowModuleId, &.{0}, graph.initialization_order.items);
+}
 
 test "CHECK keeps the reader trace for two names imported from one file" {
     const allocator = std.testing.allocator;
@@ -12186,4 +12425,48 @@ test "CHECK keeps termination claims when no function value escapes" {
         \\  return Response.text("404");
         \\}
     );
+}
+
+test "CHECK extensionless imports use reader revisions in both traversals" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { value } from "./helper";
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  return Response.text(value());
+        \\}
+    ;
+    const dependencies = [_][]const u8{
+        "export function value(): string { return \"ok\"; }",
+        "import { env } from \"zttp:env\"; export function value(): string { return env(\"API_SECRET\") ?? \"\"; }",
+    };
+    for (dependencies, 0..) |dependency, index| {
+        var reader: TracingImportReader = .{ .sources = &.{ dependency, dependencies[0] } };
+        defer reader.deinit(allocator);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "/virtual/no-disk/handler.ts", .{
+            .json_mode = true,
+            .import_reader = reader.reader(),
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(@as(usize, 2), reader.paths.items.len);
+        for (reader.paths.items) |path| try std.testing.expectEqualStrings("/virtual/no-disk/helper.ts", path);
+        // The second, clean fault revision must not replace the flow revision.
+        try std.testing.expectEqual(index == 0, result.contract.?.properties.?.no_secret_leakage);
+        try std.testing.expectEqual(index != 0, hasDiagnosticCode(&result, "ZTS400"));
+        try std.testing.expect(result.contract.?.properties.?.no_credential_leakage);
+    }
+}
+
+test "CHECK import path selection preserves explicit names and normalized cycle identity" {
+    const allocator = std.testing.allocator;
+    const spellings = [_][]const u8{ "./helper", "./helper.ts", "./nested/../helper" };
+    for (spellings) |specifier| {
+        const path = try resolveCheckImportPath(allocator, "/virtual", specifier);
+        defer allocator.free(path);
+        try std.testing.expectEqualStrings("/virtual/helper.ts", path);
+    }
+    const explicit = try resolveCheckImportPath(allocator, "/virtual", "./helper.custom");
+    defer allocator.free(explicit);
+    try std.testing.expectEqualStrings("/virtual/helper.custom", explicit);
 }

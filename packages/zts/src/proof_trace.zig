@@ -15,6 +15,7 @@ const std = @import("std");
 const handler_contract = @import("zts-contracts").handler_contract;
 const flow_checker = @import("flow_checker.zig");
 const counterexample = @import("counterexample.zig");
+const flow_evidence = @import("flow_evidence.zig");
 const ir = @import("zts-engine").parser.ir;
 const json_utils = @import("zts-base").json_utils;
 const spec_discharge = @import("spec_discharge.zig");
@@ -640,11 +641,15 @@ fn findFlowDiag(
     flow_diags: []const flow_checker.Diagnostic,
     tag: counterexample.PropertyTag,
 ) ?flow_checker.Diagnostic {
+    var first: ?flow_checker.Diagnostic = null;
     for (flow_diags) |diag| {
         const diag_tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
-        if (diag_tag == tag) return diag;
+        if (diag_tag == tag) {
+            if (diag.witness != null) return diag;
+            if (first == null) first = diag;
+        }
     }
-    return null;
+    return first;
 }
 
 fn findDefended(
@@ -674,13 +679,12 @@ fn resistedFor(
     arena: std.mem.Allocator,
     dp: flow_checker.DefendedPath,
     tag: counterexample.PropertyTag,
-) !ResistedCounterexample {
+) !?ResistedCounterexample {
     const source = sourcePhrase(tag);
     var chain: std.ArrayListUnmanaged([]const u8) = .empty;
     switch (dp.safe_form) {
         .validated => {
-            std.debug.assert(dp.guard_func != null);
-            const guard = dp.guard_func orelse "a validator";
+            const guard = dp.guard_func orelse return null;
             try chain.append(arena, try std.fmt.allocPrint(arena, "{s} enters the handler", .{source}));
             try chain.append(arena, try std.fmt.allocPrint(
                 arena,
@@ -695,16 +699,20 @@ fn resistedFor(
             return .{
                 .attack_input = counterexample.attackInput(tag),
                 .chain = try chain.toOwnedSlice(arena),
-                .conclusion = "the validator clears the taint before the sink; the attack input cannot reach it unescaped.",
+                .conclusion = "the request data reaches this sink with its required defense; the property holds.",
             };
         },
         .never_reached => {
             try chain.append(arena, try std.fmt.allocPrint(arena, "{s} is read", .{source}));
-            try chain.append(arena, "it never reaches a response, log, or egress sink");
+            try chain.append(arena, switch (tag) {
+                .no_secret_leakage, .no_credential_leakage => "it never reaches a response, log, or egress sink",
+                .input_validated, .pii_contained => "it never reaches an external egress sink",
+                .injection_safe => "it never reaches an HTML response or governed external egress sink",
+            });
             return .{
                 .attack_input = counterexample.attackInput(tag),
                 .chain = try chain.toOwnedSlice(arena),
-                .conclusion = "no sink is reachable from the tainted source; the value stays contained.",
+                .conclusion = "no sink governed by this property is reachable from the labelled source.",
             };
         },
     }
@@ -715,22 +723,20 @@ fn flowCounterexample(
     diag: flow_checker.Diagnostic,
     tag: counterexample.PropertyTag,
     ir_view: ir.IrView,
-) !ProofCounterexample {
+) !?ProofCounterexample {
+    const capsule = diag.witness orelse return null;
     const loc = ir_view.getLoc(diag.node);
-
-    const constraints: []const counterexample.WitnessConstraint =
-        if (diag.witness) |w| w.path_constraints else &.{};
-    const io_calls: []const counterexample.TrackedIoCall =
-        if (diag.witness) |w| w.io_calls else &.{};
-
-    const witness = counterexample.solve(arena, .{
+    const constraints = capsule.path_constraints;
+    const io_calls = capsule.io_calls;
+    const witness = try counterexample.solve(arena, .{
         .property = tag,
         .origin = .{ .line = if (loc) |l| l.line else 0, .column = if (loc) |l| l.column else 0 },
         .sink = .{ .line = if (loc) |l| l.line else 0, .column = if (loc) |l| l.column else 0 },
         .summary = diag.message,
         .constraints = constraints,
         .io_calls = io_calls,
-    }) catch null;
+    });
+    if (!try flow_evidence.candidateSatisfies(arena, constraints, witness)) return null;
 
     // Build the source-to-sink chain from the I/O calls observed on the
     // path, ending at the sink the diagnostic flagged.
@@ -745,9 +751,9 @@ fn flowCounterexample(
         .line = if (loc) |l| l.line else 0,
         .column = if (loc) |l| l.column else 0,
         .flow = try flow.toOwnedSlice(arena),
-        .request_method = if (witness) |w| w.request.method else "GET",
-        .request_url = if (witness) |w| w.request.url else "/",
-        .request_has_auth = if (witness) |w| w.request.has_auth_header else false,
+        .request_method = witness.request.method,
+        .request_url = witness.request.url,
+        .request_has_auth = witness.request.has_auth_header,
         .fix = diag.help orelse "validate or drop the untrusted value before it reaches the sink.",
     };
 }
@@ -1132,4 +1138,70 @@ test "writeJson reports upstream fallback sites inside the facts, and only when 
     buf = aw2.toArrayList();
     try testing.expect(std.mem.indexOf(u8, buf.items, "upstreamFallbackSites") == null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"coveredSites\":1}") != null);
+}
+
+fn checkPublicFlowTrace(source: []const u8, tag: counterexample.PropertyTag, constructive: bool, auth: bool) !void {
+    const allocator = testing.allocator;
+    const engine = @import("zts-engine");
+    var atoms = engine.atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try engine.parser.JsParser.init(allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler = @import("handler_verifier.zig").findHandlerFunction(view, root) orelse return error.MissingHandler;
+    var checker = flow_checker.FlowChecker.init(allocator, view, &atoms);
+    defer checker.deinit();
+    checker.scopes = &parser.scopes;
+    _ = try checker.check(handler);
+    const properties = checker.getProperties();
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var contract = handler_contract.emptyContract(try arena.allocator().dupe(u8, "handler.ts"));
+    contract.properties = .{ .pure = false, .read_only = false, .stateless = false, .retry_safe = false, .deterministic = properties.deterministic, .has_egress = false, .no_secret_leakage = properties.no_secret_leakage, .no_credential_leakage = properties.no_credential_leakage, .input_validated = properties.input_validated, .injection_safe = properties.injection_safe, .pii_contained = properties.pii_contained };
+    const traces = try collect(arena.allocator(), &contract, checker.getDiagnostics(), checker.getDefendedPaths(), view, 0, false);
+    for (traces) |trace| {
+        if (!std.mem.eql(u8, trace.property, @tagName(tag))) continue;
+        try testing.expect(!trace.holds);
+        try testing.expect(trace.summary.len > 0);
+        try testing.expectEqual(constructive, trace.counterexample != null);
+        if (trace.counterexample) |example| try testing.expectEqual(auth, example.request_has_auth);
+        return;
+    }
+    return error.MissingTrace;
+}
+
+test "public flow traces retain refusal without inventing absent witness evidence" {
+    try checkPublicFlowTrace("import { env } from 'zttp:env'; function handler(req) { const items = [env('API_TOKEN'), 'public']; return Response.text(items[1]); }", .no_secret_leakage, false, false);
+    try checkPublicFlowTrace("import { env } from 'zttp:env'; function handler(req) { return Response.text(env('API_TOKEN')); }", .no_secret_leakage, true, false);
+    try checkPublicFlowTrace("function handler(req) { return Response.text(req.headers.authorization); }", .no_credential_leakage, true, true);
+}
+
+test "public flow traces select supported evidence after an unsupported sink" {
+    try checkPublicFlowTrace("import { env } from 'zttp:env'; function handler(req) { const items = [env('API_TOKEN'), 'public']; console.log(items[1]); return Response.text(env('API_TOKEN')); }", .no_secret_leakage, true, false);
+}
+
+test "contradictory supplied capsules never become public counterexamples" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const constraints = [_]counterexample.WitnessConstraint{ .{ .req_method = "GET" }, .{ .req_method = "POST" } };
+    const diagnostic: flow_checker.Diagnostic = .{ .kind = .secret_in_response, .severity = .err, .node = 0, .message = "secret flow", .help = null, .witness = .{ .path_constraints = &constraints, .io_calls = &.{} } };
+    const engine = @import("zts-engine");
+    var parser = try engine.parser.JsParser.init(testing.allocator, "function handler(req) { return 'public'; }");
+    defer parser.deinit();
+    _ = try parser.parse();
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    try testing.expect((try flowCounterexample(arena.allocator(), diagnostic, .no_secret_leakage, view)) == null);
+}
+
+test "contained request evidence names only the property governed sinks" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    for ([_]counterexample.PropertyTag{ .input_validated, .pii_contained, .injection_safe }) |tag| {
+        const resisted = (try resistedFor(arena.allocator(), .{ .property = tag, .safe_form = .never_reached }, tag)).?;
+        try testing.expect(std.mem.indexOf(u8, resisted.chain[1], "external egress") != null);
+        try testing.expect(std.mem.indexOf(u8, resisted.chain[1], "never reaches a response, log") == null);
+    }
+    try testing.expect((try resistedFor(arena.allocator(), .{ .property = .injection_safe, .safe_form = .validated }, .injection_safe)) == null);
 }

@@ -13,39 +13,6 @@ comptime {
         @compileError("zttp-sdk.JSValue must match runtime JSValue size");
     if (@bitSizeOf(sdk.JSValue) != @bitSizeOf(value.JSValue))
         @compileError("zttp-sdk.JSValue must match runtime JSValue bit size");
-    // Every paired enum must agree on length and on the ordinal of its last
-    // variant, because both adaptors convert with a raw `@intFromEnum`.
-    //
-    // Naming a variant by hand was the earlier form and it rotted twice in one
-    // phase: `ReturnKind.result` stopped being last when `dict` and `bytes`
-    // were appended, and the `ModuleCapability` assertion was deleted outright
-    // with the `websocket` variant rather than re-pointed. Both left the check
-    // passing over a pair it no longer covered. `assertTailAligned` reads the
-    // tail off the type, so it cannot be aimed at the wrong variant and cannot
-    // be silently dropped.
-    assertTailAligned(sdk.EffectClass, internal.EffectClass, "EffectClass");
-    assertTailAligned(sdk.ReturnKind, internal.ReturnKind, "ReturnKind");
-    assertTailAligned(sdk.FailureSeverity, internal.FailureSeverity, "FailureSeverity");
-    assertTailAligned(sdk.ContractCategory, internal.ContractCategory, "ContractCategory");
-    assertTailAligned(sdk.LawKind, internal.LawKind, "LawKind");
-    assertTailAligned(sdk.ModuleCapability, internal.ModuleCapability, "ModuleCapability");
-}
-
-/// Both enums must have the same number of variants, and each pair at the
-/// same position must share a name and an ordinal. Reading the fields off the
-/// types is what keeps this honest when a variant is added or removed at
-/// either end.
-fn assertTailAligned(comptime SdkEnum: type, comptime InternalEnum: type, comptime name: []const u8) void {
-    const sdk_fields = @typeInfo(SdkEnum).@"enum".fields;
-    const internal_fields = @typeInfo(InternalEnum).@"enum".fields;
-    if (sdk_fields.len != internal_fields.len)
-        @compileError("sdk." ++ name ++ " has a different variant count from internal");
-    for (sdk_fields, internal_fields) |s, i| {
-        if (s.value != i.value)
-            @compileError("sdk." ++ name ++ "." ++ s.name ++ " ordinal diverges from internal");
-        if (!std.mem.eql(u8, s.name, i.name))
-            @compileError("sdk." ++ name ++ " variant order diverges from internal at '" ++ s.name ++ "'");
-    }
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
@@ -56,13 +23,12 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
     }
 
     const exports = comptime adaptFunctionBindings(binding.specifier, binding.required_capabilities, binding.exports);
-    const required_capabilities = comptime adaptModuleCapabilities(binding.required_capabilities);
     return .{
         .specifier = binding.specifier,
         .name = binding.name,
         .exports = &exports,
         .summary = binding.summary,
-        .required_capabilities = &required_capabilities,
+        .required_capabilities = binding.required_capabilities,
         .stateful = binding.stateful,
         .state_init = binding.state_init,
         .state_deinit = binding.state_deinit,
@@ -83,44 +49,20 @@ fn adaptFunctionBindings(
     return out;
 }
 
-fn adaptModuleCapabilities(comptime capabilities: []const sdk.ModuleCapability) [capabilities.len]internal.ModuleCapability {
-    var out: [capabilities.len]internal.ModuleCapability = undefined;
-    for (capabilities, 0..) |capability, i| {
-        out[i] = @enumFromInt(@intFromEnum(capability));
-    }
-    return out;
-}
-
-/// Carry an export's own capability set across the SDK boundary, preserving
-/// the null/empty distinction: null inherits the module set, empty declares
-/// that this export reaches nothing.
-fn adaptExportCapabilities(
-    comptime caps: ?[]const sdk.ModuleCapability,
-) ?[]const internal.ModuleCapability {
-    const declared = caps orelse return null;
-    const adapted = adaptModuleCapabilities(declared);
-    const frozen = adapted;
-    return &frozen;
-}
-
 fn adaptFunctionBinding(
     comptime specifier: []const u8,
     comptime required_capabilities: []const sdk.ModuleCapability,
     comptime binding: sdk.FunctionBinding,
 ) internal.FunctionBinding {
-    const param_types = comptime adaptReturnKinds(binding.param_types);
-    const contract_extractions = comptime adaptContractExtractions(binding.contract_extractions);
-    const laws = comptime adaptLaws(binding.laws);
-    const internal_required_capabilities = comptime adaptModuleCapabilities(required_capabilities);
     return .{
         .name = binding.name,
-        .func = wrapToNativeFn(binding.module_func, specifier, &internal_required_capabilities),
+        .func = wrapToNativeFn(binding.module_func, specifier, required_capabilities),
         .arg_count = binding.arg_count,
         .required_arg_count = binding.required_arg_count,
-        .effect = @enumFromInt(@intFromEnum(binding.effect)),
-        .required_capabilities = comptime adaptExportCapabilities(binding.required_capabilities),
-        .returns = @enumFromInt(@intFromEnum(binding.returns)),
-        .param_types = &param_types,
+        .effect = binding.effect,
+        .required_capabilities = binding.required_capabilities,
+        .returns = binding.returns,
+        .param_types = binding.param_types,
         // Carried, not dropped: a peer-package module that names its
         // parameters must reach discovery with them, or the type kinds answer
         // alone and the model is back to guessing which string is which.
@@ -129,17 +71,14 @@ fn adaptFunctionBinding(
         // module that declares a precise signature must reach the checker
         // with it, or the coarse enum answers in its place and the loss is
         // invisible.
-        .signature = if (binding.signature) |sig| .{ .params = sig.params, .returns = sig.returns } else null,
+        .signature = binding.signature,
         .json_encodable_args = binding.json_encodable_args,
         .traceable = binding.traceable,
         .replay_pure = binding.replay_pure,
-        .contract_extractions = &contract_extractions,
-        .contract_flags = .{
-            .sets_bearer_auth = binding.contract_flags.sets_bearer_auth,
-            .sets_jwt_auth = binding.contract_flags.sets_jwt_auth,
-        },
-        // Field by field, not a bitcast: the two sets mirror each other by
-        // name but not by width, since the internal one reserves spare bits.
+        .contract_extractions = binding.contract_extractions,
+        .contract_flags = binding.contract_flags,
+        // Reserved SDK bits never become analyzer labels. Keep the explicit
+        // field boundary even though the current packed layouts agree.
         .derives_from_args = binding.derives_from_args,
         .return_labels = .{
             .secret = binding.return_labels.secret,
@@ -164,51 +103,9 @@ fn adaptFunctionBinding(
             .nondeterministic = binding.declassifies.nondeterministic,
             .unknown = binding.declassifies.unknown,
         },
-        .failure_severity = @enumFromInt(@intFromEnum(binding.failure_severity)),
-        .laws = &laws,
+        .failure_severity = binding.failure_severity,
+        .laws = binding.laws,
     };
-}
-
-fn adaptLaws(comptime laws: []const sdk.Law) [laws.len]internal.Law {
-    var out: [laws.len]internal.Law = undefined;
-    for (laws, 0..) |law, i| {
-        out[i] = switch (law) {
-            .pure => .pure,
-            .idempotent_call => .idempotent_call,
-            .inverse_of => |target| .{ .inverse_of = target },
-            .absorbing => |pattern| .{ .absorbing = .{
-                .arg_position = pattern.arg_position,
-                .argument_shape = @enumFromInt(@intFromEnum(pattern.argument_shape)),
-                .residue = @enumFromInt(@intFromEnum(pattern.residue)),
-            } },
-        };
-    }
-    return out;
-}
-
-fn adaptReturnKinds(comptime kinds: []const sdk.ReturnKind) [kinds.len]internal.ReturnKind {
-    var out: [kinds.len]internal.ReturnKind = undefined;
-    for (kinds, 0..) |kind, i| {
-        out[i] = @enumFromInt(@intFromEnum(kind));
-    }
-    return out;
-}
-
-fn adaptContractExtractions(comptime extractions: []const sdk.ContractExtraction) [extractions.len]internal.ContractExtraction {
-    var out: [extractions.len]internal.ContractExtraction = undefined;
-    for (extractions, 0..) |extraction, i| {
-        out[i] = .{
-            .arg_position = extraction.arg_position,
-            .category = @enumFromInt(@intFromEnum(extraction.category)),
-            .transform = if (extraction.transform) |transform|
-                @enumFromInt(@intFromEnum(transform))
-            else
-                null,
-            .flag_only = extraction.flag_only,
-            .extension_category = extraction.extension_category,
-        };
-    }
-    return out;
 }
 
 /// Cross-boundary casts shared by the runtime-callback installState shims
@@ -316,4 +213,62 @@ test "adapted SDK module invocation reads authorization from its Context" {
     try std.testing.expect(Observed.clock);
     try std.testing.expect(!Observed.random);
     try std.testing.expect(ctx.active_module_scope == null);
+}
+
+test "binding metadata has one SDK type identity" {
+    inline for (.{
+        .{ sdk.EffectClass, internal.EffectClass },
+        .{ sdk.ReturnKind, internal.ReturnKind },
+        .{ sdk.binding.DeclaredSignature, internal.DeclaredSignature },
+        .{ sdk.FailureSeverity, internal.FailureSeverity },
+        .{ sdk.ModuleCapability, internal.ModuleCapability },
+        .{ sdk.DataLabel, internal.DataLabel },
+        .{ sdk.ContractCategory, internal.ContractCategory },
+        .{ sdk.ContractTransform, internal.ContractTransform },
+        .{ sdk.ContractExtraction, internal.ContractExtraction },
+        .{ sdk.ContractFlags, internal.ContractFlags },
+        .{ sdk.LawKind, internal.LawKind },
+        .{ sdk.AbsorbingPattern, internal.AbsorbingPattern },
+        .{ sdk.Law, internal.Law },
+    }) |pair| try std.testing.expect(pair[0] == pair[1]);
+    try std.testing.expect(sdk.LabelSet != internal.LabelSet);
+    try std.testing.expect(sdk.ModuleHandle != internal.ModuleHandle);
+    try std.testing.expect(sdk.JSValue != value.JSValue);
+}
+
+test "adapted bindings preserve capability inheritance and reject reserved label bits" {
+    const binding = sdk.ModuleBinding{
+        .specifier = "zttp-ext:metadata-test",
+        .name = "metadata-test",
+        .required_capabilities = &.{.clock},
+        .exports = &.{
+            .{
+                .name = "inherit",
+                .module_func = struct {
+                    fn f(_: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        return sdk.JSValue.undefined_val;
+                    }
+                }.f,
+                .arg_count = 0,
+                // Reserved SDK bits must never become analyzer facts.
+                .return_labels = .{ .unknown = true, ._reserved = 1 },
+                .declassifies = .{ .secret = true, .credential = true, ._reserved = 1 },
+            },
+            .{
+                .name = "none",
+                .module_func = struct {
+                    fn f(_: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        return sdk.JSValue.undefined_val;
+                    }
+                }.f,
+                .arg_count = 0,
+                .required_capabilities = &.{},
+            },
+        },
+    };
+    const adapted = comptime adaptModuleBinding(binding);
+    try std.testing.expect(adapted.exports[0].required_capabilities == null);
+    try std.testing.expectEqual(@as(usize, 0), adapted.exports[1].required_capabilities.?.len);
+    try std.testing.expectEqual(internal.LabelSet{ .unknown = true }, adapted.exports[0].return_labels);
+    try std.testing.expectEqual(internal.LabelSet{ .secret = true, .credential = true }, adapted.exports[0].declassifies);
 }

@@ -165,25 +165,29 @@ pub const HandlerInstance = struct {
     pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig) !*Self {
         if (config.outbound_timeout_ms == 0) return error.ZeroOutboundTimeout;
         const self = try allocator.create(Self);
-        errdefer allocator.destroy(self);
+        var initialized = false;
+        errdefer if (!initialized) allocator.destroy(self);
+
+        // Construct the heap first so early failure cleanup, like normal
+        // teardown, releases the GC before the heap it may still reference.
+        const heap_state = try allocator.create(zq.Heap);
+        errdefer if (!initialized) allocator.destroy(heap_state);
+        heap_state.* = zq.Heap.init(allocator, .{});
+        errdefer if (!initialized) heap_state.deinit();
 
         // Initialize GC
         const gc_state = try allocator.create(zq.GC);
-        errdefer allocator.destroy(gc_state);
+        errdefer if (!initialized) allocator.destroy(gc_state);
         gc_state.* = try zq.GC.init(allocator, .{
             .nursery_size = config.nursery_size,
         });
-        errdefer gc_state.deinit();
+        errdefer if (!initialized) gc_state.deinit();
 
-        // Initialize heap for size-class allocation and wire up to GC
-        const heap_state = try allocator.create(zq.Heap);
-        errdefer allocator.destroy(heap_state);
-        heap_state.* = zq.Heap.init(allocator, .{});
         gc_state.setHeap(heap_state);
 
         // Initialize context
         const ctx = try zq.Context.init(allocator, gc_state, .{});
-        errdefer ctx.deinit();
+        errdefer if (!initialized) ctx.deinit();
 
         applyRuntimeConfig(ctx, gc_state, heap_state, config);
         applyEmbeddedCapabilityPolicy(ctx, config, null);
@@ -250,7 +254,10 @@ pub const HandlerInstance = struct {
             .hybrid_state = hybrid_state,
         };
         self.strings = &self.owned_strings.?;
-        errdefer self.owned_strings.?.deinit();
+        // All core resources have moved into the wrapper. Later failures use
+        // normal teardown, including trace descriptors and the outbound backend.
+        initialized = true;
+        errdefer self.deinit();
 
         // The Context carries the host pointer so a native callback can reach
         // this runtime by an explicit cast. `self` is heap-allocated and stable
@@ -284,9 +291,7 @@ pub const HandlerInstance = struct {
         if (config.outbound_timeout_ms == 0) return error.ZeroOutboundTimeout;
         const allocator = pool_rt.ctx.allocator;
         const self = try allocator.create(Self);
-        errdefer allocator.destroy(self);
         const retained_policy = policy_generation.retain();
-        errdefer retained_policy.release();
 
         const interp = zq.Interpreter.init(pool_rt.ctx);
 
@@ -325,6 +330,9 @@ pub const HandlerInstance = struct {
             .arena_state = null,
             .hybrid_state = null,
         };
+        // The pooled Context survives a failed wrapper installation. Normal
+        // teardown clears its published host without destroying pooled cores.
+        errdefer self.deinit();
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
         applyEmbeddedCapabilityPolicy(pool_rt.ctx, config, retained_policy.policy);
@@ -840,10 +848,11 @@ pub const HandlerInstance = struct {
 
         {
             const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
-            const parsed = if (source_kind.isTyped() and !prepared_eval)
+            var parsed = if (source_kind.isTyped() and !prepared_eval)
                 zq.pipeline.ParsedModule.fromTypedExisting(ir_view, p.root_node, &self.ctx.atoms, &p.js_parser.type_store)
             else
                 zq.pipeline.ParsedModule.fromExisting(ir_view, p.root_node, &self.ctx.atoms);
+            parsed.scopes = &p.js_parser.scopes;
 
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
             defer type_env_storage.deinit(self.allocator);

@@ -511,6 +511,10 @@ const witness_flow_path = "witness-flow.ts";
 /// replay it against the same handler. Returns the response body, owned by
 /// `allocator`. This is the path a persisted witness takes, minus the file.
 fn replayFlowWitnessBody(allocator: std.mem.Allocator, handler_code: []const u8) ![]u8 {
+    return replayFlowWitnessPropertyBody(allocator, handler_code, .no_secret_leakage, null);
+}
+
+fn replayFlowWitnessPropertyBody(allocator: std.mem.Allocator, handler_code: []const u8, property: counterexample.PropertyTag, expected_io: ?[]const counterexample.TrackedIoCall) ![]u8 {
     const rt = try HandlerInstance.init(allocator, .{ .replay_file_path = "witness-flow-test" });
     defer rt.deinit();
 
@@ -526,15 +530,29 @@ fn replayFlowWitnessBody(allocator: std.mem.Allocator, handler_code: []const u8)
 
     var checker = zq.FlowChecker.init(allocator, ir_view, &rt.ctx.atoms);
     defer checker.deinit();
+    checker.scopes = &p.js_parser.scopes;
     _ = try checker.check(handler_fn);
 
     var jsonl: std.ArrayList(u8) = .empty;
     defer jsonl.deinit(allocator);
     for (checker.getDiagnostics()) |d| {
-        if (d.kind != .secret_in_response) continue;
+        const matches = switch (property) {
+            .no_secret_leakage => d.kind == .secret_in_response,
+            .no_credential_leakage => d.kind == .credential_in_response,
+            else => return error.UnsupportedReplayProperty,
+        };
+        if (!matches) continue;
         const w = d.witness orelse return error.MissingWitness;
+        if (expected_io) |expected| {
+            try std.testing.expectEqual(expected.len, w.io_calls.len);
+            for (expected, w.io_calls) |want, actual| {
+                try std.testing.expectEqualStrings(want.module, actual.module);
+                try std.testing.expectEqualStrings(want.func, actual.func);
+                try std.testing.expectEqual(want.returns, actual.returns);
+            }
+        }
         var witness = try zq.solveCounterexample(allocator, .{
-            .property = .no_secret_leakage,
+            .property = property,
             .origin = .{ .line = 1, .column = 1 },
             .sink = .{ .line = 1, .column = 1 },
             .summary = "t",
@@ -555,6 +573,14 @@ fn replayFlowWitnessBody(allocator: std.mem.Allocator, handler_code: []const u8)
     }
     if (groups.len != 1) return error.UnexpectedGroupCount;
     const group = groups[0];
+    if (expected_io) |expected| {
+        try std.testing.expectEqual(expected.len, group.io_calls.len);
+        for (expected, group.io_calls, 0..) |want, actual, seq| {
+            try std.testing.expectEqualStrings(want.module, actual.module);
+            try std.testing.expectEqualStrings(want.func, actual.func);
+            try std.testing.expectEqual(seq, actual.seq);
+        }
+    }
 
     var replay_state = zq.trace.ReplayState{ .io_calls = group.io_calls, .cursor = 0, .divergences = 0 };
     rt.ctx.setModuleState(
@@ -577,7 +603,42 @@ fn replayFlowWitnessBody(allocator: std.mem.Allocator, handler_code: []const u8)
     var response = try rt.executeHandler(request);
     defer response.deinit();
     if (replay_state.divergences != 0) return error.ReplayDiverged;
+    if (expected_io != null) try std.testing.expectEqual(group.io_calls.len, replay_state.cursor);
     return allocator.dupe(u8, response.body);
+}
+
+test "a direct credential witness supplies authorization and replays the leak" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const body = try replayFlowWitnessPropertyBody(allocator,
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ token: req.headers.authorization });
+        \\}
+    , .no_credential_leakage, null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "Bearer counterexample-token") != null);
+}
+
+test "a flow witness preserves native Bytes and Dict values during replay" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const body = try replayFlowWitnessPropertyBody(allocator,
+        \\import { env } from "zttp:env";
+        \\import { encodeUtf8, bytesLength } from "zttp:bytes";
+        \\import { dictEmpty, dictSet, dictEntries } from "zttp:collections";
+        \\function handler(req: Request): Response {
+        \\  const bytes = encodeUtf8("ok");
+        \\  const count = bytesLength(bytes);
+        \\  const dict = dictSet(dictEmpty(), "a", 1);
+        \\  const entries = dictEntries(dict);
+        \\  const secret = env("API_SECRET");
+        \\  return Response.json({ bytes: count, entries: entries.length, leaked: secret });
+        \\}
+    , .no_secret_leakage, &.{.{ .module = "env", .func = "env", .returns = .optional_string }});
+    try std.testing.expect(std.mem.indexOf(u8, body, "secret-sentinel") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"bytes\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"entries\":1") != null);
 }
 
 test "a flow witness for a leak behind a failed fetch replays into the leak" {

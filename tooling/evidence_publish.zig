@@ -487,11 +487,10 @@ fn validateUnionEvidence(
         union_payload.observations == 0 or
         union_payload.distinctSets == 0 or
         union_payload.distinctSets > union_payload.observations or
-        union_payload.smallestSet == 0 or
         union_payload.smallestSet > union_payload.largestSet or
         union_payload.largestSet > union_payload.unionCount or
-        union_payload.unionCount == 0 or
         union_payload.unionCount != union_payload.@"union".len or
+        (union_payload.largestSet == 0 and union_payload.distinctSets != 1) or
         current_tripped.len < union_payload.smallestSet or
         current_tripped.len > union_payload.largestSet or
         (union_payload.distinctSets == 1 and
@@ -723,14 +722,28 @@ fn renderCoverageMarkdown(
     var output: std.Io.Writer.Allocating = .init(allocator);
     errdefer output.deinit();
     const writer = &output.writer;
-    try writer.print(
+    try writer.writeAll(
         "<!-- Generated file. Do not edit. Run `bash scripts/update-coverage.sh` to regenerate it. -->\n\n" ++
             "# Coverage\n\nWhat the offline suite proves, and what it does not.\n\n" ++
-            "> The offline suite proves two things. The harness is faithful: recorder capture\n" ++
+            "> The harness is faithful: recorder capture\n" ++
             "> and replay, the loop, veto, apply, retry, salvage, compiler repair, and the\n" ++
-            "> hole loop execute correctly over their declared fixtures. And the\n" ++
-            "> corpus is load-bearing: of the compiler's {d} advertised rules,\n" ++
-            "> {d} are tripped by at least one case. It proves nothing about what a\n" ++
+            "> hole loop execute correctly over their declared fixtures.\n",
+    );
+    if (tripped.len == 0) {
+        try writer.print(
+            "> In this recording, no advertised registry-rule rejection is observed\n" ++
+                "> across the compiler's {d} rules. Off-registry diagnostics are recorded separately.\n",
+            .{total},
+        );
+    } else {
+        try writer.print(
+            "> The corpus is load-bearing: of the compiler's {d} advertised rules,\n" ++
+                "> {d} are tripped by at least one case.\n",
+            .{ total, tripped.len },
+        );
+    }
+    try writer.print(
+        "> It proves nothing about what a\n" ++
             "> model will draft. Raw first-draft pass, first-attempt green, median\n" ++
             "> round-trips, and intent pass\n" ++
             "> exist only as recordings of a live model, an offline run is structurally unable\n" ++
@@ -756,7 +769,7 @@ fn renderCoverageMarkdown(
             "## Rule coverage\n\n" ++
             "| Rules advertised | Tripped by at least one case | Untripped |\n|---|---|---|\n" ++
             "| {d} | {d} | {d} |\n\nTripped: ",
-        .{ total, tripped.len, recorded, version[0..12], total, tripped.len, untripped.len },
+        .{ recorded, version[0..12], total, tripped.len, untripped.len },
     );
     try writeCodes(writer, tripped);
     try writer.writeAll(
@@ -839,13 +852,12 @@ fn renderCoverageMarkdown(
             "`zig build test-expert-app` replays the committed cassettes and prints one\n" ++
             "`[proof-coverage]` line. `scripts/update-coverage.sh` lifts it, writes\n" ++
             "[coverage.json](coverage.json), and renders this page.\n\n" ++
-            "The replay carries three floors and a ratchet. The denominator must be credible,\n" ++
-            "the collector must have read something, and the committed baseline in\n" ++
-            "`packages/pi/src/expert_codegen_record.zig` must name at least five rules - an\n" ++
-            "emptied baseline iterates nothing and reports a clean ratchet over no claim. The\n" ++
-            "ratchet is one-directional and headline-model only: a corpus that grows trips\n" ++
-            "more and nothing complains, a corpus that stops standing on a fence fails and\n" ++
-            "names it.\n",
+            "The replay requires the declared rule denominator and all 13 corpus cases.\n" ++
+            "Independent positive and negative transcripts calibrate the same diagnostic\n" ++
+            "collector used for the measurements; their synthetic codes never enter this\n" ++
+            "recording's counts. The committed baseline in\n" ++
+            "`packages/pi/src/expert_codegen_record.zig` explicitly pins this measured zero\n" ++
+            "and its off-registry diagnostics. An emptied ordinary rule baseline is refused.\n",
     );
     return output.toOwnedSlice();
 }
@@ -911,12 +923,17 @@ fn printCoverageInputs(
     var stdout_buffer: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
     try stdout_writer.interface.print("{s}\n", .{try stringField(object, "corpusVersion")});
-    for (tripped, 0..) |value, index| {
-        if (index != 0) try stdout_writer.interface.writeByte(' ');
-        try stdout_writer.interface.writeAll(value.string);
-    }
+    try writeUnionPending(&stdout_writer.interface, tripped);
     try stdout_writer.interface.writeByte('\n');
     try stdout_writer.interface.flush();
+}
+
+fn writeUnionPending(writer: *std.Io.Writer, tripped: []const std.json.Value) !void {
+    if (tripped.len == 0) return writer.writeAll("--measured-zero");
+    for (tripped, 0..) |value, index| {
+        if (index != 0) try writer.writeByte(' ');
+        try writer.writeAll(value.string);
+    }
 }
 
 fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
@@ -980,6 +997,32 @@ test "auxiliary consumers require complete seed and union inputs" {
         error.InvalidUnionEvidence,
         parseUnion(std.testing.allocator, "[coverage-union] {\"observations\":1}\n"),
     );
+}
+
+test "zero coverage renders truthfully and hands off an explicit observation" {
+    const a = std.testing.allocator;
+    const version = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, "{\"corpusVersion\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"rulesTotal\":3,\"tripped\":[],\"untripped\":[\"ZTS001\",\"ZTS002\",\"ZTS003\"],\"offRegistry\":[\"ZTS056\",\"ZTS203\"]}", .{});
+    defer parsed.deinit();
+    var union_payload: UnionPayload = .{ .corpusVersion = version, .sourceTreeHash = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .observations = 2, .distinctSets = 2, .smallestSet = 0, .largestSet = 1, .unionCount = 1, .@"union" = &.{"ZTS001"} };
+    try validateUnionEvidence(union_payload, version, &.{});
+    const rendered = try renderCoverageMarkdown(a, parsed.value.object, "2026-10-20", .{ .seedsTotal = 2, .rulesTotal = 3, .verifiedRules = 2, .verified = &.{ "ZTS001", "ZTS002" }, .unseeded = &.{.{ .code = "ZTS003", .reason = "non-default" }} }, union_payload);
+    defer a.free(rendered);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "no advertised registry-rule rejection is observed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "corpus is load-bearing") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "| 3 | 0 | 3 |") != null);
+    var pending: std.Io.Writer.Allocating = .init(a);
+    defer pending.deinit();
+    try writeUnionPending(&pending.writer, &.{});
+    try std.testing.expectEqualStrings("--measured-zero", pending.written());
+    union_payload.observations = 1;
+    union_payload.distinctSets = 1;
+    union_payload.largestSet = 0;
+    union_payload.unionCount = 0;
+    union_payload.@"union" = &.{};
+    try validateUnionEvidence(union_payload, version, &.{});
+    union_payload.observations = 0;
+    try std.testing.expectError(error.InvalidUnionEvidence, validateUnionEvidence(union_payload, version, &.{}));
 }
 
 test "source comparison refuses movement and dirty evidence" {

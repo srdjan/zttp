@@ -533,6 +533,57 @@ pub fn collectCodes(
     }
 }
 
+const CodeCollector = *const fn (std.mem.Allocator, *const transcript_mod.Transcript, *CodeSet, *CodeSet) anyerror!void;
+
+/// Check the collector independently of how many mistakes a real recording
+/// contains. Probe sets never join the empirical measurement's sets.
+pub fn calibrateCodeCollector(allocator: std.mem.Allocator) !void {
+    try calibrateCodeCollectorWith(allocator, collectCodes);
+}
+
+fn calibrateCodeCollectorWith(allocator: std.mem.Allocator, collector: CodeCollector) !void {
+    const rules = zts.PolicyCatalog.rules();
+    if (rules.len < 59 or zts.PolicyCatalog.findByCode("ZTS056") != null or
+        zts.PolicyCatalog.findByCode("ZTS203") != null) return error.CollectorCalibrationFailed;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var text: std.Io.Writer.Allocating = .init(a);
+    try text.writer.writeAll(loop.veto_reject_preamble);
+    for (rules) |rule| try text.writer.print(" {s}", .{rule.code});
+    try text.writer.writeAll(" ZTS056 ZTS203 ZTS000");
+    const diagnostics = text.written();
+    for (0..3) |channel| {
+        var tr: transcript_mod.Transcript = .{};
+        switch (channel) {
+            0 => try tr.append(a, .{ .diagnostic_box = .{ .llm_text = diagnostics } }),
+            1, 2 => try tr.append(a, .{ .tool_result = .{ .tool_use_id = "calibration", .tool_name = if (channel == 1) "zts_check" else "propose_change_set", .ok = channel == 1, .llm_text = diagnostics } }),
+            else => unreachable,
+        }
+        var hits: CodeSet = .empty;
+        var off: CodeSet = .empty;
+        try collector(a, &tr, &hits, &off);
+        if (hits.count() != rules.len or off.count() != 2 or
+            !off.contains("ZTS056") or !off.contains("ZTS203")) return error.CollectorCalibrationFailed;
+        for (rules) |rule| if (!hits.contains(rule.code)) return error.CollectorCalibrationFailed;
+    }
+
+    var clean: transcript_mod.Transcript = .{};
+    try clean.append(a, .{ .user_text = diagnostics });
+    try clean.append(a, .{ .model_text = diagnostics });
+    try clean.append(a, .{ .system_note = diagnostics });
+    try clean.append(a, .{ .proof_card = .{ .llm_text = diagnostics } });
+    try clean.append(a, .{ .tool_result = .{ .tool_use_id = "read", .tool_name = "workspace_read", .ok = false, .llm_text = diagnostics } });
+    try clean.append(a, .{ .tool_result = .{ .tool_use_id = "applied", .tool_name = "propose_change_set", .ok = true, .llm_text = diagnostics } });
+    try clean.append(a, .{ .tool_result = .{ .tool_use_id = "noncompiler", .tool_name = "propose_change_set", .ok = false, .llm_text = try std.fmt.allocPrint(a, "not a compiler rejection: {s}", .{diagnostics}) } });
+    try clean.append(a, .{ .diagnostic_box = .{ .llm_text = "ZTS000 clean" } });
+    try clean.append(a, .{ .tool_result = .{ .tool_use_id = "check", .tool_name = "zts_check", .ok = true, .llm_text = "ZTS000 clean" } });
+    var hits: CodeSet = .empty;
+    var off: CodeSet = .empty;
+    try collector(a, &clean, &hits, &off);
+    if (hits.count() != 0 or off.count() != 0) return error.CollectorCalibrationFailed;
+}
+
 /// Substring match with both boundaries checked. Without it `ZTS30` matches
 /// inside `ZTS300` and `POL1` inside `POL10`, so a rule would be reported as
 /// tripped by a diagnostic for a different one.
@@ -833,4 +884,18 @@ test "code collection reads persisted apply edit compiler rejections" {
     try collectCodes(testing.allocator, &tr, &hits, &off);
     try testing.expect(hits.contains("ZTS400"));
     try testing.expectEqualStrings("ZTS400", firstZtsCode(&tr).?);
+}
+
+test "collector calibration rejects no op and false positive collectors" {
+    const Mutants = struct {
+        fn noop(_: std.mem.Allocator, _: *const transcript_mod.Transcript, _: *CodeSet, _: *CodeSet) anyerror!void {}
+
+        fn noisy(a: std.mem.Allocator, tr: *const transcript_mod.Transcript, hits: *CodeSet, off: *CodeSet) anyerror!void {
+            try collectCodes(a, tr, hits, off);
+            try hits.put(a, zts.PolicyCatalog.rules()[0].code, {});
+        }
+    };
+    try calibrateCodeCollector(testing.allocator);
+    try testing.expectError(error.CollectorCalibrationFailed, calibrateCodeCollectorWith(testing.allocator, Mutants.noop));
+    try testing.expectError(error.CollectorCalibrationFailed, calibrateCodeCollectorWith(testing.allocator, Mutants.noisy));
 }

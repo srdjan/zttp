@@ -1,7 +1,7 @@
 ---
 title: A module-level declaration carried no label, so its secret proved clean
 date: 2026-10-08
-last_updated: 2026-10-08
+last_updated: 2026-10-20
 category: security-issues
 module: packages/zts/src/flow_checker.zig (module-level declarations and .global bindings)
 problem_type: security_issue
@@ -24,6 +24,7 @@ tags:
   - soundness
 binds:
   - packages/zts/src/flow_checker.zig
+  - packages/zts/src/flow_interp.zig
 proves: zig build test-zts
 ---
 
@@ -48,6 +49,16 @@ function handler(req) {
 A sink in a module-level initializer (`const n = console.log(env("API_TOKEN"))`) also never ran, although it runs at load time.
 
 ## Solution
+
+**2026-10-20, analyzer v7.** Production now initializes modules in runtime order
+through `initializeModule` in `packages/zts/src/flow_interp.zig#FlowInterp`, then
+analyzes handler calls to a fixed point over persistent global and reachable
+heap cells. Initializer sinks and effects participate in the report. Captures
+use the parser's binding identities through
+`packages/zts/src/flow_interp.zig#CaptureTable` and `evalIdentifier`; an unplaced
+capture or a read before its declaration clears the report. The walker helpers
+below describe the original fix. Its regression tests remain in
+`flow_checker.zig`.
 
 `check` now calls `walkModuleDeclarations` before the handler and the route roots. It walks each top-level data declaration in source order, so the labels land under the `.global` key and the sinks in an initializer run. A function declaration and a function-valued constant are skipped: they hold no datum, and a call or a route root walks their bodies. `unrecordedBindingLabels` is the fail-closed half. A `.global` read with no recorded labels carries `.unknown`, and only a function declaration, a function-valued constant, or an import is exempt, each by its kind. The walk sets `walking_module_level` so that a load-time call does not enter the witness stub sequence.
 

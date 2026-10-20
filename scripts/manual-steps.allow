@@ -1,11 +1,11 @@
 # Build steps whose work nothing runs automatically, and why that is correct.
 #
-# Enforced in both directions by the step-coverage gate in build/step_coverage.zig, which
-# walks the real dependency graph rather than parsing source: a top-level step
-# whose dependency closure is not reached by `zig build test`, by a step
-# `scripts/verify.sh`, `scripts/release.sh`, or a workflow invokes, or by a shell
-# gate one of those runs directly, must appear here. A row for a step that
-# something now runs fails the same gate, and so does a row naming a step that no longer exists.
+# Enforced in both directions by build/step_coverage.zig. The live graph owns
+# task identity; tooling/verification_routes.zig owns external executable argv
+# shared with the sequential driver. Every dependency closure must be reached
+# by aggregate test, a declared per-commit/release route, or a reason here.
+# Comments and display labels provide no coverage. Rows for covered or deleted
+# tasks fail the same gate.
 #
 # One row per (step, reason slug). A row is a claim that this step is an
 # operation a human asks for, not a check that was wired and forgotten. That
@@ -61,3 +61,11 @@ test-proof-checker-mutants slow-mutation-probe
 # case's stated intent, and commits it. Wiring it into a check would defeat the
 # gate, because a build that rewrites its own expected output never disagrees.
 diagnostic-corpus-write regeneration
+
+# The canonical sequential gate is an operator entry point, never recursively
+# invoked by its own task coverage. Its constituent routes are checked.
+verify sequential-verification-driver
+
+# Shadow evaluator evidence deliberately stays outside production/aggregate
+# verdicts until P9 meets every frozen precision and semantic expectation.
+flow-shadow-diff shadow-differential-evidence

@@ -33,19 +33,57 @@ pub fn add(ctx: Context) Result {
         .optimize = optimize,
     });
     const repo_gate_exe = b.addExecutable(.{ .name = "repo-gate", .root_module = repo_gate_mod });
-    const repo_gate_tests = b.addTest(.{ .root_module = repo_gate_mod });
-    const run_repo_gate_tests = b.addRunArtifact(repo_gate_tests);
+    const repo_gate_tests = ctx.addTest(.{ .root_module = repo_gate_mod });
+    const run_repo_gate_tests = ctx.addRunTest(repo_gate_tests);
     const graph_gate_mod = b.createModule(.{
         .root_source_file = b.path("tooling/zts_graph_gate.zig"),
         .target = b.graph.host,
         .optimize = optimize,
     });
     const zts_graph_gate_exe = b.addExecutable(.{ .name = "zts-graph-gate", .root_module = graph_gate_mod });
-    const graph_gate_tests = b.addTest(.{ .root_module = graph_gate_mod });
-    const run_graph_gate_tests = b.addRunArtifact(graph_gate_tests);
+    const graph_gate_tests = ctx.addTest(.{ .root_module = graph_gate_mod });
+    const run_graph_gate_tests = ctx.addRunTest(graph_gate_tests);
     const native_gate_test_step = b.step("test-native-gates", "Run native repository gate tests");
     native_gate_test_step.dependOn(&run_repo_gate_tests.step);
     native_gate_test_step.dependOn(&run_graph_gate_tests.step);
+
+    // Separate gate processes inherit the same redirected stdout descriptor.
+    // A positional writer would erase the prefix or the preceding verdict.
+    const stream_probe = b.addSystemCommand(&.{
+        "/bin/sh",                  "-c",
+        \\set -eu
+        \\probe_file=$(mktemp)
+        \\trap 'rm -f "$probe_file"' EXIT
+        \\{ printf 'native gate prefix\n'; "$1" release-workflow scripts/release.sh; "$2" layering; } > "$probe_file"
+        \\test "$(head -n 1 "$probe_file")" = 'native gate prefix'
+        \\test "$(grep -c '^release script: ' "$probe_file")" -eq 1
+        \\test "$(grep -c '^zts layering: OK ' "$probe_file")" -eq 1
+        \\printf 'native gate stream probe: earlier output and both verdicts preserved\n'
+        ,
+        "native-gate-stream-probe",
+    });
+    stream_probe.addArtifactArg(repo_gate_exe);
+    stream_probe.addArtifactArg(zts_graph_gate_exe);
+    stream_probe.setCwd(b.path("."));
+    stream_probe.has_side_effects = true;
+    native_gate_test_step.dependOn(&stream_probe.step);
+
+    const routes_mod = b.createModule(.{ .root_source_file = b.path("tooling/verification_routes.zig"), .target = b.graph.host, .optimize = optimize });
+    const route_tests = ctx.addTest(.{ .root_module = routes_mod });
+    const run_route_tests = ctx.addRunTest(route_tests);
+    run_route_tests.setCwd(b.path("."));
+    run_route_tests.setEnvironmentVariable("ZTTP_ZIG_EXE", b.graph.zig_exe);
+    native_gate_test_step.dependOn(&run_route_tests.step);
+    const verify_exe = b.addExecutable(.{
+        .name = "verify",
+        .root_module = b.createModule(.{ .root_source_file = b.path("tooling/verify.zig"), .target = b.graph.host, .optimize = optimize }),
+    });
+    const verify_run = b.addRunArtifact(verify_exe);
+    verify_run.addArg(b.graph.zig_exe);
+    verify_run.setCwd(b.path("."));
+    verify_run.has_side_effects = true;
+    if (b.args) |args| verify_run.addArgs(args);
+    b.step("verify", "Run the sequential local verification driver").dependOn(&verify_run.step);
 
     // Release evidence parsing and rendering stay in repository-only native
     // commands. The publication shells keep the stable entry-point names.
@@ -70,8 +108,8 @@ pub fn add(ctx: Context) Result {
     if (b.args) |args| evidence_publish_cmd.addArgs(args);
     const evidence_publish_step = b.step("evidence-publish", "Render validated release evidence");
     evidence_publish_step.dependOn(&evidence_publish_cmd.step);
-    const evidence_publish_tests = b.addTest(.{ .root_module = evidence_publish_mod });
-    const run_evidence_publish_tests = b.addRunArtifact(evidence_publish_tests);
+    const evidence_publish_tests = ctx.addTest(.{ .root_module = evidence_publish_mod });
+    const run_evidence_publish_tests = ctx.addRunTest(evidence_publish_tests);
     const evidence_publish_test_step = b.step("test-evidence-publish", "Run native evidence publisher tests");
     evidence_publish_test_step.dependOn(&run_evidence_publish_tests.step);
 
@@ -90,11 +128,11 @@ pub fn add(ctx: Context) Result {
     release_provenance_cmd.has_side_effects = true;
     const release_provenance_step = b.step("release-provenance", "Validate release evidence provenance");
     release_provenance_step.dependOn(&release_provenance_cmd.step);
-    const release_provenance_tests = b.addTest(.{
+    const release_provenance_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = release_provenance_mod,
     });
-    const run_release_provenance_tests = b.addRunArtifact(release_provenance_tests);
+    const run_release_provenance_tests = ctx.addRunTest(release_provenance_tests);
     const release_provenance_test_step = b.step("test-release-provenance", "Run release provenance tests");
     release_provenance_test_step.dependOn(&run_release_provenance_tests.step);
 
@@ -117,11 +155,11 @@ pub fn add(ctx: Context) Result {
     if (b.args) |args| coverage_union_cmd.addArgs(args);
     const coverage_union_step = b.step("coverage-union", "Union the tripped rules across published runs of one corpus identity");
     coverage_union_step.dependOn(&coverage_union_cmd.step);
-    const coverage_union_tests = b.addTest(.{
+    const coverage_union_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = coverage_union_mod,
     });
-    const run_coverage_union_tests = b.addRunArtifact(coverage_union_tests);
+    const run_coverage_union_tests = ctx.addRunTest(coverage_union_tests);
     const coverage_union_test_step = b.step("test-coverage-union", "Run coverage-union tests");
     coverage_union_test_step.dependOn(&run_coverage_union_tests.step);
 
@@ -147,8 +185,8 @@ pub fn add(ctx: Context) Result {
     const release_check_step = b.step("release-check", "Print this repository's release-readiness passport");
     release_check_step.dependOn(&release_check_cmd.step);
 
-    const release_check_tests = b.addTest(.{ .filters = test_filters, .root_module = release_check_mod });
-    const run_release_check_tests = b.addRunArtifact(release_check_tests);
+    const release_check_tests = ctx.addTest(.{ .filters = test_filters, .root_module = release_check_mod });
+    const run_release_check_tests = ctx.addRunTest(release_check_tests);
     // The repository-version test reads README.md, VERSION, and the package
     // manifests by relative path, so it must run from the repository root
     // whatever directory the invoker used.
@@ -164,11 +202,11 @@ pub fn add(ctx: Context) Result {
         .target = b.graph.host,
         .optimize = optimize,
     });
-    const production_branch_metric_tests = b.addTest(.{
+    const production_branch_metric_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = production_branch_metric_mod,
     });
-    const run_production_branch_metric_tests = b.addRunArtifact(production_branch_metric_tests);
+    const run_production_branch_metric_tests = ctx.addRunTest(production_branch_metric_tests);
     const production_branch_metric = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh" }, "production-branch-metric", "Measure production branch points in tracked Zig sources");
     _ = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh", "--json" }, "production-branch-metric-json", "Measure production branch points as JSON");
     const production_branch_metric_test_step = b.step("test-production-branch-metric", "Test and run the production branch metric");

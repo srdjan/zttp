@@ -131,6 +131,7 @@ const TestHttpServer = struct {
     // Only consulted when mode == .sequenced_status: one status code per
     // accepted connection, in order.
     status_sequence: []const u16 = &.{},
+    raw_response: []const u8 = "",
 
     const Mode = enum {
         echo_request_json,
@@ -138,6 +139,7 @@ const TestHttpServer = struct {
         silent_hold,
         sequenced_status,
         forecast,
+        raw_response,
     };
 
     fn init(allocator: std.mem.Allocator, mode: Mode) !TestHttpServer {
@@ -216,6 +218,14 @@ const TestHttpServer = struct {
             .large_plain_text => try self.respondWithLargeBody(&stream, io),
             .silent_hold => try self.holdSilently(&stream, io),
             .forecast => try self.respondWithForecast(&stream, io),
+            .raw_response => {
+                var captured = try captureRequest(self.allocator, &stream, io);
+                defer captured.deinit(self.allocator);
+                var buffer: [4096]u8 = undefined;
+                var writer = stream.writer(io, &buffer);
+                try writer.interface.writeAll(self.raw_response);
+                try writer.interface.flush();
+            },
             .sequenced_status => unreachable,
         }
     }
@@ -562,6 +572,107 @@ test "a pooled wrapper re-points the host slot and clears it on deinit" {
     const second = try HandlerInstance.initFromPool(base_rt, .{}, policy_generation);
     defer second.deinit();
     try std.testing.expectEqual(@as(?*HandlerInstance, second), HandlerInstance.fromContext(base_rt.ctx));
+}
+
+test "standalone initialization unwinds builtin and trace allocation failures" {
+    const ProbeAllocator = struct {
+        backing: std.mem.Allocator,
+        fd: ?std.c.fd_t = null,
+        remaining: usize,
+        failed: bool = false,
+
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+        }
+        fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            // Context.init creates the global object before initBuiltins
+            // creates prototypes/native functions. Alternatively, target the
+            // first allocations after openTraceFile has published its fd.
+            const selected = if (self.fd) |fd|
+                std.posix.system.fcntl(fd, std.posix.F.GETFD, @as(c_int, 0)) != -1
+            else
+                len == @sizeOf(zq.JSObject);
+            if (selected) {
+                if (self.remaining == 0) {
+                    self.failed = true;
+                    return null;
+                }
+                self.remaining -= 1;
+            }
+            return self.backing.rawAlloc(len, alignment, ret_addr);
+        }
+        fn resize(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+        }
+        fn remap(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+        }
+        fn free(ptr: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.backing.rawFree(memory, alignment, ret_addr);
+        }
+    };
+    // Skip the Context's global object, then fail the first and second builtin
+    // objects. This exercises pre-handoff cleanup without an exhaustive
+    // constructor sweep on every test-root invocation.
+    for ([_]usize{ 1, 2 }) |objects_before_failure| {
+        var probe: ProbeAllocator = .{ .backing = std.testing.allocator, .remaining = objects_before_failure };
+        try std.testing.expectError(error.OutOfMemory, HandlerInstance.init(probe.allocator(), .{}));
+        try std.testing.expect(probe.failed);
+    }
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
+    defer std.testing.allocator.free(path);
+
+    for (0..2) |after_open| {
+        const fd = try runtime_config_mod.openTraceFile(std.testing.allocator, path);
+        std.Io.Threaded.closeFd(fd);
+        var probe: ProbeAllocator = .{ .backing = std.testing.allocator, .fd = fd, .remaining = after_open };
+        try std.testing.expectError(error.OutOfMemory, HandlerInstance.init(probe.allocator(), .{
+            .trace_file_path = path,
+            .outbound_http_enabled = true,
+        }));
+        try std.testing.expect(probe.failed);
+        try std.testing.expectEqual(@as(c_int, -1), std.posix.system.fcntl(fd, std.posix.F.GETFD, @as(c_int, 0)));
+    }
+}
+
+test "failed pooled initialization clears its host and releases wrapper state" {
+    const Probe = struct {
+        fn run(fail_from_end: ?usize) !usize {
+            var pool = try zq.LockFreePool.init(std.testing.allocator, .{ .max_size = 1 });
+            defer pool.deinit();
+            const base = try pool.acquire();
+            defer pool.release(base);
+            const original_allocator = base.ctx.allocator;
+            var failing = std.testing.FailingAllocator.init(original_allocator, .{});
+            base.ctx.allocator = failing.allocator();
+            defer base.ctx.allocator = original_allocator;
+            const generation = try RuntimePolicyGeneration.create(std.testing.allocator, 1, .{}, false);
+            defer generation.release();
+            const before = failing.alloc_index;
+            if (fail_from_end) |offset| failing.fail_index = before + offset;
+            if (HandlerInstance.initFromPool(base, .{ .outbound_http_enabled = true }, generation)) |rt| {
+                defer rt.deinit();
+                try std.testing.expect(fail_from_end == null);
+                return failing.alloc_index - before;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expectEqual(@as(?*anyopaque, null), base.ctx.host);
+                try std.testing.expectEqual(@as(usize, 1), generation.refs.load(.monotonic));
+                return failing.alloc_index - before;
+            }
+        }
+    };
+    const allocations = try Probe.run(null);
+    try std.testing.expect(allocations >= 8);
+    // The last binding allocations happen after host publication. Deriving
+    // their positions from a successful construction avoids brittle indices.
+    for (allocations - 8..allocations) |offset| _ = try Probe.run(offset);
 }
 
 test "fromContext returns null for a Context no runtime claimed" {
@@ -3375,6 +3486,87 @@ test "loadCodeNoHandler supports imported benchmark-style scripts" {
     const result = try rt.callGlobalFunction("run", &args);
     try std.testing.expect(result.isInt());
     try std.testing.expectEqual(@as(i32, 12), result.getInt());
+}
+
+test "outbound adapters preserve exchange results and failure stages" {
+    const gzip_body = "\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x33\x30\x34\x32\x36\x31\x35\x33\xb7\xb0\x4c\x4c\x4a\x4e\x49\x4d\x33\x40\xe3\x03\x00\x0e\xb5\x59\x77\x20\x00\x00\x00";
+    const Case = struct { response: []const u8 = "", expected_error: []const u8 = "", silent: bool = false, fail_send: bool = false };
+    const cases = [_]Case{
+        .{ .response = "HTTP/1.1 201 Origin Supplied\r\nContent-Length: 4\r\nContent-Type: text/plain\r\nX-Reply: seen\r\nConnection: close\r\n\r\nbody" },
+        .{ .response = "HTTP/1.1 200 OK\r\nContent-Length: 32\r\nConnection: close\r\n\r\nshort", .expected_error = "ResponseReadFailed" },
+        .{ .response = "invalid response\r\n\r\n", .expected_error = "ResponseHeadFailed" },
+        .{ .response = "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: 39\r\nConnection: close\r\n\r\n" ++ gzip_body, .expected_error = "ResponseTooLarge" },
+        .{ .silent = true, .expected_error = "TimedOut" },
+        .{ .silent = true, .fail_send = true, .expected_error = "RequestSendFailed" },
+    };
+    const FailWrite = struct {
+        fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, _: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
+            return error.ConnectionResetByPeer;
+        }
+    };
+
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        var previous_details: ?[]const u8 = null;
+        for ([_]bool{ false, true }) |json_adapter| {
+            var server = try TestHttpServer.init(std.testing.allocator, if (case.silent) .silent_hold else .raw_response);
+            server.raw_response = case.response;
+            defer server.join() catch {};
+            try server.start();
+            const url = try server.url(allocator, "/exchange");
+            const rt = try HandlerInstance.init(allocator, .{
+                .outbound_http_enabled = true,
+                .outbound_allow_host = "127.0.0.1",
+                .outbound_timeout_ms = 250,
+                .outbound_max_response_bytes = 16,
+                .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
+            });
+            defer rt.deinit();
+            if (case.fail_send) rt.outbound_io_backend.?.vtable.netWrite = FailWrite.write;
+            const source = if (json_adapter)
+                try std.fmt.allocPrint(allocator,
+                    \\function handler(req) {{
+                    \\  const result = JSON.parse(httpRequest(JSON.stringify({{ url: "{s}", method: "POST", body: req.body, headers: {{ "X-Test": "borrowed" }} }})));
+                    \\  return Response.json({{ status: result.status ?? 599, error: result.error ?? "", details: result.details ?? "", body: result.body ?? "", reason: result.reason ?? "", reply: "" }});
+                    \\}}
+                , .{url})
+            else
+                try std.fmt.allocPrint(allocator,
+                    \\function handler(req) {{
+                    \\  const result = fetchSync("{s}", {{ method: "POST", body: req.body, headers: {{ "X-Test": "borrowed" }} }});
+                    \\  const failure = result.status === 599 ? JSON.parse(result.body) : {{ error: "", details: "" }};
+                    \\  return Response.json({{ status: result.status, error: failure.error, details: failure.details, body: result.body, reason: result.statusText, reply: result.headers.get("x-reply") ?? "" }});
+                    \\}}
+                , .{url});
+            try rt.loadHandler(source, "<outbound-adapter-parity>");
+            var request = try makeTestRequest(allocator, "GET", "/", null);
+            defer request.deinit(allocator);
+            if (case.fail_send) {
+                const body = try allocator.alloc(u8, 64 * 1024);
+                @memset(body, 'x');
+                request.body = body;
+            }
+            var response = try rt.executeHandler(request.asView());
+            defer response.deinit();
+            try server.join();
+            var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+            defer parsed.deinit();
+            const result = parsed.value.object;
+            try std.testing.expectEqualStrings(case.expected_error, result.get("error").?.string);
+            try std.testing.expectEqual(@as(i64, if (case.expected_error.len == 0) 201 else 599), result.get("status").?.integer);
+            if (case.expected_error.len == 0) {
+                try std.testing.expectEqualStrings("body", result.get("body").?.string);
+                try std.testing.expectEqualStrings("Origin Supplied", result.get("reason").?.string);
+                if (!json_adapter) try std.testing.expectEqualStrings("seen", result.get("reply").?.string);
+            } else if (previous_details) |expected| {
+                try std.testing.expectEqualStrings(expected, result.get("details").?.string);
+            } else {
+                previous_details = try allocator.dupe(u8, result.get("details").?.string);
+            }
+        }
+    }
 }
 
 test "a POST with no body is sent with an empty body" {

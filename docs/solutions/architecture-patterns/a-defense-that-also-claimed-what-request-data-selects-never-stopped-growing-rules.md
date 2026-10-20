@@ -1,8 +1,9 @@
 ---
 title: A defense that also claimed what request data selects never stopped growing rules
 date: 2026-10-20
+last_updated: 2026-10-20
 category: architecture-patterns
-module: ZigTS flow checker defense facts (flow_interp shadow, P6)
+module: ZigTS flow interpreter defense facts (P6, production analyzer v7)
 problem_type: architecture_pattern
 component: tooling
 severity: high
@@ -23,6 +24,9 @@ tags:
   - stated-limit
   - implicit-flow
   - mutation-testing
+binds:
+  - packages/zts/src/flow_interp.zig
+proves: zig build test-zts
 ---
 
 # A defense that also claimed what request data selects never stopped growing rules
@@ -30,9 +34,16 @@ tags:
 ## Context
 
 P6 of the flow-checker redesign added defense facts beside the provenance
-labels in `packages/zts/src/flow_interp.zig`. `html_escaped` (line 133) is
+labels in `packages/zts/src/flow_interp.zig#Defense`. `html_escaped` is
 the fact that `escapeHtml` establishes and that the HTML response sink
-accepts (`requirement`, line 1201).
+accepts (`packages/zts/src/flow_interp.zig#requirement`).
+
+**2026-10-20, analyzer v7.** The interpreter now supplies the production flow
+verdict through the `FlowChecker` facade. `html_escaped` and `schema_checked`
+are separate defenses; provenance labels survive validation. Object validation
+attaches a checked view whose evidence expires when an alias writes into its
+reachable cells. The P6 design history below explains the narrower HTML claim
+that production retains.
 
 The first drafts gave `html_escaped` a wide meaning: request data controls no
 markup in the value. Request data controls markup in two ways. It injects
@@ -72,7 +83,7 @@ The owner chose this as D25 Option B. `html_escaped` now claims only this:
 every character of the value that came from request data passed `escapeHtml`,
 and no later operation turned an escaped character back into markup. It says
 nothing about which author characters appear, where, how often, or in what
-order. The doc comment on `Defense` states the claim (lines 127-137), and the
+order. The doc comment on `Defense` states the claim, and the
 doc comment on `requirement` states the limit beside the HTML-context limit
 (D24).
 
@@ -82,7 +93,7 @@ Two rules keep the narrowed claim sound:
    a callback index carry the labels of the data that computed them, and
    they combine as data. A raw request bound therefore removes the defense,
    because the bound is an exposed contributor with no defense. The callback
-   index uses the `structure` parameter (for example line 2279), which reads
+   index uses the `structure` parameter in `FlowInterp.paramValue`, which reads
    the labels of everything the receiver reaches.
 2. An operation that makes or reinterprets characters removes `html_escaped`
    at its row edge: `replace`, `replaceAll`, `String.fromCharCode`,
@@ -108,7 +119,7 @@ implicit-flow tracking that the analysis deliberately does not do.
 A narrow claim with a stated limit is checkable. A reader of the proof
 receipt can see what the fact covers, and a test can pin the limit. Test 10
 (`request data that selects author characters keeps html_escaped, as D25
-states`, line 6504) records the limit, so a later phase that narrows it must
+states`) records the limit, so a later phase that narrows it must
 change that test on purpose.
 
 A second finding from the same work: a source table row that passes a fact
@@ -116,7 +127,7 @@ through from its input needs an evaluator test, not only a census row.
 `escapeHtml` keeps `schema_checked` from a validated argument. The census
 table checked that the row said so, but no evaluator test exercised it, so a
 mutation that made `escapeHtml` keep nothing survived. Test 6 now checks
-`escapeHtml(v)` with a seed that holds `schema_checked` (lines 6423-6426). This is
+`escapeHtml(v)` with a seed that holds `schema_checked`. This is
 the same shape as [a gate can be non-vacuous and still
 porous](../conventions/a-gate-can-be-non-vacuous-and-still-porous.md): a
 census checks that a declaration exists, not that the evaluator honours it.
@@ -162,6 +173,6 @@ return Response.html("<img src=x onerror=alert(1)>".slice(n));
   is the same lesson for determinism: the fix narrowed the claim to what the
   check measures.
 - [validateJson strips the label it was asked to check](../security-issues/validate-json-strips-the-label-it-was-asked-to-check.md)
-  describes the `validated` bit that `flow_checker.zig` still uses. The
-  shadow evaluator in `flow_interp.zig` carries no `validated` label; its
-  defenses come from the `defense_sources` table (line 1123).
+  describes the former `validated` provenance bit. Production uses the separate
+  `schema_checked` defense in `flow_interp.zig`; its `defense_sources` table
+  supplies the parsed-value validation rules.
