@@ -1,8 +1,9 @@
-//! Flow evaluator, phases P2 to P5b: the abstract domain, the location scheme,
+//! Flow evaluator, phases P2 to P5c: the abstract domain, the location scheme,
 //! the field-sensitive heap, an evaluator for expressions and statements,
 //! `for...of` loops (P3), calls with captured bindings and recursion (P4), the
-//! builtin globals with the operations that take no callback (P5a), and the
-//! calls of imported virtual-module exports (P5b).
+//! builtin globals with the operations that take no callback (P5a), the calls
+//! of imported virtual-module exports (P5b), and the callbacks of array
+//! methods, `Array.from`, and seven exports (P5c).
 //!
 //! This is the shadow of the checker that will replace the label walk in
 //! `flow_checker.zig`. Nothing in the pipeline, the CLI, or any verdict reads
@@ -554,10 +555,10 @@ pub const TagPlan = union(enum) {
 /// - `budget_limit`: the root analysis reached `max_steps`.
 /// - `refused_by_strict`: the strict checker refuses the construct (call-site
 ///   spread, ZTS616, or a global the strict checker does not know).
-/// - `no_operation_rule`: an operation that has no transfer rule: a builtin
-///   method whose rule a later phase adds, a call that the runtime fails with
-///   `NotCallable`, or a native method of an object the analysis does not
-///   model (R3).
+/// - `no_operation_rule`: an operation that has no transfer rule: a method of
+///   a native Result, a callback argument that holds no function, a call that
+///   the runtime fails with `NotCallable`, or a native method of an object the
+///   analysis does not model (R3).
 pub const Owner = enum {
     p6,
     p7,
@@ -734,8 +735,27 @@ const Rule = enum {
     array_scalar,
     /// `slice` and `toReversed`: a fresh array of the elements.
     array_copy,
-    /// `toSorted`: a copy without a comparator. A comparator is a callback.
+    /// `toSorted`: a copy, and a comparator is a callback.
     array_to_sorted,
+    /// `map`: a fresh array of the callback results.
+    array_map,
+    /// `filter`: a fresh array of the elements, labelled by the predicate.
+    array_filter,
+    /// `find`: an element, labelled by the predicate.
+    array_find,
+    /// `forEach`: the callback runs for its writes.
+    array_for_each,
+    /// `every`, `some`, and `findIndex`: a primitive that the predicate decides.
+    array_test,
+    /// `reduce`: the accumulator.
+    array_reduce,
+    /// `Array.from`: a fresh array of the elements, or of the mapped elements.
+    array_from,
+    /// `h`: a vnode that holds what it was given, components included.
+    vnode,
+    /// `renderToString`: runs no component, so it has a rule only for a vnode
+    /// that holds none.
+    render,
     array_concat,
     /// A primitive computed from the arguments alone.
     deep_scalar,
@@ -768,7 +788,7 @@ const OperationRow = struct {
     reason: []const u8 = "",
 };
 
-const callback_reason = "takes a callback, and a later phase adds the rule";
+const callback_reason = "takes a callback, and a Result method is not modeled";
 const result_reason = "a Result method is not modeled";
 
 fn rowsOf(
@@ -801,12 +821,16 @@ const operation_rows =
     rowsOf("Array.prototype", .array_copy, "", &.{ "slice", "toReversed" }) ++
     rowsOf("Array.prototype", .array_to_sorted, "", &.{"toSorted"}) ++
     rowsOf("Array.prototype", .array_concat, "", &.{"concat"}) ++
-    rowsOf("Array.prototype", .no_rule, callback_reason, &.{
-        "map", "filter", "reduce", "forEach", "every", "some", "find", "findIndex",
-    }) ++
+    rowsOf("Array.prototype", .array_map, "", &.{"map"}) ++
+    rowsOf("Array.prototype", .array_filter, "", &.{"filter"}) ++
+    rowsOf("Array.prototype", .array_find, "", &.{"find"}) ++
+    rowsOf("Array.prototype", .array_for_each, "", &.{"forEach"}) ++
+    rowsOf("Array.prototype", .array_test, "", &.{ "every", "some", "findIndex" }) ++
+    rowsOf("Array.prototype", .array_reduce, "", &.{"reduce"}) ++
     rowsOf("Result.prototype", .no_rule, result_reason, &.{
-        "isOk", "isErr", "unwrap", "unwrapOr", "unwrapErr", "map", "mapErr", "andThen", "match",
+        "isOk", "isErr", "unwrap", "unwrapOr", "unwrapErr",
     }) ++
+    rowsOf("Result.prototype", .no_rule, callback_reason, &.{ "map", "mapErr", "andThen", "match" }) ++
     rowsOf("Math", .deep_scalar, "", &.{
         "abs", "floor", "ceil", "round", "min", "max", "pow", "trunc", "sqrt", "sin", "cos", "tan", "log", "exp",
     }) ++
@@ -822,13 +846,14 @@ const operation_rows =
     rowsOf("Date", .nondeterministic, "", &.{"now"}) ++
     rowsOf("Array", .deep_scalar, "", &.{"isArray"}) ++
     rowsOf("Array", .array_of, "", &.{"of"}) ++
-    rowsOf("Array", .no_rule, callback_reason, &.{"from"}) ++
+    rowsOf("Array", .array_from, "", &.{"from"}) ++
     rowsOf("String", .deep_scalar, "", &.{"fromCharCode"}) ++
     rowsOf("global", .deep_scalar, "", &.{ "String", "Number", "parseFloat", "parseInt", "isDict", "isBytes" }) ++
     rowsOf("global", .range, "", &.{"range"}) ++
     rowsOf("global", .parsed, "", &.{ "requestBody", "requestText", "requestJson" }) ++
     rowsOf("global", .hole, "", &.{"hole"}) ++
-    rowsOf("global", .no_rule, callback_reason, &.{ "h", "renderToString" });
+    rowsOf("global", .vnode, "", &.{"h"}) ++
+    rowsOf("global", .render, "", &.{"renderToString"});
 
 /// The builtin objects whose members are the `Math`-style namespace rows.
 const namespace_names = [_][]const u8{ "Array", "Date", "JSON", "Math", "Number", "Object", "Response", "String" };
@@ -846,6 +871,43 @@ fn nameIn(names: []const []const u8, name: []const u8) bool {
 fn findRow(rows: []const OperationRow, scope: []const u8, name: []const u8) ?OperationRow {
     for (rows) |row| {
         if (std.mem.eql(u8, row.scope, scope) and std.mem.eql(u8, row.name, name)) return row;
+    }
+    return null;
+}
+
+/// What a virtual-module export that calls a function passes to it. The
+/// callback is argument 1 of every one of them.
+const CallbackShape = enum {
+    /// `(value, key)` for each entry of the dictionary in argument 0.
+    dict_entries,
+    /// `(acc, value, key)`, with the initial value in argument 2.
+    dict_fold,
+    /// The payload of the Result in argument 0.
+    payload,
+};
+
+const CallbackExport = struct {
+    specifier: []const u8,
+    name: []const u8,
+    shape: CallbackShape,
+};
+
+/// The exports with a precise callback rule. The binding cannot say that a
+/// parameter is a callback, so any other export keeps the presumed call.
+/// Census C2 checks each row against `findExport` and against a test.
+const callback_exports = [_]CallbackExport{
+    .{ .specifier = "zttp:collections", .name = "dictMapValues", .shape = .dict_entries },
+    .{ .specifier = "zttp:collections", .name = "dictFilter", .shape = .dict_entries },
+    .{ .specifier = "zttp:collections", .name = "dictFold", .shape = .dict_fold },
+    .{ .specifier = "zttp:result", .name = "mapResult", .shape = .payload },
+    .{ .specifier = "zttp:result", .name = "mapError", .shape = .payload },
+    .{ .specifier = "zttp:result", .name = "andThen", .shape = .payload },
+    .{ .specifier = "zttp:result", .name = "orElse", .shape = .payload },
+};
+
+fn findCallbackExport(rows: []const CallbackExport, specifier: []const u8, name: []const u8) ?CallbackExport {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.specifier, specifier) and std.mem.eql(u8, row.name, name)) return row;
     }
     return null;
 }
@@ -1861,9 +1923,54 @@ pub const FlowInterp = struct {
             .array_scalar => return Value.labelled(LabelSet.mergeValues(labels, try self.deepLabels(st, &.{r}))),
             .array_copy => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, labels),
             .array_to_sorted => {
-                // A comparator is a callback, and a later phase adds its rule.
-                if (args.len > 0) return self.noRule(node);
-                return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, labels);
+                if (args.len == 0) return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, labels);
+                // The comparator may run many times per element, and it sees
+                // two of them.
+                const results = try self.runCallback(node, args[0], &.{ .{ .elements = r }, .{ .elements = r } }, st);
+                const sorted = withLabels(try self.readAll(st.*, r), resultLabels(results));
+                return self.allocate(st, .allocated_array, node, &.{sorted}, labels);
+            },
+            .array_map => {
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
+                return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, labels);
+            },
+            .array_filter => {
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
+                // The predicate decides which elements stay, so its labels
+                // reach each one. The receiver is read after the loop, which
+                // sees what the callback wrote.
+                const kept = withLabels(try self.readAll(st.*, r), resultLabels(results));
+                return self.allocate(st, .allocated_array, node, &.{kept}, labels);
+            },
+            .array_find => {
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
+                const kept = withLabels(try self.readAll(st.*, r), resultLabels(results));
+                return withLabels(kept, labels);
+            },
+            .array_for_each => {
+                _ = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
+                return Value.labelled(labels);
+            },
+            .array_test => {
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
+                const decided = LabelSet.mergeValues(try self.deepLabels(st, &.{r}), resultLabels(results));
+                return Value.labelled(LabelSet.mergeValues(labels, decided));
+            },
+            .array_reduce => {
+                const initial = if (args.len > 1) args[1] else try self.readAll(st.*, r);
+                const results = try self.runCallback(
+                    node,
+                    argAt(args, 0),
+                    &.{ .{ .acc = initial }, .{ .elements = r }, .clean, .{ .itself = r } },
+                    st,
+                );
+                return withLabels((try joinOpt(self.mem(), initial, results)) orelse initial, labels);
+            },
+            .array_from => {
+                const source: Param = .{ .elements_labelled = argAt(args, 0) };
+                if (args.len < 2) return self.allocate(st, .allocated_array, node, &.{try self.paramValue(st, source, null)}, labels);
+                const results = try self.runCallback(node, args[1], &.{ source, .clean }, st);
+                return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, labels);
             },
             .array_concat => {
                 var contents: std.ArrayList(Value) = .empty;
@@ -1888,6 +1995,14 @@ pub const FlowInterp = struct {
             ),
             .array_of => return self.allocate(st, .allocated_array, node, args, labels),
             .response_static => return self.allocate(st, .native, node, &.{try self.reach(st, args)}, arg_labels),
+            .vnode => return self.allocate(st, .allocated_any, node, &.{try self.reach(st, args)}, arg_labels),
+            .render => {
+                // A component runs later and writes `props`, which this
+                // analysis does not follow.
+                const read = try self.reach(st, &.{argAt(args, 0)});
+                if (read.callables_top or read.callables.len > 0) return self.noRule(node);
+                return Value.labelled(read.labels);
+            },
             .hole => {
                 // The call never returns, as a P4 call whose callee has no
                 // completion. The bindings stay readable for the rest of the
@@ -1981,6 +2096,7 @@ pub const FlowInterp = struct {
     /// or which one the result aliases. So the call reads everything the
     /// arguments reach (`R`), runs every function in `R` as a callback of
     /// unknown shape, and returns a container that may be, or hold, any of it.
+    /// The seven exports in `callback_exports` run only their callback.
     fn evalExportCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, st: *State) Error!Value {
         const arena = self.mem();
         const args = try self.evalArgs(c, st);
@@ -1996,13 +2112,18 @@ pub const FlowInterp = struct {
         if (readsVaryingSource(resolved)) labels.nondeterministic = true;
         const held = if (declassified) Value.labelled(labels) else read;
 
-        // Each function the arguments reach may be called, and a function that
-        // the analysis cannot name may be anything.
-        if (read.callables_top) try self.record(node, .call, .unknown_callee);
-        const results = if (read.callables.len > 0)
-            try self.runCallbackLoop(node, read, .{ .presumed = args.values }, st)
-        else
-            null;
+        // An export with a precise row calls the function in its argument 1.
+        // Any other export may call each function the arguments reach, and a
+        // function that the analysis cannot name may be anything.
+        var results: ?Value = null;
+        if (findCallbackExport(&callback_exports, resolved.binding.specifier, resolved.func.name)) |row| {
+            results = try self.exportCallback(node, row.shape, args.values, st);
+        } else {
+            if (read.callables_top) try self.record(node, .call, .unknown_callee);
+            if (read.callables.len > 0) {
+                results = try self.runCallbackLoop(node, read, .{ .presumed = args.values }, st);
+            }
+        }
 
         var contents: std.ArrayList(Value) = .empty;
         try contents.append(arena, held);
@@ -2026,12 +2147,31 @@ pub const FlowInterp = struct {
         return out;
     }
 
+    /// One parameter of a callback, computed from the loop head on each pass.
+    const Param = union(enum) {
+        /// The accumulator: its initial value joined with every result so far.
+        acc: Value,
+        /// Every element of the value, read at the head.
+        elements: Value,
+        /// Every element of the value, read at the head, and the labels of the
+        /// value itself.
+        elements_labelled: Value,
+        /// The labels of everything the value reaches at the head.
+        deep: Value,
+        /// The value itself.
+        itself: Value,
+        /// A primitive that carries nothing.
+        clean,
+    };
+
     /// What a callback loop passes on each pass.
     const LoopParams = union(enum) {
         /// A presumed call: every parameter of the callee is everything that
         /// these arguments reach in the loop head, joined with the results so
         /// far.
         presumed: []const Value,
+        /// A precise call: the parameters, in order.
+        precise: []const Param,
     };
 
     /// The number of parameters of the function at `func_node`, or 0 when the
@@ -2053,6 +2193,68 @@ pub const FlowInterp = struct {
                 @memset(vector, every);
                 return vector;
             },
+            .precise => |list| {
+                const vector = try arena.alloc(Value, list.len);
+                for (list, vector) |param, *slot| slot.* = try self.paramValue(head, param, results);
+                return vector;
+            },
+        }
+    }
+
+    /// The value of `param` in the loop head, with the results of the passes
+    /// so far (null before the first).
+    fn paramValue(self: *FlowInterp, head: *const State, param: Param, results: ?Value) Error!Value {
+        switch (param) {
+            .acc => |initial| return (try joinOpt(self.mem(), initial, results)) orelse initial,
+            .elements => |source| return self.readAll(head.*, source),
+            .elements_labelled => |source| {
+                return joinValue(self.mem(), try self.readAll(head.*, source), Value.labelled(source.labels));
+            },
+            .deep => |source| return Value.labelled(try self.deepLabels(head, &.{source})),
+            .itself => |v| return v,
+            .clean => return Value.clean,
+        }
+    }
+
+    fn resultLabels(results: ?Value) LabelSet {
+        return (results orelse return .empty).labels;
+    }
+
+    /// Run the callback `f` of the operation at `node` as a precise loop. A
+    /// callback that holds no function, or that may be any function, is
+    /// recorded, and the result is `top`. A null result means that no callback
+    /// completes.
+    fn runCallback(self: *FlowInterp, node: NodeIndex, f: Value, params: []const Param, st: *State) Error!?Value {
+        if (f.callables_top) {
+            try self.record(node, .call, .unknown_callee);
+            return Value.top;
+        }
+        if (f.callables.len == 0) {
+            try self.record(node, .call, .no_operation_rule);
+            return Value.top;
+        }
+        return self.runCallbackLoop(node, f, .{ .precise = params }, st);
+    }
+
+    /// The precise callback of an export (argument 1). The results join the
+    /// call's summary and value, and `dictFold` returns its accumulator, which
+    /// is the initial value joined with every result.
+    fn exportCallback(self: *FlowInterp, node: NodeIndex, shape: CallbackShape, args: []const Value, st: *State) Error!?Value {
+        const source = argAt(args, 0);
+        const f = argAt(args, 1);
+        switch (shape) {
+            .dict_entries => return self.runCallback(node, f, &.{ .{ .elements = source }, .{ .deep = source } }, st),
+            .dict_fold => {
+                const initial = argAt(args, 2);
+                const results = try self.runCallback(
+                    node,
+                    f,
+                    &.{ .{ .acc = initial }, .{ .elements = source }, .{ .deep = source } },
+                    st,
+                );
+                return try joinOpt(self.mem(), initial, results);
+            },
+            .payload => return self.runCallback(node, f, &.{.{ .elements = source }}, st),
         }
     }
 
@@ -4351,14 +4553,18 @@ test "a known callable joined with an unknown one is an unknown callee" {
 }
 
 test "a call through a property dispatches to the stored function or the builtin" {
-    // A callback method has no rule in P5a. P5c replaces the row.
-    const array_method = try analyzeSource(
-        "function f(s) { const a = [() => \"c\"]; return a.map(() => s)[0]; }",
+    // A callback method of an array resolves.
+    try expectSecret("function f(s) { const a = [() => \"c\"]; return a.map(() => s)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { const a = [() => \"c\"]; return a.map(() => \"c\")[0]; }", &.{secret_value}, false);
+
+    // The method of a native Result with the same name has no rule.
+    const result_method = try analyzeSource(
+        "function f(s) { return JSON.parse(s).map(() => \"c\")[0]; }",
         "f",
         &.{secret_value},
     );
-    defer array_method.deinit();
-    try expectUnresolved(array_method.result, .call, .no_operation_rule);
+    defer result_method.deinit();
+    try expectUnresolved(result_method.result, .call, .no_operation_rule);
 
     // A function stored in a property runs, by name and by literal key.
     try expectSecret("function f(s) { const o = { m: () => \"c\" }; return o.m(); }", &.{secret_value}, false);
@@ -4539,9 +4745,9 @@ test "a capture cell is not an object and a read through an unnamed origin skips
 //
 // These sources are internal evaluator fixtures. `s` is seeded secret. Each
 // secret test has a contrast in which a literal replaces the secret, so the
-// result is clean. Test 25 of the P5 specification is reserved: it belongs to
-// P5c, because `map` is the only name that `Array.prototype` and
-// `Result.prototype` share and P5a refuses it.
+// result is clean. Test 25 of the P5 specification is test 51, in the P5c
+// section: `map` is the only name that `Array.prototype` and
+// `Result.prototype` share.
 
 /// Run `f` and require a result whose `returned` carries exactly the labels in
 /// `expected`, with the result resolved.
@@ -4753,22 +4959,12 @@ test "clock and random reads carry nondeterministic" {
 }
 
 // P5 specification test 20.
-test "a callback method has no operation rule until P5c" {
+test "a Result method with a callback has no operation rule" {
     const sources = [_][]const u8{
-        "function f(s) { return [s].map((x) => x); }",
-        "function f(s) { return [s].filter((x) => x); }",
-        "function f(s) { return [s].forEach((x) => x); }",
-        "function f(s) { return [s].reduce((a, x) => x, \"c\"); }",
-        "function f(s) { return [s].every((x) => x); }",
-        "function f(s) { return [s].some((x) => x); }",
-        "function f(s) { return [s].find((x) => x); }",
-        "function f(s) { return [s].findIndex((x) => x); }",
-        "function f(s) { return [s].toSorted((a, b) => 0); }",
-        "function f(s) { return Array.from([s], (x) => x); }",
-        "function f(s) { return h(\"div\", {}, s); }",
-        "function f(s) { return renderToString(s); }",
         "function f(s) { return JSON.parse(s).map((x) => x); }",
+        "function f(s) { return JSON.parse(s).mapErr((x) => x); }",
         "function f(s) { return JSON.parse(s).andThen((x) => x); }",
+        "function f(s) { return JSON.parse(s).match((x) => x); }",
     };
     inline for (sources) |source| {
         const r = try analyzeSource(source, "f", &.{secret_value});
@@ -5039,6 +5235,24 @@ test "census C1: every registered builtin has a row and every row names a builti
         if (row.rule == .no_rule) row.reason = "";
     }
     try testing.expectError(error.RowWithoutReason, censusBuiltins(ctx, silent));
+
+    // After P5c the only rows with no rule are the methods of a native Result,
+    // and the only rows with a callback reason are its four callback methods.
+    var without_rule: usize = 0;
+    var callback_rows: usize = 0;
+    for (operation_rows) |row| {
+        if (row.rule == .no_rule) {
+            without_rule += 1;
+            try testing.expectEqualStrings("Result.prototype", row.scope);
+        }
+        if (std.mem.eql(u8, row.reason, callback_reason)) {
+            callback_rows += 1;
+            try testing.expectEqualStrings("Result.prototype", row.scope);
+            try testing.expect(nameIn(&.{ "map", "mapErr", "andThen", "match" }, row.name));
+        }
+    }
+    try testing.expectEqual(@as(usize, 9), without_rule);
+    try testing.expectEqual(@as(usize, 4), callback_rows);
 }
 
 // --- P5b: the calls of virtual-module exports ---
@@ -5177,21 +5391,22 @@ test "a validating export keeps the user input it was given" {
 
 // P5 specification test 36.
 test "an export with no precise row runs the closures it was given" {
-    const collections = "import { dictEmpty, dictMapValues } from \"zttp:collections\"; ";
-    try expectSecret(collections ++ "function f(s) { return dictMapValues(dictEmpty(), () => s); }", &.{secret_value}, true);
-    try expectSecret(collections ++ "function f(s) { return dictMapValues(dictEmpty(), () => \"c\"); }", &.{secret_value}, false);
+    // `dictSet` never calls its value, and it has no precise row.
+    const collections = "import { dictEmpty, dictSet } from \"zttp:collections\"; ";
+    try expectSecret(collections ++ "function f(s) { return dictSet(dictEmpty(), \"k\", () => s); }", &.{secret_value}, true);
+    try expectSecret(collections ++ "function f(s) { return dictSet(dictEmpty(), \"k\", () => \"c\"); }", &.{secret_value}, false);
 
     // A function that the analysis cannot name may be anything.
     const unknown: Value = .{ .callables_top = true };
-    const open = try analyzeSource(collections ++ "function f(g) { return dictMapValues(dictEmpty(), g); }", "f", &.{unknown});
+    const open = try analyzeSource(collections ++ "function f(g) { return dictSet(dictEmpty(), \"k\", g); }", "f", &.{unknown});
     defer open.deinit();
     try expectUnresolved(open.result, .call, .unknown_callee);
 }
 
 // P5 specification test 37.
 test "a presumed call keeps the flags of what its callbacks returned" {
-    const collections = "import { dictEmpty, dictFold } from \"zttp:collections\"; ";
-    const source = collections ++ "function f(s) { return dictFold(dictEmpty(), () => Number, 0)(s); }";
+    const collections = "import { dictEmpty, dictSet } from \"zttp:collections\"; ";
+    const source = collections ++ "function f(s) { return dictSet(dictEmpty(), \"k\", () => Number)(s); }";
     const r = try analyzeSource(source, "f", &.{secret_value});
     defer r.deinit();
     try expectUnresolved(r.result, .call, .unknown_callee);
@@ -5304,6 +5519,370 @@ test "a presumed callback loop runs again until its parameters stop growing" {
     try expectUnresolved(try h.analyze("f", &.{secret_value}), .call, .fixpoint_limit);
     h.interp.max_loop_passes = needed;
     try testing.expect(!(try h.analyze("f", &.{secret_value})).cleared);
+}
+
+// --- P5c: callbacks ---
+
+// An element in a named cell is not in the summary that a read of the method
+// name sees, so only the rule can carry it into the result. Each secret test
+// that needs the elements uses these two receivers.
+const held_secret = "function f(s) { const a = []; a[\"0\"] = s; ";
+const held_clean = "function f(s) { const a = []; a[\"0\"] = \"c\"; ";
+
+// P5 specification test 40.
+test "map passes each element to its callback and returns the results" {
+    try expectSecret("function f(s) { return [s].map((x) => x)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].map((x) => x)[0]; }", &.{secret_value}, false);
+    try expectSecret(held_secret ++ "return a.map((x) => x)[0]; }", &.{secret_value}, true);
+    try expectSecret(held_clean ++ "return a.map((x) => x)[0]; }", &.{secret_value}, false);
+    // The callback also receives the index and the array.
+    try expectSecret(held_secret ++ "return a.map((x, i, y) => y[\"0\"])[0]; }", &.{secret_value}, true);
+    try expectSecret(held_clean ++ "return a.map((x, i, y) => y[\"0\"])[0]; }", &.{secret_value}, false);
+}
+
+// P5 specification test 41.
+test "filter labels its elements with the predicate" {
+    try expectSecret("function f(s) { return [\"c\"].filter(() => s)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].filter(() => \"c\")[0]; }", &.{secret_value}, false);
+    try expectSecret(held_secret ++ "return a.filter((x) => true)[0]; }", &.{secret_value}, true);
+    try expectSecret(held_clean ++ "return a.filter((x) => true)[0]; }", &.{secret_value}, false);
+}
+
+test "find, forEach, every, some, and findIndex carry what their callback sees" {
+    try expectSecret("function f(s) { return [\"c\"].find(() => s); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].find(() => \"c\"); }", &.{secret_value}, false);
+    try expectSecret(held_secret ++ "return a.find((x) => true); }", &.{secret_value}, true);
+    try expectSecret(held_clean ++ "return a.find((x) => true); }", &.{secret_value}, false);
+
+    // `forEach` runs for its writes.
+    const each = "function f(s) { const o = { x: \"c\" }; ";
+    try expectSecret(each ++ "[s].forEach((x) => { o.x = x; }); return o.x; }", &.{secret_value}, true);
+    try expectSecret(each ++ "[\"c\"].forEach((x) => { o.x = x; }); return o.x; }", &.{secret_value}, false);
+
+    inline for (.{ "every", "some", "findIndex" }) |method| {
+        try expectSecret("function f(s) { return [\"c\"]." ++ method ++ "(() => s); }", &.{secret_value}, true);
+        try expectSecret(held_secret ++ "return a." ++ method ++ "((x) => true); }", &.{secret_value}, true);
+        try expectSecret("function f(s) { return [\"c\"]." ++ method ++ "(() => \"c\"); }", &.{secret_value}, false);
+        try expectSecret(held_clean ++ "return a." ++ method ++ "((x) => true); }", &.{secret_value}, false);
+    }
+}
+
+// P5 specification test 42.
+test "a later pass of a callback loop sees the writes of an earlier one" {
+    try expectSecret(
+        "function f(s) { const a = [\"c\"]; const out = a.map((x) => { a.push(s); return x; }); return out[\"0\"]; }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { const a = [\"c\"]; const out = a.map((x) => { a.push(\"c\"); return x; }); return out[\"0\"]; }",
+        &.{secret_value},
+        false,
+    );
+}
+
+// P5 specification test 43.
+test "reduce joins every result into its accumulator" {
+    try expectSecret("function f(s) { return [s].reduce((acc, value) => value, \"c\"); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].reduce((acc, value) => value, \"c\"); }", &.{secret_value}, false);
+    try expectSecret(held_secret ++ "return a.reduce((acc, value) => value, \"c\"); }", &.{secret_value}, true);
+    try expectSecret(held_clean ++ "return a.reduce((acc, value) => value, \"c\"); }", &.{secret_value}, false);
+    // Without an initial value the accumulator starts as the elements.
+    try expectSecret(held_secret ++ "return a.reduce((acc, value) => \"c\"); }", &.{secret_value}, true);
+    try expectSecret(held_clean ++ "return a.reduce((acc, value) => \"c\"); }", &.{secret_value}, false);
+}
+
+// P5 specification test 44.
+test "a comparator sees two elements and labels the sorted copy" {
+    const sort = "function f(s) { const o = { x: \"c\" }; ";
+    try expectSecret(sort ++ "[s].toSorted((a, b) => { o.x = a; return 0; }); return o.x; }", &.{secret_value}, true);
+    try expectSecret(sort ++ "[s].toSorted((a, b) => { o.x = b; return 0; }); return o.x; }", &.{secret_value}, true);
+    try expectSecret(sort ++ "[\"c\"].toSorted((a, b) => { o.x = b; return 0; }); return o.x; }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return [\"c\"].toSorted(() => s)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return [\"c\"].toSorted(() => 0)[0]; }", &.{secret_value}, false);
+}
+
+// P5 specification test 45.
+test "Array.from passes the source and its labels to the callback" {
+    const from = "function f(s) { const o = { x: \"c\" }; ";
+    try expectSecret(from ++ "Array.from(s, (x) => { o.x = x; return \"c\"; }); return o.x; }", &.{secret_value}, true);
+    try expectSecret(from ++ "Array.from(\"c\", (x) => { o.x = x; return \"c\"; }); return o.x; }", &.{secret_value}, false);
+    try expectSecret("function f(s) { return Array.from([\"c\"], () => s)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return Array.from([s], (x) => x)[0]; }", &.{secret_value}, true);
+    // Without a callback the result holds the elements.
+    try expectSecret("function f(s) { return Array.from([s])[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return Array.from([\"c\"])[0]; }", &.{secret_value}, false);
+}
+
+const ExportFixture = struct {
+    specifier: []const u8,
+    name: []const u8,
+    /// The result is secret, and the secret reaches it only through the
+    /// capture of the callback.
+    secret: []const u8,
+    clean: []const u8,
+    /// Another argument holds a function that returns the secret, and the
+    /// export never calls it, so the result is clean.
+    elsewhere: []const u8,
+};
+
+const collections_import = "import { dictEmpty, dictMapValues, dictFilter, dictFold } from \"zttp:collections\"; ";
+const result_import = "import { ok, err, mapResult, mapError, andThen, orElse } from \"zttp:result\"; ";
+
+const export_fixtures = [_]ExportFixture{
+    .{
+        .specifier = "zttp:collections",
+        .name = "dictMapValues",
+        .secret = collections_import ++ "function f(s) { return dictMapValues(dictEmpty(), () => s); }",
+        .clean = collections_import ++ "function f(s) { return dictMapValues(dictEmpty(), () => \"c\"); }",
+        .elsewhere = collections_import ++ "function f(s) { return dictMapValues({ k: () => s }, () => \"c\"); }",
+    },
+    .{
+        .specifier = "zttp:collections",
+        .name = "dictFilter",
+        .secret = collections_import ++ "function f(s) { return dictFilter(dictEmpty(), () => s); }",
+        .clean = collections_import ++ "function f(s) { return dictFilter(dictEmpty(), () => \"c\"); }",
+        .elsewhere = collections_import ++ "function f(s) { return dictFilter({ k: () => s }, () => \"c\"); }",
+    },
+    .{
+        .specifier = "zttp:collections",
+        .name = "dictFold",
+        .secret = collections_import ++ "function f(s) { return dictFold(dictEmpty(), () => s, 0); }",
+        .clean = collections_import ++ "function f(s) { return dictFold(dictEmpty(), () => \"c\", 0); }",
+        .elsewhere = collections_import ++ "function f(s) { return dictFold({ k: () => s }, () => \"c\", 0); }",
+    },
+    .{
+        .specifier = "zttp:result",
+        .name = "mapResult",
+        .secret = result_import ++ "function f(s) { return mapResult(ok(\"c\"), () => s); }",
+        .clean = result_import ++ "function f(s) { return mapResult(ok(\"c\"), () => \"c\"); }",
+        .elsewhere = result_import ++ "function f(s) { return mapResult({ v: () => s }, () => \"c\"); }",
+    },
+    .{
+        .specifier = "zttp:result",
+        .name = "mapError",
+        .secret = result_import ++ "function f(s) { return mapError(err(\"c\"), () => s); }",
+        .clean = result_import ++ "function f(s) { return mapError(err(\"c\"), () => \"c\"); }",
+        .elsewhere = result_import ++ "function f(s) { return mapError({ v: () => s }, () => \"c\"); }",
+    },
+    .{
+        .specifier = "zttp:result",
+        .name = "andThen",
+        .secret = result_import ++ "function f(s) { return andThen(ok(\"c\"), () => s); }",
+        .clean = result_import ++ "function f(s) { return andThen(ok(\"c\"), () => \"c\"); }",
+        .elsewhere = result_import ++ "function f(s) { return andThen({ v: () => s }, () => \"c\"); }",
+    },
+    .{
+        .specifier = "zttp:result",
+        .name = "orElse",
+        .secret = result_import ++ "function f(s) { return orElse(err(\"c\"), () => s); }",
+        .clean = result_import ++ "function f(s) { return orElse(err(\"c\"), () => \"c\"); }",
+        .elsewhere = result_import ++ "function f(s) { return orElse({ v: () => s }, () => \"c\"); }",
+    },
+};
+
+const ExportCensusError = error{
+    /// A row names no export that `findExport` finds.
+    RowWithoutExport,
+    /// A row's export has no function parameter at argument 1.
+    RowWithoutCallbackParam,
+    /// A row has no fixture.
+    RowWithoutTest,
+    /// A fixture names no row.
+    TestWithoutRow,
+};
+
+/// Check the precise export rows against `findExport` and against the
+/// fixtures, in both directions, and return the number of rows.
+fn censusExports(rows: []const CallbackExport, fixtures: []const ExportFixture) ExportCensusError!usize {
+    for (rows) |row| {
+        const found = engine.builtin_modules.findExport(row.specifier, row.name) orelse return error.RowWithoutExport;
+        if (found.func.param_types.len < 2 or found.func.param_types[1] != .object) return error.RowWithoutCallbackParam;
+        var tested = false;
+        for (fixtures) |fixture| {
+            tested = tested or (std.mem.eql(u8, fixture.specifier, row.specifier) and std.mem.eql(u8, fixture.name, row.name));
+        }
+        if (!tested) return error.RowWithoutTest;
+    }
+    for (fixtures) |fixture| {
+        if (findCallbackExport(rows, fixture.specifier, fixture.name) == null) return error.TestWithoutRow;
+    }
+    return rows.len;
+}
+
+// P5 specification test 46.
+test "census C2: each callback export runs its callback and only its callback" {
+    const rows = try censusExports(&callback_exports, &export_fixtures);
+    std.debug.print("flow_interp export census: {d} precise callback rows, {d} fixtures\n", .{ rows, export_fixtures.len });
+    // A floor on the input: a census over no rows would pass.
+    try testing.expect(rows >= 7);
+    try testing.expectEqual(callback_exports.len, rows);
+
+    for (export_fixtures) |fixture| {
+        try expectSecret(fixture.secret, &.{secret_value}, true);
+        try expectSecret(fixture.clean, &.{secret_value}, false);
+        try expectSecret(fixture.elsewhere, &.{secret_value}, false);
+    }
+
+    // A probe that drops a fixture, a row, or the export itself must fail.
+    for (0..export_fixtures.len) |skipped| {
+        var kept: [export_fixtures.len - 1]ExportFixture = undefined;
+        @memcpy(kept[0..skipped], export_fixtures[0..skipped]);
+        @memcpy(kept[skipped..], export_fixtures[skipped + 1 ..]);
+        try testing.expectError(error.RowWithoutTest, censusExports(&callback_exports, &kept));
+    }
+    for (0..callback_exports.len) |skipped| {
+        var kept: [callback_exports.len - 1]CallbackExport = undefined;
+        @memcpy(kept[0..skipped], callback_exports[0..skipped]);
+        @memcpy(kept[skipped..], callback_exports[skipped + 1 ..]);
+        try testing.expectError(error.TestWithoutRow, censusExports(&kept, &export_fixtures));
+    }
+    const missing = [_]CallbackExport{.{ .specifier = "zttp:collections", .name = "noSuchExport", .shape = .payload }};
+    try testing.expectError(error.RowWithoutExport, censusExports(&missing, &export_fixtures));
+    // `dictEmpty` takes no argument, so it has no callback parameter.
+    const no_callback = [_]CallbackExport{.{ .specifier = "zttp:collections", .name = "dictEmpty", .shape = .payload }};
+    try testing.expectError(error.RowWithoutCallbackParam, censusExports(&no_callback, &export_fixtures));
+}
+
+test "an export callback receives what its shape says" {
+    const imports = "import { ok, mapResult } from \"zttp:result\"; " ++
+        "import { dictEmpty, dictMapValues, dictFold } from \"zttp:collections\"; ";
+    const setup = imports ++ "function f(s) { const o = { x: \"c\" }; ";
+
+    // The value and the key of each entry.
+    try expectSecret(setup ++ "dictMapValues({ k: s }, (v, k) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, true);
+    try expectSecret(setup ++ "dictMapValues({ k: \"c\" }, (v, k) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, false);
+    try expectSecret(setup ++ "dictMapValues({ k: s }, (v, k) => { o.x = k; return 1; }); return o.x; }", &.{secret_value}, true);
+
+    // The accumulator starts as argument 2, and each entry follows it.
+    try expectSecret(setup ++ "dictFold(dictEmpty(), (acc) => { o.x = acc; return 1; }, s); return o.x; }", &.{secret_value}, true);
+    try expectSecret(setup ++ "dictFold(dictEmpty(), (acc) => { o.x = acc; return 1; }, \"c\"); return o.x; }", &.{secret_value}, false);
+    try expectSecret(setup ++ "dictFold({ k: s }, (acc, v) => { o.x = v; return 1; }, 0); return o.x; }", &.{secret_value}, true);
+
+    // The payload of a Result.
+    try expectSecret(setup ++ "mapResult(ok(s), (v) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, true);
+    try expectSecret(setup ++ "mapResult(ok(\"c\"), (v) => { o.x = v; return 1; }); return o.x; }", &.{secret_value}, false);
+
+    // A fold returns its accumulator, which holds every result.
+    try expectSecret(imports ++ "function f(s) { return dictFold(dictEmpty(), () => s, 0); }", &.{secret_value}, true);
+}
+
+// P5 specification test 47.
+test "a callback that may be any function is an unknown callee" {
+    const unknown: Value = .{ .callables_top = true };
+    const sources = [_][]const u8{
+        "function f(g) { return [1].map(g); }",
+        "function f(g) { return [1].reduce(g, 0); }",
+        "function f(g) { return [1].toSorted(g); }",
+        "function f(g) { return Array.from([1], g); }",
+        "import { dictMapValues, dictEmpty } from \"zttp:collections\"; function f(g) { return dictMapValues(dictEmpty(), g); }",
+    };
+    inline for (sources) |source| {
+        const r = try analyzeSource(source, "f", &.{unknown});
+        defer r.deinit();
+        try expectUnresolved(r.result, .call, .unknown_callee);
+    }
+
+    // A callback argument that holds no function has no rule.
+    const missing = [_][]const u8{
+        "function f(g) { return [1].map(); }",
+        "function f(g) { return [1].filter(3); }",
+        "function f(g) { return [1].toSorted(3); }",
+        "function f(g) { return Array.from([1], 3); }",
+        "import { dictFold, dictEmpty } from \"zttp:collections\"; function f(g) { return dictFold(dictEmpty()); }",
+    };
+    inline for (missing) |source| {
+        const r = try analyzeSource(source, "f", &.{Value.clean});
+        defer r.deinit();
+        try expectUnresolved(r.result, .call, .no_operation_rule);
+    }
+}
+
+// P5 specification test 48.
+test "a callback loop records its passes and the cap" {
+    const source =
+        "function f(s) { const o = { v: \"c\" }; [\"c\"].reduce((acc, x) => { o.v = acc; return s; }, \"c\"); return o.v; }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(
+        "function f(s) { const o = { v: \"c\" }; [\"c\"].reduce((acc, x) => { o.v = acc; return \"c\"; }, \"c\"); return o.v; }",
+        &.{secret_value},
+        false,
+    );
+
+    // The accumulator takes the result of the first pass into the second, and
+    // the third finds nothing new.
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    var needed: u32 = 0;
+    var cap: u32 = 1;
+    while (cap <= 16) : (cap += 1) {
+        h.interp.max_loop_passes = cap;
+        const result = try h.analyze("f", &.{secret_value});
+        var limited = false;
+        for (result.unresolved) |entry| limited = limited or entry.owner == .fixpoint_limit;
+        if (!limited) {
+            needed = cap;
+            break;
+        }
+    }
+    try testing.expectEqual(@as(u32, 3), needed);
+    h.interp.max_loop_passes = needed - 1;
+    try expectUnresolved(try h.analyze("f", &.{secret_value}), .call, .fixpoint_limit);
+    h.interp.max_loop_passes = needed;
+    try testing.expect(!(try h.analyze("f", &.{secret_value})).cleared);
+}
+
+test "a callback chosen through a labelled value labels what it returns" {
+    // `o[s]` stores the function under a key that is the secret, so the value
+    // read back carries it. The second pass passes that label to the
+    // accumulator, and the callback stores it where the caller reads it.
+    const labelled =
+        "function f(s) { const o = {}; const sink = { w: \"c\" }; o[s] = (acc, x) => { sink.w = acc; return \"c\"; }; [1].reduce(o.k, \"c\"); return sink.w; }";
+    try expectSecret(labelled, &.{secret_value}, true);
+    const plain =
+        "function f(s) { const o = {}; const sink = { w: \"c\" }; o[\"k\"] = (acc, x) => { sink.w = acc; return \"c\"; }; [1].reduce(o.k, \"c\"); return sink.w; }";
+    try expectSecret(plain, &.{secret_value}, false);
+}
+
+// P5 specification test 49.
+test "renderToString refuses a vnode that holds a component" {
+    // A component runs later and writes its props.
+    const component = try analyzeSource(
+        "function f(s) { const c = (props) => s; return renderToString(h(c, {})); }",
+        "f",
+        &.{secret_value},
+    );
+    defer component.deinit();
+    try expectUnresolved(component.result, .call, .no_operation_rule);
+
+    // A vnode of strings carries their labels.
+    try expectSecret("function f(s) { return renderToString(h(\"div\", {}, s)); }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return renderToString(h(\"div\", {}, \"c\")); }", &.{secret_value}, false);
+
+    // A write into the children is rendered.
+    try expectSecret(
+        "function f(s) { const v = h(\"div\", {}); v.children = s; return renderToString(v); }",
+        &.{secret_value},
+        true,
+    );
+    try expectSecret(
+        "function f(s) { const v = h(\"div\", {}); v.children = \"c\"; return renderToString(v); }",
+        &.{secret_value},
+        false,
+    );
+}
+
+// P5 specification test 50.
+test "a recursive call through a callback converges" {
+    const go = "function go(n) { if (n) { return n; } return [n].map((x) => go(x)); } ";
+    try expectSecret(go ++ "function f(s) { return go(s); }", &.{secret_value}, true);
+    try expectSecret(go ++ "function f(s) { return go(\"c\"); }", &.{secret_value}, false);
+}
+
+// P5 specification test 51.
+test "an array that a builtin returns is not a Result" {
+    try expectSecret("function f(s) { return s.split(\",\").map((x) => x)[0]; }", &.{secret_value}, true);
+    try expectSecret("function f(s) { return \"a,b\".split(\",\").map((x) => x)[0]; }", &.{secret_value}, false);
 }
 
 // --- the tag census ---
