@@ -115,12 +115,13 @@ planned to close them.
 | A request taken back out of an array, for example `[req].pop()`, before its `authorization` header is read | `no_credential_leak` |
 | `Response.json(req.headers)`, which sends every request header, `Authorization` included | `no_credential_leak` |
 | A response status computed from a secret, such as `Response.json(data, { status: 200 + secret.length })` | `no_secret_leakage` |
+| A request value rendered by `renderToString` as a tag name, as in `h(input, {})`, or as a child of `script` or `style`: the output is not escaped there | `injection_safe` |
 | A failed `assert cond;` without a message: the runtime answered with the last value on the stack, such as a local that holds a secret | `no_secret_leakage` |
 | `let b;` without an initializer in a block after another block that held a secret: `b` read the secret from the reused slot | `no_secret_leakage` |
 
-The `cacheIncr` and response-status rows are fixed after v0.22.3. The same
-change also marks the results of `cacheDelete`, `cacheStats`, `rateReset`, and
-`sqlExec` as unknown.
+The `cacheIncr`, response-status, and `renderToString` rows are fixed after
+v0.22.3. The change that fixed `cacheIncr` also marks the results of
+`cacheDelete`, `cacheStats`, `rateReset`, and `sqlExec` as unknown.
 The two runtime rows are fixed after v0.22.3 in code generation: the analysis
 was right about the program, and the runtime did not run it as written.
 `packages/runtime/src/server_test.zig` holds their regression tests. Each

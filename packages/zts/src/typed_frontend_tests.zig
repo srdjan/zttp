@@ -13892,15 +13892,15 @@ fn expectDirectSingleModuleContract(
 
 test "direct single-module full and sound extraction preserve contract bytes" {
     const fixtures = [_]struct { kind: ContractConsumerCase, source: []const u8, json_hash: u64 }{
-        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xe38f7f1346608b66 },
-        .{ .kind = .nested_first, .source = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n", .json_hash = 0xf49ade37cc4363aa },
-        .{ .kind = .outer_first, .source = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n", .json_hash = 0x01c3c619f8d2694c },
-        .{ .kind = .repeated_holes, .source = "function helper(): number { return hole(); }\nfunction helper(value: string): string { return hole(); }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0x0ba26bf92de5bd0a },
-        .{ .kind = .repeated_capsules, .source = "function helper(): Proof<string, \"pure\"> { return \"a\"; }\nfunction helper(value: string): Proof<string, \"deterministic\"> { return value; }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0x0ba26bf92de5bd0a },
-        .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n", .json_hash = 0xb99cdfc8884af371 },
-        .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0x380661d65737e5bd },
-        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x2e0eeb9482458b5a },
-        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0x6dec42332f050b66 },
+        .{ .kind = .simple, .source = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n", .json_hash = 0xed4311f00828fcd8 },
+        .{ .kind = .nested_first, .source = "function wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\nfunction handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\n", .json_hash = 0x894d00d88ffa4eb7 },
+        .{ .kind = .outer_first, .source = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"outer\");\n}\nfunction wrapper(): number {\n  function handler(req: Request): Proof<Response, \"pure\"> {\n    return Response.text(\"nested\");\n  }\n  return 1;\n}\n", .json_hash = 0x5c020a714018d97c },
+        .{ .kind = .repeated_holes, .source = "function helper(): number { return hole(); }\nfunction helper(value: string): string { return hole(); }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0x80d54852b0d3ef13 },
+        .{ .kind = .repeated_capsules, .source = "function helper(): Proof<string, \"pure\"> { return \"a\"; }\nfunction helper(value: string): Proof<string, \"deterministic\"> { return value; }\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0x80d54852b0d3ef13 },
+        .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n", .json_hash = 0xd835f7ed0fdefbe8 },
+        .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0x83c3341fd56287f4 },
+        .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0xf00e34ca1ac4265e },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0xf3e3fe560800bd31 },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".fields;
     try std.testing.expectEqual(@as(usize, 9), fixtures.len);

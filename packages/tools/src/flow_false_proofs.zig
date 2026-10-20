@@ -49,7 +49,7 @@ pub const Fixture = struct {
 
 /// The count of fixtures at the time this file was written. The floor makes a
 /// deleted fixture a test failure instead of a silent loss.
-const minimum_fixtures: usize = 36;
+const minimum_fixtures: usize = 38;
 
 pub const fixtures = [_]Fixture{
     // -- A `let` reassigned in an `if` or `else` branch.
@@ -425,6 +425,25 @@ pub const fixtures = [_]Fixture{
     \\  return found.handler(req);
     \\}
     },
+    // -- renderToString writes some parts of a vnode unescaped.
+    // runtime: `zttp serve` answered `<script></script><img src=x onerror=alert(1)></script>`
+    // for the body `</script><img src=x onerror=alert(1)>`.
+    .{ .name = "render_script_child_from_input", .property = .injection_safe, .source =
+    \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+    \\  const q = requestText(req);
+    \\  const text = match (q) { when { ok: true, value: v }: v default: "" };
+    \\  return Response.html(renderToString(h("script", {}, text)));
+    \\}
+    },
+    // runtime: `zttp serve` answered `<img src=x onerror=alert(1)></img src=x onerror=alert(1)>`
+    // for the body `img src=x onerror=alert(1)`.
+    .{ .name = "render_tag_from_input", .property = .injection_safe, .source =
+    \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+    \\  const q = requestText(req);
+    \\  const text = match (q) { when { ok: true, value: v }: v default: "" };
+    \\  return Response.html(renderToString(h(text, {})));
+    \\}
+    },
 };
 
 /// Clean contrasts. Each handler is the same shape as a fixture above with no
@@ -455,6 +474,12 @@ pub const contrasts = [_]Fixture{
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const region: string = env("REGION") ?? "";
     \\  return Response.json({ region: region }, { status: 404 });
+    \\}
+    },
+    // runtime: none.
+    .{ .name = "render_literal_clean_contrast", .property = .injection_safe, .source =
+    \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+    \\  return Response.html(renderToString(h("p", {}, "ready")));
     \\}
     },
 };

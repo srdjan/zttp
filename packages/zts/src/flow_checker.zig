@@ -79,8 +79,10 @@ pub const Severity = enum {
 /// the results of cacheIncr, cacheStats, cacheDelete, rateReset, and sqlExec as
 /// unknown. It checks fetchWithRetry as an egress sink and Response.rawJson as
 /// a response helper. It treats the second argument of every response helper
-/// as a response sink, because the runtime sends the status it reads there.
-pub const flow_analyzer_version: u32 = 5;
+/// as a response sink, because the runtime sends the status it reads there. 6
+/// stops treating the output of renderToString as validated, because it writes
+/// tag names, attribute names, and `script` and `style` children unescaped.
+pub const flow_analyzer_version: u32 = 6;
 
 pub const DiagnosticKind = enum {
     secret_in_response, // {secret} data in Response body/headers
@@ -2822,8 +2824,7 @@ pub const FlowChecker = struct {
     /// The rule: such an export discharges exactly one label, `user_input`,
     /// because that is what validating a value means. Every other label the
     /// input carried survives it. An escaped secret is still a secret and a
-    /// parsed credential is still a credential - the same reasoning the
-    /// `renderToString` arm below already applies to escaping.
+    /// parsed credential is still a credential.
     fn parsedResultLabels(self: *FlowChecker, base: LabelSet, call_data: Node.CallExpr) LabelSet {
         var labels = self.argDerivedLabels(base, call_data);
         // Cleared after the union, not before: the argument is normally the
@@ -2939,18 +2940,19 @@ pub const FlowChecker = struct {
                 return self.closureArgLabels(call_data);
             }
 
-            // renderToString(jsx) auto-escapes its output, so a user_input value
-            // interpolated into the JSX and sent via Response.html is HTML-safe
-            // (defended). Model it as `.validated` so the XSS check does not warn.
-            // Escaping does NOT hide a secret/credential, so those labels still
-            // propagate through the argument union and fire their sink diagnostics.
+            // renderToString escapes only the text children of an ordinary
+            // element. It writes the tag name, the attribute names, and the
+            // children of `script` and `style` as they are (`http.zig`
+            // `renderNode`), so its output carries every label of its argument
+            // and establishes no validation. Both `h(input, {})` and
+            // `h("script", {}, input)` sent request markup unescaped under
+            // `zttp serve` while this arm marked the output `.validated`.
             if (self.isRenderToStringCall(call_data.callee)) {
-                var labels = LabelSet{ .validated = true };
+                var labels = LabelSet.empty;
                 for (0..call_data.args_count) |i| {
                     const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
                     labels = LabelSet.mergeValues(labels, self.inferLabels(arg));
                 }
-                labels.validated = true;
                 return labels;
             }
 
@@ -3934,7 +3936,7 @@ pub const FlowChecker = struct {
             .kind = .unvalidated_input_in_egress,
             .node = node,
             .message = "unvalidated user input in Response.html (potential XSS)",
-            .help = "use JSX with renderToString() for auto-escaping, or pass input through validateObject() first",
+            .help = "escape the input with escapeHtml() from zttp:text, or pass it through validateObject() first",
         });
         self.properties.injection_safe = false;
     }
@@ -9794,8 +9796,7 @@ test "decodeJson does not launder a secret" {
 }
 
 test "escapeHtml does not launder a secret" {
-    // Escaping defends against injection. It does not make a secret public,
-    // which the renderToString arm already said and this family did not.
+    // Escaping defends against injection. It does not make a secret public.
     const source =
         \\import { env } from "zttp:env";
         \\import { escapeHtml } from "zttp:text";
@@ -10283,8 +10284,8 @@ test "no flow diagnostic offers a repair a guard cannot perform" {
     // Every kind in this checker reports that a labelled value reached a sink.
     // The label is what fails the proof, and `insert_guard_before_line` inserts
     // a conditional - it cannot remove a label, and `.validated` is conferred
-    // only by a validator call (validateJson, validateObject, schemaCompile,
-    // renderToString), never by an `if`. So every repair intent this checker
+    // only by a validator call (validateJson, validateObject, schemaCompile),
+    // never by an `if`. So every repair intent this checker
     // offered was one that could not clear the diagnostic offering it.
     //
     // That was survivable while the intent never reached the model. Once
