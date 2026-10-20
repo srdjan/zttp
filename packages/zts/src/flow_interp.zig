@@ -1,9 +1,10 @@
-//! Flow evaluator, phases P2 to P5c: the abstract domain, the location scheme,
+//! Flow evaluator, phases P2 to P6: the abstract domain, the location scheme,
 //! the field-sensitive heap, an evaluator for expressions and statements,
 //! `for...of` loops (P3), calls with captured bindings and recursion (P4), the
 //! builtin globals with the operations that take no callback (P5a), the calls
-//! of imported virtual-module exports (P5b), and the callbacks of array
-//! methods, `Array.from`, and seven exports (P5c).
+//! of imported virtual-module exports (P5b), the callbacks of array methods,
+//! `Array.from`, and seven exports (P5c), nested patterns in `match` (P6a),
+//! and the defense facts with their sources and sink requirements (P6b).
 //!
 //! This is the shadow of the checker that will replace the label walk in
 //! `flow_checker.zig`. Nothing in the pipeline, the CLI, or any verdict reads
@@ -12,8 +13,9 @@
 //! (rounds 2 and 3 override its earlier text). The contracts are
 //! `docs/plans/2026-10-19-flow-interp-p2-r16-spec.md`,
 //! `docs/plans/2026-10-19-flow-interp-p3-spec.md`,
-//! `docs/plans/2026-10-19-flow-interp-p4-spec.md`, and
-//! `docs/plans/2026-10-19-flow-interp-p5-spec.md`.
+//! `docs/plans/2026-10-19-flow-interp-p4-spec.md`,
+//! `docs/plans/2026-10-19-flow-interp-p5-spec.md`, and
+//! `docs/plans/2026-10-20-flow-interp-p6-spec.md`.
 //!
 //! The old checker keeps one label set per binding and loses what a value
 //! points at, so a write through an alias reaches nothing the reader can see.
@@ -22,6 +24,8 @@
 //! may call (`callables`). A heap cell is named by an allocation site and a
 //! property name, and one site stands for every object it creates, so every
 //! write is a weak update: it joins with the cell and never removes a label.
+//! Beside the labels, a value carries the defenses that request data passed
+//! (`Defenses`), and an operation keeps or removes them at its own edge.
 //!
 //! Anything this phase does not model sets `cleared` on the result, which means
 //! every flow property is cleared. The wrong answer for a construct owned by a
@@ -118,6 +122,121 @@ fn nodeOrder(a: NodeIndex, b: NodeIndex) std.math.Order {
     return std.math.order(a, b);
 }
 
+/// A fact about request data that a sink may accept in place of a clean
+/// value (R2). It sits beside the provenance labels and never replaces one.
+pub const Defense = enum {
+    /// Every character of the value that came from request data passed
+    /// `escapeHtml`, and no later operation turned an escaped character back
+    /// into markup. The claim is about request characters only: it says
+    /// nothing about which author characters appear, where, or in what order
+    /// (D25).
+    html_escaped,
+    /// The request-controlled part of the value passed a schema validator and
+    /// was not reinterpreted afterwards. It does not claim that the value
+    /// still satisfies the schema.
+    schema_checked,
+};
+
+/// The set of defenses that a value holds. Both are false by default, so a
+/// construct that forgets to compute defenses removes them. That costs
+/// precision and never soundness.
+pub const Defenses = packed struct(u8) {
+    html_escaped: bool = false,
+    schema_checked: bool = false,
+    _reserved: u6 = 0,
+
+    pub fn has(self: Defenses, defense: Defense) bool {
+        return switch (defense) {
+            .html_escaped => self.html_escaped,
+            .schema_checked => self.schema_checked,
+        };
+    }
+
+    /// The defenses that both sets hold.
+    fn intersect(a: Defenses, b: Defenses) Defenses {
+        const bits: u8 = @as(u8, @bitCast(a)) & @as(u8, @bitCast(b));
+        return @bitCast(bits);
+    }
+
+    /// The defenses that either set holds.
+    fn unite(a: Defenses, b: Defenses) Defenses {
+        const bits: u8 = @as(u8, @bitCast(a)) | @as(u8, @bitCast(b));
+        return @bitCast(bits);
+    }
+
+    /// The defenses of `self` that `removed` does not name.
+    fn without(self: Defenses, removed: Defenses) Defenses {
+        const bits: u8 = @as(u8, @bitCast(self)) & ~@as(u8, @bitCast(removed));
+        return @bitCast(bits);
+    }
+
+    fn isEmpty(self: Defenses) bool {
+        return @as(u8, @bitCast(self)) == 0;
+    }
+};
+
+/// What a value carries, without its origins and callables: the provenance
+/// labels and the defenses.
+///
+/// A flow is *exposed* when its labels hold `user_input` or `unknown`. A
+/// defense on a flow that is not exposed means nothing, so the canonical form
+/// has no defenses there. Every constructor and every join keeps flows
+/// canonical.
+pub const Flow = struct {
+    labels: LabelSet = .empty,
+    defenses: Defenses = .{},
+
+    pub fn exposed(self: Flow) bool {
+        return self.labels.user_input or self.labels.unknown;
+    }
+
+    /// The same flow with no defenses when it is not exposed.
+    pub fn canonical(self: Flow) Flow {
+        if (self.exposed()) return self;
+        return .{ .labels = self.labels };
+    }
+};
+
+/// The defenses of a value built from `a` and `b` as data, at a join or in a
+/// combination (R13). A side that is not exposed holds every defense, because
+/// no sink in the D24 table refuses a literal, so it is neutral. Among exposed
+/// sides, fewer defenses is higher in the order, which is the AND.
+fn combineDefenses(a: Flow, b: Flow) Defenses {
+    if (!a.exposed()) return b.defenses;
+    if (!b.exposed()) return a.defenses;
+    return a.defenses.intersect(b.defenses);
+}
+
+/// The flow of a value that an operation builds from `a` and `b` together.
+fn combineFlows(a: Flow, b: Flow) Flow {
+    const flow: Flow = .{
+        .labels = LabelSet.mergeValues(a.labels, b.labels),
+        .defenses = combineDefenses(a, b),
+    };
+    return flow.canonical();
+}
+
+/// What an operation does to the defenses of the flow that it builds its
+/// result from (`OperationRow.defense`).
+pub const DefenseEdge = enum {
+    /// The result keeps the defenses of the flow.
+    keep,
+    /// The result loses `html_escaped` and keeps `schema_checked`.
+    drop_html,
+    /// The result loses both defenses.
+    drop_all,
+
+    fn apply(edge: DefenseEdge, flow: Flow) Flow {
+        var out = flow;
+        switch (edge) {
+            .keep => {},
+            .drop_html => out.defenses.html_escaped = false,
+            .drop_all => out.defenses = .{},
+        }
+        return out;
+    }
+};
+
 /// What an expression can be. Bottom is the absence of a value (`?Value` is
 /// null), never an empty value: an empty `Value` is a reachable primitive that
 /// carries nothing, and conflating the two is how a join drops a branch.
@@ -126,6 +245,8 @@ fn nodeOrder(a: NodeIndex, b: NodeIndex) std.math.Order {
 /// can share values safely.
 pub const Value = struct {
     labels: LabelSet = .empty,
+    /// Canonical: empty unless the labels hold `user_input` or `unknown`.
+    defenses: Defenses = .{},
     /// Sorted and deduplicated.
     origins: []const SiteKey = &.{},
     /// The value may point at an object this analysis cannot name.
@@ -147,6 +268,16 @@ pub const Value = struct {
 
     pub fn labelled(labels: LabelSet) Value {
         return .{ .labels = labels };
+    }
+
+    /// A primitive with this flow, made canonical.
+    pub fn flowing(of: Flow) Value {
+        const canonical = of.canonical();
+        return .{ .labels = canonical.labels, .defenses = canonical.defenses };
+    }
+
+    pub fn flow(self: Value) Flow {
+        return .{ .labels = self.labels, .defenses = self.defenses };
     }
 };
 
@@ -210,12 +341,18 @@ fn isSubset(
     return true;
 }
 
-/// The join of two reachable values. Labels use `mergeConditional`, so a
-/// value counts as validated only when every path that produces it validated
-/// it. The other parts are set unions with the `top` flags ORed.
+/// The join of two reachable values. Labels use `mergeConditional`, and the
+/// defenses combine as data (`combineDefenses`), so a defense survives a join
+/// only when every exposed path holds it. The other parts are set unions with
+/// the `top` flags ORed.
 fn joinValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
-    return .{
+    const flow: Flow = (Flow{
         .labels = LabelSet.mergeConditional(a.labels, b.labels),
+        .defenses = combineDefenses(a.flow(), b.flow()),
+    }).canonical();
+    return .{
+        .labels = flow.labels,
+        .defenses = flow.defenses,
         .origins = try mergeSorted(SiteKey, arena, a.origins, b.origins, SiteKey.order),
         .origins_top = a.origins_top or b.origins_top,
         .callables = try mergeSorted(NodeIndex, arena, a.callables, b.callables, nodeOrder),
@@ -230,30 +367,43 @@ fn joinOpt(arena: std.mem.Allocator, a: ?Value, b: ?Value) Error!?Value {
     return try joinValue(arena, x, y);
 }
 
-/// The labels of `source` flow into a value copied out of it, and the
+/// The flow of `source` joins a value copied out of it as data, and the
 /// copied value keeps its own origins and callables because a copy of a
 /// reference still names the same object.
-fn withLabels(v: Value, labels: LabelSet) Value {
+fn withFlow(v: Value, source: Flow) Value {
     var out = v;
-    out.labels = LabelSet.mergeValues(v.labels, labels);
+    const flow = combineFlows(v.flow(), source);
+    out.labels = flow.labels;
+    out.defenses = flow.defenses;
     return out;
 }
 
-/// The union of two values that an operation reads together: the labels
-/// combine with `mergeValues`, the origins and callables are unions, and the
-/// `top` flags are ORed.
+/// `v` with no defense. An export that may transform or choose among the
+/// values it hands back returns them this way.
+fn withoutDefenses(v: Value) Value {
+    var out = v;
+    out.defenses = .{};
+    return out;
+}
+
+/// The union of two values that an operation reads together: the flows
+/// combine as data, the origins and callables are unions, and the `top` flags
+/// are ORed.
 fn unionValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
     var out = try withNative(arena, a, b);
-    out.labels = LabelSet.mergeValues(a.labels, b.labels);
+    const flow = combineFlows(a.flow(), b.flow());
+    out.labels = flow.labels;
+    out.defenses = flow.defenses;
     return out;
 }
 
-/// `v` with the origins, callables, and flags of `native` added. The labels
-/// of `v` stay as they are: a native function value carries none, and a join
-/// of labels would drop the `validated` bit of `v`.
+/// `v` with the origins, callables, and flags of `native` added. The flow of
+/// `v` stays as it is: a native function value carries none, and a join of
+/// labels would drop a fact of `v`.
 fn withNative(arena: std.mem.Allocator, v: Value, native: Value) Error!Value {
     return .{
         .labels = v.labels,
+        .defenses = v.defenses,
         .origins = try mergeSorted(SiteKey, arena, v.origins, native.origins, SiteKey.order),
         .origins_top = v.origins_top or native.origins_top,
         .callables = try mergeSorted(NodeIndex, arena, v.callables, native.callables, nodeOrder),
@@ -276,8 +426,9 @@ pub const Cells = struct {
 };
 
 /// The union of two cell sets. A name on one side only keeps its value: the
-/// other side stands for a reachable `undefined`, not for bottom. P6 must keep
-/// that distinction when it joins defense facts.
+/// other side stands for a reachable `undefined`, not for bottom. The defenses
+/// of a value on one side only survive for the same reason: `joinValue`
+/// treats the side that holds no value as one that is not exposed.
 fn joinCells(arena: std.mem.Allocator, a: Cells, b: Cells) Error!Cells {
     var named = try a.named.clone(arena);
     var it = b.named.iterator();
@@ -392,14 +543,17 @@ fn sliceEql(
     return true;
 }
 
-/// Two values are equal when every part is: all label bits, both `top` flags,
-/// and the sorted, duplicate-free slices element by element. The slices are
-/// canonical because every constructor and every join keeps them sorted, and
-/// `analyzeFunction` canonicalizes the parameters it is given.
+/// Two values are equal when every part is: all label bits, all defense bits,
+/// both `top` flags, and the sorted, duplicate-free slices element by element.
+/// The slices are canonical because every constructor and every join keeps
+/// them sorted, and `analyzeFunction` canonicalizes the parameters it is given.
 fn valueEql(a: Value, b: Value) bool {
     const a_bits: u16 = @bitCast(a.labels);
     const b_bits: u16 = @bitCast(b.labels);
+    const a_defenses: u8 = @bitCast(a.defenses);
+    const b_defenses: u8 = @bitCast(b.defenses);
     return a_bits == b_bits and
+        a_defenses == b_defenses and
         a.origins_top == b.origins_top and
         a.callables_top == b.callables_top and
         sliceEql(SiteKey, a.origins, b.origins, SiteKey.order) and
@@ -486,6 +640,7 @@ fn argsEql(a: []const Value, b: []const Value) bool {
 /// order, and equality assumes the canonical form.
 fn canonicalValue(arena: std.mem.Allocator, v: Value) Error!Value {
     var out = v;
+    out.defenses = v.flow().canonical().defenses;
     out.origins = try canonicalSlice(SiteKey, arena, v.origins, SiteKey.order);
     out.callables = try canonicalSlice(NodeIndex, arena, v.callables, nodeOrder);
     return out;
@@ -782,6 +937,9 @@ const OperationRow = struct {
     scope: []const u8,
     name: []const u8,
     rule: Rule,
+    /// What the operation does to the defenses of the flow that its rule
+    /// builds the result from. There is no default: every row states it.
+    defense: DefenseEdge,
     /// Why the operation has no rule. Set for `no_rule` rows only.
     reason: []const u8 = "",
 };
@@ -792,66 +950,83 @@ const result_reason = "a Result method is not modeled";
 fn rowsOf(
     comptime scope: []const u8,
     comptime rule: Rule,
+    comptime defense: DefenseEdge,
     comptime reason: []const u8,
     comptime names: []const []const u8,
 ) [names.len]OperationRow {
     var rows: [names.len]OperationRow = undefined;
     for (names, 0..) |name, i| {
-        rows[i] = .{ .scope = scope, .name = name, .rule = rule, .reason = reason };
+        rows[i] = .{ .scope = scope, .name = name, .rule = rule, .defense = defense, .reason = reason };
     }
     return rows;
 }
 
 /// The operation table. The census (C1) checks it against the registered
-/// builtins in both directions.
+/// builtins in both directions, and checks that exactly twelve rows have an
+/// edge other than `keep`. The edges that remove a defense, and why:
+///
+/// - `replace` and `replaceAll` can bring back markup or decode escaped text,
+///   so they remove both defenses.
+/// - `String.fromCharCode` makes a character from a number, so it removes
+///   both.
+/// - `JSON.stringify` adds a `"` next to the text, so it removes
+///   `html_escaped`.
+/// - `JSON.parse` and `JSON.tryParse` turn the text `\u003c` into `<` and
+///   build a structure that no schema checked, so they remove both.
+/// - `Object.keys` and `Object.entries` return property names, and no export
+///   escapes one, so they remove `html_escaped`.
+/// - `renderToString` writes tag names, attribute names, and the children of
+///   `script` unescaped, so it removes `html_escaped`.
+/// - The request readers return fresh request data, so they remove both.
 const operation_rows =
-    rowsOf("String.prototype", .string_scalar, "", &.{
+    rowsOf("String.prototype", .string_scalar, .keep, "", &.{
         "charAt",      "charCodeAt", "indexOf",   "lastIndexOf", "startsWith",
         "endsWith",    "includes",   "slice",     "substring",   "toLowerCase",
         "toUpperCase", "trim",       "trimStart", "trimEnd",     "repeat",
-        "padStart",    "padEnd",     "concat",    "replace",     "replaceAll",
+        "padStart",    "padEnd",     "concat",
     }) ++
-    rowsOf("String.prototype", .string_split, "", &.{"split"}) ++
-    rowsOf("Array.prototype", .array_push, "", &.{ "push", "unshift" }) ++
-    rowsOf("Array.prototype", .array_pop, "", &.{ "pop", "shift" }) ++
-    rowsOf("Array.prototype", .array_splice, "", &.{"splice"}) ++
-    rowsOf("Array.prototype", .array_scalar, "", &.{ "indexOf", "includes", "join" }) ++
-    rowsOf("Array.prototype", .array_copy, "", &.{ "slice", "toReversed" }) ++
-    rowsOf("Array.prototype", .array_to_sorted, "", &.{"toSorted"}) ++
-    rowsOf("Array.prototype", .array_concat, "", &.{"concat"}) ++
-    rowsOf("Array.prototype", .array_map, "", &.{"map"}) ++
-    rowsOf("Array.prototype", .array_filter, "", &.{"filter"}) ++
-    rowsOf("Array.prototype", .array_find, "", &.{"find"}) ++
-    rowsOf("Array.prototype", .array_for_each, "", &.{"forEach"}) ++
-    rowsOf("Array.prototype", .array_test, "", &.{ "every", "some", "findIndex" }) ++
-    rowsOf("Array.prototype", .array_reduce, "", &.{"reduce"}) ++
-    rowsOf("Result.prototype", .no_rule, result_reason, &.{
+    rowsOf("String.prototype", .string_scalar, .drop_all, "", &.{ "replace", "replaceAll" }) ++
+    rowsOf("String.prototype", .string_split, .keep, "", &.{"split"}) ++
+    rowsOf("Array.prototype", .array_push, .keep, "", &.{ "push", "unshift" }) ++
+    rowsOf("Array.prototype", .array_pop, .keep, "", &.{ "pop", "shift" }) ++
+    rowsOf("Array.prototype", .array_splice, .keep, "", &.{"splice"}) ++
+    rowsOf("Array.prototype", .array_scalar, .keep, "", &.{ "indexOf", "includes", "join" }) ++
+    rowsOf("Array.prototype", .array_copy, .keep, "", &.{ "slice", "toReversed" }) ++
+    rowsOf("Array.prototype", .array_to_sorted, .keep, "", &.{"toSorted"}) ++
+    rowsOf("Array.prototype", .array_concat, .keep, "", &.{"concat"}) ++
+    rowsOf("Array.prototype", .array_map, .keep, "", &.{"map"}) ++
+    rowsOf("Array.prototype", .array_filter, .keep, "", &.{"filter"}) ++
+    rowsOf("Array.prototype", .array_find, .keep, "", &.{"find"}) ++
+    rowsOf("Array.prototype", .array_for_each, .keep, "", &.{"forEach"}) ++
+    rowsOf("Array.prototype", .array_test, .keep, "", &.{ "every", "some", "findIndex" }) ++
+    rowsOf("Array.prototype", .array_reduce, .keep, "", &.{"reduce"}) ++
+    rowsOf("Result.prototype", .no_rule, .keep, result_reason, &.{
         "isOk", "isErr", "unwrap", "unwrapOr", "unwrapErr",
     }) ++
-    rowsOf("Result.prototype", .no_rule, callback_reason, &.{ "map", "mapErr", "andThen", "match" }) ++
-    rowsOf("Math", .deep_scalar, "", &.{
+    rowsOf("Result.prototype", .no_rule, .keep, callback_reason, &.{ "map", "mapErr", "andThen", "match" }) ++
+    rowsOf("Math", .deep_scalar, .keep, "", &.{
         "abs", "floor", "ceil", "round", "min", "max", "pow", "trunc", "sqrt", "sin", "cos", "tan", "log", "exp",
     }) ++
-    rowsOf("Math", .nondeterministic, "", &.{"random"}) ++
-    rowsOf("JSON", .parsed, "", &.{ "parse", "tryParse" }) ++
-    rowsOf("JSON", .deep_scalar, "", &.{"stringify"}) ++
-    rowsOf("Object", .object_keys, "", &.{"keys"}) ++
-    rowsOf("Object", .object_values, "", &.{"values"}) ++
-    rowsOf("Object", .object_entries, "", &.{"entries"}) ++
-    rowsOf("Object", .deep_scalar, "", &.{"hasOwn"}) ++
-    rowsOf("Number", .deep_scalar, "", &.{ "isInteger", "isNaN", "isFinite", "parseFloat", "parseInt" }) ++
-    rowsOf("Response", .response_static, "", &.{ "json", "text", "html", "redirect", "rawJson" }) ++
-    rowsOf("Date", .nondeterministic, "", &.{"now"}) ++
-    rowsOf("Array", .deep_scalar, "", &.{"isArray"}) ++
-    rowsOf("Array", .array_of, "", &.{"of"}) ++
-    rowsOf("Array", .array_from, "", &.{"from"}) ++
-    rowsOf("String", .deep_scalar, "", &.{"fromCharCode"}) ++
-    rowsOf("global", .deep_scalar, "", &.{ "String", "Number", "parseFloat", "parseInt", "isDict", "isBytes" }) ++
-    rowsOf("global", .range, "", &.{"range"}) ++
-    rowsOf("global", .parsed, "", &.{ "requestBody", "requestText", "requestJson" }) ++
-    rowsOf("global", .hole, "", &.{"hole"}) ++
-    rowsOf("global", .vnode, "", &.{"h"}) ++
-    rowsOf("global", .render, "", &.{"renderToString"});
+    rowsOf("Math", .nondeterministic, .keep, "", &.{"random"}) ++
+    rowsOf("JSON", .parsed, .drop_all, "", &.{ "parse", "tryParse" }) ++
+    rowsOf("JSON", .deep_scalar, .drop_html, "", &.{"stringify"}) ++
+    rowsOf("Object", .object_keys, .drop_html, "", &.{"keys"}) ++
+    rowsOf("Object", .object_values, .keep, "", &.{"values"}) ++
+    rowsOf("Object", .object_entries, .drop_html, "", &.{"entries"}) ++
+    rowsOf("Object", .deep_scalar, .keep, "", &.{"hasOwn"}) ++
+    rowsOf("Number", .deep_scalar, .keep, "", &.{ "isInteger", "isNaN", "isFinite", "parseFloat", "parseInt" }) ++
+    rowsOf("Response", .response_static, .keep, "", &.{ "json", "text", "html", "redirect", "rawJson" }) ++
+    rowsOf("Date", .nondeterministic, .keep, "", &.{"now"}) ++
+    rowsOf("Array", .deep_scalar, .keep, "", &.{"isArray"}) ++
+    rowsOf("Array", .array_of, .keep, "", &.{"of"}) ++
+    rowsOf("Array", .array_from, .keep, "", &.{"from"}) ++
+    rowsOf("String", .deep_scalar, .drop_all, "", &.{"fromCharCode"}) ++
+    rowsOf("global", .deep_scalar, .keep, "", &.{ "String", "Number", "parseFloat", "parseInt", "isDict", "isBytes" }) ++
+    rowsOf("global", .range, .keep, "", &.{"range"}) ++
+    rowsOf("global", .parsed, .drop_all, "", &.{ "requestBody", "requestText", "requestJson" }) ++
+    rowsOf("global", .hole, .keep, "", &.{"hole"}) ++
+    rowsOf("global", .vnode, .keep, "", &.{"h"}) ++
+    rowsOf("global", .render, .drop_html, "", &.{"renderToString"});
 
 /// The builtin objects whose members are the `Math`-style namespace rows.
 const namespace_names = [_][]const u8{ "Array", "Date", "JSON", "Math", "Number", "Object", "Response", "String" };
@@ -908,6 +1083,167 @@ fn findCallbackExport(rows: []const CallbackExport, specifier: []const u8, name:
         if (std.mem.eql(u8, row.specifier, specifier) and std.mem.eql(u8, row.name, name)) return row;
     }
     return null;
+}
+
+// ---------------------------------------------------------------------------
+// Defense sources and sink requirements (P6b)
+// ---------------------------------------------------------------------------
+
+/// What an export that declares `validated` does to the defenses of its
+/// result. The result of every other export has none, because the binding
+/// cannot say that an export leaves the characters of its input alone.
+///
+/// The result has the defenses of everything the call reads, minus `removes`,
+/// plus `establishes`. `keeps` states what the row passes through from its
+/// input, and the census checks that it never overlaps `removes`. No source
+/// removes a label: a validated request value keeps `user_input` (D23).
+const DefenseSource = struct {
+    specifier: []const u8,
+    name: []const u8,
+    establishes: Defenses = .{},
+    keeps: Defenses = .{},
+    removes: Defenses = .{},
+    /// Why the row establishes nothing. Set for such rows only.
+    reason: []const u8 = "",
+
+    fn outcome(self: DefenseSource, input: Defenses) Defenses {
+        return input.without(self.removes).unite(self.establishes);
+    }
+};
+
+const html_only: Defenses = .{ .html_escaped = true };
+const schema_only: Defenses = .{ .schema_checked = true };
+
+/// One row for each export whose binding declares `validated`. A row that
+/// establishes a defense needs a binding that declares only string
+/// parameters: each of these exports answers an `err` Result or `undefined`
+/// when an argument is not a string, so the origins of what the call reads
+/// need no check. Census C3 checks the table against the bindings and against
+/// an expected mapping.
+const defense_sources = [_]DefenseSource{
+    .{ .specifier = "zttp:text", .name = "escapeHtml", .establishes = html_only, .keeps = schema_only },
+    .{ .specifier = "zttp:validate", .name = "validateJson", .establishes = schema_only, .removes = html_only },
+    .{ .specifier = "zttp:validate", .name = "coerceJson", .establishes = schema_only, .removes = html_only },
+    .{ .specifier = "zttp:decode", .name = "decodeJson", .establishes = schema_only, .removes = html_only },
+    .{ .specifier = "zttp:decode", .name = "decodeForm", .establishes = schema_only, .removes = html_only },
+    .{ .specifier = "zttp:decode", .name = "decodeFormMultipart", .establishes = schema_only, .removes = html_only },
+    .{
+        .specifier = "zttp:validate",
+        .name = "validateObject",
+        .reason = "returns the object it was given, and defense evidence for an object is deferred (R13)",
+    },
+    .{
+        .specifier = "zttp:decode",
+        .name = "decodeQuery",
+        .reason = "takes an object, and defense evidence for an object is deferred (R13)",
+    },
+    .{
+        .specifier = "zttp:auth",
+        .name = "jwtVerify",
+        .reason = "authenticates the token and validates no claim",
+    },
+};
+
+comptime {
+    for (defense_sources) |row| {
+        if (!row.keeps.intersect(row.removes).isEmpty()) {
+            @compileError(row.name ++ " keeps and removes the same defense");
+        }
+    }
+}
+
+fn findDefenseSource(rows: []const DefenseSource, specifier: []const u8, name: []const u8) ?DefenseSource {
+    for (rows) |row| {
+        if (std.mem.eql(u8, row.specifier, specifier) and std.mem.eql(u8, row.name, name)) return row;
+    }
+    return null;
+}
+
+/// A place where request data can arrive in a response, a log, or a call to
+/// the network. P7 maps each call it finds to one of these.
+pub const InputSink = enum {
+    /// The body of `Response.html`.
+    response_html,
+    /// The body of another `Response` helper.
+    response_other,
+    /// The second argument of a helper (the status and headers).
+    response_init,
+    log,
+    egress_url,
+    egress_body,
+    egress_headers,
+    /// The options object that a call passes by name. It takes the strictest
+    /// row of the three egress fields.
+    egress_opaque,
+};
+
+/// A property that request data decides.
+pub const InputProperty = enum { input_validated, injection_safe, pii_contained };
+
+/// What a sink accepts for a property of request data (R12, D24).
+pub const Requirement = union(enum) {
+    /// The sink does not govern the property, so request data may arrive.
+    not_governed,
+    /// The sink accepts request data that holds this defense.
+    defense: Defense,
+    /// No defense is enough, so request data may not arrive.
+    no_defense,
+};
+
+/// The requirement of each sink and property. The switch has no `else` arm, so
+/// a new sink or property fails to compile until it has a row.
+///
+/// Two limits hold for every row. `html_escaped` covers HTML text and quoted
+/// attribute values: a URL attribute such as `href="javascript:..."` and a
+/// script context are outside it (D24). And it covers request characters, not
+/// the author characters that request data selects through a slice bound, an
+/// order, or a count (D25).
+pub fn requirement(sink: InputSink, property: InputProperty) Requirement {
+    return switch (sink) {
+        .response_html => switch (property) {
+            .input_validated => .not_governed,
+            .injection_safe => .{ .defense = .html_escaped },
+            .pii_contained => .not_governed,
+        },
+        .response_other, .response_init, .log => switch (property) {
+            .input_validated => .not_governed,
+            .injection_safe => .not_governed,
+            .pii_contained => .not_governed,
+        },
+        .egress_url, .egress_headers, .egress_opaque => switch (property) {
+            .input_validated => .{ .defense = .schema_checked },
+            .injection_safe => .no_defense,
+            .pii_contained => .no_defense,
+        },
+        .egress_body => switch (property) {
+            .input_validated => .{ .defense = .schema_checked },
+            .injection_safe => .{ .defense = .schema_checked },
+            .pii_contained => .no_defense,
+        },
+    };
+}
+
+/// Whether request data that reaches `sink` is acceptable for `property`.
+///
+/// `reached` must be the `deepFlow` of the value that reaches the sink, in
+/// the state at the sink. The value alone is not enough: a container with
+/// clean surface labels can hold request data in its cells, and a validated
+/// value keeps its own defense after an alias writes raw data into a cell.
+///
+/// A flow that is not exposed is always accepted. Request data is accepted
+/// where the sink does not govern the property, or where the flow holds the
+/// defense that the sink requires. It is never accepted where no defense is
+/// enough.
+///
+/// The limits of `requirement` apply: HTML context (D24) and request
+/// characters only (D25).
+pub fn inputAccepted(reached: Flow, sink: InputSink, property: InputProperty) bool {
+    if (!reached.exposed()) return true;
+    return switch (requirement(sink, property)) {
+        .not_governed => true,
+        .defense => |defense| reached.defenses.has(defense),
+        .no_defense => false,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -1522,7 +1858,7 @@ pub const FlowInterp = struct {
         if (try self.globalFunction(c.callee)) |global| {
             const args = try self.evalArgs(c, st);
             if (args.has_spread) return Value.top;
-            return self.applyRule(st, node, global.row.rule, try self.nativeFunction(global.atom), args.values);
+            return self.applyRule(st, node, global.row, try self.nativeFunction(global.atom), args.values);
         }
 
         const callee = try self.eval(c.callee, st);
@@ -1543,7 +1879,7 @@ pub const FlowInterp = struct {
         // results join. A result chosen through a labelled callee carries its
         // labels, as a read through a labelled key does.
         const joined = try self.runCallables(callee.callables, args.values, st);
-        return self.takeSummary(st, joined, callee.labels);
+        return self.takeSummary(st, joined, callee.flow());
     }
 
     /// Run every function of `callables` from `st` and join the summaries.
@@ -1556,9 +1892,9 @@ pub const FlowInterp = struct {
     }
 
     /// Continue the caller from the joined summary of a call: its heap, and its
-    /// value with `labels` added. A summary with no reachable completion
+    /// value with `flow` added as data. A summary with no reachable completion
     /// leaves the caller unreachable.
-    fn takeSummary(self: *FlowInterp, st: *State, joined: Summary, labels: LabelSet) Error!Value {
+    fn takeSummary(self: *FlowInterp, st: *State, joined: Summary, flow: Flow) Error!Value {
         if (!joined.state.reachable) {
             // No completion is reachable. The bindings stay readable for the
             // dead code that follows in the same expression.
@@ -1567,7 +1903,7 @@ pub const FlowInterp = struct {
         }
         st.heap = try joined.state.heap.clone(self.mem());
         st.top_cell = joined.state.top_cell;
-        return withLabels(joined.value orelse Value.clean, labels);
+        return withFlow(joined.value orelse Value.clean, flow);
     }
 
     // --- builtin globals and operations (P5a) ---
@@ -1753,7 +2089,7 @@ pub const FlowInterp = struct {
         if (self.isMathOpcode(callee_tag, m, c.args_count)) {
             const args = try self.evalArgs(c, st);
             if (args.has_spread) return Value.top;
-            return Value.labelled(try self.deepLabels(st, args.values));
+            return Value.flowing(try self.deepFlow(st, args.values));
         }
 
         const receiver = try self.eval(m.object, st);
@@ -1833,12 +2169,12 @@ pub const FlowInterp = struct {
                     // object has no rule.
                     const scope = self.nameOfAtom(@truncate(site.node)) orelse "";
                     const found = if (nameIn(&namespace_names, scope)) findRow(&operation_rows, scope, text) else null;
-                    const row = found orelse OperationRow{ .scope = scope, .name = text, .rule = .no_rule, .reason = "no member row" };
+                    const row = found orelse OperationRow{ .scope = scope, .name = text, .rule = .no_rule, .defense = .keep, .reason = "no member row" };
                     joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
                     candidates += 1;
                 },
                 .native => {
-                    const row: OperationRow = .{ .scope = "native", .name = text, .rule = .no_rule, .reason = "a native method" };
+                    const row: OperationRow = .{ .scope = "native", .name = text, .rule = .no_rule, .defense = .keep, .reason = "a native method" };
                     joined = try joinSummary(arena, joined, try self.candidate(node, st, row, r, args.values));
                     candidates += 1;
                 },
@@ -1857,19 +2193,24 @@ pub const FlowInterp = struct {
             try self.record(node, .call, .no_operation_rule);
             return Value.top;
         }
-        return self.takeSummary(st, joined, user.labels);
+        // The user candidate selects what runs only when it holds a function.
+        // A value that holds none cannot be called: the runtime fails with
+        // `NotCallable` and returns nothing, so its flow reaches no result.
+        // A candidate that may be any function returned above.
+        const selected: Flow = if (user.callables.len > 0 or user.callables_top) user.flow() else .{};
+        return self.takeSummary(st, joined, selected);
     }
 
     /// Apply one builtin row to a copy of the heap and return its summary.
     fn candidate(self: *FlowInterp, node: NodeIndex, st: *const State, row: OperationRow, r: Value, args: []const Value) Error!Summary {
         var copy = try self.heapState(st);
-        const value = try self.applyRule(&copy, node, row.rule, r, args);
+        const value = try self.applyRule(&copy, node, row, r, args);
         return .{ .value = value, .state = heapOnly(copy) };
     }
 
-    /// The labels of everything `vs` can reach.
-    fn deepLabels(self: *FlowInterp, st: *const State, vs: []const Value) Error!LabelSet {
-        return (try self.reach(st, vs)).labels;
+    /// The flow of everything `vs` can reach.
+    fn deepFlow(self: *FlowInterp, st: *const State, vs: []const Value) Error!Flow {
+        return (try self.reach(st, vs)).flow();
     }
 
     /// The argument at `index`, or `clean` when the call passes none.
@@ -1880,95 +2221,101 @@ pub const FlowInterp = struct {
     /// A container that a builtin makes at the call `node`. The site holds
     /// `contents` and its own self value, so a nested container has a
     /// location and a write to it lands in the site. The result is the self
-    /// value with `labels`.
-    fn allocate(self: *FlowInterp, st: *State, kind: SiteKind, node: NodeIndex, contents: []const Value, labels: LabelSet) Error!Value {
+    /// value with `flow`.
+    fn allocate(self: *FlowInterp, st: *State, kind: SiteKind, node: NodeIndex, contents: []const Value, flow: Flow) Error!Value {
         const site: SiteKey = .{ .kind = kind, .node = node, .context = 0 };
         const self_value = try self.siteValue(site, null);
         for (contents) |content| try self.weakWriteSite(st, site, null, content);
         try self.weakWriteSite(st, site, null, self_value);
         var out = self_value;
-        out.labels = labels;
+        const canonical = flow.canonical();
+        out.labels = canonical.labels;
+        out.defenses = canonical.defenses;
         return out;
     }
 
     /// The transfer of one builtin operation. `r` is the receiver, `args` the
     /// argument values, and `st` the state the operation runs in. `L` is the
-    /// labels of the receiver and of everything the arguments reach.
-    fn applyRule(self: *FlowInterp, st: *State, node: NodeIndex, rule: Rule, r: Value, args: []const Value) Error!Value {
-        const arg_labels = try self.deepLabels(st, args);
-        const labels = LabelSet.mergeValues(r.labels, arg_labels);
-        switch (rule) {
-            .string_scalar => return Value.labelled(labels),
-            .string_split => return self.allocate(st, .allocated_array, node, &.{Value.labelled(labels)}, labels),
+    /// flow of the receiver and of everything the arguments reach, combined
+    /// as data, with the defense edge of the row applied. `A` is the same flow
+    /// of the arguments alone. A value that a rule moves as it is keeps its
+    /// own flow.
+    fn applyRule(self: *FlowInterp, st: *State, node: NodeIndex, row: OperationRow, r: Value, args: []const Value) Error!Value {
+        const reached = try self.deepFlow(st, args);
+        const arg_flow = row.defense.apply(reached);
+        const flow = row.defense.apply(combineFlows(r.flow(), reached));
+        switch (row.rule) {
+            .string_scalar => return Value.flowing(flow),
+            .string_split => return self.allocate(st, .allocated_array, node, &.{Value.flowing(flow)}, flow),
             .array_push => {
                 try self.recordSharedWrite(node, r);
                 for (args) |arg| try self.writeValue(st, r, .{ .dynamic = Value.clean }, arg);
-                return Value.labelled(LabelSet.mergeValues(labels, try self.deepLabels(st, &.{r})));
+                return Value.flowing(combineFlows(flow, try self.deepFlow(st, &.{r})));
             },
             .array_pop => return self.readAll(st.*, r),
             .array_splice => {
                 const removed = try self.readAll(st.*, r);
                 try self.recordSharedWrite(node, r);
-                // The selectors decide which elements go, so their labels
-                // reach what stays, and the items from argument 2 are pushed.
-                const selectors = LabelSet.mergeValues(argAt(args, 0).labels, argAt(args, 1).labels);
-                try self.writeValue(st, r, .{ .dynamic = Value.clean }, Value.labelled(selectors));
+                // The selectors decide which elements go, so their flow
+                // reaches what stays, and the items from argument 2 are pushed.
+                const selectors = combineFlows(argAt(args, 0).flow(), argAt(args, 1).flow());
+                try self.writeValue(st, r, .{ .dynamic = Value.clean }, Value.flowing(selectors));
                 if (args.len > 2) {
                     for (args[2..]) |item| try self.writeValue(st, r, .{ .dynamic = Value.clean }, item);
                 }
-                return self.allocate(st, .allocated_array, node, &.{removed}, labels);
+                return self.allocate(st, .allocated_array, node, &.{removed}, flow);
             },
-            .array_scalar => return Value.labelled(LabelSet.mergeValues(labels, try self.deepLabels(st, &.{r}))),
-            .array_copy => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, labels),
+            .array_scalar => return Value.flowing(combineFlows(flow, try self.deepFlow(st, &.{r}))),
+            .array_copy => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, flow),
             .array_to_sorted => {
-                if (args.len == 0) return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, labels);
+                if (args.len == 0) return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, flow);
                 // The comparator may run many times per element, and it sees
                 // two of them.
                 const results = try self.runCallback(node, args[0], &.{ .{ .elements = r }, .{ .elements = r } }, st);
-                const sorted = withLabels(try self.readAll(st.*, r), resultLabels(results));
-                return self.allocate(st, .allocated_array, node, &.{sorted}, labels);
+                const sorted = withFlow(try self.readAll(st.*, r), resultFlow(results));
+                return self.allocate(st, .allocated_array, node, &.{sorted}, flow);
             },
             .array_map => {
-                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
-                return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, labels);
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, flow);
             },
             .array_filter => {
-                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
-                // The predicate decides which elements stay, so its labels
-                // reach each one. The receiver is read after the loop, which
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                // The predicate decides which elements stay, so its flow
+                // reaches each one. The receiver is read after the loop, which
                 // sees what the callback wrote.
-                const kept = withLabels(try self.readAll(st.*, r), resultLabels(results));
-                return self.allocate(st, .allocated_array, node, &.{kept}, labels);
+                const kept = withFlow(try self.readAll(st.*, r), resultFlow(results));
+                return self.allocate(st, .allocated_array, node, &.{kept}, flow);
             },
             .array_find => {
-                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
-                const kept = withLabels(try self.readAll(st.*, r), resultLabels(results));
-                return withLabels(kept, labels);
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                const kept = withFlow(try self.readAll(st.*, r), resultFlow(results));
+                return withFlow(kept, flow);
             },
             .array_for_each => {
-                _ = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
-                return Value.labelled(labels);
+                _ = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                return Value.flowing(flow);
             },
             .array_test => {
-                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .clean, .{ .itself = r } }, st);
-                const decided = LabelSet.mergeValues(try self.deepLabels(st, &.{r}), resultLabels(results));
-                return Value.labelled(LabelSet.mergeValues(labels, decided));
+                const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                const decided = combineFlows(try self.deepFlow(st, &.{r}), resultFlow(results));
+                return Value.flowing(combineFlows(flow, decided));
             },
             .array_reduce => {
                 const initial = if (args.len > 1) args[1] else try self.readAll(st.*, r);
                 const results = try self.runCallback(
                     node,
                     argAt(args, 0),
-                    &.{ .{ .acc = initial }, .{ .elements = r }, .clean, .{ .itself = r } },
+                    &.{ .{ .acc = initial }, .{ .elements = r }, .{ .structure = r }, .{ .itself = r } },
                     st,
                 );
-                return withLabels((try joinOpt(self.mem(), initial, results)) orelse initial, labels);
+                return withFlow((try joinOpt(self.mem(), initial, results)) orelse initial, flow);
             },
             .array_from => {
                 const source: Param = .{ .elements_labelled = argAt(args, 0) };
-                if (args.len < 2) return self.allocate(st, .allocated_array, node, &.{try self.paramValue(st, source, null)}, labels);
-                const results = try self.runCallback(node, args[1], &.{ source, .clean }, st);
-                return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, labels);
+                if (args.len < 2) return self.allocate(st, .allocated_array, node, &.{try self.paramValue(st, source, null)}, flow);
+                const results = try self.runCallback(node, args[1], &.{ source, .{ .structure = argAt(args, 0) } }, st);
+                return self.allocate(st, .allocated_array, node, &.{results orelse Value.clean}, flow);
             },
             .array_concat => {
                 var contents: std.ArrayList(Value) = .empty;
@@ -1977,29 +2324,29 @@ pub const FlowInterp = struct {
                     try contents.append(self.mem(), arg);
                     try contents.append(self.mem(), try self.readAll(st.*, arg));
                 }
-                return self.allocate(st, .allocated_array, node, contents.items, labels);
+                return self.allocate(st, .allocated_array, node, contents.items, flow);
             },
-            .deep_scalar => return Value.labelled(arg_labels),
+            .deep_scalar => return Value.flowing(arg_flow),
             .nondeterministic => return Value.labelled(.{ .nondeterministic = true }),
-            .parsed, .range => return self.allocate(st, .allocated_any, node, &.{Value.labelled(arg_labels)}, arg_labels),
-            .object_keys => return self.allocate(st, .allocated_array, node, &.{Value.labelled(arg_labels)}, labels),
-            .object_values => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, argAt(args, 0))}, labels),
+            .parsed, .range => return self.allocate(st, .allocated_any, node, &.{Value.flowing(arg_flow)}, arg_flow),
+            .object_keys => return self.allocate(st, .allocated_array, node, &.{Value.flowing(arg_flow)}, flow),
+            .object_values => return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, argAt(args, 0))}, flow),
             .object_entries => return self.allocate(
                 st,
                 .allocated_array,
                 node,
-                &.{ try self.readAll(st.*, argAt(args, 0)), Value.labelled(arg_labels) },
-                labels,
+                &.{ try self.readAll(st.*, argAt(args, 0)), Value.flowing(arg_flow) },
+                flow,
             ),
-            .array_of => return self.allocate(st, .allocated_array, node, args, labels),
-            .response_static => return self.allocate(st, .native, node, &.{try self.reach(st, args)}, arg_labels),
-            .vnode => return self.allocate(st, .allocated_any, node, &.{try self.reach(st, args)}, arg_labels),
+            .array_of => return self.allocate(st, .allocated_array, node, args, flow),
+            .response_static => return self.allocate(st, .native, node, &.{try self.reach(st, args)}, arg_flow),
+            .vnode => return self.allocate(st, .allocated_any, node, &.{try self.reach(st, args)}, arg_flow),
             .render => {
                 // A component runs later and writes `props`, which this
                 // analysis does not follow.
                 const read = try self.reach(st, &.{argAt(args, 0)});
                 if (read.callables_top or read.callables.len > 0) return self.noRule(node);
-                return Value.labelled(read.labels);
+                return Value.flowing(row.defense.apply(read.flow()));
             },
             .hole => {
                 // The call never returns, as a P4 call whose callee has no
@@ -2061,9 +2408,11 @@ pub const FlowInterp = struct {
     /// The labels an export declares for its result. `env` with a literal
     /// name keeps `secret` when the name looks like a credential and gives
     /// `config` otherwise, as `flow_checker.zig` refines it. A name that is
-    /// not a literal keeps the declared labels.
+    /// not a literal keeps the declared labels. The `validated` bit is never
+    /// kept: no value carries it, and the defense of the result comes from
+    /// `defense_sources`.
     fn declaredLabels(self: *const FlowInterp, resolved: ModuleExport, c: ir.Node.CallExpr) LabelSet {
-        const declared = resolved.func.return_labels;
+        const declared = resolved.func.return_labels.without(.{ .validated = true });
         if (!std.mem.eql(u8, resolved.func.name, "env") or c.args_count == 0) return declared;
         const arg = self.ir_view.getListIndex(c.args_start, 0);
         if ((self.ir_view.getTag(arg) orelse return declared) != .lit_string) return declared;
@@ -2095,6 +2444,15 @@ pub const FlowInterp = struct {
     /// arguments reach (`R`), runs every function in `R` as a callback of
     /// unknown shape, and returns a container that may be, or hold, any of it.
     /// The seven exports in `callback_exports` run only their callback.
+    ///
+    /// The result has no defense, because the binding cannot say that an
+    /// export leaves the characters of its input alone. The exports in
+    /// `defense_sources` are the exception: a row that establishes a defense
+    /// builds the result from the labels of the call and the defenses of `R`
+    /// minus what the row removes, plus what it establishes. The result of
+    /// such a row holds no origin, callable, or flag of `R`. The callback
+    /// results lose their defenses in every case, because an export may
+    /// transform them or choose among them. Nothing here removes a label.
     fn evalExportCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, st: *State) Error!Value {
         const arena = self.mem();
         const args = try self.evalArgs(c, st);
@@ -2108,7 +2466,16 @@ pub const FlowInterp = struct {
         const input = if (declassified) read.labels.without(resolved.func.declassifies) else read.labels;
         var labels = LabelSet.mergeValues(input, self.declaredLabels(resolved, c));
         if (readsVaryingSource(resolved)) labels.nondeterministic = true;
-        const held = if (declassified) Value.labelled(labels) else read;
+        // The defenses of the result come from the source table and nowhere
+        // else. A source row builds the result from the labels of the call,
+        // with no origin, callable, or flag.
+        var held = if (declassified) Value.labelled(labels) else read;
+        held.defenses = .{};
+        if (findDefenseSource(&defense_sources, resolved.binding.specifier, resolved.func.name)) |source| {
+            if (!source.establishes.isEmpty()) {
+                held = Value.flowing(.{ .labels = labels, .defenses = source.outcome(read.defenses) });
+            }
+        }
 
         // An export with a precise row calls the function in its argument 1.
         // Any other export may call each function the arguments reach, and a
@@ -2122,6 +2489,7 @@ pub const FlowInterp = struct {
                 results = try self.runCallbackLoop(node, read, .{ .presumed = args.values }, st);
             }
         }
+        if (results) |passed| results = withoutDefenses(passed);
 
         var contents: std.ArrayList(Value) = .empty;
         try contents.append(arena, held);
@@ -2129,7 +2497,7 @@ pub const FlowInterp = struct {
         const is_fetch = std.mem.eql(u8, resolved.binding.specifier, "zttp:fetch") and
             (std.mem.eql(u8, resolved.func.name, "fetch") or std.mem.eql(u8, resolved.func.name, "fetchWithRetry"));
         const site_kind: SiteKind = if (is_fetch) .native else .allocated_any;
-        const container = try self.allocate(st, site_kind, node, contents.items, labels);
+        const container = try self.allocate(st, site_kind, node, contents.items, .{ .labels = labels, .defenses = held.defenses });
 
         // The result keeps every origin, callable, and flag of what the call
         // read and of what the callbacks returned: an export can hand back an
@@ -2151,15 +2519,19 @@ pub const FlowInterp = struct {
         acc: Value,
         /// Every element of the value, read at the head.
         elements: Value,
-        /// Every element of the value, read at the head, and the labels of the
+        /// Every element of the value, read at the head, and the flow of the
         /// value itself.
         elements_labelled: Value,
-        /// The labels of everything the value reaches at the head.
+        /// The labels of everything the value reaches at the head, and no
+        /// defense. The key of a dictionary entry takes this form.
         deep: Value,
+        /// The position of an element in the value: the labels of everything
+        /// the value reaches at the head, and no defense. A receiver built
+        /// from request data has a length that the data decides, so the index
+        /// carries what the cells carry (R1).
+        structure: Value,
         /// The value itself.
         itself: Value,
-        /// A primitive that carries nothing.
-        clean,
     };
 
     /// What a callback loop passes on each pass.
@@ -2206,16 +2578,16 @@ pub const FlowInterp = struct {
             .acc => |initial| return (try joinOpt(self.mem(), initial, results)) orelse initial,
             .elements => |source| return self.readAll(head.*, source),
             .elements_labelled => |source| {
-                return joinValue(self.mem(), try self.readAll(head.*, source), Value.labelled(source.labels));
+                return joinValue(self.mem(), try self.readAll(head.*, source), Value.flowing(source.flow()));
             },
-            .deep => |source| return Value.labelled(try self.deepLabels(head, &.{source})),
+            .deep, .structure => |source| return Value.labelled((try self.deepFlow(head, &.{source})).labels),
             .itself => |v| return v,
-            .clean => return Value.clean,
         }
     }
 
-    fn resultLabels(results: ?Value) LabelSet {
-        return (results orelse return .empty).labels;
+    /// The flow of the callback results so far, or no flow before the first.
+    fn resultFlow(results: ?Value) Flow {
+        return (results orelse return .{}).flow();
     }
 
     /// Run the callback `f` of the operation at `node` as a precise loop. A
@@ -2284,7 +2656,7 @@ pub const FlowInterp = struct {
                 const summary = try self.invoke(func_node, args, &head);
                 next = try joinStates(arena, next, summary.state);
                 if (summary.value) |returned| {
-                    next_results = try joinOpt(arena, next_results, withLabels(returned, f.labels));
+                    next_results = try joinOpt(arena, next_results, withFlow(returned, f.flow()));
                 }
             }
             if (stateEql(next, head) and optValueEql(next_results, results)) break;
@@ -2549,24 +2921,24 @@ pub const FlowInterp = struct {
     }
 
     /// An absent cell is a reachable `undefined`, so a read that sees nothing
-    /// yields `clean`. The receiver and key labels join the result: a property
-    /// of a labelled value, and a selection by a labelled key, carry the label
-    /// (R1). This is the stored content only: a method that the runtime finds
-    /// on a prototype is not in any cell.
+    /// yields `clean`. The receiver and key flows join the result as data: a
+    /// property of a labelled value, and a selection by a labelled key, carry
+    /// the label (R1), and a raw receiver or key removes a defense. This is
+    /// the stored content only: a method that the runtime finds on a prototype
+    /// is not in any cell.
     fn storedRead(self: *FlowInterp, st: *const State, o: Value, key: Key) Error!Value {
         return switch (key) {
             .name => |n| blk: {
                 const seen = try self.visible(st, o, n);
-                break :blk withLabels(seen orelse Value.clean, o.labels);
+                break :blk withFlow(seen orelse Value.clean, o.flow());
             },
             .index => blk: {
                 const seen = try self.visible(st, o, null);
-                break :blk withLabels(seen orelse Value.clean, o.labels);
+                break :blk withFlow(seen orelse Value.clean, o.flow());
             },
             .dynamic => |k| blk: {
                 const seen = try self.visible(st, o, null);
-                const labels = LabelSet.mergeValues(o.labels, k.labels);
-                break :blk withLabels(seen orelse Value.clean, labels);
+                break :blk withFlow(seen orelse Value.clean, combineFlows(o.flow(), k.flow()));
             },
         };
     }
@@ -2616,43 +2988,44 @@ pub const FlowInterp = struct {
     }
 
     /// A write of `v` to `o.name` or `o[k]`. The stored value carries the
-    /// labels of the receiver and the key, because a target chosen by a
-    /// labelled value is itself a flow. Every origin takes a weak update, and
-    /// a write through an unnamed target lands in `top_cell`. The expression
-    /// value of the assignment is `v`, not the stored value.
+    /// flow of the receiver and the key, because a target chosen by a
+    /// labelled value is itself a flow, and a raw receiver or key removes a
+    /// defense from every later read of the cell. Every origin takes a weak
+    /// update, and a write through an unnamed target lands in `top_cell`. The
+    /// expression value of the assignment is `v`, not the stored value.
     fn writeValue(self: *FlowInterp, st: *State, o: Value, key: Key, v: Value) Error!void {
-        var labels = LabelSet.mergeValues(v.labels, o.labels);
+        var flow = combineFlows(v.flow(), o.flow());
         var name: ?u16 = null;
         switch (key) {
             .name => |n| name = n,
             .index => {},
-            .dynamic => |k| labels = LabelSet.mergeValues(labels, k.labels),
+            .dynamic => |k| flow = combineFlows(flow, k.flow()),
         }
-        // The combined set replaces `v`'s labels. `withLabels` would merge it
-        // with `v.labels` a second time, which can restore a `validated` flag
-        // that the combination dropped.
+        // The combined flow already holds `v`, so it replaces the flow of `v`
+        // and is not merged with it a second time.
         var stored = v;
-        stored.labels = labels;
+        stored.labels = flow.labels;
+        stored.defenses = flow.defenses;
         for (o.origins) |site| try self.weakWriteSite(st, site, name, stored);
         if (o.origins_top) st.top_cell = try weakWriteCells(self.mem(), st.top_cell, name, stored);
     }
 
     /// Copy the cells `src` shows to a dynamic read into `site`. Each copied
-    /// value takes the source's labels. A source that carries labels but shows
-    /// no cell (a labelled string) still taints the result, in the summary,
-    /// because every element or field of it is derived from it.
+    /// value takes the source's flow as data. A source that carries labels but
+    /// shows no cell (a labelled string) still taints the result, in the
+    /// summary, because every element or field of it is derived from it.
     fn spreadInto(self: *FlowInterp, st: *State, site: SiteKey, src: Value, keep_names: bool) Error!void {
         const view = try self.snapshotCells(st, src);
         var it = view.named.iterator();
         while (it.next()) |entry| {
             const name: ?u16 = if (keep_names) entry.key_ptr.* else null;
-            try self.weakWriteSite(st, site, name, withLabels(entry.value_ptr.*, src.labels));
+            try self.weakWriteSite(st, site, name, withFlow(entry.value_ptr.*, src.flow()));
         }
         if (view.summary) |summary| {
-            try self.weakWriteSite(st, site, null, withLabels(summary, src.labels));
+            try self.weakWriteSite(st, site, null, withFlow(summary, src.flow()));
         }
         if (!src.labels.isEmpty()) {
-            try self.weakWriteSite(st, site, null, Value.labelled(src.labels));
+            try self.weakWriteSite(st, site, null, Value.flowing(src.flow()));
         }
     }
 
@@ -2669,7 +3042,7 @@ pub const FlowInterp = struct {
             .unary_op => {
                 const unary = self.ir_view.getUnary(node) orelse return self.missing(node);
                 const operand = try self.eval(unary.operand, st);
-                return Value.labelled(operand.labels);
+                return Value.flowing(operand.flow());
             },
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return self.missing(node);
@@ -2826,7 +3199,7 @@ pub const FlowInterp = struct {
                 // arithmetic or comparison operator is a fresh primitive.
                 const left = try self.eval(bin.left, st);
                 const right = try self.eval(bin.right, st);
-                return Value.labelled(LabelSet.mergeValues(left.labels, right.labels));
+                return Value.flowing(combineFlows(left.flow(), right.flow()));
             },
         }
     }
@@ -2853,7 +3226,7 @@ pub const FlowInterp = struct {
             },
             else => {
                 const rhs = try self.eval(rhs_node, st);
-                return Value.labelled(LabelSet.mergeValues(old.labels, rhs.labels));
+                return Value.flowing(combineFlows(old.flow(), rhs.flow()));
             },
         }
     }
@@ -5301,11 +5674,11 @@ test "census C1: every registered builtin has a row and every row names a builti
     // A row that names nothing registered fails the other direction.
     const extra = try allocator.alloc(OperationRow, operation_rows.len + 1);
     @memcpy(extra[0..operation_rows.len], &operation_rows);
-    extra[operation_rows.len] = .{ .scope = "Math", .name = "noSuchMember", .rule = .deep_scalar };
+    extra[operation_rows.len] = .{ .scope = "Math", .name = "noSuchMember", .rule = .deep_scalar, .defense = .keep };
     try testing.expectError(error.RowWithoutProperty, censusBuiltins(ctx, extra));
 
     // A global row for a name that is not a global fails too.
-    extra[operation_rows.len] = .{ .scope = "global", .name = "noSuchGlobal", .rule = .deep_scalar };
+    extra[operation_rows.len] = .{ .scope = "global", .name = "noSuchGlobal", .rule = .deep_scalar, .defense = .keep };
     try testing.expectError(error.RowWithoutGlobal, censusBuiltins(ctx, extra));
 
     // A row with no rule states its reason.
@@ -5464,8 +5837,9 @@ test "a validating export keeps the user input it was given" {
     try testing.expect(checked.returnedLabels().user_input);
     try testing.expect(!checked.returnedLabels().validated);
 
-    // The contrast: with nothing tainted, the declared label is all it has.
-    try expectLabels(validate ++ "function f(u) { return validateObject(\"n\", {}); }", &.{user_input_value}, .{ .validated = true });
+    // The contrast: with nothing tainted the result carries nothing, because
+    // no value carries `validated` (P6).
+    try expectLabels(validate ++ "function f(u) { return validateObject(\"n\", {}); }", &.{user_input_value}, .empty);
 }
 
 // P5 specification test 36.
@@ -5962,6 +6336,810 @@ test "a recursive call through a callback converges" {
 test "an array that a builtin returns is not a Result" {
     try expectSecret("function f(s) { return s.split(\",\").map((x) => x)[0]; }", &.{secret_value}, true);
     try expectSecret("function f(s) { return \"a,b\".split(\",\").map((x) => x)[0]; }", &.{secret_value}, false);
+}
+
+// --- P6b: defenses ---
+//
+// These sources are internal evaluator fixtures. `u` is seeded `user_input`
+// and holds no defense. A seed may also be a hand-built primitive with labels
+// and defenses and no origin. Each test that expects a defense has a contrast
+// without it, and each check compares the exact defense set.
+
+const both_defenses: Defenses = .{ .html_escaped = true, .schema_checked = true };
+const no_defenses: Defenses = .{};
+
+/// A primitive that request data decided and that holds `defenses`.
+fn exposedSeed(defenses: Defenses) Value {
+    return .{ .labels = .{ .user_input = true }, .defenses = defenses };
+}
+
+const text_import = "import { escapeHtml, unescapeHtml, truncate } from \"zttp:text\"; ";
+const validate_import = "import { validateJson, validateObject, coerceJson } from \"zttp:validate\"; ";
+const decode_import = "import { decodeJson, decodeForm, decodeQuery, decodeFormMultipart } from \"zttp:decode\"; ";
+
+/// What a run returned: the flow of the value, the flow of everything the
+/// value reaches in the exit state, and whether the value points anywhere.
+const Probe = struct { cleared: bool, surface: Flow, deep: Flow, origins: usize };
+
+fn probe(source: []const u8, params: []const Value) !Probe {
+    const r = try analyzeSource(source, "f", params);
+    defer r.deinit();
+    const returned = r.result.returned orelse return error.NoReturnedValue;
+    return .{
+        .cleared = r.result.cleared,
+        .surface = returned.flow(),
+        .deep = try r.harness.interp.deepFlow(&r.result.exit, &.{returned}),
+        .origins = returned.origins.len,
+    };
+}
+
+fn expectSameDefenses(expected: Defenses, actual: Defenses) !void {
+    try testing.expectEqual(@as(u8, @bitCast(expected)), @as(u8, @bitCast(actual)));
+}
+
+/// Require a resolved run whose value is exposed to request data and holds
+/// exactly `expected`.
+fn expectDefenses(source: []const u8, params: []const Value, expected: Defenses) !void {
+    const p = try probe(source, params);
+    try testing.expect(!p.cleared);
+    try testing.expect(p.surface.labels.user_input);
+    try expectSameDefenses(expected, p.surface.defenses);
+}
+
+/// The same, for the flow of everything the value reaches.
+fn expectDeepDefenses(source: []const u8, params: []const Value, expected: Defenses) !void {
+    const p = try probe(source, params);
+    try testing.expect(!p.cleared);
+    try testing.expect(p.deep.labels.user_input);
+    try expectSameDefenses(expected, p.deep.defenses);
+}
+
+fn expectUserInput(source: []const u8, params: []const Value, expected: bool) !void {
+    const r = try analyzeSource(source, "f", params);
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expectEqual(expected, r.returnedLabels().user_input);
+}
+
+// P6 specification test 6.
+test "escapeHtml establishes html_escaped, keeps user_input, and ignores the origins of its argument" {
+    const plain = text_import ++ "function f(u) { return escapeHtml(u); }";
+    try expectDefenses(plain, &.{user_input_value}, html_only);
+    // `u` holds no defense.
+    try expectDefenses("function f(u) { return u; }", &.{user_input_value}, no_defenses);
+
+    // `t` is an exposed value with an origin, and the result is the same.
+    const split = "function f(u) { return u.split(\",\")[0]; }";
+    const origin = try probe(split, &.{user_input_value});
+    try testing.expect(origin.origins > 0);
+    try expectDefenses(text_import ++ "function f(u) { const t = u.split(\",\")[0]; return escapeHtml(t); }", &.{user_input_value}, html_only);
+
+    // The sink predicate takes the `deepFlow` of the result.
+    const escaped = try probe(plain, &.{user_input_value});
+    try testing.expect(inputAccepted(escaped.deep, .response_html, .injection_safe));
+    const raw = try probe(split, &.{user_input_value});
+    try testing.expect(!inputAccepted(raw.deep, .response_html, .injection_safe));
+
+    // The row keeps `schema_checked` from its argument.
+    const checked = text_import ++ "function f(v) { return escapeHtml(v); }";
+    try expectDefenses(checked, &.{exposedSeed(schema_only)}, both_defenses);
+    try expectDefenses(checked, &.{exposedSeed(html_only)}, html_only);
+
+    // A clean argument gives a clean result.
+    const literal = try probe(text_import ++ "function f(u) { return escapeHtml(\"c\"); }", &.{user_input_value});
+    try testing.expect(!literal.surface.labels.user_input);
+}
+
+// P6 specification test 7.
+test "a combination keeps a defense only when every exposed contributor holds it" {
+    const params = [_]Value{user_input_value};
+    try expectDefenses(text_import ++ "function f(u) { return \"<p>\" + escapeHtml(u) + \"</p>\"; }", &params, html_only);
+    try expectDefenses(text_import ++ "function f(u) { return escapeHtml(u) + u; }", &params, no_defenses);
+    try expectDefenses(text_import ++ "function f(u) { return u + escapeHtml(u); }", &params, no_defenses);
+    // Two escaped contributors keep it.
+    try expectDefenses(text_import ++ "function f(u) { return escapeHtml(u) + escapeHtml(u); }", &params, html_only);
+}
+
+// P6 specification test 8.
+test "a join keeps a defense when the other side is not exposed" {
+    const params = [_]Value{ Value.clean, user_input_value };
+    try expectDefenses(text_import ++ "function f(c, u) { return c ? escapeHtml(u) : \"x\"; }", &params, html_only);
+    try expectDefenses(text_import ++ "function f(c, u) { return c ? \"x\" : escapeHtml(u); }", &params, html_only);
+    try expectDefenses(text_import ++ "function f(c, u) { return c ? escapeHtml(u) : u; }", &params, no_defenses);
+    try expectDefenses(text_import ++ "function f(c, u) { return c ? u : escapeHtml(u); }", &params, no_defenses);
+}
+
+// P6 specification test 9.
+test "operations with the edge keep carry the defenses of their flow" {
+    const params = [_]Value{user_input_value};
+    const escaped_forms = [_][]const u8{
+        "e.toUpperCase()",
+        "e.trim()",
+        "\"<b>\".concat(e)",
+        "e.slice(0, 3)",
+        "e.split(\",\")[0]",
+        "(e + \"<\").charAt(1)",
+        "e.padStart(9, \"<\")",
+        "e.charCodeAt(0)",
+        "[e, \"<b>\"].join(\"\")",
+        "[e, \"<b>\"][0]",
+        "[e, \"<img>\"].toSorted()[0]",
+        "[e, \"<img>\"].pop()",
+        "[e, \"<b>\"].filter((x) => true).join(\"\")",
+        "[e, \"<b>\"].splice(0, 1).join(\"\")",
+    };
+    inline for (escaped_forms) |form| {
+        try expectDefenses(text_import ++ "function f(u) { const e = escapeHtml(u); return " ++ form ++ "; }", &params, html_only);
+    }
+
+    // A raw argument removes the defense.
+    try expectDefenses(text_import ++ "function f(u) { const e = escapeHtml(u); return e.slice(u.length); }", &params, no_defenses);
+    try expectDefenses(text_import ++ "function f(u) { const e = escapeHtml(u); return \"<b>\".concat(u, e); }", &params, no_defenses);
+
+    // The same holds for the other defense.
+    const seeds = [_]Value{ exposedSeed(schema_only), user_input_value };
+    try expectDefenses("function f(v, u) { return v.slice(1); }", &seeds, schema_only);
+    try expectDefenses("function f(v, u) { return v.slice(u.length); }", &seeds, no_defenses);
+
+    // `replace` and `replaceAll` remove both defenses.
+    const both = [_]Value{ exposedSeed(both_defenses), user_input_value };
+    inline for (.{ "replace", "replaceAll" }) |method| {
+        try expectDefenses(text_import ++ "function f(u) { const e = escapeHtml(u); return e." ++ method ++ "(\"a\", \"b\"); }", &params, no_defenses);
+        try expectDefenses("function f(v, u) { return v." ++ method ++ "(\"a\", \"b\"); }", &seeds, no_defenses);
+        try expectDefenses("function f(v, u) { return v." ++ method ++ "(\"a\", \"b\"); }", &both, no_defenses);
+    }
+    // Contrast: a row with the edge keep leaves both defenses where they are.
+    try expectDefenses("function f(v, u) { return v.trim(); }", &both, both_defenses);
+
+    // A container keeps the flow of its rule: it takes the raw flow of `u`
+    // while its elements are escaped.
+    const from = text_import ++ "function f(u) { return Array.from(u, (c) => escapeHtml(c)); }";
+    try expectDeepDefenses(from, &params, no_defenses);
+    const first = text_import ++ "function f(u) { return Array.from(u, (c) => escapeHtml(c))[0]; }";
+    try expectDefenses(first, &params, no_defenses);
+    try expectDeepDefenses(first, &params, no_defenses);
+}
+
+// P6 specification test 10.
+test "request data that selects author characters keeps html_escaped, as D25 states" {
+    const tag = "\"<img src=x onerror=alert(1)>\"";
+    const escaped_bound = text_import ++ "function f(u) { const n = escapeHtml(u).length; return " ++ tag ++ ".slice(n); }";
+    try expectDefenses(escaped_bound, &.{user_input_value}, html_only);
+    const raw_bound = "function f(u) { const n = u.length; return " ++ tag ++ ".slice(n); }";
+    try expectDefenses(raw_bound, &.{user_input_value}, no_defenses);
+    const literal_bound = try probe("function f(u) { const n = 1; return " ++ tag ++ ".slice(n); }", &.{user_input_value});
+    try testing.expect(!literal_bound.surface.exposed());
+    try expectSameDefenses(no_defenses, literal_bound.surface.defenses);
+}
+
+// P6 specification test 11.
+test "a computed read and a computed write combine the key as data" {
+    const params = [_]Value{user_input_value};
+    const record = text_import ++ "function f(u) { const o = { k: escapeHtml(u) }; ";
+    try expectDefenses(record ++ "return o[u]; }", &params, no_defenses);
+    try expectDefenses(record ++ "return o[escapeHtml(u)]; }", &params, html_only);
+    try expectDefenses(record ++ "return o[\"k\"]; }", &params, html_only);
+
+    // A write at a raw key removes the defense from every later read, and a
+    // write at a literal key does not.
+    try expectDefenses(record ++ "o[u] = escapeHtml(u); return o.k; }", &params, no_defenses);
+    try expectDefenses(record ++ "o[\"z\"] = escapeHtml(u); return o.k; }", &params, html_only);
+    // The value written at an escaped key keeps its own defense.
+    try expectDefenses(record ++ "o[escapeHtml(u)] = escapeHtml(u); return o.k; }", &params, html_only);
+}
+
+// P6 specification test 12.
+test "the callback index carries the structure of the receiver" {
+    const write = "o.w = \"c\".charAt(i);";
+    const calls = [_][]const u8{
+        "a.map((x, i) => { " ++ write ++ " return x; })",
+        "a.filter((x, i) => { " ++ write ++ " return true; })",
+        "a.find((x, i) => { " ++ write ++ " return true; })",
+        "a.forEach((x, i) => { " ++ write ++ " })",
+        "a.every((x, i) => { " ++ write ++ " return true; })",
+        "a.some((x, i) => { " ++ write ++ " return true; })",
+        "a.findIndex((x, i) => { " ++ write ++ " return true; })",
+        "a.reduce((acc, x, i) => { " ++ write ++ " return acc; }, \"c\")",
+        "Array.from(a, (x, i) => { " ++ write ++ " return x; })",
+    };
+    inline for (calls) |call| {
+        const head = "function f(u) { const o = { w: \"c\" }; const a = ";
+        const tail = "; " ++ call ++ "; return o.w; }";
+        // A spread copies request-derived elements into a receiver whose own
+        // labels are clean.
+        try expectUserInput(head ++ "[...u.split(\",\")]" ++ tail, &.{user_input_value}, true);
+        try expectUserInput(head ++ "[\"c\", \"c\"]" ++ tail, &.{user_input_value}, false);
+    }
+
+    const index = text_import ++ "function f(u) { return Array.from(escapeHtml(u), (c, i) => \"c\".charAt(i)).join(\"\"); }";
+    try expectUserInput(index, &.{user_input_value}, true);
+    const element = text_import ++ "function f(u) { return Array.from(escapeHtml(u), (c) => c).join(\"\"); }";
+    try expectDefenses(element, &.{user_input_value}, html_only);
+}
+
+// P6 specification test 13.
+test "method dispatch adds the user candidate only when it can be called" {
+    const params = [_]Value{user_input_value};
+    const list = text_import ++
+        "function f(u) { const a = [u]; return a.map((x) => \"<li>\" + escapeHtml(x) + \"</li>\").join(\"\"); }";
+    try expectDefenses(list, &params, html_only);
+
+    // A stored function runs, and its result reaches the call.
+    try expectUserInput("function f(u) { const a = [() => u]; return a.map(() => \"c\"); }", &params, true);
+    try expectUserInput("function f(u) { const a = [() => \"c\"]; return a.map(() => \"c\"); }", &params, false);
+
+    // The flow of a callable candidate joins the result even when the body
+    // returns a clean value.
+    const selected = "function f(s) { const a = []; a[s] = () => \"c\"; return a.map(() => \"c\"); }";
+    const p = try probe(selected, &.{secret_value});
+    try testing.expect(!p.cleared);
+    try testing.expect(p.surface.labels.secret);
+    try expectSameDefenses(no_defenses, p.surface.defenses);
+    try expectSecret("function f(s) { const a = []; a[\"k\"] = () => \"c\"; return a.map(() => \"c\"); }", &.{secret_value}, false);
+
+    // A raw key that selects the function removes a defense from the result.
+    const keyed = text_import ++
+        "function f(u) { const a = []; a[u] = () => \"c\"; return a.map(() => escapeHtml(u)).join(\"\"); }";
+    try expectDefenses(keyed, &params, no_defenses);
+}
+
+/// The call of one export with a precise callback row, split around the
+/// callback: the text before it and the text after it.
+const CallbackCall = struct { before: []const u8, after: []const u8 };
+
+const callback_calls = [_]CallbackCall{
+    .{ .before = "dictMapValues(dictEmpty(), ", .after = ")" },
+    .{ .before = "dictFilter(dictEmpty(), ", .after = ")" },
+    .{ .before = "dictFold(dictSet(dictEmpty(), \"k\", \"c\"), ", .after = ", \"\")" },
+    .{ .before = "mapResult(ok(\"c\"), ", .after = ")" },
+    .{ .before = "mapError(err(\"c\"), ", .after = ")" },
+    .{ .before = "andThen(ok(\"c\"), ", .after = ")" },
+    .{ .before = "orElse(err(\"c\"), ", .after = ")" },
+};
+
+const callback_imports = text_import ++
+    "import { dictEmpty, dictSet, dictMapValues, dictFilter, dictFold } from \"zttp:collections\"; " ++
+    "import { ok, err, mapResult, mapError, andThen, orElse } from \"zttp:result\"; ";
+
+// P6 specification test 14.
+test "a non-source export clears the defenses of its callback results" {
+    // The callback returns an escaped value, or a seed that holds a defense.
+    const callbacks = [_][]const u8{ "() => escapeHtml(u)", "() => v" };
+    const schema_seeds = [_]Value{ user_input_value, exposedSeed(schema_only) };
+    const html_seeds = [_]Value{ user_input_value, exposedSeed(html_only) };
+    inline for (callback_calls) |call| {
+        inline for (callbacks) |callback| {
+            const source = callback_imports ++ "function f(u, v) { return " ++ call.before ++ callback ++ call.after ++ "; }";
+            try expectDefenses(source, &schema_seeds, no_defenses);
+            try expectDeepDefenses(source, &schema_seeds, no_defenses);
+            try expectDeepDefenses(source, &html_seeds, no_defenses);
+        }
+    }
+
+    // The named example.
+    const fold = callback_imports ++
+        "function f(u) { return dictFold(dictSet(dictEmpty(), \"k\", \"c\"), () => escapeHtml(u), \"\"); }";
+    try expectDeepDefenses(fold, &.{user_input_value}, no_defenses);
+}
+
+// P6 specification test 15.
+test "an export that is not a source removes the defenses of what it read" {
+    const params = [_]Value{user_input_value};
+    try expectDefenses(text_import ++ "function f(u) { return unescapeHtml(escapeHtml(u)); }", &params, no_defenses);
+    try expectDefenses(text_import ++ "function f(u) { return truncate(escapeHtml(u), 3); }", &params, no_defenses);
+    try expectDeepDefenses(text_import ++ "function f(u) { return unescapeHtml(escapeHtml(u)); }", &params, no_defenses);
+    // Contrast: the escaped value itself keeps it.
+    try expectDefenses(text_import ++ "function f(u) { return escapeHtml(u); }", &params, html_only);
+}
+
+// P6 specification test 16.
+test "fromCharCode removes both defenses and charCodeAt keeps them" {
+    try expectDefenses("function f(n) { return String.fromCharCode(n); }", &.{exposedSeed(both_defenses)}, no_defenses);
+    try expectDefenses("function f(n) { return String.fromCharCode(n); }", &.{exposedSeed(html_only)}, no_defenses);
+    try expectDefenses(text_import ++ "function f(u) { return escapeHtml(u).charCodeAt(0); }", &.{user_input_value}, html_only);
+}
+
+// P6 specification test 17.
+test "JSON.stringify keeps schema_checked and JSON.parse removes both" {
+    const seeds = [_]Value{exposedSeed(both_defenses)};
+    try expectDefenses("function f(v) { return JSON.stringify(v); }", &seeds, schema_only);
+    try expectDefenses("function f(v) { return JSON.parse(v); }", &seeds, no_defenses);
+    try expectDefenses("function f(v) { return JSON.tryParse(v); }", &seeds, no_defenses);
+    try expectDeepDefenses("function f(v) { return JSON.parse(v); }", &seeds, no_defenses);
+    // Contrast: a seed with html_escaped alone loses it at stringify.
+    try expectDefenses("function f(v) { return JSON.stringify(v); }", &.{exposedSeed(html_only)}, no_defenses);
+}
+
+// P6 specification test 18.
+test "Object.keys and Object.entries remove html_escaped and Object.values keeps it" {
+    const params = [_]Value{user_input_value};
+    const record = text_import ++ "function f(u) { const o = { k: escapeHtml(u) }; ";
+    try expectDefenses(record ++ "return Object.keys(o).join(\"\"); }", &params, no_defenses);
+    try expectDefenses(record ++ "return Object.entries(o).join(\"\"); }", &params, no_defenses);
+    try expectDefenses(record ++ "return Object.values(o).join(\"\"); }", &params, html_only);
+}
+
+// P6 specification test 19.
+test "renderToString removes html_escaped" {
+    const params = [_]Value{user_input_value};
+    try expectDefenses(text_import ++ "function f(u) { return renderToString(h(\"p\", {}, escapeHtml(u))); }", &params, no_defenses);
+    // Contrast: building the vnode keeps it.
+    try expectDefenses(text_import ++ "function f(u) { return h(\"p\", {}, escapeHtml(u)); }", &params, html_only);
+}
+
+/// A call of one source with the argument `u`, and the extra argument that
+/// `decodeFormMultipart` takes.
+const SchemaSource = struct { imports: []const u8, call: []const u8 };
+
+const schema_sources = [_]SchemaSource{
+    .{ .imports = validate_import, .call = "validateJson(\"n\", u)" },
+    .{ .imports = validate_import, .call = "coerceJson(\"n\", u)" },
+    .{ .imports = decode_import, .call = "decodeJson(\"n\", u)" },
+    .{ .imports = decode_import, .call = "decodeForm(\"n\", u)" },
+    .{ .imports = decode_import, .call = "decodeFormMultipart(\"n\", u, \"multipart/form-data\")" },
+};
+
+// P6 specification test 20.
+test "a schema source establishes schema_checked and removes html_escaped" {
+    const raw = [_]Value{user_input_value};
+    const escaped = [_]Value{exposedSeed(html_only)};
+    inline for (schema_sources) |source| {
+        const result = source.imports ++ "function f(u) { return " ++ source.call ++ "; }";
+        const member = source.imports ++ "function f(u) { return " ++ source.call ++ ".value; }";
+        inline for (.{ result, member }) |text| {
+            try expectDefenses(text, &raw, schema_only);
+            try expectDefenses(text, &escaped, schema_only);
+            try expectDeepDefenses(text, &raw, schema_only);
+        }
+    }
+    // Contrast: the same call on a clean argument is not exposed.
+    const clean = try probe(validate_import ++ "function f(u) { return validateJson(\"n\", \"{}\"); }", &raw);
+    try testing.expect(!clean.surface.exposed());
+}
+
+// P6 specification test 21.
+test "a row without a defense establishes nothing" {
+    const params = [_]Value{user_input_value};
+    const auth = "import { jwtVerify } from \"zttp:auth\"; ";
+    const sources = [_][]const u8{
+        validate_import ++ "function f(u) { return validateObject(\"n\", u); }",
+        validate_import ++ "function f(u) { return validateObject(\"n\", { k: u }); }",
+        decode_import ++ "function f(u) { return decodeQuery(\"n\", { k: u }); }",
+        auth ++ "function f(u) { return jwtVerify(u, \"k\"); }",
+    };
+    for (sources) |source| {
+        try expectDefenses(source, &params, no_defenses);
+        try expectDeepDefenses(source, &params, no_defenses);
+        // An escaped argument does not survive either.
+        try expectDefenses(source, &.{exposedSeed(both_defenses)}, no_defenses);
+    }
+    const r = try analyzeSource(auth ++ "function f(u) { return jwtVerify(u, \"k\"); }", "f", &params);
+    defer r.deinit();
+    try testing.expect(r.returnedLabels().credential);
+    try testing.expect(r.returnedLabels().user_input);
+}
+
+// P6 specification test 22.
+test "a write into a validated result removes the defense for later reads" {
+    const params = [_]Value{user_input_value};
+    const head = validate_import ++ "function f(u) { const r = validateJson(\"n\", u); ";
+    try expectDefenses(head ++ "r.value.x = u; return r.value.x; }", &params, no_defenses);
+    try expectDefenses(head ++ "return r.value.x; }", &params, schema_only);
+    // A write of a validated value keeps the defense.
+    try expectDefenses(head ++ "r.value.x = r.value; return r.value.x; }", &params, schema_only);
+}
+
+// P6 specification test 23.
+test "a defense survives a call, a loop, and a callback" {
+    const params = [_]Value{user_input_value};
+    try expectDefenses(
+        text_import ++ "function esc(x) { return escapeHtml(x); } function f(u) { return esc(u); }",
+        &params,
+        html_only,
+    );
+    try expectDefenses(
+        text_import ++ "function f(u) { let r = \"x\"; for (const y of [escapeHtml(u)]) { r = y; } return r; }",
+        &params,
+        html_only,
+    );
+    try expectDefenses(text_import ++ "function f(u) { return [u].map((x) => escapeHtml(x)).join(\"\"); }", &params, html_only);
+    try expectDefenses(text_import ++ "function f(u) { return [u].map((x) => x).join(\"\"); }", &params, no_defenses);
+}
+
+// P6 specification test 24.
+test "canonical form: only an exposed value holds a defense" {
+    const literal = try probe(text_import ++ "function f(u) { return escapeHtml(\"c\"); }", &.{user_input_value});
+    try testing.expect(!literal.cleared);
+    try testing.expect(!literal.surface.exposed());
+    try expectSameDefenses(no_defenses, literal.surface.defenses);
+
+    try testing.expect(Value.top.flow().exposed());
+    try testing.expect(Value.labelled(.{ .unknown = true }).flow().exposed());
+    try testing.expect(!Value.labelled(.{ .secret = true }).flow().exposed());
+
+    // A join with `Value.top` and a combination with a value that holds only
+    // `unknown` both remove the defense.
+    const joined = text_import ++ "function f(c, t, u) { return c ? t : escapeHtml(u); }";
+    const p = try probe(joined, &.{ Value.clean, Value.top, user_input_value });
+    try testing.expect(p.surface.exposed());
+    try expectSameDefenses(no_defenses, p.surface.defenses);
+    const unknown_only = Value.labelled(.{ .unknown = true });
+    const combined = try probe(text_import ++ "function f(x, u) { return x + escapeHtml(u); }", &.{ unknown_only, user_input_value });
+    try testing.expect(combined.surface.exposed());
+    try expectSameDefenses(no_defenses, combined.surface.defenses);
+
+    // The join of the values themselves.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const escaped = exposedSeed(html_only);
+    const top_join = try joinValue(arena.allocator(), Value.top, escaped);
+    try expectSameDefenses(no_defenses, top_join.defenses);
+    const clean_join = try joinValue(arena.allocator(), Value.clean, escaped);
+    try expectSameDefenses(html_only, clean_join.defenses);
+    // A flow that is not exposed cannot hold a defense.
+    const quiet = Value.flowing(.{ .labels = .{ .secret = true }, .defenses = html_only });
+    try expectSameDefenses(no_defenses, quiet.defenses);
+}
+
+// P6 specification test 25.
+test "no value carries the validated label" {
+    const params = [_]Value{user_input_value};
+    const sources = [_][]const u8{
+        validate_import ++ "function f(u) { return validateJson(\"n\", u); }",
+        validate_import ++ "function f(u) { return validateJson(\"n\", u).value; }",
+        text_import ++ "function f(u) { return escapeHtml(u); }",
+        validate_import ++ "function f(u) { return validateJson(\"n\", \"{}\"); }",
+        validate_import ++ "function f(u) { return validateObject(\"n\", {}); }",
+        text_import ++ "function f(u) { return escapeHtml(\"c\"); }",
+    };
+    for (sources) |source| {
+        const r = try analyzeSource(source, "f", &params);
+        defer r.deinit();
+        try testing.expect(!r.result.cleared);
+        try testing.expect(!r.returnedLabels().validated);
+    }
+    // Nothing else is declared either: the labels of a call that reads
+    // nothing are empty.
+    try expectLabels(validate_import ++ "function f(u) { return validateObject(\"n\", {}); }", &params, .empty);
+    try expectLabels(text_import ++ "function f(u) { return escapeHtml(\"c\"); }", &params, .empty);
+}
+
+// P6 specification test 26.
+test "a loop that makes a value exposed converges" {
+    const params = [_]Value{user_input_value};
+    const head = text_import ++ "function f(u) { let x = escapeHtml(\"c\"); for (const y of [u]) { ";
+    try expectDefenses(head ++ "x = x + escapeHtml(y); } return x; }", &params, html_only);
+    try expectDefenses(head ++ "x = x + y; } return x; }", &params, no_defenses);
+    // The same through a callback loop.
+    try expectDefenses(
+        text_import ++ "function f(u) { let x = escapeHtml(\"c\"); [u].forEach((y) => { x = x + escapeHtml(y); }); return x; }",
+        &params,
+        html_only,
+    );
+}
+
+// P6 specification test 27.
+test "requirement matches the table and inputAccepted reads the defenses of the reached flow" {
+    const open: Requirement = .not_governed;
+    const html: Requirement = .{ .defense = .html_escaped };
+    const schema: Requirement = .{ .defense = .schema_checked };
+    const closed: Requirement = .no_defense;
+    // Rows follow the order of `InputSink`, columns the order of
+    // `InputProperty`.
+    const expected = [_][3]Requirement{
+        .{ open, html, open },
+        .{ open, open, open },
+        .{ open, open, open },
+        .{ open, open, open },
+        .{ schema, closed, closed },
+        .{ schema, schema, closed },
+        .{ schema, closed, closed },
+        .{ schema, closed, closed },
+    };
+    const sinks = std.enums.values(InputSink);
+    const properties = std.enums.values(InputProperty);
+    try testing.expectEqual(expected.len, sinks.len);
+    try testing.expectEqual(expected[0].len, properties.len);
+    for (sinks, expected) |sink, row| {
+        for (properties, row) |property, want| {
+            try testing.expectEqual(want, requirement(sink, property));
+        }
+    }
+
+    const raw: Flow = .{ .labels = .{ .user_input = true } };
+    const html_flow: Flow = .{ .labels = .{ .user_input = true }, .defenses = html_only };
+    const schema_flow: Flow = .{ .labels = .{ .user_input = true }, .defenses = schema_only };
+    const both_flow: Flow = .{ .labels = .{ .user_input = true }, .defenses = both_defenses };
+
+    // The escaped value at the HTML body.
+    const escaped = try probe(text_import ++ "function f(u) { return escapeHtml(u); }", &.{user_input_value});
+    try testing.expect(inputAccepted(escaped.deep, .response_html, .injection_safe));
+    try testing.expect(!inputAccepted(schema_flow, .response_html, .injection_safe));
+    try testing.expect(!inputAccepted(raw, .response_html, .injection_safe));
+
+    // The validated value at the network.
+    try testing.expect(inputAccepted(schema_flow, .egress_url, .input_validated));
+    try testing.expect(!inputAccepted(schema_flow, .egress_url, .injection_safe));
+    try testing.expect(!inputAccepted(html_flow, .egress_body, .input_validated));
+    try testing.expect(!inputAccepted(html_flow, .egress_body, .injection_safe));
+    try testing.expect(inputAccepted(schema_flow, .egress_body, .input_validated));
+    try testing.expect(inputAccepted(schema_flow, .egress_body, .injection_safe));
+
+    // Personal data is never contained by a defense.
+    for ([_]InputSink{ .egress_url, .egress_body, .egress_headers, .egress_opaque }) |sink| {
+        for ([_]Flow{ raw, html_flow, schema_flow, both_flow }) |flow| {
+            try testing.expect(!inputAccepted(flow, sink, .pii_contained));
+        }
+    }
+
+    // A flow that is not exposed is accepted everywhere. A flow that holds
+    // only `unknown` needs the defense, and raw request data passes only where
+    // the sink does not govern the property.
+    const quiet: Flow = .{ .labels = .{ .secret = true } };
+    const unknown_only: Flow = .{ .labels = .{ .unknown = true } };
+    var governed: usize = 0;
+    for (sinks) |sink| {
+        for (properties) |property| {
+            try testing.expect(inputAccepted(quiet, sink, property));
+            try testing.expect(inputAccepted(.{}, sink, property));
+            switch (requirement(sink, property)) {
+                .not_governed => {
+                    try testing.expect(inputAccepted(raw, sink, property));
+                    try testing.expect(inputAccepted(unknown_only, sink, property));
+                },
+                .defense => {
+                    governed += 1;
+                    try testing.expect(!inputAccepted(raw, sink, property));
+                    try testing.expect(!inputAccepted(unknown_only, sink, property));
+                },
+                .no_defense => {
+                    try testing.expect(!inputAccepted(raw, sink, property));
+                    try testing.expect(!inputAccepted(both_flow, sink, property));
+                },
+            }
+        }
+    }
+    try testing.expectEqual(@as(usize, 6), governed);
+
+    // The sink reads the flow of everything the value reaches.
+    const body = try probe("function f(u) { return { body: u }; }", &.{user_input_value});
+    try testing.expect(!inputAccepted(body.deep, .egress_body, .input_validated));
+
+    const checked = validate_import ++ "function f(u) { const r = validateJson(\"n\", u); ";
+    const intact = try probe(checked ++ "return r.value; }", &.{user_input_value});
+    try testing.expect(inputAccepted(intact.deep, .egress_url, .input_validated));
+    const aliased = try probe(checked ++ "const alias = r.value; alias.x = u; return r.value; }", &.{user_input_value});
+    // The surface of the value keeps its own defense, and the cells do not.
+    try testing.expect(inputAccepted(aliased.surface, .egress_url, .input_validated));
+    try testing.expect(!inputAccepted(aliased.deep, .egress_url, .input_validated));
+}
+
+/// An operation row the census expects to carry an edge other than `keep`.
+const ExpectedEdge = struct { scope: []const u8, name: []const u8, edge: DefenseEdge };
+
+const expected_edges = [_]ExpectedEdge{
+    .{ .scope = "String.prototype", .name = "replace", .edge = .drop_all },
+    .{ .scope = "String.prototype", .name = "replaceAll", .edge = .drop_all },
+    .{ .scope = "String", .name = "fromCharCode", .edge = .drop_all },
+    .{ .scope = "JSON", .name = "stringify", .edge = .drop_html },
+    .{ .scope = "JSON", .name = "parse", .edge = .drop_all },
+    .{ .scope = "JSON", .name = "tryParse", .edge = .drop_all },
+    .{ .scope = "Object", .name = "keys", .edge = .drop_html },
+    .{ .scope = "Object", .name = "entries", .edge = .drop_html },
+    .{ .scope = "global", .name = "renderToString", .edge = .drop_html },
+    .{ .scope = "global", .name = "requestBody", .edge = .drop_all },
+    .{ .scope = "global", .name = "requestText", .edge = .drop_all },
+    .{ .scope = "global", .name = "requestJson", .edge = .drop_all },
+};
+
+const EdgeCensusError = error{
+    /// An expected row is missing or has another edge.
+    EdgeMismatch,
+    /// A row that is not expected has an edge other than `keep`.
+    UnexpectedEdge,
+};
+
+/// Check that the rows with an edge other than `keep` are exactly `expected`,
+/// and return their number.
+fn censusEdges(rows: []const OperationRow, expected: []const ExpectedEdge) EdgeCensusError!usize {
+    for (expected) |want| {
+        const row = findRow(rows, want.scope, want.name) orelse return error.EdgeMismatch;
+        if (row.defense != want.edge) return error.EdgeMismatch;
+    }
+    var removing: usize = 0;
+    for (rows) |row| {
+        if (row.defense != .keep) removing += 1;
+    }
+    if (removing != expected.len) return error.UnexpectedEdge;
+    return removing;
+}
+
+// P6 specification test 28, the C1 half.
+test "census C1: the rows that remove a defense are exactly the twelve" {
+    const removing = try censusEdges(&operation_rows, &expected_edges);
+    std.debug.print("flow_interp edge census: {d} rows remove a defense of {d}\n", .{ removing, operation_rows.len });
+    // A floor on the input: a census over no rows would pass.
+    try testing.expectEqual(@as(usize, 12), removing);
+    try testing.expectEqual(@as(usize, 12), expected_edges.len);
+
+    var arena_owner = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_owner.deinit();
+    const allocator = arena_owner.allocator();
+
+    // A probe that gives any of the twelve another edge must fail, and so
+    // must a probe that gives another row an edge.
+    for (expected_edges) |want| {
+        const copy = try allocator.dupe(OperationRow, &operation_rows);
+        const at = rowIndex(copy, want.scope, want.name) orelse return error.RowNotFound;
+        copy[at].defense = .keep;
+        try testing.expectError(error.EdgeMismatch, censusEdges(copy, &expected_edges));
+        copy[at].defense = if (want.edge == .drop_all) .drop_html else .drop_all;
+        try testing.expectError(error.EdgeMismatch, censusEdges(copy, &expected_edges));
+    }
+    const slice = try allocator.dupe(OperationRow, &operation_rows);
+    slice[rowIndex(slice, "String.prototype", "slice") orelse return error.RowNotFound].defense = .drop_html;
+    try testing.expectError(error.UnexpectedEdge, censusEdges(slice, &expected_edges));
+
+    // The field has no default, so every `rowsOf` call and every literal row
+    // names its edge.
+    inline for (@typeInfo(OperationRow).@"struct".fields) |field| {
+        if (std.mem.eql(u8, field.name, "defense")) try testing.expect(field.defaultValue() == null);
+    }
+}
+
+/// What the census expects of one defense source.
+const ExpectedSource = struct {
+    specifier: []const u8,
+    name: []const u8,
+    establishes: Defenses,
+    keeps: Defenses,
+    removes: Defenses,
+};
+
+const expected_sources = [_]ExpectedSource{
+    .{ .specifier = "zttp:text", .name = "escapeHtml", .establishes = html_only, .keeps = schema_only, .removes = no_defenses },
+    .{ .specifier = "zttp:validate", .name = "validateJson", .establishes = schema_only, .keeps = no_defenses, .removes = html_only },
+    .{ .specifier = "zttp:validate", .name = "coerceJson", .establishes = schema_only, .keeps = no_defenses, .removes = html_only },
+    .{ .specifier = "zttp:decode", .name = "decodeJson", .establishes = schema_only, .keeps = no_defenses, .removes = html_only },
+    .{ .specifier = "zttp:decode", .name = "decodeForm", .establishes = schema_only, .keeps = no_defenses, .removes = html_only },
+    .{ .specifier = "zttp:decode", .name = "decodeFormMultipart", .establishes = schema_only, .keeps = no_defenses, .removes = html_only },
+    .{ .specifier = "zttp:validate", .name = "validateObject", .establishes = no_defenses, .keeps = no_defenses, .removes = no_defenses },
+    .{ .specifier = "zttp:decode", .name = "decodeQuery", .establishes = no_defenses, .keeps = no_defenses, .removes = no_defenses },
+    .{ .specifier = "zttp:auth", .name = "jwtVerify", .establishes = no_defenses, .keeps = no_defenses, .removes = no_defenses },
+};
+
+const SourceCensusError = error{
+    /// An export declares `validated` and no row names it.
+    ExportWithoutRow,
+    /// A row names no export that `findExport` finds.
+    RowWithoutExport,
+    /// A row names an export that does not declare `validated`.
+    RowWithoutValidated,
+    /// A row establishes a defense and its export takes a parameter that is
+    /// not a string, or takes none.
+    NonStringParameter,
+    /// A row that establishes nothing states no reason.
+    RowWithoutReason,
+    /// The table differs from the expected mapping.
+    TableDiffers,
+};
+
+const SourceCensus = struct { rows: usize, validated_exports: usize };
+
+/// Check `rows` against the bindings in both directions and against the
+/// expected mapping.
+fn censusSources(rows: []const DefenseSource, expected: []const ExpectedSource) SourceCensusError!SourceCensus {
+    var validated_exports: usize = 0;
+    for (&engine.builtin_modules.all) |*binding| {
+        for (binding.exports) |*func| {
+            if (!func.return_labels.validated) continue;
+            validated_exports += 1;
+            if (findDefenseSource(rows, binding.specifier, func.name) == null) return error.ExportWithoutRow;
+        }
+    }
+    for (rows) |row| {
+        const found = engine.builtin_modules.findExport(row.specifier, row.name) orelse return error.RowWithoutExport;
+        if (!found.func.return_labels.validated) return error.RowWithoutValidated;
+        if (row.establishes.isEmpty()) {
+            if (row.reason.len == 0) return error.RowWithoutReason;
+        } else {
+            if (found.func.param_types.len == 0) return error.NonStringParameter;
+            for (found.func.param_types) |kind| {
+                if (kind != .string) return error.NonStringParameter;
+            }
+        }
+    }
+    if (rows.len != expected.len) return error.TableDiffers;
+    for (rows) |row| {
+        var matched = false;
+        for (expected) |want| {
+            if (!std.mem.eql(u8, want.specifier, row.specifier) or !std.mem.eql(u8, want.name, row.name)) continue;
+            matched = true;
+            const same = @as(u8, @bitCast(row.establishes)) == @as(u8, @bitCast(want.establishes)) and
+                @as(u8, @bitCast(row.keeps)) == @as(u8, @bitCast(want.keeps)) and
+                @as(u8, @bitCast(row.removes)) == @as(u8, @bitCast(want.removes));
+            if (!same) return error.TableDiffers;
+        }
+        if (!matched) return error.TableDiffers;
+    }
+    return .{ .rows = rows.len, .validated_exports = validated_exports };
+}
+
+// P6 specification test 28, the C3 half.
+test "census C3: each export that declares validated has a source row with the expected defenses" {
+    const counts = try censusSources(&defense_sources, &expected_sources);
+    std.debug.print(
+        "flow_interp defense census: {d} source rows, {d} exports declare validated\n",
+        .{ counts.rows, counts.validated_exports },
+    );
+    // A floor on the input: a census over no rows would pass.
+    try testing.expect(counts.rows >= 9);
+    try testing.expectEqual(counts.validated_exports, counts.rows);
+    try testing.expectEqual(defense_sources.len, counts.rows);
+
+    var arena_owner = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_owner.deinit();
+    const allocator = arena_owner.allocator();
+
+    // A probe that removes one row must fail.
+    for (0..defense_sources.len) |skipped| {
+        const without = try allocator.alloc(DefenseSource, defense_sources.len - 1);
+        @memcpy(without[0..skipped], defense_sources[0..skipped]);
+        @memcpy(without[skipped..], defense_sources[skipped + 1 ..]);
+        try testing.expectError(error.ExportWithoutRow, censusSources(without, &expected_sources));
+    }
+
+    // A row for an export without `validated` fails, and so does a row that
+    // names no export.
+    const extra = try allocator.alloc(DefenseSource, defense_sources.len + 1);
+    @memcpy(extra[0..defense_sources.len], &defense_sources);
+    extra[defense_sources.len] = .{ .specifier = "zttp:text", .name = "unescapeHtml", .reason = "derives from its argument" };
+    try testing.expectError(error.RowWithoutValidated, censusSources(extra, &expected_sources));
+    extra[defense_sources.len] = .{ .specifier = "zttp:text", .name = "noSuchExport", .reason = "none" };
+    try testing.expectError(error.RowWithoutExport, censusSources(extra, &expected_sources));
+
+    // `validateObject` takes an object, so it cannot establish a defense.
+    const takes_object = try allocator.dupe(DefenseSource, &defense_sources);
+    takes_object[sourceIndex(takes_object, "validateObject")].establishes = schema_only;
+    try testing.expectError(error.NonStringParameter, censusSources(takes_object, &expected_sources));
+    const query = try allocator.dupe(DefenseSource, &defense_sources);
+    query[sourceIndex(query, "decodeQuery")].establishes = schema_only;
+    try testing.expectError(error.NonStringParameter, censusSources(query, &expected_sources));
+
+    // `jwtVerify` takes only strings, so only the expected mapping rejects a
+    // defense there.
+    const jwt = try allocator.dupe(DefenseSource, &defense_sources);
+    jwt[sourceIndex(jwt, "jwtVerify")].establishes = schema_only;
+    try testing.expectError(error.TableDiffers, censusSources(jwt, &expected_sources));
+
+    // A row with a wrong defense fails even when its parameters are strings.
+    const wrong = try allocator.dupe(DefenseSource, &defense_sources);
+    wrong[sourceIndex(wrong, "escapeHtml")].establishes = schema_only;
+    try testing.expectError(error.TableDiffers, censusSources(wrong, &expected_sources));
+    wrong[sourceIndex(wrong, "escapeHtml")] = defense_sources[sourceIndex(&defense_sources, "escapeHtml")];
+    wrong[sourceIndex(wrong, "escapeHtml")].removes = html_only;
+    try testing.expectError(error.TableDiffers, censusSources(wrong, &expected_sources));
+    wrong[sourceIndex(wrong, "escapeHtml")] = defense_sources[sourceIndex(&defense_sources, "escapeHtml")];
+    wrong[sourceIndex(wrong, "validateJson")].removes = no_defenses;
+    try testing.expectError(error.TableDiffers, censusSources(wrong, &expected_sources));
+    wrong[sourceIndex(wrong, "validateJson")] = defense_sources[sourceIndex(&defense_sources, "validateJson")];
+    wrong[sourceIndex(wrong, "decodeForm")].keeps = html_only;
+    try testing.expectError(error.TableDiffers, censusSources(wrong, &expected_sources));
+
+    // A row that establishes nothing states why.
+    const silent = try allocator.dupe(DefenseSource, &defense_sources);
+    silent[sourceIndex(silent, "jwtVerify")].reason = "";
+    try testing.expectError(error.RowWithoutReason, censusSources(silent, &expected_sources));
+
+    // The expected mapping is part of the check: a shorter one differs.
+    try testing.expectError(error.TableDiffers, censusSources(&defense_sources, expected_sources[1..]));
+}
+
+fn sourceIndex(rows: []const DefenseSource, name: []const u8) usize {
+    for (rows, 0..) |row, i| {
+        if (std.mem.eql(u8, row.name, name)) return i;
+    }
+    return rows.len;
 }
 
 // --- the tag census ---
