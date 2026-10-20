@@ -518,7 +518,7 @@ fn canonicalSlice(
 // ---------------------------------------------------------------------------
 
 /// The phase that will resolve a construct this phase leaves unresolved.
-pub const Phase = enum { p6, p7, p8 };
+pub const Phase = enum { p7, p8 };
 
 /// How the evaluators treat one `NodeTag`. P9 requires that no tag is `later`.
 pub const TagPlan = union(enum) {
@@ -560,7 +560,6 @@ pub const TagPlan = union(enum) {
 ///   the runtime fails with `NotCallable`, or a native method of an object the
 ///   analysis does not model (R3).
 pub const Owner = enum {
-    p6,
     p7,
     p8,
     fixpoint_limit,
@@ -612,7 +611,6 @@ pub const FunctionResult = struct {
 
 fn ownerOfPhase(phase: Phase) Owner {
     return switch (phase) {
-        .p6 => .p6,
         .p7 => .p7,
         .p8 => .p8,
     };
@@ -657,6 +655,7 @@ pub fn tagPlan(tag: NodeTag) TagPlan {
         .match_expr,
         .match_arm,
         .match_pattern,
+        .array_pattern,
         .match_type_test,
         .expr_stmt,
         .var_decl,
@@ -675,7 +674,6 @@ pub fn tagPlan(tag: NodeTag) TagPlan {
         // A spread inside an array or object literal is read by the literal's
         // rule. A call-site spread is the case this plan names.
         .spread => .refused_by_strict,
-        .array_pattern => .{ .later = .p6 },
 
         .await_expr,
         .yield_expr,
@@ -3021,9 +3019,10 @@ pub const FlowInterp = struct {
         return result orelse Value.clean;
     }
 
-    /// Bind the fields a record pattern names. A binding gets the static read
-    /// of its field from the discriminant, so it carries that field's cell and
-    /// the discriminant's labels and not a neighbouring field's.
+    /// Bind the names a pattern holds. A binding gets the static read of its
+    /// field or element from the discriminant, so it carries that cell and the
+    /// discriminant's labels and not a neighbouring field's. A nested record or
+    /// array pattern reads the same way and binds below that read.
     fn bindPattern(self: *FlowInterp, pattern: NodeIndex, disc: Value, st: *State) Error!void {
         if (pattern == null_node) return;
         const tag = self.ir_view.getTag(pattern) orelse return;
@@ -3048,9 +3047,14 @@ pub const FlowInterp = struct {
                             const field = try self.readValue(st, disc, .{ .name = name });
                             try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), field);
                         },
-                        // A nested record or array pattern binds below the
-                        // first level, which P2 does not follow.
-                        .match_pattern, .array_pattern => try self.record(prop.value, value_tag, .p6),
+                        .match_pattern, .array_pattern => {
+                            const name = (try self.literalKey(prop.key)) orelse {
+                                try self.record(prop_idx, .object_property, .refused_by_parser);
+                                continue;
+                            };
+                            const field = try self.readValue(st, disc, .{ .name = name });
+                            try self.bindPattern(prop.value, field, st);
+                        },
                         // exhaustive: a record pattern field holds a binding, a
                         // nested pattern, or a literal. A literal is a
                         // discriminant test and binds nothing, and the tags the
@@ -3059,8 +3063,22 @@ pub const FlowInterp = struct {
                     }
                 }
             },
+            .array_pattern => {
+                self.noteVisited(.array_pattern);
+                const arr = self.ir_view.getArray(pattern) orelse return;
+                var i: u16 = 0;
+                while (i < arr.elements_count) : (i += 1) {
+                    const element = self.ir_view.getListIndex(arr.elements_start, i);
+                    // A hole reads nothing.
+                    if (element == null_node) continue;
+                    const element_tag = self.ir_view.getTag(element) orelse continue;
+                    // Only a record or array element can hold a binding.
+                    if (element_tag != .match_pattern and element_tag != .array_pattern) continue;
+                    const elem = try self.readValue(st, disc, .index);
+                    try self.bindPattern(element, elem, st);
+                }
+            },
             .match_type_test => self.noteVisited(.match_type_test),
-            .array_pattern => try self.record(pattern, .array_pattern, .p6),
             // exhaustive: an arm pattern is a record, an array, a type test, a
             // literal, or the default. Only the first two bind a name, and a
             // literal is a discriminant test that binds nothing.
@@ -3746,7 +3764,7 @@ fn expectUnresolved(result: FunctionResult, tag: NodeTag, owner: Owner) !void {
     return error.UnresolvedEntryNotFound;
 }
 
-test "a call, an upvalue read, and a nested pattern clear the result with their owner" {
+test "a call and an upvalue read clear the result with their owner, and a nested pattern does not" {
     // A callee with no function in it is the runtime's `NotCallable`, which
     // has no operation rule.
     const call = try analyzeSource("function f(g) { return g(1); }", "f", &.{Value.clean});
@@ -3765,13 +3783,10 @@ test "a call, an upvalue read, and a nested pattern clear the result with their 
     defer upvalue.deinit();
     try expectUnresolved(upvalue.result, .function_decl, .capture_unseeded);
 
-    const nested = try analyzeSource(
-        "function f(x) { return match (x) { when { a: { b: v } }: v default: 0 }; }",
-        "f",
-        &.{Value.clean},
-    );
-    defer nested.deinit();
-    try expectUnresolved(nested.result, .match_pattern, .p6);
+    // A nested pattern binds below the first level, so it resolves.
+    const nested = "function f(s) { const o = { a: { b: s } }; return match (o) { when { a: { b: v } }: v default: 0 }; }";
+    try expectSecret(nested, &.{secret_value}, true);
+    try expectSecret(nested, &.{Value.clean}, false);
 
     // The contrast: the same shapes without the construct stay resolved, and
     // the whole of `outer` creates the capture it reads.
@@ -3803,6 +3818,70 @@ test "match arms join and a record pattern binding reads its own field" {
     // join includes a clean path and keeps the labels of the arms.
     const no_default = "function f(s, x) { return match (x) { when \"a\": s when \"b\": \"c\" }; }";
     try expectSecret(no_default, &.{ secret_value, Value.clean }, true);
+}
+
+// --- nested match patterns (P6a) ---
+
+test "a nested record pattern binds its field and not a neighbour" {
+    const source = "function f(s) { const x = { a: { b: s } }; return match (x) { when { a: { b: v } }: v default: \"c\" }; }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(source, &.{Value.clean}, false);
+
+    const neighbour = "function f(s) { const x = { a: { b: \"c\", z: s } }; return match (x) { when { a: { b: v } }: v default: \"c\" }; }";
+    try expectSecret(neighbour, &.{secret_value}, false);
+}
+
+test "an array pattern binds through an element record pattern" {
+    const source = "function f(s) { const x = [{ k: s }]; return match (x) { when [{ k: v }]: v default: \"c\" }; }";
+    try expectSecret(source, &.{secret_value}, true);
+    try expectSecret(source, &.{Value.clean}, false);
+}
+
+test "a pattern nested in a record field or an array element binds" {
+    const in_field = "function f(s) { const x = { a: [{ b: s }] }; return match (x) { when { a: [{ b: v }] }: v default: \"c\" }; }";
+    try expectSecret(in_field, &.{secret_value}, true);
+    try expectSecret(in_field, &.{Value.clean}, false);
+
+    const in_element = "function f(s) { const x = [[{ b: s }]]; return match (x) { when [[{ b: v }]]: v default: \"c\" }; }";
+    try expectSecret(in_element, &.{secret_value}, true);
+    try expectSecret(in_element, &.{Value.clean}, false);
+}
+
+test "a hole and a literal element bind nothing and the arm still evaluates" {
+    const holes = [_][]const u8{
+        // The arm body reads a parameter, so the arm runs.
+        "function f(s, x) { return match (x) { when [, \"a\"]: s default: \"c\" }; }",
+        "function f(s, x) { return match (x) { when [\"a\", , { k: v }]: s default: \"c\" }; }",
+    };
+    for (holes) |source| {
+        const r = try analyzeSource(source, "f", &.{ secret_value, Value.clean });
+        defer r.deinit();
+        try testing.expect(!r.result.cleared);
+        try testing.expectEqual(@as(usize, 0), r.result.unresolved.len);
+        try testing.expect(r.returnedLabels().secret);
+    }
+
+    // A secret in the discriminant reaches no binding, because the hole and
+    // the literal bind none.
+    const unbound = "function f(s) { const x = [s, \"a\"]; return match (x) { when [, \"a\"]: \"d\" default: \"c\" }; }";
+    const r = try analyzeSource(unbound, "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expectEqual(@as(usize, 0), r.result.unresolved.len);
+    try testing.expect(r.returnedLabels().isEmpty());
+}
+
+test "no tag is left to the nested-pattern phase" {
+    try testing.expect(!@hasField(Phase, "p6"));
+    try testing.expect(!@hasField(Owner, "p6"));
+    try testing.expect(tagPlan(.array_pattern) == .handled);
+    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
+        const tag: NodeTag = @enumFromInt(field.value);
+        switch (tagPlan(tag)) {
+            .later => |phase| try testing.expect(!std.mem.eql(u8, @tagName(phase), "p6")),
+            else => {},
+        }
+    }
 }
 
 test "a binding declared without an initializer is clean" {
@@ -5913,6 +5992,7 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { if (p) { return 1; } else { return 2; } }",
     "function f(p, q) { assert p, \"no\"; assert q; return 1; }",
     "function f(p, q) { return match (p) { when { kind: \"a\", text }: text when \"x\": q when string: q default: 0 }; }",
+    "function f(p, q) { return match (p) { when [{ k: v }, , \"a\"]: v when { a: [{ b: w }] }: w when { c: { d: z } }: z default: 0 }; }",
     "function f(p, q) { p; return; }",
     "function f(p, q) { let r = p; for (const v of q) { if (v) { r = v; break; } if (r) { continue; } r = q; } return r; }",
     // Calls: a local callee, a captured binding read and written through a
@@ -5927,7 +6007,6 @@ const resolved_corpus = [_][]const u8{
 const unresolved_corpus = [_][]const u8{
     "function f(g) { return g(1); }",
     "function f(g, xs) { return g(...xs); }",
-    "function f(x) { return match (x) { when [_, _]: 1 default: 0 }; }",
 };
 
 test "tagPlan agrees with eval and exec for every tag" {
@@ -6022,16 +6101,16 @@ test "tagPlan agrees with eval and exec for every tag" {
         }
     }
     try testing.expectEqual(tag_count, handled + later + refused + refused_strict + not_produced);
-    try testing.expect(handled > 0 and later > 0 and refused > 0 and refused_strict > 0 and not_produced > 0);
-    // After P4 only the array pattern is left.
-    try testing.expectEqual(@as(usize, 1), later);
-    try testing.expect(tagPlan(.array_pattern) == .later);
+    try testing.expect(handled > 0 and refused > 0 and refused_strict > 0 and not_produced > 0);
+    // After P6a no tag is left to a later phase.
+    try testing.expectEqual(@as(usize, 0), later);
+    try testing.expect(tagPlan(.array_pattern) == .handled);
     try testing.expect(tagPlan(.spread) == .refused_by_strict);
     inline for (.{ NodeTag.for_of_stmt, NodeTag.break_stmt, NodeTag.continue_stmt, NodeTag.call }) |tag| {
         try testing.expect(tagPlan(tag) == .handled);
     }
     std.debug.print(
-        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p6={d} p7={d} p8={d}) refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
-        .{ tag_count, handled, later, by_phase[0], by_phase[1], by_phase[2], refused, refused_strict, not_produced },
+        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p7={d} p8={d}) refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
+        .{ tag_count, handled, later, by_phase[0], by_phase[1], refused, refused_strict, not_produced },
     );
 }
