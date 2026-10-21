@@ -1,6 +1,6 @@
 # Pruning round 2: plan for rounds 2a and 2b
 
-Status: draft plan, 2026-10-21. Implementation is not yet approved.
+Status: complete, 2026-10-21. U1 to U17 are committed locally; see the [worklog](2026-10-21-pruning-round-2-worklog.md).
 Source list: [round 2 list](2026-10-20-pruning-round-2-list.md), audited at `294680be`.
 The owner chose the recommended option for decisions 1 to 5 of that list with "as recommended".
 Those choices are: 1B (rounds 2a and 2b), 2A, 3A, 4A, and 5A.

@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Pruning round 2 plan](2026-10-21-pruning-round-2-plan.md) | Draft 2026-10-21 for rounds 2a and 2b (U1 to U17), revised after one Fable validation round | Owner chose decisions 1B, 2A, 3A, 4A, 5A with "as recommended"; implementation not yet approved |
+| [Pruning round 2 plan](2026-10-21-pruning-round-2-plan.md) | Complete 2026-10-21; U1 to U17 committed locally; results in the [worklog](2026-10-21-pruning-round-2-worklog.md) | Owner chose decisions 1B, 2A, 3A, 4A, 5A with "as recommended" and approved implementation (decision 6A) with "yes" |
 | [Hardening and pruning, round 2](2026-10-20-pruning-round-2-list.md) | Audit list 2026-10-20: 21 hardening, 19 dead-code, 13 consolidation, and 8 documentation items; nothing selected | No implementation authority |
 | [Hardening and pruning](2026-10-20-hardening-pruning-plan.md) | Eight audit findings selected; ordered implementation in progress, 2026-10-20 | Owner selected all findings with "all of them" |
 | [P7 request contents and sink evidence](2026-10-20-flow-interp-p7-spec.md) | Active version 7 evaluator, sink evidence and imported snapshots implemented; final acceptance pending | Included in the owner's approval of all hardening and pruning units |
