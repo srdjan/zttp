@@ -9,7 +9,7 @@ const app = @import("app.zig");
 const agent = @import("agent.zig");
 const loop = @import("loop.zig");
 const session_events = @import("session/events.zig");
-const veto = @import("veto.zig");
+const prove_probe = @import("test_support/prove_probe.zig");
 const EnvOverride = @import("test_support/env.zig").EnvOverride;
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
@@ -95,13 +95,12 @@ test "local MLX expert flow" {
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var target_check = try veto.runVeto(allocator, .{
-        .file = "handler.ts",
-        .content = accepted_handler,
-        .before = initial_handler,
+    var target_check = try prove_probe.observe(allocator, .{
+        .baseline = initial_handler,
+        .candidate = accepted_handler,
     });
     defer target_check.deinit(allocator);
-    try std.testing.expect(target_check.outcome.ok);
+    try std.testing.expect(target_check.accepted);
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);

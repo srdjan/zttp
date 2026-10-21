@@ -26,7 +26,8 @@ tags:
 binds:
   - packages/pi/src/standin/defect_seeds.zig
   - packages/pi/src/standin_range_tests.zig
-  - packages/pi/src/veto.zig
+  - packages/pi/src/aggregate_proof.zig
+  - packages/pi/src/test_support/prove_probe.zig
 proves: zig build test-standin
 ---
 
@@ -41,7 +42,7 @@ the rejection half of the loop became reachable without spending model turns.
 `packages/pi/src/standin/defect_seeds.zig` declares each seed's outcome as a
 `VetoClass`. One of the three classes is `salvaged`: the draft trips a
 canonical-band diagnostic, `canonicalize.normalizeSource` clears it inside
-`veto.runVeto`, the canonicalized bytes are applied, and the turn still counts as
+`aggregate_proof.prove`, the canonicalized bytes are applied, and the turn still counts as
 a first-draft pass. The model never sees a rejection.
 
 Two gates were written over that work. Both reported a pass while checking
@@ -88,23 +89,24 @@ A clean first draft satisfies both of those trivially. It differs from the bad
 draft, and it differs from the baseline, and no salvage happened at all. The gate
 reported salvage over a run that contained none.
 
-The fix is to compute the claim and compare against it. Run the real veto over
-the bad draft inside the test, take `report.normalized_content`, and require the
-bytes on disk to equal it (`packages/pi/src/standin_tests.zig`, test
+The fix is to compute the claim and compare against it. Run the production
+proof over the bad draft inside the test, take the normalized candidate, and
+require the bytes on disk to equal it (`packages/pi/src/standin_tests.zig`, test
 "stand-in seeded arm: a canonical slip is salvaged without a retry"):
 
 ```zig
-var normalized = try veto.runVeto(allocator, .{
-    .file = "handler.ts",
-    .content = seed.bad_draft,
-    .before = seed.seed_source,
+var normalized = try prove_probe.observe(allocator, .{
+    .baseline = seed.seed_source,
+    .candidate = seed.bad_draft,
+    .policy_json = seed.policy_json,
+    .sql_schema = seed.sql_schema,
 });
 defer normalized.deinit(allocator);
-const canonical = normalized.report.normalized_content orelse {
+if (!normalized.accepted or !normalized.salvaged(seed.bad_draft)) {
     std.debug.print("[standin-gate] seed {s}: nothing was normalized\n", .{seed.id});
     return error.SeedNotSalvaged;
-};
-try testing.expectEqualStrings(canonical, run.on_disk);
+}
+try testing.expectEqualStrings(normalized.candidate, run.on_disk);
 ```
 
 Note that this does not weaken the oracle. The expected value comes from the

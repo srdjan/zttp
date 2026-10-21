@@ -19,7 +19,7 @@ const playbook = @import("standin/playbook.zig");
 const request = @import("standin/request.zig");
 const range = @import("standin/range.zig");
 const server_mod = @import("standin/server.zig");
-const veto = @import("veto.zig");
+const prove_probe = @import("test_support/prove_probe.zig");
 const zts = @import("zts");
 
 comptime {
@@ -257,17 +257,18 @@ test "stand-in seeded arm: a canonical slip is salvaged without a retry" {
         // salvage happens at all - which is the opposite of what it reports, and
         // is what the probe found. The bytes on disk must be precisely what
         // normalizing the bad draft produces.
-        var normalized = try veto.runVeto(allocator, .{
-            .file = "handler.ts",
-            .content = seed.bad_draft,
-            .before = seed.seed_source,
+        var normalized = try prove_probe.observe(allocator, .{
+            .baseline = seed.seed_source,
+            .candidate = seed.bad_draft,
+            .policy_json = seed.policy_json,
+            .sql_schema = seed.sql_schema,
         });
         defer normalized.deinit(allocator);
-        const canonical = normalized.report.normalized_content orelse {
+        if (!normalized.accepted or !normalized.salvaged(seed.bad_draft)) {
             std.debug.print("[standin-gate] seed {s}: nothing was normalized\n", .{seed.id});
             return error.SeedNotSalvaged;
-        };
-        try testing.expectEqualStrings(canonical, run.on_disk);
+        }
+        try testing.expectEqualStrings(normalized.candidate, run.on_disk);
         try testing.expect(!std.mem.eql(u8, run.on_disk, seed.bad_draft));
     }
 
@@ -653,14 +654,12 @@ test "stand-in gate: every source edit draft passes the real parser and compiler
             .change_set => |edit| {
                 try testing.expectEqualStrings(case.file, edit.file);
                 try testing.expect(std.mem.indexOf(u8, edit.content, case.must_contain) != null);
-                var veto_result = try veto.runVeto(allocator, .{
-                    .file = edit.file,
-                    .content = edit.content,
-                    .before = case.source,
+                var proof = try prove_probe.observe(allocator, .{
+                    .baseline = case.source,
+                    .candidate = edit.content,
                 });
-                defer veto_result.deinit(allocator);
-                try testing.expect(veto_result.outcome.ok);
-                try testing.expectEqual(@as(u32, 0), veto_result.report.new);
+                defer proof.deinit(allocator);
+                try testing.expect(proof.accepted);
             },
             else => return error.ExpectedEdit,
         }
@@ -723,14 +722,12 @@ test "stand-in environment edit preserves existing handler source and passes the
             const env_read = std.mem.indexOf(u8, edit.content, "env(\"APP_NAME\");") orelse return error.MissingEnvironmentRead;
             const marker = std.mem.indexOf(u8, edit.content, "const marker = \"preserve-me\";") orelse return error.MissingMarker;
             try testing.expect(env_read < marker);
-            var veto_result = try veto.runVeto(allocator, .{
-                .file = edit.file,
-                .content = edit.content,
-                .before = source,
+            var proof = try prove_probe.observe(allocator, .{
+                .baseline = source,
+                .candidate = edit.content,
             });
-            defer veto_result.deinit(allocator);
-            try testing.expect(veto_result.outcome.ok);
-            try testing.expectEqual(@as(u32, 0), veto_result.report.new);
+            defer proof.deinit(allocator);
+            try testing.expect(proof.accepted);
         },
         else => return error.ExpectedEdit,
     }
@@ -819,14 +816,12 @@ test "stand-in violation fix preserves source around the inserted guard" {
     switch (reply.response) {
         .change_set => |edit| {
             try testing.expectEqualStrings(expected, edit.content);
-            var veto_result = try veto.runVeto(allocator, .{
-                .file = edit.file,
-                .content = edit.content,
-                .before = source,
+            var proof = try prove_probe.observe(allocator, .{
+                .baseline = source,
+                .candidate = edit.content,
             });
-            defer veto_result.deinit(allocator);
-            try testing.expect(veto_result.outcome.ok);
-            try testing.expectEqual(@as(u32, 0), veto_result.report.new);
+            defer proof.deinit(allocator);
+            try testing.expect(proof.accepted);
         },
         else => return error.ExpectedEdit,
     }

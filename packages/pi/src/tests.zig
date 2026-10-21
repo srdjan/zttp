@@ -39,7 +39,7 @@ comptime {
     _ = @import("aggregate_proof.zig");
     _ = @import("change_transaction.zig");
     _ = @import("change_set_receipt.zig");
-    _ = @import("veto.zig");
+    _ = @import("test_support/prove_probe.zig");
     _ = @import("transcript.zig");
     _ = @import("context_budget_test.zig");
     _ = @import("compaction.zig");

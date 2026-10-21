@@ -441,7 +441,7 @@ pub fn renderRichEntryToOwnedTty(
 }
 
 const testing = std.testing;
-const veto = @import("veto.zig");
+const prove_probe = @import("test_support/prove_probe.zig");
 
 fn renderToString(
     allocator: std.mem.Allocator,
@@ -608,16 +608,19 @@ test "renderRichEntryToOwnedTty leaves a small tool_result body untouched" {
     try testing.expect(std.mem.indexOf(u8, tty, "ok") != null);
 }
 
-test "veto -> turn -> transcript pipeline still lands a proof entry" {
-    var result = try veto.runVeto(testing.allocator, .{
-        .file = "handler.ts",
-        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }",
-        .before = null,
+test "aggregate proof -> turn -> transcript pipeline still lands a proof entry" {
+    var proof = try prove_probe.observe(testing.allocator, .{
+        .baseline = null,
+        .candidate = "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }",
     });
-    defer result.deinit(testing.allocator);
+    defer proof.deinit(testing.allocator);
+    try testing.expect(proof.accepted);
 
+    // The loop reports an accepted proof as plain text with no `ui_payload`.
+    // Build the same outcome here instead of a payload production never emits.
+    const llm_text = "aggregate proof passed for 1 source file";
     var machine: turn.TurnMachine = .{ .state = .verifying_change_set };
-    const action = machine.transition(.{ .change_set_verified = result.outcome });
+    const action = machine.transition(.{ .change_set_verified = .{ .ok = true, .llm_text = llm_text } });
 
     var tr: Transcript = .{};
     defer tr.deinit(testing.allocator);
@@ -628,38 +631,14 @@ test "veto -> turn -> transcript pipeline still lands a proof entry" {
     }
 
     switch (tr.at(0).*) {
-        .proof_card => |message| try testing.expect(std.mem.indexOf(u8, message.llm_text, "\"total\":0") != null),
-        else => return error.TestFailed,
-    }
-}
-
-test "renderRich renders a proof_card payload legibly, not as raw edit-simulate JSON" {
-    var result = try veto.runVeto(testing.allocator, .{
-        .file = "handler.ts",
-        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }",
-        .before = null,
-    });
-    defer result.deinit(testing.allocator);
-
-    var machine: turn.TurnMachine = .{ .state = .verifying_change_set };
-    const action = machine.transition(.{ .change_set_verified = result.outcome });
-
-    var tr: Transcript = .{};
-    defer tr.deinit(testing.allocator);
-
-    switch (action) {
-        .render => |msg| try tr.append(testing.allocator, msg),
+        .proof_card => |message| {
+            try testing.expectEqualStrings(llm_text, message.llm_text);
+            try testing.expect(message.ui_payload == null);
+        },
         else => return error.TestFailed,
     }
 
-    // The entry's llm_text is the raw edit-simulate JSON envelope; the rich
-    // (human) renderer must instead surface the legible proof card.
     const rendered = try renderRichEntryToOwned(testing.allocator, tr.at(0));
     defer testing.allocator.free(rendered);
-
-    try testing.expect(std.mem.indexOf(u8, rendered, "PROVEN") != null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "Compiler verification") != null);
-    // No raw analyzer JSON should leak into the human rendering.
-    try testing.expect(std.mem.indexOf(u8, rendered, "\"total\"") == null);
-    try testing.expect(std.mem.indexOf(u8, rendered, "\"violations\":[") == null);
+    try testing.expect(std.mem.indexOf(u8, rendered, llm_text) != null);
 }

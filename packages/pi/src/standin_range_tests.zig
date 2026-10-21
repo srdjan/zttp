@@ -512,7 +512,7 @@ const unseeded_rules = @import("unseeded_rules");
 const defect_seeds = @import("standin/defect_seeds.zig");
 const hole_seeds = @import("standin/hole_seeds.zig");
 const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
-const veto = @import("veto.zig");
+const prove_probe = @import("test_support/prove_probe.zig");
 const zts = @import("zts");
 const edit_simulate = @import("zts_cli").edit_simulate;
 
@@ -790,48 +790,51 @@ test "stand-in gate: every enabled guard family has rejection and property-prese
     );
 }
 
-test "stand-in gate: every defect seed reproduces its declared veto class through the real veto" {
-    for (defect_seeds.seeds) |seed| {
-        // A seed whose drafts import `zttp:sql` needs a schema on disk: the
-        // analyzer resolves query names against a file, and a schema-less
-        // zttp:sql edit is refused with guidance before any rule can fire.
-        // Written per seed and removed with it, so nothing leaks between seeds
-        // and a seed without one is unaffected.
-        var schema_dir: ?std.testing.TmpDir = null;
-        defer if (schema_dir) |*dir| dir.cleanup();
-        // `realPathFileAlloc` returns a sentinel-terminated slice; freeing it
-        // as a plain `[]u8` drops the sentinel byte and trips the debug
-        // allocator's size check.
-        var schema_path_buf: ?[:0]u8 = null;
-        defer if (schema_path_buf) |buf| testing.allocator.free(buf);
-        if (seed.sql_schema) |schema_source| {
-            schema_dir = std.testing.tmpDir(.{});
-            try schema_dir.?.dir.writeFile(testing.io, .{ .sub_path = "schema.sql", .data = schema_source });
-            schema_path_buf = try std.Io.Dir.realPathFileAlloc(schema_dir.?.dir, testing.io, "schema.sql", testing.allocator);
-        }
-        const schema_path: ?[]const u8 = schema_path_buf;
+/// Seeds whose bad draft introduces more than one new code. `prove` names
+/// only the first, so each pin records the first code observed through it.
+/// The simulator still confirms that the patch introduces the declared code.
+const pinned_first_proof_codes = [_]struct { seed: []const u8, code: []const u8 }{
+    .{ .seed = "ceiling-never-reached", .code = "ZTS306" },
+    .{ .seed = "helper-breaks-property", .code = "ZTS500" },
+};
 
-        // The seed must be clean. The veto is differential (`ok` is
-        // `new_count == 0`), so a seed already carrying its own defect makes the
-        // defect pre-existing, the bad draft passes, and the arm tests nothing
-        // while reporting a clean run. This is the assertion that stops it.
+fn pinnedFirstProofCode(seed_id: []const u8) ?[]const u8 {
+    for (pinned_first_proof_codes) |pin| {
+        if (std.mem.eql(u8, pin.seed, seed_id)) return pin.code;
+    }
+    return null;
+}
+
+test "stand-in gate: every defect seed reproduces its declared veto class through the production proof" {
+    var pinned_first_seen: usize = 0;
+    for (defect_seeds.seeds) |seed| {
+        // Every verdict below comes from `aggregate_proof.prove`, the oracle the
+        // loop uses, through `prove_probe`. A seed that carries project context
+        // gets a workspace with `zttp.json`, `policy.json`, and `schema.sql`,
+        // so the policy and the schema reach the proof the way a project's do.
+
+        // The seed must be clean. The proof is differential: it rejects only a
+        // diagnostic the baseline cannot account for. A seed already carrying
+        // its own defect makes the defect pre-existing, the bad draft passes,
+        // and the arm tests nothing while reporting a clean run. This is the
+        // assertion that stops it.
         {
-            var clean = try veto.runVetoWithSchema(testing.allocator, .{
-                .file = "handler.ts",
-                .content = seed.seed_source,
-                .before = null,
-                .policy_source = seed.policy_json,
-            }, schema_path);
+            var clean = try prove_probe.observe(testing.allocator, .{
+                .baseline = null,
+                .candidate = seed.seed_source,
+                .policy_json = seed.policy_json,
+                .sql_schema = seed.sql_schema,
+            });
             defer clean.deinit(testing.allocator);
-            // `ok` alone is too weak: salvage-on-reject normalizes a
-            // canonical-band defect and reports a pass, so a baseline carrying
-            // `let total = 1` would satisfy it while being exactly the
+            // `accepted` alone is too weak: normalization rewrites a
+            // canonical-band defect before the proof runs, so a baseline
+            // carrying `let total = 1` would be accepted while being exactly the
             // pre-existing defect this check exists to refuse. A clean baseline
             // is one nothing had to rewrite.
-            if (!clean.outcome.ok or clean.report.normalized_content != null) {
+            if (!clean.accepted or clean.salvaged(seed.seed_source)) {
                 std.debug.print(
-                    "[standin-gate] seed {s}: its baseline is not veto-clean (ok={} new={d} normalized={})\n",
-                    .{ seed.id, clean.outcome.ok, clean.report.new, clean.report.normalized_content != null },
+                    "[standin-gate] seed {s}: its baseline is not proof-clean (accepted={} rewrites={d} code={s})\n",
+                    .{ seed.id, clean.accepted, clean.rewrite_count, clean.rejection_code orelse "none" },
                 );
                 return error.DefectSeedBaselineDirty;
             }
@@ -841,29 +844,54 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
         // reaches it in the arm, and leaving it unchecked is how a class change
         // ships a broken second draft.
         {
-            var good = try veto.runVetoWithSchema(testing.allocator, .{
-                .file = "handler.ts",
-                .content = seed.good_draft,
-                .before = seed.seed_source,
-                .policy_source = seed.policy_json,
-            }, schema_path);
+            var good = try prove_probe.observe(testing.allocator, .{
+                .baseline = seed.seed_source,
+                .candidate = seed.good_draft,
+                .policy_json = seed.policy_json,
+                .sql_schema = seed.sql_schema,
+            });
             defer good.deinit(testing.allocator);
-            if (!good.outcome.ok or good.report.new != 0) {
+            if (!good.accepted) {
                 std.debug.print(
-                    "[standin-gate] seed {s}: its good draft does not pass ({d} new violations)\n",
-                    .{ seed.id, good.report.new },
+                    "[standin-gate] seed {s}: its good draft is rejected with {s}\n",
+                    .{ seed.id, good.rejection_code orelse "none" },
                 );
                 return error.DefectSeedGoodDraftFails;
             }
         }
 
-        // What the bad draft introduces, read before the veto decides what to do
-        // about it. The veto's own text cannot answer this for a salvaged seed:
-        // normalization clears the diagnostic, so the code never appears in a
-        // result that reads as a pass. Asking the simulator directly keeps the
-        // claim "this draft introduces exactly this code" independent of the
-        // outcome, which is the half the class switch below then checks.
+        // The bad draft, measured against the seed as baseline: this is what the
+        // arm actually submits.
+        var bad = try prove_probe.observe(testing.allocator, .{
+            .baseline = seed.seed_source,
+            .candidate = seed.bad_draft,
+            .policy_json = seed.policy_json,
+            .sql_schema = seed.sql_schema,
+        });
+        defer bad.deinit(testing.allocator);
+
+        // What the bad draft introduces, read before the proof decides what to
+        // do about it. The proof's own verdict cannot answer this for a
+        // salvaged seed: normalization clears the diagnostic, so the code never
+        // appears in a result that reads as a pass. `prove` also returns only
+        // the first new code, never a count. Asking the simulator directly
+        // keeps the claim "this draft introduces exactly this code" independent
+        // of the outcome, which is the half the class switch below then checks.
         {
+            var schema_dir: ?std.testing.TmpDir = null;
+            defer if (schema_dir) |*dir| dir.cleanup();
+            // `realPathFileAlloc` returns a sentinel-terminated slice; freeing it
+            // as a plain `[]u8` drops the sentinel byte and trips the debug
+            // allocator's size check.
+            var schema_path_buf: ?[:0]u8 = null;
+            defer if (schema_path_buf) |buf| testing.allocator.free(buf);
+            if (seed.sql_schema) |schema_source| {
+                schema_dir = std.testing.tmpDir(.{});
+                try schema_dir.?.dir.writeFile(testing.io, .{ .sub_path = "schema.sql", .data = schema_source });
+                schema_path_buf = try std.Io.Dir.realPathFileAlloc(schema_dir.?.dir, testing.io, "schema.sql", testing.allocator);
+            }
+            const schema_path: ?[]const u8 = schema_path_buf;
+
             var raw = try edit_simulate.simulate(testing.allocator, .{
                 .file = "handler.ts",
                 .content = seed.bad_draft,
@@ -887,49 +915,65 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
                 }
                 return error.DefectSeedCodeNotObserved;
             }
-        }
 
-        // The bad draft, measured against the seed as baseline: this is what the
-        // arm actually submits.
-        var bad = try veto.runVetoWithSchema(testing.allocator, .{
-            .file = "handler.ts",
-            .content = seed.bad_draft,
-            .before = seed.seed_source,
-            .policy_source = seed.policy_json,
-        }, schema_path);
-        defer bad.deinit(testing.allocator);
+            // `prove` names only the first new diagnostic, and a draft may
+            // introduce several. The rejection code must be one the simulator
+            // saw the patch introduce; it need not be the seed's own code.
+            if (bad.rejection_code) |proved| {
+                var proved_introduced = false;
+                for (raw.violations.items) |v| {
+                    if (v.introduced_by_patch and std.mem.eql(u8, v.code, proved)) proved_introduced = true;
+                }
+                if (!proved_introduced) {
+                    std.debug.print(
+                        "[standin-gate] seed {s}: the proof rejected with {s}, which the patch does not introduce\n",
+                        .{ seed.id, proved },
+                    );
+                    return error.DefectSeedProofCodeNotIntroduced;
+                }
+                const expected_first = pinnedFirstProofCode(seed.id) orelse seed.code;
+                if (pinnedFirstProofCode(seed.id) != null) pinned_first_seen += 1;
+                if (!std.mem.eql(u8, proved, expected_first)) {
+                    std.debug.print(
+                        "[standin-gate] seed {s}: the proof names {s} first; expected {s} (declared {s})\n",
+                        .{ seed.id, proved, expected_first, seed.code },
+                    );
+                    return error.DefectSeedProofCodeMismatch;
+                }
+            }
+        }
 
         switch (seed.class) {
             // Salvage is a positive claim, so it needs positive evidence rather
             // than the absence of a rejection: normalization must have produced
             // different bytes and named the rewrite it applied.
             .salvaged => {
-                if (!bad.outcome.ok or bad.report.normalized_content == null or bad.report.rewrite_trace.len == 0) {
+                if (!bad.accepted or !bad.salvaged(seed.bad_draft)) {
                     std.debug.print(
-                        "[standin-gate] seed {s} declares salvaged: ok={} normalized={} rewrites={d}\n",
-                        .{ seed.id, bad.outcome.ok, bad.report.normalized_content != null, bad.report.rewrite_trace.len },
+                        "[standin-gate] seed {s} declares salvaged: accepted={} rewrites={d} code={s}\n",
+                        .{ seed.id, bad.accepted, bad.rewrite_count, bad.rejection_code orelse "none" },
                     );
                     return error.DefectSeedNotSalvaged;
                 }
-                try testing.expect(!std.mem.eql(u8, bad.report.normalized_content.?, seed.bad_draft));
             },
-            // And a rejection must actually be one, with nothing salvaged behind
-            // it. A seed that quietly starts being salvaged would otherwise make
-            // the retry arm pass while never retrying.
+            // And a rejection must actually be one, for the declared code, with
+            // nothing salvaged behind it. A seed that quietly starts being
+            // salvaged would otherwise make the retry arm pass while never
+            // retrying.
             .model_retry => {
-                if (bad.outcome.ok or bad.report.new == 0 or bad.report.normalized_content != null) {
+                if (bad.accepted or bad.rewrite_count != 0) {
                     std.debug.print(
-                        "[standin-gate] seed {s} declares model_retry: ok={} new={d} normalized={}\n",
-                        .{ seed.id, bad.outcome.ok, bad.report.new, bad.report.normalized_content != null },
+                        "[standin-gate] seed {s} declares model_retry: accepted={} code={s} rewrites={d}\n",
+                        .{ seed.id, bad.accepted, bad.rejection_code orelse "none", bad.rewrite_count },
                     );
                     return error.DefectSeedNotRejected;
                 }
             },
             .compiler_repair => {
-                if (bad.outcome.ok or bad.report.new == 0 or bad.report.normalized_content != null) {
+                if (bad.accepted or bad.rewrite_count != 0) {
                     std.debug.print(
-                        "[standin-gate] seed {s} declares compiler_repair: ok={} new={d} normalized={}\n",
-                        .{ seed.id, bad.outcome.ok, bad.report.new, bad.report.normalized_content != null },
+                        "[standin-gate] seed {s} declares compiler_repair: accepted={} code={s} rewrites={d}\n",
+                        .{ seed.id, bad.accepted, bad.rejection_code orelse "none", bad.rewrite_count },
                     );
                     return error.DefectSeedNotRejected;
                 }
@@ -951,19 +995,22 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
                 }
                 try testing.expectEqualStrings(seed.good_draft, candidate.proposed_content.?);
 
-                var repaired = try veto.runVetoWithSchema(testing.allocator, .{
-                    .file = "handler.ts",
-                    .content = candidate.proposed_content.?,
-                    .before = seed.seed_source,
-                    .policy_source = seed.policy_json,
-                }, schema_path);
+                var repaired = try prove_probe.observe(testing.allocator, .{
+                    .baseline = seed.seed_source,
+                    .candidate = candidate.proposed_content.?,
+                    .policy_json = seed.policy_json,
+                    .sql_schema = seed.sql_schema,
+                });
                 defer repaired.deinit(testing.allocator);
-                if (!repaired.outcome.ok or repaired.report.new != 0) {
+                if (!repaired.accepted) {
                     return error.CompilerRepairCandidateFailsBindingVeto;
                 }
             },
         }
     }
+
+    // A pin that no seed reaches is stale and hides nothing; fail on it.
+    try testing.expectEqual(pinned_first_proof_codes.len, pinned_first_seen);
 
     std.debug.print(
         "[standin-gate] veto classes {d}/{d} seeds reproduce their declaration\n",
@@ -1223,17 +1270,16 @@ test "stand-in gate: every generated route source keeps the synthesized draft ve
         const source = try source_grammar.renderRouteSource(allocator, variant);
         const proposed = try playbook.synthesizeRoute(allocator, source, spec, "handleGetHealth");
 
-        var result = try veto.runVeto(allocator, .{
-            .file = "handler.ts",
-            .content = proposed,
-            .before = source,
+        var result = try prove_probe.observe(allocator, .{
+            .baseline = source,
+            .candidate = proposed,
         });
         defer result.deinit(allocator);
 
-        if (!result.outcome.ok or result.report.new != 0) {
+        if (!result.accepted) {
             std.debug.print(
-                "[standin-gate] route variant router={} routes={} spec={} alias={} synthesizes {d} new violations:\n{s}\n",
-                .{ variant.has_router, variant.has_routes, variant.has_spec_import, variant.has_guardrails_alias, result.report.new, proposed },
+                "[standin-gate] route variant router={} routes={} spec={} alias={} is rejected with {s}:\n{s}\n",
+                .{ variant.has_router, variant.has_routes, variant.has_spec_import, variant.has_guardrails_alias, result.rejection_code orelse "none", proposed },
             );
             return error.SynthesizedRouteFailsVeto;
         }
@@ -1301,16 +1347,15 @@ test "stand-in gate: every generated env source gets the answer its shape implie
             },
         };
 
-        var result = try veto.runVeto(allocator, .{
-            .file = "handler.ts",
-            .content = proposed,
-            .before = source,
+        var result = try prove_probe.observe(allocator, .{
+            .baseline = source,
+            .candidate = proposed,
         });
         defer result.deinit(allocator);
-        if (!result.outcome.ok or result.report.new != 0) {
+        if (!result.accepted) {
             std.debug.print(
-                "[standin-gate] env variant import={} synthesizes {d} new violations:\n{s}\n",
-                .{ variant.has_env_import, result.report.new, proposed },
+                "[standin-gate] env variant import={} is rejected with {s}:\n{s}\n",
+                .{ variant.has_env_import, result.rejection_code orelse "none", proposed },
             );
             return error.SynthesizedEnvFailsVeto;
         }

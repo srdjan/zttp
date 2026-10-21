@@ -33,7 +33,6 @@ packages/pi/
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
     expert_workflow.zig   # deterministic task routing hints before first model round-trip
-    veto.zig              # runVeto: wraps zts_cli.edit_simulate for pre-apply gate
     change_set.zig        # canonical targets, normalized candidates, exact baselines
     workspace_snapshot.zig # captures and rechecks the complete proof read set
     aggregate_proof.zig   # proves the candidate change set against its baseline
