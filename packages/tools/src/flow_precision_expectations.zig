@@ -38,7 +38,7 @@
 //! `examples/fetch/webhook.ts` is a listed entry with an empty expectation. It
 //! stays in the manifest so that a later proof shows in review.
 //!
-//! Paths are repository-relative, as in `packages/zts/src/tests/asi_census.zig`.
+//! Paths are repository-relative.
 //! The tests work when they run from the repository root, which is how
 //! `zig build` runs them. Each handler runs through the production typed
 //! pipeline, `precompile.runCheckOnlyFromSourceWithOptions`, with its real path

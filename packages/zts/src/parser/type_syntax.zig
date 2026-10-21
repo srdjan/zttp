@@ -395,15 +395,6 @@ pub fn hasDedicatedAssignmentArrowWindow(
     ).len == 0;
 }
 
-pub fn isPrivateArrowPrefixEligible(
-    source: []const u8,
-    previous: Token,
-    generic_start: u32,
-) bool {
-    if (hasDedicatedAssignmentArrowWindow(source, previous, generic_start)) return true;
-    return !rawLooksLikeComparison(source, generic_start);
-}
-
 pub fn rawLooksLikeComparison(source: []const u8, generic_start: u32) bool {
     var at: usize = generic_start;
     while (at > 0) {
@@ -869,28 +860,6 @@ pub const Store = struct {
         self.function_signatures.deinit(self.allocator);
         self.type_only_modules.deinit(self.allocator);
         self.erased_type_prefixes.deinit(self.allocator);
-    }
-
-    pub fn add(self: *Store, binding: BindingRef, parsed: ParsedPrimitive) !void {
-        const previous = self.checkpoint();
-        errdefer self.rollback(previous);
-        const root = try self.appendNode(.{
-            .tag = .primitive,
-            .semantic_span = parsed.semantic_span,
-            .data = .{ .primitive = parsed.primitive },
-        });
-        try self.validateParsed(.{ .present = root }, parsed.raw_span);
-        const annotation: Annotation = .{
-            .binding = binding,
-            .root = .{ .present = root },
-            .node_range = .{ .start = @intCast(previous.nodes), .count = 1 },
-            .raw_span = parsed.raw_span,
-            .admission_end = parsed.raw_span.end,
-            .semantic_prefix_end = parsed.semantic_span.end,
-        };
-        try self.validateAnnotation(annotation);
-        try self.annotations.ensureUnusedCapacity(self.allocator, 1);
-        self.annotations.appendAssumeCapacity(annotation);
     }
 
     pub const Checkpoint = struct {
@@ -3467,22 +3436,11 @@ pub fn scanParenthesizedArrowHeader(
     return arrow;
 }
 
-pub const ParsedPrimitive = struct {
-    primitive: Primitive,
-    semantic_span: Span,
-    raw_span: Span,
-};
-
 pub const Failure = union(enum) {
     missing_type: Token,
     unmatched_parenthesis: Token,
     nesting_too_deep: Token,
     unsupported_suffix: Token,
-};
-
-pub const ParseOutcome = union(enum) {
-    parsed: ParsedPrimitive,
-    failure: Failure,
 };
 
 pub const ParsedType = struct {
@@ -3537,62 +3495,6 @@ pub const max_type_depth: u16 = 512;
 pub const max_parser_frames: usize = 4096;
 /// The raw scanner declines syntax that exceeds this private template budget.
 pub const max_template_levels: usize = 512;
-
-/// Parse one primitive annotation and leave `cursor.current` at its delimiter.
-/// Plain identifier suffixes remain in the raw span but not the semantic span.
-pub fn parsePrimitive(source: []const u8, cursor: *Cursor) ParseOutcome {
-    return parsePrimitiveWithLimit(source, cursor, max_type_depth);
-}
-
-/// Validate comparison eligibility after a depth refusal, using the same grammar.
-/// Each opening parenthesis consumes a source byte, which bounds this scan.
-pub fn validatePrimitiveAfterDepthRefusal(source: []const u8, cursor: *Cursor) ParseOutcome {
-    return parsePrimitiveWithLimit(source, cursor, source.len);
-}
-
-fn parsePrimitiveWithLimit(source: []const u8, cursor: *Cursor, limit: usize) ParseOutcome {
-    const raw_start = cursor.current.start;
-    var depth: usize = 0;
-
-    while (cursor.current.type == .lparen) {
-        if (depth == limit) {
-            return .{ .failure = .{ .nesting_too_deep = cursor.current } };
-        }
-        depth += 1;
-        cursor.advance();
-    }
-
-    const primitive_token = cursor.current;
-    const primitive = primitiveFor(primitive_token, source) orelse {
-        return .{ .failure = .{ .missing_type = primitive_token } };
-    };
-    cursor.advance();
-
-    var semantic_end = primitive_token.start + primitive_token.len;
-    var remaining = depth;
-    while (remaining > 0) : (remaining -= 1) {
-        if (cursor.current.type != .rparen) {
-            return .{ .failure = .{ .unmatched_parenthesis = cursor.current } };
-        }
-        semantic_end = cursor.current.start + cursor.current.len;
-        cursor.advance();
-    }
-
-    var raw_end = semantic_end;
-    while (!isAnnotationDelimiter(cursor.current.type)) {
-        if (!isPlainSuffix(cursor.current)) {
-            return .{ .failure = .{ .unsupported_suffix = cursor.current } };
-        }
-        raw_end = cursor.current.start + cursor.current.len;
-        cursor.advance();
-    }
-
-    return .{ .parsed = .{
-        .primitive = primitive,
-        .semantic_span = .{ .start = raw_start, .end = semantic_end },
-        .raw_span = .{ .start = raw_start, .end = raw_end },
-    } };
-}
 
 pub fn parseTypeValueAndStore(
     store: *Store,
@@ -4461,26 +4363,6 @@ fn scanObservedMatchingBracket(
     return .{ .complete = .{ .end = pos, .closed = depth == 0 } };
 }
 
-fn skipLegacyMatchingBracket(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    start: usize,
-    open: u8,
-    suppressed_diagnostic: *bool,
-) !?usize {
-    return switch (try scanLegacyMatchingBracketCore(
-        allocator,
-        source,
-        start,
-        open,
-        suppressed_diagnostic,
-        null,
-    )) {
-        .complete => |end| end,
-        .nesting_too_deep => null,
-    };
-}
-
 fn scanBalancedGenericListCore(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -5008,10 +4890,6 @@ fn appendProjectedCallFragments(store: *Store, projected_span: Span) !void {
         _ = try parseSemanticFragmentAndStore(store, raw_span);
         count += 1;
     }
-}
-
-fn appendProjectedGenericParameters(store: *Store, list_span: Span) !void {
-    try appendProjectedGenericParametersFromSpan(store, projectedListBody(store.source, list_span));
 }
 
 const ProjectedParameterRanges = struct {
@@ -7603,15 +7481,6 @@ const SyntaxParser = struct {
     }
 };
 
-fn primitiveFor(tok: Token, source: []const u8) ?Primitive {
-    return switch (tok.type) {
-        .undefined_lit => .undefined,
-        .null_lit => .null,
-        .identifier => primitiveForIdentifier(tok.text(source)),
-        else => null,
-    };
-}
-
 fn primitiveForIdentifier(text: []const u8) ?Primitive {
     if (std.mem.eql(u8, text, "unknown")) return .unknown;
     if (std.mem.eql(u8, text, "never")) return .never;
@@ -7630,29 +7499,6 @@ fn isIdentifierStart(byte: u8) bool {
 
 fn isIdentifierContinue(byte: u8) bool {
     return isIdentifierStart(byte) or std.ascii.isDigit(byte);
-}
-
-fn isAnnotationDelimiter(kind: token_mod.TokenType) bool {
-    return kind == .assign or kind == .semicolon or kind == .eof;
-}
-
-fn isPlainSuffix(tok: Token) bool {
-    if (tok.type == .identifier or tok.type == .kw_void) return true;
-    return false;
-}
-
-test "primitive parser retains semantic and raw annotation spans" {
-    const source = "(((string))) tolerated_suffix = value;";
-    var cursor = Cursor.init(source);
-    const parsed = switch (parsePrimitive(source, &cursor)) {
-        .parsed => |value| value,
-        .failure => return error.TestUnexpectedResult,
-    };
-
-    try std.testing.expectEqual(Primitive.string, parsed.primitive);
-    try std.testing.expectEqualStrings("(((string)))", parsed.semantic_span.text(source));
-    try std.testing.expectEqualStrings("(((string))) tolerated_suffix", parsed.raw_span.text(source));
-    try std.testing.expectEqual(token_mod.TokenType.assign, cursor.current.type);
 }
 
 test "simple declaration retains ownership and component spans" {
@@ -7889,55 +7735,6 @@ test "excluded declaration preserves prior syntax and cursor" {
     try std.testing.expect(std.meta.eql(before, cursor));
     try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
     try std.testing.expectEqual(@as(usize, 1), store.declarations.items.len);
-}
-
-test "primitive parser admits 512 type parentheses and refuses the next" {
-    var admitted_source: std.ArrayListUnmanaged(u8) = .empty;
-    defer admitted_source.deinit(std.testing.allocator);
-    try admitted_source.appendNTimes(std.testing.allocator, '(', max_type_depth);
-    try admitted_source.appendSlice(std.testing.allocator, "number");
-    try admitted_source.appendNTimes(std.testing.allocator, ')', max_type_depth);
-    try admitted_source.appendSlice(std.testing.allocator, " = 1;");
-
-    var admitted = Cursor.init(admitted_source.items);
-    switch (parsePrimitive(admitted_source.items, &admitted)) {
-        .parsed => {},
-        .failure => return error.TestUnexpectedResult,
-    }
-
-    var refused_source: std.ArrayListUnmanaged(u8) = .empty;
-    defer refused_source.deinit(std.testing.allocator);
-    try refused_source.appendNTimes(std.testing.allocator, '(', max_type_depth + 1);
-    try refused_source.appendSlice(std.testing.allocator, "number");
-    try refused_source.appendNTimes(std.testing.allocator, ')', max_type_depth + 1);
-    try refused_source.appendSlice(std.testing.allocator, " = 1;");
-
-    var refused = Cursor.init(refused_source.items);
-    const failure = switch (parsePrimitive(refused_source.items, &refused)) {
-        .parsed => return error.TestUnexpectedResult,
-        .failure => |value| value,
-    };
-    const at = switch (failure) {
-        .nesting_too_deep => |token| token,
-        else => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(token_mod.TokenType.lparen, at.type);
-    try std.testing.expectEqual(@as(u32, max_type_depth), at.start);
-}
-
-test "type store closes every allocation failure" {
-    const Context = struct {
-        fn run(allocator: std.mem.Allocator) !void {
-            var store = Store.init(allocator, "string suffix");
-            defer store.deinit();
-            try store.add(.global(300), .{
-                .primitive = .string,
-                .semantic_span = .{ .start = 0, .end = 6 },
-                .raw_span = .{ .start = 0, .end = 13 },
-            });
-        }
-    };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }
 
 test "annotation publication failure preserves its cursor and prior syntax" {
@@ -9967,11 +9764,7 @@ test "type store validation rejects invalid nodes without erasing prior syntax" 
     inline for (std.meta.tags(Case)) |case| {
         var store = Store.init(std.testing.allocator, "number");
         defer store.deinit();
-        try store.add(.global(300), .{
-            .primitive = .number,
-            .semantic_span = .{ .start = 0, .end = 6 },
-            .raw_span = .{ .start = 0, .end = 6 },
-        });
+        try seedNumberAnnotation(&store);
         const prior = store.checkpoint();
         const index: NodeIndex = @intCast(store.nodes.items.len);
         const invalid: Node = switch (case) {
@@ -10020,11 +9813,7 @@ test "type store validation rejects invalid nodes without erasing prior syntax" 
 
     var store = Store.init(std.testing.allocator, "number");
     defer store.deinit();
-    try store.add(.global(300), .{
-        .primitive = .number,
-        .semantic_span = .{ .start = 0, .end = 6 },
-        .raw_span = .{ .start = 0, .end = 6 },
-    });
+    try seedNumberAnnotation(&store);
     const valid = store.annotations.items[0];
     store.annotations.items[0].root = .{ .present = @intCast(store.nodes.items.len) };
     try std.testing.expectError(error.InvalidTypeChild, store.validate());
@@ -10288,11 +10077,7 @@ test "admitted return rejects a trimmed spelling without changing prior syntax" 
     const raw_end: u32 = @intCast(std.mem.indexOf(u8, source, "   {").?);
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
-    try store.add(.global(300), .{
-        .primitive = .number,
-        .semantic_span = .{ .start = 0, .end = 6 },
-        .raw_span = .{ .start = 0, .end = 6 },
-    });
+    try seedNumberAnnotation(&store);
     const prior = store.checkpoint();
     try std.testing.expect(prior.annotations > 0);
 
@@ -10825,11 +10610,7 @@ test "admitted generic declaration failure preserves a published seed" {
     });
     var store = Store.init(failing.allocator(), source);
     defer store.deinit();
-    try store.add(.global(300), .{
-        .primitive = .number,
-        .semantic_span = .{ .start = 0, .end = 6 },
-        .raw_span = .{ .start = 0, .end = 6 },
-    });
+    try seedNumberAnnotation(&store);
     const prior = store.checkpoint();
     try std.testing.expect(prior.nodes > 0);
     try std.testing.expect(prior.annotations > 0);
@@ -10877,11 +10658,7 @@ test "admitted annotation failure preserves a published seed" {
     });
     var store = Store.init(failing.allocator(), source);
     defer store.deinit();
-    try store.add(.global(300), .{
-        .primitive = .number,
-        .semantic_span = .{ .start = 0, .end = 6 },
-        .raw_span = .{ .start = 0, .end = 6 },
-    });
+    try seedNumberAnnotation(&store);
     const prior = store.checkpoint();
     try std.testing.expect(prior.nodes > 0);
     try std.testing.expect(prior.annotations > 0);
@@ -10899,6 +10676,15 @@ test "admitted annotation failure preserves a published seed" {
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
     try store.validate();
+}
+
+/// Publish one `number` annotation so a test starts from prior syntax.
+fn seedNumberAnnotation(store: *Store) !void {
+    var cursor = Cursor.init(store.source);
+    switch (try parseAndStore(store, .global(300), store.source, 0, &cursor)) {
+        .parsed => {},
+        .failure, .excluded => return error.TestUnexpectedResult,
+    }
 }
 
 fn parseReturnForTest(store: *Store) !ReturnSyntax {

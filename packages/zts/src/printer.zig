@@ -77,23 +77,13 @@ pub const Options = struct {
     reason_out: ?*Refusal = null,
 };
 
-pub const Input = union(enum) {
-    original_source: []const u8,
-    parsed_store: *const TypeSyntax.Store,
-};
-
 /// Print `source` in canonical form. The caller owns the result.
 pub fn print(allocator: std.mem.Allocator, source: []const u8, options: Options) Error![]u8 {
-    return printInput(allocator, .{ .original_source = source }, options);
-}
-
-/// Print one selected source form. The caller owns the result.
-pub fn printInput(allocator: std.mem.Allocator, input: Input, options: Options) Error![]u8 {
     var arena_inst = std.heap.ArenaAllocator.init(allocator);
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const printed = try printInto(arena, input, options, true);
+    const printed = try printInto(arena, source, options, true);
     return allocator.dupe(u8, printed);
 }
 
@@ -211,46 +201,6 @@ fn collectSourceRegions(
             .end = declarationEnd(source, declaration.body.end),
         }),
     };
-    return finalizeRegions(arena, &regions);
-}
-
-fn collectDirectRegions(
-    arena: std.mem.Allocator,
-    store: *const TypeSyntax.Store,
-) Error![]Region {
-    var regions: std.ArrayListUnmanaged(Region) = .empty;
-    for (store.annotations.items) |annotation| {
-        try appendRegion(arena, store.source, &regions, annotation.raw_span);
-    }
-    for (store.parameter_annotations.items) |parameter| {
-        try appendRegion(arena, store.source, &regions, parameter.value.raw_span);
-    }
-    for (store.function_signatures.items) |signature| {
-        if (signature.return_syntax) |return_syntax| {
-            try appendRegion(arena, store.source, &regions, return_syntax.raw_span);
-        }
-    }
-    for (store.declarations.items) |declaration| switch (declaration.body) {
-        .absent => {},
-        .present => |body| try appendTrimmedRegion(
-            arena,
-            store.source,
-            &regions,
-            .{
-                .start = declarationStart(store.source, declaration.name_span.start),
-                .end = declarationEnd(store.source, body.raw_span.end),
-            },
-        ),
-    };
-    for (store.generic_owners.items) |owner| {
-        try appendGenericProjection(arena, store.source, &regions, owner.capture_spans.legacy_recorded_span);
-    }
-    for (store.explicit_call_arguments.items) |arguments| {
-        try appendGenericProjection(arena, store.source, &regions, arguments.capture_spans.legacy_recorded_span);
-    }
-    for (store.erased_type_prefixes.items) |prefix| {
-        try appendGenericProjection(arena, store.source, &regions, prefix.capture_spans.legacy_recorded_span);
-    }
     return finalizeRegions(arena, &regions);
 }
 
@@ -1687,14 +1637,10 @@ fn stripTrivia(chunks: []const Chunk) []const Chunk {
 
 fn printInto(
     arena: std.mem.Allocator,
-    input: Input,
+    source: []const u8,
     options: Options,
     self_check: bool,
 ) Error![]const u8 {
-    const source = switch (input) {
-        .original_source => |value| value,
-        .parsed_store => |store| store.source,
-    };
     if (std.mem.indexOfScalar(u8, source, '\r') != null) {
         return refuse(options, .carriage_return);
     }
@@ -1706,16 +1652,7 @@ fn printInto(
     // and let `--write` truncate it with exit 0.
     if (source.len == 0) return "";
 
-    const regions = switch (input) {
-        .original_source => try collectSourceRegions(arena, source, options),
-        .parsed_store => |store| blk: {
-            store.validate() catch |err| switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return refuse(options, .strip_failed),
-            };
-            break :blk try collectDirectRegions(arena, store);
-        },
-    };
+    const regions = try collectSourceRegions(arena, source, options);
     const trivia_items = trivia.collect(arena, source) catch return error.OutOfMemory;
 
     var builder = Builder{
@@ -1829,298 +1766,6 @@ fn expectRefusal(source: []const u8, reason: Refusal) !void {
     const result = print(testing.allocator, source, .{ .reason_out = &got });
     try testing.expectError(error.UnprintableConstruct, result);
     try testing.expectEqual(reason, got);
-}
-
-const DirectPrinterCase = enum {
-    absent_declaration,
-    absent_generic_declaration,
-    empty_callable,
-    empty_prefix,
-    nonempty_declaration,
-    type_only_spacing,
-    adjacent_declaration,
-    spaced_explicit_call,
-    empty_explicit_call,
-    commented_callable,
-    complex_annotation,
-    exported_declaration,
-    declaration_without_terminator,
-    type_only_export_spacing,
-};
-
-const DirectPrinterOutcome = union(enum) {
-    output: []const u8,
-    refusal: Refusal,
-};
-
-const DirectPrinterFixture = struct {
-    kind: DirectPrinterCase,
-    source: []const u8,
-    outcome: DirectPrinterOutcome,
-};
-
-fn expectSelectedRefusal(input: Input, expected: Refusal) !void {
-    var reason: Refusal = undefined;
-    const result = printInput(testing.allocator, input, .{ .reason_out = &reason });
-    if (result) |output| {
-        testing.allocator.free(output);
-        return error.TestUnexpectedResult;
-    } else |err| {
-        try testing.expectEqual(error.UnprintableConstruct, err);
-    }
-    try testing.expectEqual(expected, reason);
-}
-
-fn expectDirectFixtureRecords(kind: DirectPrinterCase, store: *const TypeSyntax.Store) !void {
-    switch (kind) {
-        .absent_declaration => {
-            try testing.expectEqual(@as(usize, 1), store.declarations.items.len);
-            try testing.expect(std.meta.activeTag(store.declarations.items[0].body) == .absent);
-        },
-        .absent_generic_declaration => {
-            try testing.expectEqual(@as(usize, 1), store.declarations.items.len);
-            try testing.expect(std.meta.activeTag(store.declarations.items[0].body) == .absent);
-            try testing.expectEqual(@as(usize, 1), store.generic_owners.items.len);
-        },
-        .empty_callable => {
-            try testing.expectEqual(@as(usize, 1), store.generic_owners.items.len);
-            const span = store.generic_owners.items[0].capture_spans.legacy_recorded_span;
-            try testing.expectEqual(span.start, span.end);
-        },
-        .empty_prefix => {
-            try testing.expectEqual(@as(usize, 1), store.erased_type_prefixes.items.len);
-            const span = store.erased_type_prefixes.items[0].capture_spans.legacy_recorded_span;
-            try testing.expectEqual(span.start, span.end);
-        },
-        .nonempty_declaration, .adjacent_declaration => {
-            try testing.expectEqual(@as(usize, 1), store.declarations.items.len);
-            try testing.expect(std.meta.activeTag(store.declarations.items[0].body) == .present);
-            try testing.expectEqual(@as(usize, 1), store.generic_owners.items.len);
-        },
-        .type_only_spacing, .type_only_export_spacing => {
-            try testing.expectEqual(@as(usize, 1), store.type_only_modules.items.len);
-        },
-        .spaced_explicit_call => {
-            try testing.expectEqual(@as(usize, 0), store.explicit_call_arguments.items.len);
-        },
-        .empty_explicit_call => {
-            try testing.expectEqual(@as(usize, 1), store.explicit_call_arguments.items.len);
-            const span = store.explicit_call_arguments.items[0].capture_spans.legacy_recorded_span;
-            try testing.expectEqual(span.start, span.end);
-        },
-        .commented_callable => {
-            try testing.expectEqual(@as(usize, 1), store.generic_owners.items.len);
-        },
-        .complex_annotation => {
-            try testing.expectEqual(@as(usize, 1), store.annotations.items.len);
-        },
-        .exported_declaration => {
-            try testing.expectEqual(@as(usize, 1), store.declarations.items.len);
-            try testing.expect(store.declarations.items[0].export_span != null);
-        },
-        .declaration_without_terminator => {
-            try testing.expectEqual(@as(usize, 1), store.declarations.items.len);
-            try testing.expect(store.declarations.items[0].terminator_span == null);
-        },
-    }
-}
-
-test "direct printer preserves measured legacy behavior" {
-    const fixtures = [_]DirectPrinterFixture{
-        .{
-            .kind = .absent_declaration,
-            .source = "structural  Empty  =   ;\n",
-            .outcome = .{ .output = "structural Empty =;\n" },
-        },
-        .{
-            .kind = .absent_generic_declaration,
-            .source = "structural  Empty<T>  =   ;\n",
-            .outcome = .{ .refusal = .self_check },
-        },
-        .{
-            .kind = .empty_callable,
-            .source = "function f<>(value) { return value; }\n",
-            .outcome = .{ .output = "function f < > (value) {\n  return value;\n}\n" },
-        },
-        .{
-            .kind = .empty_prefix,
-            .source = "const value = <>(1);\n",
-            .outcome = .{ .output = "const value = < > (1);\n" },
-        },
-        .{
-            .kind = .nonempty_declaration,
-            .source = "structural  Pair < T > = { left : T ; right:T }; const value=1;\n",
-            .outcome = .{ .output = "structural  Pair < T > = { left : T ; right:T };\nconst value = 1;\n" },
-        },
-        .{
-            .kind = .type_only_spacing,
-            .source = "import   type  { A ,  B }  from  \"model\";\nconst value = 1;\n",
-            .outcome = .{ .output = "import type { A, B } from \"model\";\nconst value = 1;\n" },
-        },
-        .{
-            .kind = .adjacent_declaration,
-            .source = "structural Pair<T>={ left:T; right:T };\n",
-            .outcome = .{ .output = "structural Pair<T>={ left:T; right:T };\n" },
-        },
-        .{
-            .kind = .spaced_explicit_call,
-            .source = "const value = id < T > (1);\n",
-            .outcome = .{ .output = "const value = id < T > (1);\n" },
-        },
-        .{
-            .kind = .empty_explicit_call,
-            .source = "const value = id<>(1);\n",
-            .outcome = .{ .output = "const value = id < > (1);\n" },
-        },
-        .{
-            .kind = .commented_callable,
-            .source = "function f<T>/* gap */(value) { return value; }\n",
-            .outcome = .{ .refusal = .comment_position },
-        },
-        .{
-            .kind = .complex_annotation,
-            .source = "const value: { id : string ; nested: readonly number[] } = data;\n",
-            .outcome = .{ .output = "const value: { id : string ; nested: readonly number[] } = data;\n" },
-        },
-        .{
-            .kind = .exported_declaration,
-            .source = "export structural  Box<T> = { value:T };\n",
-            .outcome = .{ .output = "export structural  Box<T> = { value:T };\n" },
-        },
-        .{
-            .kind = .declaration_without_terminator,
-            .source = "structural Box = { value: string }\n",
-            .outcome = .{ .output = "structural Box = { value: string }\n" },
-        },
-        .{
-            .kind = .type_only_export_spacing,
-            .source = "export   type  { A , B };\n",
-            .outcome = .{ .output = "export type { A, B };\n" },
-        },
-    };
-    const enum_fields = @typeInfo(DirectPrinterCase).@"enum".fields;
-    try testing.expectEqual(@as(usize, 14), fixtures.len);
-    try testing.expectEqual(enum_fields.len, fixtures.len);
-    var seen: [enum_fields.len]bool = @splat(false);
-
-    for (fixtures) |fixture| {
-        const index = @intFromEnum(fixture.kind);
-        try testing.expect(!seen[index]);
-        seen[index] = true;
-
-        var parser = try JsParser.initTyped(testing.allocator, testing.allocator, fixture.source);
-        defer parser.deinit();
-        _ = try parser.parse();
-        try expectDirectFixtureRecords(fixture.kind, &parser.type_store);
-
-        switch (fixture.outcome) {
-            .output => |expected| {
-                const direct = try printInput(
-                    testing.allocator,
-                    .{ .parsed_store = &parser.type_store },
-                    .{},
-                );
-                defer testing.allocator.free(direct);
-                try testing.expectEqualStrings(expected, direct);
-            },
-            .refusal => |expected| {
-                try expectSelectedRefusal(.{ .parsed_store = &parser.type_store }, expected);
-            },
-        }
-    }
-    for (seen) |present| try testing.expect(present);
-}
-
-test "direct printer keeps lexical refusal priority over Store validation" {
-    const source = "const value: string = data;\n";
-    var parser = try JsParser.initTyped(testing.allocator, testing.allocator, source);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
-
-    const original_annotation = parser.type_store.annotations.items[0];
-    defer parser.type_store.annotations.items[0] = original_annotation;
-    parser.type_store.annotations.items[0].raw_span.end = @intCast(source.len + 1);
-    try expectSelectedRefusal(.{ .parsed_store = &parser.type_store }, .strip_failed);
-    parser.type_store.annotations.items[0] = original_annotation;
-
-    var malformed = parser.type_store;
-    malformed.source = "\r";
-    try expectSelectedRefusal(.{ .parsed_store = &malformed }, .carriage_return);
-    malformed.source = "\x00";
-    try expectSelectedRefusal(.{ .parsed_store = &malformed }, .invalid_token);
-}
-
-fn runDirectPrinterAllocationSweep(allocator: std.mem.Allocator, source: []const u8) !void {
-    var parser = try JsParser.initTyped(testing.allocator, testing.allocator, source);
-    defer parser.deinit();
-    _ = try parser.parse();
-
-    const direct = try printInput(allocator, .{ .parsed_store = &parser.type_store }, .{});
-    defer allocator.free(direct);
-    try testing.expect(direct.len > 0);
-    try testing.expect(parser.type_store.annotations.items.len > 0);
-    try testing.expect(parser.type_store.declarations.items.len > 0);
-    try testing.expect(parser.type_store.generic_owners.items.len > 0);
-    try testing.expect(parser.type_store.explicit_call_arguments.items.len > 0);
-    try testing.expect(parser.type_store.parameter_annotations.items.len > 0);
-    try testing.expect(parser.type_store.function_signatures.items.len > 0);
-    try testing.expect(parser.type_store.function_signatures.items[0].return_syntax != null);
-    try testing.expect(parser.type_store.erased_type_prefixes.items.len > 0);
-}
-
-test "direct printer propagates every output allocation failure" {
-    const source =
-        "structural Pair<T> = { left: T };\n" ++
-        "function identity<U>(value: U): U { return value; }\n" ++
-        "const prefixed = <P>(1);\n" ++
-        "const result: Pair<string> = identity<string>({ left: \"x\" });\n";
-    try testing.checkAllAllocationFailures(
-        testing.allocator,
-        runDirectPrinterAllocationSweep,
-        .{source},
-    );
-}
-
-test "direct printer propagates Store validation allocation failure" {
-    var source: std.ArrayListUnmanaged(u8) = .empty;
-    defer source.deinit(testing.allocator);
-    try source.appendSlice(testing.allocator, "import type ");
-    for (0..TypeSyntax.max_template_levels + 1) |_| {
-        try source.appendSlice(testing.allocator, "`${");
-    }
-    try source.appendSlice(testing.allocator, "value");
-    for (0..TypeSyntax.max_template_levels + 1) |_| {
-        try source.appendSlice(testing.allocator, "}`");
-    }
-    try source.appendSlice(testing.allocator, ";\nconst value: string = \"ok\";\n");
-
-    var store_allocator = testing.FailingAllocator.init(testing.allocator, .{});
-    var parser = try JsParser.initTyped(
-        testing.allocator,
-        store_allocator.allocator(),
-        source.items,
-    );
-    defer parser.deinit();
-    _ = try parser.parse();
-    try testing.expectEqual(@as(usize, 1), parser.type_store.type_only_modules.items.len);
-    try testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
-
-    store_allocator.fail_index = store_allocator.alloc_index;
-    var reason: Refusal = .self_check;
-    const result = printInput(
-        testing.allocator,
-        .{ .parsed_store = &parser.type_store },
-        .{ .reason_out = &reason },
-    );
-    if (result) |output| {
-        testing.allocator.free(output);
-        return error.TestUnexpectedResult;
-    } else |err| {
-        try testing.expectEqual(error.OutOfMemory, err);
-    }
-    try testing.expect(store_allocator.has_induced_failure);
-    try testing.expectEqual(Refusal.self_check, reason);
 }
 
 test "a declaration prints with canonical spacing" {

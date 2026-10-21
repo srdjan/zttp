@@ -90,50 +90,6 @@ const Precedence = enum(u8) {
     primary = 20,
 };
 
-/// Parser state
-/// Where a parse accepted a statement terminator it never saw.
-///
-/// Split by arm because the arms do not mean the same thing. `after_rbrace`
-/// covers a statement whose previous token is `}`, which spec section 8
-/// terminates with the brace; the other three cover statements the grammar
-/// requires a `;` after, and are what removing ASI actually costs.
-pub const AsiCensus = struct {
-    after_rbrace: u32 = 0,
-    before_rbrace: u32 = 0,
-    at_eof: u32 = 0,
-    at_newline: u32 = 0,
-    /// The first location any of the three counted arms accepted, so a report
-    /// names a line rather than only a count.
-    first: ?SourceLocation = null,
-    /// Every line a counted arm accepted on, in parse order, bounded so the
-    /// census costs no allocation. A file with more than this many is a file
-    /// the repair producer reports as needing more than one pass, which is
-    /// honest: the count is still exact, only the line list is capped.
-    lines: [max_recorded_lines]u32 = [_]u32{0} ** max_recorded_lines,
-    recorded: u8 = 0,
-
-    pub const max_recorded_lines = 64;
-
-    pub fn note(self: *AsiCensus, loc: SourceLocation) void {
-        if (self.first == null) self.first = loc;
-        if (self.recorded < max_recorded_lines) {
-            // A line already recorded is not recorded twice: two statements on
-            // one line need one repair for that line, and the producer keys on
-            // the line.
-            for (self.lines[0..self.recorded]) |seen| {
-                if (seen == loc.line) return;
-            }
-            self.lines[self.recorded] = loc.line;
-            self.recorded += 1;
-        }
-    }
-
-    /// Statements that would stop parsing if the acceptance were removed.
-    pub fn required(self: AsiCensus) u32 {
-        return self.before_rbrace + self.at_eof + self.at_newline;
-    }
-};
-
 /// Safe-build assertion that a parser loop makes progress.
 ///
 /// A loop that parses a list or a block must consume at least one token each
@@ -267,27 +223,16 @@ pub const Parser = struct {
     // Optional atom table for interning identifiers/properties
     atoms: ?*atom_table.AtomTable,
 
-    /// When true, a statement missing its `;` is accepted and counted instead
-    /// of refused. Spec 5.5 mandates no ASI, so the default is false and every
-    /// normal parse refuses.
+    /// When true, a statement missing its `;` is accepted instead of refused.
+    /// Spec 5.5 mandates no ASI, so the default is false and every normal
+    /// parse refuses.
     ///
-    /// Three callers need the old acceptance and say so: the census that
-    /// measures reliance, the repair producer that has to find the insertion
-    /// points in a source that no longer parses, and M2, which compares the
-    /// tree of the unrepaired original against the tree of the repaired file -
-    /// the unique-parse argument spec 5.5 makes.
+    /// Two callers need the old acceptance and say so: the repair producer,
+    /// which has to find the insertion points in a source that no longer
+    /// parses, and M2, which compares the tree of the unrepaired original
+    /// against the tree of the repaired file - the unique-parse argument
+    /// spec 5.5 makes.
     allow_asi: bool = false,
-
-    /// How many statements this parse terminated by automatic semicolon
-    /// insertion rather than by a written `;`, split by the arm that accepted.
-    /// Spec 5.5 mandates no ASI, and this is the measurement that says what
-    /// removing it costs.
-    ///
-    /// `after_rbrace` is excluded from the total on purpose: a statement whose
-    /// previous token is `}` is a block or a declaration, which spec section 8
-    /// terminates with the brace rather than with a semicolon. The other three
-    /// arms are statements the grammar requires a `;` after.
-    asi: AsiCensus = .{},
 
     // Context flags
     in_loop: bool,
@@ -6412,28 +6357,17 @@ pub const Parser = struct {
         // A statement whose previous token is `}` is a block or a declaration,
         // which section 8 terminates with the brace rather than with a `;`.
         // This arm is not insertion and stays.
-        if (self.previous.type == .rbrace) {
-            self.asi.after_rbrace +|= 1;
-            return;
-        }
+        if (self.previous.type == .rbrace) return;
         if (self.check(.rbrace)) {
-            self.asi.before_rbrace +|= 1;
-            self.asi.note(self.previous.location());
             if (!self.allow_asi) return self.refuseMissingSemicolon();
             return;
         }
         if (self.check(.eof)) {
-            self.asi.at_eof +|= 1;
-            self.asi.note(self.previous.location());
             if (!self.allow_asi) return self.refuseMissingSemicolon();
             return;
         }
-        // For simplicity, just accept. Counted so the migration this removal
-        // needs can be measured before it is attempted: spec 5.5 mandates no
-        // automatic semicolon insertion, and how much tracked source relies on
-        // it decides whether the flip is mechanical or a migration.
-        self.asi.at_newline +|= 1;
-        self.asi.note(self.previous.location());
+        // Missing `;` before a newline: refused unless the compatibility mode
+        // is on. Spec 5.5 mandates no automatic semicolon insertion.
         if (!self.allow_asi) return self.refuseMissingSemicolon();
     }
 
@@ -8330,7 +8264,6 @@ test "the compatibility mode still parses what insertion accepted" {
     parser.allow_asi = true;
     _ = try parser.parse();
     try std.testing.expect(!parser.hasErrors());
-    try std.testing.expectEqual(@as(u32, 2), parser.asi.required());
 }
 
 test "parse simple expression" {

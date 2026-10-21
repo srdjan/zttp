@@ -63,7 +63,6 @@ test {
 // explicitly.
 test {
     _ = @import("tests/opcode_parity.zig");
-    _ = @import("tests/asi_census.zig");
     _ = @import("tests/frontend_fuzz.zig");
 }
 

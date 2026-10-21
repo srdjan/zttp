@@ -109,7 +109,6 @@ zts security_events.zig
 zts source_frontend.zig
 zts sqlite.zig
 zts string.zig
-zts tests/asi_census.zig
 zts tests/frontend_fuzz.zig
 zts tests/opcode_parity.zig
 zts translation_witness.zig
