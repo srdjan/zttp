@@ -100,7 +100,7 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-canonicalize` | runs canonicalize and normalize tests | after source-repair or normalization changes |
 | `zig build test-expert` | runs expert command contract tests | after expert command changes |
 | `zig build test-zts-cli` | runs analyzer dispatch and machine-command tests | after zts CLI changes |
-| `zig build test-deploy-manifest` | runs deploy-manifest renderer tests | after deploy-manifest changes |
+| `zig build test-deploy-manifest` | runs proven-facts extraction tests | after deploy-manifest changes |
 | `zig build test-agent-identity` | runs agent identity primitive tests | after agent identity changes |
 | `zig build test-module-graph-record` | runs module graph and digest tests | after module graph record changes |
 | `zig build test-agent-protocol` | runs agent protocol envelope tests | after agent protocol changes |

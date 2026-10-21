@@ -180,7 +180,7 @@
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "runs deploy-manifest renderer tests",
+      "does": "runs proven-facts extraction tests",
       "requiredWhen": "after deploy-manifest changes"
     },
     {

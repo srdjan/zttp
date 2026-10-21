@@ -42,7 +42,7 @@ const host_test_roots = [_]HostTestRoot{
     // imports (describe_rule.zig, search_rules.zig, ...) are reached only
     // through the `zts_cli` module. Same rationale as canonicalize.
     .{ .owner = .tools, .src = "src/zts_cli.zig", .step = "test-zts-cli", .desc = "Run analyzer dispatch + machine-command module tests", .project_config = true },
-    .{ .owner = .tools, .src = "src/deploy_manifest.zig", .step = "test-deploy-manifest", .desc = "Run deploy manifest renderer tests" },
+    .{ .owner = .tools, .src = "src/deploy_manifest.zig", .step = "test-deploy-manifest", .desc = "Run proven-facts extraction tests" },
     // collected_via_named_module: agent_identity.zig is re-exported by
     // zts_cli.zig but not yet referenced by any analyzed code, and Zig only
     // collects tests from files it analyzes - so the `zts_cli` root runs

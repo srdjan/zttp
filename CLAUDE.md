@@ -83,7 +83,7 @@ Request body readers (globals): `requestBody(req)` returns `Bytes` and is total,
 - **Flow analysis**: data label tracking (secret, credential, user_input). `packages/zts/src/flow_checker.zig`.
 - **Fault coverage**: path enumeration, failure severity. `packages/zts/src/fault_coverage.zig`.
 - **Replay**: `packages/zts/src/trace.zig`.
-- **Deploy manifests**: `packages/tools/src/deploy_manifest.zig`.
+- **Proven deployment facts**: `packages/tools/src/deploy_manifest.zig`.
 - **Artifact acceptance**: `packages/proof-checker/` owns bounded certificate
   decoding, obligation reconstruction, evidence checks, consumer policy, and
   exhaustive verdicts. `packages/runtime/src/proof_activation.zig` supplies the
