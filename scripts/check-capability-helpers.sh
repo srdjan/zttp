@@ -9,12 +9,26 @@ echo "======================="
 
 fail=0
 
+# Floor on this gate's own scanner. A missing rg, or one without PCRE2, would
+# leave every scan below empty and report a pass. Exit status 1 from rg means
+# no match and is the only status tolerated; any other status fails the gate.
+command -v rg >/dev/null 2>&1 || { echo "FAIL: rg (ripgrep) is not on PATH; this gate cannot scan" >&2; exit 1; }
+rg --pcre2 -q a <<<a || { echo "FAIL: rg PCRE2 self-test failed; this gate cannot scan" >&2; exit 1; }
+rg_error_marker="$(mktemp)"
+trap 'command rm -f "$rg_error_marker"' EXIT
+export rg_error_marker
+
 check_pattern() {
     local description="$1"
     local pattern="$2"
     local matches
 
-    matches="$(git ls-files -z -- 'packages/modules/src' 'packages/zts/src/modules' | xargs -0 rg -n -H --color never -g '*.zig' "$pattern" || true)"
+    matches="$(git ls-files -z -- 'packages/modules/src' 'packages/zts/src/modules' | xargs -0 bash -c 'rg "$@"; status=$?; if [ "$status" -gt 1 ]; then echo "rg exited with status $status" >> "$rg_error_marker"; fi; exit 0' rg_scan -n -H --color never -g '*.zig' "$pattern")"
+    if [ -s "$rg_error_marker" ]; then
+        echo "FAIL: rg errored while scanning for: $description" >&2
+        cat "$rg_error_marker" >&2
+        exit 1
+    fi
     if [ -n "$matches" ]; then
         echo ""
         echo "FAIL: $description"

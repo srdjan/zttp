@@ -6,6 +6,23 @@ fail() {
   exit 1
 }
 
+# Floor on the ripgrep scanner. A missing rg, or one without PCRE2, would leave
+# every census below empty and report a pass. rg exit status 1 means no match
+# and is tolerated; any other status is recorded and fails the gate. The
+# marker file carries that status out of the xargs pipelines below.
+command -v rg >/dev/null 2>&1 || fail "rg (ripgrep) is not on PATH; the source censuses cannot scan"
+rg --pcre2 -q a <<<a || fail "rg PCRE2 self-test failed; the source censuses cannot scan"
+rg_error_marker="$(mktemp)"
+trap 'command rm -f "$rg_error_marker"' EXIT
+export rg_error_marker
+rg_scan_body='rg "$@"; status=$?; if [ "$status" -gt 1 ]; then echo "rg exited with status $status" >> "$rg_error_marker"; fi; exit 0'
+rg_scan_ok() {
+  if [[ -s "$rg_error_marker" ]]; then
+    cat "$rg_error_marker" >&2
+    fail "rg errored during a source census; a failed scan is not a clean result"
+  fi
+}
+
 modules_doc="docs/virtual-modules/README.md"
 registry_file="packages/zts/src/builtin_modules.zig"
 
@@ -438,8 +455,9 @@ fi
 
 legacy_types_hits="$({
   git ls-files -z |
-    xargs -0 rg -n -F -- 'zttp:types' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n -F -- 'zttp:types'
 } | grep -v -E '^(CHANGELOG\.md:|docs/(archive|plans|solutions)/|docs/(convergence|restrictions-to-proofs)\.md:|packages/pi/src/simulator/testdata/empirical/|packages/zts/src/(source_diagnostics|restriction_registry)\.zig:|packages/tools/src/precompile\.zig:|packages/pi/src/expert_persona\.zig:|scripts/check-docs-drift\.sh:|tests/corpus/[a-z]+/bad/)' || true)"
+rg_scan_ok
 if [[ -n "${legacy_types_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$legacy_types_hits" >&2
   fail "live source still references removed zttp:types; use ambient Proof<T, P> and Effects<T, R>"
@@ -458,8 +476,9 @@ fi
 
 removed_parameter_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
-    xargs -0 rg -n -U --pcre2 -- '(?s)(?:function\s+[A-Za-z_$][A-Za-z0-9_$]*(?:\s*<[^>{}]*>)?\s*\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)|\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)[^)]*\)\s*=>)' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n -U --pcre2 -- '(?s)(?:function\s+[A-Za-z_$][A-Za-z0-9_$]*(?:\s*<[^>{}]*>)?\s*\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)|\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)[^)]*\)\s*=>)'
 } | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
+rg_scan_ok
 if [[ -n "${removed_parameter_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_parameter_hits" >&2
   fail "tracked TypeScript still uses a default or optional parameter; use T | undefined and resolve absence in the body"
@@ -469,8 +488,9 @@ fi
 # refusal probes in Zig, but no tracked handler may retain either legacy form.
 removed_module_export_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
-    xargs -0 rg -n --pcre2 -- '^\s*export\s+(?:default|let)\b' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n --pcre2 -- '^\s*export\s+(?:default|let)\b'
 } | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
+rg_scan_ok
 if [[ -n "${removed_module_export_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_module_export_hits" >&2
   fail "tracked TypeScript still uses a default or mutable export; use a statically named export function or export const"
@@ -480,8 +500,9 @@ fi
 # where every hit is source syntax rather than a Zig host-language return type.
 removed_type_spelling_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
-    xargs -0 rg -n --pcre2 -- '(?:\b(?:Array|ReadonlyArray)\s*<|\bvoid\b)' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n --pcre2 -- '(?:\b(?:Array|ReadonlyArray)\s*<|\bvoid\b)'
 } | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
+rg_scan_ok
 if [[ -n "${removed_type_spelling_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_type_spelling_hits" >&2
   fail "tracked TypeScript still uses Array<T>, ReadonlyArray<T>, or void; use postfix arrays and undefined"
@@ -492,8 +513,9 @@ fi
 # and fixtures from continuing to teach the forms its ZTS001 diagnostics remove.
 removed_statement_form_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
-    xargs -0 rg -n -U --pcre2 -- '(?m)(?:\bdebugger\s*;|\bwhen\s+_\s*:|^\s*;\s*(?://[^\n]*)?$|;;)' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n -U --pcre2 -- '(?m)(?:\bdebugger\s*;|\bwhen\s+_\s*:|^\s*;\s*(?://[^\n]*)?$|;;)'
 } | grep -v -E '^(docs/|tests/corpus/[a-z]+/bad/)' || true)"
+rg_scan_ok
 if [[ -n "${removed_statement_form_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_statement_form_hits" >&2
   fail "tracked TypeScript still uses debugger, an empty statement, or when _; remove inert statements and use default:"
@@ -504,8 +526,9 @@ fi
 # census rather than rewritten.
 removed_declaration_destructuring_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
-    xargs -0 rg -n -U --pcre2 -- '(?s)\b(?:const|let|var)\s+(?:\{|\[)' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n -U --pcre2 -- '(?s)\b(?:const|let|var)\s+(?:\{|\[)'
 } | grep -v -E '^(docs/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
+rg_scan_ok
 if [[ -n "${removed_declaration_destructuring_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_declaration_destructuring_hits" >&2
   fail "tracked TypeScript still uses declaration destructuring; bind one name and read members or indexed elements explicitly"
@@ -516,8 +539,9 @@ fi
 # object-expression census. Historical recordings remain immutable evidence.
 removed_record_field_hits="$({
   git ls-files -z -- '*.ts' |
-    xargs -0 rg -n -U --pcre2 -- '(?s)(?:(?:=|return|\(|,)\s*\{\s*(?:\.\.\.[^,}]+,\s*)?(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|(?:return|Response\.json\(|=>|=)\s*\{(?:(?![{}()]).)*,\s*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|\{\s*\[[^]]+\]\s*:)' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n -U --pcre2 -- '(?s)(?:(?:=|return|\(|,)\s*\{\s*(?:\.\.\.[^,}]+,\s*)?(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|(?:return|Response\.json\(|=>|=)\s*\{(?:(?![{}()]).)*,\s*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|\{\s*\[[^]]+\]\s*:)'
 } | grep -v -E '^(docs/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' || true)"
+rg_scan_ok
 if [[ -n "${removed_record_field_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_record_field_hits" >&2
   fail "tracked TypeScript still uses object shorthand or a computed record key; spell fields explicitly or use Dict"
@@ -528,8 +552,9 @@ fi
 # authoritative diagnostic check. Historical recordings remain evidence.
 removed_expression_form_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
-    xargs -0 rg -n -U --pcre2 -- '(?m)(?:\?\.\s*[\[(]|(?:^|[=(:,;!?{}\[])\s*\+\s*(?:[A-Za-z_$]|\()|(?:\b[A-Za-z_$][A-Za-z0-9_$]*|\)|\])\s+in\s+(?:[A-Za-z_$]|\(|\{|\[))' 2>/dev/null || true
+    xargs -0 bash -c "$rg_scan_body" rg_scan -n -U --pcre2 -- '(?m)(?:\?\.\s*[\[(]|(?:^|[=(:,;!?{}\[])\s*\+\s*(?:[A-Za-z_$]|\()|(?:\b[A-Za-z_$][A-Za-z0-9_$]*|\)|\])\s+in\s+(?:[A-Za-z_$]|\(|\{|\[))'
 } | grep -v -E '^(docs/|packages/pi/src/simulator/testdata/empirical/|tests/corpus/[a-z]+/bad/)' | grep -v -E ':[[:space:]]*(//|\*)' || true)"
+rg_scan_ok
 if [[ -n "${removed_expression_form_hits//[[:space:]]/}" ]]; then
   printf '%s\n' "$removed_expression_form_hits" >&2
   fail "tracked TypeScript still uses in, unary plus, optional call, or optional computed access; use explicit predicates, conversions, and absence branches"

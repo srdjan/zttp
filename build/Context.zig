@@ -201,8 +201,12 @@ pub fn proofCheckerMod(ctx: Context) *std.Build.Module {
 /// Developer filters retain the package runner but must collect real tests.
 pub fn addTest(ctx: Context, original: std.Build.TestOptions) *std.Build.Step.Compile {
     var options = original;
-    if (ctx.test_filters.len != 0) {
-        options.filters = ctx.test_filters;
+    // A developer filter replaces any fixed filter. A fixed filter on its own
+    // still gets the non-empty runner, so a suite whose filter matches no test
+    // fails instead of reporting a pass over zero tests.
+    const effective: []const []const u8 = if (ctx.test_filters.len != 0) ctx.test_filters else original.filters;
+    if (effective.len != 0) {
+        options.filters = effective;
         const selected = original.test_runner orelse std.Build.Step.Compile.TestRunner{
             .path = .{ .cwd_relative = ctx.b.pathJoin(&.{ ctx.b.graph.zig_lib_directory.path.?, "compiler", "test_runner.zig" }) },
             .mode = .server,
@@ -214,7 +218,7 @@ pub fn addTest(ctx: Context, original: std.Build.TestOptions) *std.Build.Step.Co
         }));
         const runner_options = ctx.b.addOptions();
         runner_options.addOption(bool, "simple", selected.mode == .simple);
-        runner_options.addOption([]const u8, "filter", ctx.test_filters[0]);
+        runner_options.addOption([]const u8, "filter", effective[0]);
         options.root_module.addOptions("selection_runner_options", runner_options);
         options.test_runner = .{ .path = ctx.b.path("tooling/nonempty_test_runner.zig"), .mode = selected.mode };
     }
@@ -223,7 +227,7 @@ pub fn addTest(ctx: Context, original: std.Build.TestOptions) *std.Build.Step.Co
 
 pub fn addRunTest(ctx: Context, compile: *std.Build.Step.Compile) *std.Build.Step.Run {
     const run = ctx.b.addRunArtifact(compile);
-    if (ctx.test_filters.len != 0 and compile.kind == .@"test") {
+    if ((ctx.test_filters.len != 0 or compile.filters.len != 0) and compile.kind == .@"test") {
         const path = ctx.b.cache_root.join(ctx.b.allocator, &.{ctx.b.fmt("test-selection-{x}.txt", .{@intFromPtr(run)})}) catch @panic("OOM");
         run.setEnvironmentVariable("ZTTP_TEST_SELECTION_COUNT", path);
         run.has_side_effects = true;

@@ -18,13 +18,18 @@ const Guard = struct {
     }
 };
 
-pub fn attach(b: *std.Build, runs: []const Run) void {
+/// `require_runs` is set for a developer filter, where a step that reaches no
+/// counted run selected nothing and must fail. Without a developer filter only
+/// steps that reach a fixed-filter run are guarded, and the rest stay untouched.
+pub fn attach(b: *std.Build, runs: []const Run, require_runs: bool) void {
     for (b.top_level_steps.values()) |tls| {
-        if (!std.mem.startsWith(u8, tls.step.name, "test-") and !std.mem.eql(u8, tls.step.name, "check-spine")) continue;
+        const aggregate = !require_runs and std.mem.eql(u8, tls.step.name, "test");
+        if (!aggregate and !std.mem.startsWith(u8, tls.step.name, "test-") and !std.mem.eql(u8, tls.step.name, "check-spine")) continue;
         var paths: std.ArrayList([]const u8) = .empty;
         for (runs) |run| if (reachable(&tls.step, run.step)) {
             paths.append(b.allocator, run.count_path) catch @panic("OOM");
         };
+        if (!require_runs and paths.items.len == 0) continue;
         const guard = b.allocator.create(Guard) catch @panic("OOM");
         guard.* = .{
             .step = .init(.{ .id = .custom, .name = b.fmt("nonempty selection for {s}", .{tls.step.name}), .owner = b, .makeFn = Guard.make }),

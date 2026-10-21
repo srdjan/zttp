@@ -53,11 +53,13 @@ run_tests_with_args() {
     local failed
     failed=$(echo "$results" | grep -o '[0-9]* failed' | grep -o '[0-9]*')
 
-    if [ "$command_status" -eq 0 ] && [ "${failed:-1}" = "0" ]; then
+    # A suite that ran no test proves nothing: zero failures over zero tests
+    # is not a pass.
+    if [ "$command_status" -eq 0 ] && [ "${failed:-1}" = "0" ] && [ "${passed:-0}" -gt 0 ]; then
         echo "  PASS  $name ($passed tests)"
         PASS=$((PASS + 1))
     else
-        echo "  FAIL  $name ($failed failed)"
+        echo "  FAIL  $name (${passed:-0} passed, ${failed:-?} failed)"
         echo "$output" | grep "FAIL" | head -5 | sed 's/^/        /'
         FAIL=$((FAIL + 1))
     fi

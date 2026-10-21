@@ -33,6 +33,9 @@ pub fn build(b: *std.Build) void {
     const capability_audit = repo_gates.addCapabilityAudit(ctx);
     const tools = tooling.add(ctx);
     const gates = repo_gates.add(ctx, tools);
+    const gate_floor_probe = repo_gates.addGateFloorProbe(ctx);
+    capability_audit.step.dependOn(&gate_floor_probe.step);
+    gates.docs_drift_step.dependOn(&gate_floor_probe.step);
     const bins = artifacts.add(ctx, gates);
     const golden = goldens.add(ctx, bins);
     artifacts.addRunSteps(ctx, bins);
@@ -87,6 +90,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&bins.runtime_purity_cmd.step);
 
     runtime_tests.addIntegration(ctx, bins, test_step);
+    // addIntegration registers test-examples, so the lookup must follow it.
+    const examples_step = b.top_level_steps.get("test-examples") orelse @panic("runtime_tests.addIntegration registers test-examples");
+    examples_step.step.dependOn(&gate_floor_probe.step);
 
     // Release build step (with handler precompilation if provided)
     const release_step = b.step("release", "Build optimized release binaries (zttp, zttp-runtime, zts)");
@@ -102,11 +108,15 @@ pub fn build(b: *std.Build) void {
     step_coverage.attachScriptCensus(b, test_step, proofs.script_reachability, tools.repo_gate_exe);
     agent_spine.attachTaskCensus(b, spine);
     step_coverage.add(b, test_step, coverage_step);
-    if (ctx.test_filters.len != 0) {
+    const test_selection = @import("build/test_selection.zig");
+    if (ctx.test_filters.len == 0) {
+        // A fixed filter such as the stand-in suite's must also select a test.
+        test_selection.attach(b, ctx.test_selections.items, false);
+    } else {
         // An aggregate with filtered roots cannot establish its advertised
         // invariants. Retain useful filtering only on explicitly named suites.
         test_step.dependencies.clearRetainingCapacity();
         test_step.dependOn(&b.addFail("test rejects -Dtest-filter; use a named test suite for developer selection").step);
-        @import("build/test_selection.zig").attach(b, ctx.test_selections.items);
+        test_selection.attach(b, ctx.test_selections.items, true);
     }
 }

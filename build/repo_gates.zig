@@ -9,6 +9,14 @@ pub fn addCapabilityAudit(ctx: Context) *std.Build.Step.Run {
     return ctx.addGate(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" }, "test-capability-audit", "Run capability helper audit").run;
 }
 
+/// Rejection probes for the ripgrep floors of the capability audit and the docs
+/// drift gate. Both gates depend on this one Run step, so each gate step runs it.
+pub fn addGateFloorProbe(ctx: Context) *std.Build.Step.Run {
+    const probe = ctx.b.addSystemCommand(&.{ "/bin/bash", "scripts/test-gate-floors.sh" });
+    probe.has_side_effects = true;
+    return probe;
+}
+
 pub const Result = struct {
     kernel_safety_step: *std.Build.Step,
     module_boundary: *std.Build.Step.Run,
