@@ -1,3 +1,4 @@
+const std = @import("std");
 const h = @import("helpers.zig");
 const value = h.value;
 const context = h.context;
@@ -34,18 +35,27 @@ pub fn dateNow(ctx: *context.Context, this: value.JSValue, args: []const value.J
     return result;
 }
 
-pub var perf_time_origin: ?compat.Instant = null;
+/// Initialization states for `perf_time_origin`: the first caller wins the
+/// compare-and-swap and publishes the origin; later callers wait for it.
+const origin_uninit: u8 = 0;
+const origin_writing: u8 = 1;
+const origin_ready: u8 = 2;
+
+var perf_time_origin: compat.Instant = undefined;
+var perf_origin_state = std.atomic.Value(u8).init(origin_uninit);
 
 /// performance.now() - Returns milliseconds since time origin (monotonic)
 pub fn performanceNow(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     _ = args;
     const now = compat.Instant.now() catch return value.JSValue.undefined_val;
-    if (perf_time_origin == null) {
+    if (perf_origin_state.cmpxchgStrong(origin_uninit, origin_writing, .acquire, .acquire) == null) {
         perf_time_origin = now;
+        perf_origin_state.store(origin_ready, .release);
         return allocFloat(ctx, 0);
     }
-    const elapsed_ns = now.since(perf_time_origin.?);
+    while (perf_origin_state.load(.acquire) != origin_ready) std.atomic.spinLoopHint();
+    const elapsed_ns = now.since(perf_time_origin);
     const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
     return allocFloat(ctx, elapsed_ms);
 }

@@ -168,7 +168,6 @@ pub const Runtime = pool.LockFreePool.Runtime;
 pub const Interpreter = interpreter.Interpreter;
 pub const Opcode = bytecode.Opcode;
 pub const FunctionBytecode = bytecode.FunctionBytecode;
-pub const FunctionBytecodeCompact = bytecode.FunctionBytecodeCompact;
 pub const Atom = object.Atom;
 pub const AtomTable = context.AtomTable;
 /// Per-request cost accounting: the `Meter` a `Context` carries and the

@@ -64,7 +64,3 @@ pub fn snapshotPerfStats(self: *const Interpreter) PerfStats {
         .opcode_histogram = self.opcode_histogram,
     };
 }
-
-pub fn recordDeopt(self: *Interpreter) void {
-    self.deopt_count +%= 1;
-}

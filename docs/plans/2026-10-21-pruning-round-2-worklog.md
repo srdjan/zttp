@@ -60,3 +60,9 @@ Tag `pre-round-2-archive` holds the deleted files. Each line gives the file path
 | `zig build test`, second run | 0 |
 
 The first aggregate run failed one test of 9,394: "concurrent first launch of one named session is rejected before publication" in `packages/pi/src/agent.zig`. The log does not show the failing assertion. No round 2 unit changed `agent.zig`. The test did not fail again in four later runs. The cause is not known. A probable source is process-global state, because the test sets `ZTTP_SESSIONS_DIR` and takes a session lock. A repeated run of `test-expert-app` under parallel load can confirm it. The failure is recorded and is not attributed to this plan.
+
+## Round 2b
+
+| Unit | Commit | Gates and exit statuses | Notes |
+|---|---|---|---|
+| U9 | this commit | `test-zts` 0, `test-zruntime` 0, `test-precompile` 0, `test-meta-drift` 0, `test-zts-layering` 0, `test-docs-drift` 0, `check-spine` 0, `zig fmt --check` 0 | 7 files, 14 insertions, 1,033 deletions. Deleted hot reload versioning, `FunctionBytecodeCompact` with `BytecodeCache.put` and `get`, the guard ID counter, `FUNC_GUARD_ID`, `profileBackedge`, `recordDeopt`, `tier_count`, `LOOP_THRESHOLD`, and the `WithAtoms` serializer pair. `perf.zig` had no dead part to remove. A16: the `performance.now` origin is now published once through an atomic state; no test runs two threads against it. Parallel worktree dispatch was abandoned: the worktree tool branched from origin's `main`, which lacks the unpushed local commits. |

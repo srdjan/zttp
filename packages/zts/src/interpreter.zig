@@ -23,8 +23,6 @@ const util = @import("interpreter/util.zig");
 const lifecycle = @import("interpreter/lifecycle.zig");
 const compat = @import("zts-base").compat;
 
-const tier_count = perf.tier_count;
-
 pub const PerfStats = perf.PerfStats;
 const enable_opcode_histogram = perf.enable_opcode_histogram;
 
@@ -94,12 +92,6 @@ pub const Interpreter = struct {
         }
     }
 
-    /// Profile back-edge: increment counter, return true if loop is hot
-    inline fn profileBackedge(self: *Interpreter) bool {
-        self.backedge_count +%= 1;
-        return self.backedge_count >= bytecode.LOOP_THRESHOLD;
-    }
-
     pub fn resetProfilingCounters(self: *Interpreter) void {
         lifecycle.resetProfilingCounters(self);
     }
@@ -115,10 +107,6 @@ pub const Interpreter = struct {
 
     pub fn snapshotPerfStats(self: *const Interpreter) PerfStats {
         return lifecycle.snapshotPerfStats(self);
-    }
-
-    pub fn recordDeopt(self: *Interpreter) void {
-        lifecycle.recordDeopt(self);
     }
 
     inline fn offsetPc(self: *Interpreter, offset: i16) void {

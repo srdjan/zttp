@@ -34,7 +34,7 @@ pub const ConstantTag = enum(u8) {
     float = 1, // followed by f64 (8 bytes)
     string = 2, // followed by u16 length + UTF-8 bytes
     special = 3, // followed by u8 special code
-    nested_function = 4, // followed by serialized FunctionBytecodeCompact
+    nested_function = 4, // followed by FunctionBytecode written by serializeFunctionBytecode
 };
 
 /// Special value codes for serialization
@@ -630,42 +630,6 @@ pub const BytecodeCache = struct {
         return hasher.finalResult();
     }
 
-    /// Store bytecode in cache
-    pub fn put(self: *BytecodeCache, key: CacheKey, func: *const bytecode.FunctionBytecodeCompact) !void {
-        if (self.max_entries == 0) return;
-        const bytes = func.asBytes();
-
-        // Copy bytes to owned memory
-        const owned = try self.allocator.dupe(u8, bytes);
-        errdefer self.allocator.free(owned);
-
-        self.lock.lock();
-        defer self.lock.unlock();
-
-        // Remove old entry if exists
-        if (self.cache.fetchRemove(key)) |old| {
-            self.allocator.free(old.value);
-            self.removeOrderEntryLocked(key);
-        }
-
-        try self.order.append(self.allocator, key);
-        errdefer self.removeOrderEntryLocked(key);
-        try self.cache.put(self.allocator, key, owned);
-        self.evictOverflowLocked();
-    }
-
-    /// Retrieve bytecode from cache
-    pub fn get(self: *BytecodeCache, key: CacheKey) ?*const bytecode.FunctionBytecodeCompact {
-        self.lock.lockShared();
-        defer self.lock.unlockShared();
-        if (self.cache.get(key)) |bytes| {
-            _ = self.hits.fetchAdd(1, .monotonic);
-            return @ptrCast(@alignCast(bytes.ptr));
-        }
-        _ = self.misses.fetchAdd(1, .monotonic);
-        return null;
-    }
-
     /// Store raw serialized bytes in cache (Phase 1b: for JSValue constant serialization)
     pub fn putRaw(self: *BytecodeCache, key: CacheKey, data: []const u8) !void {
         if (self.max_entries == 0) return;
@@ -760,53 +724,6 @@ pub const BytecodeCache = struct {
         }
     }
 };
-
-test "BytecodeCache basic operations" {
-    const allocator = std.testing.allocator;
-
-    var cache = BytecodeCache.init(allocator);
-    defer cache.deinit();
-
-    // Create test bytecode
-    const code = [_]u8{ 0x08, 0x53 }; // push_null, ret
-    const constants = [_]u32{42};
-
-    const func = try bytecode.FunctionBytecodeCompact.create(
-        allocator,
-        .{},
-        0,
-        0,
-        1,
-        2,
-        .{},
-        &code,
-        &constants,
-        &.{},
-    );
-    defer func.destroy(allocator);
-
-    // Generate cache key
-    const source = "function test() { return null; }";
-    const key = BytecodeCache.cacheKey(source);
-
-    // Store in cache
-    try cache.put(key, func);
-    try std.testing.expectEqual(@as(usize, 1), cache.count());
-
-    // Retrieve from cache
-    const retrieved = cache.get(key);
-    try std.testing.expect(retrieved != null);
-    try std.testing.expectEqual(func.code_len, retrieved.?.code_len);
-
-    // Miss for different key
-    const other_key = BytecodeCache.cacheKey("different source");
-    const miss = cache.get(other_key);
-    try std.testing.expect(miss == null);
-
-    // Check stats
-    try std.testing.expectEqual(@as(u64, 1), cache.hits.load(.monotonic));
-    try std.testing.expectEqual(@as(u64, 1), cache.misses.load(.monotonic));
-}
 
 test "BytecodeCache identity changes invalidate the same source" {
     const source = "function handler() { return true; }";
@@ -1644,28 +1561,6 @@ pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRe
     }
 }
 
-/// Full bytecode serialization with atom table (Phase 1c)
-/// Includes bytecode, constants, and atoms for complete cache hit path
-pub fn serializeBytecodeWithAtoms(
-    func: *const bytecode.FunctionBytecode,
-    atom_table: *AtomTable,
-    writer: anytype,
-    allocator: std.mem.Allocator,
-) !void {
-    // Collect all referenced atoms
-    const atoms = try collectAtoms(func, allocator);
-    defer allocator.free(atoms);
-
-    // Write atoms first (needed for remapping on deserialize)
-    try serializeAtoms(atoms, atom_table, writer);
-
-    // Write bytecode and constants
-    try serializeFunctionBytecode(func, writer, allocator);
-
-    // Write empty shapes section (no shapes in this variant)
-    try writer.writeInt(u16, 0, .little);
-}
-
 // ============================================================================
 // Phase 1d: Object Literal Shape Serialization
 // ============================================================================
@@ -1998,28 +1893,6 @@ pub fn deserializeBytecodeWithAtomsAndShapes(
     };
 }
 
-/// Full bytecode deserialization with atom remapping (Phase 1c)
-/// Re-interns atoms in target context and remaps all references
-pub fn deserializeBytecodeWithAtoms(
-    reader: anytype,
-    target_atoms: *AtomTable,
-    allocator: std.mem.Allocator,
-    strings_table: ?*string.StringTable,
-) !*bytecode.FunctionBytecode {
-    // Deserialize atoms and build remapping
-    var remap = try deserializeAtoms(reader, target_atoms, allocator);
-    defer remap.deinit();
-
-    // Deserialize bytecode
-    const func = try deserializeFunctionBytecode(reader, allocator, strings_table);
-    errdefer destroyDeserializedFunction(allocator, func);
-
-    // Remap all atom references
-    try remapBytecodeAtoms(func, &remap);
-
-    return func;
-}
-
 // ============================================================================
 // Phase 1c Tests: Atom Serialization
 // ============================================================================
@@ -2175,86 +2048,6 @@ test "atom remapping in bytecode" {
     const remapped_atom2 = std.mem.readInt(u16, func.code[4..6], .little);
     try std.testing.expectEqual(@as(u16, 300), remapped_atom1);
     try std.testing.expectEqual(@as(u16, 301), remapped_atom2);
-}
-
-test "full bytecode with atoms roundtrip" {
-    const allocator = std.testing.allocator;
-
-    // Create source context atoms
-    var source_atoms = AtomTable.init(allocator);
-    defer source_atoms.deinit();
-
-    var target_atoms = AtomTable.init(allocator);
-    defer target_atoms.deinit();
-
-    // Create a dynamic atom in source
-    const src_global = try source_atoms.intern("myGlobal");
-    const src_global_id = @intFromEnum(src_global);
-
-    // Create bytecode referencing the dynamic atom
-    var code_buf = [_]u8{
-        @intFromEnum(bytecode.Opcode.get_global),
-        @truncate(src_global_id),
-        @truncate(src_global_id >> 8),
-        @intFromEnum(bytecode.Opcode.ret),
-    };
-
-    const constants = try allocator.alloc(value.JSValue, 0);
-    const code = try allocator.dupe(u8, &code_buf);
-    const upvalue_info = try allocator.alloc(bytecode.UpvalueInfo, 0);
-    const line_table = [_]bytecode.LineEntry{
-        .{ .offset = 0, .line = 7, .column = 3 },
-    };
-
-    const func = try allocator.create(bytecode.FunctionBytecode);
-    func.* = .{
-        .header = .{},
-        .name_atom = 0,
-        .arg_count = 0,
-        .local_count = 0,
-        .stack_size = 1,
-        .flags = .{},
-        .upvalue_count = 0,
-        .upvalue_info = upvalue_info,
-        .code = code,
-        .constants = constants,
-        .source_map = null,
-        .line_table = &line_table,
-    };
-    defer {
-        allocator.free(func.code);
-        allocator.free(func.constants);
-        allocator.free(func.upvalue_info);
-        allocator.destroy(func);
-    }
-
-    // Serialize with atoms
-    var buffer: [1024]u8 = undefined;
-    var writer = SliceWriter{ .buffer = &buffer };
-    try serializeBytecodeWithAtoms(func, &source_atoms, &writer, allocator);
-
-    // Deserialize with atom remapping
-    var reader = SliceReader{ .data = writer.getWritten() };
-    const restored = try deserializeBytecodeWithAtoms(&reader, &target_atoms, allocator, null);
-    defer {
-        allocator.free(restored.code);
-        allocator.free(restored.constants);
-        allocator.free(restored.upvalue_info);
-        if (restored.line_table) |restored_lines| {
-            if (restored_lines.len > 0) allocator.free(restored_lines);
-        }
-        allocator.destroy(restored);
-    }
-
-    // Get the target atom
-    const tgt_global = try target_atoms.intern("myGlobal");
-    const tgt_global_id = @intFromEnum(tgt_global);
-
-    // Verify bytecode atom was remapped
-    const restored_atom = std.mem.readInt(u16, restored.code[1..3], .little);
-    try std.testing.expectEqual(@as(u16, @truncate(tgt_global_id)), restored_atom);
-    try std.testing.expect(restored.line_table != null);
-    try std.testing.expectEqualSlices(bytecode.LineEntry, &line_table, restored.line_table.?);
 }
 
 test "executable span walk covers every function in a module blob" {

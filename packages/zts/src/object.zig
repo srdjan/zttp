@@ -1359,9 +1359,6 @@ pub const JSObject = extern struct {
         pub const FUNC_DATA: usize = 0;
         /// Function objects: true_val for bytecode function, undefined for native
         pub const FUNC_IS_BYTECODE: usize = 1;
-        /// Bytecode function objects: guard_id for fast JIT monomorphic call checks
-        /// Stored as raw u64 - single comparison replaces 5-check guard sequence
-        pub const FUNC_GUARD_ID: usize = 2;
         /// Closure objects: true_val marker to identify closures
         pub const FUNC_IS_CLOSURE: usize = 4;
 
