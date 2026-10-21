@@ -208,6 +208,11 @@ pub const StrictChecker = struct {
     /// strict rules fire. The void walkers may continue, but no partial result
     /// escapes `check`.
     allocation_failed: bool = false,
+    /// True while the walk is inside any function body (declaration, function
+    /// expression, or arrow). Module scope cannot read the request, so a
+    /// registration there may use any expression; inside a function the
+    /// request can reach the argument.
+    in_function_body: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -407,7 +412,7 @@ pub const StrictChecker = struct {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 self.checkFunctionAnnotation(decl.init);
                 if (self.ir_view.getFunction(decl.init)) |func| {
-                    self.walkStmt(func.body);
+                    self.walkFunctionBody(func.body);
                 }
             },
             .var_decl => {
@@ -940,10 +945,20 @@ pub const StrictChecker = struct {
             },
             .function_expr, .arrow_function => {
                 self.checkFunctionAnnotation(node);
-                if (self.ir_view.getFunction(node)) |func| self.walkStmt(func.body);
+                if (self.ir_view.getFunction(node)) |func| self.walkFunctionBody(func.body);
             },
             else => {},
         }
+    }
+
+    /// Walk a function body with `in_function_body` set. The caller's value
+    /// returns afterwards, so a module-scope statement that follows a function
+    /// stays at module scope.
+    fn walkFunctionBody(self: *StrictChecker, body: NodeIndex) void {
+        const saved = self.in_function_body;
+        self.in_function_body = true;
+        defer self.in_function_body = saved;
+        self.walkStmt(body);
     }
 
     /// Checks rules whose scope is the exported declaration itself. ZTS061 is
@@ -1609,6 +1624,17 @@ pub const StrictChecker = struct {
                     }
                 }
             }
+            // Registration takes its text from argument 1. Inside a function the
+            // request can reach it, so the client could pick the statement or
+            // schema. Module scope cannot read the request and stays open. Only
+            // a direct call through the imported identifier is seen: an alias
+            // such as `const r = sql;` or a function held in a container is not.
+            if (self.in_function_body and registersStatementText(imported.module, imported.name) and call.args_count > 1) {
+                const text_arg = self.ir_view.getListIndex(call.args_start, 1);
+                if (!self.isLiteralOrStaticTemplate(text_arg)) {
+                    self.reportComputedCapability(text_arg, imported.module, imported.name, 1);
+                }
+            }
         }
 
         if (self.type_checker) |tc| {
@@ -2090,10 +2116,20 @@ fn unguardedSurfaceHelp(module: []const u8, name: []const u8) []const u8 {
     if (std.mem.eql(u8, module, "zttp:sql") and std.mem.eql(u8, name, "sql")) {
         return "registering a computed SQL statement is a different question from executing a named query, and no policy section decides it; register literal statements";
     }
+    if (std.mem.eql(u8, module, "zttp:validate") and std.mem.eql(u8, name, "schemaCompile")) {
+        return "compile literal schemas at module scope; a schema chosen per request lets the client decide what validates";
+    }
     if (std.mem.eql(u8, module, "zttp:fetch") and std.mem.eql(u8, name, "fetchSync")) {
         return "fetchSync is outside the guarded egress surface; use fetch or fetchWithRetry with a literal URL";
     }
     return "no policy section decides this resource at run time; use a literal env key, cache namespace, SQL query name, egress URL, or route path";
+}
+
+/// The two exports that register request-independent text as argument 1: the
+/// SQL statement behind a query name and the schema behind a validator name.
+fn registersStatementText(module: []const u8, name: []const u8) bool {
+    if (std.mem.eql(u8, module, "zttp:sql") and std.mem.eql(u8, name, "sql")) return true;
+    return std.mem.eql(u8, module, "zttp:validate") and std.mem.eql(u8, name, "schemaCompile");
 }
 
 fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
@@ -2630,6 +2666,80 @@ test "covered computed env egress and cache resources are guarded rather than re
         defer h.deinit();
         try expectNoKind(&h.checker, .dynamic_capability_access);
     }
+}
+
+const sql_import = "import { sql } from \"zttp:sql\";\n";
+const validate_import = "import { schemaCompile } from \"zttp:validate\";\n";
+
+fn expectRegistrationVerdict(source: []const u8, refused: bool) !void {
+    var h = try checkDirect(source);
+    defer h.deinit();
+    if (refused) {
+        try expectKind(&h.checker, .dynamic_capability_access);
+    } else {
+        try expectNoKind(&h.checker, .dynamic_capability_access);
+    }
+}
+
+test "a SQL statement computed from the request inside a handler is refused" {
+    try expectRegistrationVerdict(sql_import ++
+        "function handler(req: Request): Response { sql(\"q\", req.url); return Response.json({}); }\n", true);
+}
+
+test "a literal SQL statement inside a handler is accepted" {
+    try expectRegistrationVerdict(sql_import ++
+        "function handler(req: Request): Response { sql(\"q\", \"SELECT 1\"); return Response.json({}); }\n", false);
+}
+
+test "a computed SQL statement at module scope is accepted" {
+    try expectRegistrationVerdict(sql_import ++
+        "const statement = JSON.stringify({});\nsql(\"q\", statement);\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
+}
+
+test "a computed SQL statement registered by a helper function is refused" {
+    try expectRegistrationVerdict(sql_import ++
+        "function reg(s: string): void { sql(\"q\", s); }\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
+}
+
+test "a computed SQL statement in an arrow body or callback is refused" {
+    try expectRegistrationVerdict(sql_import ++
+        "const reg = (s: string): void => { sql(\"q\", s); };\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
+    try expectRegistrationVerdict(sql_import ++
+        "function handler(req: Request): Response { const ids = [1].map((n: number): number => { sql(\"q\", req.url); return n; }); return Response.json({ ids: ids }); }\n", true);
+}
+
+test "a function declaration does not leak function scope to later module code" {
+    try expectRegistrationVerdict(sql_import ++
+        "function noop(): void { return; }\nconst statement = JSON.stringify({});\nsql(\"q\", statement);\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
+}
+
+test "a nested function body keeps function scope after an inner function ends" {
+    try expectRegistrationVerdict(sql_import ++
+        "function handler(req: Request): Response {\n  function inner(): void { return; }\n  sql(\"q\", req.url);\n  return Response.json({});\n}\n", true);
+}
+
+test "a static constant statement inside a handler is accepted" {
+    try expectRegistrationVerdict(sql_import ++
+        "const statement = \"SELECT 1\";\nfunction handler(req: Request): Response { sql(\"q\", statement); return Response.json({}); }\n", false);
+}
+
+test "a renamed SQL import is still refused for a computed statement" {
+    try expectRegistrationVerdict("import { sql as register } from \"zttp:sql\";\nfunction handler(req: Request): Response { register(\"q\", req.url); return Response.json({}); }\n", true);
+}
+
+test "a schema computed from the request inside a handler is refused" {
+    try expectRegistrationVerdict(validate_import ++
+        "function handler(req: Request): Response { schemaCompile(\"b\", req.headers.get(\"x\") ?? \"{}\"); return Response.json({}); }\n", true);
+}
+
+test "a schema built at module scope is accepted" {
+    try expectRegistrationVerdict(validate_import ++
+        "schemaCompile(\"b\", JSON.stringify({ type: \"object\" }));\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
+}
+
+test "a literal schema inside a handler is accepted" {
+    try expectRegistrationVerdict(validate_import ++
+        "function handler(req: Request): Response { schemaCompile(\"b\", \"{}\"); return Response.json({}); }\n", false);
 }
 
 test "a multi-line signature is fully annotated" {

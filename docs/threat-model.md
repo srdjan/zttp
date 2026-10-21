@@ -92,6 +92,14 @@ repository is in scope.
 - Computed env, egress, and cache resources require their policy sections.
   Computed SQL remains rejected because its policy cannot distinguish reads
   from writes. An unnamed egress address scope permits no connection.
+- Registering a SQL statement with `sql(name, statement)` or a validation
+  schema with `schemaCompile(name, schemaJson)` inside any function body needs
+  a static argument for the statement or schema. A computed argument reports
+  ZTS602, because a request can then choose what runs or what validates.
+  Registration at module scope accepts any expression, because module scope
+  cannot read the request. The check sees direct calls through the imported
+  identifier only. A call through an alias such as `const r = sql;`, or
+  through a function held in a container, is not detected.
 - Egress authorizes the normalized scheme, host, and effective port before DNS,
   then authorizes the resolved address scope before opening a socket. Every
   retry repeats both checks under one pinned generation.
