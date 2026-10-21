@@ -216,3 +216,76 @@ packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
 # types. The numbered rows cover separate insertions in the same function.
 packages/zts/src/type_env.zig findNonContractiveAliases catch-poison@2
 packages/zts/src/type_env.zig internName catch-block@2
+
+# --- Path generator: decides fault_covered and paths_exhaustive ---
+#
+# Both walkPaths catches free the loop bound and then `return err`. The error
+# propagates to the caller, so no path set is published for that walk.
+packages/zts/src/path_generator.zig walkPaths catch-block
+packages/zts/src/path_generator.zig walkPaths catch-block@2
+
+# Loop descriptions are display text on a bound whose kind is already chosen.
+# An allocation failure shortens the text to a fixed string or to empty, and
+# freeLoopBound skips an empty description. The symbolic or unknown kind is
+# unchanged, so the summarized walk still blocks exhaustiveness.
+packages/zts/src/path_generator.zig allocLoopDesc catch-multiline
+packages/zts/src/path_generator.zig allocLoopDesc catch-value
+
+# These three catches only shorten the human-readable test name. The name is a
+# label on the generated case. It does not enter the constraints, the stubs,
+# or any property the generator reports.
+packages/zts/src/path_generator.zig emitTestCase catch-value
+packages/zts/src/path_generator.zig emitTestCase catch-value@2
+
+# A failed argument signature leaves the stub without one. Canonicalization
+# merges two I/O calls only when both carry a matching non-null signature, so a
+# null signature removes a merge and can never add one.
+packages/zts/src/path_generator.zig emitTestCase catch-value@3
+
+# A schema that does not parse yields no static item bound. The caller then
+# falls through to a symbolic loop bound, which marks the walk as a summary.
+# A missing bound cannot become a constant bound.
+packages/zts/src/path_generator.zig schemaFieldMaxItems catch-return
+
+# A LIMIT digit run that does not fit in u32 yields no bound. The caller falls
+# through to the same symbolic loop bound as for a missing LIMIT clause.
+packages/zts/src/path_generator.zig trailingLimitValue catch-value
+
+# --- Pipeline ---
+#
+# The three optimizeIR calls ignore a failure of the constant-folding pass. The
+# pass is append-only: it adds folded nodes and records replacements in its own
+# map, and it never edits an existing node. A failure leaves the parsed IR as
+# it was before the pass, so the analysis runs on the same program meaning.
+packages/zts/src/pipeline.zig extractContract catch-block
+packages/zts/src/pipeline.zig extractPreparedEvalContract catch-block
+packages/zts/src/pipeline.zig extractVirtualContract catch-block
+
+# The cleanup block frees the export effects that the failed list append did
+# not take, and then returns the error. The multi-module extraction fails.
+packages/zts/src/pipeline.zig extractMultiModuleContractWithEntry catch-block
+
+# Failure to build effect facts is cached as `.unavailable`. The path generator
+# reads `.unavailable` as "reaches recursion", and that blocks fault_covered.
+# The failure moves the result toward unproven.
+packages/zts/src/pipeline.zig pathEffectFacts catch-block
+
+# The output is 20 bytes: a four-digit year, five two-digit fields, and fixed
+# punctuation. The buffer holds 24 bytes, so bufPrint cannot overflow.
+packages/zts/src/pipeline.zig formatIsoTimestamp catch-trap
+
+# --- Proof IR lowering ---
+#
+# The collector stores the first error in `failed`, skips all later children,
+# and the caller returns `failed` after the walk. The lowering fails as a whole.
+packages/zts/src/proof_ir.zig visit catch-block
+packages/zts/src/proof_ir.zig visit catch-block@2
+
+# --- Translation witness recorder ---
+#
+# Every catch sets `incomplete`. Recorder.check returns WitnessIncomplete when
+# that flag is set, and a recording that is not whole yields no certificate.
+packages/zts/src/translation_witness.zig applyCompaction catch-block
+packages/zts/src/translation_witness.zig notePreOptimizationLen catch-block
+packages/zts/src/translation_witness.zig recordRewrite catch-block
+packages/zts/src/translation_witness.zig recordRewrite catch-block@2

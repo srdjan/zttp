@@ -61,8 +61,12 @@ proof_files=(
   packages/zts/src/handler_contract.zig
   packages/zts/src/handler_verifier.zig
   packages/zts/src/intent_extractor.zig
+  packages/zts/src/path_generator.zig
+  packages/zts/src/pipeline.zig
+  packages/zts/src/proof_ir.zig
   packages/zts/src/route_resolution.zig
   packages/zts/src/spec_discharge.zig
+  packages/zts/src/translation_witness.zig
   packages/zts/src/type_checker.zig
   packages/zts/src/type_env.zig
   packages/proof-checker/src/checker.zig

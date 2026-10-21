@@ -166,6 +166,7 @@ const Lowerer = struct {
         const tag = self.view.getTag(index) orelse return null;
         return switch (tag) {
             .call, .method_call => resolver.call(index),
+            // exhaustive: only call nodes can be guarded; any other node is not a guarded call.
             else => null,
         };
     }
@@ -287,6 +288,7 @@ const Lowerer = struct {
             .spread, .object_spread => {
                 if (self.view.getOptValue(index)) |value| visit(ctx, self, value);
             },
+            // exhaustive: the profile refuses the other child-bearing kinds (switch, try, throw, labeled, await, yield, comma, object methods, default exports; ZTS001 observed), and match patterns hold literals only.
             else => {},
         }
     }

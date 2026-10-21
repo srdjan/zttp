@@ -70,6 +70,7 @@ pub const Constraint = union(enum) {
     pub fn isFailure(self: Constraint) bool {
         return switch (self) {
             .stub_falsy, .result_not_ok => true,
+            // exhaustive: only stub_falsy and result_not_ok model an I/O failure; the other variants constrain the request or a success path.
             else => false,
         };
     }
@@ -1490,6 +1491,7 @@ pub const PathGenerator = struct {
                 }
             },
 
+            // exhaustive: the parser refuses while, do-while, C-style for, for-in, try, throw, and labeled statements (ZTS001); assert, break, continue, and imports hold no return or branch.
             else => {},
         }
     }
@@ -1736,6 +1738,7 @@ pub const PathGenerator = struct {
                 return self.extractBooleanCallConstraint(cond);
             },
 
+            // exhaustive: an unrecognized condition adds no constraint and both branches stay walked, so no path is dropped.
             else => {},
         }
 
@@ -2178,6 +2181,7 @@ pub const PathGenerator = struct {
                 const not = switch (c) {
                     .req_method_not => |m| if (part == .method) m else continue,
                     .req_url_not => |u| if (part == .url) u else continue,
+                    // exhaustive: only req_method_not and req_url_not can exclude a candidate; other constraints exclude nothing.
                     else => continue,
                 };
                 if (std.mem.eql(u8, not, candidate)) excluded = true;
@@ -2358,12 +2362,15 @@ pub const PathGenerator = struct {
             .req_method => |x| switch (b) {
                 .req_method => |y| !std.mem.eql(u8, x, y),
                 .req_method_not => |y| std.mem.eql(u8, x, y),
+                // exhaustive: a pair not named is not a conflict; keeping its path can only add an infeasible path, never drop a feasible one.
                 else => false,
             },
             .req_method_not => |x| switch (b) {
                 .req_method => |y| std.mem.eql(u8, x, y),
+                // exhaustive: a pair not named is not a conflict; keeping its path can only add an infeasible path, never drop a feasible one.
                 else => false,
             },
+            // exhaustive: a pair not named is not a conflict; keeping its path can only add an infeasible path, never drop a feasible one.
             else => false,
         };
     }
@@ -2381,6 +2388,7 @@ pub const PathGenerator = struct {
         for (self.constraints.items, 0..) |c, i| {
             const first = switch (c) {
                 .status_is => |s| s,
+                // exhaustive: only status_is constraints start a status requirement.
                 else => continue,
             };
             // Handle each call once, at its first status test.
@@ -2404,6 +2412,7 @@ pub const PathGenerator = struct {
                     .result_not_ok => |info| if (info.call_site == site) {
                         ok_state = false;
                     },
+                    // exhaustive: other constraints name no status requirement for this call.
                     else => {},
                 }
             }
@@ -2449,6 +2458,7 @@ pub const PathGenerator = struct {
                 if (if_s.else_branch == null_node) break :blk false;
                 break :blk self.stmtAlwaysReturns(if_s.then_branch) and self.stmtAlwaysReturns(if_s.else_branch);
             },
+            // exhaustive: any other statement is treated as not always returning, so the walk continues past it.
             else => false,
         };
     }
@@ -2581,6 +2591,7 @@ pub const PathGenerator = struct {
                     .desc = self.allocLoopDesc("{s}", .{"for...of loop"}, "for...of loop"),
                 } };
             },
+            // exhaustive: any other iterable kind is an unknown bound, which summarizes the loop and blocks exhaustiveness.
             else => return .{ .unknown = .{
                 .line = loc.line,
                 .column = loc.column,
@@ -2600,6 +2611,7 @@ pub const PathGenerator = struct {
             },
             .identifier => if (self.sqlLimitForIdentifier(iterable)) |count| return count,
             .member_access => if (self.schemaMaxItemsForMember(iterable)) |count| return count,
+            // exhaustive: any other iterable has no constant bound; the caller then uses a symbolic or unknown bound.
             else => {},
         }
         return null;
@@ -2746,21 +2758,25 @@ pub const PathGenerator = struct {
 
         const root = switch (parsed.value) {
             .object => |obj| obj,
+            // exhaustive: a schema without an object root has no static maxItems, so the loop bound stays symbolic.
             else => return null,
         };
         const properties_val = root.get("properties") orelse return null;
         const properties = switch (properties_val) {
             .object => |obj| obj,
+            // exhaustive: a schema without a properties object has no static maxItems, so the loop bound stays symbolic.
             else => return null,
         };
         const field_val = properties.get(field) orelse return null;
         const field_obj = switch (field_val) {
             .object => |obj| obj,
+            // exhaustive: a schema field that is not an object has no static maxItems, so the loop bound stays symbolic.
             else => return null,
         };
         const field_type = field_obj.get("type") orelse return null;
         switch (field_type) {
             .string => |s| if (!std.mem.eql(u8, s, "array")) return null,
+            // exhaustive: a field type that is not a string has no static maxItems, so the loop bound stays symbolic.
             else => return null,
         }
         const max_items = field_obj.get("maxItems") orelse return null;
@@ -2778,6 +2794,7 @@ pub const PathGenerator = struct {
             const prop_tag = self.ir_view.getTag(prop_idx) orelse return null;
             switch (prop_tag) {
                 .object_property, .object_method, .object_getter, .object_setter => count += 1,
+                // exhaustive: a property kind other than a plain member makes the key count unknown, so the loop bound stays symbolic.
                 else => return null,
             }
         }
@@ -2849,6 +2866,7 @@ pub const PathGenerator = struct {
         return switch (v) {
             .integer => |i| if (i >= 0 and i <= std.math.maxInt(u32)) @intCast(i) else null,
             .float => |f| if (std.math.isFinite(f) and f >= 0 and f <= max) @intFromFloat(@trunc(f)) else null,
+            // exhaustive: a non-numeric or out-of-range JSON value gives no bound, so the loop bound stays symbolic.
             else => null,
         };
     }
@@ -2873,6 +2891,7 @@ pub const PathGenerator = struct {
                 return self.memberPropertyName(init_node);
             },
             .member_access => return self.memberPropertyName(iterable),
+            // exhaustive: the name is provenance text only; null gives a named-less symbolic bound.
             else => return null,
         }
     }
@@ -2951,6 +2970,7 @@ fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
             .result => "{\"ok\":false,\"error\":\"test-error\"}",
             .boolean => "false",
             .number => "0",
+            // exhaustive: the stub for any other return kind is JSON null; stubs shape generated tests and are not a reported property.
             else => "null",
         };
     }

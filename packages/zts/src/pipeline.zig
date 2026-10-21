@@ -485,6 +485,7 @@ pub fn flowImportBindingKey(view: IrView, slot: u16) ?u32 {
         const node: ir_mod.NodeIndex = @intCast(index);
         switch (view.getTag(node) orelse continue) {
             .import_specifier, .import_default, .import_namespace => {},
+            // exhaustive: a node that is not an import specifier cannot bind the slot; no match returns null and the caller raises ImportNotFound.
             else => continue,
         }
         const specifier = view.getImportSpec(node) orelse continue;
@@ -4091,6 +4092,7 @@ fn expectEveryContextBoolean(source: []const u8, comptime expected: usize) !void
                         try operand(checker, bin.right);
                         seen += 2;
                     },
+                    // exhaustive: test probe: node kinds without a condition operand are not counted, and the test compares the count to an expected value.
                     else => {},
                 }
             }
