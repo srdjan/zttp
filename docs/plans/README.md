@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Hardening and pruning, round 2](2026-10-20-pruning-round-2-list.md) | Audit list 2026-10-20: 21 hardening, 19 dead-code, 13 consolidation, and 8 documentation items; nothing selected | No implementation authority |
 | [Hardening and pruning](2026-10-20-hardening-pruning-plan.md) | Eight audit findings selected; ordered implementation in progress, 2026-10-20 | Owner selected all findings with "all of them" |
 | [P7 request contents and sink evidence](2026-10-20-flow-interp-p7-spec.md) | Active version 7 evaluator, sink evidence and imported snapshots implemented; final acceptance pending | Included in the owner's approval of all hardening and pruning units |
 | [Flow checker redesign](2026-10-18-flow-checker-sound-redesign-plan.md) | Draft 2026-10-18, revised after one Codex astra validation round; D9 to D12 decided 2026-10-19; revised after the second validation round | Owner chose Decision 8 Option A; P0 and P1 approved (D13); R16 and P2 approved 2026-10-19 |
