@@ -390,8 +390,8 @@ pub const WitnessStub = struct {
 /// the handler down the violating path, the IO stub script that pins the
 /// virtual-module return values, and the source span endpoints. Replayable
 /// via `zts.counterexample.writeJsonl` against the runtime's `--test`
-/// path. The stable `key` is the same digest `witness_key.forWitness`
-/// produces; consumers compare witness identity by byte equality on `key`.
+/// path. The stable `key` is the digest from `CounterexampleWitness.stableKey`;
+/// consumers compare witness identity by byte equality on `key`.
 pub const WitnessBody = struct {
     key: []u8,
     property: []u8,

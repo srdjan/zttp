@@ -1,10 +1,8 @@
 //! Recorder half of the cassette harness.
 //!
-//! Live API responses are captured here and persisted as cassettes that
-//! the replay client (`cassette_client.zig`) plays back deterministically.
-//! The recorder itself is provider-agnostic; the live providers know how to
-//! frame their request and which header to send. The recorder only owns
-//! capturing the HTTP response bytes and serialising them in the cassette
+//! Recorded API responses are serialised here as cassettes that the replay
+//! client (`cassette_client.zig`) plays back deterministically. The recorder
+//! is provider-agnostic: it only serialises response bytes in the cassette
 //! format `cassette_client.zig` consumes.
 
 const std = @import("std");
@@ -12,90 +10,6 @@ const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const file_io = zts.file_io;
 const cassette_client = @import("cassette_client.zig");
-
-// -----------------------------------------------------------------------
-// Captured response
-// -----------------------------------------------------------------------
-
-/// A captured live response. Owns its byte slices via the supplied
-/// allocator; call `deinit` to release.
-pub const CapturedResponse = struct {
-    status: u16,
-    body: []u8,
-
-    pub fn deinit(self: *CapturedResponse, allocator: std.mem.Allocator) void {
-        allocator.free(self.body);
-        self.* = undefined;
-    }
-};
-
-pub const RecordError = error{
-    HttpNotOk,
-    UnsupportedProtocol,
-};
-
-const max_response_body_bytes: usize = 16 * 1024 * 1024;
-
-/// Perform a real HTTP POST and capture the response body in full. The
-/// caller owns the returned slice. Used by both `record` and `passthrough`
-/// modes; the only difference is whether `writeCassette` is also called.
-pub fn capturePost(
-    allocator: std.mem.Allocator,
-    url: []const u8,
-    extra_headers: []const std.http.Header,
-    body: []const u8,
-) !CapturedResponse {
-    const uri = try std.Uri.parse(url);
-
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var client = std.http.Client{ .allocator = allocator, .io = io };
-    defer client.deinit();
-
-    const now = std.Io.Clock.real.now(io);
-    if (uri.scheme.len > 0 and std.mem.eql(u8, uri.scheme, "https")) {
-        client.ca_bundle.rescan(allocator, io, now) catch return error.CertificateBundleLoadFailure;
-    }
-    client.now = now;
-
-    const protocol = std.http.Client.Protocol.fromUri(uri) orelse return RecordError.UnsupportedProtocol;
-    var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = try uri.getHost(&host_buf);
-    const connection = try client.connectTcpOptions(.{
-        .host = host,
-        .port = uri.port orelse switch (protocol) {
-            .plain => 80,
-            .tls => 443,
-        },
-        .protocol = protocol,
-        .timeout = .none,
-    });
-
-    var req = try client.request(.POST, uri, .{
-        .redirect_behavior = .unhandled,
-        .keep_alive = false,
-        .connection = connection,
-        .extra_headers = extra_headers,
-    });
-    defer req.deinit();
-
-    req.transfer_encoding = .{ .content_length = body.len };
-    var req_body = try req.sendBodyUnflushed(&.{});
-    try req_body.writer.writeAll(body);
-    try req_body.end();
-    try req.connection.?.flush();
-
-    var response = try req.receiveHead(&.{});
-    const status_code: u16 = @intFromEnum(response.head.status);
-    if (response.head.status != .ok) return RecordError.HttpNotOk;
-
-    var read_buf: [1024]u8 = undefined;
-    var reader = response.reader(&read_buf);
-    const captured = try reader.allocRemaining(allocator, .limited(max_response_body_bytes));
-    return .{ .status = status_code, .body = captured };
-}
 
 // -----------------------------------------------------------------------
 // Cassette writer
@@ -302,12 +216,6 @@ test "writeCassette + loadCassetteFromPath: full disk round-trip" {
     try testing.expectEqualStrings(body, cassette.body);
 }
 
-// -----------------------------------------------------------------------
-// Round-trip test: tiny local std.Io.net server -> capturePost ->
-// writeCassette -> loadCassetteFromPath. Validates that the bytes we
-// capture from a real socket match the bytes the cassette replay yields.
-// -----------------------------------------------------------------------
-
 const TestErrorInt = u16;
 
 /// One-response loopback server shared by provider and recorder integration
@@ -416,54 +324,4 @@ fn drainRequestHead(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io
         // recorder is what owns full-body reads, not this server.
         return;
     }
-}
-
-test "round-trip: capture from local server, serialise, replay yields identical body" {
-    const response_body =
-        "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"hello world\"}}]," ++
-        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2}}";
-
-    var server = try LocalHttpServer.init(testing.allocator, response_body, "application/json");
-    try server.start();
-    errdefer server.join() catch {};
-
-    const url = try server.url(testing.allocator, "/v1/chat/completions");
-    defer testing.allocator.free(url);
-
-    var captured = try capturePost(testing.allocator, url, &.{
-        .{ .name = "content-type", .value = "application/json" },
-    }, "{\"model\":\"test-model\",\"messages\":[]}");
-    defer captured.deinit(testing.allocator);
-
-    try testing.expectEqual(@as(u16, 200), captured.status);
-    try testing.expectEqualStrings(response_body, captured.body);
-
-    // Write cassette, then replay.
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cassette_path = try std.fs.path.resolve(testing.allocator, &.{
-        ".zig-cache", "tmp", tmp.sub_path[0..], "roundtrip.jsonl",
-    });
-    defer testing.allocator.free(cassette_path);
-
-    try writeCassette(testing.allocator, cassette_path, captured.body, .{
-        .provider = .local,
-        .scenario = "roundtrip",
-        .stream = false,
-        .request_sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-    });
-
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const cassette = try cassette_client.loadCassetteFromPath(arena.allocator(), cassette_path);
-    try testing.expectEqualStrings(captured.body, cassette.body);
-
-    // And the replay produces a valid ModelCallResult through the local decoder.
-    const result = try cassette_client.replay(arena.allocator(), cassette);
-    switch (result.reply.response) {
-        .final_text => |t| try testing.expectEqualStrings("hello world", t),
-        else => return error.TestFailed,
-    }
-
-    try server.join();
 }

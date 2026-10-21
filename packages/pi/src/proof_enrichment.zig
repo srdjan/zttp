@@ -11,109 +11,6 @@ const precompile = zts_cli.precompile;
 const contract_diff = zts.contract_diff;
 const HandlerProperties = zts.HandlerProperties;
 
-pub const PatchAnalysis = struct {
-    stats: ui_payload.ProofStats,
-    violations: []ui_payload.ViolationDeltaItem,
-    before_properties: ?ui_payload.PropertiesSnapshot,
-    after_properties: ?ui_payload.PropertiesSnapshot,
-    prove: ?ui_payload.ProveSummary,
-    rule_citations: [][]u8,
-    unified_diff: []u8,
-    hunks: []ui_payload.DiffHunk,
-
-    pub fn deinit(self: *PatchAnalysis, allocator: std.mem.Allocator) void {
-        for (self.violations) |*item| item.deinit(allocator);
-        allocator.free(self.violations);
-        if (self.prove) |*prove| prove.deinit(allocator);
-        for (self.rule_citations) |citation| allocator.free(citation);
-        allocator.free(self.rule_citations);
-        allocator.free(self.unified_diff);
-        allocator.free(self.hunks);
-        self.* = .{
-            .stats = .{ .total = 0, .new = 0, .preexisting = null },
-            .violations = &.{},
-            .before_properties = null,
-            .after_properties = null,
-            .prove = null,
-            .rule_citations = &.{},
-            .unified_diff = &.{},
-            .hunks = &.{},
-        };
-    }
-};
-
-pub fn analyzePatch(
-    allocator: std.mem.Allocator,
-    workspace_root: []const u8,
-    file: []const u8,
-    before: ?[]const u8,
-    after: []const u8,
-    transcript: ?*const transcript_mod.Transcript,
-) !PatchAnalysis {
-    const absolute_path = try resolveHandlerPath(allocator, workspace_root, file);
-    defer allocator.free(absolute_path);
-
-    // zttp:sql handlers need the project SQL schema to analyze. Without it,
-    // simulate() on a SQL handler throws MissingSqlSchema and crashes the
-    // receipt build after an otherwise successful apply. Root it at the handler:
-    // a run started outside the handler's project could otherwise validate
-    // queries against a different zttp.json.
-    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, absolute_path);
-    defer if (sql_schema_path) |p| allocator.free(p);
-
-    var simulated = try edit_simulate.simulate(allocator, .{
-        .file = absolute_path,
-        .content = after,
-        .before = before,
-        .sql_schema_path = sql_schema_path,
-    });
-    defer simulated.deinit(allocator);
-
-    const violations = try copyViolations(allocator, simulated.violations.items);
-    errdefer {
-        for (violations) |*item| item.deinit(allocator);
-        allocator.free(violations);
-    }
-
-    const before_snapshot = try optionalPropertiesSnapshot(allocator, absolute_path, before, sql_schema_path);
-    const after_snapshot = if (simulated.properties) |properties|
-        propertiesSnapshot(properties)
-    else
-        try optionalPropertiesSnapshot(allocator, absolute_path, after, sql_schema_path);
-
-    var prove = try optionalProveSummary(allocator, absolute_path, before, after, sql_schema_path);
-    errdefer if (prove) |*summary| summary.deinit(allocator);
-    const citations = if (transcript) |tr|
-        try collectRuleCitations(allocator, tr)
-    else
-        try allocator.alloc([]u8, 0);
-    errdefer {
-        for (citations) |citation| allocator.free(citation);
-        allocator.free(citations);
-    }
-
-    const diff = try buildUnifiedDiff(allocator, before, after);
-    errdefer {
-        allocator.free(diff.text);
-        allocator.free(diff.hunks);
-    }
-
-    return .{
-        .stats = .{
-            .total = simulated.total,
-            .new = simulated.new_count,
-            .preexisting = simulated.preexisting_count,
-        },
-        .violations = violations,
-        .before_properties = before_snapshot,
-        .after_properties = after_snapshot,
-        .prove = prove,
-        .rule_citations = citations,
-        .unified_diff = diff.text,
-        .hunks = diff.hunks,
-    };
-}
-
 pub fn loadProveSummaryForPatch(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
@@ -186,37 +83,6 @@ pub fn propertiesSnapshot(properties: HandlerProperties) ui_payload.PropertiesSn
     return snap;
 }
 
-fn loadPropertiesSnapshot(
-    allocator: std.mem.Allocator,
-    absolute_path: []const u8,
-    source: ?[]const u8,
-    sql_schema_path: ?[]const u8,
-) !?ui_payload.PropertiesSnapshot {
-    const content = source orelse return null;
-    var result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, content, absolute_path, .{
-        .sql_schema_path = sql_schema_path,
-        .json_mode = true,
-    });
-    defer result.deinit(allocator);
-
-    if (result.properties) |properties| {
-        return propertiesSnapshot(properties);
-    }
-    return null;
-}
-
-fn optionalPropertiesSnapshot(
-    allocator: std.mem.Allocator,
-    absolute_path: []const u8,
-    source: ?[]const u8,
-    sql_schema_path: ?[]const u8,
-) !?ui_payload.PropertiesSnapshot {
-    return loadPropertiesSnapshot(allocator, absolute_path, source, sql_schema_path) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => null,
-    };
-}
-
 fn computeProveSummary(
     allocator: std.mem.Allocator,
     absolute_path: []const u8,
@@ -275,19 +141,6 @@ fn computeProveSummary(
     return null;
 }
 
-fn optionalProveSummary(
-    allocator: std.mem.Allocator,
-    absolute_path: []const u8,
-    before: ?[]const u8,
-    after: []const u8,
-    sql_schema_path: ?[]const u8,
-) !?ui_payload.ProveSummary {
-    return computeProveSummary(allocator, absolute_path, before, after, sql_schema_path) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => null,
-    };
-}
-
 fn resolveHandlerPath(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
@@ -312,66 +165,6 @@ fn normalizeWorkspaceRoot(
     defer allocator.free(cwd_real);
 
     return std.fs.path.resolve(allocator, &.{ cwd_real, workspace_root });
-}
-
-fn collectRuleCitations(
-    allocator: std.mem.Allocator,
-    transcript: *const transcript_mod.Transcript,
-) ![][]u8 {
-    const start = blk: {
-        var i = transcript.len();
-        while (i > 0) {
-            i -= 1;
-            switch (transcript.at(i).*) {
-                .user_text => break :blk i,
-                else => {},
-            }
-        }
-        break :blk 0;
-    };
-
-    var set: std.StringHashMapUnmanaged(void) = .empty;
-    defer {
-        var it = set.iterator();
-        while (it.next()) |entry| allocator.free(entry.key_ptr.*);
-        set.deinit(allocator);
-    }
-
-    var i = start;
-    while (i < transcript.len()) : (i += 1) {
-        const entry = transcript.at(i);
-        switch (entry.*) {
-            .model_text => |body| try scanRuleCodes(allocator, body, &set),
-            else => {},
-        }
-    }
-
-    const out = try allocator.alloc([]u8, set.count());
-    errdefer allocator.free(out);
-    var it = set.iterator();
-    var index: usize = 0;
-    while (it.next()) |entry| : (index += 1) {
-        out[index] = try allocator.dupe(u8, entry.key_ptr.*);
-    }
-    std.mem.sort([]u8, out, {}, lessThanString);
-    return out;
-}
-
-fn scanRuleCodes(
-    allocator: std.mem.Allocator,
-    text: []const u8,
-    set: *std.StringHashMapUnmanaged(void),
-) !void {
-    var i: usize = 0;
-    while (i + 6 <= text.len) : (i += 1) {
-        if (!std.mem.eql(u8, text[i .. i + 3], "ZTS")) continue;
-        if (!std.ascii.isDigit(text[i + 3]) or !std.ascii.isDigit(text[i + 4]) or !std.ascii.isDigit(text[i + 5])) {
-            continue;
-        }
-        const code = text[i .. i + 6];
-        if (set.contains(code)) continue;
-        try set.put(allocator, try allocator.dupe(u8, code), {});
-    }
 }
 
 pub const UnifiedDiff = struct {
@@ -452,59 +245,6 @@ fn lineCount(text: []const u8) u32 {
     return count;
 }
 
-fn copyViolations(
-    allocator: std.mem.Allocator,
-    violations: []const edit_simulate.SimulatedViolation,
-) ![]ui_payload.ViolationDeltaItem {
-    const out = try allocator.alloc(ui_payload.ViolationDeltaItem, violations.len);
-    errdefer allocator.free(out);
-    for (out) |*item| item.* = undefined;
-    var i: usize = 0;
-    errdefer {
-        while (i > 0) {
-            i -= 1;
-            out[i].deinit(allocator);
-        }
-        allocator.free(out);
-    }
-    while (i < violations.len) : (i += 1) {
-        const stable_key = try stableViolationKey(allocator, violations[i].code, violations[i].message);
-        defer allocator.free(stable_key);
-        out[i] = try ui_payload.ViolationDeltaItem.init(
-            allocator,
-            stable_key,
-            violations[i].code,
-            violations[i].severity,
-            violations[i].message,
-            violations[i].line,
-            violations[i].column,
-            violations[i].introduced_by_patch,
-        );
-    }
-    return out;
-}
-
-fn stableViolationKey(
-    allocator: std.mem.Allocator,
-    code: []const u8,
-    message: []const u8,
-) ![]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(code);
-    hasher.update("\x00");
-    hasher.update(message);
-    var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    hasher.final(&digest);
-
-    const out = try allocator.alloc(u8, digest.len * 2);
-    @memcpy(out, &std.fmt.bytesToHex(digest, .lower));
-    return out;
-}
-
-fn lessThanString(_: void, a: []u8, b: []u8) bool {
-    return std.mem.lessThan(u8, a, b);
-}
-
 const testing = std.testing;
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 
@@ -550,34 +290,6 @@ test "resolveHandlerPath rejects absolute paths outside workspace" {
         error.PathOutsideWorkspace,
         resolveHandlerPath(testing.allocator, "/tmp/zttp-proof-workspace", "/etc/passwd"),
     );
-}
-
-test "analyzePatch returns prove classification and rule citations" {
-    const workspace_root = try tools_common.workspaceRoot(testing.allocator);
-    defer testing.allocator.free(workspace_root);
-
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(testing.allocator);
-    try transcript.append(testing.allocator, .{ .user_text = "make handler additive" });
-    try transcript.append(testing.allocator, .{ .model_text = "Preserve ZTS204 and add a new route without breaking the old one." });
-
-    var analysis = try analyzePatch(
-        testing.allocator,
-        workspace_root,
-        "handler.ts",
-        "function handler(req: Request): Response { return Response.json({ ok: true }); }",
-        "import { env } from \"zttp:env\";\nfunction handler(req: Request): Response { return Response.json({ ok: true, region: env(\"REGION\") }); }",
-        &transcript,
-    );
-    defer analysis.deinit(testing.allocator);
-
-    try testing.expectEqual(@as(u32, 0), analysis.stats.new);
-    try testing.expect(analysis.after_properties != null);
-    try testing.expect(analysis.prove != null);
-    try testing.expectEqualStrings("additive", analysis.prove.?.classification);
-    try testing.expectEqual(@as(usize, 1), analysis.rule_citations.len);
-    try testing.expectEqualStrings("ZTS204", analysis.rule_citations[0]);
-    try testing.expect(analysis.hunks.len == 1);
 }
 
 test "buildUnifiedDiff emits empty diff for identical content" {

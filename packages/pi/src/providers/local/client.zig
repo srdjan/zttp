@@ -386,15 +386,7 @@ pub fn decodeResponse(
     return decodeResponseValue(arena, sha256(request_body), response.bytes, response.value, null);
 }
 
-pub fn decodeResponseFromRequestDigest(
-    arena: std.mem.Allocator,
-    request_sha256: []const u8,
-    response_body: []const u8,
-) !loop.ModelCallResult {
-    return decodeResponseFromRequestDigestObserved(arena, request_sha256, response_body, null);
-}
-
-/// `decodeResponseFromRequestDigest`, reporting which change-set refusal fired
+/// Decode a recorded response from its request digest, reporting which change-set refusal fired
 /// through `observed`.
 ///
 /// `local` is the recorder's default provider, so this is the decode most
