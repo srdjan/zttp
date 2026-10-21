@@ -432,6 +432,18 @@ fn collectCheckDiagnostics(
         ) catch return full_error;
         defer fallback.deinit(allocator);
         if (fallback.json_diagnostics.items.len == 0) return full_error;
+        // The fallback skips contract and flow analysis, so its diagnostics
+        // alone cannot show that the file is still sound. Record the failed
+        // full analysis as a diagnostic: a side that already failed the same
+        // way matches it, and only a new failure rejects the edit.
+        try appendDiagnostic(
+            allocator,
+            out,
+            common.relativeToRoot(materialized_root, handler_path),
+            "analysis_incomplete",
+            "error",
+            @errorName(full_error),
+        );
         try appendCheckDiagnostics(allocator, out, materialized_root, fallback.json_diagnostics.items);
         return if (fallback.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null;
     };
@@ -730,4 +742,78 @@ test "proof identity binds ordered candidates and full read set" {
     defer second.deinit(testing.allocator);
     if (second != .accepted) return error.TestUnexpectedResult;
     try testing.expect(!std.mem.eql(u8, &first_id, &second.accepted.proof_id));
+}
+
+/// Each handler carries one ZTS626 advisory: a front-end diagnostic that does
+/// not halt analysis, so the skip_contract fallback has something to report.
+const advisory_prefix =
+    "structural Command = { kind: \"echo\", text: string } | { kind: \"ping\", text: string };\n" ++
+    "function run(cmd: Command): string {\n" ++
+    "  return match (cmd) {\n" ++
+    "    when { kind: \"echo\" }: cmd.text\n" ++
+    "    when { kind: \"ping\" }: \"pong\"\n" ++
+    "  };\n" ++
+    "}\n";
+
+const handler_body =
+    "export function handler(req: Request): Proof<Response, \"state_isolated\"> {\n" ++
+    "  const cmd: Command = { kind: \"echo\", text: \"hi\" };\n";
+
+/// Contract analysis refuses this handler with MissingSqlSchema when the
+/// project has no sqlite schema.
+const sql_advisory_handler = "import { sql } from \"zttp:sql\";\n" ++ advisory_prefix ++ handler_body ++
+    "  sql(\"q\", \"SELECT id FROM users WHERE id = :id\");\n" ++
+    "  return Response.text(run(cmd));\n}\n";
+
+const plain_advisory_handler = advisory_prefix ++ handler_body ++
+    "  return Response.text(run(cmd));\n}\n";
+
+/// Collect check diagnostics for one handler written into a fresh temporary
+/// project that has no sqlite schema.
+fn collectForSource(allocator: std.mem.Allocator, source: []const u8, out: *std.ArrayList(Diagnostic)) !void {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/handler.ts", .data = source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const handler_path = try std.fs.path.join(allocator, &.{ root, "src/handler.ts" });
+    defer allocator.free(handler_path);
+    _ = try collectCheckDiagnostics(allocator, out, root, handler_path, null, null);
+}
+
+test "a failed full analysis is recorded beside the fallback diagnostics" {
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer deinitDiagnostics(testing.allocator, &diagnostics);
+    try collectForSource(testing.allocator, sql_advisory_handler, &diagnostics);
+
+    var incomplete: ?Diagnostic = null;
+    var fallback_advisories: usize = 0;
+    for (diagnostics.items) |diagnostic| {
+        if (std.mem.eql(u8, diagnostic.code, "analysis_incomplete")) incomplete = diagnostic;
+        if (std.mem.eql(u8, diagnostic.code, "ZTS626")) fallback_advisories += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), fallback_advisories);
+    const entry = incomplete orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("src/handler.ts", entry.file);
+    try testing.expectEqualStrings("error", entry.severity);
+    try testing.expectEqualStrings("MissingSqlSchema", entry.message);
+}
+
+test "only a new failed full analysis rejects an edit" {
+    var baseline: std.ArrayList(Diagnostic) = .empty;
+    defer deinitDiagnostics(testing.allocator, &baseline);
+    var same_failure: std.ArrayList(Diagnostic) = .empty;
+    defer deinitDiagnostics(testing.allocator, &same_failure);
+    var clean: std.ArrayList(Diagnostic) = .empty;
+    defer deinitDiagnostics(testing.allocator, &clean);
+    // Two temporary projects have different roots, so the entries match only
+    // when the file is recorded relative to its root.
+    try collectForSource(testing.allocator, sql_advisory_handler, &baseline);
+    try collectForSource(testing.allocator, sql_advisory_handler, &same_failure);
+    try collectForSource(testing.allocator, plain_advisory_handler, &clean);
+
+    try testing.expect(firstNewDiagnostic(baseline.items, same_failure.items) == null);
+    const rejected = firstNewDiagnostic(clean.items, baseline.items) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("analysis_incomplete", rejected.code);
 }
