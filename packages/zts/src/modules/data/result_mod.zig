@@ -65,8 +65,6 @@ pub const binding = mb.ModuleBinding{
     },
 };
 
-pub const exports = binding.toModuleExports();
-
 fn argAt(args: []const JSValue, index: usize) JSValue {
     if (args.len <= index) return JSValue.undefined_val;
     return args[index];

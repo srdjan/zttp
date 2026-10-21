@@ -9,7 +9,6 @@ const modules = @import("zttp-modules");
 const fetch_module = modules.net.fetch;
 
 pub const binding = adapter.adaptModuleBinding(fetch_module.binding);
-pub const exports = binding.toModuleExports();
 
 pub const MODULE_STATE_SLOT: usize = fetch_module.MODULE_STATE_SLOT;
 

@@ -61,8 +61,6 @@ pub const binding = mb.ModuleBinding{
     },
 };
 
-pub const exports = binding.toModuleExports();
-
 /// The closed error taxonomy of spec 6.4. Every parse or encode failure is one
 /// of these, so a caller matching on `kind` has a finite set to cover.
 const ErrorKind = enum {

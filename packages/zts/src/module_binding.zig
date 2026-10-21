@@ -129,51 +129,6 @@ pub const hasInverseLawPointingTo = types.hasInverseLawPointingTo;
 // Tests
 // -------------------------------------------------------------------------
 
-test "FunctionBinding toModuleExport preserves fields" {
-    const fb = FunctionBinding{
-        .name = "testFn",
-        .func = struct {
-            fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
-                return value.JSValue.undefined_val;
-            }
-        }.f,
-        .arg_count = 2,
-        .effect = .write,
-        .returns = .boolean,
-    };
-
-    const me = comptime fb.toModuleExport();
-    try std.testing.expectEqualStrings("testFn", me.name);
-    try std.testing.expectEqual(@as(u8, 2), me.arg_count);
-    try std.testing.expectEqual(EffectClass.write, me.effect);
-}
-
-test "ModuleBinding toModuleExports generates correct array" {
-    const binding = ModuleBinding{
-        .specifier = "zttp:test",
-        .name = "test",
-        .exports = &.{
-            .{ .name = "fn1", .func = struct {
-                fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
-                    return value.JSValue.undefined_val;
-                }
-            }.f, .arg_count = 1 },
-            .{ .name = "fn2", .func = struct {
-                fn f(_: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
-                    return value.JSValue.false_val;
-                }
-            }.f, .arg_count = 0, .effect = .write },
-        },
-    };
-
-    const exports = comptime binding.toModuleExports();
-    try std.testing.expectEqual(@as(usize, 2), exports.len);
-    try std.testing.expectEqualStrings("fn1", exports[0].name);
-    try std.testing.expectEqualStrings("fn2", exports[1].name);
-    try std.testing.expectEqual(EffectClass.read, exports[0].effect);
-    try std.testing.expectEqual(EffectClass.write, exports[1].effect);
-}
-
 test "wrapModuleFn generates valid NativeFn" {
     const module_fn: ModuleFn = struct {
         fn f(_: *ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
@@ -198,9 +153,9 @@ test "FunctionBinding with module_func wraps correctly" {
         .arg_count = 1,
     };
 
-    const me = comptime fb.toModuleExport();
-    try std.testing.expectEqualStrings("sandboxedFn", me.name);
-    try std.testing.expectEqual(@typeInfo(object.NativeFn), @typeInfo(@TypeOf(me.func)));
+    const native_fn = comptime fb.getNativeFn();
+    const expected = comptime wrapModuleFn(fb.module_func.?);
+    try std.testing.expect(native_fn == expected);
 }
 
 test "LabelSet merge combines labels" {

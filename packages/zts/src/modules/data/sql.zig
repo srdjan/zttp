@@ -5,7 +5,6 @@ const modules = @import("zttp-modules");
 const sql_module = modules.data.sql;
 
 pub const binding = adapter.adaptModuleBinding(sql_module.binding);
-pub const exports = binding.toModuleExports();
 
 pub const MODULE_STATE_SLOT: usize = sql_module.MODULE_STATE_SLOT;
 

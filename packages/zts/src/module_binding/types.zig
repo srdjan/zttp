@@ -354,16 +354,6 @@ pub const FunctionBinding = struct {
         if (self.module_func) |mf| return wrapModuleFn(mf);
         @compileError("FunctionBinding must set either func or module_func");
     }
-
-    /// Convert to a legacy ModuleExport for backward compatibility.
-    pub fn toModuleExport(comptime self: FunctionBinding) resolver.ModuleExport {
-        return .{
-            .name = self.name,
-            .func = self.getNativeFn(),
-            .arg_count = self.arg_count,
-            .effect = self.effect,
-        };
-    }
 };
 
 // -------------------------------------------------------------------------
@@ -405,15 +395,6 @@ pub const ModuleBinding = struct {
 
     /// Whether the contract should feed into RuntimePolicy sandboxing.
     sandboxable: bool = false,
-
-    /// Generate a legacy exports array from this binding.
-    pub fn toModuleExports(comptime self: ModuleBinding) [self.exports.len]resolver.ModuleExport {
-        var result: [self.exports.len]resolver.ModuleExport = undefined;
-        for (self.exports, 0..) |exp, i| {
-            result[i] = exp.toModuleExport();
-        }
-        return result;
-    }
 };
 
 // -------------------------------------------------------------------------

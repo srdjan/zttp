@@ -50,8 +50,6 @@ pub const binding = mb.ModuleBinding{
     },
 };
 
-pub const exports = binding.toModuleExports();
-
 test "dictFilter rejects a non-boolean predicate result" {
     const testing = std.testing;
     const gc_mod = @import("../../gc.zig");

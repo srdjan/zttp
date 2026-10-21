@@ -18,14 +18,6 @@ const module_specifier = @import("zts-base").module_specifier;
 /// (pure, read_only, retry_safe) at compile time.
 pub const EffectClass = @import("zttp-sdk").EffectClass;
 
-/// A single exported function from a virtual module.
-pub const ModuleExport = struct {
-    name: []const u8,
-    func: object.NativeFn,
-    arg_count: u8,
-    effect: EffectClass = .read,
-};
-
 /// Resolution result
 pub const ResolveResult = union(enum) {
     /// Virtual module with native implementations

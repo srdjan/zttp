@@ -59,8 +59,6 @@ pub const binding = mb.ModuleBinding{
     },
 };
 
-pub const exports = binding.toModuleExports();
-
 // ---------------------------------------------------------------------------
 // The error taxonomy of spec 6.3
 // ---------------------------------------------------------------------------
