@@ -2,8 +2,8 @@
 //!
 //! `test-flow-census` runs the gate over the generated probe census, then the
 //! gate's own unit tests. The probes and the expected verdicts live in
-//! packages/tools/src/flow_census_probes.zig, and the allowlist of the
-//! verdicts the checker does not yet meet is scripts/flow-census.allow.
+//! packages/tools/src/flow_census_probes.zig. Any probe that misses its
+//! expected verdict fails the step.
 
 const std = @import("std");
 const Context = @import("Context.zig");
@@ -30,7 +30,7 @@ pub fn add(ctx: Context) Result {
     });
 
     // A Run step caches on its argv and binary, never on the files it reads,
-    // so without has_side_effects an edited allowlist would not rerun it.
+    // so has_side_effects keeps the census running on every invocation.
     const check = b.addRunArtifact(gate_exe);
     check.has_side_effects = true;
     if (b.args) |args| check.addArgs(args);

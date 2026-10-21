@@ -20,23 +20,14 @@
 //! unproven property), `weak` (expected a refusal, got only an unproven
 //! property), or `no_verdict`.
 //!
-//! Today's verdicts are the starting state, so a non-matching probe is
-//! carried by one row of `scripts/flow-census.allow`. The row names the probe,
-//! the outcome it carries, and a mechanism tag from a closed set that names
-//! the plan unit expected to close it. Each unit that fixes the checker
-//! deletes the rows it closes. The gate fails on the opposite case too: a row
-//! whose probe now matches is stale, and the ratchet only moves toward fewer
-//! rows.
+//! A probe whose observed outcome is not `match` fails the gate. No allowlist
+//! carries a mismatch: fix the checker or correct the expectation.
 //!
 //! What this gate refuses, each as a named `FailureKind`:
 //!   * a probe with no verdict (a parse or type error, a missing flow stage,
 //!     an error outside the flow codes, a claim failure that disagrees with
 //!     the property), or a check that crashed;
-//!   * a non-matching probe with no allowlist row, and a row whose recorded
-//!     outcome differs from the observed outcome;
-//!   * a row for a matching probe, for an unknown probe, a duplicate row, a
-//!     row with an empty or unknown mechanism, and a row with an outcome that
-//!     is not `fail_open`, `over_refusal`, or `weak`;
+//!   * a probe whose outcome is `fail_open`, `over_refusal`, or `weak`;
 //!   * a census below the committed floor in total, in a group, or in any
 //!     (label, sink) column, and two probes with one name;
 //!   * an expectation that states no reason.
@@ -63,28 +54,9 @@ const Expect = probes_mod.Expect;
 const Group = probes_mod.Group;
 const Property = probes_mod.Property;
 
-const allow_path = "scripts/flow-census.allow";
-const max_file_bytes = 1024 * 1024;
-
 pub const Observed = enum { refused, unproven, held, no_verdict };
 
 pub const Outcome = enum { match, fail_open, over_refusal, weak, no_verdict };
-
-/// The plan units that can close a non-matching probe. A row names exactly
-/// one. The closed set is the contract between this gate and the plan.
-pub const mechanisms = [_][]const u8{
-    "F1", // a sink is silent during a summary
-    "F1b", // an unresolved call whose result is discarded
-    "F1c", // recursion stops at the active frame
-    "F2", // a captured value carries no label
-    "F3", // a re-walked callee keeps stale labels
-    "F4", // HTML built in a callee and discarded
-    "F5", // a return-path, concise-body, or nested-expression sink
-    "F6", // a credential read through a passed request
-    "F7", // a cross-file helper
-    "F10", // a credential in an egress body
-    "G", // a module-level declaration carries no label
-};
 
 pub const FailureKind = enum {
     below_floor,
@@ -96,13 +68,6 @@ pub const FailureKind = enum {
     check_crashed,
     no_verdict,
     unexplained_mismatch,
-    wrong_outcome,
-    stale_row,
-    unknown_probe_row,
-    duplicate_row,
-    empty_mechanism,
-    unknown_mechanism,
-    unknown_outcome_row,
 };
 
 pub const Failure = struct {
@@ -139,8 +104,6 @@ pub const committed_floors: Floors = .{
 
 pub const Options = struct {
     check: CheckFn = defaultCheck,
-    /// The text of `scripts/flow-census.allow`.
-    allow_text: []const u8,
     floors: Floors = committed_floors,
     /// Print one line per probe.
     list: bool = false,
@@ -173,10 +136,6 @@ pub const Report = struct {
     /// Matches by what the probe expected, for the plan's table shape.
     matched_refuse: [group_count]usize = @splat(0),
     matched_hold: [group_count]usize = @splat(0),
-    /// Allowlisted probes per mechanism (index into `mechanisms`) and rows read.
-    mechanism_counts: [mechanisms.len]usize = @splat(0),
-    allowlisted: usize = 0,
-    rows_read: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator) Report {
         return .{ .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -312,56 +271,6 @@ pub fn outcomeOf(expect: Expect, observed: Observed) Outcome {
 }
 
 // ---------------------------------------------------------------------------
-// The allowlist.
-// ---------------------------------------------------------------------------
-
-pub const AllowRow = struct {
-    probe: []const u8,
-    outcome: []const u8,
-    mechanism: []const u8,
-    line: usize,
-};
-
-/// Parse `PROBE OUTCOME MECHANISM [note...]` rows. A blank line and a line that
-/// starts with `#` are skipped. A missing field is the empty string, so the
-/// gate can name the row that lacks it.
-pub fn parseAllow(a: std.mem.Allocator, text: []const u8) ![]AllowRow {
-    var rows: std.ArrayList(AllowRow) = .empty;
-    var line_no: usize = 0;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |raw| {
-        line_no += 1;
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        var fields = std.mem.tokenizeAny(u8, line, " \t");
-        try rows.append(a, .{
-            .probe = fields.next() orelse "",
-            .outcome = fields.next() orelse "",
-            .mechanism = fields.next() orelse "",
-            .line = line_no,
-        });
-    }
-    return rows.toOwnedSlice(a);
-}
-
-fn mechanismIndex(name: []const u8) ?usize {
-    for (mechanisms, 0..) |known, i| {
-        if (std.mem.eql(u8, known, name)) return i;
-    }
-    return null;
-}
-
-/// The outcomes a row may carry. `match` needs no row, and `no_verdict` is
-/// never explained by a row.
-fn rowOutcome(text: []const u8) ?Outcome {
-    const outcome = std.meta.stringToEnum(Outcome, text) orelse return null;
-    return switch (outcome) {
-        .fail_open, .over_refusal, .weak => outcome,
-        .match, .no_verdict => null,
-    };
-}
-
-// ---------------------------------------------------------------------------
 // The run.
 // ---------------------------------------------------------------------------
 
@@ -447,74 +356,22 @@ pub fn runCensus(
         }
     }
 
-    try checkAllowlist(&report, probes, options.allow_text);
+    try checkOutcomes(&report, probes);
     return report;
 }
 
-fn checkAllowlist(report: *Report, probes: []const Probe, allow_text: []const u8) !void {
-    const a = report.arena.allocator();
-    const rows = try parseAllow(a, allow_text);
-    report.rows_read = rows.len;
-
-    var probe_index: std.StringHashMapUnmanaged(usize) = .empty;
-    for (probes, 0..) |probe, i| try probe_index.put(a, probe.name, i);
-    var outcome_of_probe: std.AutoHashMapUnmanaged(usize, Outcome) = .empty;
-    for (report.records.items) |record| try outcome_of_probe.put(a, record.probe, record.outcome);
-
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    var explained: std.AutoHashMapUnmanaged(usize, void) = .empty;
-    for (rows) |row| {
-        if (seen.contains(row.probe)) {
-            try report.add(.duplicate_row, row.probe, "{s}:{d}: a second row for this probe", .{ allow_path, row.line });
-            continue;
-        }
-        try seen.put(a, row.probe, {});
-        const index = probe_index.get(row.probe) orelse {
-            try report.add(.unknown_probe_row, row.probe, "{s}:{d}: no probe has this name", .{ allow_path, row.line });
-            continue;
-        };
-        if (row.mechanism.len == 0) {
-            try report.add(.empty_mechanism, row.probe, "{s}:{d}: the row names no mechanism", .{ allow_path, row.line });
-            continue;
-        }
-        const mechanism = mechanismIndex(row.mechanism) orelse {
-            try report.add(.unknown_mechanism, row.probe, "{s}:{d}: \"{s}\" is not a mechanism of the closed set", .{ allow_path, row.line, row.mechanism });
-            continue;
-        };
-        const carried = rowOutcome(row.outcome) orelse {
-            try report.add(.unknown_outcome_row, row.probe, "{s}:{d}: \"{s}\" is not fail_open, over_refusal, or weak", .{ allow_path, row.line, row.outcome });
-            continue;
-        };
-        // A probe that did not run has no outcome; its own failure is reported.
-        const observed = outcome_of_probe.get(index) orelse continue;
-        if (observed == .match) {
-            try report.add(.stale_row, row.probe, "{s}:{d}: the probe now matches its expected verdict; delete the row", .{ allow_path, row.line });
-            continue;
-        }
-        if (observed != carried) {
-            try report.add(.wrong_outcome, row.probe, "{s}:{d}: the row says {s}, the probe is now {s}", .{ allow_path, row.line, @tagName(carried), @tagName(observed) });
-            continue;
-        }
-        try explained.put(a, index, {});
-        report.mechanism_counts[mechanism] += 1;
-        report.allowlisted += 1;
-    }
-
+fn checkOutcomes(report: *Report, probes: []const Probe) !void {
     for (report.records.items) |record| {
         const probe = probes[record.probe];
         switch (record.outcome) {
             .match => {},
             .no_verdict => try report.add(.no_verdict, probe.name, "the probe reached no flow verdict: {s}", .{record.detail}),
-            .fail_open, .over_refusal, .weak => {
-                if (explained.contains(record.probe) or seen.contains(probe.name)) continue;
-                try report.add(.unexplained_mismatch, probe.name, "expected {s}, observed {s} ({s}), outcome {s}; fix the checker, or add a row to {s} that states the mechanism", .{
-                    @tagName(probe.expect),
-                    @tagName(record.observed),
-                    record.detail,
-                    @tagName(record.outcome),
-                    allow_path,
-                });
-            },
+            .fail_open, .over_refusal, .weak => try report.add(.unexplained_mismatch, probe.name, "expected {s}, observed {s} ({s}), outcome {s}; fix the checker or the expectation", .{
+                @tagName(probe.expect),
+                @tagName(record.observed),
+                record.detail,
+                @tagName(record.outcome),
+            }),
         }
     }
 }
@@ -579,9 +436,6 @@ fn printReport(report: *const Report, probes: []const Probe, options: Options) v
             options.floors.total,
         },
     );
-    std.debug.print("flow census: {d} allowlist row(s) read, {d} probe(s) carried; by mechanism:", .{ report.rows_read, report.allowlisted });
-    for (mechanisms, 0..) |name, i| std.debug.print(" {s}={d}", .{ name, report.mechanism_counts[i] });
-    std.debug.print("\n", .{});
 }
 
 fn usage() error{InvalidArguments} {
@@ -617,12 +471,6 @@ fn run(init: std.process.Init) !void {
         }
     }
 
-    const allow_text = std.Io.Dir.cwd().readFileAlloc(io, allow_path, gpa, .limited(max_file_bytes)) catch |err| {
-        std.debug.print("flow census: cannot read {s}: {s}\n", .{ allow_path, @errorName(err) });
-        return error.CensusFailed;
-    };
-    defer gpa.free(allow_text);
-
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const probes = try probes_mod.generate(arena.allocator());
@@ -650,7 +498,7 @@ fn run(init: std.process.Init) !void {
     const real = try scratch.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(real);
 
-    const options: Options = .{ .allow_text = allow_text, .list = list };
+    const options: Options = .{ .list = list };
     var report = try runCensus(gpa, io, scratch, real, probes, options);
     defer report.deinit();
     printReport(&report, probes, options);
@@ -768,20 +616,16 @@ const TinyRun = struct {
     }
 };
 
-fn tinyOptions(allow_text: []const u8) Options {
-    return .{ .check = fakeCheck, .allow_text = allow_text, .floors = tiny_floors };
+fn tinyOptions() Options {
+    return .{ .check = fakeCheck, .floors = tiny_floors };
 }
 
-const ok_allow = "p_open  fail_open  F1  a hold probe whose property held\n";
-
 /// Build the census the mutation probes start from: one probe of each good
-/// shape. `p_ref` is refused as expected, `p_hold` is held as expected, and
-/// `p_open` expects a refusal but is held, which the allowlist carries.
+/// shape. `p_ref` is refused as expected and `p_hold` is held as expected.
 fn goodCensus(a: std.mem.Allocator) ![]Probe {
-    const probes = try a.alloc(Probe, 3);
+    const probes = try a.alloc(Probe, 2);
     probes[0] = try tinyProbe(a, .{ .name = "p_ref", .marker = "// refused", .expect = .refuse, .label = .secret, .sink = .log });
     probes[1] = try tinyProbe(a, .{ .name = "p_hold", .marker = "// held", .expect = .hold, .label = .clean, .sink = .log });
-    probes[2] = try tinyProbe(a, .{ .name = "p_open", .marker = "// held", .expect = .refuse, .label = .secret, .sink = .egress_body });
     return probes;
 }
 
@@ -807,32 +651,31 @@ fn mutate(kind: FailureKind) !void {
 
     // The unmutated census passes, so a failure below comes from the mutation.
     {
-        var clean = try env.run(good, tinyOptions(ok_allow));
+        var clean = try env.run(good, tinyOptions());
         defer clean.deinit();
         for (clean.failures.items) |failure| {
             std.debug.print("clean failure [{s}] {s}: {s}\n", .{ @tagName(failure.kind), failure.path, failure.detail });
         }
         try testing.expectEqual(@as(usize, 0), clean.failures.items.len);
-        try testing.expectEqual(@as(usize, 1), clean.allowlisted);
     }
 
     switch (kind) {
         .below_floor => {
-            var options = tinyOptions(ok_allow);
+            var options = tinyOptions();
             options.floors.total = good.len + 1;
             var report = try env.run(good, options);
             defer report.deinit();
             try expectFailureAt(&report, kind, "census");
         },
         .group_below_floor => {
-            var options = tinyOptions(ok_allow);
+            var options = tinyOptions();
             options.floors.extended = 1;
             var report = try env.run(good, options);
             defer report.deinit();
             try expectFailureAt(&report, kind, "extended");
         },
         .column_below_floor => {
-            var options = tinyOptions(ok_allow);
+            var options = tinyOptions();
             options.floors.per_column = 1;
             var report = try env.run(good, options);
             defer report.deinit();
@@ -842,14 +685,14 @@ fn mutate(kind: FailureKind) !void {
             const doubled = try a.alloc(Probe, good.len + 1);
             @memcpy(doubled[0..good.len], good);
             doubled[good.len] = good[0];
-            var report = try env.run(doubled, tinyOptions(ok_allow));
+            var report = try env.run(doubled, tinyOptions());
             defer report.deinit();
             try expectFailureAt(&report, kind, "p_ref");
         },
         .missing_reason => {
             const changed = try a.dupe(Probe, good);
             changed[1].reason = "";
-            var report = try env.run(changed, tinyOptions(ok_allow));
+            var report = try env.run(changed, tinyOptions());
             defer report.deinit();
             try expectFailureAt(&report, kind, "p_hold");
         },
@@ -859,14 +702,14 @@ fn mutate(kind: FailureKind) !void {
             const files = try a.dupe(probes_mod.SourceFile, good[0].files);
             files[0].name = "no_such_dir/p_ref.ts";
             changed[0].files = files;
-            var report = try env.run(changed, tinyOptions(ok_allow));
+            var report = try env.run(changed, tinyOptions());
             defer report.deinit();
             try expectFailureAt(&report, kind, "p_ref");
         },
         .check_crashed => {
             const changed = try a.dupe(Probe, good);
             changed[1] = try tinyProbe(a, .{ .name = "p_hold", .marker = "// crash", .expect = .hold, .label = .clean, .sink = .log });
-            var report = try env.run(changed, tinyOptions(ok_allow));
+            var report = try env.run(changed, tinyOptions());
             defer report.deinit();
             try expectFailureAt(&report, kind, "p_hold");
         },
@@ -874,51 +717,17 @@ fn mutate(kind: FailureKind) !void {
             // A type error is not a refusal of the leak: the probe must fail.
             const changed = try a.dupe(Probe, good);
             changed[0] = try tinyProbe(a, .{ .name = "p_ref", .marker = "// type_error", .expect = .refuse, .label = .secret, .sink = .log });
-            var report = try env.run(changed, tinyOptions(ok_allow));
+            var report = try env.run(changed, tinyOptions());
             defer report.deinit();
             try expectFailureAt(&report, kind, "p_ref");
         },
         .unexplained_mismatch => {
-            var report = try env.run(good, tinyOptions(""));
-            defer report.deinit();
-            try expectFailureAt(&report, kind, "p_open");
-        },
-        .wrong_outcome => {
-            // The probe is a fail_open, and the row says it is over-refused.
-            var report = try env.run(good, tinyOptions("p_open over_refusal F1\n"));
-            defer report.deinit();
-            try expectFailureAt(&report, kind, "p_open");
-        },
-        .stale_row => {
-            // p_hold matches its expectation, so a row for it is stale.
-            var report = try env.run(good, tinyOptions(ok_allow ++ "p_hold fail_open F1\n"));
+            // p_hold is held, so expecting a refusal makes it a fail_open.
+            const changed = try a.dupe(Probe, good);
+            changed[1] = try tinyProbe(a, .{ .name = "p_hold", .marker = "// held", .expect = .refuse, .label = .clean, .sink = .log });
+            var report = try env.run(changed, tinyOptions());
             defer report.deinit();
             try expectFailureAt(&report, kind, "p_hold");
-        },
-        .unknown_probe_row => {
-            var report = try env.run(good, tinyOptions(ok_allow ++ "p_missing fail_open F1\n"));
-            defer report.deinit();
-            try expectFailureAt(&report, kind, "p_missing");
-        },
-        .duplicate_row => {
-            var report = try env.run(good, tinyOptions(ok_allow ++ "p_open fail_open F1\n"));
-            defer report.deinit();
-            try expectFailureAt(&report, kind, "p_open");
-        },
-        .empty_mechanism => {
-            var report = try env.run(good, tinyOptions("p_open fail_open\n"));
-            defer report.deinit();
-            try expectFailureAt(&report, kind, "p_open");
-        },
-        .unknown_mechanism => {
-            var report = try env.run(good, tinyOptions("p_open fail_open F99\n"));
-            defer report.deinit();
-            try expectFailureAt(&report, kind, "p_open");
-        },
-        .unknown_outcome_row => {
-            var report = try env.run(good, tinyOptions("p_open nonsense F1\n"));
-            defer report.deinit();
-            try expectFailureAt(&report, kind, "p_open");
         },
     }
 }
@@ -930,15 +739,6 @@ test "every failure kind is probed and rejected" {
             return err;
         };
     }
-}
-
-test "every row outcome that is not a match needs a mechanism, and a row cannot explain no_verdict" {
-    // `no_verdict` is an outcome that no row may carry; a `match` needs no row.
-    try testing.expect(rowOutcome("no_verdict") == null);
-    try testing.expect(rowOutcome("match") == null);
-    try testing.expectEqual(Outcome.fail_open, rowOutcome("fail_open").?);
-    try testing.expectEqual(Outcome.over_refusal, rowOutcome("over_refusal").?);
-    try testing.expectEqual(Outcome.weak, rowOutcome("weak").?);
 }
 
 test "the outcome of every expected and observed pair is the one written here" {
@@ -976,21 +776,17 @@ test "a synthetic census produces every outcome and every observed class" {
         try tinyProbe(a, .{ .name = "over_one", .marker = "// refused", .expect = .hold, .label = .secret, .sink = .log }),
         try tinyProbe(a, .{ .name = "no_verdict_one", .marker = "// type_error", .expect = .hold, .label = .secret, .sink = .log }),
     };
-    const allow =
-        "weak_one weak F1\n" ++
-        "fail_open_one fail_open F1\n" ++
-        "over_one over_refusal F4\n";
-    var report = try env.run(&probes, tinyOptions(allow));
+    var report = try env.run(&probes, tinyOptions());
     defer report.deinit();
     try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.match)]);
     try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.weak)]);
     try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.fail_open)]);
     try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.over_refusal)]);
     try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.no_verdict)]);
-    try testing.expectEqual(@as(usize, 3), report.allowlisted);
-    // The only failure is the probe with no verdict.
-    try testing.expectEqual(@as(usize, 1), report.failures.items.len);
+    // Three mismatches and one probe with no verdict each fail.
+    try testing.expectEqual(@as(usize, 4), report.failures.items.len);
     try testing.expect(report.has(.no_verdict));
+    try testing.expect(report.has(.unexplained_mismatch));
     // The counts per column sum to the probes in it.
     const column = probes_mod.columnOf(probes[0]);
     var sum: usize = 0;
@@ -1043,20 +839,6 @@ test "classify gives no verdict when the property and its claim failure disagree
     var odd = try fakeResult(testing.allocator, true, true, true, &.{.{ "ZTS999", "warning", "something new" }});
     defer odd.deinit(testing.allocator);
     try testing.expectEqual(Observed.no_verdict, (try classify(arena.allocator(), &odd, .no_secret_leakage)).observed);
-}
-
-test "allowlist rows parse probe, outcome, mechanism and note" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const rows = try parseAllow(arena.allocator(), "# note\n\na__b__c fail_open F1 the note\n  d weak\ne\n");
-    try testing.expectEqual(@as(usize, 3), rows.len);
-    try testing.expectEqualStrings("a__b__c", rows[0].probe);
-    try testing.expectEqualStrings("fail_open", rows[0].outcome);
-    try testing.expectEqualStrings("F1", rows[0].mechanism);
-    try testing.expectEqualStrings("weak", rows[1].outcome);
-    try testing.expectEqualStrings("", rows[1].mechanism);
-    try testing.expectEqualStrings("", rows[2].outcome);
-    try testing.expectEqual(@as(usize, 5), rows[2].line);
 }
 
 // The real check, on three probes: a leak the handler body refuses, a clean

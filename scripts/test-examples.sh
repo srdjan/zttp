@@ -119,6 +119,9 @@ run_tests_with_args "examples/patterns/bytes-boundary.ts"            "examples/p
 run_tests_with_args "examples/patterns/nominal-brand.ts"           "examples/patterns/nominal-brand.test.jsonl"
 run_tests_with_args "examples/patterns/boundary-types.ts"          "examples/patterns/boundary-types.test.jsonl"
 
+# validate/
+run_tests_with_args "tests/validate/format_handler.ts" "tests/validate/format.test.jsonl"
+
 # sql/ - a zttp:sql handler needs its schema to type-check; assert it proves
 # clean (this is the example whose one-arg sqlMany("listTodos") regressed when
 # the sql bindings lacked required_arg_count).
@@ -144,8 +147,8 @@ echo "Suites: $((PASS + FAIL)) total, $PASS passed, $FAIL failed"
 # which reads as coverage. The number is a backstop against an emptied run and
 # not a target: set well under the current count so adding a suite never has to
 # move it, and a deletion of any real fraction of them does.
-# The unfiltered retained example suite measured 33 passing suites in Phase 3.
-MIN_SUITES=33
+# The unfiltered retained example suite measured 33 passing suites in Phase 3; tests/validate added the 34th.
+MIN_SUITES=34
 if [ "$((PASS + FAIL))" -lt "$MIN_SUITES" ]; then
     echo "error: ran $((PASS + FAIL)) suites, fewer than the floor of $MIN_SUITES - this run checked almost nothing and would otherwise report a pass" >&2
     exit 1

@@ -229,10 +229,8 @@ one labelled value (secret, credential, user input, or clean) on a path to one
 sink, through one kind of callee, and claims one property. The expected verdict
 of each (label, sink) pair is an explicit table derived from the documented
 promise, not from the checker, so a fail-open in the handler body cannot make a
-whole column read as held. A probe that misses its expected verdict needs one
-row in `scripts/flow-census.allow` that names the outcome and the plan unit that
-closes it, and a row for a probe that now matches fails, so the list only
-shrinks. The gate fails on a probe with no verdict, asserts a floor on the
+whole column read as held. A probe that misses its expected verdict fails the gate; no allowlist
+carries a mismatch. The gate also fails on a probe with no verdict, asserts a floor on the
 probes in total, per group, and per (label, sink) column, prints the counts on
 every run, and probes every failure kind through a small synthetic census.
 `-- --list` prints every probe, and `-- --dump DIR` writes the probes to `DIR`.
