@@ -162,6 +162,4 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-spine` | runs agent-spine behavior tests and rejection probes | after agent-spine policy or tooling changes |
 | `zig build verify` | runs the full local gate in separate sequential processes | before the full local verification gate is claimed |
 | `zig build test-agent-determinism` | checks complete agent envelopes are deterministic | after agent wire or transport changes |
-| `zig build flow-shadow-diff` | compares every frozen precision and P0 property with the shadow evaluator | while closing P9 precision and unresolved constructs |
-| `zig build test-flow-shadow-diff` | tests shadow verdict classification and frozen corpus floors | after shadow differential harness changes |
 <!-- end generated: gates -->

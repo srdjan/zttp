@@ -11,7 +11,6 @@ const atom_table = engine.atom_table;
 const counterexample = @import("counterexample.zig");
 const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;
-const null_node = ir.null_node;
 const mb = engine.module_binding;
 const LabelSet = mb.LabelSet;
 
@@ -51,6 +50,7 @@ pub const FlowChecker = struct {
     properties: FlowProperties = unproven,
     diagnostics: []const Diagnostic = &.{},
     defended_paths: []const DefendedPath = &.{},
+    unresolved_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, ir_view: ir.IrView, atoms: ?*engine.atom_table.AtomTable) FlowChecker {
         return .{ .allocator = allocator, .ir_view = ir_view, .atoms = atoms };
@@ -80,6 +80,7 @@ pub const FlowChecker = struct {
         self.properties = result.properties;
         self.diagnostics = result.diagnostics;
         self.defended_paths = result.defended_paths;
+        self.unresolved_count = result.evaluation.unresolved.len;
         // Report storage lives in the evaluator arena, while the temporary
         // capture table is needed only during this analysis.
         analysis.captures = null;
@@ -97,6 +98,12 @@ pub const FlowChecker = struct {
 
     pub fn getDefendedPaths(self: *const FlowChecker) []const DefendedPath {
         return self.defended_paths;
+    }
+
+    /// Constructs the last `check` could not follow. Any non-zero count clears
+    /// every flow property, so a frozen corpus asserts this stays zero.
+    pub fn unresolvedCount(self: *const FlowChecker) usize {
+        return self.unresolved_count;
     }
 
     pub fn setTypeChecker(self: *FlowChecker, checker: *type_checker.TypeChecker) void {
@@ -120,29 +127,12 @@ pub const FlowChecker = struct {
         }
     }
 
-    /// Project the complete returned value, including its heap contents.
-    /// Unsupported evaluation contributes unknown instead of a clean summary.
-    pub fn exportedReturnLabels(self: *FlowChecker, name: []const u8) !?engine.module_binding.LabelSet {
-        const function = self.findExportedFunction(name) orelse return null;
-        var owned_captures: ?evaluator.CaptureTable = null;
-        defer if (owned_captures) |*table| table.deinit();
-        var analysis = self.newEvaluator();
-        defer analysis.deinit();
-        if (analysis.captures == null) if (self.scopes) |scopes| {
-            owned_captures = try evaluator.CaptureTable.init(self.allocator, scopes);
-            analysis.captures = &owned_captures.?;
-        };
-        const result = try analysis.analyzeFunction(function, &.{});
-        const flow = try analysis.returnedFlow(result);
-        if (self.type_checker) |checker| try checker.ensureHealthy();
-        return flow.labels;
-    }
-
     fn clearEvaluation(self: *FlowChecker) void {
         if (self.evaluation) |*analysis| analysis.deinit();
         self.evaluation = null;
         self.properties = unproven;
         self.diagnostics = &.{};
+        self.unresolved_count = 0;
         self.defended_paths = &.{};
     }
 
@@ -153,37 +143,6 @@ pub const FlowChecker = struct {
         analysis.initialization_order = self.initialization_order;
         analysis.modules_complete = self.modules_complete;
         return analysis;
-    }
-
-    fn findExportedFunction(self: *const FlowChecker, name: []const u8) ?ir.NodeIndex {
-        var found: ?ir.NodeIndex = null;
-        for (0..self.ir_view.nodeCount()) |i| {
-            const node: ir.NodeIndex = @intCast(i);
-            if (self.ir_view.getTag(node) != .export_decl) continue;
-            const exported = self.ir_view.getExportDecl(node) orelse continue;
-            if (exported.kind != .named or exported.from_module_idx != 0 or exported.declaration == ir.null_node) continue;
-            const tag = self.ir_view.getTag(exported.declaration) orelse continue;
-            if (tag != .function_decl and tag != .var_decl) continue;
-            const declaration = self.ir_view.getVarDecl(exported.declaration) orelse continue;
-            const declared_name = self.atomName(declaration.binding.name_atom) orelse continue;
-            if (!std.mem.eql(u8, declared_name, name)) continue;
-            const function_tag = self.ir_view.getTag(declaration.init) orelse continue;
-            if (function_tag != .function_expr and function_tag != .arrow_function) continue;
-            if (found != null) return null;
-            found = declaration.init;
-        }
-        return found;
-    }
-
-    fn atomName(self: *const FlowChecker, atom_idx: u16) ?[]const u8 {
-        const atom: engine.object.Atom = @enumFromInt(atom_idx);
-        if (self.atoms) |table| return atom.toPredefinedName() orelse table.getName(atom);
-        const string_name = self.ir_view.getString(atom_idx);
-        const predefined_name = atom.toPredefinedName();
-        if (string_name) |string| if (predefined_name) |predefined| {
-            if (!std.mem.eql(u8, string, predefined)) return null;
-        };
-        return string_name orelse predefined_name;
     }
 };
 
@@ -207,46 +166,6 @@ test "candidate facade owns captures and retains warning diagnostics" {
         if (diagnostic.kind == .credential_in_response and diagnostic.severity == .warning) saw_warning = true;
     }
     try std.testing.expect(saw_warning);
-}
-
-test "candidate export projection includes returned heap and unknown evaluation" {
-    const allocator = std.testing.allocator;
-    var atoms = engine.atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try engine.parser.JsParser.init(allocator,
-        \\import { env } from "zttp:env";
-        \\export function published() { return { value: env("SECRET_KEY") }; }
-        \\export function unresolved() { return missing(); }
-        \\function privateFunction() { return "public"; }
-    );
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    _ = try parser.parse();
-    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var checker = FlowChecker.init(allocator, view, &atoms);
-    defer checker.deinit();
-    checker.scopes = &parser.scopes;
-    try std.testing.expect((try checker.exportedReturnLabels("published")).?.secret);
-    try std.testing.expect((try checker.exportedReturnLabels("unresolved")).?.unknown);
-    try std.testing.expect((try checker.exportedReturnLabels("privateFunction")) == null);
-    try std.testing.expect((try checker.exportedReturnLabels("missingExport")) == null);
-}
-
-test "candidate export lookup declines conflicting atom and string spellings" {
-    const allocator = std.testing.allocator;
-    var parser = try engine.parser.JsParser.init(allocator, "export function published() { return 1; }");
-    defer parser.deinit();
-    _ = try parser.parse();
-    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-    // The no-atoms parser puts the declaration's name at string index zero,
-    // which also names the predefined atom `null`. Neither spelling wins.
-    try std.testing.expectEqualStrings("published", view.getString(0).?);
-    try std.testing.expectEqualStrings("null", engine.object.Atom.null.toPredefinedName().?);
-    var checker = FlowChecker.init(allocator, view, null);
-    defer checker.deinit();
-    checker.scopes = &parser.scopes;
-    try std.testing.expect(checker.atomName(0) == null);
-    try std.testing.expect((try checker.exportedReturnLabels("published")) == null);
 }
 
 test "FlowChecker fails closed when taint state cannot allocate" {
@@ -312,42 +231,6 @@ test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     // Every allocation on a real diagnostic-producing path must propagate
     // failure, including the storage that publishes the diagnostic itself.
     try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ leaking_view, leaking_handler, &leaking_atoms, &leaking.scopes });
-}
-
-fn expectExportedSecretLabels(
-    allocator: std.mem.Allocator,
-    view: IrView,
-    atoms: *atom_table.AtomTable,
-    scopes: *const @import("zts-engine").parser.ScopeAnalyzer,
-) !void {
-    var checker = FlowChecker.init(allocator, view, atoms);
-    checker.scopes = scopes;
-    defer checker.deinit();
-
-    const labels = (try checker.exportedReturnLabels("encodeKey")) orelse
-        return error.ExportNotFound;
-    try std.testing.expect(labels.has(.secret));
-}
-
-test "exported return labels propagate allocation failure" {
-    const source =
-        \\import { env } from "zttp:env";
-        \\import { urlEncode } from "zttp:url";
-        \\export function encodeKey() { return urlEncode(env("SECRET_KEY")); }
-    ;
-    var parser = try @import("zts-engine").parser.JsParser.init(std.testing.allocator, source);
-    var atoms = atom_table.AtomTable.init(std.testing.allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    defer parser.deinit();
-    _ = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        expectExportedSecretLabels,
-        .{ view, &atoms, &parser.scopes },
-    );
 }
 
 test "FlowChecker captures witness constraints on secret-in-response" {

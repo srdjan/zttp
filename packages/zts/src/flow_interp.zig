@@ -828,15 +828,10 @@ fn canonicalSlice(
 // Results and the tag census
 // ---------------------------------------------------------------------------
 
-/// The phase that will resolve a construct this phase leaves unresolved.
-pub const Phase = enum { p7, p8 };
-
-/// How the evaluators treat one `NodeTag`. P9 requires that no tag is `later`.
+/// How the evaluators treat one `NodeTag`.
 pub const TagPlan = union(enum) {
     /// A rule exists and resolves the tag in every context the census uses.
     handled,
-    /// The phase that adds the rule. Until then the tag is unresolved.
-    later: Phase,
     /// The restricted profile refuses the construct, so no accepted program
     /// holds it.
     refused_by_parser,
@@ -849,9 +844,15 @@ pub const TagPlan = union(enum) {
     not_produced,
 };
 
-/// Why a construct is unresolved: the phase that owns it, or the reason that
-/// no phase does.
+/// Why a construct is unresolved: the mechanism the evaluator does not model.
 ///
+/// - `prototype_method_unmodeled`: a method of a request, headers, or response
+///   site that the runtime prototype table has no row for.
+/// - `module_graph_gap`: the module graph is absent, incomplete, or inconsistent,
+///   or an import or re-export has no resolvable source.
+/// - `module_state_unmodeled`: module-level state the evaluator does not place:
+///   a global read or write with no persistent cell, an upvalue store, or a
+///   write into a runtime object that every request shares.
 /// - `fixpoint_limit`: a loop reached `max_loop_passes`, or a recursive
 ///   function reached `max_recursion_passes`, before its summary stopped
 ///   changing.
@@ -871,8 +872,9 @@ pub const TagPlan = union(enum) {
 ///   the runtime fails with `NotCallable`, or a native method of an object the
 ///   analysis does not model (R3).
 pub const Owner = enum {
-    p7,
-    p8,
+    prototype_method_unmodeled,
+    module_graph_gap,
+    module_state_unmodeled,
     fixpoint_limit,
     read_before_declaration,
     unknown_callee,
@@ -942,19 +944,11 @@ pub const HandlerReport = struct {
     defended_paths: []const report_types.DefendedPath = &.{},
 };
 
-fn ownerOfPhase(phase: Phase) Owner {
-    return switch (phase) {
-        .p7 => .p7,
-        .p8 => .p8,
-    };
-}
-
 /// A handled tag that reaches an evaluator in a position its parent rule does
 /// not read (an `object_property` evaluated as an expression) is the parser
 /// putting a tag where it never does, so it reports `not_produced`.
 fn ownerOf(tag: NodeTag) Owner {
     return switch (tagPlan(tag)) {
-        .later => |phase| ownerOfPhase(phase),
         .refused_by_parser => .refused_by_parser,
         .refused_by_strict => .refused_by_strict,
         .handled, .not_produced => .not_produced,
@@ -1703,7 +1697,7 @@ pub const FlowInterp = struct {
     fn prepareModules(self: *FlowInterp, root_func: NodeIndex) Error!bool {
         if (self.modules.len == 0) return true;
         if (self.modules.len > std.math.maxInt(ModuleId) or self.initialization_order.len != self.modules.len) {
-            try self.record(root_func, .function_expr, .p8);
+            try self.record(root_func, .function_expr, .module_graph_gap);
             return false;
         }
         self.module_offsets = try self.mem().alloc(NodeIndex, self.modules.len);
@@ -1712,7 +1706,7 @@ pub const FlowInterp = struct {
         var next: u64 = 0;
         for (self.modules, 0..) |source, id| {
             if (source.id != id or next + source.ir_view.nodeCount() >= null_node) {
-                try self.record(root_func, .function_expr, .p8);
+                try self.record(root_func, .function_expr, .module_graph_gap);
                 return false;
             }
             self.module_offsets[id] = @intCast(next);
@@ -1722,12 +1716,12 @@ pub const FlowInterp = struct {
         @memset(initialized, false);
         for (self.initialization_order) |id| {
             if (id >= self.modules.len or initialized[id]) {
-                try self.record(root_func, .function_expr, .p8);
+                try self.record(root_func, .function_expr, .module_graph_gap);
                 return false;
             }
             initialized[id] = true;
         }
-        if (!self.modules_complete) try self.record(root_func, .function_expr, .p8);
+        if (!self.modules_complete) try self.record(root_func, .function_expr, .module_graph_gap);
         return true;
     }
 
@@ -1750,7 +1744,7 @@ pub const FlowInterp = struct {
     fn heapAtom(self: *FlowInterp, local: u16) Error!u16 {
         if (self.modules.len == 0 or self.active_module == 0) return local;
         const name = self.nameOfAtom(local) orelse {
-            try self.record(0, .identifier, .p8);
+            try self.record(0, .identifier, .module_graph_gap);
             return 0;
         };
         return @intCast(@intFromEnum(try self.modules[0].atoms.intern(name)));
@@ -1851,10 +1845,6 @@ pub const FlowInterp = struct {
         st.path.constraints = joined;
     }
 
-    pub fn tagVisits(self: *const FlowInterp, tag: NodeTag) u32 {
-        return self.visits[@intFromEnum(tag)];
-    }
-
     fn noteVisited(self: *FlowInterp, tag: NodeTag) void {
         self.visits[@intFromEnum(tag)] +|= 1;
     }
@@ -1933,7 +1923,7 @@ pub const FlowInterp = struct {
                 const declaration = self.ir_view.getVarDecl(declaration_node) orelse continue;
                 if ((declaration_node != func and declaration.init != func) or declaration.binding.kind != .global) continue;
                 const selected = (try self.loadGlobal(&entry, declaration.binding.name_atom)) orelse Value.top;
-                if (selected.callables_top or selected.callables.len != 1 or selected.callables[0] != self.functionHandle(declaration.init)) try self.record(func, .function_expr, .p8);
+                if (selected.callables_top or selected.callables.len != 1 or selected.callables[0] != self.functionHandle(declaration.init)) try self.record(func, .function_expr, .module_state_unmodeled);
             }
             const request = try self.seedRequest(func, &entry);
             self.completions = .empty;
@@ -1978,7 +1968,7 @@ pub const FlowInterp = struct {
                         continue;
                     };
                     if (declaration.declaration != null_node) try self.exec(declaration.declaration, st);
-                    if (declaration.from_module_idx != 0) try self.record(node, .export_decl, .p8);
+                    if (declaration.from_module_idx != 0) try self.record(node, .export_decl, .module_graph_gap);
                 },
                 .export_default => if (self.ir_view.getOptValue(node)) |value| {
                     _ = try self.eval(value, st);
@@ -1991,14 +1981,14 @@ pub const FlowInterp = struct {
                         while (k < declaration.specifiers_count) : (k += 1) {
                             const spec = self.ir_view.getImportSpec(self.ir_view.getListIndex(declaration.specifiers_start, k)) orelse continue;
                             const resolved = self.importedExport(name, spec.imported_atom) orelse {
-                                try self.record(node, .import_decl, .p8);
+                                try self.record(node, .import_decl, .module_graph_gap);
                                 continue;
                             };
                             try self.storeGlobal(st, spec.local_binding.name_atom, try self.exportValue(resolved));
                         }
                     } else {
                         if (self.modules.len == 0) {
-                            try self.record(node, .import_decl, .p8);
+                            try self.record(node, .import_decl, .module_graph_gap);
                             continue;
                         }
                         var k: u8 = 0;
@@ -2020,7 +2010,7 @@ pub const FlowInterp = struct {
                                     self.leaveModule(saved);
                                 }
                             }
-                            if (copied == null) try self.record(node, .import_decl, .p8);
+                            if (copied == null) try self.record(node, .import_decl, .module_graph_gap);
                             try self.storeGlobal(st, spec.local_binding.name_atom, copied orelse Value.top);
                         }
                     }
@@ -2103,12 +2093,6 @@ pub const FlowInterp = struct {
     pub fn analyzeHandlerReport(self: *FlowInterp, func: NodeIndex) Error!HandlerReport {
         const result = try self.analyzeHandler(func);
         return self.finishHandlerReport(result);
-    }
-
-    pub fn returnedFlow(self: *FlowInterp, result: FunctionResult) Error!Flow {
-        var flow = try self.deepFlow(&result.exit, &.{result.returned orelse Value.clean});
-        if (result.cleared) flow.labels.unknown = true;
-        return flow;
     }
 
     fn seedRequest(self: *FlowInterp, func: NodeIndex, entry: *State) Error!Value {
@@ -2595,7 +2579,7 @@ pub const FlowInterp = struct {
     /// when exactly one declaration in the program binds it, that declaration
     /// is a function declaration or a `const` arrow function at the top level
     /// (so module initialization runs it before any request), and no
-    /// assignment targets the name. Anything else stays module state (P8).
+    /// assignment targets the name. Anything else stays module state.
     fn moduleFunction(self: *FlowInterp, atom: u16) Error!?NodeIndex {
         const names = try self.moduleNames();
         return names.functions.get(atom);
@@ -2613,7 +2597,7 @@ pub const FlowInterp = struct {
     /// declaration is an import specifier from a `zttp:` path whose module
     /// exports the imported name, and no assignment targets the name. An
     /// import from a user module, or of a name with no export, stays module
-    /// state (P8).
+    /// state.
     fn moduleExport(self: *FlowInterp, atom: u16) Error!?ModuleExport {
         const names = try self.moduleNames();
         return names.exports.get(atom);
@@ -3196,7 +3180,7 @@ pub const FlowInterp = struct {
                     if (findRow(&runtime_prototype_rows, scope, text)) |row| {
                         joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
                     } else {
-                        try self.record(node, .call, .p7);
+                        try self.record(node, .call, .prototype_method_unmodeled);
                         joined = try joinSummary(arena, joined, .{ .value = Value.top, .state = try self.heapState(candidate_entry) });
                     }
                     candidates += 1;
@@ -3428,9 +3412,9 @@ pub const FlowInterp = struct {
     }
 
     /// A write into the receiver of an array method. A shared runtime object
-    /// is shared by every request, so a write into one belongs to P8.
+    /// is shared by every request, so a write into one is module state.
     fn recordSharedWrite(self: *FlowInterp, node: NodeIndex, r: Value) Error!void {
-        if (hasBuiltinSite(r) and !self.persistent_globals) try self.record(node, .call, .p8);
+        if (hasBuiltinSite(r) and !self.persistent_globals) try self.record(node, .call, .module_state_unmodeled);
     }
 
     // --- virtual-module exports (P5b) ---
@@ -4580,7 +4564,7 @@ pub const FlowInterp = struct {
                 return self.captureValue(st, key);
             },
             // A module function is a fixed value; any other module name is
-            // state that P8 owns. An undeclared global that the module level
+            // state the evaluator does not place. An undeclared global that the module level
             // never binds is a builtin.
             .global, .undeclared_global => {
                 if (self.persistent_globals) {
@@ -4602,7 +4586,7 @@ pub const FlowInterp = struct {
                 if (binding.kind == .undeclared_global and !try self.moduleBinds(binding.name_atom)) {
                     return self.builtinGlobal(node, binding.name_atom);
                 }
-                try self.record(node, .identifier, .p8);
+                try self.record(node, .identifier, .module_state_unmodeled);
                 return Value.top;
             },
         }
@@ -4700,13 +4684,13 @@ pub const FlowInterp = struct {
                         try self.weakWriteCapture(st, key, assigned);
                         return assigned;
                     },
-                    // Module state belongs to P8.
+                    // Module state has no cell here unless globals persist.
                     .global, .undeclared_global => {
                         const assigned = if (asg.op) |op|
                             try self.compoundValue(op, (try self.loadGlobal(st, binding.name_atom)) orelse Value.top, asg.value, st)
                         else
                             try self.eval(asg.value, st);
-                        if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, assigned) else try self.record(node, .assignment, .p8);
+                        if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, assigned) else try self.record(node, .assignment, .module_state_unmodeled);
                         return assigned;
                     },
                 }
@@ -4742,7 +4726,7 @@ pub const FlowInterp = struct {
         } else try self.eval(asg.value, st);
         try self.writeValue(st, o, key, assigned);
         // A shared runtime object is shared by every request.
-        if (hasBuiltinSite(o) and !self.persistent_globals) try self.record(node, .assignment, .p8);
+        if (hasBuiltinSite(o) and !self.persistent_globals) try self.record(node, .assignment, .module_state_unmodeled);
         return assigned;
     }
 
@@ -5160,8 +5144,8 @@ pub const FlowInterp = struct {
     ) Error!void {
         switch (binding.kind) {
             .local, .argument => try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), v),
-            .global, .undeclared_global => if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, v) else try self.record(node, tag, .p8),
-            .upvalue => try self.record(node, tag, .p8),
+            .global, .undeclared_global => if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, v) else try self.record(node, tag, .module_state_unmodeled),
+            .upvalue => try self.record(node, tag, .module_state_unmodeled),
         }
     }
 };
@@ -5525,12 +5509,12 @@ test "receiver and key labels travel with a read and a write" {
 
     // The read at a labelled key may return a method of `table` (the key may
     // name one), a function object that every request shares. So the write
-    // through it is a P8 write, and the label still reaches `a.x`.
+    // through it is a shared-state write, and the label still reaches `a.x`.
     const write_through_key = "function f(s) { const a = {}; const table = [a]; table[s].x = \"X\"; return a.x; }";
     inline for (.{ secret_value, Value.clean }, .{ true, false }) |seed, leaks| {
         const r = try analyzeSource(write_through_key, "f", &.{seed});
         defer r.deinit();
-        try expectUnresolved(r.result, .assignment, .p8);
+        try expectUnresolved(r.result, .assignment, .module_state_unmodeled);
         try testing.expectEqual(leaks, r.returnedLabels().secret);
     }
 
@@ -5792,19 +5776,6 @@ test "a hole and a literal element bind nothing and the arm still evaluates" {
     try testing.expect(!r.result.cleared);
     try testing.expectEqual(@as(usize, 0), r.result.unresolved.len);
     try testing.expect(r.returnedLabels().isEmpty());
-}
-
-test "no tag is left to the nested-pattern phase" {
-    try testing.expect(!@hasField(Phase, "p6"));
-    try testing.expect(!@hasField(Owner, "p6"));
-    try testing.expect(tagPlan(.array_pattern) == .handled);
-    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
-        const tag: NodeTag = @enumFromInt(field.value);
-        switch (tagPlan(tag)) {
-            .later => |phase| try testing.expect(!std.mem.eql(u8, @tagName(phase), "p6")),
-            else => {},
-        }
-    }
 }
 
 test "a binding declared without an initializer is clean" {
@@ -6380,7 +6351,7 @@ test "a module-level function resolves only when it is the single fixed declarat
         &.{secret_value},
     );
     defer second.deinit();
-    try expectUnresolved(second.result, .identifier, .p8);
+    try expectUnresolved(second.result, .identifier, .module_state_unmodeled);
 
     // An assignment in another function may replace it.
     const assigned = try analyzeSource(
@@ -6389,7 +6360,7 @@ test "a module-level function resolves only when it is the single fixed declarat
         &.{secret_value},
     );
     defer assigned.deinit();
-    try expectUnresolved(assigned.result, .identifier, .p8);
+    try expectUnresolved(assigned.result, .identifier, .module_state_unmodeled);
 
     // An unbraced declaration under an `if` runs only when the condition holds.
     const conditional = try analyzeSource(
@@ -6398,12 +6369,12 @@ test "a module-level function resolves only when it is the single fixed declarat
         &.{secret_value},
     );
     defer conditional.deinit();
-    try expectUnresolved(conditional.result, .identifier, .p8);
+    try expectUnresolved(conditional.result, .identifier, .module_state_unmodeled);
 
     // A `let` arrow is not a fixed function.
     const mutable = try analyzeSource("let help = (x) => x; function f(s) { return help(s); }", "f", &.{secret_value});
     defer mutable.deinit();
-    try expectUnresolved(mutable.result, .identifier, .p8);
+    try expectUnresolved(mutable.result, .identifier, .module_state_unmodeled);
 }
 
 test "a recursive call feeds its arguments into the entry" {
@@ -6914,14 +6885,14 @@ test "an optional call keeps the state of the skip path" {
 }
 
 // P5 specification test 16.
-test "a write to a shared runtime object is a P8 write" {
+test "a write to a shared runtime object is a module-state write" {
     const math = try analyzeSource("function f(s) { Math.x = s; return 1; }", "f", &.{secret_value});
     defer math.deinit();
-    try expectUnresolved(math.result, .assignment, .p8);
+    try expectUnresolved(math.result, .assignment, .module_state_unmodeled);
 
     const alias = try analyzeSource("function f(s) { const g = parseInt; g.x = s; return 1; }", "f", &.{secret_value});
     defer alias.deinit();
-    try expectUnresolved(alias.result, .assignment, .p8);
+    try expectUnresolved(alias.result, .assignment, .module_state_unmodeled);
 
     // The contrast: a write to a local object is resolved.
     try expectSecret("function f(s) { const o = {}; o.x = s; return 1; }", &.{secret_value}, false);
@@ -7453,12 +7424,12 @@ test "a container nested in an export result has a location" {
 test "an import from a user module is module state" {
     const r = try analyzeSource("import { helper } from \"./other.ts\"; function f(s) { return helper(s); }", "f", &.{secret_value});
     defer r.deinit();
-    try expectUnresolved(r.result, .identifier, .p8);
+    try expectUnresolved(r.result, .identifier, .module_state_unmodeled);
 
     // An import of a name that the module does not export is module state too.
     const missing = try analyzeSource("import { noSuchExport } from \"zttp:text\"; function f(s) { return noSuchExport(s); }", "f", &.{secret_value});
     defer missing.deinit();
-    try expectUnresolved(missing.result, .identifier, .p8);
+    try expectUnresolved(missing.result, .identifier, .module_state_unmodeled);
 }
 
 test "an export read as a value is a native function value" {
@@ -8807,11 +8778,9 @@ test "tagPlan agrees with eval and exec for every tag" {
     }
 
     var handled: usize = 0;
-    var later: usize = 0;
     var refused: usize = 0;
     var refused_strict: usize = 0;
     var not_produced: usize = 0;
-    var by_phase = [_]usize{0} ** @typeInfo(Phase).@"enum".fields.len;
     inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
         const tag: NodeTag = @enumFromInt(field.value);
         const index = @intFromEnum(tag);
@@ -8824,11 +8793,6 @@ test "tagPlan agrees with eval and exec for every tag" {
                     std.debug.print("handled tag never reached by the corpus: {s}\n", .{field.name});
                     return error.HandledTagNotReached;
                 }
-            },
-            .later => |phase| {
-                later += 1;
-                by_phase[@intFromEnum(phase)] += 1;
-                try testing.expect(census.unresolved[index] > 0);
             },
             .refused_by_parser => {
                 refused += 1;
@@ -8844,18 +8808,16 @@ test "tagPlan agrees with eval and exec for every tag" {
             },
         }
     }
-    try testing.expectEqual(tag_count, handled + later + refused + refused_strict + not_produced);
+    try testing.expectEqual(tag_count, handled + refused + refused_strict + not_produced);
     try testing.expect(handled > 0 and refused > 0 and refused_strict > 0 and not_produced > 0);
-    // After P6a no tag is left to a later phase.
-    try testing.expectEqual(@as(usize, 0), later);
     try testing.expect(tagPlan(.array_pattern) == .handled);
     try testing.expect(tagPlan(.spread) == .refused_by_strict);
     inline for (.{ NodeTag.for_of_stmt, NodeTag.break_stmt, NodeTag.continue_stmt, NodeTag.call }) |tag| {
         try testing.expect(tagPlan(tag) == .handled);
     }
     std.debug.print(
-        "flow_interp tagPlan: {d} tags, handled={d} later={d} (p7={d} p8={d}) refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
-        .{ tag_count, handled, later, by_phase[0], by_phase[1], refused, refused_strict, not_produced },
+        "flow_interp tagPlan: {d} tags, handled={d} refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
+        .{ tag_count, handled, refused, refused_strict, not_produced },
     );
 }
 

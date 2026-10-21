@@ -1727,6 +1727,7 @@ fn runCheckOnParsedSource(
         result.flow_errors = @intCast(checked.flow_error_count);
         const flow_diags = checked.flowDiagnostics();
         result.flow_warnings = @intCast(flow_diags.len -| result.flow_errors);
+        result.flow_unresolved = checked.flow_checker.unresolvedCount();
         if (json_mode) {
             for (flow_diags) |diag| {
                 if (json_diag.fromCheckerDiagnostic(allocator, .flow, diag, ir_view, handler_path)) |jd| {

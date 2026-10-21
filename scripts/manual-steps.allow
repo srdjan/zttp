@@ -65,7 +65,3 @@ diagnostic-corpus-write regeneration
 # The canonical sequential gate is an operator entry point, never recursively
 # invoked by its own task coverage. Its constituent routes are checked.
 verify sequential-verification-driver
-
-# Shadow evaluator evidence deliberately stays outside production/aggregate
-# verdicts until P9 meets every frozen precision and semantic expectation.
-flow-shadow-diff shadow-differential-evidence

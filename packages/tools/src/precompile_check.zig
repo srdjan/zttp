@@ -60,6 +60,9 @@ pub const CheckResult = struct {
     verify_warnings: u32 = 0,
     flow_errors: u32 = 0,
     flow_warnings: u32 = 0,
+    /// Constructs the flow interpreter could not follow. Zero over every frozen
+    /// corpus case; any other count clears the proven properties.
+    flow_unresolved: usize = 0,
     canonical_errors: u32 = 0,
     /// Capability-policy violations (POL0xx). Only ever non-zero when the
     /// caller supplied a policy; a project that declares none cannot fail this.

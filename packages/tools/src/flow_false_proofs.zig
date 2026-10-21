@@ -35,7 +35,7 @@ const probes = @import("flow_census_probes.zig");
 const Property = probes.Property;
 
 pub const Fixture = struct {
-    /// Unique fixture identity, also used by the shadow differential runner.
+    /// Unique fixture identity.
     name: []const u8,
     /// The property the fixture must NOT prove.
     property: Property,

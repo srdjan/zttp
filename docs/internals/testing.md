@@ -169,42 +169,7 @@ A table of old-checker misses is empty today, and a test holds it equal to the
 observed misses. The new flow interpreter must meet every expectation with no
 exemption before it replaces the old checker.
 
-`zig build flow-shadow-diff > /tmp/flow-shadow.jsonl` runs the repository-only
-P9 differential report. It compares all five properties for those 48 handlers,
-including the frozen 214 required bits, plus all 38 false-proof fixtures and
-four clean contrasts. Each JSONL property row reports the production and shadow
-status as `PROVEN`, `REFUSED`, `UNPROVEN`, or `NO_VERDICT`; diagnostics and every
-unresolved source tag are separate records. A refused property needs a diagnostic
-for that property. Missing analysis is `NO_VERDICT` and fails the run. A
-contradiction between a proved property and its diagnostic also fails the run.
-Any frozen expectation miss, unresolved operation, source error, or corpus floor change
-fails after the complete report. Status differences are reported even when the
-fixed expectation permits them. This step is explicitly manual. The shadow harness is retained as a migration
-check until its planned removal in pruning round 2; it supplies P9 evidence without changing production
-CHECK. `test-flow-shadow-diff` tests report classification and corpus floors and
-also runs under `test-flow-census`; those helper tests do not establish precision.
-
-Add `-- --census --diagnostic-corpus --codegen` to append the actual generated
-734-probe flow census, all 182 diagnostic corpus sources, and the active codegen
-workspaces. The census keeps its own semantic expectations, including the
-difference between a witnessed refusal and an unproven property. Codegen follows
-all 29 committed active-generation descriptors across both providers, verifies
-the declared expected-workspace file digests, analyzes the 18 existing handler
-roots with their helpers and schema, and explicitly records the 11 workspaces
-without a handler. No recordings or goldens are rewritten. Each flag can also
-run separately; the original 90 cases and frozen floors run in every mode.
-
-Corpus inputs stopped by production parsing, boolean/type/strict checks, or
-without a handler receive a `flow_not_applicable` record with stages, blocker
-counts, and the shared production-prefix diagnostics. The shadow never runs
-flow past that boundary. Unexpected admission or source errors still fail. Flow
-diagnostic differences compare full code, severity, text, file, source location,
-suggestion, and repair intent as a multiset, preserving repeated diagnostics.
-Every difference is emitted and fails the evidence run. Module graph records
-identify retained paths, revisions, initialization order, and completeness;
-unresolved operations and sink events carry their source module and location.
-Production proof-trace JSON is retained when available. Shadow witnesses and
-defended paths remain pending until its report provides them.
+The same file also holds a floor over the whole frozen corpus: the 48 precision handlers, the 38 false-proof fixtures, and the four clean contrasts. The test runs each case through the production check path. It requires 90 cases, no source error, and `CheckResult.flow_unresolved == 0`. An unresolved construct clears every flow property, so a non-zero count would hide a lost proof.
 
 `test-zts` also runs the failure-severity census, in
 `packages/zts/src/severity_census.zig`. It generates one probe handler per
