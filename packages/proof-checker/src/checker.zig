@@ -941,7 +941,15 @@ const Session = struct {
             else
                 edge.grade;
         }
-        if (self.certificate.translation.len() > 0 and !has_opcode_dependency) {
+        // Bytecode opcode meaning is unmodeled, so any claim on totality
+        // depends on it: translation witnesses, a graded totality edge, or a
+        // policy that requires the property. An absent opcode edge is a
+        // certificate that hides that dependency, whatever the translation
+        // section holds.
+        if (!has_opcode_dependency and (self.certificate.translation.len() > 0 or
+            grades[totality_slot] != null or
+            self.policy.requires(.response_total)))
+        {
             return reject(.evidence_check, .trusted_edge_undeclared, .{ .property = .response_total });
         }
 
@@ -1388,6 +1396,7 @@ pub const test_support = struct {
         obligations: [8]cert_mod.Obligation,
         evidence: [10]cert_mod.Evidence,
         residual_plan: [1]cert_mod.ResidualObligation,
+        trusted: [1]cert_mod.TrustedEdge,
         buffer: [8192]u8 = undefined,
         len: usize = 0,
         policy_bytes: [256]u8 = undefined,
@@ -1480,6 +1489,7 @@ pub const test_support = struct {
                 .obligations = &self.obligations,
                 .ir = &self.ir,
                 .evidence = &self.evidence,
+                .trusted = &self.trusted,
                 .residual = &self.residual_plan,
             };
         }
@@ -1585,6 +1595,9 @@ pub const test_support = struct {
                     .impl_id = residual.guard_impl.env_read_v1,
                     .operation_id = 2,
                 },
+            },
+            .trusted = .{
+                .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
             },
         };
         fixture.writePolicy(&.{"API_KEY"});
@@ -1692,12 +1705,14 @@ test "a guarded artifact is accepted, and its guards are counted apart from its 
     try testing.expectEqual(@as(u8, 1 << 0), result.guards.kinds);
 
     // A covered guard is not a discharged property. Nothing about the guard
-    // appears in the property verdicts, and the grade is still the weakest
-    // static edge.
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.grade());
+    // appears in the property verdicts. The totality grade is capped at
+    // trusted by the opcode edge, so the overall grade is trusted and the
+    // other seven properties stay tested.
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade());
     inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
         const property: ps.Property = @enumFromInt(field.value);
-        try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.properties.gradeFor(property));
+        const expected: verdict.AssuranceGrade = if (property == .response_total) .trusted else .tested;
+        try testing.expectEqual(@as(?verdict.AssuranceGrade, expected), result.properties.gradeFor(property));
     }
 }
 
@@ -2104,6 +2119,57 @@ test "translation cannot omit its trusted opcode dependency" {
     try testing.expect(!result.accepted());
     try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
     try testing.expectEqual(verdict.ReasonCode.trusted_edge_undeclared, result.rejection().?.code);
+}
+
+const without_totality_requirement = [_]policy_mod.Requirement{
+    .{ .property = .results_checked, .min_grade = .tested },
+};
+
+fn policyWithoutTotality() Policy {
+    @setRuntimeSafety(true);
+    var policy = policy_mod.production;
+    policy.required = &without_totality_requirement;
+    return policy;
+}
+
+test "an established totality claim with no translation still needs its opcode edge" {
+    // The guarded fixture proves totality from the IR alone, so it carries no
+    // translation evidence and no witness. Dropping the opcode edge must not
+    // let the claim through at a grade above trusted.
+    var fixture = try test_support.buildGuarded();
+    var parts = fixture.parts();
+    parts.trusted = &.{};
+    try encodeGuardedParts(&fixture, parts);
+    try expectAt(check(fixture.inputs(), policyWithoutTotality()), .evidence_check, .trusted_edge_undeclared);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .trusted_edge_undeclared);
+}
+
+test "a required totality property with unestablished evidence still needs its opcode edge" {
+    var fixture = try test_support.buildGuarded();
+    fixture.evidence[0] = .{ .obligation_index = 0, .edge = .not_established, .rule = null, .node_id = 0, .aux = 0 };
+    var parts = fixture.parts();
+    parts.evidence = &fixture.evidence;
+    parts.trusted = &.{};
+    try encodeGuardedParts(&fixture, parts);
+    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .trusted_edge_undeclared);
+}
+
+test "translation witnesses with unestablished totality still need the opcode edge" {
+    var fixture = try test_support.build();
+    fixture.evidence[0] = .{ .obligation_index = 0, .edge = .not_established, .rule = null, .node_id = 0, .aux = 0 };
+    var parts = fixture.parts();
+    parts.trusted = &.{};
+    try fixture.encodeParts(parts);
+    try expectAt(check(fixture.inputs(), policyWithoutTotality()), .evidence_check, .trusted_edge_undeclared);
+}
+
+test "an established totality claim with no translation is accepted at trusted with its opcode edge" {
+    var fixture = try test_support.buildGuarded();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.rejection() == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade());
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.response_total));
 }
 
 test "a matching certificate and inventory reach policy acceptance" {
@@ -3227,7 +3293,7 @@ fn reasonAllowlist(code: verdict.ReasonCode) ?[]const u8 {
         .rule_premise_unmet => "checker tests for a missing return premise and an inapplicable cited rule pin this reason",
         .proof_node_cycle => "checker.test.a root with a nonzero parent rejects checks the root shape",
         .proof_node_unknown => "checker tests for a bad node id, wrong handler tag, and two handlers pin shape refusals",
-        .trusted_edge_undeclared => "checker.test.translation cannot omit its trusted opcode dependency checks the inventory",
+        .trusted_edge_undeclared => "checker.test.translation cannot omit its trusted opcode dependency checks the inventory, and checker.test.an established totality claim with no translation still needs its opcode edge covers the empty-translation claim",
         .evidence_edge_invalid => "checker tests for a missing kernel rule and a nontrusted inventory grade pin this reason",
         .proof_node_parent_mismatch => "checker.test.a child whose parent disagrees with its owner rejects checks ownership",
 
