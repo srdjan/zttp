@@ -13,6 +13,7 @@ const precompile = zts_cli.precompile;
 const deploy_manifest = zts_cli.deploy_manifest;
 const shared = @import("cli_shared.zig");
 const artifact_graph = @import("artifact_graph.zig");
+const contract_runtime = @import("contract_runtime.zig");
 const pcc = @import("zttp_proof_checker");
 const proof_activation = @import("proof_activation.zig");
 const proof_certificate = @import("proof_certificate.zig");
@@ -562,6 +563,16 @@ const ArtifactTailInput = struct {
     configured_policy: ?*const zts.HandlerPolicy = null,
 };
 
+/// The sections the artifact tail is about to embed, exactly as written.
+const ArtifactAcceptanceInput = struct {
+    certificate: ?[]const u8,
+    bytecode: []const u8,
+    dep_bytecodes: []const []const u8,
+    contract_json: ?[]const u8,
+    policy_section: []const u8,
+    policy_section_digest: [32]u8,
+};
+
 const ArtifactTailCapabilities = struct {
     context: ?*anyopaque,
     serialize_contract: *const fn (
@@ -578,6 +589,15 @@ const ArtifactTailCapabilities = struct {
         runtime_policy_sha256: []const u8,
         executable_root_sha256: []const u8,
     ) anyerror!?[]u8,
+    /// Production acceptance of the artifact about to be written: the same
+    /// consumer check the served binary runs at startup. It returns
+    /// `error.ProofAcceptanceFailed` after naming the refusal, so a build
+    /// never writes a binary that would refuse to serve.
+    accept_artifact: *const fn (
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        input: ArtifactAcceptanceInput,
+    ) anyerror!void,
     create_artifact: *const fn (
         context: ?*anyopaque,
         allocator: std.mem.Allocator,
@@ -647,10 +667,81 @@ fn createArtifactCapability(
     };
 }
 
+/// Run the consumer acceptance the served binary runs at startup
+/// (`Server.acceptEmbeddedCertificate`) over the sections about to be written.
+/// A build that passes here produces a binary that production acceptance
+/// accepts; a build that fails here would have produced one that refuses to
+/// serve. Provenance is `.absent`: production policy requires none, and this
+/// build has not verified any signature.
+fn acceptArtifactCapability(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    input: ArtifactAcceptanceInput,
+) !void {
+    const contract_json = input.contract_json orelse {
+        reportBuildRefusal("the artifact carries no contract, so nothing can be checked");
+        return error.ProofAcceptanceFailed;
+    };
+    const raw = contract_runtime.parseContractJson(allocator, contract_json) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            reportBuildRefusal("the serialized contract does not parse");
+            return error.ProofAcceptanceFailed;
+        },
+    };
+    var validated = contract_runtime.validate(raw, .{ .bytecode = input.bytecode }) catch {
+        // `validate` has no allocating path, so every error is a refusal.
+        reportBuildRefusal("the serialized contract fails validation");
+        return error.ProofAcceptanceFailed;
+    };
+    defer validated.deinit();
+
+    // The same projection `Server.observedArtifactIdentity` reads at startup.
+    const view = validated.view();
+    var identity = artifact_graph.Identity{
+        .module_specifiers = view.modules,
+        .core_profile_id = view.source_identity.core_profile.id(),
+        .core_grammar_hash = view.source_identity.core_grammar_hash,
+        .semantics_hash = view.source_identity.semantics_hash,
+    };
+    if (view.capabilities) |caps| identity.capability_hash = caps.hash;
+
+    const assessment = try proof_activation.accept(allocator, .{
+        .certificate = input.certificate,
+        .bytecode = input.bytecode,
+        .dep_bytecodes = input.dep_bytecodes,
+        .contract_section = contract_json,
+        .policy_section_digest = input.policy_section_digest,
+        .policy_section = input.policy_section,
+        .identity = identity,
+        .provenance = .absent,
+    }, pcc.policy.production);
+
+    if (contract_runtime.promote(&validated, assessment, input.policy_section_digest) == null) {
+        if (!builtin.is_test) {
+            if (assessment.rejection()) |rejection| {
+                std.debug.print(
+                    "Build refused: production acceptance failed at {s} ({s}); the artifact would refuse to serve.\n",
+                    .{ rejection.stage.name(), rejection.code.text() },
+                );
+            } else {
+                std.debug.print("Build refused: production acceptance did not complete; the artifact would refuse to serve.\n", .{});
+            }
+        }
+        return error.ProofAcceptanceFailed;
+    }
+}
+
+fn reportBuildRefusal(reason: []const u8) void {
+    if (builtin.is_test) return;
+    std.debug.print("Build refused: {s}; the artifact would refuse to serve.\n", .{reason});
+}
+
 const production_artifact_tail_capabilities = ArtifactTailCapabilities{
     .context = null,
     .serialize_contract = serializeContractCapability,
     .sign_contract = signContractCapability,
+    .accept_artifact = acceptArtifactCapability,
     .create_artifact = createArtifactCapability,
 };
 
@@ -768,6 +859,18 @@ fn writeArtifactTail(
         );
     };
     defer if (attestation_jws) |attestation| allocator.free(attestation);
+
+    // Refuse before writing: the served binary runs this same acceptance at
+    // startup, and a deploy that reports success for a binary that will not
+    // start is worse than a refused build. No file is created on refusal.
+    try capabilities.accept_artifact(capabilities.context, allocator, .{
+        .certificate = if (certificate) |value| value.bytes else null,
+        .bytecode = input.bytecode,
+        .dep_bytecodes = input.dep_bytecodes,
+        .contract_json = contract_json,
+        .policy_section = policy_section,
+        .policy_section_digest = runtime_policy_digest,
+    });
 
     try capabilities.create_artifact(
         capabilities.context,
@@ -1234,6 +1337,7 @@ const ArtifactTailProbe = struct {
             .context = self,
             .serialize_contract = recordSerialization,
             .sign_contract = recordSigning,
+            .accept_artifact = acceptArtifactPassThrough,
             .create_artifact = recordCreation,
         };
     }
@@ -2030,8 +2134,15 @@ test "the signed root and the startup rebuild are the same fold" {
 // Artifact round-trip through the producer and consumer
 // ---------------------------------------------------------------------------
 
-const contract_runtime = @import("contract_runtime.zig");
 const proofs_bundle = @import("proofs/bundle.zig");
+
+/// Test probes that deliberately write artifacts the server must refuse, and
+/// that read the written payload back, skip production acceptance.
+fn acceptArtifactPassThrough(
+    _: ?*anyopaque,
+    _: std.mem.Allocator,
+    _: ArtifactAcceptanceInput,
+) !void {}
 
 /// Captures the payload the artifact tail would write, serialized exactly as
 /// `self_extract.create` serializes it, so a test reads it back the way a
@@ -2062,6 +2173,7 @@ const PayloadCapture = struct {
             .context = self,
             .serialize_contract = serializeContractCapability,
             .sign_contract = signContractCapability,
+            .accept_artifact = acceptArtifactPassThrough,
             .create_artifact = capture,
         };
     }
@@ -2883,4 +2995,162 @@ fn buildDirectCertificateForAllocationTest(
     var built = try proof_certificate.build(allocator, inputs);
     defer built.deinit();
     try std.testing.expect(built.bytes.len > 0);
+}
+
+// ---------------------------------------------------------------------------
+// The build refuses what production acceptance refuses
+// ---------------------------------------------------------------------------
+
+/// The production artifact tail with only artifact creation replaced, so a test
+/// runs the real acceptance and sees whether the build reached creation.
+const ProductionAcceptanceProbe = struct {
+    create_calls: usize = 0,
+
+    fn recordCreation(
+        context: ?*anyopaque,
+        _: std.mem.Allocator,
+        _: []const u8,
+        _: []const u8,
+        _: self_extract.PayloadInput,
+    ) !void {
+        const self: *ProductionAcceptanceProbe = @ptrCast(@alignCast(context.?));
+        self.create_calls += 1;
+    }
+
+    fn capabilities(self: *ProductionAcceptanceProbe) ArtifactTailCapabilities {
+        var caps = production_artifact_tail_capabilities;
+        caps.context = self;
+        caps.create_artifact = recordCreation;
+        return caps;
+    }
+};
+
+/// A secret env value in the response body: the compile succeeds and emits a
+/// certificate, and production acceptance refuses it at the policy stage
+/// (`required_property_not_established`), as `zttp deploy` did in the field.
+const refused_by_production_source =
+    \\import { env } from "zttp:env";
+    \\function handler(req: Request): Response {
+    \\  const v = env("SECRET_KEY");
+    \\  return Response.text(v === undefined ? "none" : v);
+    \\}
+;
+
+const accepted_by_production_source =
+    \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+    \\  return Response.text("ok");
+    \\}
+;
+
+fn compileForProductionTail(allocator: std.mem.Allocator, source: []const u8) !precompile.CompiledHandler {
+    return precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+}
+
+test "a handler that production acceptance refuses never reaches artifact creation" {
+    const allocator = std.testing.allocator;
+    var compiled = try compileForProductionTail(allocator, refused_by_production_source);
+    defer compiled.deinit(allocator);
+    // The fixture reaches acceptance with everything a build normally has.
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    var probe = ProductionAcceptanceProbe{};
+    try std.testing.expectError(error.ProofAcceptanceFailed, writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = &evidence,
+    }, probe.capabilities()));
+    try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
+}
+
+test "a handler that production acceptance accepts reaches artifact creation once" {
+    const allocator = std.testing.allocator;
+    var compiled = try compileForProductionTail(allocator, accepted_by_production_source);
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    var probe = ProductionAcceptanceProbe{};
+    try writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = &evidence,
+    }, probe.capabilities());
+    try std.testing.expectEqual(@as(usize, 1), probe.create_calls);
+}
+
+test "production acceptance in the build refuses a missing certificate and a missing contract" {
+    const allocator = std.testing.allocator;
+    var compiled = try compileForProductionTail(allocator, accepted_by_production_source);
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    var no_certificate = ProductionAcceptanceProbe{};
+    try std.testing.expectError(error.ProofAcceptanceFailed, writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = null,
+    }, no_certificate.capabilities()));
+    try std.testing.expectEqual(@as(usize, 0), no_certificate.create_calls);
+
+    var no_contract = ProductionAcceptanceProbe{};
+    try std.testing.expectError(error.ProofAcceptanceFailed, writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = null,
+        .proof_evidence = &evidence,
+    }, no_contract.capabilities()));
+    try std.testing.expectEqual(@as(usize, 0), no_contract.create_calls);
+}
+
+test "a refused build leaves an existing output file unchanged" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try zts.file_io.writeFile(allocator, "runtime", "runtime-template");
+    try zts.file_io.writeFile(allocator, "artifact.bin", "previous build");
+
+    var compiled = try compileForProductionTail(allocator, refused_by_production_source);
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    // The real creation capability: only a refusal before it keeps the file.
+    try std.testing.expectError(error.ProofAcceptanceFailed, writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = &evidence,
+    }, production_artifact_tail_capabilities));
+
+    const existing = try zts.file_io.readFile(allocator, "artifact.bin", 64);
+    defer allocator.free(existing);
+    try std.testing.expectEqualStrings("previous build", existing);
 }

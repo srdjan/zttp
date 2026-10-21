@@ -274,7 +274,7 @@ fn cmdCompile(ctx: cli_help.Ctx) anyerror!void {
             printNoProjectConfigDiagnostic(ctx.command);
             std.process.exit(1);
         }
-        if (err == error.MissingArgument or err == error.HandlerReadFailed or isDeclarationBuildError(err)) {
+        if (err == error.MissingArgument or err == error.HandlerReadFailed or err == error.ProofAcceptanceFailed or isDeclarationBuildError(err)) {
             std.process.exit(1);
         }
         return err;
@@ -305,6 +305,7 @@ fn cmdBuild(ctx: cli_help.Ctx) anyerror!void {
             err == error.HandlerReadFailed or
             err == error.PolicyContextFailed or
             err == error.PolicyViolation or
+            err == error.ProofAcceptanceFailed or
             isDeclarationBuildError(err))
         {
             std.process.exit(1);
@@ -355,6 +356,7 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
             error.HandlerReadFailed,
             error.PolicyContextFailed,
             error.PolicyViolation,
+            error.ProofAcceptanceFailed,
             error.DeclarationContextFailed,
             error.RequiredClassificationAbsent,
             error.CeilingBreached,
