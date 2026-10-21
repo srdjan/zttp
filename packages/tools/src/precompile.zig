@@ -1858,7 +1858,7 @@ fn runCheckOnParsedSource(
         defer trace_arena.deinit();
         const flow_for_trace = if (analysis.checkedModule()) |checked| checked.flowDiagnostics() else &.{};
         const defended_for_trace = if (analysis.checkedModule()) |checked| checked.defendedPaths() else &.{};
-        if (zts.proof_trace.collect(
+        const traces = try zts.proof_trace.collect(
             trace_arena.allocator(),
             c,
             flow_for_trace,
@@ -1866,14 +1866,15 @@ fn runCheckOnParsedSource(
             ir_view,
             result.paths_enumerated,
             result.paths_exhaustive,
-        )) |traces| {
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-            const ok = if (zts.proof_trace.writeJson(&aw.writer, traces)) |_| true else |_| false;
-            buf = aw.toArrayList();
-            if (ok) result.proof_trace_json = allocator.dupe(u8, buf.items) catch null;
-        } else |_| {}
+        );
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+        const trace_written = zts.proof_trace.writeJson(&aw.writer, traces);
+        buf = aw.toArrayList();
+        // An allocating writer fails only when it cannot allocate.
+        trace_written catch return error.OutOfMemory;
+        result.proof_trace_json = try allocator.dupe(u8, buf.items);
     }
 
     // Later analysis stages mutate contract.properties, so keep the flat
@@ -2557,9 +2558,12 @@ pub fn compileHandler(
             const test_count = handler_tests.len;
             if (test_count > 0) {
                 var jsonl_buf: std.ArrayList(u8) = .empty;
+                defer jsonl_buf.deinit(allocator);
                 var jsonl_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl_buf);
-                gen.writeJsonl(&jsonl_aw.writer) catch {};
+                const jsonl_written = gen.writeJsonl(&jsonl_aw.writer);
                 jsonl_buf = jsonl_aw.toArrayList();
+                // An allocating writer fails only when it cannot allocate.
+                jsonl_written catch return error.OutOfMemory;
                 generated_tests_jsonl = try jsonl_buf.toOwnedSlice(allocator);
             }
 

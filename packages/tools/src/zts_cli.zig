@@ -153,6 +153,38 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     std.process.exit(1);
 }
 
+/// Writes the `check --json` envelope. A writer failure propagates so that the
+/// command never reports success with a truncated or empty envelope.
+fn writeCheckEnvelope(
+    writer: *std.Io.Writer,
+    has_errors: bool,
+    contract: ?*const zts.HandlerContract,
+    diagnostics: []const json_diagnostics.JsonDiagnostic,
+    proof_trace_json: ?[]const u8,
+) !void {
+    if (has_errors) {
+        try json_diag.writeErrorJson(writer, contract, diagnostics, proof_trace_json);
+    } else {
+        try json_diag.writeSuccessJson(writer, contract, diagnostics, proof_trace_json);
+    }
+}
+
+/// Writes every byte to `fd`. A short write continues from the unwritten tail,
+/// an interrupted write retries, and any other failure is `error.WriteFailed`.
+fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rest = bytes[offset..];
+        const n = std.c.write(fd, rest.ptr, rest.len);
+        if (n < 0) {
+            if (std.posix.errno(n) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (n == 0) return error.WriteFailed;
+        offset += @intCast(n);
+    }
+}
+
 fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var sql_schema_path: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
@@ -247,18 +279,17 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         defer buf.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-        if (result.totalErrors() > 0) {
-            const contract_ptr: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items, result.proof_trace_json) catch {};
-        } else {
-            const contract_ptr: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
-            json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items, result.proof_trace_json) catch {};
-        }
-
+        const contract_ptr: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
+        const envelope_written = writeCheckEnvelope(
+            &aw.writer,
+            result.totalErrors() > 0,
+            contract_ptr,
+            result.json_diagnostics.items,
+            result.proof_trace_json,
+        );
         buf = aw.toArrayList();
-        if (buf.items.len > 0) {
-            _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
-        }
+        try envelope_written;
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
 
         if (result.totalErrors() > 0) std.process.exit(1);
         return;
@@ -688,6 +719,17 @@ fn printGenTestsHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+}
+
+test "check envelope writer failure propagates" {
+    var failing = std.Io.Writer.failing;
+    try std.testing.expectError(error.WriteFailed, writeCheckEnvelope(&failing, false, null, &.{}, null));
+    try std.testing.expectError(error.WriteFailed, writeCheckEnvelope(&failing, true, null, &.{}, null));
+}
+
+test "writeAllFd fails on a closed descriptor and writes a full buffer" {
+    try std.testing.expectError(error.WriteFailed, writeAllFd(-1, "x"));
+    try writeAllFd(std.c.STDERR_FILENO, "");
 }
 
 test "missing sql schema json uses diagnostic envelope" {

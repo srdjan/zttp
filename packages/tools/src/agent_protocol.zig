@@ -3433,7 +3433,7 @@ test "modules returns the resolved graph and binds one hash in two places" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data =
         \\import { env } from "zttp:env";
         \\import { two } from "./util.ts";
-        \\export function handler(req) { return Response.json({ two, e: env("X") }); }
+        \\export function handler(req) { return Response.json({ two: two, e: env("X") }); }
         \\
     });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);

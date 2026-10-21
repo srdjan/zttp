@@ -71,6 +71,9 @@ pub const rejection_path_outside_root = "path_outside_project_root";
 pub const rejection_file_unreadable = "file_unreadable";
 pub const rejection_unknown_specifier = "unknown_specifier";
 pub const rejection_extension_unavailable = "extension_manifest_unavailable";
+/// The parser failed on the module, so its import list may be partial or empty.
+/// Recorded with an empty specifier and the module as the importer.
+pub const rejection_parse_failed = "parse_failed";
 
 pub const BuildError = error{
     /// The entry file could not be read. Distinct from an unreadable import,
@@ -230,8 +233,24 @@ fn buildInternal(
         .modules = module_slice,
         .rejected = rejected_slice,
         .builtin_registry_hash = builtin_hash,
-        .hash = computeHash(module_slice, builtin_hash),
+        .hash = computeHash(module_slice, rejected_slice, builtin_hash),
     };
+}
+
+fn recordParseFailure(
+    allocator: std.mem.Allocator,
+    rejected: *std.ArrayList(Rejection),
+    importer_rel: []const u8,
+) !void {
+    const specifier = try allocator.dupe(u8, "");
+    errdefer allocator.free(specifier);
+    const importer = try allocator.dupe(u8, importer_rel);
+    errdefer allocator.free(importer);
+    try rejected.append(allocator, .{
+        .specifier = specifier,
+        .importer = importer,
+        .reason = rejection_parse_failed,
+    });
 }
 
 fn collectImports(
@@ -258,9 +277,15 @@ fn collectImports(
     var js_parser = (if (typed)
         parser.JsParser.initAdmission(allocator, allocator, source, .compile)
     else
-        parser.JsParser.init(allocator, source)) catch return;
+        parser.JsParser.init(allocator, source)) catch |err| switch (err) {
+        // Init fails only on allocation.
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     defer js_parser.deinit();
-    _ = js_parser.parse() catch {};
+    _ = js_parser.parse() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => try recordParseFailure(allocator, rejected, importer_rel),
+    };
 
     const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const node_count = js_parser.getRetainedImportNodeCount();
@@ -371,8 +396,10 @@ fn lessRejection(_: void, a: Rejection, b: Rejection) bool {
 /// the built-in registry hash, terminated. The extension-manifest section
 /// appends after the builtin hash once manifests are authenticated, so the
 /// terminator is unconditional and an empty section is not the same pre-image
-/// as an absent one.
-fn computeHash(modules: []const ModuleRecord, builtin_hash: [64]u8) [64]u8 {
+/// as an absent one. Each rejection then appends `importer \0 specifier \0
+/// reason \0 \x02` after the modules and before the builtin hash, so an empty
+/// rejection list leaves the pre-image unchanged.
+fn computeHash(modules: []const ModuleRecord, rejected: []const Rejection, builtin_hash: [64]u8) [64]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     for (modules) |m| {
         hasher.update(m.path);
@@ -389,6 +416,15 @@ fn computeHash(modules: []const ModuleRecord, builtin_hash: [64]u8) [64]u8 {
         }
         hasher.update("\x01");
     }
+    for (rejected) |r| {
+        hasher.update(r.importer);
+        hasher.update("\x00");
+        hasher.update(r.specifier);
+        hasher.update("\x00");
+        hasher.update(r.reason);
+        hasher.update("\x00");
+        hasher.update("\x02");
+    }
     hasher.update(&builtin_hash);
     hasher.update("\x01");
     return std.fmt.bytesToHex(hasher.finalResult(), .lower);
@@ -398,7 +434,7 @@ fn computeHash(modules: []const ModuleRecord, builtin_hash: [64]u8) [64]u8 {
 /// registry alone. Operations that take no `file` bind this, so `expected` has
 /// something to compare and the envelope field is never empty.
 pub fn contextFreeHash() [64]u8 {
-    return computeHash(&.{}, moduleMetadata.builtinRegistryHash());
+    return computeHash(&.{}, &.{}, moduleMetadata.builtinRegistryHash());
 }
 
 // ---------------------------------------------------------------------------
@@ -658,24 +694,25 @@ test "contextFreeHash is the builtin-only digest and is stable" {
 test "tolerant graph observation preserves imports before failed top-level statements" {
     const ExpectedImport = struct { specifier: []const u8, kind: ImportKind, target: []const u8 };
     const ExpectedRejection = struct { specifier: []const u8, importer: []const u8, reason: []const u8 };
+    const parse_failed: ExpectedRejection = .{ .specifier = "", .importer = "entry.ts", .reason = "parse_failed" };
     const cases = [_]struct {
         source: []const u8,
         modules: usize,
         imports: []const ExpectedImport,
         rejected: []const ExpectedRejection,
     }{
-        .{ .source = "import { env } from \"zttp:env\"; const broken = ; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
-        .{ .source = "const broken = ; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{} },
-        .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{.{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" }} },
-        .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; }", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
-        .{ .source = "import { env } from \"zttp:env\"; while (true) {} import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
-        .{ .source = "import { env } from \"zttp:env\"; const value: any = 1; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
-        .{ .source = "const value: any = 1; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{} },
-        .{ .source = "import { env } from \"zttp:env\"; import type { A } /* ; */ from \"./dep\"; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
+        .{ .source = "import { env } from \"zttp:env\"; const broken = ; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
+        .{ .source = "const broken = ; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
+        .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{ parse_failed, .{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" } } },
+        .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; }", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
+        .{ .source = "import { env } from \"zttp:env\"; while (true) {} import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
+        .{ .source = "import { env } from \"zttp:env\"; const value: any = 1; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
+        .{ .source = "const value: any = 1; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
+        .{ .source = "import { env } from \"zttp:env\"; import type { A } /* ; */ from \"./dep\"; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
         .{ .source = "import { a } from \"unknown\"; import { b } from \"zttp-ext:missing\"; import { c } from \"../outside\"; import { answer } from \"./dep\";", .modules = 2, .imports = &.{ .{ .specifier = "unknown", .kind = .unresolved, .target = "" }, .{ .specifier = "zttp-ext:missing", .kind = .extension, .target = "" }, .{ .specifier = "../outside", .kind = .relative, .target = "" }, .{ .specifier = "./dep", .kind = .relative, .target = "dep.ts" } }, .rejected = &.{ .{ .specifier = "../outside", .importer = "entry.ts", .reason = "path_outside_project_root" }, .{ .specifier = "unknown", .importer = "entry.ts", .reason = "unknown_specifier" }, .{ .specifier = "zttp-ext:missing", .importer = "entry.ts", .reason = "extension_manifest_unavailable" } } },
         .{ .source = "structural Broken = number |; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
-        .{ .source = "import { env } from \"zttp:env\"; function wrapper() { const broken = ; const value: number = 1; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{.{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" }} },
-        .{ .source = "function wrapper() { import { env } from \"zttp:env\"; const broken = ; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{.{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" }} },
+        .{ .source = "import { env } from \"zttp:env\"; function wrapper() { const broken = ; const value: number = 1; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{ parse_failed, .{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" } } },
+        .{ .source = "function wrapper() { import { env } from \"zttp:env\"; const broken = ; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{ parse_failed, .{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" } } },
     };
     try testing.expectEqual(@as(usize, 12), cases.len);
     var tmp = testing.tmpDir(.{});
@@ -706,4 +743,58 @@ test "tolerant graph observation preserves imports before failed top-level state
             try testing.expectEqualStrings(want.reason, found.reason);
         }
     }
+}
+
+test "a parse failure is a rejection that changes the graph hash" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "entry.ts", .data = "" });
+    const root = try tmpRoot(&tmp, a);
+    defer a.free(root);
+
+    var graph = try buildWithEntrySource(a, testing.io, root, "entry.ts", "const broken = ;");
+    defer graph.deinit(a);
+    try testing.expectEqual(@as(usize, 1), graph.rejected.len);
+    try testing.expectEqualStrings(rejection_parse_failed, graph.rejected[0].reason);
+    try testing.expectEqualStrings("entry.ts", graph.rejected[0].importer);
+
+    const builtin = moduleMetadata.builtinRegistryHash();
+    const without = computeHash(graph.modules, &.{}, builtin);
+    try testing.expect(!std.mem.eql(u8, &without, &graph.hash));
+}
+
+test "a graph with no rejections hashes as the modules-only pre-image" {
+    const a = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "entry.ts", .data = "" });
+    const root = try tmpRoot(&tmp, a);
+    defer a.free(root);
+    var graph = try buildWithEntrySource(a, testing.io, root, "entry.ts", "import { env } from \"zttp:env\";\nexport const x = 1;\n");
+    defer graph.deinit(a);
+    try testing.expectEqual(@as(usize, 0), graph.rejected.len);
+
+    // The pre-image as it stood before rejections were hashed, written out
+    // independently of `computeHash`.
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (graph.modules) |m| {
+        hasher.update(m.path);
+        hasher.update("\x00");
+        hasher.update(&m.source_digest);
+        hasher.update("\x00");
+        for (m.imports) |imp| {
+            hasher.update(imp.specifier);
+            hasher.update("\x00");
+            hasher.update(@tagName(imp.kind));
+            hasher.update("\x00");
+            hasher.update(imp.target);
+            hasher.update("\x00");
+        }
+        hasher.update("\x01");
+    }
+    hasher.update(&graph.builtin_registry_hash);
+    hasher.update("\x01");
+    const expected = std.fmt.bytesToHex(hasher.finalResult(), .lower);
+    try testing.expectEqualSlices(u8, &expected, &graph.hash);
 }
