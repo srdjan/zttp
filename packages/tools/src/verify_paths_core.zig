@@ -1,6 +1,6 @@
 //! Shared `verify-paths` v1 envelope writer. See docs/zts-expert-contract.md.
 //!
-//! Diagnostics from `precompile.runCheckOnly` are serialized inside the loop
+//! Diagnostics from `precompile.runCheckOnlyWithOptions` are serialized inside the loop
 //! while the per-file CheckResult is still alive, so no cross-iteration
 //! borrowed strings survive into the envelope.
 

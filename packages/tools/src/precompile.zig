@@ -994,18 +994,6 @@ pub const CheckOptions = struct {
     import_reader: ?ImportReader = null,
 };
 
-pub fn runCheckOnly(
-    allocator: std.mem.Allocator,
-    handler_path: []const u8,
-    sql_schema_path: ?[]const u8,
-    json_mode: bool,
-) !CheckResult {
-    return runCheckOnlyWithOptions(allocator, handler_path, .{
-        .sql_schema_path = sql_schema_path,
-        .json_mode = json_mode,
-    });
-}
-
 /// Plain reason for the common handler-read failures. Any other error keeps
 /// its Zig error name, so no failure is hidden. Only the text output uses
 /// this: the `--json` message and the ZTS000 diagnostic keep `@errorName`.

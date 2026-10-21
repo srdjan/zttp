@@ -593,11 +593,6 @@ fn applyServeFlags(
             config.pool_size = std.fmt.parseInt(usize, value, 10) catch return error.InvalidPoolSize;
         } else if (std.mem.eql(u8, arg, "--static")) {
             config.static_dir = try shared.takeArg(&i, argv, error.MissingStaticDir);
-        } else if (std.mem.eql(u8, arg, "--outbound-http")) {
-            config.runtime_config.outbound_http_enabled = true;
-        } else if (std.mem.eql(u8, arg, "--outbound-host")) {
-            config.runtime_config.outbound_http_enabled = true;
-            config.runtime_config.outbound_allow_host = try shared.takeArg(&i, argv, error.MissingOutboundHost);
         } else if (std.mem.eql(u8, arg, "--outbound-timeout-ms")) {
             const value = try shared.takeArg(&i, argv, error.MissingOutboundTimeout);
             config.runtime_config.outbound_http_enabled = true;
@@ -621,7 +616,6 @@ fn applyServeFlags(
             config.runtime_config.test_file_path = try shared.takeArg(&i, argv, error.MissingTestFile);
         } else if (std.mem.eql(u8, arg, "--watch") or
             std.mem.eql(u8, arg, "--prove") or
-            std.mem.eql(u8, arg, "--force-swap") or
             std.mem.eql(u8, arg, "--force-swap"))
         {
             // Handled by serveCommand before parseServeArgs is called

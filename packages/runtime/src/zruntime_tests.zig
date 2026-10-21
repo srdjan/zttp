@@ -125,9 +125,6 @@ const TestHttpServer = struct {
     thread: ?std.Thread = null,
     closed: bool = false,
     thread_error: std.atomic.Value(TestErrorInt) = std.atomic.Value(TestErrorInt).init(0),
-    request_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    captured_path: [256]u8 = undefined,
-    captured_path_len: usize = 0,
     // Only consulted when mode == .sequenced_status: one status code per
     // accepted connection, in order.
     status_sequence: []const u16 = &.{},
@@ -138,7 +135,6 @@ const TestHttpServer = struct {
         large_plain_text,
         silent_hold,
         sequenced_status,
-        forecast,
         raw_response,
     };
 
@@ -217,7 +213,6 @@ const TestHttpServer = struct {
             .echo_request_json => try self.respondWithEcho(&stream, io),
             .large_plain_text => try self.respondWithLargeBody(&stream, io),
             .silent_hold => try self.holdSilently(&stream, io),
-            .forecast => try self.respondWithForecast(&stream, io),
             .raw_response => {
                 var captured = try captureRequest(self.allocator, &stream, io);
                 defer captured.deinit(self.allocator);
@@ -293,24 +288,6 @@ const TestHttpServer = struct {
         defer captured.deinit(self.allocator);
         const reason: []const u8 = if (status >= 500) "Internal Server Error" else "OK";
         try writeTestResponse(stream, io, status, reason, &.{"Content-Type: text/plain"}, "");
-    }
-
-    fn respondWithForecast(self: *TestHttpServer, stream: *std.Io.net.Stream, io: std.Io) !void {
-        var captured = try captureRequest(self.allocator, stream, io);
-        defer captured.deinit(self.allocator);
-        if (captured.path.len > self.captured_path.len) return error.InvalidTestRequest;
-        @memcpy(self.captured_path[0..captured.path.len], captured.path);
-        self.captured_path_len = captured.path.len;
-        _ = self.request_count.fetchAdd(1, .release);
-        try writeTestResponse(stream, io, 200, "OK", &.{"Content-Type: text/plain"}, "forecast");
-    }
-
-    fn requestCount(self: *const TestHttpServer) u32 {
-        return self.request_count.load(.acquire);
-    }
-
-    fn capturedPath(self: *const TestHttpServer) []const u8 {
-        return self.captured_path[0..self.captured_path_len];
     }
 };
 

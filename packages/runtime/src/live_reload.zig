@@ -5,7 +5,7 @@
 //! running version and only applies changes proven safe by the upgrade verifier.
 //!
 //! Data flow on file change:
-//!   1. Read handler source, run full analysis pipeline (runCheckOnly)
+//!   1. Read handler source, run full analysis pipeline (runCheckOnlyWithOptions)
 //!   2. If analysis fails: print errors, keep running old handler
 //!   3. Diff new contract against current contract (if --prove)
 //!   4. If safe or safe_with_additions: hot-swap pool, update server contract

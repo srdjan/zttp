@@ -2002,12 +2002,6 @@ const LoadedArtifact = struct {
             },
         };
     }
-
-    fn executableRoot(self: *const LoadedArtifact) ![32]u8 {
-        var budget = pcc.limits.Budget.init(.{});
-        const decoded = try pcc.certificate.decode(self.payload.certificate orelse return error.TestUnexpectedResult, .{}, &budget);
-        return decoded.identity.executable_root;
-    }
 };
 
 /// Compile `source`, run the production artifact tail over it, and load the
@@ -2040,17 +2034,6 @@ fn loadArtifactForSource(allocator: std.mem.Allocator, source: []const u8) !Load
     const raw = try contract_runtime.parseContractJson(allocator, payload.contract_json orelse return error.TestUnexpectedResult);
     const validated = try contract_runtime.validate(raw, .{ .bytecode = payload.bytecode });
     return .{ .payload = payload, .contract = validated, .allocator = allocator };
-}
-
-fn expectAccepted(assessment: pcc.Assessment) !void {
-    if (assessment.rejection()) |rejection| {
-        std.debug.print(
-            "unexpected rejection: {s} / {s}\n",
-            .{ rejection.stage.name(), rejection.code.text() },
-        );
-        return error.TestUnexpectedResult;
-    }
-    try std.testing.expect(assessment.accepted());
 }
 
 fn expectRefusedAt(assessment: pcc.Assessment, stage: pcc.verdict.Stage, code: pcc.ReasonCode) !void {
