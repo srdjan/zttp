@@ -171,8 +171,11 @@ pub const Severity = enum {
 /// Classify the loss of the proven property `field` (true to false).
 /// Critical: properties whose loss indicates a safety regression.
 /// Warning: properties whose loss changes operational characteristics.
-/// Info: every other property.
-pub fn propertyLossSeverity(field: []const u8) Severity {
+/// Info: properties whose loss is informational by decision, plus the two
+/// non-boolean rows (`max_io_depth`, `cost_class`) that `diffContracts` emits.
+/// Null: a name that has no entry. Callers treat null as critical, so a new
+/// property is never classified as informational by default.
+pub fn propertyLossSeverity(field: []const u8) ?Severity {
     if (std.mem.eql(u8, field, "retry_safe")) return .critical;
     if (std.mem.eql(u8, field, "injection_safe")) return .critical;
     if (std.mem.eql(u8, field, "state_isolated")) return .critical;
@@ -188,7 +191,24 @@ pub fn propertyLossSeverity(field: []const u8) Severity {
     if (std.mem.eql(u8, field, "input_validated")) return .warning;
     if (std.mem.eql(u8, field, "pii_contained")) return .warning;
 
-    return .info;
+    if (std.mem.eql(u8, field, "pure")) return .info;
+    if (std.mem.eql(u8, field, "stateless")) return .info;
+    if (std.mem.eql(u8, field, "has_egress")) return .info;
+    if (std.mem.eql(u8, field, "post_only")) return .info;
+    if (std.mem.eql(u8, field, "canonical")) return .info;
+    if (std.mem.eql(u8, field, "cost_bounded")) return .info;
+    if (std.mem.eql(u8, field, "max_io_depth")) return .info;
+    if (std.mem.eql(u8, field, "cost_class")) return .info;
+
+    return null;
+}
+
+comptime {
+    for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
+        if (field.type == bool and propertyLossSeverity(field.name) == null) {
+            @compileError("propertyLossSeverity has no entry for HandlerProperties." ++ field.name);
+        }
+    }
 }
 
 pub const BehaviorPathChange = struct {
@@ -2774,9 +2794,10 @@ test "propertyLossSeverity: eight critical properties, a warning tier, everythin
     };
     for (critical) |name| {
         try std.testing.expect(handler_contract.HandlerProperties.isMonotonicProvenSpecName(name));
-        try std.testing.expectEqual(Severity.critical, propertyLossSeverity(name));
+        try std.testing.expectEqual(@as(?Severity, .critical), propertyLossSeverity(name));
     }
-    try std.testing.expectEqual(Severity.warning, propertyLossSeverity("deterministic"));
-    try std.testing.expectEqual(Severity.info, propertyLossSeverity("pure"));
-    try std.testing.expectEqual(Severity.info, propertyLossSeverity("stateless"));
+    try std.testing.expectEqual(@as(?Severity, .warning), propertyLossSeverity("deterministic"));
+    try std.testing.expectEqual(@as(?Severity, .info), propertyLossSeverity("pure"));
+    try std.testing.expectEqual(@as(?Severity, .info), propertyLossSeverity("stateless"));
+    try std.testing.expectEqual(@as(?Severity, null), propertyLossSeverity("not_a_property"));
 }

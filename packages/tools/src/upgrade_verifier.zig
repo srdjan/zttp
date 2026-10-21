@@ -72,7 +72,7 @@ pub const PropertyRegression = struct {
 /// a loss is classified by `contract_diff.propertyLossSeverity`.
 fn propertySeverity(field: []const u8, gained: bool) Severity {
     if (gained) return .info;
-    return contract_diff.propertyLossSeverity(field);
+    return contract_diff.propertyLossSeverity(field) orelse .critical;
 }
 
 // -------------------------------------------------------------------------

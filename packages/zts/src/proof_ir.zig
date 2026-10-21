@@ -1232,25 +1232,51 @@ test "a declared node is total even when no rule closes it" {
     try testing.expect(total[function_id]);
 }
 
+// The parser refuses statement nesting beyond its own recursion limit (512
+// frames, about two per nested block) with ZTS044. `lower` also counts two
+// levels per nested block (the `if` node and its body), so its bound of
+// `max_depth` is crossed first, by source the parser still admits at about 254
+// nested blocks. This test walks
+// the nesting upward, requires that `lower` first refuses such an admitted
+// program with `ProgramTooDeep`, and requires that the refusal precedes the
+// parser's own limit. A parser or lowerer limit change that moves the order
+// fails here.
 test "a program deeper than the walk bound is refused, not truncated" {
     const allocator = testing.allocator;
-    var source: std.ArrayList(u8) = .empty;
-    defer source.deinit(allocator);
-    try source.appendSlice(allocator, "function handler(req) {\n");
-    var i: usize = 0;
-    while (i < max_depth + 8) : (i += 1) {
-        try source.appendSlice(allocator, "  if (req.ok) {\n");
-    }
-    try source.appendSlice(allocator, "    return Response.text(\"ok\");\n");
-    i = 0;
-    while (i < max_depth + 8) : (i += 1) {
-        try source.appendSlice(allocator, "  }\n");
-    }
-    try source.appendSlice(allocator, "}\n");
+    var refused_at: ?usize = null;
+    var parser_refused_at: ?usize = null;
+    var n: usize = 200;
+    while (n < 600) : (n += 1) {
+        var source: std.ArrayList(u8) = .empty;
+        defer source.deinit(allocator);
+        try source.appendSlice(allocator, "function handler(req) {\n");
+        var i: usize = 0;
+        while (i < n) : (i += 1) try source.appendSlice(allocator, "  if (req.ok) {\n");
+        try source.appendSlice(allocator, "    return Response.text(\"ok\");\n");
+        i = 0;
+        while (i < n) : (i += 1) try source.appendSlice(allocator, "  }\n");
+        try source.appendSlice(allocator, "}\n");
 
-    var parser = JsParser.init(allocator, source.items) catch return;
-    defer parser.deinit();
-    const root = parser.parse() catch return;
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    try testing.expectError(error.ProgramTooDeep, lower(allocator, view, root, null, null));
+        var parser = JsParser.init(allocator, source.items) catch {
+            parser_refused_at = n;
+            break;
+        };
+        defer parser.deinit();
+        const root = parser.parse() catch {
+            parser_refused_at = n;
+            break;
+        };
+        const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        if (lower(allocator, view, root, null, null)) |lowered| {
+            var owned = lowered;
+            owned.deinit();
+            try testing.expect(refused_at == null);
+        } else |err| {
+            try testing.expectEqual(error.ProgramTooDeep, err);
+            if (refused_at == null) refused_at = n;
+        }
+    }
+    try testing.expect(refused_at != null);
+    try testing.expect(parser_refused_at != null);
+    try testing.expect(refused_at.? < parser_refused_at.?);
 }

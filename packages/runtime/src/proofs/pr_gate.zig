@@ -534,7 +534,7 @@ fn lostProperties(arena: std.mem.Allocator, diff: *const contract_diff.ContractD
         if (!zts.handler_contract.HandlerProperties.isMonotonicProvenSpecName(change.field)) continue;
         try list.append(arena, .{
             .field = try arena.dupe(u8, change.field),
-            .severity = contract_diff.propertyLossSeverity(change.field),
+            .severity = contract_diff.propertyLossSeverity(change.field) orelse .critical,
         });
     }
     return try list.toOwnedSlice(arena);

@@ -48,7 +48,7 @@ pub const FlowChecker = struct {
     modules_complete: bool = true,
     type_checker: ?*type_checker.TypeChecker = null,
     evaluation: ?evaluator.FlowInterp = null,
-    properties: FlowProperties = .{},
+    properties: FlowProperties = unproven,
     diagnostics: []const Diagnostic = &.{},
     defended_paths: []const DefendedPath = &.{},
 
@@ -5665,5 +5665,23 @@ fn collectFlowDiagnosticKinds(
             );
             return error.FlowDiagnosticOffersUnperformableRepair;
         }
+    }
+}
+
+test "FlowChecker reports every property unproven before check runs" {
+    const source = "function handler(req) { return Response.text(\"ok\"); }";
+    var parser = try @import("zts-engine").parser.JsParser.init(std.testing.allocator, source);
+    var atoms = atom_table.AtomTable.init(std.testing.allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var checker = FlowChecker.init(std.testing.allocator, ir_view, &atoms);
+    defer checker.deinit();
+    const properties = checker.getProperties();
+    inline for (@typeInfo(FlowProperties).@"struct".fields) |field| {
+        try std.testing.expect(!@field(properties, field.name));
     }
 }

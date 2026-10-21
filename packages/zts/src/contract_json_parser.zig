@@ -403,6 +403,24 @@ const PropertiesWire = struct {
     costBounded: bool = false,
 };
 
+// Every `HandlerProperties` field needs a wire field of its camelCase name, and
+// the counts must match, so the two field sets are equal. A mismatch fails the
+// build, so a new property cannot be dropped silently when a contract is read.
+comptime {
+    const type_fields = @typeInfo(contract_types.HandlerProperties).@"struct".fields;
+    const wire_fields = @typeInfo(PropertiesWire).@"struct".fields;
+    if (type_fields.len != wire_fields.len) {
+        @compileError("PropertiesWire and HandlerProperties differ in field count");
+    }
+    for (type_fields) |field| {
+        const camel = contract_types.HandlerProperties.camelKeyFor(field.name) orelse
+            @compileError("camelKeyFor has no entry for HandlerProperties." ++ field.name);
+        if (!@hasField(PropertiesWire, camel)) {
+            @compileError("PropertiesWire lacks `" ++ camel ++ "` for HandlerProperties." ++ field.name);
+        }
+    }
+}
+
 const SpecDiagnosticWire = struct {
     kind: ?WireString = null,
     code: ?WireString = null,
