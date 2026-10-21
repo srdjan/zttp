@@ -1207,11 +1207,23 @@ fn renderAreas(ctx: *Context) ![]const u8 {
 
 fn renderGates(ctx: *Context) ![]const u8 {
     var output: std.Io.Writer.Allocating = .init(ctx.a());
-    try output.writer.writeAll("| Gate | Proves | Required when | Measured |\n| --- | --- | --- | --- |\n");
+    // The column appears only when some gate carries a measurement. A column
+    // that reads "not measured" in every row carries no information.
+    var any_measured = false;
+    for (ctx.spine.commands) |command| {
+        if (command.intent == .verify and command.seconds != null) any_measured = true;
+    }
+    if (any_measured) {
+        try output.writer.writeAll("| Gate | Proves | Required when | Measured |\n| --- | --- | --- | --- |\n");
+    } else {
+        try output.writer.writeAll("| Gate | Proves | Required when |\n| --- | --- | --- |\n");
+    }
     for (ctx.spine.commands) |command| {
         if (command.intent != .verify) continue;
         const name = try commandName(ctx.a(), command);
-        if (command.seconds) |seconds| {
+        if (!any_measured) {
+            try output.writer.print("| `{s} {s}` | {s} | {s} |\n", .{ ctx.spine.runner, name, command.does, command.requiredWhen orelse "-" });
+        } else if (command.seconds) |seconds| {
             try output.writer.print("| `{s} {s}` | {s} | {s} | {d:.1}s |\n", .{ ctx.spine.runner, name, command.does, command.requiredWhen orelse "-", seconds });
         } else {
             try output.writer.print("| `{s} {s}` | {s} | {s} | not measured |\n", .{ ctx.spine.runner, name, command.does, command.requiredWhen orelse "-" });

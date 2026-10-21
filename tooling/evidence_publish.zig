@@ -819,7 +819,7 @@ fn renderCoverageMarkdown(
             "one counts rules the compiler was *observed* rejecting, from the defect-seed\n" ++
             "suite in `packages/pi/src/standin/defect_seeds.zig`: each seed pairs a\n" ++
             "veto-clean baseline with a draft that introduces exactly one code, and the\n" ++
-            "stand-in gate re-derives the outcome through the real veto before this number\n" ++
+            "stand-in gate re-derives the outcome through the production proof before this number\n" ++
             "is printed.\n\n" ++
             "| Rules advertised | Verified firing by a seed | Seeds |\n|---|---|---|\n" ++
             "| {d} | {d} | {d} |\n\nVerified: ",

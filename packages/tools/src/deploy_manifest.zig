@@ -5,8 +5,9 @@
 //! handler does (env vars, egress hosts, cache namespaces, routes) as proven
 //! facts - not heuristic guesses.
 //!
-//! The old build-time AWS renderer has been retired; runtime `zttp deploy`
-//! consumes the portable fact extraction and reporting surfaces from this file.
+//! Runtime code consumes `extractProvenFacts` and the fact types from this file.
+//! The renderers and `writeDeployReport` have no caller outside this file; the
+//! pruning round 2 plan (U10) deletes them.
 
 const std = @import("std");
 const zts = @import("zts");

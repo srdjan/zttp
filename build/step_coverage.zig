@@ -72,7 +72,7 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.B
     }
 
     if (violations > 0) {
-        const message = std.fmt.allocPrint(b.allocator, "step coverage: {d} problem(s)\n{s}\nRun the step from scripts/verify.sh, scripts/release.sh, a workflow, or `zig build test`; or add a row to scripts/manual-steps.allow with the reason a human asks for it.", .{ violations, report.items }) catch @panic("OOM");
+        const message = std.fmt.allocPrint(b.allocator, "step coverage: {d} problem(s)\n{s}\nRun the step from scripts/verify.sh, scripts/release.sh, or `zig build test`; or add a row to scripts/manual-steps.allow with the reason a human asks for it.", .{ violations, report.items }) catch @panic("OOM");
         step_coverage_step.dependOn(&b.addFail(message).step);
     } else {
         const ok = b.addSystemCommand(&.{ "/bin/echo", b.fmt("step coverage: OK ({d} steps, {d} run by hand with a stated reason, {d} run only at release)", .{ step_count, manual_rows, release_only }) });

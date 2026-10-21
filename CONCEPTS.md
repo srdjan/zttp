@@ -290,7 +290,7 @@ A deliberately wrong draft, kept as a fixture, whose purpose is to make a reject
 ### Gate
 A build step that fails when a repo invariant is violated, as distinct from a test that checks a behavior. A Gate is usually bidirectional: it fails both when something is missing from an allowlist and when an allowlist row no longer matches anything, so the list cannot rot in either direction.
 
-A Gate must assert a floor on its own input before any count it reports means anything. A Gate whose corpus is empty, whose filter matches nothing, or whose build product has no consumer reports success while checking nothing, and is then cited afterwards as evidence. Deleting a Gate's input and confirming it turns red is the check that separates the two.
+A Gate must assert a floor on its own input before any count it reports means anything. A Gate whose corpus is empty, whose filter matches nothing, or whose build product has no consumer reports success while checking nothing, and is then cited afterwards as evidence. Deleting a Gate's input and confirming it turns red is the check that separates the two. In this repository a filter that selects no test now fails (`tooling/nonempty_test_runner.zig`), but a filtered run still checks only part of the suite and is never evidence.
 
 A floor guards the input a Gate holds, not whether that input is the one in the tree. A Gate that compiles its input list into its own executable was observed to keep running an earlier list after the list was edited, because the build reused an executable built from the old list. Such a Gate reads its data at run time instead. A Gate that reports an item no file contains any more is the sign that it holds a stale input.
 

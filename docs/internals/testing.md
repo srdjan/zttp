@@ -179,8 +179,8 @@ for that property. Missing analysis is `NO_VERDICT` and fails the run. A
 contradiction between a proved property and its diagnostic also fails the run.
 Any frozen expectation miss, unresolved operation, source error, or corpus floor change
 fails after the complete report. Status differences are reported even when the
-fixed expectation permits them. This step is explicitly manual while the shadow
-interpreter is incomplete; it supplies P9 evidence without changing production
+fixed expectation permits them. This step is explicitly manual. The shadow harness is retained as a migration
+check until its planned removal in pruning round 2; it supplies P9 evidence without changing production
 CHECK. `test-flow-shadow-diff` tests report classification and corpus floors and
 also runs under `test-flow-census`; those helper tests do not establish precision.
 
@@ -421,13 +421,14 @@ Reassess this limitation when the pinned Zig toolchain changes.
 ## Running One Test
 
 This is a shortening device for the edit loop, not a way to establish anything.
-A filtered run is never evidence: `-Dtest-filter` is wired to `.filters` on every
-test artifact (`build/Context.zig`), so an artifact holding no test the filter
-matches runs zero tests and exits 0, and the aggregate step reports a pass for
-it. A filtered run was measured here reporting "2 passed" while the named test's
-assertion had been sabotaged to expect an impossible error, because that run
-executed neither of them. Take every verdict you intend to cite from an
-unfiltered run of the named step, as `AGENTS.md` requires.
+A filtered run is never evidence, because it checks only part of the suite.
+`-Dtest-filter` reaches every test artifact through `addTest` in
+`build/Context.zig`, which wraps the artifact in `tooling/nonempty_test_runner.zig`.
+A named suite whose filter selects no test now fails, and the aggregate
+`zig build test` refuses the option. An earlier build exited 0 over zero tests
+and reported "2 passed" while the named test had been sabotaged. Take every
+verdict you intend to cite from an unfiltered run of the named step, as
+`AGENTS.md` requires.
 
 ```bash
 zig build test -Dtest-filter="runtime init and deinit"

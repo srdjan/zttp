@@ -195,29 +195,29 @@ the WASM playground, the Claude and OpenAI providers, the SMT layer, RPC mode,
 the performance and equivalence receipt writers, the provable-reach tooling,
 and the dead code those removals left behind. Groups G1 to G15 changed no model-visible
 input, and the policy, module registry, and spec hashes equal their baselines.
-The [worklog](plans/2026-10-11-feature-removal-worklog.md) records each group, the
+The worklog (`pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md`) records each group, the
 deleted and kept plans, and the recount of files and lines.
 Studio and edge are not part of "Supported Now".
 Phase 2 is complete. It removed runtime tool routes, agent turns, application invariants, and consumer declarations.
 New artifacts use payload format 7 and certificate schema 5. The updated reader refuses the previous formats.
-The [Phase 2 worklog](plans/2026-10-12-feature-removal-phase-2-worklog.md) records offline verification, unchanged compiler identities, and review limits.
+The Phase 2 worklog (`pre-round-2-archive:docs/plans/2026-10-12-feature-removal-phase-2-worklog.md`) records offline verification, unchanged compiler identities, and review limits.
 Phase 3 source cuts removed orchestration, TSX, source `comptime()`, hypermedia,
 and the deferred PI tools. Phase 3 is complete, including coupling cleanup and offline evidence publication.
 The 0.22.0 convergence and coverage pages carry the current published evidence.
 
-The owner approved the [first shared-analysis unit](plans/2026-10-11-shared-analysis-first-unit.md) on 2026-10-11.
-The unit preserves documented features and initial wire formats. Its [worklog](plans/2026-10-11-shared-analysis-worklog.md) records execution evidence.
+The owner approved the first shared-analysis unit (`pre-round-2-archive:docs/plans/2026-10-11-shared-analysis-first-unit.md`) on 2026-10-11.
+The unit preserves documented features and initial wire formats. Its worklog (`pre-round-2-archive:docs/plans/2026-10-11-shared-analysis-worklog.md`) records execution evidence.
 The unit is complete. Single-module coordinators own their analysis, and private contract operations consume completed results.
 All 13 named checks pass. Fixed public JSON and generated compiler output match the baseline exactly.
 The worklog records review coverage limits. Whole-graph migration remains outside this unit.
 
-The owner approved the [multi-module contract phase](plans/2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md) with "yes, execute".
+The owner approved the multi-module contract phase (`pre-round-2-archive:docs/plans/2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md`) with "yes, execute".
 That phase is complete. Both default graph producers now consume completed per-module contract analysis from one owner.
 Custom callbacks retain their existing compatibility branch. Pass selection, diagnostic acceptance, and initial wire formats remain unchanged.
 All nine required named checks pass: 10769 tests passed and six were skipped.
 
 Four public comparisons preserve exact generated code and contract bytes. Two compiling mutations confirm that required analysis and dependency merges remain necessary.
-The [multi-module worklog](plans/2026-10-11-multi-module-analysis-worklog.md) records review limits, cleanup measurements, and responsibility changes.
+The multi-module worklog (`pre-round-2-archive:docs/plans/2026-10-11-multi-module-analysis-worklog.md`) records review limits, cleanup measurements, and responsibility changes.
 Production code grows by 186 lines in this phase. The change consolidates analysis ownership and adds completion guards.
 
 CHECK retains its current import traversal because strict graph reuse would change its verdicts and revision reads.
@@ -228,7 +228,7 @@ That unit removes duplicate root facts construction from CHECK path analysis thr
 It preserves imported traversal, reader calls, public verdicts, and current formats.
 The owner selected execution with "D12: 1".
 The source change and focused checks are complete. Offline evidence publication and final release verification follow the source closure commit.
-The [Phase 4 worklog](plans/2026-10-13-feature-removal-phase-4-worklog.md) records exact output comparisons, reader characterization, cleanup measurements, and review limits.
+The Phase 4 worklog (`pre-round-2-archive:docs/plans/2026-10-13-feature-removal-phase-4-worklog.md`) records exact output comparisons, reader characterization, cleanup measurements, and review limits.
 Later Phase 4 units address imported analysis, binding semantics, and a typed frontend prototype.
 
 The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`) is historical.

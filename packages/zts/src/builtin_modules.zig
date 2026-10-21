@@ -4,7 +4,7 @@
 //! truth for which modules exist - all consumers (resolver, type checker,
 //! verifier, contract builder) read from this list.
 //!
-//! Third-party modules are appended to this list via build.zig options.
+//! The list is a fixed array; the build adds no third-party modules.
 
 const mb = @import("module_binding.zig");
 const adapter = @import("module_binding_adapter.zig");
@@ -72,7 +72,7 @@ pub const builtins = [_]ModuleBinding{
     ported.sse,
 };
 
-/// Unified module registry: the core built-ins.
+/// The registry: the core built-ins.
 pub const all = builtins;
 
 /// Number of built-in modules.

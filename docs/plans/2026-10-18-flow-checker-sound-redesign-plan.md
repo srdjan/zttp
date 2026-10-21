@@ -4,7 +4,7 @@ Status: draft, revised after one validation round (Codex astra facts and soundne
 document the known false proofs (commit `82832b27`) and plan a redesign.
 Implementation needs separate owner approval.
 
-Evidence: [the superseded guard plan](2026-10-18-callback-iteration-writes-plan.md)
+Evidence: the superseded guard plan (`pre-round-2-archive:docs/plans/2026-10-18-callback-iteration-writes-plan.md`)
 records every observed false proof (F1 to F6) and the three validation rounds.
 Probes are in `/tmp/zttp-probe/` and `/tmp/zttp-probe2/`; P0 moves them into
 the repository.

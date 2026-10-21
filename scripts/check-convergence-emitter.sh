@@ -98,7 +98,7 @@ coverage_publisher="scripts/update-coverage.sh"
 producer="packages/pi/src/expert_codegen_record.zig"
 # The seed figure has its own producer on purpose: it is printed by the gate
 # that verifies it, so a marker can only appear after every seed reproduced its
-# declared class through the real veto.
+# declared class through the production proof.
 seed_producer="packages/pi/src/standin_range_tests.zig"
 
 check_marker "$convergence_marker" "$producer" "$native_consumer"

@@ -7,7 +7,7 @@
 //!
 //! A seed declares which of those outcomes its bad draft produces. The
 //! declaration is not trusted: the gate in `standin_range_tests.zig` derives the
-//! class by running the real veto over the real bytes, so a canonicalizer or a
+//! class by running the production proof (`aggregate_proof.prove`) over the real bytes, so a canonicalizer or a
 //! repair lane that later learns a new fix fails the gate and the class is moved
 //! deliberately rather than drifting.
 //!

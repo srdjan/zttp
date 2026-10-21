@@ -92,7 +92,7 @@ These kinds stay outside the range on purpose. They are what the negative corpus
 
 ## Defect seeds
 
-Drafts the stand-in emits expecting the veto to reject them, so the rejection half of the loop is reachable with no live model. Each seed declares what the loop does with its bad draft; the declaration is re-derived by running the real veto, never trusted.
+Drafts the stand-in emits expecting the veto to reject them, so the rejection half of the loop is reachable with no live model. Each seed declares what the loop does with its bad draft; the declaration is re-derived by running the production proof (`aggregate_proof.prove`), never trusted.
 
 | Seed | Code | Outcome |
 |---|---|---|

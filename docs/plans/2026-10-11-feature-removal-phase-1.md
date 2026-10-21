@@ -1,5 +1,5 @@
 > Execution approved on 2026-10-11. The owner accepted every recommended decision of `advisor-plans/005-feature-removal-rebase.md` with "your recommendations".
-> This file is the Phase 1 implementation plan. Progress belongs in the companion worklog, `2026-10-11-feature-removal-worklog.md`, which G1 creates.
+> This file is the Phase 1 implementation plan. Progress belongs in the companion worklog, `pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md`, which G1 creates.
 > Revision 2: a Fable critique and a Codex astra fact-check of revision 1 found that three groups changed the model-visible tool catalog. This revision moves those removals to Phase 3 and writes every keep or delete verdict into the plan.
 
 # Plan 005 Phase 1: remove surfaces that move no identity
@@ -49,7 +49,7 @@ Line numbers are at `464240f1`. The edit sites come from an importer census and 
 
 ### G1 Standalone documents and the archive
 
-First create `docs/plans/2026-10-11-feature-removal-worklog.md` with the invariant 4 baselines.
+First create `pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md` with the invariant 4 baselines.
 Delete: `docs/internals/zttp-runtime-architecture.html`, `docs/internals/zttp-runtime-architecture.archify.json`, `docs/investor-precise.html`, `docs/investor-warm.html`, `docs/antfly-zig-patterns.html`, `docs/hypermedia-explainer.html`, `docs/essay.md`, `advisor-plans/001-tigerbeetle-inspired-predictable-performance-plan.md`, `advisor-plans/002-local-lfm-default-cutover-plan.md`, all of `docs/archive/`, all of `docs/zttp-next/`.
 Edit sites: `STRATEGY.md`, `docs/README.md`, `docs/roadmap.md`, `docs/plans/README.md`, `pre-rebase:docs/plans/2026-09-19-feat-agent-handler-spec.md`, `pre-rebase:docs/plans/2026-09-22-m4-release-contract.md`, `docs/user-guide.md`, `docs/zts-formal-spec-northstar-advanced.md` (outside its grammar and idiom sections, which `check-grammar-drift.sh` and `check-idiom-table.sh` read), `advisor-plans/README.md`, and six solution docs: `architecture-patterns/separate-wire-compatibility-from-owned-domain-projection.md:50`, `conventions/a-gate-that-counts-nothing-still-reports-a-pass.md:33`, `logic-errors/admitting-a-value-made-latent-conflations-wrong.md:128`, `logic-errors/testing-effect-instead-of-form-refused-the-canonical-predicate.md:201`, `security-issues/empty-label-set-claimed-a-value-was-clean.md:140`, `tooling-decisions/zts-rich-surface-small-kernel.md:118`. Retarget source comments found by `git grep -n "docs/archive\|zttp-next"`.
 

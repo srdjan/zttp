@@ -2,7 +2,7 @@
 #
 # `packages/pi/src/standin/defect_seeds.zig` pairs a veto-clean baseline with a
 # draft that introduces exactly one diagnostic code, and the stand-in gate
-# re-derives each outcome through the real veto. A rule that no seed covers is
+# re-derives each outcome through the production proof. A rule that no seed covers is
 # a rule nothing in this repository has ever been observed enforcing.
 #
 # One row per (code, reason slug), with the finding above it. Enforced in both

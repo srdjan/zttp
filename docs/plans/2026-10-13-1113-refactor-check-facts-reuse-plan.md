@@ -171,7 +171,7 @@ The path operation must finish before the analysis owner's destructor runs.
 
 The source baseline is `1bae15bb8b4c7bb36995e698d7e35d9a94b861d4` on local `main`.
 The baseline includes the 0.22.0 evidence publication.
-The completed graph contract unit is documented in `docs/plans/2026-10-11-multi-module-analysis-worklog.md`.
+The completed graph contract unit is documented in `pre-round-2-archive:docs/plans/2026-10-11-multi-module-analysis-worklog.md`.
 
 The current sources are `SingleModuleAnalysis`, `analyzeHandlerPaths`, and `runCheckOnPreparedSource` in `packages/tools/src/precompile.zig`.
 `PathGenerator.resolveFacts` and its destructor in `packages/zts/src/path_generator.zig` define the existing borrowed-input behavior.

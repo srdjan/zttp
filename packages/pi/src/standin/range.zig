@@ -348,8 +348,8 @@ pub fn renderDocument(allocator: std.mem.Allocator) ![]u8 {
     try writer.writeAll(
         "Drafts the stand-in emits expecting the veto to reject them, so the rejection " ++
             "half of the loop is reachable with no live model. Each seed declares what the " ++
-            "loop does with its bad draft; the declaration is re-derived by running the real " ++
-            "veto, never trusted.\n\n",
+            "loop does with its bad draft; the declaration is re-derived by running the production " ++
+            "proof (`aggregate_proof.prove`), never trusted.\n\n",
     );
     try writer.writeAll("| Seed | Code | Outcome |\n|---|---|---|\n");
     for (defect_seeds.seeds) |seed| {

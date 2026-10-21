@@ -363,11 +363,12 @@ zig build test -j1 --summary all
 (`build.zig`). The narrower `zig build test-invariant-drift` runs the same
 artifact (`addInvariantDriftEvidence` in `build/proof_gates.zig`).
 
-`zig build test -j1 -Dtest-filter=SIGTERM --summary all` is convenient while you
-iterate on the probe, but its result is not evidence. `-Dtest-filter` reaches
-`.filters` on every test artifact (`test_filters` in `build/Context.zig`), so an artifact the filter
-matches nothing in runs zero tests and exits 0, which is the exit status a pass
-also gives. Take the verdict from the unfiltered step.
+`zig build test-server -j1 -Dtest-filter=SIGTERM --summary all` is convenient while you
+iterate on the probe, but its result is not evidence. A filtered run checks only part of the suite.
+The aggregate `test` step now refuses `-Dtest-filter`, so the example names the `test-server` step.
+An earlier build let an artifact that matched nothing run zero tests and exit 0,
+which is the exit status a pass also gives; `addTest` in `build/Context.zig` now
+fails that case. Take the verdict from the unfiltered step.
 
 The corrected E2E exits nonzero at
 `Wait.forFlag(&shutdown_started, true, 2_000)` with `error.TestTimedOut`
