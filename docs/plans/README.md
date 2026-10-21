@@ -6,6 +6,10 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Soundness hand-off](2026-10-21-soundness-handoff.md) | Hand-off 2026-10-21: Q1 to Q3, U6 and U1 committed locally; U2 and U3 specified, not validated or implemented | Records the owner decisions D1 to D8 |
+| [Soundness plan](2026-10-21-soundness-plan.md) | U6 and U1 complete 2026-10-21; U2 (`env.public`) and U3 (bounded `mask`) approved and specified, validation pending | Owner approved D3(a), D4(a), D5(a) with "approved" and D6(a), D7(a), D8(a) with "as recommended" |
+| [Quick-fixes plan](2026-10-21-quick-fixes-plan.md) | Complete 2026-10-21; Q1 to Q3 committed locally | Owner chose D1(a) and D2(a) with "yes" |
+| [Completeness audit](2026-10-21-completeness-audit.md) | Audit 2026-10-21 with Fable verdicts; groups beyond the quick fixes and soundness are not selected | No implementation authority |
 | [Pruning round 2 plan](2026-10-21-pruning-round-2-plan.md) | Complete 2026-10-21; U1 to U17 committed locally; results in the [worklog](2026-10-21-pruning-round-2-worklog.md) | Owner chose decisions 1B, 2A, 3A, 4A, 5A with "as recommended" and approved implementation (decision 6A) with "yes" |
 | [Hardening and pruning, round 2](2026-10-20-pruning-round-2-list.md) | Audit list 2026-10-20: 21 hardening, 19 dead-code, 13 consolidation, and 8 documentation items; nothing selected | No implementation authority |
 | [Hardening and pruning](2026-10-20-hardening-pruning-plan.md) | Eight audit findings selected; ordered implementation in progress, 2026-10-20 | Owner selected all findings with "all of them" |
