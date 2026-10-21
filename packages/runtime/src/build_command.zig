@@ -1832,6 +1832,101 @@ test "real guarded artifacts reach consumer acceptance in expression positions" 
     }
 }
 
+test "proofs verify accepts a bundled guarded artifact by handing acceptance its policy section" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var policy = try zts.handler_policy.parsePolicyJson(
+        allocator,
+        "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    );
+    defer policy.deinit(allocator);
+
+    // A computed env key: the compiler cannot enumerate it, so the artifact
+    // carries a guard that only the runtime policy section can discharge.
+    const source =
+        \\import { env } from "zttp:env";
+        \\export function handler(req: Request): Response {
+        \\  if (env(req.method) !== undefined) {
+        \\    return Response.text("set");
+        \\  }
+        \\  return Response.text("missing");
+        \\}
+    ;
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+        .policy = policy,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    try zts.file_io.writeFile(allocator, "runtime", "runtime-template");
+    try writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "handler.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = &evidence,
+        .configured_policy = &policy,
+    }, production_artifact_tail_capabilities);
+
+    // The fixture is sound before it is bundled: production acceptance, handed
+    // the policy bytes, accepts it and counts one covered guard. Without this
+    // the verify assertions below could pass or fail for another reason.
+    {
+        const path_z = try allocator.dupeZ(u8, "handler.bin");
+        defer allocator.free(path_z);
+        var loaded = blk: {
+            var payload = (try self_extract.detectPath(allocator, path_z)) orelse return error.TestUnexpectedResult;
+            errdefer payload.deinit(allocator);
+            const raw = try contract_runtime.parseContractJson(allocator, payload.contract_json orelse return error.TestUnexpectedResult);
+            const validated = try contract_runtime.validate(raw, .{ .bytecode = payload.bytecode });
+            break :blk LoadedArtifact{ .payload = payload, .contract = validated, .allocator = allocator };
+        };
+        defer loaded.deinit();
+        try std.testing.expect(loaded.payload.policy_section != null);
+        const assessment = try proof_activation.accept(allocator, loaded.activationInputs(), pcc.policy.production);
+        try std.testing.expect(assessment.accepted());
+        try std.testing.expectEqual(@as(u32, 1), assessment.guards.required);
+        try std.testing.expectEqual(@as(u32, 1), assessment.guards.covered);
+    }
+
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    try zts.file_io.writeFile(allocator, "handler.contract.json", contract_json);
+
+    var write_out = std.Io.Writer.Allocating.init(allocator);
+    defer write_out.deinit();
+    var write_err = std.Io.Writer.Allocating.init(allocator);
+    defer write_err.deinit();
+    try proofs_bundle.writeBundle(allocator, .{
+        .contract_path = "handler.contract.json",
+        .binary_path = "handler.bin",
+        .out_dir = "bundle",
+    }, &write_out.writer, &write_err.writer);
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(allocator);
+    defer err.deinit();
+    proofs_bundle.verify(allocator, "bundle", true, &out.writer, &err.writer) catch |e| {
+        std.debug.print("verify failed with {s}:\n{s}\n", .{ @errorName(e), out.writer.buffered() });
+        return e;
+    };
+    const text = out.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, text, "REJECTED") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "Guards:    1 of 1 covered (env_key)") != null);
+}
+
 test "the signed root and the startup rebuild are the same fold" {
     const allocator = std.testing.allocator;
     const source =
@@ -1936,6 +2031,7 @@ test "the signed root and the startup rebuild are the same fold" {
 // ---------------------------------------------------------------------------
 
 const contract_runtime = @import("contract_runtime.zig");
+const proofs_bundle = @import("proofs/bundle.zig");
 
 /// Captures the payload the artifact tail would write, serialized exactly as
 /// `self_extract.create` serializes it, so a test reads it back the way a

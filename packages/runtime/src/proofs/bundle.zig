@@ -373,6 +373,7 @@ fn verifySemantics(
         .dep_bytecodes = payload.dep_bytecodes,
         .contract_section = payload.contract_json,
         .policy_section_digest = payload.policy_section_sha256,
+        .policy_section = payload.policy_section,
         .identity = identity,
         .provenance = if (payload.attestation_jws != null) .unchecked else .absent,
     }, pcc.policy.production);
