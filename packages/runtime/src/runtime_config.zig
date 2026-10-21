@@ -2,11 +2,23 @@
 //! `RuntimeConfig` into GC/heap/capability-policy mutations.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
 
 const cost_meter = zq.CostMeter;
+
+/// True when `mode` keeps the internal debug panic hook. ReleaseFast and
+/// ReleaseSmall builds compile the hook out.
+pub fn debugHooksEnabledIn(mode: std.builtin.OptimizeMode) bool {
+    return switch (mode) {
+        .Debug, .ReleaseSafe => true,
+        .ReleaseFast, .ReleaseSmall => false,
+    };
+}
+
+pub const debug_hooks_enabled = debugHooksEnabledIn(builtin.mode);
 
 pub const CostCeilings = struct {
     per_class: [cost_meter.class_count]?u64 = @splat(null),

@@ -234,7 +234,10 @@ pub const HandlerPool = struct {
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .trace_file = null,
             .trace_mutex = null,
-            .debug_panic_path = config.debug_panic_path orelse if (std.c.getenv("ZTTP_DEBUG_PANIC_PATH")) |raw| std.mem.span(raw) else null,
+            .debug_panic_path = if (runtime_config_mod.debug_hooks_enabled)
+                config.debug_panic_path orelse if (std.c.getenv("ZTTP_DEBUG_PANIC_PATH")) |raw| std.mem.span(raw) else null
+            else
+                null,
         };
         errdefer self.deinit();
 
@@ -782,10 +785,12 @@ pub const HandlerPool = struct {
         panic_recovery.arm(&frame);
         defer panic_recovery.disarm();
 
-        if (self.debug_panic_path) |pp| {
-            const effective_path = if (request.path.len > 0) request.path else request.url;
-            if (std.mem.eql(u8, effective_path, pp)) {
-                @panic("zttp_debug_panic_path");
+        if (comptime runtime_config_mod.debug_hooks_enabled) {
+            if (self.debug_panic_path) |pp| {
+                const effective_path = if (request.path.len > 0) request.path else request.url;
+                if (std.mem.eql(u8, effective_path, pp)) {
+                    @panic("zttp_debug_panic_path");
+                }
             }
         }
 

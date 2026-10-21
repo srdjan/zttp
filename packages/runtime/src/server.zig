@@ -8,6 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const engine = @import("engine_adapter.zig");
+const runtime_config_mod = @import("runtime_config.zig");
 const Io = std.Io;
 const net = std.Io.net;
 const Dir = std.Io.Dir;
@@ -1804,8 +1805,10 @@ pub const Server = struct {
                 self.embedded_bytecode,
                 self.runtime_dep_bytecodes,
             );
-        if (pool_rt_config.debug_panic_path) |path| {
-            self.pool.?.debug_panic_path = path;
+        if (comptime runtime_config_mod.debug_hooks_enabled) {
+            if (pool_rt_config.debug_panic_path) |path| {
+                self.pool.?.debug_panic_path = path;
+            }
         }
         if (pool_timer) |*t| {
             const elapsed_ms = t.read() / std.time.ns_per_ms;

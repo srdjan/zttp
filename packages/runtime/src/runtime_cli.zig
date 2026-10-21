@@ -15,6 +15,7 @@ const self_extract = @import("self_extract.zig");
 const live_reload_mod = @import("runtime_features.zig").live_reload;
 const serve_policy = @import("serve_policy.zig");
 const shared = @import("cli_shared.zig");
+const runtime_config_mod = @import("runtime_config.zig");
 
 const embedded_handler = @import("embedded_handler");
 
@@ -213,7 +214,24 @@ pub fn serveCommandWithEnviron(
     argv: []const []const u8,
     environ: std.process.Environ,
 ) !void {
-    return serveCommandWithDebugPanicPath(allocator, argv, environ.getPosix("ZTTP_DEBUG_PANIC_PATH"));
+    const env_panic_path: ?[]const u8 = if (runtime_config_mod.debug_hooks_enabled)
+        environ.getPosix("ZTTP_DEBUG_PANIC_PATH")
+    else
+        null;
+    return serveCommandWithDebugPanicPath(allocator, argv, env_panic_path);
+}
+
+/// Parse `--_debug-panic-path`. ReleaseFast and ReleaseSmall builds refuse the
+/// flag because the panic hook is not compiled in. The mode is a parameter so
+/// a Debug test binary can exercise the refusal.
+fn parseDebugPanicPathFlag(
+    comptime mode: std.builtin.OptimizeMode,
+    config: *ServerConfig,
+    i: *usize,
+    argv: []const []const u8,
+) !void {
+    if (comptime !runtime_config_mod.debugHooksEnabledIn(mode)) return error.DebugPanicPathNeedsDebugOrSafeBuild;
+    config.runtime_config.debug_panic_path = try shared.takeArg(i, argv, error.MissingDebugPanicPath);
 }
 
 fn applyDebugPanicPathDefault(config: *ServerConfig, debug_panic_path: ?[]const u8) void {
@@ -596,7 +614,7 @@ fn applyServeFlags(
         } else if (std.mem.eql(u8, arg, "--incident-log")) {
             config.runtime_config.incident_log_path = try shared.takeArg(&i, argv, error.MissingIncidentLog);
         } else if (std.mem.eql(u8, arg, "--_debug-panic-path")) {
-            config.runtime_config.debug_panic_path = try shared.takeArg(&i, argv, error.MissingDebugPanicPath);
+            try parseDebugPanicPathFlag(builtin.mode, config, &i, argv);
         } else if (std.mem.eql(u8, arg, "--replay")) {
             config.runtime_config.replay_file_path = try shared.takeArg(&i, argv, error.MissingReplayFile);
         } else if (std.mem.eql(u8, arg, "--test")) {
@@ -935,6 +953,22 @@ test "parseServeArgs parses internal debug panic path flag" {
 
     const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--_debug-panic-path", "/flag" });
     try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
+}
+
+test "debug panic path flag is refused in ReleaseFast and ReleaseSmall configurations" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    const argv = [_][]const u8{ "--_debug-panic-path", "/x" };
+    inline for (.{ std.builtin.OptimizeMode.ReleaseFast, std.builtin.OptimizeMode.ReleaseSmall }) |mode| {
+        var i: usize = 0;
+        try std.testing.expectError(
+            error.DebugPanicPathNeedsDebugOrSafeBuild,
+            parseDebugPanicPathFlag(mode, &config, &i, &argv),
+        );
+        try std.testing.expect(config.runtime_config.debug_panic_path == null);
+    }
+    var i: usize = 0;
+    try parseDebugPanicPathFlag(.ReleaseSafe, &config, &i, &argv);
+    try std.testing.expectEqualStrings("/x", config.runtime_config.debug_panic_path.?);
 }
 
 test "parseServeArgs refuses a zero outbound timeout" {
