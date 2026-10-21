@@ -47,3 +47,16 @@ Tag `pre-round-2-archive` holds the deleted files. Each line gives the file path
 - docs/plans/2026-10-17-weak-assertion-census-worklog.md (118 lines)
 - docs/plans/2026-10-18-callback-iteration-writes-plan.md (305 lines)
 - advisor-plans/004-shared-analysis-first-unit.md (277 lines)
+
+## Round 2a gate (after U8, at `e788a8a3`)
+
+| Command | Exit status |
+|---|---|
+| `git diff --check 7486decf~1 HEAD` | 0 |
+| `zig build test`, first run | 1 |
+| `zig build check-spine` | 0 |
+| `bash scripts/verify.sh` | 0 |
+| `zig build test-expert-app`, three reruns | 0, 0, 0 |
+| `zig build test`, second run | 0 |
+
+The first aggregate run failed one test of 9,394: "concurrent first launch of one named session is rejected before publication" in `packages/pi/src/agent.zig`. The log does not show the failing assertion. No round 2 unit changed `agent.zig`. The test did not fail again in four later runs. The cause is not known. A probable source is process-global state, because the test sets `ZTTP_SESSIONS_DIR` and takes a session lock. A repeated run of `test-expert-app` under parallel load can confirm it. The failure is recorded and is not attributed to this plan.
