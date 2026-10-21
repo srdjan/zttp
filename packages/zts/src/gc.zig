@@ -15,11 +15,9 @@ pub const GCConfig = struct {
     nursery_size: usize = 4 * 1024 * 1024, // 4MB
     /// Tenured (old generation) initial size
     tenured_initial_size: usize = 16 * 1024 * 1024, // 16MB
-    /// Enable SIMD bitvector sweeping
-    simd_sweep: bool = true,
     /// Enable advancing wavefront (no marking regression)
     advancing_wavefront: bool = true,
-    /// Objects per incremental sweep step (also used as SIMD batch hint)
+    /// Objects per incremental sweep step
     sweep_chunk_size: usize = 4096,
     /// Cap on automatic major-GC threshold growth (number of tenured objects).
     /// Bounds the live_count*2 growth in continueIncrementalMajorGCSweep so a
@@ -182,46 +180,6 @@ pub const TenuredHeap = struct {
         return false;
     }
 
-    /// SIMD turbosweep - process 256 objects per vector operation
-    /// Uses Zig's @Vector for portable SIMD
-    pub fn simdSweep(self: *TenuredHeap, free_callback: ?*const fn (*anyopaque) void, heap_ptr: ?*heap.Heap) void {
-        const VecSize = 4; // 4 x u64 = 256 bits
-        const Vec = @Vector(VecSize, u64);
-
-        self.last_sweep_freed_bytes = 0;
-        var i: usize = 0;
-
-        // Process in SIMD chunks of 256 objects
-        while (i + VecSize <= self.mark_bitvector.len) : (i += VecSize) {
-            const marks: Vec = self.mark_bitvector[i..][0..VecSize].*;
-
-            // Check if any unmarked objects in this chunk (any word has a zero bit)
-            if (@reduce(.And, marks) != ~@as(u64, 0)) {
-                // Some objects unmarked - process individually
-                for (0..VecSize) |j| {
-                    const word = self.mark_bitvector[i + j];
-                    const unmarked = ~word;
-                    if (unmarked != 0) {
-                        self.processUnmarkedWord(i + j, unmarked, free_callback, heap_ptr);
-                    }
-                }
-            }
-
-            // Clear marks for next cycle
-            @memset(self.mark_bitvector[i..][0..VecSize], 0);
-        }
-
-        // Handle remaining words
-        while (i < self.mark_bitvector.len) : (i += 1) {
-            const word = self.mark_bitvector[i];
-            const unmarked = ~word;
-            if (unmarked != 0) {
-                self.processUnmarkedWord(i, unmarked, free_callback, heap_ptr);
-            }
-            self.mark_bitvector[i] = 0;
-        }
-    }
-
     fn processUnmarkedWord(self: *TenuredHeap, word_idx: usize, unmarked: u64, free_callback: ?*const fn (*anyopaque) void, heap_ptr: ?*heap.Heap) void {
         var bits = unmarked;
         while (bits != 0) {
@@ -260,19 +218,6 @@ pub const TenuredHeap = struct {
             }
 
             bits &= bits - 1; // Clear lowest set bit
-        }
-    }
-
-    /// Scalar sweep fallback (for small heaps or debugging)
-    pub fn scalarSweep(self: *TenuredHeap, free_callback: ?*const fn (*anyopaque) void, heap_ptr: ?*heap.Heap) void {
-        self.last_sweep_freed_bytes = 0;
-
-        for (self.mark_bitvector, 0..) |mark_word, word_idx| {
-            const free_mask = ~mark_word;
-            if (free_mask != 0) {
-                self.processUnmarkedWord(word_idx, free_mask, free_callback, heap_ptr);
-            }
-            self.mark_bitvector[word_idx] = 0;
         }
     }
 
@@ -373,40 +318,6 @@ pub const RootSet = struct {
     /// Add a root value
     pub fn addRoot(self: *RootSet, val: value.JSValue) !void {
         try self.roots.append(self.allocator, val);
-    }
-
-    /// Add a root value and return its stable index. The index remains valid
-    /// until removeRootAt is called; GC updates the stored value in place so
-    /// getRoot always returns the current (possibly-forwarded) address.
-    pub fn addRootTracked(self: *RootSet, val: value.JSValue) !usize {
-        const idx = self.roots.items.len;
-        try self.roots.append(self.allocator, val);
-        return idx;
-    }
-
-    /// Read the current (possibly-forwarded) value for a tracked root slot.
-    pub fn getRoot(self: *const RootSet, idx: usize) value.JSValue {
-        return self.roots.items[idx];
-    }
-
-    /// Mark a tracked root slot as removed. The slot is tombstoned with
-    /// gc_tombstone_val so GC iteration skips it safely (isPtr returns false)
-    /// and it is distinct from undefined_val (a valid user-visible JS value).
-    pub fn removeRootAt(self: *RootSet, idx: usize) void {
-        self.roots.items[idx] = value.JSValue.gc_tombstone_val;
-    }
-
-    /// Remove a root value by value identity (for non-tracked callers).
-    /// Uses tombstoning (not swapRemove) to preserve stable indices returned
-    /// by addRootTracked; mixing physical removal with tracked indices would
-    /// silently corrupt getRoot lookups.
-    pub fn removeRoot(self: *RootSet, val: value.JSValue) void {
-        for (self.roots.items, 0..) |v, i| {
-            if (v.raw == val.raw) {
-                self.roots.items[i] = value.JSValue.gc_tombstone_val;
-                return;
-            }
-        }
     }
 
     /// Iterate all roots
@@ -606,7 +517,7 @@ pub const GC = struct {
     allocator: std.mem.Allocator,
 
     /// Optional heap reference for proper memory deallocation during major GC
-    /// When set, majorGC() will properly free swept objects via heap.free()
+    /// When set, the incremental sweep frees swept objects via heap.freeRaw()
     heap_ptr: ?*heap.Heap = null,
 
     /// Forwarding pointers for evacuation (maps old ptr address -> new ptr)
@@ -713,57 +624,9 @@ pub const GC = struct {
         return ptr;
     }
 
-    /// Allocate with automatic GC trigger
-    pub fn allocWithGC(self: *GC, size: usize) !*anyopaque {
-        const aligned_size = std.mem.alignForward(usize, size, 8);
-        if (!self.withinBudget(aligned_size)) {
-            if (!self.hybrid_mode) {
-                self.majorGCWithHeap(self.heap_ptr);
-            }
-            if (!self.withinBudget(aligned_size)) return error.OutOfMemory;
-        }
-        // Try nursery first
-        if (self.nursery.alloc(size)) |ptr| {
-            self.total_bytes_allocated += aligned_size;
-            return ptr;
-        }
-
-        // Nursery full - trigger minor GC
-        self.minorGC();
-
-        // Retry after GC
-        if (self.nursery.alloc(size)) |ptr| {
-            self.total_bytes_allocated += aligned_size;
-            return ptr;
-        }
-
-        // Still no space - allocation too large for nursery
-        return error.OutOfMemory;
-    }
-
     /// Add a GC root
     pub fn addRoot(self: *GC, val: value.JSValue) !void {
         try self.root_set.addRoot(val);
-    }
-
-    /// Add a GC root and return a stable index for later removal via removeRootAt.
-    pub fn addRootTracked(self: *GC, val: value.JSValue) !usize {
-        return self.root_set.addRootTracked(val);
-    }
-
-    /// Read the current (possibly-forwarded) value for a tracked root slot.
-    pub fn getRoot(self: *const GC, idx: usize) value.JSValue {
-        return self.root_set.getRoot(idx);
-    }
-
-    /// Remove a tracked root by its stable index.
-    pub fn removeRootAt(self: *GC, idx: usize) void {
-        self.root_set.removeRootAt(idx);
-    }
-
-    /// Remove a GC root
-    pub fn removeRoot(self: *GC, val: value.JSValue) void {
-        self.root_set.removeRoot(val);
     }
 
     /// Allocate a Float64Box for boxed float values
@@ -777,7 +640,7 @@ pub const GC = struct {
 
         // Slow path: allocate new Float64Box
         const size = @sizeOf(value.JSValue.Float64Box);
-        const ptr = try self.allocWithGC(size);
+        const ptr = self.allocNursery(size) orelse return error.OutOfMemory;
         const box: *value.JSValue.Float64Box = @ptrCast(@alignCast(ptr));
         box.* = .{
             .header = heap.MemBlockHeader.init(.float64, size),
@@ -1122,14 +985,6 @@ pub const GC = struct {
         }
     }
 
-    /// Major GC: mark-sweep on tenured generation
-    /// Uses the stored heap_ptr for proper memory deallocation
-    /// Skipped in hybrid mode where arena handles ephemeral allocations
-    pub fn majorGC(self: *GC) void {
-        if (self.hybrid_mode) return;
-        self.majorGCWithHeap(self.heap_ptr);
-    }
-
     /// Check if major GC should be triggered based on tenured heap size
     /// Call this after minor GC to prevent unbounded tenured growth
     /// Skipped in hybrid mode
@@ -1215,26 +1070,6 @@ pub const GC = struct {
             grown
         else
             @min(grown, self.config.max_major_gc_threshold);
-    }
-
-    /// Major GC with explicit heap reference for memory deallocation
-    /// Skipped in hybrid mode
-    pub fn majorGCWithHeap(self: *GC, heap_ptr: ?*heap.Heap) void {
-        if (self.hybrid_mode) return;
-        self.beginIncrementalMajorGC();
-        if (self.phase != .sweeping) return;
-
-        // 4. Sweep unmarked and FREE memory (CRITICAL fix for memory leak)
-        if (self.config.simd_sweep) {
-            self.tenured.simdSweep(null, heap_ptr);
-        } else {
-            self.tenured.scalarSweep(null, heap_ptr);
-        }
-
-        self.total_bytes_freed += self.tenured.last_sweep_freed_bytes;
-        self.phase = .idle;
-        self.incremental_sweep_word = 0;
-        self.incremental_sweep_limit_word = 0;
     }
 
     fn currentBytes(self: *const GC) usize {
@@ -1509,6 +1344,20 @@ pub const GC = struct {
     };
 };
 
+/// Test-only: force one full major collection through the incremental path.
+/// Production code starts a cycle only above `major_gc_threshold`, so the
+/// helper lowers the threshold to zero, then steps until the phase is idle.
+/// It fails if the phase is not idle after a bounded number of steps.
+pub fn runMajorGCToIdleForTest(gc_state: *GC) error{GCDidNotReachIdle}!void {
+    gc_state.major_gc_threshold = 0;
+    var steps: usize = 0;
+    while (steps < 1024) : (steps += 1) {
+        gc_state.runIncrementalGCStep(gc_state.config.sweep_chunk_size);
+        if (gc_state.phase == .idle) return;
+    }
+    return error.GCDidNotReachIdle;
+}
+
 test "NurseryHeap bump allocation" {
     var buf: [1024]u8 = undefined;
     var nursery = NurseryHeap.init(&buf);
@@ -1578,27 +1427,8 @@ test "GC root management" {
 
     try std.testing.expectEqual(@as(usize, 2), gc_state.root_set.roots.items.len);
 
-    gc_state.removeRoot(val1);
-    // removeRoot tombstones rather than shrinks, so item count is preserved.
-    try std.testing.expectEqual(@as(usize, 2), gc_state.root_set.roots.items.len);
-    try std.testing.expect(gc_state.root_set.roots.items[0].raw == value.JSValue.gc_tombstone_val.raw);
-}
-
-test "GC allocWithGC triggers collection" {
-    const allocator = std.testing.allocator;
-    var gc_state = try GC.init(allocator, .{ .nursery_size = 256 });
-    defer gc_state.deinit();
-
-    // Fill nursery
-    _ = try gc_state.allocWithGC(100);
-    _ = try gc_state.allocWithGC(100);
-
-    // This should trigger GC
-    _ = try gc_state.allocWithGC(100);
-
-    // Each request rounds up to 104 bytes, so two fit in 256 and the third
-    // overflows the nursery once.
-    try std.testing.expectEqual(@as(u64, 1), gc_state.minor_gc_count);
+    try std.testing.expect(gc_state.root_set.roots.items[0].raw == val1.raw);
+    try std.testing.expect(gc_state.root_set.roots.items[1].raw == val2.raw);
 }
 
 test "GC statistics" {
@@ -1624,8 +1454,8 @@ test "GC memory limit enforcement" {
     gc_state.setHeap(&heap_state);
     gc_state.setMemoryLimit(64);
 
-    _ = try gc_state.allocWithGC(32);
-    try std.testing.expectError(error.OutOfMemory, gc_state.allocWithGC(40));
+    try std.testing.expect(gc_state.allocNursery(32) != null);
+    try std.testing.expect(gc_state.allocNursery(40) == null);
 }
 
 test "RememberedSet operations" {
@@ -2080,11 +1910,28 @@ test "GC major collection" {
     var gc_state = try GC.init(allocator, .{ .nursery_size = 4096 });
     defer gc_state.deinit();
 
+    var heap_state = heap.Heap.init(allocator, .{});
+    defer heap_state.deinit();
+    gc_state.setHeap(&heap_state);
+
+    // One unrooted tenured object, so a major cycle has something to sweep.
+    const TestObj = struct {
+        header: heap.MemBlockHeader,
+        data: u64,
+    };
+    const size = @sizeOf(TestObj);
+    const ptr = heap_state.allocRaw(size) orelse return error.OutOfMemory;
+    const obj: *TestObj = @ptrCast(@alignCast(ptr));
+    obj.* = .{ .header = heap.MemBlockHeader.init(.object, size), .data = 1 };
+    const idx = try gc_state.tenured.registerObject(obj);
+
     // Trigger major GC (should complete without error)
-    gc_state.majorGC();
+    try runMajorGCToIdleForTest(&gc_state);
 
     try std.testing.expectEqual(@as(u64, 1), gc_state.major_gc_count);
     try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
+    // The unrooted object was swept and freed.
+    try std.testing.expect(gc_state.tenured.objects.items[idx] == null);
 }
 
 test "GC maybeDoMajorGC below threshold" {
@@ -2165,7 +2012,7 @@ test "GC phase transitions" {
     try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
 
     // After major GC, should return to idle
-    gc_state.majorGC();
+    try runMajorGCToIdleForTest(&gc_state);
     try std.testing.expectEqual(GC.GCPhase.idle, gc_state.phase);
 }
 
@@ -2180,7 +2027,7 @@ test "GC isInNursery" {
     try std.testing.expect(gc_state.isInNursery(ptr.?));
 }
 
-test "TenuredHeap SIMD sweep" {
+test "TenuredHeap incremental sweep clears marks" {
     const allocator = std.testing.allocator;
     var tenured = try TenuredHeap.init(allocator, 4096);
     defer tenured.deinit();
@@ -2209,45 +2056,10 @@ test "TenuredHeap SIMD sweep" {
     // Mark only first object
     tenured.setMark(idx1);
 
-    // SIMD sweep should clear marks
-    tenured.simdSweep(null, &heap_state);
-
-    // After sweep, marks should be cleared
-    try std.testing.expect(!tenured.isMarked(idx1));
-    try std.testing.expect(!tenured.isMarked(idx2));
-}
-
-test "TenuredHeap scalar sweep" {
-    const allocator = std.testing.allocator;
-    var tenured = try TenuredHeap.init(allocator, 4096);
-    defer tenured.deinit();
-
-    var heap_state = heap.Heap.init(allocator, .{});
-    defer heap_state.deinit();
-
-    // Use allocRaw to get header pointers (registerObject expects header pointers)
-    const TestObj = struct {
-        header: heap.MemBlockHeader,
-        data: u64,
-    };
-    const size = @sizeOf(TestObj);
-
-    const ptr1 = heap_state.allocRaw(size) orelse return error.OutOfMemory;
-    const obj1: *TestObj = @ptrCast(@alignCast(ptr1));
-    obj1.* = .{ .header = heap.MemBlockHeader.init(.object, size), .data = 1 };
-
-    const ptr2 = heap_state.allocRaw(size) orelse return error.OutOfMemory;
-    const obj2: *TestObj = @ptrCast(@alignCast(ptr2));
-    obj2.* = .{ .header = heap.MemBlockHeader.init(.object, size), .data = 2 };
-
-    const idx1 = try tenured.registerObject(obj1);
-    const idx2 = try tenured.registerObject(obj2);
-
-    // Mark only second object
-    tenured.setMark(idx2);
-
-    // Scalar sweep should clear marks
-    tenured.scalarSweep(null, &heap_state);
+    // A full incremental sweep should clear marks
+    var cursor: usize = 0;
+    const done = tenured.incrementalSweepStep(&cursor, tenured.mark_bitvector.len, tenured.mark_bitvector.len, null, &heap_state);
+    try std.testing.expect(done);
 
     // After sweep, marks should be cleared
     try std.testing.expect(!tenured.isMarked(idx1));

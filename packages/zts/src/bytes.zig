@@ -508,7 +508,7 @@ test "a rooted Bytes survives a collection with its octets intact" {
 
     try h.gc.addRoot(b.toValue());
     h.gc.minorGC();
-    h.gc.majorGC();
+    try gc_mod.runMajorGCToIdleForTest(&h.gc);
 
     try testing.expectEqualSlices(u8, &[_]u8{ 9, 8, 7, 6 }, data(b));
     try testing.expectEqual(heap.MemTag.byte_array, buffer(b).?.header.tag);
