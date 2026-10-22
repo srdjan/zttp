@@ -86,3 +86,63 @@ The lead reviewed the diff line by line. The lead then re-ran the gates with a f
 The first aggregate failure in `check-spine` and `test-spine` came from line anchors in the plan document. The lead removed the anchors, and `check-spine` exited 0.
 
 Effect on existing ledgers: a multi-module handler now records the seven properties as false. A ledger that holds an earlier entry for that handler can show one demotion on the next deploy. That earlier entry claimed properties that nothing proved.
+
+## U2: the binding adapter copies fields by reflection
+
+Status: implemented, awaiting review. Only `packages/zts/src/module_binding_adapter.zig` changed in source. No pin, golden, or wire byte moved.
+
+### What changed
+
+`adaptFunctionBinding`, `adaptModuleBinding`, and a new `adaptLabels` now copy fields with an `inline for` over `std.meta.fields` of the SDK type. The hand-written struct literals are gone. The new `coverageProblem` function takes a source type, a target type, a source exclusion list, and a target exclusion list. Each exclusion is an `Exclusion` record with a name and a reason. `requireCoverage` turns its result into a `@compileError`.
+
+`coverageProblem` fails in these cases. A source field has no target field of the same name. A source and target field of one name have different types. A target field has no source field. An exclusion names a field that its own side does not have. An exclusion has an empty reason. The message names both types and the field.
+
+The existing `requireCoverage` in `packages/zttp-sdk/src/descriptors.zig` is unchanged. It checks names only and allows exclusions on the source side only. The new function lives in the adapter file.
+
+The test "adapted bindings preserve capability inheritance and reject reserved label bits" is unchanged. I added one test, "adapter coverage refuses unclassified fields, type changes, and bad exclusions". It checks each failure case of `coverageProblem` on small local types.
+
+### Exclusions
+
+| Pair | Side | Field | Reason |
+|---|---|---|---|
+| `FunctionBinding` | source | `module_func` | `wrapToNativeFn` turns it into the internal `func` field. |
+| `FunctionBinding` | source and target | `return_labels` | The two `LabelSet` types differ. `adaptLabels` converts it. |
+| `FunctionBinding` | source and target | `declassifies` | The two `LabelSet` types differ. `adaptLabels` converts it. |
+| `FunctionBinding` | target | `func` | The adapter sets it from the wrapped SDK `module_func`. |
+| `FunctionBinding` | target | `module_func` | It stays null. The adapter wraps the SDK function into `func`. |
+| `ModuleBinding` | source and target | `exports` | The element type differs. `adaptFunctionBindings` converts it. |
+| `LabelSet` | source and target | `_reserved` | Reserved bits never become analyzer labels. |
+
+The adapter assigns `func`, `module_func`, `return_labels`, `declassifies`, and `exports` explicitly. The `inline for` assigns every other field by name.
+
+### Probes
+
+Each probe changed one SDK file and ran `zig build test-zts` with a private cache. I restored the file after each probe. `git status` then showed only the adapter file as modified.
+
+| Probe | Exit | Error text | Log |
+|---|---|---|---|
+| Add `probe_flag: bool = false` to `FunctionBinding` in `packages/zttp-sdk/src/binding.zig` only | 1 | `binding.FunctionBinding -> module_binding.types.FunctionBinding: unclassified source field: probe_flag` | `/private/tmp/claude-501/u2logs/probe-a.log` |
+| Add `probe_label: bool` to the SDK `LabelSet` in `packages/zttp-sdk/src/descriptors.zig` only, and shrink `_reserved` to `u6` | 1 | `descriptors.LabelSet -> module_binding.types.LabelSet: unclassified source field: probe_label` | `/private/tmp/claude-501/u2logs/probe-b.log` |
+| Change `arg_count` in the SDK `FunctionBinding` from `u8` to `u16` | 1 | `binding.FunctionBinding -> module_binding.types.FunctionBinding: field type differs: arg_count` | `/private/tmp/claude-501/u2logs/probe-c.log` |
+
+### Gates
+
+Logs are under `/private/tmp/claude-501/u2logs/`.
+
+| Gate | Exit | Log |
+|---|---|---|
+| `zig fmt --check` on the adapter file | 0 | not logged |
+| `zig build test-sdk` | 0 | `final-test-sdk.log` |
+| `zig build test-modules` | 0 | `final-test-modules.log` |
+| `zig build test-zts` | 0 | `final-test-zts.log` |
+| `zig build test-module-governance` | 0 | `final-test-module-governance.log` |
+| `zig build test-capability-audit` | 0 | `final-test-capability-audit.log` |
+| `zig build test-flow-census` | 0 | `final-test-flow-census.log` |
+| `zig build test-meta-drift` | 0 | `final-test-meta-drift.log` |
+| `zig build test` | 0 | `final-test.log` |
+
+`EXPECTED_BUILTIN_HASH` did not move. `test-meta-drift` exits 0, so the reflective copy yields the same bindings as the old literals for all 17 adapted modules.
+
+### U2 lead verification
+
+The lead reviewed the diff line by line. With a fresh private cache in `/private/tmp/claude-501/verify-u2/`, `zig fmt --check`, `test-sdk`, `test-modules`, `test-zts`, `test-module-governance`, `test-capability-audit`, `test-flow-census`, `test-meta-drift`, `check-spine`, and `zig build test` each exited 0. The aggregate reported 200/200 steps and 9161/9167 tests passed, with 6 skipped. `EXPECTED_BUILTIN_HASH` did not move.

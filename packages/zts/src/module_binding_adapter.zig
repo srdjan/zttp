@@ -15,26 +15,114 @@ comptime {
         @compileError("zttp-sdk.JSValue must match runtime JSValue bit size");
 }
 
+/// One field that a coverage check leaves out of the field-by-field copy.
+/// The reason states why the copy does not carry the field.
+const Exclusion = struct {
+    name: []const u8,
+    reason: []const u8,
+};
+
+fn isExcluded(comptime excluded: []const Exclusion, comptime name: []const u8) bool {
+    for (excluded) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
+/// Return the first problem in the field mapping from `Source` to `Target`, or null.
+/// Every source field is excluded or has a target field of the same type.
+/// Every target field is excluded or has a source field of the same type.
+/// Each exclusion names a field that exists on its own side and has a reason.
+fn coverageProblem(
+    comptime Source: type,
+    comptime Target: type,
+    comptime source_excluded: []const Exclusion,
+    comptime target_excluded: []const Exclusion,
+) ?[]const u8 {
+    @setEvalBranchQuota(100_000);
+    const names = @typeName(Source) ++ " -> " ++ @typeName(Target);
+    for (source_excluded) |entry| {
+        if (!@hasField(Source, entry.name)) return names ++ ": source exclusion names no field: " ++ entry.name;
+        if (entry.reason.len == 0) return names ++ ": source exclusion has no reason: " ++ entry.name;
+    }
+    for (target_excluded) |entry| {
+        if (!@hasField(Target, entry.name)) return names ++ ": target exclusion names no field: " ++ entry.name;
+        if (entry.reason.len == 0) return names ++ ": target exclusion has no reason: " ++ entry.name;
+    }
+    for (std.meta.fields(Source)) |field| {
+        if (isExcluded(source_excluded, field.name)) continue;
+        if (!@hasField(Target, field.name) or isExcluded(target_excluded, field.name))
+            return names ++ ": unclassified source field: " ++ field.name;
+        if (@FieldType(Target, field.name) != field.type)
+            return names ++ ": field type differs: " ++ field.name;
+    }
+    for (std.meta.fields(Target)) |field| {
+        if (isExcluded(target_excluded, field.name)) continue;
+        if (!@hasField(Source, field.name) or isExcluded(source_excluded, field.name))
+            return names ++ ": unclassified target field: " ++ field.name;
+    }
+    return null;
+}
+
+fn requireCoverage(
+    comptime Source: type,
+    comptime Target: type,
+    comptime source_excluded: []const Exclusion,
+    comptime target_excluded: []const Exclusion,
+) void {
+    if (coverageProblem(Source, Target, source_excluded, target_excluded)) |problem| @compileError(problem);
+}
+
+const label_exclusions = [_]Exclusion{
+    .{ .name = "_reserved", .reason = "reserved bits never become analyzer labels" },
+};
+
+/// Copy the nine named labels. The reserved bits stay zero in the result.
+fn adaptLabels(comptime labels: sdk.LabelSet) internal.LabelSet {
+    comptime requireCoverage(sdk.LabelSet, internal.LabelSet, &label_exclusions, &label_exclusions);
+    var out: internal.LabelSet = .{};
+    inline for (std.meta.fields(sdk.LabelSet)) |field| {
+        if (comptime isExcluded(&label_exclusions, field.name)) continue;
+        @field(out, field.name) = @field(labels, field.name);
+    }
+    return out;
+}
+
+const module_source_exclusions = [_]Exclusion{
+    .{ .name = "exports", .reason = "the element type differs; adaptFunctionBindings converts it" },
+};
+const module_target_exclusions = [_]Exclusion{
+    .{ .name = "exports", .reason = "the element type differs; adaptFunctionBindings converts it" },
+};
+
+const function_source_exclusions = [_]Exclusion{
+    .{ .name = "module_func", .reason = "wrapToNativeFn turns it into the internal func field" },
+    .{ .name = "return_labels", .reason = "the LabelSet types differ; adaptLabels converts it" },
+    .{ .name = "declassifies", .reason = "the LabelSet types differ; adaptLabels converts it" },
+};
+const function_target_exclusions = [_]Exclusion{
+    .{ .name = "func", .reason = "set from the wrapped SDK module_func" },
+    .{ .name = "module_func", .reason = "stays null; the adapter wraps the SDK function into func" },
+    .{ .name = "return_labels", .reason = "the LabelSet types differ; adaptLabels converts it" },
+    .{ .name = "declassifies", .reason = "the LabelSet types differ; adaptLabels converts it" },
+};
+
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {
     const builtin_prefix = std.mem.startsWith(u8, binding.specifier, "zttp:");
     const extension_prefix = std.mem.startsWith(u8, binding.specifier, "zttp-ext:");
     if (!builtin_prefix and !extension_prefix) {
         @compileError("adapted module specifier must start with 'zttp:' or 'zttp-ext:': " ++ binding.specifier);
     }
+    comptime requireCoverage(sdk.ModuleBinding, internal.ModuleBinding, &module_source_exclusions, &module_target_exclusions);
 
     const exports = comptime adaptFunctionBindings(binding.specifier, binding.required_capabilities, binding.exports);
-    return .{
-        .specifier = binding.specifier,
-        .name = binding.name,
-        .exports = &exports,
-        .summary = binding.summary,
-        .required_capabilities = binding.required_capabilities,
-        .stateful = binding.stateful,
-        .state_init = binding.state_init,
-        .state_deinit = binding.state_deinit,
-        .contract_section = binding.contract_section,
-        .sandboxable = binding.sandboxable,
-    };
+    var out: internal.ModuleBinding = undefined;
+    out.exports = &exports;
+    inline for (std.meta.fields(sdk.ModuleBinding)) |field| {
+        if (comptime isExcluded(&module_source_exclusions, field.name)) continue;
+        @field(out, field.name) = @field(binding, field.name);
+    }
+    return out;
 }
 
 fn adaptFunctionBindings(
@@ -54,58 +142,17 @@ fn adaptFunctionBinding(
     comptime required_capabilities: []const sdk.ModuleCapability,
     comptime binding: sdk.FunctionBinding,
 ) internal.FunctionBinding {
-    return .{
-        .name = binding.name,
-        .func = wrapToNativeFn(binding.module_func, specifier, required_capabilities),
-        .arg_count = binding.arg_count,
-        .required_arg_count = binding.required_arg_count,
-        .effect = binding.effect,
-        .required_capabilities = binding.required_capabilities,
-        .returns = binding.returns,
-        .param_types = binding.param_types,
-        // Carried, not dropped: a peer-package module that names its
-        // parameters must reach discovery with them, or the type kinds answer
-        // alone and the model is back to guessing which string is which.
-        .param_names = binding.param_names,
-        // Carried across the boundary rather than dropped: a peer-package
-        // module that declares a precise signature must reach the checker
-        // with it, or the coarse enum answers in its place and the loss is
-        // invisible.
-        .signature = binding.signature,
-        .json_encodable_args = binding.json_encodable_args,
-        .traceable = binding.traceable,
-        .replay_pure = binding.replay_pure,
-        .contract_extractions = binding.contract_extractions,
-        .contract_flags = binding.contract_flags,
-        // Reserved SDK bits never become analyzer labels. Keep the explicit
-        // field boundary even though the current packed layouts agree.
-        .derives_from_args = binding.derives_from_args,
-        .return_labels = .{
-            .secret = binding.return_labels.secret,
-            .credential = binding.return_labels.credential,
-            .user_input = binding.return_labels.user_input,
-            .config = binding.return_labels.config,
-            .internal = binding.return_labels.internal,
-            .external = binding.return_labels.external,
-            .validated = binding.return_labels.validated,
-            .nondeterministic = binding.return_labels.nondeterministic,
-            .unknown = binding.return_labels.unknown,
-        },
-        .declassify_bound_arg = binding.declassify_bound_arg,
-        .declassifies = .{
-            .secret = binding.declassifies.secret,
-            .credential = binding.declassifies.credential,
-            .user_input = binding.declassifies.user_input,
-            .config = binding.declassifies.config,
-            .internal = binding.declassifies.internal,
-            .external = binding.declassifies.external,
-            .validated = binding.declassifies.validated,
-            .nondeterministic = binding.declassifies.nondeterministic,
-            .unknown = binding.declassifies.unknown,
-        },
-        .failure_severity = binding.failure_severity,
-        .laws = binding.laws,
-    };
+    comptime requireCoverage(sdk.FunctionBinding, internal.FunctionBinding, &function_source_exclusions, &function_target_exclusions);
+    var out: internal.FunctionBinding = undefined;
+    out.func = wrapToNativeFn(binding.module_func, specifier, required_capabilities);
+    out.module_func = null;
+    out.return_labels = adaptLabels(binding.return_labels);
+    out.declassifies = adaptLabels(binding.declassifies);
+    inline for (std.meta.fields(sdk.FunctionBinding)) |field| {
+        if (comptime isExcluded(&function_source_exclusions, field.name)) continue;
+        @field(out, field.name) = @field(binding, field.name);
+    }
+    return out;
 }
 
 /// Cross-boundary casts shared by the runtime-callback installState shims
@@ -271,4 +318,25 @@ test "adapted bindings preserve capability inheritance and reject reserved label
     try std.testing.expectEqual(@as(usize, 0), adapted.exports[1].required_capabilities.?.len);
     try std.testing.expectEqual(internal.LabelSet{ .unknown = true }, adapted.exports[0].return_labels);
     try std.testing.expectEqual(internal.LabelSet{ .secret = true, .credential = true }, adapted.exports[0].declassifies);
+}
+
+test "adapter coverage refuses unclassified fields, type changes, and bad exclusions" {
+    const Source = struct { name: []const u8, wrapped: u8, added: bool };
+    const Target = struct { name: []const u8, built: u8 };
+    const Retyped = struct { name: u32, built: u8 };
+    const Same = struct { name: []const u8 };
+    const src_excl = [_]Exclusion{.{ .name = "wrapped", .reason = "test" }};
+    const tgt_excl = [_]Exclusion{.{ .name = "built", .reason = "test" }};
+    const added_excl = [_]Exclusion{.{ .name = "added", .reason = "test" }};
+    const absent = [_]Exclusion{.{ .name = "absent", .reason = "test" }};
+    const no_reason = [_]Exclusion{.{ .name = "wrapped", .reason = "" }};
+    const both = src_excl ++ added_excl;
+
+    try std.testing.expect(comptime coverageProblem(Source, Target, &both, &tgt_excl) == null);
+    try std.testing.expect(comptime std.mem.endsWith(u8, coverageProblem(Source, Target, &src_excl, &tgt_excl).?, "unclassified source field: added"));
+    try std.testing.expect(comptime std.mem.endsWith(u8, coverageProblem(Same, Source, &.{}, &.{}).?, "unclassified target field: wrapped"));
+    try std.testing.expect(comptime std.mem.endsWith(u8, coverageProblem(Source, Retyped, &both, &tgt_excl).?, "field type differs: name"));
+    try std.testing.expect(comptime std.mem.endsWith(u8, coverageProblem(Source, Target, &(both ++ absent), &tgt_excl).?, "source exclusion names no field: absent"));
+    try std.testing.expect(comptime std.mem.endsWith(u8, coverageProblem(Source, Target, &both, &(tgt_excl ++ absent)).?, "target exclusion names no field: absent"));
+    try std.testing.expect(comptime std.mem.endsWith(u8, coverageProblem(Source, Target, &(added_excl ++ no_reason), &tgt_excl).?, "source exclusion has no reason: wrapped"));
 }
