@@ -999,11 +999,95 @@ pub const HandlerVerifier = struct {
                     self.walkExprForRefs(val);
                 }
             },
-            // exhaustive: the remaining statement kinds hold no expression that
-            // can reference a tracked binding; the kinds that do are handled
-            // above and recurse.
-            else => {},
+            .assert_stmt => {
+                const stmt = self.ir_view.getAssertStmt(node) orelse return;
+                self.walkExprForRefs(stmt.condition);
+                self.walkExprForRefs(stmt.error_expr);
+            },
+            .function_decl => {
+                const func = self.ir_view.getFunctionOfDecl(node) orelse return;
+                self.walkNestedFunctionBody(func.body);
+            },
+            // exhaustive: every statement kind not named above descends through
+            // the shared expression-child map, so a node kind that holds code
+            // is walked by default. Each child gets its own journal span, so a
+            // guard in one child never clears the code after the statement.
+            else => {
+                var it = self.ir_view.expressionChildren(node);
+                while (it.next()) |child| self.walkScopedChild(child);
+            },
         }
+    }
+
+    /// True for a node kind that `walkForResultsAndRefs` handles.
+    fn isStatementTag(tag: NodeTag) bool {
+        return switch (tag) {
+            .expr_stmt,
+            .var_decl,
+            .if_stmt,
+            .for_stmt,
+            .for_of_stmt,
+            .for_in_stmt,
+            .while_stmt,
+            .do_while_stmt,
+            .switch_stmt,
+            .case_clause,
+            .return_stmt,
+            .assert_stmt,
+            .throw_stmt,
+            .break_stmt,
+            .continue_stmt,
+            .try_stmt,
+            .block,
+            .labeled_stmt,
+            .function_decl,
+            .import_decl,
+            .export_decl,
+            .program,
+            .stmt_list,
+            => true,
+            // exhaustive: every other tag is an expression, a pattern, or a leaf. Those
+            // belong to the expression walk, which descends through the same child map.
+            else => false,
+        };
+    }
+
+    /// Walk a child found by the shared child map: a statement goes to the
+    /// statement walk and anything else to the expression walk.
+    fn walkChild(self: *HandlerVerifier, child: NodeIndex) void {
+        const tag = self.ir_view.getTag(child) orelse return;
+        if (isStatementTag(tag)) {
+            self.walkForResultsAndRefs(child);
+        } else {
+            self.walkExprForRefs(child);
+        }
+    }
+
+    /// `walkChild` in its own journal span.
+    fn walkScopedChild(self: *HandlerVerifier, child: NodeIndex) void {
+        const mark = self.journalMark();
+        defer self.journalRestore(mark);
+        self.walkChild(child);
+    }
+
+    /// Walk the body of a nested function (declaration, expression, or arrow).
+    /// A closure can run at any later time, so no check made outside it holds
+    /// inside it: every flag is cleared for the walk and restored exactly after.
+    /// A check or narrowing made inside the body is undone with the walk. A kill
+    /// made inside the body survives, because the closure may have run:
+    /// `killCheckedFlag` rewrites the journal entries, so the restore leaves the
+    /// flag false.
+    fn walkNestedFunctionBody(self: *HandlerVerifier, body: NodeIndex) void {
+        if (body == null_node) return;
+        const mark = self.journalMark();
+        defer self.journalRestore(mark);
+        for (self.result_bindings.items) |rb| {
+            self.setCheckedFlag(.result_ok_checked, rb.key(), false);
+        }
+        for (self.optional_bindings.items) |ob| {
+            self.setCheckedFlag(.optional_narrowed, ob.key(), false);
+        }
+        self.walkChild(body);
     }
 
     /// Walk an expression for reference counting and result access checking.
@@ -1013,7 +1097,7 @@ pub const HandlerVerifier = struct {
 
         switch (tag) {
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return;
+                const binding = self.bindingOf(node) orelse return;
                 self.incrementRefCount(binding);
             },
             .member_access, .optional_chain => {
@@ -1111,8 +1195,15 @@ pub const HandlerVerifier = struct {
                 }
             },
             .spread => {
-                const unary = self.ir_view.getUnary(node) orelse return;
-                self.walkExprForRefs(unary.operand);
+                // The parser stores the operand in the value word (`getOptValue`),
+                // not in the unary operand word, so `getUnary` read an empty slot
+                // and `[...result.value]` reached no check.
+                const operand = self.ir_view.getOptValue(node) orelse return;
+                self.walkExprForRefs(operand);
+            },
+            .function_expr, .arrow_function => {
+                const func = self.ir_view.getFunction(node) orelse return;
+                self.walkNestedFunctionBody(func.body);
             },
             .computed_access => {
                 const member = self.ir_view.getMember(node) orelse return;
@@ -1127,10 +1218,14 @@ pub const HandlerVerifier = struct {
                 self.checkResultValueAccessComputed(member, node);
                 self.checkOptionalObjectAccess(member, node);
             },
-            // exhaustive: this walk looks for unguarded Result and optional reads,
-            // and every expression that can perform one is handled above. A leaf
-            // reads nothing, so there is no access to check.
-            else => {},
+            // exhaustive: this walk looks for unguarded Result and optional reads.
+            // Every expression kind not named above descends through the shared
+            // expression-child map, so a node kind that holds code is walked by
+            // default. A leaf has no children and reads nothing.
+            else => {
+                var it = self.ir_view.expressionChildren(node);
+                while (it.next()) |child| self.walkChild(child);
+            },
         }
     }
 
@@ -1224,6 +1319,32 @@ pub const HandlerVerifier = struct {
         return null;
     }
 
+    /// The binding an identifier node reads, as the declaring scope names it.
+    /// A closure reads a captured binding through an upvalue reference whose
+    /// scope and slot index the closure's own upvalue table, so the tracked
+    /// state, which is keyed by the declaring scope and slot, would never
+    /// match it. An upvalue reference is resolved by name to the one variable
+    /// declaration that has that name. When two declarations share the name,
+    /// the reference stays unresolved and reads no tracked state: this is the
+    /// same blind spot that closures had before the walk entered them.
+    fn bindingOf(self: *const HandlerVerifier, identifier_node: NodeIndex) ?ir.BindingRef {
+        const ref = self.ir_view.getBinding(identifier_node) orelse return null;
+        if (ref.kind != .upvalue) return ref;
+        var found: ?BindingState = null;
+        for (self.all_bindings.items) |declared| {
+            if (declared.name_atom != ref.name_atom) continue;
+            if (found != null) return ref;
+            found = declared;
+        }
+        const declared = found orelse return ref;
+        return .{
+            .scope_id = declared.scope_id,
+            .slot = declared.slot,
+            .name_atom = declared.name_atom,
+            .kind = .local,
+        };
+    }
+
     /// Find a result binding by (scope_id, slot), or null if not tracked.
     /// Keying on the slot alone would let a `.ok` check in one branch clear the
     /// unchecked-value state of a same-slot binding in a sibling scope, yielding
@@ -1260,7 +1381,7 @@ pub const HandlerVerifier = struct {
         // Check object is an identifier that's a tracked result
         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
         if (obj_tag != .identifier) return null;
-        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        const binding = self.bindingOf(member.object) orelse return null;
 
         if (self.findResultBinding(binding)) |_| return binding;
         return null;
@@ -1291,7 +1412,7 @@ pub const HandlerVerifier = struct {
         // Check if the object is a result binding
         const obj_tag = self.ir_view.getTag(member.object) orelse return;
         if (obj_tag != .identifier) return;
-        const binding = self.ir_view.getBinding(member.object) orelse return;
+        const binding = self.bindingOf(member.object) orelse return;
 
         const rb = self.findResultBinding(binding) orelse return;
         if (!rb.ok_checked) {
@@ -1576,7 +1697,7 @@ pub const HandlerVerifier = struct {
         const right_tag = self.ir_view.getTag(binary.right) orelse return null;
 
         if (left_tag == .identifier and right_tag == .lit_undefined) {
-            const binding = self.ir_view.getBinding(binary.left) orelse return null;
+            const binding = self.bindingOf(binary.left) orelse return null;
             if (self.findOptionalBinding(binding.slot, binding.scope_id) != null) {
                 return .{ .slot = binding.slot, .scope_id = binding.scope_id };
             }
@@ -1584,7 +1705,7 @@ pub const HandlerVerifier = struct {
 
         // Check left=undefined, right=identifier
         if (left_tag == .lit_undefined and right_tag == .identifier) {
-            const binding = self.ir_view.getBinding(binary.right) orelse return null;
+            const binding = self.bindingOf(binary.right) orelse return null;
             if (self.findOptionalBinding(binding.slot, binding.scope_id) != null) {
                 return .{ .slot = binding.slot, .scope_id = binding.scope_id };
             }
@@ -1604,7 +1725,7 @@ pub const HandlerVerifier = struct {
 
     /// Resolve an identifier node to its un-narrowed optional binding, if any.
     fn getUnnarrowedOptional(self: *HandlerVerifier, identifier_node: NodeIndex) ?*OptionalBindingState {
-        const binding = self.ir_view.getBinding(identifier_node) orelse return null;
+        const binding = self.bindingOf(identifier_node) orelse return null;
         const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return null;
         if (ob.narrowed) return null;
         return ob;
@@ -1676,7 +1797,7 @@ pub const HandlerVerifier = struct {
         const target_tag = self.ir_view.getTag(assign.target) orelse return;
         if (target_tag != .identifier) return;
 
-        const binding = self.ir_view.getBinding(assign.target) orelse return;
+        const binding = self.bindingOf(assign.target) orelse return;
         const key = bindingKey(binding.scope_id, binding.slot);
 
         // The assigned value is new: a check made on the old Result does not hold for it.
@@ -2626,6 +2747,174 @@ test "ZTS309 optional guard scope follows the block that holds it" {
         \\}
     );
     try std.testing.expectEqual(@as(u32, 1), nested.unchecked_optional);
+}
+
+test "ZTS303 reports an unchecked Result read inside an assert condition" {
+    const source = result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  assert result.value !== undefined, Response.text("no");
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const counts = try routeVerifierCounts(source);
+    try std.testing.expectEqual(@as(u32, 1), counts.unchecked_result);
+    // The assert reads `result`, so it is not a dead variable.
+    try std.testing.expectEqual(@as(u32, 0), try countUnusedVariableWarnings(source));
+}
+
+test "ZTS303 reports an unchecked Result read inside a closure" {
+    const arrow = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  const g = () => String(result.value);
+        \\  return Response.text(g());
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), arrow.unchecked_result);
+
+    const arrow_block = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  const g = () => { return String(result.value); };
+        \\  return Response.text(g());
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), arrow_block.unchecked_result);
+
+    const declared = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  function g() { return String(result.value); }
+        \\  return Response.text(g());
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), declared.unchecked_result);
+}
+
+test "ZTS303 reports an unchecked Result read through a spread" {
+    const counts = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  const items = [...result.value];
+        \\  return Response.text(String(items.length));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), counts.unchecked_result);
+}
+
+test "ZTS303 a guard inside a closure does not clear the enclosing read" {
+    const declared = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  function g() {
+        \\    if (result.ok === false) { return "no"; }
+        \\    return "yes";
+        \\  }
+        \\  const t = g();
+        \\  return Response.text([String(result.value), t].join(""));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), declared.unchecked_result);
+
+    const arrow = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  const g = () => {
+        \\    if (result.ok === false) { return "no"; }
+        \\    return "yes";
+        \\  };
+        \\  const t = g();
+        \\  return Response.text([String(result.value), t].join(""));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), arrow.unchecked_result);
+}
+
+test "ZTS309 an assignment inside a closure does not narrow the enclosing read" {
+    const counts = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  const g = () => {
+        \\    v = "x";
+        \\    return 1;
+        \\  };
+        \\  const len = v.length;
+        \\  const n = g();
+        \\  v = "y";
+        \\  return Response.text(String(len) + String(n) + v);
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), counts.unchecked_optional);
+}
+
+test "a reassignment inside a closure makes the enclosing Result or optional unchecked" {
+    const result_kill = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  let result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  const g = () => {
+        \\    result = jwtVerify("x", "k");
+        \\    return 1;
+        \\  };
+        \\  g();
+        \\  return Response.text(String(result.value));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), result_kill.unchecked_result);
+
+    const optional_kill = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  if (v === undefined) { return Response.text("none"); }
+        \\  const g = () => {
+        \\    v = cacheGet("items", "k2");
+        \\    return 1;
+        \\  };
+        \\  g();
+        \\  return Response.text(String(v.length));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), optional_kill.unchecked_optional);
+}
+
+test "ZTS303 closure walks keep the precision of the checks outside them" {
+    // A closure that does not touch the Result adds nothing.
+    const untouched = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  const g = () => 1;
+        \\  return Response.text(String(result.value) + String(g()));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), untouched.unchecked_result);
+
+    // Documented precision cost: a closure can run at any later time, so a
+    // check around its definition does not hold inside it.
+    const inside_guard = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (result.ok) {
+        \\    const g = () => String(result.value);
+        \\    return Response.text(g());
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), inside_guard.unchecked_result);
+
+    // The flags are restored after the closure: the guard still holds after it.
+    const restored = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  const g = () => 1;
+        \\  const n = g();
+        \\  return Response.text(String(result.value) + String(n));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), restored.unchecked_result);
 }
 
 const import_corpus = @import("tests/import_corpus.zig");

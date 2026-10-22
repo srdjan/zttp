@@ -199,7 +199,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W1 | done: `IrView.expressionChildren` and the `subtreeContains` fix; `zig build test` 200/200 steps, 9250/9256 tests |
 | W2 | done: effect walks reach `assert` and spread operands; `cap_in_assert.ts` now exits 1; `zig build test` 200/200 steps, 9255/9261 tests |
 | W3a | done: block-scoped checked-flag journal; `res_nested`, `res_let_reassign`, `opt_renarrow` now refused; one allowlist row (`setCheckedFlag catch-poison`); residual: a `for...of` body that reads then reassigns a Result is not caught on the second iteration |
-| W3b | not started |
+| W3b | done: the verifier walks `assert`, nested functions, closures (with every flag cleared), and spread operands; upvalue reads map to a unique declared binding; residual: a hoisted `function` that reads a Result declared later is not resolved |
 | W4 | not started |
 | W5 | not started |
 | W6 | not started |
