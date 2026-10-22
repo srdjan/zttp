@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Walker soundness](2026-10-22-walker-soundness-plan.md) | Revised 2026-10-22 after one Codex and Fable round; 13 confirmed walk defects, W1 to W11; decision 9 open | Owner chose decisions 8(a), 5(a), 6(a), 7(a) with "a" |
 | [Coupling census](2026-10-22-coupling-census-plan.md) | Complete 2026-10-22; U1 to U4 committed, `verify.sh` passed; U5 census confirmed two fail-opens (assert, spread), not fixed; results in the [worklog](2026-10-22-coupling-census-worklog.md) | Owner chose audit decisions 1(a) to 4(a) with "as recommended" |
 | [Modular boundaries](2026-10-22-modular-boundaries-plan.md) | Complete, 2026-10-22; all five phases reviewed, focused gates and independent aggregate/full verification passed | Owner approved phased implementation with "go ahead in phases" |
 | [Soundness hand-off](2026-10-21-soundness-handoff.md) | Hand-off 2026-10-21: Q1 to Q3, U6 and U1 committed locally; U2 and U3 specified, not validated or implemented | Records the owner decisions D1 to D8 |

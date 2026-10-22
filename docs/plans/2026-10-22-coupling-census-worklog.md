@@ -661,3 +661,57 @@ The owner chose decision 6(a): probe the five suspects before the fix plan. The 
 | Behavior diff (`computeArgSignature`) | `diff_two_lit.ts` to `diff_one_lit.ts`: drop `cacheSet("items", "k2", ...)`. `breaking`, exit 1. | `diff_two_dyn.ts` to `diff_one_dyn.ts`: drop `cacheSet("items", b, ...)`, where `a = req.url` and `b = req.method`. `equivalent_modulo_laws`, `"safe": true`, exit 0, law `cache.cacheSet.idempotent_call`. | Confirmed. Two different dynamic keys both give the signature token `?`, the idempotent-write law collapses them, and `prove-behavior` reports an edit that drops a cache write as safe. |
 
 Result: with the two U5 fail-opens, the census now has six confirmed defects: the effect walk misses `assert` and spread operands, the narrowing kill misses an initializer, the route resolver misses a non-identifier root, the verifier misses `assert` and closures, and the behavior canonicalizer equates unknown arguments. The return join is a seventh, with a type-level effect only.
+
+### Plan research probes
+
+While writing `2026-10-22-walker-soundness-plan.md`, the lead ran three more probes with the same binary. The sources are in `/private/tmp/claude-501/probes/s/`.
+
+| Probe | Result | Reading |
+|---|---|---|
+| `if_a.ts` to `if_b.ts`: an `if (!ok) { return Response.text("no"); }` branch changes to status 500 | `breaking`, `response_changed=1`, exit 1 | Control. |
+| `as_a.ts` to `as_b.ts`: `assert ok, Response.text("no")` changes to status 500 | `equivalent`, `response_changed=0`, exit 0 | Confirmed defect. The path generator emits no path for a failed `assert`. `emitAssert` in `parser/codegen.zig` returns the error expression from the enclosing function. |
+| `res3_assertok.ts`: `assert result.ok, ...` then `result.value` | ZTS303 | `assert result.ok` does not narrow the Result in the verifier. This is a false refusal, not a fail-open. |
+
+### Validation round
+
+Two reviewers checked the first draft of `2026-10-22-walker-soundness-plan.md`. Codex `gpt-6-astra` (read-only) checked the facts, and Fable checked the argument with its own probes in `/private/tmp/claude-501/fable/`. The lead re-ran `diff_ret2_a.ts` to `diff_ret2_b.ts` (`equivalent`, exit 0), `rt_forof.ts` (no ZTS30x), and `res_nested.ts` (no ZTS303) and got the reported results. The lead also ran `diff_one_dyn.ts` to `diff_one_dyn_b.ts`, which writes key `b` in place of key `a`: `equivalent`, exit 0. The literal-key control `diff_one_lit.ts` to `diff_one_lit_b.ts` is `breaking`, exit 1.
+
+Findings that changed the plan:
+
+- Codex: the six `strict_checker.zig` spread arms are load-bearing for ZTS612, ZTS622, ZTS608, and nested strict checks, and `contract_builder.zig` sets `canonical` true when strict checking passes. `bool_checker.zig` has the same spread misread, and boolean errors gate contract extraction. `contract_diff.zig` `canonicalPathsEqual` also equates `?` with `?`. A bare failed `assert` gives HTTP 500. An unbraced branch reaches `walkPaths` without `walkBlockFrom`. ZTS204 does not check an `assert` error expression. The kill walk's `assignment` arm skips the target.
+- Fable: `trackModuleCallUnder` records only a call that is a whole initializer or statement value, so a nested write is invisible to the behavior diff. The verifier's checked state is not scoped, which is a fail-open today and would make the first W3 draft add two more. The route escape scan misses a `for...of` alias. The strict walks miss closures for ZTS620 and ZTS604. A `for...of` return arm that ignores zero iterations would type a possibly undefined value as `number`. The stop conditions must also catch an unpredicted move from refused to proven.
+
+Storage map for the 69 `NodeTag` members, from the Codex round. `E[n]` means `extra[a+n]`. `L` means an index list, and `R(b)` means a list reference stored through `b`.
+
+| Tags | Node-bearing storage and accessor |
+|---|---|
+| `lit_int`, `lit_float`, `lit_string`, `lit_bool`, `lit_null`, `lit_undefined`, `identifier`, `break_stmt`, `continue_stmt`, `import_specifier`, `import_default`, `import_namespace`, `param_list`, `arg_list`, `stmt_list` | none |
+| `binary_op` | `a.low24`, `b`; `getBinary` |
+| `unary_op` | `b`; `getUnary` |
+| `ternary` | `E[0,1,2]`; `getTernary` |
+| `call`, `method_call` | `a`, `R(b)`; `getCall` |
+| `member_access`, `optional_chain` | `a`; `getMember` |
+| `computed_access` | `a`, `b`; `getMember` |
+| `assignment` | `a`, `b.low24`; `getAssignment` |
+| `array_literal`, `array_pattern`, `sequence_expr`, `comma_expr` | `L(a)`; `getArray` |
+| `object_literal` | `L(a)`; `getObject` |
+| `object_property`, `object_method`, `object_getter`, `object_setter` | `a`, `b.low24`; `getProperty` |
+| `spread`, `object_spread`, `await_expr`, `yield_expr`, `return_stmt`, `throw_stmt`, `expr_stmt`, `export_default`, `export_all` | `a`; `getOptValue` |
+| `function_expr`, `arrow_function` | parameters `L(E[2])`, body `E[4]`; `getFunction` |
+| `function_decl`, `var_decl` | initializer `E[1]`; `getVarDecl` |
+| `if_stmt` | `E[0,1,2]`; `getIfStmt` |
+| `for_stmt`, `while_stmt`, `do_while_stmt` | `E[1,2,3,4]`; `getLoop` |
+| `for_of_stmt`, `for_in_stmt` | `E[1,3]`; `getForIter` |
+| `switch_stmt` | `a`, `R(b)`; `getSwitchStmt` |
+| `case_clause` | `a`, `R(b)`; `getCaseClause` |
+| `match_expr` | `a`, `R(b)`; `getMatchExpr` |
+| `match_arm` | pattern `a`, body `b`; `getMatchArm` |
+| `match_pattern` | `L(a)`; `getMatchPattern` |
+| `match_type_test` | predicate `b`; `getMatchTypeTest` |
+| `assert_stmt` | `a`, `b`; `getAssertStmt` |
+| `try_stmt` | `E[0,2,3]`; no typed accessor |
+| `block`, `program` | `L(a)`; `getBlock` |
+| `labeled_stmt` | `b`; no typed accessor |
+| `pattern_element`, `pattern_rest`, `pattern_default` | nested pattern `E[2]`, default `E[4]`; `getPatternElem` |
+| `import_decl` | specifiers `R(b)`; `getImportDecl` |
+| `export_decl`, `export_specifier` | `E[1]`, `L(E[2])`; `getExportDecl` |
