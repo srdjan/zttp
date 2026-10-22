@@ -473,3 +473,177 @@ With a fresh private cache in `/private/tmp/claude-501/verify-u4/`, `zig fmt --c
 ## Final gate
 
 `bash scripts/verify.sh` exited 0 and ended with \"verify.sh: all per-commit gates passed\". The log is `/private/tmp/claude-501/verify-u4/verify.log`. This run covers U1 to U4.
+
+## U5: a census of node-kind default arms in the proof files
+
+U5 is read-only research. I edited no source file, script, or allowlist, and I ran no `zig build`. The census covers HEAD `f9b50984` on local main.
+
+### Method
+
+I read the 22 files in `proof_files` in `scripts/check-proof-swallow.sh`. A brace-aware awk scanner found every `else =>` arm and the operand of its switch. Outside `test` blocks it found 130 `else` arms. A plain grep also counts 130, so the scanner missed no arm. I then read the declaration of each operand. I kept an arm only when its operand is a `parser/ir.zig` `NodeTag` value from `IrView.getTag`, or a parameter typed `NodeTag`. I dropped the `TypePool.getTag` switches in `type_env.zig` and `type_checker.zig`, because those switch on type tags. The proof-checker has its own `proof_system.NodeTag`, and no `else` arm switches on it.
+
+The result is 68 `NodeTag` switches with an `else` arm. I ran the gate's own silent-arm awk over the same files. That awk matches 58 of the 68 arms, and each of the 58 carries an `// exhaustive:` reason. The gate cannot see the other 10 arms. Their shapes are `else => try ...` (6), a multi-line `else => {` (1), `else => _ = try ...` (1), `else => self.f(...)` (1), and `else => return error.X` (1). The gate excludes the last shape as propagation on purpose.
+
+### Child-bearing tags (step 2)
+
+`IRStore.add` in `parser/ir.zig` is an exhaustive switch over all 69 `NodeTag` members. It shows which payload words each tag stores as node indices, and the `IrView` accessors decode the same words. 15 members carry no node-index child: `lit_int`, `lit_float`, `lit_string`, `lit_bool`, `lit_null`, `lit_undefined`, `identifier`, `break_stmt`, `continue_stmt`, `import_specifier`, `import_default`, `import_namespace`, `param_list`, `arg_list`, and `stmt_list`. The other 54 members carry children.
+
+The parser can produce only 32 of the 54 child-bearing members. I counted the producers in `parser/parse.zig`: the `.tag = .X` sites and the `Node.*` helpers. No other source rewrites a tag into a child-bearing kind. The 32 are `binary_op`, `unary_op`, `ternary`, `call`, `member_access`, `computed_access`, `optional_chain`, `assignment`, `array_literal`, `object_literal`, `object_property`, `object_spread`, `function_expr`, `arrow_function`, `spread`, `match_expr`, `match_arm`, `match_pattern`, `match_type_test`, `expr_stmt`, `var_decl`, `if_stmt`, `for_of_stmt`, `return_stmt`, `assert_stmt`, `block`, `function_decl`, `array_pattern`, `pattern_element`, `import_decl`, `export_decl`, and `program`. The parser never produces the other 22: `method_call`, the three object method kinds, `await_expr`, `yield_expr`, `sequence_expr`, `comma_expr`, the four non-`for...of` loops, `switch_stmt`, `case_clause`, `throw_stmt`, `try_stmt`, `labeled_stmt`, `pattern_rest`, `pattern_default`, `export_specifier`, `export_default`, and `export_all`.
+
+### Label rules
+
+I gave each arm one label, using the first label that applies. Mechanically, a child-bearing tag reaches every one of the 68 arms. Even with only the 32 producible members, every arm leaves at least 5 children unnamed (`forEachSubNode` in `proof_ir.zig` has the fewest). So no arm meets the strict `leaf-correct` rule. I used `leaf-correct` for three narrower shapes, and I name the shape in each row so that the owner can reject the reading:
+
+- flat scan: the loop visits every node index, so the arm drops no child. The arm only decides whether this one node is the searched shape.
+- operand domain: the code above the switch admits only the named tags.
+- no descent: the switch classifies one node, and a separate walker does the descent.
+
+`local-refusal` means that the arm returns or sets the function's unknown, unresolved, blocked, or incomplete value, and I read a caller that turns it into a conservative outcome. `diagnosed` includes parser refusal: the parser grammar refuses every other form at that position with a diagnostic.
+
+### Table
+
+| File | Function | Arm shape | Gate-visible | Label | Evidence |
+|---|---|---|---|---|---|
+| `contract_builder.zig` | `expectedTypeForDecl` | `else => return "unknown",` | yes | local-refusal | Returns the top string for the hole summary. |
+| `contract_builder.zig` | `extractSchemaJson` | `else => return null,` | yes | local-refusal | The caller sets `api_schemas_dynamic` on null. |
+| `contract_builder.zig` | `getObjectPropertyKey` | `else => null,` | yes | local-refusal | `extractApiRoutesFromObject` sets `api_routes_dynamic`. `extractStatusFromOptionsNode` records no status. |
+| `contract_builder.zig` | `resolveObjectLiteralNode` | `else => return null,` | yes | local-refusal | `extractApiRoutesFromCall` sets `api_routes_dynamic`. |
+| `contract_builder.zig` | `findFunctionNodeByBinding` | `else => {},` | yes | leaf-correct (flat scan) | Only `var_decl` and `function_decl` bind a function init. Null makes `resolveFunctionNode` null, and the route becomes dynamic. |
+| `contract_builder.zig` | `resolveFunctionNode` | `else => return null,` | yes | local-refusal | `extractApiRoutesFromObject` sets `api_routes_dynamic`, and `computeProperties` then refuses `post_only`. |
+| `contract_builder.zig` | `scanFunctionNodeForApiFacts` | `else => {},` | yes | precision-only | Spread, object spread, `assert_stmt`, patterns, and imports reach it. It records only per-route request schema refs, auth flags, and response facts. `post_only` reads only route methods and `api_routes_dynamic`. The runtime builds `requires_bearer` and `request_schema_refs` only in test fixtures. |
+| `contract_builder.zig` | `extractResponseSchemaRef` | `else => return null,` | yes | local-refusal | Null leaves the response undocumented. |
+| `contract_builder.zig` | `extractStatusFromOptionsNode` | `else => return null,` | yes | local-refusal | Null leaves the status unrecorded. |
+| `contract_builder.zig` | `findTestFunctionNode` | `else => {},` | yes | leaf-correct (flat scan) | Only the test helper `buildTestContract` calls it. |
+| `effect_inference.zig` | `collectFunctionsIn` | `else => {},` | yes | refused-downstream | A missed nested function has a local binding. `userFnOf` needs a global (`slotIsAtom`). `calleeIsUnresolvable` then returns true, `handleCall` sets `row.lower_bound`, and `computeProperties` refuses on `lower_bound`. |
+| `effect_inference.zig` | `registerModuleBindings` | `else => {},` | yes | unclear | It drops module-scope `expr_stmt`, `if_stmt`, `for_of_stmt`, `assert_stmt`, and `block`. No row receives a call that runs at load time. I found no check that refuses a capability call at module scope. |
+| `effect_inference.zig` | `isSafeDataShape` | `else => false,` | yes | local-refusal | False keeps the export blocked. |
+| `effect_inference.zig` | `walkBaseStmt` | `else => try self.walkBaseExpr(...)` | no | unclear | It forwards to `walkBaseExpr`, and `walkBaseExpr` then drops `assert_stmt`. |
+| `effect_inference.zig` | `walkBaseExpr` | `else => {},` | yes | unclear | Probable fail-open. No arm names `assert_stmt`, so the walk never reaches the condition or the error expression of an `assert`. |
+| `effect_inference.zig` | `markCallThroughHolder` | `else => return,` | yes | unclear | A callee rooted at a call or a literal leaves the row unchanged. The comment cites an "R6" rule, and no R6 exists in the file. Safety rests on charge-at-reference and `scanFunctionValueEscapes`. That needs more than two functions to show. |
+| `effect_inference.zig` | `scanFunctionValueEscapes` | `else => continue,` | yes | leaf-correct (flat scan) | Only function literals, object methods, and identifiers can be function values. Call results go through `referencesEscapingSibling`. |
+| `effect_inference.zig` | `closeFunctionArgument` | `else => {},` | yes | local-refusal | The node stays open, and the final pass reports it as an escape. |
+| `effect_inference.zig` | `isCallbackMethod` | `else => return true,` | yes | refused-downstream | This arm returns the permissive value. A user method on a call-result receiver is a function literal or a reference outside P0 to P3, so the final pass of `scanFunctionValueEscapes` reports it. `recordFunctionValueArg` charges the closed argument. |
+| `effect_inference.zig` | `closeRouteTables` | `else => {},` | yes | leaf-correct (flat scan) | A missed table start closes less and reports more. |
+| `effect_inference.zig` | `includeReachableNodeEffects` | `else => {},` | yes | unclear | `computeProperties` ANDs this legacy summary with the handler row. The row has the same `assert_stmt` gap (see `walkBaseExpr`), so the AND does not cover it. |
+| `effect_inference.zig` | `resolveFunctionNode` (contract projection) | `else => null,` | yes | precision-only | `computeProperties` ANDs the summary with the handler row. `handleCall` sets `lower_bound` for every identifier callee that it cannot resolve. |
+| `flow_interp.zig` | `evidenceValue` | `else => return null,` | yes | local-refusal | The branch capsule is declined. |
+| `flow_interp.zig` | `initializeModule` | `else => try self.exec(node, st),` | no | local-refusal | It forwards to `exec`. `exec` names all 69 tags with no `else` and records the unproduced tags. A non-empty unresolved list sets `cleared` in `analyzeRoot`. |
+| `flow_interp.zig` | `buildModuleNames` (declaration scan) | `else => {},` | yes | leaf-correct (flat scan) | Other tags declare or assign no module name. |
+| `flow_interp.zig` | `buildModuleNames` (function test) | `else => false,` | yes | leaf-correct (operand domain) | `countDeclaration` gets a non-null node only from the `var_decl` and `function_decl` arm. |
+| `flow_interp.zig` | `evalAssignment` | multi-line `else => {` | no | local-refusal | It records `refused_by_parser` and returns top. |
+| `flow_interp.zig` | `evalObject` | `else => _ = try self.unresolvedNode(...)` | no | local-refusal | `unresolvedNode` records the gap and returns top. |
+| `flow_interp.zig` | `bindPattern` (field value) | `else => {},` | yes | diagnosed | `parseMatchObjectPattern` and `parseMatchPattern` admit only a binding, a nested pattern, a literal, or `_`, and refuse other forms with "expected pattern". |
+| `flow_interp.zig` | `bindPattern` (pattern) | `else => {},` | yes | diagnosed | The same parser grammar applies. Only literals remain. |
+| `flow_interp.zig` | `leaveLoop` | `else => try self.record(...)` | no | leaf-correct (operand domain) | The only caller (`exec`) passes `break_stmt` or `continue_stmt`. The arm also records `not_produced`. |
+| `function_specs.zig` | `functionSignature` | `else => return error.InvalidFunctionOwner,` | no | local-refusal | It returns an error. The gate excludes this shape as propagation. |
+| `handler_verifier.zig` | `pureStmtReturns` | `else => .never,` | yes | local-refusal | `.never` can only cost the total-return proof. |
+| `handler_verifier.zig` | `stmtReturns` | `else => .never,` | yes | local-refusal | The same reason applies. |
+| `handler_verifier.zig` | `walkForResultsAndRefs` | `else => {},` | yes | unclear | Probable fail-open. No arm names `assert_stmt`, so an unchecked `result.value` read or an optional use inside an `assert` is not reported. I did not check whether the type checker refuses the same read. |
+| `handler_verifier.zig` | `walkExprForRefs` | `else => {},` | yes | unclear | The arm drops `function_expr` and `arrow_function`, so the walk does not enter a closure body. The `.spread` arm also misreads its operand (see the side findings). |
+| `handler_verifier.zig` | `stmtReturnsQuick` | `else => .never,` | yes | local-refusal | `.never` only prevents post-dominator narrowing. |
+| `intent_extractor.zig` | `writeLiteralAsJson` | `else => return error.NotLiteral,` | no | local-refusal | The caller calls `markDynamic` on `NotLiteral`. |
+| `intent_extractor.zig` | `propKeyName` | `else => return null,` | yes | local-refusal | The caller sets `info.dynamic = true`. |
+| `path_generator.zig` | `walkPaths` | `else => {},` | yes | unclear | `scanUnseenFailableCalls` blocks `isCovered` for a failable call that no path saw, so fault coverage is protected. `buildCostEnvelope` sums only walked `io_seq` entries, so a module call inside an `assert` is missing from the cost count. |
+| `path_generator.zig` | `extractConditionConstraint` | `else => {},` | yes | local-refusal | The arm adds no constraint, so the walk visits both branches. |
+| `path_generator.zig` | `computeArgSignature` | `else => try buf.append(allocator, '?'),` | no | unclear | `?` is the documented unknown token. `behavior_canonical.signaturesEqual` compares bytes, so two `?` tokens are equal. Two calls with different dynamic arguments can then count as adjacent duplicates in the `contract_diff` canonicalizer. |
+| `path_generator.zig` | `stmtAlwaysReturns` | `else => false,` | yes | local-refusal | False makes the walk continue past the statement. |
+| `path_generator.zig` | `resolveLoopBound` | `else => return .{ .unknown = ...` | yes | local-refusal | An unknown bound blocks exhaustiveness. |
+| `path_generator.zig` | `constantLoopBound` | `else => {},` | yes | local-refusal | It returns null, and the caller uses a symbolic or unknown bound. |
+| `path_generator.zig` | `objectLiteralPropertyCount` | `else => return null,` | yes | local-refusal | Null keeps the bound symbolic. |
+| `path_generator.zig` | `iterableName` | `else => return null,` | yes | local-refusal | The value is provenance text only. Null gives a bound with no name. |
+| `pipeline.zig` | `flowImportBindingKey` | `else => continue,` | yes | leaf-correct (flat scan) | Null makes the caller raise `ImportNotFound`. |
+| `pipeline.zig` | `run` (probe in `expectEveryContextBoolean`) | `else => {},` | yes | leaf-correct (flat scan) | It is a test helper, and the probe compares an exact count. |
+| `proof_ir.zig` | `guardedIndex` | `else => null,` | yes | leaf-correct (no descent) | Only a call node can be a call to a capability export. `forEachSubNode` does the descent. |
+| `proof_ir.zig` | `forEachSubNode` | `else => {},` | yes | diagnosed | The parser produces none of the 22 unnamed members and refuses that syntax. The 5 producible unnamed members (`match_pattern`, `match_type_test`, `array_pattern`, `pattern_element`, `import_decl`) hold only literals, bindings, parser-built `isDict`, `isBytes`, or `Array.isArray` calls over a name or a member path, and import specifiers. None of these is a module export. Default parameters are refused at parse time. |
+| `proof_ir.zig` | `build` | `else => try self.leaf(.plain, ...)` | no | local-refusal | A `plain` node is never total in the producer fold or in the kernel fold in `checker.zig`. `leaf` still descends through `forEachSubNode` for guarded calls. |
+| `route_resolution.zig` | `bindingEscapesStableResolutionDepth` | `else => {},` | yes | unclear | The flat scan checks only a `var_decl` init, an assignment value, a call argument, and a return value. It does not check `expr_stmt` values, `for...of` iterables, `match` discriminants, or an assignment target that contains the binding. |
+| `route_resolution.zig` | `resolveFunctionNode` | `else => null,` | yes | local-refusal | `appendRouterMatchTargets` sets `unresolved`, and `callKeepsArgumentLocal` returns false. |
+| `route_resolution.zig` | `resolveInitialFunctionNode` | `else => null,` | yes | local-refusal | Two of its three callers set `unresolved`. The third caller, `appendAssignedTableFunctions`, only widens the root set. |
+| `route_resolution.zig` | `assignmentRootBinding` | `else => return null,` | yes | unclear | Probable fail-open. A member chain rooted at an array literal or a call returns null, and `bindingIsMutated` then skips that assignment. An example is `[routes][0]["/a"] = f`. |
+| `type_checker.zig` | `killNarrowingsAssignedIn` | `else => {},` | yes | unclear | Probable fail-open. A missed kill keeps a narrowing, which is the unsafe direction. The comment says that it costs only precision, and that is the reverse. An assignment nested in a call argument, an initializer, a ternary, a `match` arm, an `assert`, or a closure is not killed before a `for...of` body. |
+| `type_checker.zig` | `walkStmt` | `else => {},` | yes | unclear | A concise arrow body that is an object literal, an array literal, or a member read is not typed. A missed type is a missed rejection. I did not trace whether any proof depends on that rejection. |
+| `type_checker.zig` | `walkExpr` | `else => {},` | yes | unclear | The arm drops member reads, `optional_chain`, `computed_access`, and the spread kinds. The comment depends on `isAssignableTo` skipping `null_type_idx`. |
+| `type_checker.zig` | `extractSchemaJson` | `else => null,` | yes | local-refusal | The caller registers no schema type. |
+| `type_checker.zig` | `getObjectPropertyKey` | `else => null,` | yes | local-refusal | Null stops the literal read. |
+| `type_checker.zig` | `inferType` | `else => null_type_idx,` | yes | unclear | `null_type_idx` means "skip rather than reject", not a refusing top. `optional_chain` and `computed_access` get no type. The file has 171 uses of `null_type_idx`. |
+| `type_checker.zig` | `admitTypePredicates` | `else => {},` | yes | precision-only | A predicate in another position is not admitted. The narrowing at a call site requires the name in `admitted_predicates`. |
+| `type_checker.zig` | `predicateLeafTestsParam` | `else => return false,` | yes | local-refusal | False means that the predicate is not verified, and the checker raises ZTS211. |
+| `type_checker.zig` | `operandNamesParam` | `else => return false,` | yes | local-refusal | The same reason applies. |
+| `type_checker.zig` | `isComparableLiteral` | `else => false,` | yes | local-refusal | The same reason applies. |
+| `type_checker.zig` | `callableMetadataForExpression` | `else => self.callableMetadataFromType(inferred),` | no | local-refusal | `callableMetadataFromType` returns `.unavailable` unless the inferred type is a function type. |
+| `type_checker.zig` | `bodyReturnType` | `else => return null_type_idx,` | yes | unclear | Probable fail-open. A `for...of` body can hold a `return`, and this arm drops it. When the function has another `return`, the joined return type is narrower than the real type. |
+
+### Counts
+
+| Label | Arms |
+|---|---|
+| leaf-correct | 10 (flat scan 7, operand domain 2, no descent 1; strict mechanical 0) |
+| local-refusal | 34 |
+| refused-downstream | 2 |
+| diagnosed | 3 |
+| precision-only | 3 |
+| unclear | 16 |
+| Total | 68 |
+
+The gate sees 58 arms and cannot see 10. The 58 visible arms are part of the 104 silent arms that `test-proof-swallow` reviews, and the other 46 are not `NodeTag` switches. Of the 10 invisible arms, 7 are local-refusal, 1 is leaf-correct, and 2 are unclear (`walkBaseStmt`, `computeArgSignature`).
+
+### Owner decision list: the 16 unclear arms
+
+1. `effect_inference.zig` `walkBaseExpr`: no arm names `assert_stmt`. Probable fail-open.
+2. `effect_inference.zig` `walkBaseStmt`: it forwards to `walkBaseExpr`, so the arm has the same gap as item 1.
+3. `effect_inference.zig` `includeReachableNodeEffects`: it has the same `assert_stmt` gap, and the AND with the row does not cover it.
+4. `effect_inference.zig` `registerModuleBindings`: no row receives a call in a module-scope statement.
+5. `effect_inference.zig` `markCallThroughHolder`: the cited "R6" rule does not exist.
+6. `handler_verifier.zig` `walkForResultsAndRefs`: an `assert` is not walked for Result and optional reads.
+7. `handler_verifier.zig` `walkExprForRefs`: a closure body is not walked.
+8. `path_generator.zig` `walkPaths`: the cost envelope misses a module call inside an `assert`.
+9. `path_generator.zig` `computeArgSignature`: two `?` tokens compare equal in `behavior_canonical`.
+10. `route_resolution.zig` `bindingEscapesStableResolutionDepth`: the escape scan omits several value positions.
+11. `route_resolution.zig` `assignmentRootBinding`: a mutation through a non-identifier root is not seen. Probable fail-open.
+12. `type_checker.zig` `killNarrowingsAssignedIn`: an under-kill keeps a narrowing. Probable fail-open.
+13. `type_checker.zig` `walkStmt`: a concise arrow body of some kinds is not typed.
+14. `type_checker.zig` `walkExpr`: member, optional-chain, computed, and spread kinds are not typed here.
+15. `type_checker.zig` `inferType`: `null_type_idx` skips checks.
+16. `type_checker.zig` `bodyReturnType`: a `return` inside `for...of` is dropped. Probable fail-open.
+
+### Side findings outside the `else` arms
+
+These come from the explicit arms that I read, so the counts above leave them out.
+
+- Spread payload misread. The parser stores a `.spread` operand in payload word `a` with `b = 0`, and codegen reads it with `getOptValue`. `getUnary` reads the operand from `b`. These `.spread` arms use `getUnary`, so they walk node 0 or nothing: `effect_inference.zig` `walkBaseExpr`, `isSafeDataShape`, and `includeReachableNodeEffects`; `handler_verifier.zig` `walkExprForRefs`; six arms in `strict_checker.zig`; and `IrView.subtreeContains` in `parser/ir.zig`.
+- Object spread read as a property. The `object_literal` arms of `effect_inference.zig` `walkBaseExpr` and `includeReachableNodeEffects` read an `object_spread` member with `getProperty`. That read gives value 0, so the walk never reaches the operand. `handler_verifier.zig` and `flow_interp.zig` already handle `object_spread` with `getOptValue`. A test in `handler_verifier.zig` records the same bug class as fixed there.
+- Slot-only lookup. `findFunctionNodeByBinding` in `contract_builder.zig` and in the effect-inference contract projection matches a binding by slot and ignores scope. I did not check the effect.
+
+### Checks that can confirm the probable fail-opens
+
+No check below has been run.
+
+- Effect rows and `assert`: put a write export call from `zttp:cache` inside an `assert` condition in a handler. Then read `read_only` and `pure` from the contract. If either one is proven, the fail-open is confirmed.
+- Effect rows and spread: put a write call only inside a spread operand, for example `{ ...{ a: <write call> } }` or `[...[<write call>]]`. Then make the same `read_only` check.
+- Result reads: read `r.value` from an unchecked Result inside an `assert`, and in a second probe inside an arrow callback. Run `-Dverify`, and check that it reports `unchecked_result_value` or that the type checker refuses the read.
+- Narrowing kill: narrow `x` before a `for...of`. In the loop body, read `x.length`, then assign `x = undefined` inside a `const` initializer or a call argument. The probe must be refused.
+- Return type join: write a callback with `return` inside a `for...of` and a second `return` of another type. Use the result at the narrower type. The probe must be refused.
+- Route table mutation: mutate a `routerMatch` table through `[routes][0]["/a"] = f`, where `f` writes. Check that the handler row has `lower_bound` set, or that `read_only` is not proven.
+- Behavior diff: add a `behavior_canonical` test with two adjacent calls to the same read export whose signatures are both `?`. Check whether the duplicate law fires.
+
+### U5 lead probes
+
+The lead ran three of the census probes with the analyzer that `bash scripts/verify.sh` built (`zig-out/bin/zts check --json`). The probe sources are in `/private/tmp/claude-501/probes/`. Each probe has a control that holds the same write outside the construct.
+
+| Probe | Construct | `zts check` exit | Contract properties |
+|---|---|---|---|
+| `base.ts` (control) | `const ok = save(); assert ok, ...` | 1 | `read_only`, `retry_safe`, `idempotent` false |
+| `in_assert.ts` | `assert save(), ...` | 1 (ZTS500 for `fault_covered` and ZTS501 for the import only) | `read_only`, `retry_safe`, `idempotent` true; proof trace says "No virtual-module calls" |
+| `in_spread_base.ts` (control) | `[String(save()), "x"]` | 1 | `read_only`, `retry_safe`, `idempotent` false |
+| `in_spread.ts` | `[...[String(save())], "x"]` | 1 | `read_only`, `retry_safe`, `idempotent` true |
+| `in_objspread.ts` | `{ ...{ a: save() }, b: 1 }` | 1 | `read_only`, `retry_safe`, `idempotent` true |
+| `cap_base.ts` (control) | `Proof<T, "retry_safe" \| "idempotent">`, write outside `assert` | 1 (ZTS500, ZTS305) | refused |
+| `cap_in_assert.ts` | same capsule, write inside `assert` | 0 | `retry_safe` and `idempotent` proven |
+
+`save()` calls `cacheSet` from `zttp:cache`. The handler writes the cache on every request in each probe.
+
+Result: two fail-opens are confirmed. (1) A capability call inside an `assert` condition does not reach the handler's effect summary. (2) A capability call inside an array spread or an object spread operand does not reach it. In `cap_in_assert.ts`, a handler that writes the cache on each request passes CHECK with `retry_safe` and `idempotent` proven.
+
+The function capsule path (`proven` in the JSON) reports `read_only` false for the same probes. Only the handler properties are wrong.
+
+The other probable defects in the census (the narrowing kill, the return type join, the route table mutation, the Result reads, and the behavior diff) are not probed.

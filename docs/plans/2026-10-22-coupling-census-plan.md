@@ -1,6 +1,6 @@
 # Coupling census plan
 
-Status: revised 2026-10-22 after one Fable argument review and one Codex astra fact check. Planned at `0d4866c8`.
+Status: complete 2026-10-22. U1 to U4 committed; U5 census recorded. Revised once after one Fable argument review and one Codex astra fact check. Planned at `0d4866c8`.
 
 Authority: the owner answered decisions 1 to 4 of the coupling audit with "as recommended", which selects option (a) for each decision.
 - Decision 1(a): confirm F0 first, then do the units that move no bytes (F5, F3, F4).
@@ -189,4 +189,4 @@ After U4, run `zig build test`, `zig build check-spine`, and `bash scripts/verif
 | U2 Reflective binding adapter | Done 2026-10-22; lead re-ran U2 gates and `zig build test` (200/200 steps) with a fresh cache |
 | U3 Contract census | Done 2026-10-22; lead re-ran U3 gates and `zig build test` (200/200 steps) with a fresh cache |
 | U4 Imported analysis under the swallow gate | Done 2026-10-22; lead re-ran U4 gates, `zig build test` (200/200 steps), and `bash scripts/verify.sh` (exit 0) with a fresh cache |
-| U5 Node-kind arm census | Not started |
+| U5 Node-kind arm census | Done 2026-10-22; 68 arms, 16 unclear; lead probes confirmed two fail-opens (assert and spread), fix not authorized |
