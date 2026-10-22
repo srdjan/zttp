@@ -45,20 +45,20 @@ pub const ProvenFacts = struct {
 
     retry_safe: bool = false,
     read_only: bool = false,
-    injection_safe: bool = true,
+    injection_safe: bool = false,
     idempotent: bool = false,
-    state_isolated: bool = true,
+    state_isolated: bool = false,
     /// True when the handler has no `Date.now()` or `Math.random()` call
     /// sites. Surfaced in the live HUD so authors see `+deterministic`
     /// flip when they introduce a non-deterministic builtin.
-    deterministic: bool = true,
+    deterministic: bool = false,
     max_io_depth: ?u32 = null,
 
     // Data flow provenance
-    no_secret_leakage: bool = true,
-    no_credential_leakage: bool = true,
-    input_validated: bool = true,
-    pii_contained: bool = true,
+    no_secret_leakage: bool = false,
+    no_credential_leakage: bool = false,
+    input_validated: bool = false,
+    pii_contained: bool = false,
 
     // Verification
     results_safe: bool = false,
@@ -124,15 +124,15 @@ pub fn extractProvenFacts(
             .checks_passed = checks_buf,
             .retry_safe = if (contract.properties) |p| p.retry_safe else false,
             .read_only = if (contract.properties) |p| p.read_only else false,
-            .injection_safe = if (contract.properties) |p| p.injection_safe else true,
+            .injection_safe = if (contract.properties) |p| p.injection_safe else false,
             .idempotent = if (contract.properties) |p| p.idempotent else false,
-            .state_isolated = if (contract.properties) |p| p.state_isolated else true,
-            .deterministic = if (contract.properties) |p| p.deterministic else true,
+            .state_isolated = if (contract.properties) |p| p.state_isolated else false,
+            .deterministic = if (contract.properties) |p| p.deterministic else false,
             .max_io_depth = if (contract.properties) |p| p.max_io_depth else null,
-            .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else true,
-            .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else true,
-            .input_validated = if (contract.properties) |p| p.input_validated else true,
-            .pii_contained = if (contract.properties) |p| p.pii_contained else true,
+            .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else false,
+            .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else false,
+            .input_validated = if (contract.properties) |p| p.input_validated else false,
+            .pii_contained = if (contract.properties) |p| p.pii_contained else false,
             .results_safe = if (contract.verification) |v| v.results_safe else false,
             .fault_covered = if (contract.properties) |p| p.fault_covered else false,
         },
@@ -280,4 +280,67 @@ test "extractProvenFacts with env and egress" {
     try std.testing.expect(!facts.egress_proven);
     try std.testing.expectEqual(ProofLevel.partial, facts.proof_level);
     try std.testing.expectEqual(@as(usize, 3), facts.checks_passed.len);
+}
+
+/// The seven properties whose absence must read as false. A contract with
+/// `properties == null` proved none of them.
+const security_property_names = [_][]const u8{
+    "injection_safe",
+    "state_isolated",
+    "deterministic",
+    "no_secret_leakage",
+    "no_credential_leakage",
+    "input_validated",
+    "pii_contained",
+};
+
+test "extractProvenFacts reads every security property as false when properties is null" {
+    const allocator = std.testing.allocator;
+    var contract = try makeTestContract(allocator);
+    defer contract.deinit(allocator);
+    try std.testing.expect(contract.properties == null);
+
+    const result = try extractProvenFacts(allocator, &contract);
+    defer allocator.free(result.checks_buf);
+    defer allocator.free(result.routes_buf);
+
+    inline for (security_property_names) |name| {
+        try std.testing.expect(!@field(result.facts, name));
+    }
+}
+
+test "extractProvenFacts keeps a proven property when properties is set" {
+    const allocator = std.testing.allocator;
+    var contract = try makeTestContract(allocator);
+    defer contract.deinit(allocator);
+    contract.properties = .{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = true,
+        .has_egress = false,
+        .injection_safe = true,
+    };
+
+    const result = try extractProvenFacts(allocator, &contract);
+    defer allocator.free(result.checks_buf);
+    defer allocator.free(result.routes_buf);
+
+    try std.testing.expect(result.facts.injection_safe);
+    try std.testing.expect(result.facts.deterministic);
+}
+
+// A property that nothing proved reads as not held. No `bool` field of
+// `ProvenFacts` may default to true, so a new property added with `= true`
+// fails the build instead of reading as proven. A field with no default is
+// allowed: the producer must then state it.
+comptime {
+    for (std.meta.fields(ProvenFacts)) |field| {
+        if (field.type == bool) {
+            if (field.defaultValue()) |default| {
+                if (default) @compileError("ProvenFacts." ++ field.name ++ " must default to false");
+            }
+        }
+    }
 }

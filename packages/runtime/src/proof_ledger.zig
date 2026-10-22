@@ -501,7 +501,19 @@ pub fn buildFactsForTest(
         .cache_namespaces = try allocator.alloc([]const u8, 0),
         .routes = routes,
         .capabilities = try allocator.alloc([]const u8, 0),
-        .properties = .{ .results_safe = true, .read_only = true },
+        // This fixture is a handler whose security properties were all proven.
+        // The defaults read false, so each property is set here.
+        .properties = .{
+            .results_safe = true,
+            .read_only = true,
+            .injection_safe = true,
+            .state_isolated = true,
+            .deterministic = true,
+            .no_secret_leakage = true,
+            .no_credential_leakage = true,
+            .input_validated = true,
+            .pii_contained = true,
+        },
     };
 }
 

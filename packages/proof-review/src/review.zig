@@ -92,25 +92,25 @@ pub const SpecState = struct {
 };
 
 // Properties carries the property booleans that show up in the contract.
-// Defaults match what extractProvenFacts uses when contract.properties is null,
-// so a missing-field parse round-trips the same shape an absent properties
-// block would have produced.
+// Every default is false. A missing properties block, a missing key, or a
+// non-bool value proves nothing, so it reads as not held. This matches
+// extractProvenFacts when contract.properties is null.
 pub const Properties = struct {
     retry_safe: bool = false,
     read_only: bool = false,
-    injection_safe: bool = true,
+    injection_safe: bool = false,
     idempotent: bool = false,
-    state_isolated: bool = true,
-    no_secret_leakage: bool = true,
-    no_credential_leakage: bool = true,
-    input_validated: bool = true,
-    pii_contained: bool = true,
+    state_isolated: bool = false,
+    no_secret_leakage: bool = false,
+    no_credential_leakage: bool = false,
+    input_validated: bool = false,
+    pii_contained: bool = false,
     results_safe: bool = false,
     fault_covered: bool = false,
     /// True when the handler has no `Date.now()` or `Math.random()` calls.
     /// First-class in the live-reload HUD so authors see the canonical
     /// `+deterministic`/`-deterministic` flip while editing.
-    deterministic: bool = true,
+    deterministic: bool = false,
 };
 
 pub const PropertyMeta = struct {
@@ -1292,6 +1292,7 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
         .injection_safe = false,
         .idempotent = true,
         .state_isolated = false,
+        .deterministic = true,
         .no_secret_leakage = false,
         .no_credential_leakage = false,
         .input_validated = false,
@@ -1335,6 +1336,7 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
     try std.testing.expect(!review.properties.injection_safe);
     try std.testing.expect(review.properties.idempotent);
     try std.testing.expect(!review.properties.state_isolated);
+    try std.testing.expect(review.properties.deterministic);
     try std.testing.expect(!review.properties.no_secret_leakage);
     try std.testing.expect(!review.properties.no_credential_leakage);
     try std.testing.expect(!review.properties.input_validated);
@@ -1492,7 +1494,7 @@ test "ReviewFacts.parseJson tolerates missing optional fields" {
     try std.testing.expectEqual(@as(usize, 0), facts.env_keys.len);
     try std.testing.expectEqual(@as(usize, 0), facts.routes.len);
     try std.testing.expect(!facts.properties.results_safe);
-    try std.testing.expect(facts.properties.injection_safe); // default true
+    try std.testing.expect(!facts.properties.injection_safe); // a missing block proves nothing
 }
 
 test "renderReviewCard: first deploy shows baseline none and no blockers" {
@@ -1789,4 +1791,66 @@ test "writeProofCardPlaintext: renders a card built without a DeployReview" {
     try std.testing.expect(std.mem.indexOf(u8, out, "read-only") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   none (first deploy)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe") != null);
+}
+
+fn expectNoPropertyHeld(properties: Properties) !void {
+    inline for (property_metas) |meta| {
+        try std.testing.expect(!@field(properties, meta.field));
+    }
+}
+
+fn parsePropertiesOf(allocator: std.mem.Allocator, input: []const u8) !Properties {
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    var facts = try ReviewFacts.parseJson(allocator, parsed.value.object);
+    defer facts.deinit(allocator);
+    return facts.properties;
+}
+
+test "ReviewFacts.parseJson reads every property as false when the properties key is missing" {
+    try expectNoPropertyHeld(try parsePropertiesOf(std.testing.allocator, "{\"contractSha\":\"sha-x\"}"));
+}
+
+test "ReviewFacts.parseJson reads every property as false when properties is empty" {
+    try expectNoPropertyHeld(try parsePropertiesOf(
+        std.testing.allocator,
+        "{\"contractSha\":\"sha-x\",\"properties\":{}}",
+    ));
+}
+
+test "ReviewFacts.parseJson reads a non-bool property value as false" {
+    const properties = try parsePropertiesOf(
+        std.testing.allocator,
+        "{\"contractSha\":\"sha-x\",\"properties\":{\"injectionSafe\":\"yes\",\"stateIsolated\":1," ++
+            "\"deterministic\":null,\"noSecretLeakage\":[],\"noCredentialLeakage\":{}," ++
+            "\"inputValidated\":\"true\",\"piiContained\":0}}",
+    );
+    try expectNoPropertyHeld(properties);
+}
+
+test "ReviewFacts.parseJson keeps a property that the JSON states as true" {
+    const properties = try parsePropertiesOf(
+        std.testing.allocator,
+        "{\"contractSha\":\"sha-x\",\"properties\":{\"injectionSafe\":true}}",
+    );
+    try std.testing.expect(properties.injection_safe);
+    try std.testing.expect(!properties.state_isolated);
+}
+
+// A property that nothing proved reads as not held. No `bool` field of
+// `Properties` may default to true, and each field needs a `property_metas`
+// row, because `parseJson`, `writeJson`, and `deriveDelta` walk that table.
+comptime {
+    for (std.meta.fields(Properties)) |field| {
+        if (field.type == bool) {
+            if (field.defaultValue()) |default| {
+                if (default) @compileError("review.Properties." ++ field.name ++ " must default to false");
+            }
+        }
+        var has_meta = false;
+        for (property_metas) |meta| {
+            if (std.mem.eql(u8, meta.field, field.name)) has_meta = true;
+        }
+        if (!has_meta) @compileError("review.Properties." ++ field.name ++ " has no property_metas row");
+    }
 }

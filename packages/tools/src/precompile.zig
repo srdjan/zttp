@@ -3754,6 +3754,50 @@ test "compileHandler keeps merged properties null after loaded graph effects" {
     try std.testing.expect(merged.properties == null);
 }
 
+test "multi-module compile proves no security property in the extracted facts" {
+    const deploy_manifest = @import("deploy_manifest.zig");
+    const entry_source =
+        \\import { saveAlias } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  saveAlias();
+        \\  return Response.text("ok");
+        \\}
+        \\
+    ;
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { cacheSet } from "zttp:cache";
+        \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
+        \\export const saveAlias = save;
+        \\
+    );
+
+    const allocator = std.testing.allocator;
+    var compiled = try fixture.compile(.{ .emit_contract = true });
+    defer compiled.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+    const merged = compiled.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expect(merged.properties == null);
+
+    const extracted = try deploy_manifest.extractProvenFacts(allocator, &merged);
+    defer allocator.free(extracted.checks_buf);
+    defer allocator.free(extracted.routes_buf);
+
+    const names = [_][]const u8{
+        "injection_safe",
+        "state_isolated",
+        "deterministic",
+        "no_secret_leakage",
+        "no_credential_leakage",
+        "input_validated",
+        "pii_contained",
+    };
+    inline for (names) |name| {
+        try std.testing.expect(!@field(extracted.facts, name));
+    }
+}
+
 test "compileHandler rejects disallowed policy from imported module" {
     const entry_source =
         \\import { readSecret } from "./dep.ts";
