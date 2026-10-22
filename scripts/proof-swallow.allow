@@ -281,3 +281,56 @@ packages/zts/src/translation_witness.zig applyCompaction catch-block
 packages/zts/src/translation_witness.zig notePreOptimizationLen catch-block
 packages/zts/src/translation_witness.zig recordRewrite catch-block
 packages/zts/src/translation_witness.zig recordRewrite catch-block@2
+
+# --- Imported-file analysis for CHECK (precompile_imports.zig) ---
+#
+# The imported flow traversal and the imported fault scan decide what an
+# imported file contributes to the handler's flow, effect, and fault verdicts.
+# Both traversals answer in one direction: every failure to reach an answer is
+# a blocked effect, an incomplete module graph, or a blocked fault entry.
+#
+# Extensionless paths reach this call after `std.fs.path.extension` found no
+# extension. `file_resolver.resolve` fails only with OutOfMemory, which
+# propagates here, or with UnsupportedSourceExtension, which needs an extension
+# on the path. The unreachable arm is a claimed invariant, not an error result:
+# if the claim failed, the build would trap and no verdict would be reported.
+packages/tools/src/precompile_imports.zig resolveCheckImportPath catch-switch
+
+# `graph.load` fails with OutOfMemory, which propagates, or with an unreadable
+# or unparsable imported file. The other errors set `graph.complete = false`
+# and return the default analysis: a `.blocked` effect and no flow target.
+# A blocked effect merges as the top row (every capability, impure, writes,
+# egress, lower bound) into the importer. `complete = false` makes the flow
+# evaluator record `module_graph_gap`, and any unresolved construct clears
+# every flow property. Neither result is cleaner than a successful load.
+packages/tools/src/precompile_imports.zig analyzeImportedFunction catch-switch
+
+# The three type-check catches set `type_check_clean = false`. That choice sets
+# `graph.complete = false` (flow properties clear), skips `finishModule` and
+# the flow target, and blocks every relative import of the file in the effect
+# inputs. The effect analysis then runs with `type_source = .omitted`. The type
+# environment is read at one place in effect_inference.zig, the function
+# `contributeDeclaredCallbackRow`, which returns false without it. The caller
+# then sets `row.lower_bound = true`, where the typed run adds the declared
+# callback row and leaves the bound clear. An exported row with `lower_bound`
+# merges into the importer as the top row (`mergeImportedEffect`). The untyped
+# result is therefore never narrower than the typed result.
+packages/tools/src/precompile_imports.zig analyzeImportedFunction catch-block
+packages/tools/src/precompile_imports.zig analyzeImportedFunction catch-block@2
+packages/tools/src/precompile_imports.zig analyzeImportedFunction catch-block@3
+
+# `effects.analyze` and `exportEffects` run after the flow target is set. A
+# failure, including OutOfMemory, returns the result with its default effect
+# `.blocked`, which merges into the importer as the top row. The flow target
+# does not depend on the effect result, and the effect side stays blocked.
+packages/tools/src/precompile_imports.zig analyzeImportedFunction catch-return
+packages/tools/src/precompile_imports.zig analyzeImportedFunction catch-return@2
+
+# The gate attributes these two rows to the nested helper `at`, because the
+# scanner keeps the last `fn` name it saw. Both sites belong to
+# `scanImportedFileTree`. A file that fails to load or fails IR validation
+# returns a blocked fault entry. `scanImportRecords` in path_generator.zig
+# turns every entry except `.clean` into an unseen failable call, so a blocked
+# import cannot read as scanned clean. OutOfMemory propagates at the second.
+packages/tools/src/precompile_imports.zig at catch-return
+packages/tools/src/precompile_imports.zig at catch-switch

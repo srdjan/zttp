@@ -336,3 +336,140 @@ The first `test-module-boundary` run failed with `proof-review handler_contract`
 ### U3 lead verification
 
 The lead reviewed the schema, the census tests, the population check, and the three projection checks. With a fresh private cache in `/private/tmp/claude-501/verify-u3/`, `zig fmt --check`, `test-zts`, `test-contract-golden`, `test-deploy-manifest`, `test-proof-review`, `test-cli`, `test-zruntime`, `test-module-boundary`, `test-zts-layering`, `test-docs-drift`, `test-doc-links`, `check-spine`, and `zig build test` each exited 0. The aggregate reported 200/200 steps and 9206/9212 tests passed, with 6 skipped. The existing goldens did not move.
+
+## U4: the imported-file analysis gets its own file under the swallow gate
+
+Status: implemented, awaiting review. Nothing is committed. `packages/tools/src/precompile_imports.zig` is staged with `git add` (needed by the gate probe) and nothing else is staged. No pin, golden, or wire byte moved. No moved body changed.
+
+Builds used a private cache under `/private/tmp/claude-501/zcache-u4/` with `DEEPSEEK_API_KEY` unset. Logs are in `/private/tmp/claude-501/u4logs/`. Each exit status was read directly from the build command.
+
+### What moved
+
+The moved text is 590 lines of `precompile.zig`, from the doc comment of `max_import_depth` to the end of `analyzeImportedFunction`. A plain `diff` of the old text against the new file body shows only the `pub` changes listed below plus one added comment line. The new file adds a 4-line module doc and imports of `std`, `builtin`, `zts`, and `zts.parser` (alias `ir`). It adds its own `readFilePosix` alias.
+
+Moved symbols: `max_import_depth`, `ImportStack`, `ImportReader`, `ImportedFile`, `FlowModuleGraph`, `loadFlowModulesForCheck`, `ImportedFunctionAnalysis`, `ImportedFunctionAnalyses`, `collectImportedAnalyses`, `importBindingKey`, `importedFunctionNode`, `ImportedFaultScan`, `resolveCheckImportPath`, `isRelativeSpecifier`, `collectImportedFailableCalls`, `importedFileDisplay`, `scanImportedFileTree`, `analyzeImportedFunction`.
+
+`precompile.zig` keeps its own `readFilePosix` alias, because five other call sites in that file use it. This is a small deviation from the plan, which said to move `readFilePosix`. The parent re-exports `ImportReader`, `FlowModuleGraph`, and `loadFlowModulesForCheck` as `pub`. It imports `max_import_depth`, `ImportedFile`, `collectImportedFailableCalls`, and `resolveCheckImportPath` as private aliases for its own code and tests. `precompile.ImportReader` stays a public path.
+
+### Visibility changes
+
+| Symbol | Before | After | Reason |
+|---|---|---|---|
+| `max_import_depth` | private | `pub` | Parent tests use it. |
+| `ImportedFile` | private | `pub` | Parent tests build one. |
+| `ImportedFile.load` | private | `pub` | Parent tests call it. |
+| `ImportedFile.deinit` | private | `pub` | Parent tests call it. |
+| `ImportedFaultScan` | private | `pub` | It is the return type of the `pub` function below. |
+| `ImportedFaultScan.deinit` | private | `pub` | Parent production code calls it. |
+| `collectImportedFailableCalls` | private | `pub` | Parent production code calls it at two sites. |
+| `resolveCheckImportPath` | private | `pub` | Parent tests call it. |
+
+`ImportReader`, `FlowModuleGraph`, `FlowModuleGraph.deinit`, and `loadFlowModulesForCheck` were already `pub`. I made no other symbol `pub`. The compiler accepted these and nothing more.
+
+The one added line is an `// exhaustive:` comment above the `else => unreachable` arm in `resolveCheckImportPath`. The gate requires it.
+
+### Test counts
+
+| Step | Before | After |
+|---|---|---|
+| `zig build test-precompile` | 290 passed of 290 | 290 passed of 290 |
+
+The moved range holds no `test` block, so no test moved. The count did not change. Log files: `before-test-precompile.log`, `g-test-precompile.log`. The sibling files `precompile_check.zig` and `precompile_args.zig` do not need a collection line for the new file, because it has no tests.
+
+### Swallow gate
+
+I staged the new file, then added it to `proof_files` (22 files). The first run (`b1-swallow.log`) exited 1 and listed 9 unreviewed catch sites. The silent-arm scan had one more site, which only shows after the catch scan passes. After the rows below and the `// exhaustive:` comment, the gate exits 0 with `22 files, 121 reviewed swallows, 104 reviewed silent arms, 0 unreviewed`. The baseline was `21 files, 112 reviewed swallows, 103 reviewed silent arms`.
+
+New allowlist rows (all in `scripts/proof-swallow.allow`, file `precompile_imports.zig`):
+
+| Function | Pattern | Why it cannot make an unproven program proven |
+|---|---|---|
+| `resolveCheckImportPath` | `catch-switch` | OutOfMemory propagates. The other arm traps on an error that needs a file extension, and the path has none here. A trap reports no verdict. |
+| `analyzeImportedFunction` | `catch-switch` | `graph.load` failure other than OutOfMemory sets `complete = false` and returns a `.blocked` effect with no target. |
+| `analyzeImportedFunction` | `catch-block`, `@2`, `@3` | The three type-check catches. See the analysis below. |
+| `analyzeImportedFunction` | `catch-return`, `@2` | `effects.analyze` and `exportEffects` failure returns the default `.blocked` effect. |
+| `at` | `catch-return` | Attributed to the nested helper `at` by the scanner. The site is in `scanImportedFileTree`. A file that fails to load returns a blocked fault entry. |
+| `at` | `catch-switch` | Same attribution. OutOfMemory propagates and invalid IR returns a blocked fault entry. |
+
+### Analysis of the three type-check catches
+
+Observation. The three catches are the `initWithSource` catch, the `check` catch, and the `ensureHealthy` catch. Each sets `type_check_clean = false`.
+
+What happens next, by code reading:
+- `graph.complete = false`. The flow evaluator then records `module_graph_gap`. A non-zero unresolved count clears every flow property (`FlowChecker.unresolvedCount` doc comment).
+- `finishModule` does not run and no flow target is set.
+- Every relative import of the file gets a `.blocked` effect before the effect analysis runs.
+- `EffectAnalyzer` runs with `type_source = .omitted`.
+
+`type_source` reaches `self.type_env`. In `effect_inference.zig`, `type_env` is read at exactly one place: `contributeDeclaredCallbackRow`. It starts with `self.type_env orelse return false`. Without a type environment the function returns false, and the caller sets `row.lower_bound = true`. With a type environment, the function adds the declared callback row and leaves `lower_bound` clear. A grep over the file found no other read of `type_env` or `type_source` apart from `analyze`, which only calls `validate()`.
+
+Conclusion. The untyped result differs from the typed result in one way. It is a lower-bound row, and it misses the declared callback capabilities. The importer then merges that row through `mergeImportedEffect`. That function merges the full `incomplete` row (every capability, impure, non-deterministic, writes, egress, lower bound) whenever the supplied row has `lower_bound`. The untyped result is therefore not weaker than the typed result. The rows are justified. I found no defect here.
+
+Limit of this evidence. It comes from reading the code. I did not run a probe that forces each of the three catches. The existing tests that cover the type-failure path are in `precompile.zig` (the `!graph.complete` assertions and the nested-read-order tests). They pass.
+
+One observation that is not a defect. The two `catch return result` sites also swallow OutOfMemory as a `.blocked` effect. Other sites in the same function propagate OutOfMemory. The swallow is conservative, so it needs no fix for the gate.
+
+### Step 5: catches in the rest of `precompile.zig`
+
+I ran the gate's catch scan against `precompile.zig` without adding the file to `proof_files`. The scan reports 63 sites outside the moved range. The plan expected 72 minus 9, which is 63. The scan skips `test` blocks. I added no rows. The classification:
+
+| Function | Sites | Class | Can it weaken a verdict? |
+|---|---|---|---|
+| `runCompileWithArgs` | 16 | 13 propagate an error or map it to a named error. 2 are `MissingArgument` returns after argument parsing. 1 prints a failure to write the violations file. | No. The `MissingArgument` return emits no artifact. The violations-file write happens after `verify_failed`, and the function still returns `VerificationFailed`. |
+| `runCheckOnlyWithOptions` | 3 | All return the original error or a structured error diagnostic with `parse_errors = 1`. | No. |
+| `appendCheckAdmissionDiagnostic` | 1 | Drops one JSON diagnostic when append fails. | No. Both callers set `parse_errors` from the diagnostic count after the call. |
+| `runCheckOnParsedSource` | 15 | 1 import-validation catch that returns `parse_errors = 1`. 1 catch-switch (OutOfMemory sets `parse_errors = 1`, others return the error). 3 parse-error catches and JSON appends that set `parse_errors` after. 5 JSON appends that drop a record on OutOfMemory. 4 formatter writes to stderr. 1 unsupported-extension append. | No. Each count (`bool_errors`, `type_errors`, `strict_errors`, `verify_errors`, `flow_errors`, `flow_unresolved`) is set from the checker before the append. `totalErrors` reads the counts. The one consumer of the list length, in `packages/pi/src/aggregate_proof.zig`, returns the original error when the list is empty. |
+| `runGenTests` | 4 | 1 read failure (returns the error). 2 parse failures (return `ParseError`). 1 `catch null`. | See the next paragraph. |
+| `compileHandler` | 14 | 3 propagate or refuse (parse, recorder check, serialization). 6 formatter writes to stderr. 1 `gen.generate(hf) catch {}` on the verification-failure path. 2 violation-text catches on the failure path and 2 on the success path. | No. The `gen.generate` catch only enriches counterexamples before `verify_failed = true` is returned. The violation text on the success path is printed and does not set `verify_failed`. `recorder.check` failure refuses the certificate. |
+| `compileMultiModule` | 4 | All return the error. | No. |
+| `projectCompletedFlow` | 1 | One formatter write to stderr. | No. The counts are printed separately and the properties come from `completed.getProperties()`. |
+| `validateSqlContractNative` | 2 | Both return an error. | No. |
+| `enforcePolicyForContract` | 1 | One formatter write to stderr. | No. The function returns `PolicyViolation` right after. |
+| `appendPolicyDiagnostics` | 1 | A policy parse failure appends an error diagnostic and adds to `policy_errors`. | No. |
+| `read` (test helper `TracingImportReader`) | 1 | Frees the copy and returns the error. | No. It is test code. |
+
+`runGenTests` `catch null`. A failure to build effect facts falls back to `.unavailable`. In `path_generator.zig`, `.unavailable` sets `reaches_recursion = true` for the handler. That blocks the fault-covered result. The test `"unavailable effect facts conservatively report recursion"` pins this. The command only writes a starter test fixture, so no verdict depends on it. The fallback moves toward unproven.
+
+Limit. This is a classification from reading each block. No probe forced any of the 63 catches.
+
+### Documents
+
+| File | Change |
+|---|---|
+| `docs/decisions.md` | D-006 `Binds` line now names `packages/tools/src/precompile_imports.zig`. |
+| `docs/solutions/security-issues/a-missing-import-entry-was-conservative-for-one-proof-and-clean-for-another.md` | Three lines named `precompile.zig` for moved functions. They now name `precompile_imports.zig`. One line says `collectImportedFnSummaries` is now `collectImportedAnalyses`. |
+| `AGENTS.md` | Not edited. The Testing Guidelines paragraph still says "the twenty-one listed" files. The list now holds 22. This is outside the U4 scope, so I left it for the lead. |
+
+### Gates
+
+Logs are under `/private/tmp/claude-501/u4logs/`. The final run used the files `g-<step>.log`, taken after the last source edit. I ran the doc edits and `check-spine` again inside that run.
+
+| Gate | Exit | Result |
+|---|---|---|
+| `zig fmt --check` on `precompile.zig` and `precompile_imports.zig` | 0 | not logged |
+| `zig build test-precompile` | 0 | 4/4 steps, 290/290 tests |
+| `zig build test-proof-swallow` | 0 | 22 files, 121 reviewed swallows, 104 reviewed silent arms, 0 unreviewed |
+| `zig build test-diagnostic-corpus` | 0 | 6/6 steps, 308/308 tests |
+| `zig build test-flow-census` | 0 | 6/6 steps, 290/290 tests |
+| `zig build test-contract-golden` | 0 | 8/8 steps |
+| `zig build test-script-reachability` | 0 | 4/4 steps |
+| `zig build test-module-boundary` | 0 | 2/2 steps, no row added |
+| `zig build test-runtime-purity` | 0 | 8/8 steps |
+| `zig build test-docs-drift` | 0 | 3/3 steps |
+| `zig build test-zts-layering` | 0 | 3/3 steps |
+| `zig build check-spine` | 0 | 4/4 steps |
+| `zig build test-doc-links` | 0 | 2/2 steps |
+| `zig build test-cli` | 0 | 5/5 steps. It builds the runtime consumer `proofs_cli.zig` and `pr_gate.zig`, which use `precompile.ImportReader`. |
+| `zig build test` | 0 | 200/200 steps, 9206/9212 tests (6 skipped), the same totals as the end of U3 |
+
+The first `test-proof-swallow` run exited 1 as intended (`b1-swallow.log`). It proves the gate sees the new file. I did not run `bash scripts/verify.sh`. The plan assigns that run to the lead.
+
+### U4 lead verification
+
+The lead reviewed the move, the re-exports, and each allowlist reason. The lead confirmed that `effect_inference.zig` reads the type environment only in `contributeDeclaredCallbackRow`, and that its caller sets `row.lower_bound = true` when the function returns false. The lead also updated the file count in `AGENTS.md` from twenty-one to twenty-two.
+
+With a fresh private cache in `/private/tmp/claude-501/verify-u4/`, `zig fmt --check`, `test-precompile`, `test-proof-swallow`, `test-diagnostic-corpus`, `test-flow-census`, `test-contract-golden`, `test-script-reachability`, `test-module-boundary`, `test-runtime-purity`, `test-docs-drift`, `test-doc-links`, `test-cli`, `check-spine`, and `zig build test` each exited 0. The aggregate reported 200/200 steps and 9206/9212 tests passed, with 6 skipped.
+
+## Final gate
+
+`bash scripts/verify.sh` exited 0 and ended with \"verify.sh: all per-commit gates passed\". The log is `/private/tmp/claude-501/verify-u4/verify.log`. This run covers U1 to U4.
