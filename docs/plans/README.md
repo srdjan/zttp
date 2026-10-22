@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Coupling census](2026-10-22-coupling-census-plan.md) | Revised 2026-10-22 after one Fable and one Codex astra round; U1 to U5 not started | Owner chose audit decisions 1(a) to 4(a) with "as recommended" |
 | [Modular boundaries](2026-10-22-modular-boundaries-plan.md) | Complete, 2026-10-22; all five phases reviewed, focused gates and independent aggregate/full verification passed | Owner approved phased implementation with "go ahead in phases" |
 | [Soundness hand-off](2026-10-21-soundness-handoff.md) | Hand-off 2026-10-21: Q1 to Q3, U6 and U1 committed locally; U2 and U3 specified, not validated or implemented | Records the owner decisions D1 to D8 |
 | [Soundness plan](2026-10-21-soundness-plan.md) | U6 and U1 complete 2026-10-21; U2 (`env.public`) and U3 (bounded `mask`) approved and specified, validation pending | Owner approved D3(a), D4(a), D5(a) with "approved" and D6(a), D7(a), D8(a) with "as recommended" |
