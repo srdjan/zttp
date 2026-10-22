@@ -347,6 +347,15 @@ fn lookupTrackedFunction(module_specifier: []const u8, name: []const u8) ?Functi
 
 const bindingKey = bool_checker_mod.packBindingKey;
 
+/// One change to a checked flag, kept so the enclosing block can restore the
+/// value the flag had before the change.
+const CheckedChange = struct {
+    const Flag = enum { result_ok_checked, optional_narrowed };
+    flag: Flag,
+    key: u32,
+    old: bool,
+};
+
 const OptionalFnSlot = struct {
     slot: u16,
     kind: OptionalKind,
@@ -400,6 +409,9 @@ pub const HandlerVerifier = struct {
     // Optional checking state (Check 6)
     optional_bindings: std.ArrayList(OptionalBindingState),
     optional_function_slots: std.ArrayList(OptionalFnSlot),
+    /// Changes to `ok_checked` and `narrowed`, in order, so a block can undo what
+    /// it changed when it ends. See `journalMark` and `journalRestore`.
+    checked_journal: std.ArrayList(CheckedChange),
     /// Shared import index, injected by the orchestrator when one exists.
     /// Borrowed; must outlive the verifier. Null means build a private one.
     facts: ?*const module_facts_mod.ModuleFacts = null,
@@ -443,6 +455,7 @@ pub const HandlerVerifier = struct {
             .result_function_slots = .empty,
             .optional_bindings = .empty,
             .optional_function_slots = .empty,
+            .checked_journal = .empty,
             .all_bindings = .empty,
             .import_bindings = .empty,
             .allocation_failed = false,
@@ -456,6 +469,7 @@ pub const HandlerVerifier = struct {
         self.result_function_slots.deinit(self.allocator);
         self.optional_bindings.deinit(self.allocator);
         self.optional_function_slots.deinit(self.allocator);
+        self.checked_journal.deinit(self.allocator);
         self.all_bindings.deinit(self.allocator);
         self.import_bindings.deinit(self.allocator);
     }
@@ -830,6 +844,10 @@ pub const HandlerVerifier = struct {
         switch (tag) {
             .block, .program => {
                 const block = self.ir_view.getBlock(node) orelse return;
+                // A guard in this block holds for the rest of this block and no
+                // further: restore every checked flag the block changed when it ends.
+                const mark = self.journalMark();
+                defer self.journalRestore(mark);
                 var i: u16 = 0;
                 while (i < block.stmts_count) : (i += 1) {
                     const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
@@ -898,16 +916,16 @@ pub const HandlerVerifier = struct {
                 if (checked_slot) |binding| {
                     // Mark the result as checked in the then-branch scope
                     self.setResultChecked(binding, true);
-                    self.walkForResultsAndRefs(if_stmt.then_branch);
+                    self.walkScoped(if_stmt.then_branch);
                     self.setResultChecked(binding, false);
 
                     // In the else branch, .ok is known to be false
                     if (if_stmt.else_branch != null_node) {
-                        self.walkForResultsAndRefs(if_stmt.else_branch);
+                        self.walkScoped(if_stmt.else_branch);
                     }
                 } else if (self.extractNegatedResultOkCheck(if_stmt.condition)) |binding| {
                     // Negated pattern: if (!result.ok) { return ...; }
-                    self.walkForResultsAndRefs(if_stmt.then_branch);
+                    self.walkScoped(if_stmt.then_branch);
 
                     // If the then branch always returns, code after is the ok path
                     const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
@@ -917,7 +935,7 @@ pub const HandlerVerifier = struct {
 
                     if (if_stmt.else_branch != null_node) {
                         self.setResultChecked(binding, true);
-                        self.walkForResultsAndRefs(if_stmt.else_branch);
+                        self.walkScoped(if_stmt.else_branch);
                         // Only reset if then-branch did NOT always return: when
                         // then_returns == .always the early-return guard means all
                         // post-if code (including after the else) is the ok path.
@@ -931,15 +949,15 @@ pub const HandlerVerifier = struct {
                         .then => {
                             // if (val) - narrowed in then-branch only
                             self.setOptionalNarrowed(info.slot, info.scope_id, true);
-                            self.walkForResultsAndRefs(if_stmt.then_branch);
+                            self.walkScoped(if_stmt.then_branch);
                             self.setOptionalNarrowed(info.slot, info.scope_id, false);
                             if (if_stmt.else_branch != null_node) {
-                                self.walkForResultsAndRefs(if_stmt.else_branch);
+                                self.walkScoped(if_stmt.else_branch);
                             }
                         },
                         .then_returns_early => {
                             // if (!val) { return ...; } - code after is narrowed
-                            self.walkForResultsAndRefs(if_stmt.then_branch);
+                            self.walkScoped(if_stmt.then_branch);
 
                             const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
                             if (then_returns == .always) {
@@ -949,7 +967,7 @@ pub const HandlerVerifier = struct {
 
                             if (if_stmt.else_branch != null_node) {
                                 self.setOptionalNarrowed(info.slot, info.scope_id, true);
-                                self.walkForResultsAndRefs(if_stmt.else_branch);
+                                self.walkScoped(if_stmt.else_branch);
                                 // Don't restore if then_returns - leave narrowed for subsequent code
                                 if (then_returns != .always) {
                                     self.setOptionalNarrowed(info.slot, info.scope_id, false);
@@ -958,16 +976,16 @@ pub const HandlerVerifier = struct {
                         },
                     }
                 } else {
-                    self.walkForResultsAndRefs(if_stmt.then_branch);
+                    self.walkScoped(if_stmt.then_branch);
                     if (if_stmt.else_branch != null_node) {
-                        self.walkForResultsAndRefs(if_stmt.else_branch);
+                        self.walkScoped(if_stmt.else_branch);
                     }
                 }
             },
             .for_of_stmt => {
                 const for_iter = self.ir_view.getForIter(node) orelse return;
                 self.walkExprForRefs(for_iter.iterable);
-                self.walkForResultsAndRefs(for_iter.body);
+                self.walkScoped(for_iter.body);
             },
             .return_stmt => {
                 const opt_val = self.ir_view.getOptValue(node);
@@ -1316,10 +1334,77 @@ pub const HandlerVerifier = struct {
     }
 
     /// Set the ok_checked state for a result binding, keyed by (scope_id, slot).
+    /// The change is journaled, so the enclosing block restores it when it ends.
     fn setResultChecked(self: *HandlerVerifier, binding: ir.BindingRef, checked: bool) void {
-        if (self.findResultBinding(binding)) |rb| {
-            rb.ok_checked = checked;
+        self.setCheckedFlag(.result_ok_checked, bindingKey(binding.scope_id, binding.slot), checked);
+    }
+
+    /// Pointer to the flag that `flag` and `key` name, or null when the binding
+    /// is not tracked. Valid until the next append to the binding lists.
+    fn checkedFlagPtr(self: *HandlerVerifier, flag: CheckedChange.Flag, key: u32) ?*bool {
+        switch (flag) {
+            .result_ok_checked => {
+                for (self.result_bindings.items) |*rb| {
+                    if (rb.key() == key) return &rb.ok_checked;
+                }
+            },
+            .optional_narrowed => {
+                for (self.optional_bindings.items) |*ob| {
+                    if (ob.key() == key) return &ob.narrowed;
+                }
+            },
         }
+        return null;
+    }
+
+    /// Set a checked flag and journal the old value when the flag changes.
+    fn setCheckedFlag(self: *HandlerVerifier, flag: CheckedChange.Flag, key: u32, value: bool) void {
+        const ptr = self.checkedFlagPtr(flag, key) orelse return;
+        if (ptr.* == value) return;
+        // A failed append is sticky: `allocation_failed` voids the whole verdict.
+        self.checked_journal.append(self.allocator, .{ .flag = flag, .key = key, .old = ptr.* }) catch self.markAllocationFailure();
+        ptr.* = value;
+    }
+
+    /// Clear a checked flag because the binding now holds a new, unchecked
+    /// value. The kill is not undone when a block ends: the value that a block
+    /// assigned is still there after the block. The kill also rewrites every
+    /// journal entry of the flag to `false`, so no restore can bring back a
+    /// check made before the assignment.
+    fn killCheckedFlag(self: *HandlerVerifier, flag: CheckedChange.Flag, key: u32) void {
+        const ptr = self.checkedFlagPtr(flag, key) orelse return;
+        ptr.* = false;
+        for (self.checked_journal.items) |*change| {
+            if (change.flag == flag and change.key == key) change.old = false;
+        }
+    }
+
+    /// Start of a block's journal span. Pair with `journalRestore`.
+    fn journalMark(self: *const HandlerVerifier) usize {
+        return self.checked_journal.items.len;
+    }
+
+    /// Undo every checked-flag change made since `mark`, newest first. A guard
+    /// holds for the rest of the block that contains it. Restoring at the end
+    /// of that block, and not at the end of the `if` statement, is what lets
+    /// `if (!result.ok) { return ...; }` clear the code after it in the same
+    /// block and nowhere else. This is the model of `beginNarrowScope` and
+    /// `endNarrowScope` in `type_checker.zig`.
+    fn journalRestore(self: *HandlerVerifier, mark: usize) void {
+        var i = self.checked_journal.items.len;
+        while (i > mark) {
+            i -= 1;
+            const change = self.checked_journal.items[i];
+            if (self.checkedFlagPtr(change.flag, change.key)) |ptr| ptr.* = change.old;
+        }
+        self.checked_journal.shrinkRetainingCapacity(mark);
+    }
+
+    /// Walk a branch body in its own journal span.
+    fn walkScoped(self: *HandlerVerifier, node: NodeIndex) void {
+        const mark = self.journalMark();
+        defer self.journalRestore(mark);
+        self.walkForResultsAndRefs(node);
     }
 
     /// Increment reference count for a binding (scope-aware).
@@ -1527,9 +1612,7 @@ pub const HandlerVerifier = struct {
 
     /// Set the narrowed state for an optional binding.
     fn setOptionalNarrowed(self: *HandlerVerifier, slot: u16, scope_id: ir.ScopeId, narrowed: bool) void {
-        if (self.findOptionalBinding(slot, scope_id)) |ob| {
-            ob.narrowed = narrowed;
-        }
+        self.setCheckedFlag(.optional_narrowed, bindingKey(scope_id, slot), narrowed);
     }
 
     /// Check if a node is an un-narrowed optional identifier, and emit diagnostic.
@@ -1585,20 +1668,30 @@ pub const HandlerVerifier = struct {
         });
     }
 
-    /// Handle reassignment: if target is a tracked optional and RHS is not optional-producing,
-    /// mark as permanently narrowed.
+    /// Handle reassignment to a tracked binding. A non-optional value narrows an
+    /// optional, for the rest of the enclosing block. An optional-producing
+    /// call makes the binding optional again, and a Result-producing call or any
+    /// other value makes a Result binding unchecked. Those kills outlast the block.
     fn handleOptionalReassignment(self: *HandlerVerifier, assign: Node.AssignExpr) void {
         const target_tag = self.ir_view.getTag(assign.target) orelse return;
         if (target_tag != .identifier) return;
 
         const binding = self.ir_view.getBinding(assign.target) orelse return;
-        const ob = self.findOptionalBinding(binding.slot, binding.scope_id) orelse return;
+        const key = bindingKey(binding.scope_id, binding.slot);
 
-        // If RHS is another optional-producing call, keep tracking
-        if (self.isOptionalProducingCall(assign.value) != null) return;
+        // The assigned value is new: a check made on the old Result does not hold for it.
+        self.killCheckedFlag(.result_ok_checked, key);
+
+        if (self.findOptionalBinding(binding.slot, binding.scope_id) == null) return;
+
+        // Another optional-producing call: the binding is optional again
+        if (self.isOptionalProducingCall(assign.value) != null) {
+            self.killCheckedFlag(.optional_narrowed, key);
+            return;
+        }
 
         // Reassignment to non-optional resolves optionality
-        ob.narrowed = true;
+        self.setCheckedFlag(.optional_narrowed, key, true);
     }
 
     // -----------------------------------------------------------------------
@@ -2381,6 +2474,158 @@ test "ZTS309 stays silent once the optional is narrowed" {
     for (verifier.getDiagnostics()) |diag| {
         try std.testing.expect(diag.kind != .unchecked_optional_access);
     }
+}
+
+const result_import = "import { jwtVerify } from \"zttp:auth\";\n";
+const optional_import = "import { cacheGet } from \"zttp:cache\";\n";
+
+test "ZTS303 guard inside a nested block does not clear the code after the block" {
+    // The guard sits inside `if (flag)`, so on the path where `flag` is false
+    // the Result is unchecked when `result.value` is read.
+    const nested = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  const flag = req.method === "GET";
+        \\  if (flag) {
+        \\    if (!result.ok) {
+        \\      return Response.text("no");
+        \\    }
+        \\  }
+        \\  return Response.text(String(result.value));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), nested.unchecked_result);
+
+    // The same guard without a single-statement block holds the same way.
+    const bare = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (req.method === "GET") if (!result.ok) return Response.text("no");
+        \\  return Response.text(String(result.value));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), bare.unchecked_result);
+}
+
+test "ZTS303 guard at the top level of the handler still clears the code after it" {
+    const top = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  return Response.text(String(result.value));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), top.unchecked_result);
+
+    // A guard and its read in the same inner block still pair up.
+    const inner = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (req.method === "GET") {
+        \\    if (!result.ok) { return Response.text("no"); }
+        \\    return Response.text(String(result.value));
+        \\  }
+        \\  return Response.text("other");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), inner.unchecked_result);
+
+    const positive = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  const result = jwtVerify("token", "key");
+        \\  if (result.ok) { return Response.text(String(result.value)); }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), positive.unchecked_result);
+}
+
+test "ZTS303 reassigning a checked Result makes it unchecked again" {
+    const reassigned = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  let result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  result = jwtVerify("other", "key");
+        \\  return Response.text(String(result.value));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), reassigned.unchecked_result);
+
+    // A reassignment inside a branch outlasts the branch: the value is
+    // unchecked on the path that ran it.
+    const in_branch = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  let result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  if (req.method === "GET") { result = jwtVerify("other", "key"); }
+        \\  return Response.text(String(result.value));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), in_branch.unchecked_result);
+
+    // Control: no reassignment, so the guard still holds.
+    const kept = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  let result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  return Response.text(String(result.value));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), kept.unchecked_result);
+}
+
+test "ZTS309 reassigning an optional-producing call un-narrows the binding" {
+    const renarrowed = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  v = "x";
+        \\  v = cacheGet("items", "k2");
+        \\  return Response.text(String(v.length));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), renarrowed.unchecked_optional);
+
+    // Control: a non-optional assignment still narrows for the rest of the block.
+    const narrowed = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  v = "x";
+        \\  return Response.text(String(v.length));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), narrowed.unchecked_optional);
+
+    // A narrowing assignment inside a branch does not narrow the other path.
+    const branch = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  if (req.method === "GET") { v = "x"; }
+        \\  return Response.text(String(v.length));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), branch.unchecked_optional);
+}
+
+test "ZTS309 optional guard scope follows the block that holds it" {
+    const undefined_guard = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  const v = cacheGet("items", "k");
+        \\  if (v === undefined) { return Response.text("none"); }
+        \\  return Response.text(String(v.length));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), undefined_guard.unchecked_optional);
+
+    const nested = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  const v = cacheGet("items", "k");
+        \\  if (req.method === "GET") {
+        \\    if (v === undefined) { return Response.text("none"); }
+        \\  }
+        \\  return Response.text(String(v.length));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), nested.unchecked_optional);
 }
 
 const import_corpus = @import("tests/import_corpus.zig");

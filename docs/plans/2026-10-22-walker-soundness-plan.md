@@ -171,7 +171,7 @@ The implementer stops and reports to the lead in each of these cases. The lead b
 - `test-expert-app` replay fails, or `test-meta-drift` moves. Model-visible bytes moved, and a DeepSeek re-record needs owner approval.
 - A unit changes a verdict from proven to refused, and the defect that the unit fixes does not cause the change.
 - A unit changes a verdict from refused to proven, and this plan does not predict it. The predicted cases are in W4 (none expected), W5 (none expected), and W8 (`fault_covered`).
-- `test-proof-swallow` refuses an arm, and the fix would need a new allowlist row.
+- `test-proof-swallow` refuses an arm, and the fix would need an allowlist row whose mechanism is not already in the allowlist. A row that joins an existing group with the same verified mechanism, for example the `handler_verifier.zig` `allocation_failed` poison, is the lead's call, and the commit says so.
 - A unit would change `proof_ir.zig` lowering or certificate bytes.
 
 ## Gates
@@ -198,7 +198,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 |---|---|
 | W1 | done: `IrView.expressionChildren` and the `subtreeContains` fix; `zig build test` 200/200 steps, 9250/9256 tests |
 | W2 | done: effect walks reach `assert` and spread operands; `cap_in_assert.ts` now exits 1; `zig build test` 200/200 steps, 9255/9261 tests |
-| W3a | not started |
+| W3a | done: block-scoped checked-flag journal; `res_nested`, `res_let_reassign`, `opt_renarrow` now refused; one allowlist row (`setCheckedFlag catch-poison`); residual: a `for...of` body that reads then reassigns a Result is not caught on the second iteration |
 | W3b | not started |
 | W4 | not started |
 | W5 | not started |
