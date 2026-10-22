@@ -1,6 +1,6 @@
 # Walker soundness plan: close the confirmed walk fail-opens
 
-Status: revised 2026-10-22 after one validation round (Codex astra for facts, Fable for the argument). Decision 9 (the structural diff of a dynamic argument) is open for the owner. W1 does not depend on it.
+Status: revised 2026-10-22 after one validation round (Codex astra for facts, Fable for the argument). The owner chose decision 9(a) with "a" on 2026-10-22.
 
 Authority: the owner chose decision 8(a) with "a". That answer also accepted decision 5(a): plan, validate, and implement a fix for the confirmed fail-opens. It accepted decision 6(a): probe the five suspects first. It accepted decision 7(a): defer the contract diff gaps and the six properties that never reach the ledger.
 
@@ -123,7 +123,7 @@ Tests: `diff_two_dyn.ts` to `diff_one_dyn.ts` is `breaking`. `diff_two_lit.ts` t
 
 ### W7b: the structural half of the argument compare (D9)
 
-This unit waits for decision 9. The options are at the end of this plan.
+The owner chose decision 9(a). When a compared path has a `?` token on either side, the diff is not a safe no-op. Two handlers with an equal IR identity (`ir_identity.zig`) stay `equivalent`. Contract bytes do not move. The implementer confirms that `ir_identity.zig` gives an identity for a whole handler module and that `prove-behavior` can reach it; if it cannot, stop and report.
 
 Tests for every option: `diff_one_dyn.ts` to `diff_one_dyn_b.ts` is not a safe no-op. `diff_same.ts` to itself stays `equivalent`.
 
@@ -162,7 +162,7 @@ Write a probe first: a boolean misuse inside an array spread operand and inside 
 
 ## Order
 
-W1, W2, W3a, W3b, W4, W5, W6, W7a, W8, W9, W10, then W7b when decision 9 is made, then W11.
+W1, W2, W3a, W3b, W4, W5, W6, W7a, W7b, W8, W9, W10, W11.
 
 ## Stop conditions
 
@@ -186,7 +186,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 - Migration of `forEachChild` and the `proof_ir.zig` `forEachSubNode` to the new map.
 - Narrowing through `assert result.ok` in the verifier.
 
-## Decision 9: the structural compare of a dynamic argument (open)
+## Decision 9: the structural compare of a dynamic argument (decided: option a)
 
 - (a) A safe no-op needs exact arguments. When a compared path has a `?` token on either side, the diff is not a safe no-op. The exception is two handlers with an equal IR identity (`ir_identity.zig`), which stay `equivalent`. Contract bytes do not move. An edit to a handler that passes a dynamic argument to a module call then gets `breaking` ("needs review"), even when the edit does not touch that call. Recommended: it is sound, small, and adds no new output word.
 - (b) An identity token. A non-literal argument's signature becomes the canonical text of its subtree, with single-assignment `const` initializers inlined. This is more precise. Every dynamic `arg_signature` in contract JSON changes, and a same-named binding whose initializer changes compares equal unless the inliner follows it.
@@ -204,7 +204,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W5 | not started |
 | W6 | not started |
 | W7a | not started |
-| W7b | waits for decision 9 |
+| W7b | not started; decision 9(a) |
 | W8 | not started |
 | W9 | not started |
 | W10 | not started |
