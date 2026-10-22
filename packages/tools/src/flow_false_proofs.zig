@@ -278,7 +278,7 @@ pub const fixtures = [_]Fixture{
     \\import { env } from "zttp:env";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const s: string = env("SECRET_KEY") ?? "";
-    \\  assert req.url.length > 100, s;
+    \\  assert req.url.length > 100, Response.text(s);
     \\  return Response.text("ok");
     \\}
     },

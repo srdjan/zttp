@@ -27,8 +27,11 @@ Each analysis pass in zts has its own hand-written recursive walk over the IR. E
 | D11 | `path_generator.zig` `walkPaths` | `assert` is treated as a statement with no branch. A failed `assert` returns its error expression, or halts with status 500 when it has none (`emitAssert` in `parser/codegen.zig`, and the runtime in `handler_instance.zig`). | An edit changes an `assert` error response from status 200 to 500. | `equivalent`. The same edit in an `if` branch is `breaking`. | `as_a.ts` to `as_b.ts` |
 | D12 | `strict_checker.zig` | Six `.spread` arms read word `b`. `collectCallCounts` reads `object_spread` as a property. The walks do not enter closures. | A spread operand or a closure holds the refused form. | ZTS612, ZTS622, ZTS608, and nested strict checks can miss a refusal, and `contract_builder.zig` then sets `canonical` true. ZTS620 is missed in a closure. ZTS604 is a false refusal in a closure. | Codex arm table, `res_closure_guard2.ts`, `opt_closure.ts` (Fable) |
 | D13 | `bool_checker.zig` | `.spread` is treated as a leaf, and `object_spread` is read as a property. | A boolean misuse is inside a spread operand. | A missed boolean error. Boolean errors gate contract extraction in `pipeline.zig`. | Codex (code read, no probe) |
+| D14 | `type_checker.zig` narrowing across a call | A narrowing is not killed when a call runs a closure that assigns the narrowed variable. Inside the closure the variable is an `upvalue` binding with another key, and no call kills narrowings. | `let x: string \| undefined`; a closure sets `x = undefined`; an `x === undefined` early return; the closure is called; then `needS(x)`. | No ZTS203. Only the unrelated ZTS604 and ZTS600 refuse the probe today. | `/private/tmp/claude-501/w4/p/o1.ts` (found during W4) |
 
 D13 has no probe yet. W10 writes one before it changes code.
+
+D14 is out of scope for W4. It needs its own design, because a sound rule must kill narrowings of every captured variable that any called closure can assign. It is recorded here for the owner and for a later unit.
 
 ## Design
 
@@ -200,7 +203,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W2 | done: effect walks reach `assert` and spread operands; `cap_in_assert.ts` now exits 1; `zig build test` 200/200 steps, 9255/9261 tests |
 | W3a | done: block-scoped checked-flag journal; `res_nested`, `res_let_reassign`, `opt_renarrow` now refused; one allowlist row (`setCheckedFlag catch-poison`); residual: a `for...of` body that reads then reassigns a Result is not caught on the second iteration |
 | W3b | done: the verifier walks `assert`, nested functions, closures (with every flag cleared), and spread operands; upvalue reads map to a unique declared binding; residual: a hoisted `function` that reads a Result declared later is not resolved |
-| W4 | not started |
+| W4 | done: the kill walk reaches every assignment; the return join covers loops, `if` without a covering return, and `assert`; ZTS204 checks an `assert` error expression; one fixture (`flow_false_proofs.zig`) wraps its `assert` message in `Response.text`; 296-file sweep unchanged |
 | W5 | not started |
 | W6 | not started |
 | W7a | not started |

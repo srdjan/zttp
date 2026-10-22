@@ -507,55 +507,80 @@ pub const TypeChecker = struct {
     /// survives the body if the body never assigns the binding, because the
     /// back edge re-enters with whatever the last iteration left.
     ///
-    /// The walk is structural over the statement shapes the subset admits. A
-    /// shape it does not reach costs precision, never soundness: the set this
-    /// kills only ever grows, and a narrowing it fails to kill is caught by
-    /// nothing, which is why the listed shapes are the ones that can hold an
-    /// assignment.
-    fn killNarrowingsAssignedIn(self: *TypeChecker, node: NodeIndex, depth: u8) void {
-        if (node == null_node or depth > 32) return;
+    /// The walk descends through `IrView.expressionChildren`, so it reaches an
+    /// assignment wherever code can hold one: a declaration initializer, a call
+    /// argument, a ternary, a `match` arm, an `assert`, the target of another
+    /// assignment, and the body of a nested function. A closure can run during
+    /// the loop, so an assignment inside its body kills the narrowing too.
+    ///
+    /// A captured binding has a different `bindingKey` inside the closure
+    /// (kind `upvalue`, the closure's scope and capture slot) than the binding
+    /// has where it is declared, so the key cannot name the narrowing to kill.
+    /// An assignment to a captured binding inside a nested function therefore
+    /// kills every narrowing.
+    ///
+    /// A shape this walk fails to reach is the unsound direction. The set it
+    /// kills only ever grows, and over-killing widens a binding back to its
+    /// declared type, which costs precision. A kill that never happens keeps a
+    /// narrowing the body has already invalidated, and nothing else catches
+    /// it. When the nesting passes `max_kill_depth`, the walk gives up and kills
+    /// every narrowing, for the same reason.
+    fn killNarrowingsAssignedIn(self: *TypeChecker, node: NodeIndex, depth: u16, in_closure: bool) void {
+        if (node == null_node) return;
+        if (depth > max_kill_depth) {
+            self.killAllNarrowings();
+            return;
+        }
         const tag = self.ir_view.getTag(node) orelse return;
-        switch (tag) {
-            .assignment => {
-                const asgn = self.ir_view.getAssignment(node) orelse return;
-                if (self.ir_view.getTag(asgn.target) == .identifier) {
-                    if (self.ir_view.getBinding(asgn.target)) |binding| {
-                        self.killNarrowing(bindingKey(binding));
-                    }
+        if (tag == .assignment) {
+            const asgn = self.ir_view.getAssignment(node) orelse return;
+            if (self.ir_view.getTag(asgn.target) == .identifier) {
+                if (self.ir_view.getBinding(asgn.target)) |binding| {
+                    self.killNarrowing(bindingKey(binding));
+                    if (in_closure and binding.kind == .upvalue) self.killAllNarrowings();
                 }
-                self.killNarrowingsAssignedIn(asgn.value, depth + 1);
-            },
-            .program, .block => {
-                const block = self.ir_view.getBlock(node) orelse return;
-                for (0..block.stmts_count) |i| {
-                    self.killNarrowingsAssignedIn(
-                        self.ir_view.getListIndex(block.stmts_start, @intCast(i)),
-                        depth + 1,
-                    );
-                }
-            },
-            .if_stmt => {
-                const if_s = self.ir_view.getIfStmt(node) orelse return;
-                self.killNarrowingsAssignedIn(if_s.condition, depth + 1);
-                self.killNarrowingsAssignedIn(if_s.then_branch, depth + 1);
-                self.killNarrowingsAssignedIn(if_s.else_branch, depth + 1);
-            },
-            .expr_stmt, .return_stmt => {
-                if (self.ir_view.getOptValue(node)) |value| {
-                    self.killNarrowingsAssignedIn(value, depth + 1);
-                }
-            },
-            .for_of_stmt, .for_in_stmt => {
-                const fi = self.ir_view.getForIter(node) orelse return;
-                self.killNarrowingsAssignedIn(fi.iterable, depth + 1);
-                self.killNarrowingsAssignedIn(fi.body, depth + 1);
-            },
-            // exhaustive: the listed shapes are the ones that can contain an
-            // assignment in this subset. A tag not reached here contributes no
-            // kill, which costs precision and never soundness: the set this
-            // function kills only ever grows, and over-killing a narrowing widens
-            // a binding back to its declared type.
-            else => {},
+            }
+            // The target can hold an assignment of its own: `a[(x = 1)] = 2`.
+            self.killNarrowingsAssignedIn(asgn.target, depth + 1, in_closure);
+            self.killNarrowingsAssignedIn(asgn.value, depth + 1, in_closure);
+            return;
+        }
+        const child_in_closure = in_closure or tag == .function_decl or
+            tag == .function_expr or tag == .arrow_function;
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| {
+            self.killNarrowingsAssignedIn(child, depth + 1, child_in_closure);
+        }
+    }
+
+    /// The deepest nesting `killNarrowingsAssignedIn` follows before it kills
+    /// every narrowing instead.
+    const max_kill_depth: u16 = 256;
+
+    /// Drop every narrowing, journaled so an enclosing branch scope can put
+    /// each one back.
+    fn killAllNarrowings(self: *TypeChecker) void {
+        var keys = self.narrowed.keyIterator();
+        while (keys.next()) |key| self.recordNarrowChange(key.*);
+        self.narrowed.clearRetainingCapacity();
+    }
+
+    /// Compare a value that leaves the enclosing function with its declared
+    /// return type. `node` is the statement that returns it: a `return`, or an
+    /// `assert` whose error expression a failed condition returns. A function
+    /// with no declared return type, and a value whose type is unknown, pass.
+    fn checkReturnedValue(self: *TypeChecker, node: NodeIndex, value: NodeIndex) void {
+        if (self.current_return_type == null_type_idx) return;
+        const inferred = self.inferType(value);
+        if (inferred != null_type_idx and !self.env.isAssignableTo(inferred, self.current_return_type)) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .return_type_mismatch,
+                .node = node,
+                .message = "return type does not match declared return type",
+                .help = "the enclosing function's declared return type is what this value must match; " ++
+                    "when it comes back from a virtual-module call, wrap it rather than returning it directly",
+            });
         }
     }
 
@@ -724,20 +749,7 @@ pub const TypeChecker = struct {
             .return_stmt => {
                 if (self.ir_view.getOptValue(node)) |ret_val| {
                     self.walkExpr(ret_val);
-                    // Check return type against declared return type
-                    if (self.current_return_type != null_type_idx) {
-                        const inferred = self.inferType(ret_val);
-                        if (inferred != null_type_idx and !self.env.isAssignableTo(inferred, self.current_return_type)) {
-                            self.addDiagnostic(.{
-                                .severity = .err,
-                                .kind = .return_type_mismatch,
-                                .node = node,
-                                .message = "return type does not match declared return type",
-                                .help = "the enclosing function's declared return type is what this value must match; " ++
-                                    "when it comes back from a virtual-module call, wrap it rather than returning it directly",
-                            });
-                        }
-                    }
+                    self.checkReturnedValue(node, ret_val);
                 }
             },
 
@@ -749,6 +761,10 @@ pub const TypeChecker = struct {
                 self.recordContextType(assert.condition);
                 if (assert.error_expr != null_node) {
                     self.walkExpr(assert.error_expr);
+                    // A failed `assert c, e` returns `e` from the enclosing
+                    // function, so `e` answers the declared return type the
+                    // way a `return e` does.
+                    self.checkReturnedValue(node, assert.error_expr);
                 }
                 const narrow = self.extractNarrowingGuard(assert.condition);
                 if (narrow.key) |key| {
@@ -775,7 +791,7 @@ pub const TypeChecker = struct {
                 // valid inside it if the body never reassigns the binding, and
                 // a narrowing established inside the body does not survive the
                 // back edge.
-                self.killNarrowingsAssignedIn(fi.body, 0);
+                self.killNarrowingsAssignedIn(fi.body, 0, false);
                 var before = self.narrowed.clone(self.allocator) catch {
                     self.markAllocationFailure();
                     self.walkStmt(fi.body);
@@ -3199,7 +3215,25 @@ pub const TypeChecker = struct {
     /// own contract, not this one. A body whose returns disagree joins to a
     /// union, which is the same answer the checker gives a match expression
     /// whose arms disagree.
+    ///
+    /// Two statements return without a `return` statement or inside a loop.
+    /// A failed `assert c, e` returns `e`, so the join includes the type of
+    /// `e`. A `return` inside a `for...of` or `for...in` body is reached only
+    /// when the loop runs at least once, so the loop can also fall through
+    /// with no value. See `bodyReturnTypeIn`.
     fn bodyReturnType(self: *const TypeChecker, node: NodeIndex, depth: u8) TypeIndex {
+        return self.bodyReturnTypeIn(node, depth, false);
+    }
+
+    /// `bodyReturnType` with `covered`: true when a statement after this node
+    /// returns on every path, so control cannot leave the function from this
+    /// node by falling through. A loop or an `if` that holds a `return` adds
+    /// `undefined` to the join unless it is covered, because a loop that runs
+    /// zero times, and an `if` whose branch does not return, leave the function
+    /// with no value. An `if` that returns on every path adds nothing. A loop
+    /// body is covered, since falling off its end goes back to the loop and not
+    /// out of the function.
+    fn bodyReturnTypeIn(self: *const TypeChecker, node: NodeIndex, depth: u8, covered: bool) TypeIndex {
         if (depth > 8 or node == null_node) return null_type_idx;
         const tag = self.ir_view.getTag(node) orelse return null_type_idx;
         switch (tag) {
@@ -3207,32 +3241,81 @@ pub const TypeChecker = struct {
                 const value = self.ir_view.getOptValue(node) orelse return null_type_idx;
                 return self.inferType(value);
             },
+            .assert_stmt => {
+                const assert = self.ir_view.getAssertStmt(node) orelse return null_type_idx;
+                if (assert.error_expr == null_node) return null_type_idx;
+                return self.inferType(assert.error_expr);
+            },
             .program, .block => {
                 const block = self.ir_view.getBlock(node) orelse return null_type_idx;
+                // A statement is covered when a later one returns on every
+                // path, so find the last such statement first.
+                var last_returning: ?usize = null;
+                for (0..block.stmts_count) |i| {
+                    const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
+                    if (self.returnsOnEveryPath(stmt)) last_returning = i;
+                }
                 var result: TypeIndex = null_type_idx;
                 for (0..block.stmts_count) |i| {
                     const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
-                    result = self.joinReturnType(result, self.bodyReturnType(stmt, depth + 1));
+                    const stmt_covered = covered or (if (last_returning) |last| i < last else false);
+                    result = self.joinReturnType(result, self.bodyReturnTypeIn(stmt, depth + 1, stmt_covered));
                 }
                 return result;
             },
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return null_type_idx;
-                const then_type = self.bodyReturnType(if_s.then_branch, depth + 1);
+                const then_type = self.bodyReturnTypeIn(if_s.then_branch, depth + 1, covered);
                 const else_type = if (if_s.else_branch != null_node)
-                    self.bodyReturnType(if_s.else_branch, depth + 1)
+                    self.bodyReturnTypeIn(if_s.else_branch, depth + 1, covered)
                 else
                     null_type_idx;
-                return self.joinReturnType(then_type, else_type);
+                const branches = self.joinReturnType(then_type, else_type);
+                if (branches == null_type_idx or covered or self.returnsOnEveryPath(node)) return branches;
+                return self.joinReturnType(branches, self.env.pool.idx_undefined);
+            },
+            .for_of_stmt, .for_in_stmt => {
+                const fi = self.ir_view.getForIter(node) orelse return null_type_idx;
+                const body_type = self.bodyReturnTypeIn(fi.body, depth + 1, true);
+                if (body_type == null_type_idx or covered) return body_type;
+                return self.joinReturnType(body_type, self.env.pool.idx_undefined);
             },
             // exhaustive: the listed statement shapes are the ones that can
-            // carry a `return` for this function. Every other tag either holds
-            // no statement (an expression, a declaration) or opens a nested
-            // function, whose returns answer its own contract. Answering
-            // nothing here is not a swallowed verdict: the caller infers no
-            // type for the argument and the type parameter stays unbound, which
-            // `instantiateSignature` reports as ambiguous.
+            // carry a `return` for this function. Every other tag is an
+            // expression or a declaration, which holds no `return` for this
+            // function, or it opens a nested function, whose returns answer
+            // its own contract. Answering nothing here is not a swallowed
+            // verdict: the caller infers no type for the argument and the type
+            // parameter stays unbound, which `instantiateSignature` reports as
+            // ambiguous.
             else => return null_type_idx,
+        }
+    }
+
+    /// True when every path through `node` ends in a `return`: a `return`, a
+    /// block with a statement that does, and an `if` with an `else` where both
+    /// branches do. A loop never does, since it can run zero times.
+    fn returnsOnEveryPath(self: *const TypeChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        switch (tag) {
+            .return_stmt => return true,
+            .block => {
+                const block = self.ir_view.getBlock(node) orelse return false;
+                for (0..block.stmts_count) |i| {
+                    if (self.returnsOnEveryPath(self.ir_view.getListIndex(block.stmts_start, @intCast(i)))) return true;
+                }
+                return false;
+            },
+            .if_stmt => {
+                const if_s = self.ir_view.getIfStmt(node) orelse return false;
+                if (if_s.else_branch == null_node) return false;
+                return self.returnsOnEveryPath(if_s.then_branch) and self.returnsOnEveryPath(if_s.else_branch);
+            },
+            // exhaustive: every other statement can be left by falling through
+            // or holds no `return` of this function, so none returns on every
+            // path. Answering false adds `undefined` to a join, which is the
+            // fail-closed direction.
+            else => return false,
         }
     }
 
@@ -4679,6 +4762,338 @@ test "narrowing: a loop body that reassigns kills the narrowing at entry" {
         \\  return "ok";
         \\}
     , 1, null);
+}
+
+/// Counts of the three diagnostics the W4 tests pin: ZTS203, ZTS204, ZTS208.
+const KindCounts = struct {
+    arg_type: usize,
+    return_type: usize,
+    ambiguous: usize,
+};
+
+fn expectKindCounts(source: []const u8, expected: KindCounts) !void {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator, source, false);
+    defer freeSeenDiagnostics(allocator, seen);
+    const actual: KindCounts = .{
+        .arg_type = countKind(seen, .arg_type_mismatch),
+        .return_type = countKind(seen, .return_type_mismatch),
+        .ambiguous = countKind(seen, .ambiguous_type_argument),
+    };
+    if (!std.meta.eql(expected, actual)) {
+        for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
+    }
+    try std.testing.expectEqual(expected, actual);
+}
+
+/// A `count` function whose `x` is narrowed to `string` before a `for...of`
+/// loop. `body` follows `needS(x)` in the loop body.
+fn narrowedBeforeLoop(comptime body: []const u8) []const u8 {
+    const head =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function id(v: string | undefined): number {
+        \\  return 1;
+        \\}
+        \\function count(input: string | undefined): number {
+        \\  let x: string | undefined = input;
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  let n = 0;
+        \\  for (const i of [1, 2]) {
+        \\    n = n + needS(x);
+    ;
+    const tail =
+        \\  }
+        \\  return n;
+        \\}
+    ;
+    return head ++ "\n" ++ body ++ "\n" ++ tail;
+}
+
+test "narrowing: a loop body that assigns inside an initializer kills the narrowing at entry" {
+    // n2_init. The assignment is the initializer of a `const`, which the kill
+    // walk did not enter, so `needS(x)` kept the narrowing to `string`.
+    //
+    // Control first: the same loop with a plain assignment statement, and the
+    // same loop with no assignment. The second is what shows the refusals below
+    // come from the assignment.
+    try expectKindCounts(narrowedBeforeLoop("    n = n + 1;"), .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(narrowedBeforeLoop("    x = undefined;"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(narrowedBeforeLoop("    const y = (x = undefined);"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+}
+
+test "narrowing: a loop body that assigns inside a ternary or an assert kills the narrowing" {
+    try expectKindCounts(
+        narrowedBeforeLoop("    const t = i > 1 ? (x = undefined) : 1;"),
+        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
+    );
+    try expectKindCounts(
+        narrowedBeforeLoop("    assert i > 0, (x = undefined);"),
+        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
+    );
+}
+
+test "narrowing: a closure in a loop body that assigns the narrowed binding kills the narrowing" {
+    // A closure can run during the loop. Its `x` is a captured binding, whose
+    // key differs from the declaration's, so the walk kills every narrowing.
+    try expectKindCounts(
+        narrowedBeforeLoop(
+            \\    const g = () => {
+            \\      x = undefined;
+            \\      return 1;
+            \\    };
+            \\    n = n + g();
+        ),
+        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
+    );
+    try expectKindCounts(
+        narrowedBeforeLoop(
+            \\    function g(): number {
+            \\      x = undefined;
+            \\      return 1;
+            \\    }
+        ),
+        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
+    );
+    // Control: a closure that assigns only its own local leaves the narrowing.
+    try expectKindCounts(
+        narrowedBeforeLoop(
+            \\    const g = () => {
+            \\      let w = 1;
+            \\      w = 2;
+            \\      return w;
+            \\    };
+            \\    n = n + g();
+        ),
+        .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 },
+    );
+}
+
+/// A generic `apply` whose callback result is passed to `needS`. `apply`'s own
+/// `return f(2)` reports one ZTS204 (a generic-return limitation), so every
+/// case below expects `return_type = 1`.
+fn callbackReturning(comptime body: []const u8) []const u8 {
+    const head =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function apply<T>(f: (n: number) => T): T {
+        \\  return f(2);
+        \\}
+        \\export function handler(req: Request): Response {
+        \\  const v = apply((y: number) => {
+    ;
+    const tail =
+        \\  });
+        \\  return Response.text(String(needS(v)));
+        \\}
+    ;
+    return head ++ "\n" ++ body ++ "\n" ++ tail;
+}
+
+test "callback return type: a return inside an if joins the callback type" {
+    // r3_base, the control for the loop and assert cases below.
+    try expectKindCounts(
+        callbackReturning(
+            \\    if (y > 1) {
+            \\      return y;
+            \\    }
+            \\    return "s";
+        ),
+        .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
+    );
+}
+
+test "callback return type: a return inside a for...of joins the callback type" {
+    // r3_forof. The loop's `return z` was dropped from the join, so the
+    // callback typed as `string` and `needS(v)` was accepted.
+    try expectKindCounts(
+        callbackReturning(
+            \\    for (const z of [y]) {
+            \\      return z;
+            \\    }
+            \\    return "s";
+        ),
+        .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
+    );
+}
+
+test "callback return type: an assert error expression joins the callback type" {
+    // A failed `assert c, e` returns `e` from the callback.
+    try expectKindCounts(
+        callbackReturning(
+            \\    assert y > 1, y;
+            \\    return "s";
+        ),
+        .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
+    );
+}
+
+/// A callback whose only `return` is inside a loop, passed to a generic
+/// function whose result `needN` consumes.
+fn loopOnlyCallback(comptime body: []const u8) []const u8 {
+    const head =
+        \\function needN(n: number): number {
+        \\  return n + 1;
+        \\}
+        \\function apply<T>(f: (xs: number[]) => T): T {
+        \\  return f([]);
+        \\}
+        \\export function handler(req: Request): Response {
+        \\  const v = apply((xs: number[]) => {
+    ;
+    const tail =
+        \\  });
+        \\  return Response.text(String(needN(v)));
+        \\}
+    ;
+    return head ++ "\n" ++ body ++ "\n" ++ tail;
+}
+
+test "callback return type: a callback whose only return is in a loop stays refused" {
+    // r5_forof_only. The returned `z` has no type while the callback is first
+    // inferred, so `T` is ambiguous (ZTS208), as for any return of a
+    // parameter-typed value.
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    for (const z of xs) {
+            \\      return z;
+            \\    }
+        ),
+        .{ .arg_type = 1, .return_type = 1, .ambiguous = 1 },
+    );
+    // A literal return types at once. A loop that runs zero times returns
+    // nothing, so the callback type is `number | undefined` and not the
+    // loop's `number` alone: `needN(v)` is refused.
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    for (const z of xs) {
+            \\      return 5;
+            \\    }
+        ),
+        .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
+    );
+}
+
+test "callback return type: a return after the loop covers the fall-through" {
+    // The loop cannot fall out of the function when a later statement returns
+    // on every path, so the join is `5 | 6` and `undefined` is not added.
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    for (const z of xs) {
+            \\      return 5;
+            \\    }
+            \\    return 6;
+        ),
+        .{ .arg_type = 0, .return_type = 1, .ambiguous = 0 },
+    );
+}
+
+test "callback return type: an if whose return can be skipped adds undefined" {
+    // The only `return` is inside an `if` with no `else`, so the callback
+    // returns `undefined` when the condition is false. Typing it as `5` alone
+    // let `needN(v)` pass.
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    if (xs.length > 1) {
+            \\      return 5;
+            \\    }
+        ),
+        .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
+    );
+    // An `else` that does not return leaves the same path open.
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    if (xs.length > 1) {
+            \\      return 5;
+            \\    } else {
+            \\      const w = 1;
+            \\    }
+        ),
+        .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
+    );
+}
+
+test "callback return type: a covering return keeps an if from adding undefined" {
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    if (xs.length > 1) {
+            \\      return 5;
+            \\    }
+            \\    return 6;
+        ),
+        .{ .arg_type = 0, .return_type = 1, .ambiguous = 0 },
+    );
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    if (xs.length > 1) {
+            \\      return 5;
+            \\    } else {
+            \\      return 6;
+            \\    }
+        ),
+        .{ .arg_type = 0, .return_type = 1, .ambiguous = 0 },
+    );
+    // Nested: both inner branches return, so the outer `if` is covered too.
+    try expectKindCounts(
+        loopOnlyCallback(
+            \\    if (xs.length > 1) {
+            \\      if (xs.length > 2) {
+            \\        return 5;
+            \\      } else {
+            \\        return 6;
+            \\      }
+            \\    } else {
+            \\      return 7;
+            \\    }
+        ),
+        .{ .arg_type = 0, .return_type = 1, .ambiguous = 0 },
+    );
+}
+
+test "assert error expression: it must match the declared return type" {
+    // A failed `assert c, e` returns `e`, so `e` answers the declared return
+    // type the way `return e` does.
+    try expectKindCounts(
+        \\function f(c: boolean): string {
+        \\  assert c, 5;
+        \\  return "ok";
+        \\}
+    , .{ .arg_type = 0, .return_type = 1, .ambiguous = 0 });
+    try expectKindCounts(
+        \\function f(c: boolean): string {
+        \\  assert c, "no";
+        \\  return "ok";
+        \\}
+    , .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(
+        \\export function handler(req: Request): Response {
+        \\  const c = req.method === "GET";
+        \\  assert c, Response.text("no");
+        \\  return Response.text("ok");
+        \\}
+    , .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
+}
+
+test "assert error expression: a Proof capsule return type adds no ZTS204" {
+    // cap_base. The declared type is a capsule over `Response`, and the
+    // `Response` the assert returns matches it as the final `return` does.
+    try expectKindCounts(
+        \\import { cacheSet } from "zttp:cache";
+        \\structural RetryProof<T> = Proof<T, "retry_safe" | "idempotent">;
+        \\function save(): boolean {
+        \\  cacheSet("items", "key", "value", 60);
+        \\  return true;
+        \\}
+        \\function handler(req: Request): RetryProof<Response> {
+        \\  const ok = save();
+        \\  assert ok, Response.text("no");
+        \\  return Response.text("ok");
+        \\}
+    , .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
 }
 
 test "the join asks for structural identity, not the same pool index" {
