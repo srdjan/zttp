@@ -76,7 +76,6 @@ pub const ModuleCompiler = struct {
                 if (formatted.len > 0) if (!@import("builtin").is_test) std.log.err("{s}", .{formatted});
                 return err;
             };
-            _ = zts_parser.ir_opt.optimizeIR(self.allocator, &parser.nodes, &parser.constants, root) catch {};
             if (module.source_profile == .direct) {
                 try parser.type_store.validateRuntimeOwners(self.allocator, zts_parser.IrView.fromIRStore(&parser.nodes, &parser.constants));
             }

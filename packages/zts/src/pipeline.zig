@@ -1573,7 +1573,6 @@ pub fn extractContract(
         .terminal_admission_refused => |failure| return source_frontend_mod.prepareErrorForAdmissionFailure(failure),
         .recovered_admission_refused => unreachable,
     };
-    _ = parser_mod.optimizeIR(allocator, &frontend.parser.nodes, &frontend.parser.constants, root) catch {};
     const ir_view = IrView.fromIRStore(&frontend.parser.nodes, &frontend.parser.constants);
     try frontend.parser.type_store.validateRuntimeOwners(allocator, ir_view);
     var parsed = ParsedModule.fromTypedExisting(ir_view, root, &frontend.atoms, &frontend.parser.type_store);
@@ -1614,7 +1613,6 @@ pub fn extractPreparedEvalContract(
         .terminal_admission_refused => |failure| return source_frontend_mod.prepareErrorForAdmissionFailure(failure),
         .recovered_admission_refused => return error.AdmissionRefused,
     };
-    _ = parser_mod.optimizeIR(allocator, &parser.nodes, &parser.constants, root) catch {};
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     try parser.type_store.validateRuntimeOwners(allocator, view);
     var parsed = ParsedModule.fromExisting(view, root, &atoms);
@@ -1642,7 +1640,6 @@ fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, file
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    _ = parser_mod.optimizeIR(allocator, &parser.nodes, &parser.constants, root) catch {};
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var parsed = ParsedModule.fromExisting(view, root, &atoms);
     parsed.scopes = &parser.scopes;

@@ -1,534 +1,162 @@
-//! IR Optimization Pass
+//! Allocation-free constant evaluation for code generation. Analysis always
+//! sees the original IR: folding must not erase a refused operator, a call, or
+//! a proof member. Only complete, side-effect-free expression trees fold.
 //!
-//! Performs constant folding and simplification on the IR before codegen.
-//! Runs between parsing and bytecode generation.
-//!
-//! Optimizations:
-//!   - Boolean constant folding: !true -> false, !false -> true
-//!   - Float arithmetic: 1.5 + 2.5 -> 4.0
-//!   - Short-circuit simplification: true && x -> x, false || x -> x
-//!
-//! Design: Single-pass O(n) traversal for cold-start friendliness.
-//! Uses replacement map instead of rewriting IR (append-only structure).
+//! A shared visit budget bounds work even for a long expression containing a
+//! nonconstant leaf. No node-order assumption, replacement map, or IR mutation
+//! is needed. Larger trees emit normally; smaller subtrees can still fold.
 
 const std = @import("std");
 const ir = @import("ir.zig");
 
-const NodeTag = ir.NodeTag;
-const NodeIndex = ir.NodeIndex;
-const null_node = ir.null_node;
-const BinaryOp = ir.BinaryOp;
-const UnaryOp = ir.UnaryOp;
-const IRStore = ir.IRStore;
-const ConstantPool = ir.ConstantPool;
-const SourceLocation = ir.SourceLocation;
-const DataPayload = ir.DataPayload;
+pub const Constant = union(enum) {
+    int: i32,
+    float: f64,
+    boolean: bool,
 
-/// Statistics from IR optimization pass
-pub const IROptStats = struct {
-    bool_folds: u32 = 0,
-    float_folds: u32 = 0,
-    short_circuit_simplifications: u32 = 0,
-
-    pub fn totalOptimizations(self: IROptStats) u32 {
-        return self.bool_folds + self.float_folds + self.short_circuit_simplifications;
+    fn number(self: Constant) ?f64 {
+        return switch (self) {
+            .int => |v| @floatFromInt(v),
+            .float => |v| v,
+            .boolean => null,
+        };
     }
 };
 
-/// IR Optimizer
-pub const IROptimizer = struct {
-    ir_store: *IRStore,
-    constants: *ConstantPool,
-    allocator: std.mem.Allocator,
-    stats: IROptStats,
+/// Called only for expressions about to be emitted, after semantic analysis.
+pub fn fold(view: ir.IrView, index: ir.NodeIndex) ?Constant {
+    var remaining: usize = 64;
+    return evaluate(view, index, &remaining);
+}
 
-    // Replacement map: original node index -> replacement node index
-    // If an entry exists, use the replacement when visiting that node
-    replacements: std.AutoHashMapUnmanaged(NodeIndex, NodeIndex),
+fn evaluate(view: ir.IrView, index: ir.NodeIndex, remaining: *usize) ?Constant {
+    if (remaining.* == 0) return null;
+    remaining.* -= 1;
+    const tag = view.getTag(index) orelse return null;
+    return switch (tag) {
+        .lit_int => .{ .int = view.getIntValue(index) orelse return null },
+        .lit_float => .{ .float = view.getFloat(view.getFloatIdx(index) orelse return null) orelse return null },
+        .lit_bool => .{ .boolean = view.getBoolValue(index) orelse return null },
+        .unary_op => blk: {
+            const expr = view.getUnary(index) orelse return null;
+            break :blk unary(expr.op, evaluate(view, expr.operand, remaining) orelse return null);
+        },
+        .binary_op => blk: {
+            const expr = view.getBinary(index) orelse return null;
+            const left = evaluate(view, expr.left, remaining) orelse return null;
+            // Require both sides even for && and ||. Otherwise folding could
+            // remove a call that the proof IR still contains.
+            const right = evaluate(view, expr.right, remaining) orelse return null;
+            break :blk binary(expr.op, left, right);
+        },
+        else => null,
+    };
+}
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        ir_store: *IRStore,
-        constants: *ConstantPool,
-    ) IROptimizer {
-        return .{
-            .ir_store = ir_store,
-            .constants = constants,
-            .allocator = allocator,
-            .stats = .{},
-            .replacements = .{},
-        };
+fn unary(op: ir.UnaryOp, operand: Constant) ?Constant {
+    return switch (op) {
+        .not => switch (operand) {
+            .boolean => |v| .{ .boolean = !v },
+            else => null,
+        },
+        .neg => switch (operand) {
+            // The VM promotes MIN_INT to a float. Leave that case to it.
+            .int => |v| if (v == std.math.minInt(i32)) null else .{ .int = -v },
+            .float => |v| finite(-v),
+            else => null,
+        },
+        .bit_not => switch (operand) {
+            .int => |v| .{ .int = ~v },
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn finite(v: f64) ?Constant {
+    // Keep NaN/infinity representation and exceptional arithmetic in the VM.
+    return if (std.math.isFinite(v)) .{ .float = v } else null;
+}
+
+fn binary(op: ir.BinaryOp, left: Constant, right: Constant) ?Constant {
+    if (op == .and_op or op == .or_op) {
+        if (left != .boolean) return null;
+        return if (op == .and_op)
+            (if (left.boolean) right else left)
+        else
+            (if (left.boolean) left else right);
     }
 
-    pub fn deinit(self: *IROptimizer) void {
-        self.replacements.deinit(self.allocator);
-    }
-
-    /// Optimize the IR tree starting from root
-    /// Returns statistics about optimizations performed
-    pub fn optimize(self: *IROptimizer, root: NodeIndex) !IROptStats {
-        if (root == null_node) return self.stats;
-
-        // Single pass: visit each node and potentially replace with constant
-        _ = try self.visitNode(root);
-
-        return self.stats;
-    }
-
-    /// Error type for optimization operations
-    pub const OptError = std.mem.Allocator.Error || error{TooManyNodes};
-
-    /// Visit a node and return the optimized result (may be same or different node)
-    fn visitNode(self: *IROptimizer, idx: NodeIndex) OptError!NodeIndex {
-        if (idx == null_node) return null_node;
-
-        // Check if already have a replacement
-        if (self.replacements.get(idx)) |replacement| {
-            return replacement;
-        }
-
-        const tag = self.ir_store.getTag(idx);
-
-        return switch (tag) {
-            .unary_op => try self.optimizeUnary(idx),
-            .binary_op => try self.optimizeBinary(idx),
-            else => idx, // No optimization for other node types
-        };
-    }
-
-    /// Optimize unary expressions
-    fn optimizeUnary(self: *IROptimizer, idx: NodeIndex) OptError!NodeIndex {
-        const data = self.ir_store.getData(idx);
-        const op: UnaryOp = @enumFromInt(@as(u4, @truncate(data.a)));
-        const operand_idx: NodeIndex = data.b;
-
-        // First optimize the operand
-        const opt_operand = try self.visitNode(operand_idx);
-        const operand_tag = self.ir_store.getTag(opt_operand);
-
-        // Boolean NOT folding: !true -> false, !false -> true
-        if (op == .not and operand_tag == .lit_bool) {
-            const bool_val = self.ir_store.getData(opt_operand).a != 0;
-            const loc = self.ir_store.getLoc(idx);
-            const result = try self.ir_store.addNode(.lit_bool, loc, .{ .a = if (bool_val) 0 else 1, .b = 0 });
-            try self.replacements.put(self.allocator, idx, result);
-            self.stats.bool_folds += 1;
-            return result;
-        }
-
-        // Double NOT folding on literal: !!true -> true, !!false -> false
-        if (op == .not and operand_tag == .unary_op) {
-            const inner_data = self.ir_store.getData(opt_operand);
-            const inner_op: UnaryOp = @enumFromInt(@as(u4, @truncate(inner_data.a)));
-            if (inner_op == .not) {
-                const inner_operand: NodeIndex = inner_data.b;
-                const inner_tag = self.ir_store.getTag(inner_operand);
-                if (inner_tag == .lit_bool) {
-                    // !!bool_literal -> bool_literal
-                    try self.replacements.put(self.allocator, idx, inner_operand);
-                    self.stats.bool_folds += 1;
-                    return inner_operand;
-                }
-            }
-        }
-
-        // Negation of float constant: -1.5 -> -1.5 (as new constant)
-        if (op == .neg and operand_tag == .lit_float) {
-            const float_idx: u16 = @truncate(self.ir_store.getData(opt_operand).a);
-            if (self.constants.getFloat(float_idx)) |f| {
-                // A full constant pool leaves the negation unfolded: same meaning.
-                const neg_idx = self.constants.addFloat(-f) catch |err| switch (err) {
-                    error.TooManyConstants => return idx,
-                    error.OutOfMemory => return error.OutOfMemory,
+    if (left == .int and right == .int) {
+        const a = left.int;
+        const b = right.int;
+        switch (op) {
+            .add, .sub, .mul => {
+                const result = switch (op) {
+                    .add => @addWithOverflow(a, b),
+                    .sub => @subWithOverflow(a, b),
+                    .mul => @mulWithOverflow(a, b),
+                    else => unreachable,
                 };
-                const loc = self.ir_store.getLoc(idx);
-                const result = try self.ir_store.addLitFloat(loc, neg_idx);
-                try self.replacements.put(self.allocator, idx, result);
-                self.stats.float_folds += 1;
-                return result;
-            }
+                return if (result[1] == 0) .{ .int = result[0] } else null;
+            },
+            .mod => return if (b == 0) null else .{
+                .int = if (a == std.math.minInt(i32) and b == -1) 0 else @rem(a, b),
+            },
+            .bit_and => return .{ .int = a & b },
+            .bit_or => return .{ .int = a | b },
+            .bit_xor => return .{ .int = a ^ b },
+            .shl => return .{ .int = a << @as(u5, @truncate(@as(u32, @bitCast(b)))) },
+            .shr => return .{ .int = a >> @as(u5, @truncate(@as(u32, @bitCast(b)))) },
+            .strict_eq => return .{ .boolean = a == b },
+            .strict_neq => return .{ .boolean = a != b },
+            .lt => return .{ .boolean = a < b },
+            .lte => return .{ .boolean = a <= b },
+            .gt => return .{ .boolean = a > b },
+            .gte => return .{ .boolean = a >= b },
+            else => {},
         }
-
-        // Negation of int constant: -5 -> -5 (as new constant)
-        if (op == .neg and operand_tag == .lit_int) {
-            const int_val = self.ir_store.getData(opt_operand).toInt();
-            const loc = self.ir_store.getLoc(idx);
-            const result = try self.ir_store.addLitInt(loc, -int_val);
-            try self.replacements.put(self.allocator, idx, result);
-            self.stats.float_folds += 1; // Count with float folds for simplicity
-            return result;
-        }
-
-        return idx;
     }
 
-    /// Optimize binary expressions
-    fn optimizeBinary(self: *IROptimizer, idx: NodeIndex) OptError!NodeIndex {
-        const data = self.ir_store.getData(idx);
-        const binary = data.toBinary();
-        const op = binary.op;
-
-        // First optimize operands
-        const opt_left = try self.visitNode(binary.left);
-        const opt_right = try self.visitNode(binary.right);
-
-        const left_tag = self.ir_store.getTag(opt_left);
-        const right_tag = self.ir_store.getTag(opt_right);
-        const loc = self.ir_store.getLoc(idx);
-
-        // Integer arithmetic: lit_int op lit_int -> lit_int
-        if (left_tag == .lit_int and right_tag == .lit_int) {
-            const left_val = self.ir_store.getData(opt_left).toInt();
-            const right_val = self.ir_store.getData(opt_right).toInt();
-
-            const result_val: ?i32 = switch (op) {
-                .add => if (@addWithOverflow(left_val, right_val)[1] == 0) left_val + right_val else null,
-                .sub => if (@subWithOverflow(left_val, right_val)[1] == 0) left_val - right_val else null,
-                .mul => if (@mulWithOverflow(left_val, right_val)[1] == 0) left_val * right_val else null,
-                .div => if (right_val != 0) @divTrunc(left_val, right_val) else null,
-                .mod => if (right_val != 0) @mod(left_val, right_val) else null,
-                .bit_and => left_val & right_val,
-                .bit_or => left_val | right_val,
-                .bit_xor => left_val ^ right_val,
-                .shl => blk: {
-                    const shift: u5 = @intCast(@as(u32, @bitCast(right_val)) & 0x1F);
-                    break :blk @shlWithOverflow(left_val, shift)[0];
-                },
-                .shr => blk: {
-                    const shift: u5 = @intCast(@as(u32, @bitCast(right_val)) & 0x1F);
-                    break :blk left_val >> shift;
-                },
-                else => null,
-            };
-
-            if (result_val) |val| {
-                const result = try self.ir_store.addLitInt(loc, val);
-                try self.replacements.put(self.allocator, idx, result);
-                self.stats.float_folds += 1;
-                return result;
-            }
-        }
-
-        // Float arithmetic: lit_float op lit_float -> lit_float
-        if (left_tag == .lit_float and right_tag == .lit_float) {
-            const left_idx: u16 = @truncate(self.ir_store.getData(opt_left).a);
-            const right_idx: u16 = @truncate(self.ir_store.getData(opt_right).a);
-
-            if (self.constants.getFloat(left_idx)) |left_val| {
-                if (self.constants.getFloat(right_idx)) |right_val| {
-                    const result_val: ?f64 = switch (op) {
-                        .add => left_val + right_val,
-                        .sub => left_val - right_val,
-                        .mul => left_val * right_val,
-                        .div => if (right_val != 0) left_val / right_val else null,
-                        .pow => std.math.pow(f64, left_val, right_val),
-                        else => null,
-                    };
-
-                    if (result_val) |val| {
-                        // A full constant pool leaves the expression unfolded.
-                        const result_idx = self.constants.addFloat(val) catch |err| switch (err) {
-                            error.TooManyConstants => return idx,
-                            error.OutOfMemory => return error.OutOfMemory,
-                        };
-                        const result = try self.ir_store.addLitFloat(loc, result_idx);
-                        try self.replacements.put(self.allocator, idx, result);
-                        self.stats.float_folds += 1;
-                        return result;
-                    }
-                }
-            }
-        }
-
-        // Short-circuit simplification for &&
-        if (op == .and_op and left_tag == .lit_bool) {
-            const left_val = self.ir_store.getData(opt_left).a != 0;
-            if (left_val) {
-                // true && x -> x
-                try self.replacements.put(self.allocator, idx, opt_right);
-                self.stats.short_circuit_simplifications += 1;
-                return opt_right;
-            } else {
-                // false && x -> false
-                try self.replacements.put(self.allocator, idx, opt_left);
-                self.stats.short_circuit_simplifications += 1;
-                return opt_left;
-            }
-        }
-
-        // Short-circuit simplification for ||
-        if (op == .or_op and left_tag == .lit_bool) {
-            const left_val = self.ir_store.getData(opt_left).a != 0;
-            if (!left_val) {
-                // false || x -> x
-                try self.replacements.put(self.allocator, idx, opt_right);
-                self.stats.short_circuit_simplifications += 1;
-                return opt_right;
-            } else {
-                // true || x -> true
-                try self.replacements.put(self.allocator, idx, opt_left);
-                self.stats.short_circuit_simplifications += 1;
-                return opt_left;
-            }
-        }
-
-        // Comparison folding for integers
-        if (left_tag == .lit_int and right_tag == .lit_int) {
-            const left_val = self.ir_store.getData(opt_left).toInt();
-            const right_val = self.ir_store.getData(opt_right).toInt();
-
-            const result_val: ?bool = switch (op) {
-                .strict_eq => left_val == right_val,
-                .strict_neq => left_val != right_val,
-                .lt => left_val < right_val,
-                .lte => left_val <= right_val,
-                .gt => left_val > right_val,
-                .gte => left_val >= right_val,
-                else => null,
-            };
-
-            if (result_val) |val| {
-                const result = try self.ir_store.addNode(.lit_bool, loc, .{ .a = if (val) 1 else 0, .b = 0 });
-                try self.replacements.put(self.allocator, idx, result);
-                self.stats.bool_folds += 1;
-                return result;
-            }
-        }
-
-        return idx;
-    }
-};
-
-// ============================================================================
-// Convenience function
-// ============================================================================
-
-/// Optimize IR, returns statistics
-pub fn optimizeIR(
-    allocator: std.mem.Allocator,
-    ir_store: *IRStore,
-    constants: *ConstantPool,
-    root: NodeIndex,
-) !IROptStats {
-    var optimizer = IROptimizer.init(allocator, ir_store, constants);
-    defer optimizer.deinit();
-    return optimizer.optimize(root);
+    const a = left.number() orelse return null;
+    const b = right.number() orelse return null;
+    return switch (op) {
+        .add => finite(a + b),
+        .sub => finite(a - b),
+        .mul => finite(a * b),
+        // Division always produces a float, including two integer operands.
+        .div => if (b == 0) null else finite(a / b),
+        else => null,
+    };
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
-test "IROptimizer: boolean NOT folding" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create !true -> should become false
-    const true_node = try store.addNode(.lit_bool, loc, .{ .a = 1, .b = 0 });
-    const not_node = try store.addUnary(loc, .not, true_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(not_node);
-
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.bool_folds);
-    // Result should be a lit_bool with value false
-    try std.testing.expectEqual(NodeTag.lit_bool, store.getTag(result));
-    try std.testing.expectEqual(@as(u32, 0), store.getData(result).a);
+test "constant arithmetic follows VM division and remainder semantics" {
+    try std.testing.expectEqual(@as(f64, 3.5), binary(.div, .{ .int = 7 }, .{ .int = 2 }).?.float);
+    try std.testing.expectEqual(@as(i32, -2), binary(.mod, .{ .int = -5 }, .{ .int = 3 }).?.int);
+    try std.testing.expectEqual(@as(i32, 2), binary(.mod, .{ .int = 5 }, .{ .int = -3 }).?.int);
+    try std.testing.expectEqual(@as(i32, 0), binary(.mod, .{ .int = std.math.minInt(i32) }, .{ .int = -1 }).?.int);
+    try std.testing.expect(binary(.div, .{ .int = 1 }, .{ .int = 0 }) == null);
+    try std.testing.expect(binary(.mod, .{ .int = 1 }, .{ .int = 0 }) == null);
+    try std.testing.expect(binary(.add, .{ .int = std.math.maxInt(i32) }, .{ .int = 1 }) == null);
+    try std.testing.expect(unary(.neg, .{ .int = std.math.minInt(i32) }) == null);
+    try std.testing.expect(std.math.signbit(binary(.div, .{ .float = -0.0 }, .{ .int = 2 }).?.float));
 }
 
-test "IROptimizer: boolean NOT false -> true" {
+test "folding is bounded and leaves calls in short circuits" {
     const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
+    var store = ir.IRStore.init(allocator);
     defer store.deinit();
-    var constants = ConstantPool.init(allocator);
+    var constants = ir.ConstantPool.init(allocator);
     defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create !false -> should become true
-    const false_node = try store.addNode(.lit_bool, loc, .{ .a = 0, .b = 0 });
-    const not_node = try store.addUnary(loc, .not, false_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(not_node);
-
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.bool_folds);
-    try std.testing.expectEqual(NodeTag.lit_bool, store.getTag(result));
-    try std.testing.expectEqual(@as(u32, 1), store.getData(result).a);
-}
-
-test "IROptimizer: integer arithmetic folding" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create 10 + 32 -> should become 42
-    const left_node = try store.addLitInt(loc, 10);
-    const right_node = try store.addLitInt(loc, 32);
-    const add_node = try store.addBinary(loc, .add, left_node, right_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(add_node);
-
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.float_folds);
-    try std.testing.expectEqual(NodeTag.lit_int, store.getTag(result));
-    try std.testing.expectEqual(@as(i32, 42), store.getData(result).toInt());
-}
-
-test "IROptimizer: float arithmetic folding" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create 1.5 + 2.5 -> should become 4.0
-    const left_idx = try constants.addFloat(1.5);
-    const right_idx = try constants.addFloat(2.5);
-    const left_node = try store.addLitFloat(loc, left_idx);
-    const right_node = try store.addLitFloat(loc, right_idx);
-    const add_node = try store.addBinary(loc, .add, left_node, right_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(add_node);
-
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.float_folds);
-    try std.testing.expectEqual(NodeTag.lit_float, store.getTag(result));
-    // Result should be 4.0
-    const result_idx: u16 = @truncate(store.getData(result).a);
-    try std.testing.expectEqual(@as(f64, 4.0), constants.getFloat(result_idx).?);
-}
-
-test "IROptimizer: short-circuit && with true" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create true && 42 -> should become 42
-    const true_node = try store.addNode(.lit_bool, loc, .{ .a = 1, .b = 0 });
-    const int_node = try store.addLitInt(loc, 42);
-    const and_node = try store.addBinary(loc, .and_op, true_node, int_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(and_node);
-
-    // true && x should simplify to x
-    try std.testing.expectEqual(int_node, result);
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.short_circuit_simplifications);
-}
-
-test "IROptimizer: short-circuit && with false" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create false && 42 -> should become false
-    const false_node = try store.addNode(.lit_bool, loc, .{ .a = 0, .b = 0 });
-    const int_node = try store.addLitInt(loc, 42);
-    const and_node = try store.addBinary(loc, .and_op, false_node, int_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(and_node);
-
-    // false && x should simplify to false
-    try std.testing.expectEqual(false_node, result);
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.short_circuit_simplifications);
-}
-
-test "IROptimizer: short-circuit || with false" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create false || 42 -> should become 42
-    const false_node = try store.addNode(.lit_bool, loc, .{ .a = 0, .b = 0 });
-    const int_node = try store.addLitInt(loc, 42);
-    const or_node = try store.addBinary(loc, .or_op, false_node, int_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(or_node);
-
-    // false || x should simplify to x
-    try std.testing.expectEqual(int_node, result);
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.short_circuit_simplifications);
-}
-
-test "IROptimizer: comparison folding" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create 5 < 10 -> should become true
-    const left_node = try store.addLitInt(loc, 5);
-    const right_node = try store.addLitInt(loc, 10);
-    const lt_node = try store.addBinary(loc, .lt, left_node, right_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-    defer optimizer.deinit();
-
-    const result = try optimizer.visitNode(lt_node);
-
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.bool_folds);
-    try std.testing.expectEqual(NodeTag.lit_bool, store.getTag(result));
-    try std.testing.expectEqual(@as(u32, 1), store.getData(result).a); // true
-}
-
-test "IROptimizer: convenience function" {
-    const allocator = std.testing.allocator;
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create !false
-    const false_node = try store.addNode(.lit_bool, loc, .{ .a = 0, .b = 0 });
-    const not_node = try store.addUnary(loc, .not, false_node);
-
-    const stats = try optimizeIR(allocator, &store, &constants, not_node);
-
-    try std.testing.expectEqual(@as(u32, 1), stats.bool_folds);
-    try std.testing.expectEqual(@as(u32, 1), stats.totalOptimizations());
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const yes = try store.addNode(.lit_bool, loc, .{ .a = 1, .b = 0 });
+    const call = try store.addNode(.call, loc, .{ .a = 0, .b = 0 });
+    const expr = try store.addBinary(loc, .or_op, yes, call);
+    try std.testing.expect(fold(ir.IrView.fromIRStore(&store, &constants), expr) == null);
+    var nested = yes;
+    for (0..1000) |_| nested = try store.addUnary(loc, .not, nested);
+    const count = store.tags.items.len;
+    try std.testing.expect(fold(ir.IrView.fromIRStore(&store, &constants), nested) == null);
+    try std.testing.expectEqual(count, store.tags.items.len);
+    try std.testing.expectEqual(ir.NodeTag.unary_op, store.getTag(nested));
 }

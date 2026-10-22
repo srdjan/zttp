@@ -678,6 +678,10 @@ pub const ConstantPool = struct {
     string_index: std.StringHashMapUnmanaged(u16),
     float_index: std.AutoHashMapUnmanaged(u64, u16),
 
+    /// Only initBorrowingSource permits source-backed entries. That source must
+    /// remain immutable and alive until the pool is deinitialized.
+    borrowed_source: ?[]const u8 = null,
+
     pub fn init(allocator: std.mem.Allocator) ConstantPool {
         return .{
             .strings = .empty,
@@ -689,11 +693,40 @@ pub const ConstantPool = struct {
     }
 
     pub fn deinit(self: *ConstantPool) void {
-        for (self.strings.items) |str| self.allocator.free(str);
+        for (self.strings.items) |str| {
+            if (!self.isSourceSlice(str)) self.allocator.free(str);
+        }
         self.string_index.deinit(self.allocator);
         self.float_index.deinit(self.allocator);
         self.strings.deinit(self.allocator);
         self.floats.deinit(self.allocator);
+    }
+
+    /// The caller retains source ownership. addString and addOwnedString keep
+    /// their owning contracts; only addSourceString may borrow this source.
+    pub fn initBorrowingSource(allocator: std.mem.Allocator, source: []const u8) ConstantPool {
+        var pool = init(allocator);
+        pool.borrowed_source = source;
+        return pool;
+    }
+
+    fn isSourceSlice(self: *const ConstantPool, str: []const u8) bool {
+        const source = self.borrowed_source orelse return false;
+        const offset, const underflow = @subWithOverflow(@intFromPtr(str.ptr), @intFromPtr(source.ptr));
+        return underflow == 0 and offset <= source.len and str.len <= source.len - offset;
+    }
+
+    /// An owning pool copies. A borrowing pool accepts only slices within its
+    /// declared source, so unrelated temporary buffers cannot become borrowed.
+    pub fn addSourceString(self: *ConstantPool, str: []const u8) !u16 {
+        if (self.borrowed_source == null) return self.addString(str);
+        if (!self.isSourceSlice(str)) return error.InvalidSourceSlice;
+        if (self.string_index.get(str)) |idx| return idx;
+        const idx = std.math.cast(u16, self.strings.items.len) orelse return error.TooManyConstants;
+        try self.strings.append(self.allocator, str);
+        errdefer _ = self.strings.pop();
+        try self.string_index.put(self.allocator, str, idx);
+        return idx;
     }
 
     pub fn addString(self: *ConstantPool, str: []const u8) !u16 {
@@ -704,8 +737,8 @@ pub const ConstantPool = struct {
         // constant. The key goes into the map only after the string is stored,
         // so a failure leaves no entry without a value behind.
         const idx = std.math.cast(u16, self.strings.items.len) orelse return error.TooManyConstants;
-        // Deep-copy so ConstantPool owns the memory and deinit can free it
-        // unconditionally (callers may pass slices into source text or
+        // Deep-copy so ConstantPool owns this entry even in borrowing mode
+        // (callers may pass slices into source text or
         // freshly-allocated unescape buffers; ownership is not transferred).
         const owned = try self.allocator.dupe(u8, str);
         return self.insertOwnedString(owned, idx);
@@ -1462,6 +1495,34 @@ test "node list operations" {
 
     const node = list.get(idx1).?;
     try std.testing.expectEqual(@as(i32, 10), node.data.int_value);
+}
+
+test "source-backed strings keep borrowing explicit across failures and duplicates" {
+    const Probe = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            const source = "plain quoted text";
+            var pool = ConstantPool.initBorrowingSource(allocator, source);
+            defer pool.deinit();
+            const plain = try pool.addSourceString(source[0..5]);
+            try std.testing.expect(pool.getString(plain).?.ptr == source.ptr);
+            try std.testing.expectEqual(plain, try pool.addOwnedString(try allocator.dupe(u8, "plain")));
+            const escaped = try pool.addOwnedString(try allocator.dupe(u8, "decoded\nvalue"));
+            try std.testing.expectEqualStrings("decoded\nvalue", pool.getString(escaped).?);
+            const copied = try pool.addString("generated");
+            try std.testing.expect(!pool.isSourceSlice(pool.getString(copied).?));
+            try std.testing.expectError(error.InvalidSourceSlice, pool.addSourceString("unrelated"));
+            const empty = try pool.addSourceString(source[source.len..]);
+            try std.testing.expectEqualStrings("", pool.getString(empty).?);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Probe.run, .{});
+
+    var source = [_]u8{ 'c', 'o', 'p', 'y' };
+    var pool = ConstantPool.init(std.testing.allocator);
+    defer pool.deinit();
+    const copied = try pool.addSourceString(&source);
+    source[0] = 'X';
+    try std.testing.expectEqualStrings("copy", pool.getString(copied).?);
 }
 
 test "constant pool" {

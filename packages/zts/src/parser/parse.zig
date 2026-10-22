@@ -300,6 +300,13 @@ pub const Parser = struct {
         return initWithProfile(allocator, allocator, source, null, false, null, false);
     }
 
+    /// Opt in before parsing only when source outlives this parser and any
+    /// transferred constant pool. The default parser owns its string copies.
+    pub fn borrowSourceStrings(self: *Parser) void {
+        std.debug.assert(self.constants.strings.items.len == 0);
+        self.constants.borrowed_source = self.source;
+    }
+
     /// Private migration initializer. Production callers remain on `init`.
     pub fn initTyped(
         allocator: std.mem.Allocator,
@@ -6939,7 +6946,9 @@ pub const Parser = struct {
     }
 
     fn addUnescapedString(self: *Parser, content: []const u8, has_escape: bool) !u16 {
-        if (!has_escape) return self.addString(content);
+        // Recovery for a lone quote uses a synthetic empty slice. Normalize it
+        // to a source slice so borrowing preserves the existing diagnostic.
+        if (!has_escape) return self.constants.addSourceString(if (content.len == 0) self.source[0..0] else content);
         // addOwnedString consumes the decoded allocation on success, duplicate,
         // and error. It never makes a second copy of a newly decoded value.
         return self.constants.addOwnedString(try self.unescape(content));

@@ -1501,14 +1501,6 @@ fn runCheckOnParsedSource(
         return result;
     };
 
-    // Stage 4: IR optimization
-    _ = zts.parser.optimizeIR(
-        allocator,
-        &js_parser.nodes,
-        &js_parser.constants,
-        root,
-    ) catch {};
-
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     var parsed = if (source_kind.isTyped())
         zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.DirectTypeSyntaxUnavailable
@@ -2172,14 +2164,6 @@ pub fn compileHandler(
             manifest_registry,
         );
     }
-
-    // Optimize IR (cold-start-friendly single pass)
-    _ = zts.parser.optimizeIR(
-        allocator,
-        &js_parser.nodes,
-        &js_parser.constants,
-        root,
-    ) catch {};
 
     const ir_view_check = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     if (source_kind.isTyped()) try js_parser.type_store.validateRuntimeOwners(allocator, ir_view_check);

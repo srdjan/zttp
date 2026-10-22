@@ -3405,6 +3405,85 @@ test "handler loading refuses retired source extensions" {
     try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadHandler(source, "handler.tsx"));
 }
 
+test "constant folding matches runtime arithmetic and preserves short circuit effects" {
+    const cases = [_]struct { expression: []const u8, dynamic: []const u8, expected: f64 }{
+        .{ .expression = "7 / 2", .dynamic = "const a = 7; const b = 2; return a / b;", .expected = 3.5 },
+        .{ .expression = "-5 % 3", .dynamic = "const a = -5; const b = 3; return a % b;", .expected = -2 },
+        .{ .expression = "5 % -3", .dynamic = "const a = 5; const b = -3; return a % b;", .expected = 2 },
+        .{ .expression = "(-2147483647 - 1) % -1", .dynamic = "const a = -2147483647 - 1; const b = -1; return a % b;", .expected = 0 },
+        .{ .expression = "-(-2147483647 - 1)", .dynamic = "const a = -2147483647 - 1; return -a;", .expected = 2147483648 },
+        .{ .expression = "2147483647 + 1", .dynamic = "const a = 2147483647; return a + 1;", .expected = 2147483648 },
+        .{ .expression = "1.5 + 2.5", .dynamic = "const a = 1.5; const b = 2.5; return a + b;", .expected = 4 },
+        .{ .expression = "(1.5 + 2.5) * 2", .dynamic = "const a = 1.5; const b = 2.5; return (a + b) * 2;", .expected = 8 },
+        .{ .expression = "-0.0 / 2", .dynamic = "const a = -0.0; return a / 2;", .expected = -0.0 },
+        .{ .expression = "1 / 0", .dynamic = "const a = 1; const b = 0; return a / b;", .expected = std.math.inf(f64) },
+        .{ .expression = "1 % 0", .dynamic = "const a = 1; const b = 0; return a % b;", .expected = std.math.nan(f64) },
+        .{ .expression = "1 << 33", .dynamic = "const a = 1; const b = 33; return a << b;", .expected = 2 },
+        .{ .expression = "~5", .dynamic = "const a = 5; return ~a;", .expected = -6 },
+    };
+    for (cases) |case| {
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+        const source = try std.fmt.allocPrint(
+            allocator,
+            "function folded() {{ return {s}; }} function baseline() {{ {s} }}",
+            .{ case.expression, case.dynamic },
+        );
+        const rt = try HandlerInstance.init(allocator, .{});
+        defer rt.deinit();
+        try rt.loadCodeNoHandler(source, "<bench>");
+        const folded = try rt.callGlobalFunction("folded", &.{});
+        const baseline = try rt.callGlobalFunction("baseline", &.{});
+        const actual = folded.toNumber() orelse return error.TestUnexpectedResult;
+        const reference = baseline.toNumber() orelse return error.TestUnexpectedResult;
+        if (std.math.isNan(case.expected)) {
+            try std.testing.expect(std.math.isNan(actual));
+            try std.testing.expect(std.math.isNan(reference));
+        } else {
+            try std.testing.expectEqual(@as(u64, @bitCast(case.expected)), @as(u64, @bitCast(actual)));
+            try std.testing.expectEqual(@as(u64, @bitCast(reference)), @as(u64, @bitCast(actual)));
+        }
+        try std.testing.expectEqual(baseline.isInt(), folded.isInt());
+    }
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const rt = try HandlerInstance.init(arena.allocator(), .{});
+    defer rt.deinit();
+    try rt.loadCodeNoHandler(
+        \\function run() {
+        \\  let count = 0;
+        \\  function touch() { count = count + 1; return true; }
+        \\  const a = false && touch();
+        \\  const b = true || touch();
+        \\  const c = true && touch();
+        \\  const d = false || touch();
+        \\  const truth = !(5 < 2) && !!true;
+        \\  return truth ? count : -1;
+        \\}
+    , "<bench>");
+    const result = try rt.callGlobalFunction("run", &.{});
+    try std.testing.expect(result.isInt());
+    try std.testing.expectEqual(@as(i32, 2), result.getInt());
+}
+
+test "runtime strings survive the borrowed parser source" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const source = try allocator.dupe(u8,
+        \\function handler(req) { return Response.json(["plain", "escaped\nvalue", "plain"]); }
+    );
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadHandler(source, "strings.ts");
+    @memset(source, 'x');
+    var response = try rt.executeHandler(.{ .method = "GET", .url = "/", .headers = .empty, .body = null });
+    defer response.deinit();
+    try std.testing.expectEqualStrings("[\"plain\",\"escaped\\nvalue\",\"plain\"]", response.body);
+}
+
 test "loadCodeNoHandler supports benchmark-style scripts" {
     const allocator = std.heap.c_allocator;
 

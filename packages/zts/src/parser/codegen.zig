@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const ir = @import("ir.zig");
+const ir_opt = @import("ir_opt.zig");
 const scope_mod = @import("scope.zig");
 
 // Import real types from parent module for integration
@@ -414,6 +415,20 @@ pub const CodeGen = struct {
         const tag = self.ir.getTag(index) orelse return;
         try self.recordNodeLocation(index);
 
+        if (tag == .binary_op or tag == .unary_op) {
+            // A speculative fold must not require an unaddressable constant.
+            // The ordinary emitter may still express it without a pool slot.
+            if (ir_opt.fold(self.ir, index)) |constant| fold: {
+                if (self.constants.items.len > std.math.maxInt(u16)) break :fold;
+                switch (constant) {
+                    .int => |v| try self.emitInteger(v),
+                    .float => |v| try self.emitFloatValue(v),
+                    .boolean => |v| try self.emitBool(v),
+                }
+                return;
+            }
+        }
+
         switch (tag) {
             // Literals
             .lit_int => try self.emitInteger(self.ir.getIntValue(index).?),
@@ -507,6 +522,10 @@ pub const CodeGen = struct {
 
     fn emitFloat(self: *CodeGen, float_idx: u16) !void {
         const f = self.ir.getFloat(float_idx) orelse 0.0;
+        return self.emitFloatValue(f);
+    }
+
+    fn emitFloatValue(self: *CodeGen, f: f64) !void {
         // Float64 needs heap allocation via Float64Box
         const float_box = try self.allocator.create(JSValue.Float64Box);
         float_box.* = .{
@@ -647,37 +666,6 @@ pub const CodeGen = struct {
         };
     }
 
-    /// Try to fold a binary operation on two constant integers
-    fn tryFoldIntBinaryOp(op: BinaryOp, a: i32, b: i32) ?i32 {
-        return switch (op) {
-            .add => blk: {
-                const sum, const overflow = @addWithOverflow(a, b);
-                break :blk if (overflow == 0) sum else null;
-            },
-            .sub => blk: {
-                const diff, const overflow = @subWithOverflow(a, b);
-                break :blk if (overflow == 0) diff else null;
-            },
-            .mul => blk: {
-                const product, const overflow = @mulWithOverflow(a, b);
-                break :blk if (overflow == 0) product else null;
-            },
-            .mod => if (b != 0) @mod(a, b) else null,
-            .bit_and => a & b,
-            .bit_or => a | b,
-            .bit_xor => a ^ b,
-            .shl => blk: {
-                const shift: u5 = @intCast(@as(u32, @bitCast(b)) & 31);
-                break :blk a << shift;
-            },
-            .shr => blk: {
-                const shift: u5 = @intCast(@as(u32, @bitCast(b)) & 31);
-                break :blk a >> shift;
-            },
-            else => null, // Division, comparison, etc. not folded
-        };
-    }
-
     /// Try to emit a fused arithmetic-modulo opcode for pattern: (a op b) % divisor
     /// Returns error if pattern doesn't match
     fn tryEmitFusedArithMod(self: *CodeGen, left_expr: NodeIndex, divisor: i32) !void {
@@ -715,16 +703,6 @@ pub const CodeGen = struct {
             .nullish => return self.emitNullishCoalescing(binary),
             .loose_eq, .loose_neq => return error.UnsupportedOperator,
             else => {},
-        }
-
-        // Try constant folding for integer operands
-        if (self.tryGetConstantInt(binary.left)) |left_val| {
-            if (self.tryGetConstantInt(binary.right)) |right_val| {
-                if (tryFoldIntBinaryOp(binary.op, left_val, right_val)) |result| {
-                    try self.emitInteger(result);
-                    return;
-                }
-            }
         }
 
         // Pattern: (a op b) % constant - emit fused opcode
@@ -969,23 +947,6 @@ pub const CodeGen = struct {
     }
 
     fn emitUnaryOp(self: *CodeGen, unary: Node.UnaryExpr) !void {
-        // Try constant folding for unary operations
-        if (self.tryGetConstantInt(unary.operand)) |val| {
-            const folded: ?i32 = switch (unary.op) {
-                .neg => blk: {
-                    // Negation can overflow for MIN_INT
-                    if (val == std.math.minInt(i32)) break :blk null;
-                    break :blk -val;
-                },
-                .bit_not => ~val,
-                else => null,
-            };
-            if (folded) |result| {
-                try self.emitInteger(result);
-                return;
-            }
-        }
-
         try self.emitNode(unary.operand);
 
         const opcode: Opcode = switch (unary.op) {
@@ -2541,7 +2502,7 @@ pub const CodeGen = struct {
     // ============ Constant Pool ============
 
     fn addConstant(self: *CodeGen, val: JSValue) !u16 {
-        const idx = @as(u16, @intCast(self.constants.items.len));
+        const idx = std.math.cast(u16, self.constants.items.len) orelse return error.TooManyConstants;
         try self.constants.append(self.allocator, val);
         return idx;
     }
@@ -2707,4 +2668,63 @@ test "binary op codegen" {
     // With constant folding, we should NOT have add opcode, but SHOULD have push_3
     try std.testing.expect(!found_add);
     try std.testing.expect(found_push_3);
+}
+
+test "bytecode constants refuse an unrepresentable index" {
+    const allocator = std.testing.allocator;
+    var nodes = NodeList.init(allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    var scopes = try ScopeAnalyzer.init(allocator);
+    defer scopes.deinit();
+    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    defer gen.deinit();
+    try gen.constants.resize(allocator, std.math.maxInt(u16));
+    @memset(gen.constants.items, JSValue.undefined_val);
+    try std.testing.expectEqual(std.math.maxInt(u16), try gen.addConstant(JSValue.fromInt(42)));
+    try std.testing.expectError(error.TooManyConstants, gen.addConstant(JSValue.fromInt(43)));
+    try std.testing.expectEqual(@as(usize, 65536), gen.constants.items.len);
+    try std.testing.expectEqual(@as(i32, 42), gen.constants.items[65535].getInt());
+
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const left = try nodes.add(Node.litInt(loc, 7));
+    const right = try nodes.add(Node.litInt(loc, 2));
+    const division = try nodes.add(Node.binaryOp(loc, .div, left, right));
+    const result = try gen.generate(division);
+    // At capacity, emit 7 / 2 normally rather than allocate a folded float.
+    try std.testing.expectEqualSlices(u8, &.{ @intFromEnum(Opcode.push_i8), 7, @intFromEnum(Opcode.push_2), @intFromEnum(Opcode.div), @intFromEnum(Opcode.ret_undefined) }, result.code);
+}
+
+test "constant expressions fold inside a handler without changing source IR" {
+    const allocator = std.testing.allocator;
+    const Parser = @import("parse.zig").Parser;
+    var parser = try Parser.init(allocator,
+        \\function handler(req) { return 1.5 + 2.5; }
+    );
+    defer parser.deinit();
+    const root = try parser.parse();
+    const node_count = parser.nodes.tags.items.len;
+    var gen = CodeGen.initWithIRStore(allocator, &parser.nodes, &parser.constants, &parser.scopes, null, null);
+    defer gen.deinit();
+    defer gen.freeOwnedConstantPayloads();
+    const result = try gen.generate(root);
+    var found_handler = false;
+    for (result.constants) |constant| {
+        if (!constant.isExternPtr()) continue;
+        const function = constant.toExternPtr(FunctionBytecode);
+        // One float push and return; there is no add instruction to execute.
+        try std.testing.expectEqual(@as(usize, 5), function.code.len);
+        try std.testing.expectEqual(@intFromEnum(Opcode.push_const), function.code[0]);
+        try std.testing.expectEqual(@intFromEnum(Opcode.ret), function.code[3]);
+        try std.testing.expectEqual(@as(f64, 4.0), function.constants[0].getFloat64());
+        found_handler = true;
+    }
+    try std.testing.expect(found_handler);
+    try std.testing.expectEqual(node_count, parser.nodes.tags.items.len);
+    var binary_count: usize = 0;
+    for (parser.nodes.tags.items) |tag| {
+        if (tag == .binary_op) binary_count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), binary_count);
 }

@@ -2253,6 +2253,22 @@ fn expectRefusedAt(assessment: pcc.Assessment, stage: pcc.verdict.Stage, code: p
     try std.testing.expectEqual(stage, rejection.stage);
 }
 
+test "folded handler expressions retain production proof acceptance" {
+    const allocator = std.testing.allocator;
+    var artifact = try loadArtifactForSource(allocator,
+        \\function isGet(req: Request): boolean { return req.method === "GET"; }
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  const folded = (1.5 + 2.5) / 2;
+        \\  const truth = !(5 < 2);
+        \\  const side = true || isGet(req);
+        \\  return Response.json({ value: folded, truth: truth, side: side });
+        \\}
+    );
+    defer artifact.deinit();
+    const assessment = try proof_activation.accept(allocator, artifact.activationInputs(), pcc.policy.production);
+    try std.testing.expect(assessment.accepted());
+}
+
 test "a changed runtime policy member is refused at artifact binding (B8.8)" {
     const allocator = std.testing.allocator;
     var artifact = try loadArtifactForSource(allocator,

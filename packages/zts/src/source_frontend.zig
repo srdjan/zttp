@@ -199,6 +199,9 @@ pub const DirectCheckSource = struct {
             mode,
         );
         errdefer self.parser.deinit();
+        // DirectCheckSource already retains this immutable source until its
+        // parser is destroyed; no parsed storage escapes this owner's lifetime.
+        self.parser.borrowSourceStrings();
         self.parser.setAtomTable(&self.atoms);
 
         const parse_outcome = try self.parser.parseAdmission();

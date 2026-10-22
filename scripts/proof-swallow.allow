@@ -253,14 +253,6 @@ packages/zts/src/path_generator.zig trailingLimitValue catch-value
 
 # --- Pipeline ---
 #
-# The three optimizeIR calls ignore a failure of the constant-folding pass. The
-# pass is append-only: it adds folded nodes and records replacements in its own
-# map, and it never edits an existing node. A failure leaves the parsed IR as
-# it was before the pass, so the analysis runs on the same program meaning.
-packages/zts/src/pipeline.zig extractContract catch-block
-packages/zts/src/pipeline.zig extractPreparedEvalContract catch-block
-packages/zts/src/pipeline.zig extractVirtualContract catch-block
-
 # The cleanup block frees the export effects that the failed list append did
 # not take, and then returns the error. The multi-module extraction fails.
 packages/zts/src/pipeline.zig extractMultiModuleContractWithEntry catch-block

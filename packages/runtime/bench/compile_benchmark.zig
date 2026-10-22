@@ -220,6 +220,7 @@ const GeneratedFixture = enum {
     typed_declarations,
     blob_4mb,
     escaped_strings,
+    constant_expressions,
 
     fn source(self: GeneratedFixture, allocator: std.mem.Allocator) ![]u8 {
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -233,6 +234,11 @@ const GeneratedFixture = enum {
                     try w.writeAll("return x;\n}\n");
                 }
                 try w.writeAll("function handler(req: Request): Response { return Response.text(String(dense0(1))); }\n");
+            },
+            .constant_expressions => {
+                try w.writeAll("function handler(req: Request): Response { return Response.json([\n");
+                for (0..512) |i| try w.print("(({d} + 1) * 3 - 2) / 2.0,\n", .{i});
+                try w.writeAll("]); }\n");
             },
             .wide_lists => {
                 try w.writeAll("function handler(req: Request): Response { const values = [\n");
@@ -666,7 +672,7 @@ test "benchmark memory accounting includes shrink remap and overlapping owners" 
 
 test "generated benchmark census compiles and completes all semantic passes" {
     const allocator = std.testing.allocator;
-    try std.testing.expectEqual(@as(usize, 6), generated_fixtures.len);
+    try std.testing.expectEqual(@as(usize, 7), generated_fixtures.len);
     for (generated_fixtures) |kind| {
         const source = try kind.source(allocator);
         defer allocator.free(source);
@@ -674,7 +680,7 @@ test "generated benchmark census compiles and completes all semantic passes" {
         const compiled = try compileOnce(allocator, source, .compile);
         try std.testing.expect(compiled.ir_nodes > 0);
         try std.testing.expect(compiled.bytecode_len > 0);
-        if (kind == .dense_expressions or kind == .wide_lists) try std.testing.expect(compiled.ir_nodes > 1024);
+        if (kind == .dense_expressions or kind == .wide_lists or kind == .constant_expressions) try std.testing.expect(compiled.ir_nodes > 1024);
         const checked = try compileOnce(allocator, source, .check);
         try std.testing.expectEqual(compiled.ir_nodes, checked.ir_nodes);
         try std.testing.expectEqual(@as(u64, 0), checked.diagnostics);

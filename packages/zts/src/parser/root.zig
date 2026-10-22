@@ -78,9 +78,6 @@ pub const AdmissionFailure = @import("parse.zig").AdmissionFailure;
 pub const AdmissionParseOutcome = @import("parse.zig").AdmissionParseOutcome;
 pub const CodeGen = @import("codegen.zig").CodeGen;
 pub const ir_opt = @import("ir_opt.zig");
-pub const IROptimizer = ir_opt.IROptimizer;
-pub const IROptStats = ir_opt.IROptStats;
-pub const optimizeIR = ir_opt.optimizeIR;
 
 /// Parse options
 pub const ParseOptions = struct {
@@ -196,6 +193,9 @@ pub const Parser = struct {
             .strings = strings,
             .atoms = atoms,
         };
+        // This wrapper already borrows source for its complete lifetime, and
+        // codegen copies strings into the runtime StringTable before teardown.
+        p.js_parser.borrowSourceStrings();
         if (atoms) |atom_table| {
             p.js_parser.setAtomTable(atom_table);
         }
@@ -220,6 +220,7 @@ pub const Parser = struct {
             .atoms = atoms,
             .typed_phase = .ready,
         };
+        result.js_parser.borrowSourceStrings();
         if (atoms) |table| result.js_parser.setAtomTable(table);
         return result;
     }
@@ -230,7 +231,6 @@ pub const Parser = struct {
         const outcome = try self.js_parser.parseAdmission();
         switch (outcome) {
             .accepted => |root| {
-                _ = ir_opt.optimizeIR(self.allocator, &self.js_parser.nodes, &self.js_parser.constants, root) catch {};
                 try self.js_parser.type_store.validateRuntimeOwners(
                     self.js_parser.type_store.allocator,
                     IrView.fromIRStore(&self.js_parser.nodes, &self.js_parser.constants),
@@ -286,14 +286,6 @@ pub const Parser = struct {
         if (self.typed_phase != null) return error.InvalidParserPhase;
         const root = try self.js_parser.parse();
         self.root_node = root;
-
-        // Non-fatal: optimization failures are silently ignored.
-        _ = ir_opt.optimizeIR(
-            self.allocator,
-            &self.js_parser.nodes,
-            &self.js_parser.constants,
-            root,
-        ) catch {};
 
         self.code_gen = CodeGen.initWithIRStore(
             codegen_alloc,
