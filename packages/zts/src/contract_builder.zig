@@ -3173,6 +3173,79 @@ test "a write reached as a function value fails the handler properties closed" {
     }
 }
 
+const save_helper =
+    \\import { cacheSet } from "zttp:cache";
+    \\function save() {
+    \\  cacheSet("items", "key", "value", 60);
+    \\  return true;
+    \\}
+    \\
+;
+
+fn expectWriteHandlerProperties(handler_source: []const u8) !void {
+    const source = try std.mem.concat(std.testing.allocator, u8, &.{ save_helper, handler_source });
+    defer std.testing.allocator.free(source);
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expectEqual(false, props.read_only);
+    try std.testing.expectEqual(false, props.retry_safe);
+    try std.testing.expectEqual(false, props.idempotent);
+}
+
+test "a write inside an assert condition fails the handler properties closed" {
+    try expectWriteHandlerProperties(
+        \\function handler(req) {
+        \\  assert save(), Response.text("no");
+        \\  return Response.text("ok");
+        \\}
+    );
+}
+
+test "a write inside an assert error expression fails the handler properties closed" {
+    try expectWriteHandlerProperties(
+        \\function handler(req) {
+        \\  assert req.method === "GET", Response.text(String(save()));
+        \\  return Response.text("ok");
+        \\}
+    );
+}
+
+test "a write inside an array spread operand fails the handler properties closed" {
+    try expectWriteHandlerProperties(
+        \\function handler(req) {
+        \\  const parts = [...[String(save())], "x"];
+        \\  return Response.text(parts.join(""));
+        \\}
+    );
+}
+
+test "a write inside an object spread operand fails the handler properties closed" {
+    try expectWriteHandlerProperties(
+        \\function handler(req) {
+        \\  const o = { ...{ a: save() }, b: 1 };
+        \\  return Response.json(o);
+        \\}
+    );
+}
+
+test "a write bound before an assert still fails the handler properties closed" {
+    // Controls: these two shapes were already refused before the descent fix.
+    try expectWriteHandlerProperties(
+        \\function handler(req) {
+        \\  const ok = save();
+        \\  assert ok, Response.text("no");
+        \\  return Response.text("ok");
+        \\}
+    );
+    try expectWriteHandlerProperties(
+        \\function handler(req) {
+        \\  const parts = [String(save()), "x"];
+        \\  return Response.text(parts.join(""));
+        \\}
+    );
+}
+
 test "clean routed handler keeps effect-derived properties" {
     const source =
         \\import { routerMatch } from "zttp:router";

@@ -930,8 +930,8 @@ pub const Analyzer = struct {
                     self.isSafeDataShape(ternary.else_branch);
             },
             .spread => blk: {
-                const spread = self.ir_view.getUnary(node) orelse break :blk false;
-                break :blk self.isSafeDataShape(spread.operand);
+                const operand = self.ir_view.getOptValue(node) orelse break :blk false;
+                break :blk self.isSafeDataShape(operand);
             },
             .array_literal => blk: {
                 const array = self.ir_view.getArray(node) orelse break :blk false;
@@ -1130,9 +1130,22 @@ pub const Analyzer = struct {
                 try self.walkBaseExpr(bin.left, owner, row, seen_users);
                 try self.walkBaseExpr(bin.right, owner, row, seen_users);
             },
-            .unary_op, .spread => {
+            .unary_op => {
                 const un = self.ir_view.getUnary(node) orelse return;
                 try self.walkBaseExpr(un.operand, owner, row, seen_users);
+            },
+            // The parser stores a spread operand in word `a`, read by
+            // `getOptValue`. `getUnary` reads word `b` and found nothing.
+            .spread => {
+                const operand = self.ir_view.getOptValue(node) orelse return;
+                try self.walkBaseExpr(operand, owner, row, seen_users);
+            },
+            // A failed `assert` returns its error expression, so both the
+            // condition and the error expression run.
+            .assert_stmt => {
+                const assertion = self.ir_view.getAssertStmt(node) orelse return;
+                try self.walkBaseExpr(assertion.condition, owner, row, seen_users);
+                try self.walkBaseExpr(assertion.error_expr, owner, row, seen_users);
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node) orelse return;
@@ -1185,6 +1198,14 @@ pub const Analyzer = struct {
                 const obj = self.ir_view.getObject(node) orelse return;
                 for (0..obj.properties_count) |i| {
                     const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    // An `object_spread` member keeps its operand in word `a`,
+                    // not in a property value slot.
+                    if (self.ir_view.getTag(prop_idx) == .object_spread) {
+                        if (self.ir_view.getOptValue(prop_idx)) |operand| {
+                            try self.walkBaseExpr(operand, owner, row, seen_users);
+                        }
+                        continue;
+                    }
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
                     try self.walkBaseExpr(prop.value, owner, row, seen_users);
                 }
@@ -1212,9 +1233,15 @@ pub const Analyzer = struct {
             // other route (`const f = cacheSet; items.forEach(f)`,
             // `{ f: w }.f()`) proving `read_only` for a write.
             .identifier => try self.chargeValueReference(node, owner, row, seen_users),
-            // exhaustive: the remaining tags are literals and other leaves
-            // with no sub-expression that could reach a capability.
-            else => {},
+            // exhaustive: a tag without an arm above descends into every
+            // expression child from the shared map. A leaf has no child and
+            // yields nothing.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| {
+                    try self.walkBaseExpr(child, owner, row, seen_users);
+                }
+            },
         }
     }
 
@@ -2524,9 +2551,20 @@ const ContractProjectionBuilder = struct {
                 try self.includeReachableNodeEffects(binary.left, summary, seen_functions);
                 try self.includeReachableNodeEffects(binary.right, summary, seen_functions);
             },
-            .unary_op, .spread => {
+            .unary_op => {
                 const unary = self.ir_view.getUnary(node) orelse return;
                 try self.includeReachableNodeEffects(unary.operand, summary, seen_functions);
+            },
+            // The parser stores a spread operand in word `a`, read by
+            // `getOptValue`. `getUnary` reads word `b` and found nothing.
+            .spread => {
+                const operand = self.ir_view.getOptValue(node) orelse return;
+                try self.includeReachableNodeEffects(operand, summary, seen_functions);
+            },
+            .assert_stmt => {
+                const assertion = self.ir_view.getAssertStmt(node) orelse return;
+                try self.includeReachableNodeEffects(assertion.condition, summary, seen_functions);
+                try self.includeReachableNodeEffects(assertion.error_expr, summary, seen_functions);
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node) orelse return;
@@ -2573,6 +2611,14 @@ const ContractProjectionBuilder = struct {
                         object_literal.properties_start,
                         @intCast(index),
                     );
+                    // An `object_spread` member keeps its operand in word `a`,
+                    // not in a property value slot.
+                    if (self.ir_view.getTag(property_node) == .object_spread) {
+                        if (self.ir_view.getOptValue(property_node)) |operand| {
+                            try self.includeReachableNodeEffects(operand, summary, seen_functions);
+                        }
+                        continue;
+                    }
                     const property = self.ir_view.getProperty(property_node) orelse continue;
                     try self.includeReachableNodeEffects(property.value, summary, seen_functions);
                 }
@@ -2590,10 +2636,16 @@ const ContractProjectionBuilder = struct {
                 const function = self.ir_view.getFunction(node) orelse return;
                 try self.includeReachableNodeEffects(function.body, summary, seen_functions);
             },
-            // exhaustive: this legacy projection visits the container tags above.
-            // Other tags add no summary fact under its frozen policy.
-            // The independent composed rows still constrain contract properties.
-            else => {},
+            // exhaustive: a tag without an arm above descends into every
+            // expression child from the shared map. A leaf has no child and
+            // yields nothing. Only a call adds a summary fact, in
+            // `includeReachableCallEffects`.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| {
+                    try self.includeReachableNodeEffects(child, summary, seen_functions);
+                }
+            },
         }
     }
 

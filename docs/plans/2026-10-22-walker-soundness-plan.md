@@ -197,7 +197,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | Unit | State |
 |---|---|
 | W1 | done: `IrView.expressionChildren` and the `subtreeContains` fix; `zig build test` 200/200 steps, 9250/9256 tests |
-| W2 | not started |
+| W2 | done: effect walks reach `assert` and spread operands; `cap_in_assert.ts` now exits 1; `zig build test` 200/200 steps, 9255/9261 tests |
 | W3a | not started |
 | W3b | not started |
 | W4 | not started |
