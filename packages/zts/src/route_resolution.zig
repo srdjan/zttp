@@ -245,8 +245,7 @@ pub const Resolver = struct {
                 result.unresolved = true;
                 continue;
             };
-            const target = self.assignmentRootBinding(assignment.target) orelse continue;
-            if (packBindingKey(target.scope_id, target.slot) != key) continue;
+            if (self.assignmentRootMatch(assignment.target, key, 0) != .match) continue;
             matched = try self.appendRouteSourceTargets(
                 allocator,
                 result,
@@ -348,8 +347,7 @@ pub const Resolver = struct {
                 result.unresolved = true;
                 continue;
             };
-            const target = self.assignmentRootBinding(assignment.target) orelse continue;
-            if (packBindingKey(target.scope_id, target.slot) != key) continue;
+            if (self.assignmentRootMatch(assignment.target, key, 0) != .match) continue;
             const function = self.resolveInitialFunctionNode(assignment.value) orelse {
                 result.unresolved = true;
                 continue;
@@ -374,8 +372,7 @@ pub const Resolver = struct {
                 result.unresolved = true;
                 continue;
             };
-            const target = self.assignmentRootBinding(assignment.target) orelse continue;
-            if (packBindingKey(target.scope_id, target.slot) != key) continue;
+            if (self.assignmentRootMatch(assignment.target, key, 0) != .match) continue;
             const function = self.resolveInitialFunctionNode(assignment.value) orelse continue;
             try result.appendUnique(allocator, function);
         }
@@ -438,14 +435,23 @@ pub const Resolver = struct {
         return null;
     }
 
+    /// True when a mutation of `binding` may occur anywhere in the program. An
+    /// assignment whose target roots at the binding counts. An assignment whose
+    /// target has an untracked root (a call result, a literal, a conditional)
+    /// also counts, because that root may alias the table: a missed mutation
+    /// is the unsound direction. The cost is that one untracked root anywhere
+    /// in the file makes every table, and every callee parameter read through
+    /// this function, look mutated.
     fn bindingIsMutated(self: *const Resolver, binding: ir.BindingRef) bool {
         const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             if (self.ir_view.getTag(idx) != .assignment) continue;
             const assignment = self.ir_view.getAssignment(idx) orelse return true;
-            const root = self.assignmentRootBinding(assignment.target) orelse continue;
-            if (packBindingKey(root.scope_id, root.slot) == key) return true;
+            switch (self.assignmentRootMatch(assignment.target, key, 0)) {
+                .match, .untracked => return true,
+                .other => {},
+            }
         }
         return false;
     }
@@ -478,6 +484,33 @@ pub const Resolver = struct {
         return self.bindingEscapesStableResolutionDepth(binding, allow_router_match, 0);
     }
 
+    /// True when `binding` occurs in a value position that is not an
+    /// explicitly stable use. The walk visits every node as a parent and reads
+    /// its children through `IrView.expressionChildren`, so it reaches a
+    /// `for...of` iterable, a `match` discriminant, an `expr_stmt` value, an
+    /// array or object element, a nested function body, and every other code
+    /// position without a fixed list of node kinds. A parent kind that the walk
+    /// does not name is an escape, so a new node kind is unsafe by default.
+    ///
+    /// A child is checked when its value may be the table itself:
+    /// `valueMayBeBinding` is true for the identifier, and for a logical
+    /// operator, a conditional, or a sequence that can yield it. These
+    /// value-transparent nodes pass the question to their own parent, which
+    /// decides. The stable parent positions are:
+    /// - the object of a member read, `table["GET /"]`;
+    /// - the target of an assignment, because `bindingIsMutated` already
+    ///   decides every assignment whose target roots at the binding;
+    /// - an operand of a comparison, arithmetic, or unary operator, and the
+    ///   test of a conditional, `if`, loop, or `assert`, because the result is
+    ///   a primitive that cannot alias the table;
+    /// - an expression statement, because the value is dropped;
+    /// - call argument 0 of `routerMatch`, when `allow_router_match` is set;
+    /// - a call argument that `callKeepsArgumentLocal` proves stays local.
+    ///
+    /// Every other position is an escape: the value of an assignment, a
+    /// variable initializer, a return, an array or object element, a spread,
+    /// a loop iterable, a `match` discriminant, a callee, a computed index,
+    /// and any call argument that is not proven local.
     fn bindingEscapesStableResolutionDepth(
         self: *const Resolver,
         binding: ir.BindingRef,
@@ -487,43 +520,119 @@ pub const Resolver = struct {
         if (depth >= max_resolution_depth) return true;
         const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
-            switch (tag) {
-                .var_decl => {
-                    const declaration = self.ir_view.getVarDecl(idx) orelse return true;
-                    if (declaration.init == null_node) continue;
-                    if (packBindingKey(declaration.binding.scope_id, declaration.binding.slot) == key) continue;
-                    if (self.nodeContainsBinding(declaration.init, key, 0)) return true;
-                },
-                .assignment => {
-                    const assignment = self.ir_view.getAssignment(idx) orelse return true;
-                    if (self.nodeContainsBinding(assignment.value, key, 0)) return true;
-                },
-                .call, .method_call => {
-                    const call = self.ir_view.getCall(idx) orelse return true;
-                    for (0..call.args_count) |argument_index| {
-                        const argument = self.ir_view.getListIndex(call.args_start, @intCast(argument_index));
-                        if (!self.nodeContainsBinding(argument, key, 0)) continue;
-                        if (allow_router_match and argument_index == 0 and
-                            self.isRouterMatchCallee(call.callee) and
-                            self.nodeIsBinding(argument, key)) continue;
-                        if (self.nodeIsBinding(argument, key) and
-                            self.callKeepsArgumentLocal(call, argument_index, depth + 1)) continue;
+            const parent: NodeIndex = @intCast(idx_usize);
+            const parent_tag = self.ir_view.getTag(parent) orelse continue;
+            var children = self.ir_view.expressionChildren(parent);
+            while (children.next()) |child| {
+                if (!self.valueMayBeBinding(child, key, 0)) continue;
+                switch (parent_tag) {
+                    .member_access, .optional_chain, .computed_access => {
+                        const member = self.ir_view.getMember(parent) orelse return true;
+                        // Reading a member does not store or pass the table.
+                        // The index of a computed access is a value position.
+                        if (member.object == child and member.computed != child) continue;
                         return true;
-                    }
-                },
-                .return_stmt => {
-                    const value = self.ir_view.getOptValue(idx) orelse continue;
-                    if (self.nodeContainsBinding(value, key, 0)) return true;
-                },
-                // exhaustive: all other nodes cannot themselves store, pass,
-                // or return the binding. Their enclosing expression is read
-                // by one of the cases above.
-                else => {},
+                    },
+                    .assignment => {
+                        const assignment = self.ir_view.getAssignment(parent) orelse return true;
+                        // The target is a mutation, counted by `bindingIsMutated`.
+                        if (assignment.target == child and assignment.value != child) continue;
+                        return true;
+                    },
+                    .call, .method_call => {
+                        const call = self.ir_view.getCall(parent) orelse return true;
+                        if (call.callee == child) return true;
+                        if (!self.nodeIsBinding(child, key)) return true;
+                        var argument_position: ?usize = null;
+                        for (0..call.args_count) |argument_index| {
+                            const argument = self.ir_view.getListIndex(call.args_start, @intCast(argument_index));
+                            if (argument == child) {
+                                argument_position = argument_index;
+                                break;
+                            }
+                        }
+                        const argument_index = argument_position orelse return true;
+                        if (allow_router_match and argument_index == 0 and
+                            self.isRouterMatchCallee(call.callee)) continue;
+                        if (self.callKeepsArgumentLocal(call, argument_index, depth + 1)) continue;
+                        return true;
+                    },
+                    // The result of a comparison, arithmetic, or unary
+                    // operator is a primitive. A logical operator, a
+                    // conditional, and a sequence yield an operand, so the
+                    // question moves to their own parent, which is visited as
+                    // a parent of this node.
+                    .binary_op, .unary_op, .ternary, .sequence_expr, .comma_expr => continue,
+                    // The value is dropped.
+                    .expr_stmt => continue,
+                    .if_stmt => {
+                        const stmt = self.ir_view.getIfStmt(parent) orelse return true;
+                        if (stmt.condition == child) continue;
+                        return true;
+                    },
+                    .while_stmt, .for_stmt, .do_while_stmt => {
+                        const loop = self.ir_view.getLoop(parent) orelse return true;
+                        if (loop.condition == child) continue;
+                        return true;
+                    },
+                    .assert_stmt => {
+                        const stmt = self.ir_view.getAssertStmt(parent) orelse return true;
+                        if (stmt.condition == child) continue;
+                        return true;
+                    },
+                    // exhaustive: a parent kind that this walk does not name is an
+                    // escape, because a missed escape is the unsound direction. Every
+                    // other parent position stores, passes, iterates, or returns the
+                    // table, so the binding is not stable.
+                    else => return true,
+                }
             }
         }
         return false;
+    }
+
+    /// True when the value of `node` may be the table bound to `key` itself:
+    /// the identifier, or a node that yields one of its operands (a logical
+    /// operator, a conditional branch, a sequence). A node that builds a new
+    /// value from the table, such as an array literal, is not included: its
+    /// elements are children and are checked as such.
+    fn valueMayBeBinding(self: *const Resolver, node: NodeIndex, key: u32, depth: usize) bool {
+        if (node == null_node) return false;
+        // Expression edges point to nodes that already exist, so this walk is
+        // acyclic. The node count is the structural bound. Past it, answer yes.
+        if (depth >= self.ir_view.nodeCount()) return true;
+        const tag = self.ir_view.getTag(node) orelse return true;
+        switch (tag) {
+            .identifier => return self.nodeIsBinding(node, key),
+            .binary_op => {
+                const binary = self.ir_view.getBinary(node) orelse return true;
+                switch (binary.op) {
+                    .and_op, .or_op, .nullish => {},
+                    // exhaustive: comparison, arithmetic, and bitwise operators yield a
+                    // primitive and never the table itself.
+                    else => return false,
+                }
+                return self.valueMayBeBinding(binary.left, key, depth + 1) or
+                    self.valueMayBeBinding(binary.right, key, depth + 1);
+            },
+            .ternary => {
+                const ternary = self.ir_view.getTernary(node) orelse return true;
+                return self.valueMayBeBinding(ternary.then_branch, key, depth + 1) or
+                    self.valueMayBeBinding(ternary.else_branch, key, depth + 1);
+            },
+            .sequence_expr, .comma_expr => {
+                const array = self.ir_view.getArray(node) orelse return true;
+                for (0..array.elements_count) |index| {
+                    const element = self.ir_view.getListIndex(array.elements_start, @intCast(index));
+                    if (self.valueMayBeBinding(element, key, depth + 1)) return true;
+                }
+                return false;
+            },
+            // exhaustive: a call result, a member read, and the other shapes
+            // build or fetch a different value, never the table itself. A call
+            // argument that is the table is checked at the call.
+            else => return false,
+        }
     }
 
     fn callKeepsArgumentLocal(
@@ -550,8 +659,9 @@ pub const Resolver = struct {
             const tag = self.ir_view.getTag(idx) orelse continue;
             if (tag != .call and tag != .method_call) continue;
             const nested_call = self.ir_view.getCall(idx) orelse return false;
-            const receiver = self.assignmentRootBinding(nested_call.callee) orelse continue;
-            if (packBindingKey(receiver.scope_id, receiver.slot) == key) return false;
+            // A method call on the parameter may mutate it. An untracked
+            // receiver root cannot be this parameter, so it does not count here.
+            if (self.assignmentRootMatch(nested_call.callee, key, 0) == .match) return false;
         }
         return !self.bindingIsMutated(binding) and
             !self.bindingHasAlias(binding) and
@@ -562,134 +672,6 @@ pub const Resolver = struct {
         if (self.ir_view.getTag(node) != .identifier) return false;
         const binding = self.ir_view.getBinding(node) orelse return false;
         return packBindingKey(binding.scope_id, binding.slot) == key;
-    }
-
-    fn nodeContainsBinding(self: *const Resolver, node: NodeIndex, key: u32, depth: usize) bool {
-        if (node == null_node) return false;
-        // Expression edges point to nodes that already exist, so this walk is
-        // acyclic. Use the parsed node count as the structural bound. The
-        // route-resolution depth bounds alias chains and must not make a deep
-        // object literal look as if it contains every binding.
-        if (depth >= self.ir_view.nodeCount()) return true;
-        const tag = self.ir_view.getTag(node) orelse return true;
-        if (tag == .identifier) return self.nodeIsBinding(node, key);
-        return switch (tag) {
-            .member_access, .optional_chain, .computed_access => blk: {
-                const member = self.ir_view.getMember(node) orelse break :blk true;
-                if (self.nodeIsBinding(member.object, key)) break :blk false;
-                break :blk self.nodeContainsBinding(member.object, key, depth + 1);
-            },
-            .array_literal => blk: {
-                const array = self.ir_view.getArray(node) orelse break :blk true;
-                for (0..array.elements_count) |index| {
-                    const element = self.ir_view.getListIndex(array.elements_start, @intCast(index));
-                    if (self.nodeContainsBinding(element, key, depth + 1)) break :blk true;
-                }
-                break :blk false;
-            },
-            .object_literal => blk: {
-                const literal = self.ir_view.getObject(node) orelse break :blk true;
-                for (0..literal.properties_count) |index| {
-                    const property = self.ir_view.getListIndex(literal.properties_start, @intCast(index));
-                    if (self.nodeContainsBinding(property, key, depth + 1)) break :blk true;
-                }
-                break :blk false;
-            },
-            .object_property => blk: {
-                const property = self.ir_view.getProperty(node) orelse break :blk true;
-                break :blk self.nodeContainsBinding(property.value, key, depth + 1);
-            },
-            .spread, .object_spread => blk: {
-                const value = self.ir_view.getOptValue(node) orelse break :blk true;
-                break :blk self.nodeContainsBinding(value, key, depth + 1);
-            },
-            .ternary => blk: {
-                const ternary = self.ir_view.getTernary(node) orelse break :blk true;
-                break :blk self.nodeContainsBinding(ternary.condition, key, depth + 1) or
-                    self.nodeContainsBinding(ternary.then_branch, key, depth + 1) or
-                    self.nodeContainsBinding(ternary.else_branch, key, depth + 1);
-            },
-            .binary_op => blk: {
-                const binary = self.ir_view.getBinary(node) orelse break :blk true;
-                break :blk self.nodeContainsBinding(binary.left, key, depth + 1) or
-                    self.nodeContainsBinding(binary.right, key, depth + 1);
-            },
-            .unary_op => blk: {
-                const unary = self.ir_view.getUnary(node) orelse break :blk true;
-                break :blk self.nodeContainsBinding(unary.operand, key, depth + 1);
-            },
-            .match_expr => blk: {
-                const match_expr = self.ir_view.getMatchExpr(node) orelse break :blk true;
-                for (0..match_expr.arms_count) |index| {
-                    const arm_node = self.ir_view.getListIndex(match_expr.arms_start, @intCast(index));
-                    const arm = self.ir_view.getMatchArm(arm_node) orelse break :blk true;
-                    if (self.nodeContainsBinding(arm.body, key, depth + 1)) break :blk true;
-                }
-                break :blk false;
-            },
-            // These nodes either have no value child, or their relevant edges
-            // are scanned directly by bindingEscapesStableResolutionDepth.
-            // Keep this list exhaustive so a new child-bearing tag cannot
-            // silently make an escaping route binding look stable.
-            .lit_int,
-            .lit_float,
-            .lit_string,
-            .lit_bool,
-            .lit_null,
-            .lit_undefined,
-            .identifier,
-            .call,
-            .method_call,
-            .assignment,
-            .object_method,
-            .object_getter,
-            .object_setter,
-            .function_expr,
-            .arrow_function,
-            .await_expr,
-            .yield_expr,
-            .sequence_expr,
-            .comma_expr,
-            .match_arm,
-            .match_pattern,
-            .match_type_test,
-            .expr_stmt,
-            .var_decl,
-            .if_stmt,
-            .for_stmt,
-            .for_of_stmt,
-            .for_in_stmt,
-            .while_stmt,
-            .do_while_stmt,
-            .switch_stmt,
-            .case_clause,
-            .return_stmt,
-            .assert_stmt,
-            .throw_stmt,
-            .break_stmt,
-            .continue_stmt,
-            .try_stmt,
-            .block,
-            .labeled_stmt,
-            .function_decl,
-            .array_pattern,
-            .pattern_element,
-            .pattern_rest,
-            .pattern_default,
-            .import_decl,
-            .import_specifier,
-            .import_default,
-            .import_namespace,
-            .export_decl,
-            .export_specifier,
-            .export_default,
-            .export_all,
-            .program,
-            .param_list,
-            .arg_list,
-            .stmt_list,
-            => false,
-        };
     }
 
     fn resolveFunctionNode(self: *const Resolver, node: NodeIndex) ?NodeIndex {
@@ -731,23 +713,63 @@ pub const Resolver = struct {
         };
     }
 
-    fn assignmentRootBinding(self: *const Resolver, target: NodeIndex) ?ir.BindingRef {
-        var node = target;
-        while (true) {
-            const tag = self.ir_view.getTag(node) orelse return null;
-            switch (tag) {
-                .identifier => return self.ir_view.getBinding(node),
-                .member_access, .optional_chain, .computed_access => {
-                    const member = self.ir_view.getMember(node) orelse return null;
-                    node = member.object;
-                },
-                // exhaustive: no other assignment target shape has a root
-                // binding that this resolver can track.
-                else => return null,
-            }
+    const RootMatch = enum {
+        /// The root is, or contains, the binding with the given key.
+        match,
+        /// The root is a shape this resolver cannot follow, such as a call
+        /// result or a conditional. It may alias any binding.
+        untracked,
+        /// The root is a different binding, or an identifier with no binding.
+        other,
+    };
+
+    /// Classify the root of an assignment target or a call receiver against
+    /// the binding `key`. A member chain follows its object. An array literal
+    /// root, as in `[table][0]["GET /"] = f`, matches when any element roots
+    /// at the binding, because `[table][0]` is the table itself. Any other
+    /// non-identifier root is `untracked`: reporting it as `other` would let a
+    /// mutation through an unfollowed path leave the table looking stable,
+    /// which is the unsound direction. An identifier with no binding keeps the
+    /// old answer, `other`.
+    fn assignmentRootMatch(
+        self: *const Resolver,
+        target: NodeIndex,
+        key: u32,
+        depth: usize,
+    ) RootMatch {
+        // Expression edges point to nodes that already exist, so this walk is
+        // acyclic. The node count is the structural bound.
+        if (depth >= self.ir_view.nodeCount()) return .untracked;
+        const tag = self.ir_view.getTag(target) orelse return .untracked;
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(target) orelse return .other;
+                return if (packBindingKey(binding.scope_id, binding.slot) == key) .match else .other;
+            },
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(target) orelse return .untracked;
+                return self.assignmentRootMatch(member.object, key, depth + 1);
+            },
+            .array_literal => {
+                const array = self.ir_view.getArray(target) orelse return .untracked;
+                var result: RootMatch = .other;
+                for (0..array.elements_count) |index| {
+                    const element = self.ir_view.getListIndex(array.elements_start, @intCast(index));
+                    if (element == null_node) continue;
+                    switch (self.assignmentRootMatch(element, key, depth + 1)) {
+                        .match => return .match,
+                        .untracked => result = .untracked,
+                        .other => {},
+                    }
+                }
+                return result;
+            },
+            // exhaustive: any other target shape is reported as untracked and
+            // not ignored, because a missed root is the unsound direction and
+            // it may alias the table.
+            else => return .untracked,
         }
     }
-
     fn isGlobalMethodCall(
         self: *const Resolver,
         callee: NodeIndex,

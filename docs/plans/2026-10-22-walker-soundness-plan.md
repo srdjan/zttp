@@ -204,7 +204,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W3a | done: block-scoped checked-flag journal; `res_nested`, `res_let_reassign`, `opt_renarrow` now refused; one allowlist row (`setCheckedFlag catch-poison`); residual: a `for...of` body that reads then reassigns a Result is not caught on the second iteration |
 | W3b | done: the verifier walks `assert`, nested functions, closures (with every flag cleared), and spread operands; upvalue reads map to a unique declared binding; residual: a hoisted `function` that reads a Result declared later is not resolved |
 | W4 | done: the kill walk reaches every assignment; the return join covers loops, `if` without a covering return, and `assert`; ZTS204 checks an `assert` error expression; one fixture (`flow_false_proofs.zig`) wraps its `assert` message in `Response.text`; 296-file sweep unchanged |
-| W5 | not started |
+| W5 | done: an array-literal or untracked assignment root counts as a mutation; the escape scan checks every value position through the child map; `!routes` and `typeof routes` now stay resolved (sound precision gain); 296-file sweep unchanged |
 | W6 | not started |
 | W7a | not started |
 | W7b | not started; decision 9(a) |

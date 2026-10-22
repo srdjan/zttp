@@ -2355,6 +2355,172 @@ test "reading routerMatch params does not make a stable dispatch unresolved" {
     try std.testing.expectEqual(@as(u32, 0), counts.unchecked_result);
 }
 
+const route_table_prelude =
+    \\import { routerMatch } from "zttp:router";
+    \\import { jwtVerify } from "zttp:auth";
+    \\function getHome(req) { return Response.text("home"); }
+    \\function bad(req) {
+    \\  const result = jwtVerify("token", "key");
+    \\  return Response.text(String(result.value));
+    \\}
+    \\function getBox() { return { n: 1 }; }
+    \\
+;
+
+const route_table_dispatch =
+    \\  const found = routerMatch(routes, req);
+    \\  if (found !== undefined) {
+    \\    return found.handler(req);
+    \\  }
+    \\  return Response.text("nf");
+    \\}
+;
+
+test "a table mutated through an array literal root is unresolved" {
+    // `[routes][0]` is the table itself. Before the fix the assignment root was
+    // not an identifier, the mutation was skipped, and the table proved stable.
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  [routes][0]["GET /"] = bad;
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+    try std.testing.expect(counts.unchecked_result > 0);
+}
+
+test "a table iterated through an array literal is unresolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  for (const t of [routes]) {
+        \\    t["GET /"] = bad;
+        \\  }
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+    try std.testing.expect(counts.unchecked_result > 0);
+}
+
+test "a table stored or iterated through a value position is unresolved" {
+    const shapes = [_][]const u8{
+        // for...of iterable
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  for (const k of routes) {}
+        ,
+        // array element in a discarded expression
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  [routes];
+        ,
+        // a logical operator yields the table, and a declaration stores it
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const t = routes || routes;
+        ,
+        // a conditional yields the table, and an assignment stores it
+        \\const routes = { "GET /": getHome };
+        \\let other = 0;
+        \\function handler(req) {
+        \\  other = req ? routes : routes;
+        ,
+        // a computed index is a value position
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const k = req.x[routes];
+        ,
+    };
+    inline for (shapes) |head| {
+        const counts = try routeVerifierCounts(route_table_prelude ++ head ++ "\n" ++ route_table_dispatch);
+        try std.testing.expect(counts.unresolved_dispatch);
+    }
+}
+
+test "a table that is only tested or dropped stays resolved" {
+    const shapes = [_][]const u8{
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  routes;
+        ,
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  if (routes === undefined) return Response.text("x");
+        ,
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const ok = !routes;
+        ,
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const label = typeof routes;
+        ,
+    };
+    inline for (shapes) |head| {
+        const counts = try routeVerifierCounts(route_table_prelude ++ head ++ "\n" ++ route_table_dispatch);
+        try std.testing.expect(!counts.unresolved_dispatch);
+    }
+}
+
+test "a directly mutated table stays unresolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  routes["GET /"] = bad;
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+    try std.testing.expect(counts.unchecked_result > 0);
+}
+
+test "a stable table holding the unchecked route reports it and stays resolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": bad };
+        \\function handler(req) {
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(!counts.unresolved_dispatch);
+    try std.testing.expectEqual(@as(u32, 1), counts.unchecked_result);
+}
+
+test "a stable table with only reads stays resolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const known = routes["GET /"];
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(!counts.unresolved_dispatch);
+    try std.testing.expectEqual(@as(u32, 0), counts.unchecked_result);
+}
+
+test "an untracked assignment root unresolves every table in the file" {
+    // Documented precision cost: `getBox().n = 5` may alias any table, so the
+    // unrelated assignment makes the table look mutated.
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  getBox().n = 5;
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+}
+
+test "an assignment to a plain local object leaves the table stable" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const box = { n: 1 };
+        \\  box.n = 5;
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(!counts.unresolved_dispatch);
+}
+
+test "an alias of the table is unresolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function handler(req) {
+        \\  const t = routes;
+        \\  t["GET /"] = bad;
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
+    try std.testing.expect(counts.unchecked_result > 0);
+}
+
 test "a binding read only through an object spread is not reported unused" {
     // Same cause as the type checker's `{ base: unknown }`: the spread's
     // operand sits where a property's key sits, so walking the property's value
