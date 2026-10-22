@@ -133,6 +133,11 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
 `test-compile-bench`, `test-bench-diff`.
 
+`test-sdk` also runs a separate standard-library-only descriptor root. Its tests
+check field-coverage classification and the absence of runtime callback fields;
+the SDK root checks declaration projection. Engine tests compare every builtin
+descriptor field and export position with the original runtime declaration.
+
 `test-zts` checks the shared IR JSON writer's exact output, unsupported inputs,
 malformed property nodes, caller atom resolution, and allocation cleanup.
 The type checker tests inferred schema types. `test-precompile` checks emitted

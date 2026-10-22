@@ -11,209 +11,23 @@ pub const ModuleFn = *const fn (
     args: []const JSValue,
 ) anyerror!JSValue;
 
-pub const EffectClass = enum {
-    read,
-    write,
-    none,
+const descriptors = @import("descriptors.zig");
 
-    pub fn toString(self: EffectClass) []const u8 {
-        return @tagName(self);
-    }
-};
-
-pub const ReturnKind = enum {
-    /// Plain value types - no caller-side check required
-    boolean,
-    number,
-    string,
-    object,
-    undefined,
-    unknown,
-
-    /// Optional types - verifier requires narrowing before use
-    optional_string,
-    optional_object,
-    /// `number | undefined`. The shape `byteAt` answers with, and the only
-    /// optional the vocabulary was missing: declaring it `.unknown` would have
-    /// been the checker knowing less than spec 6.3 states.
-    optional_number,
-
-    /// Result type ({ok, value, error}) - verifier requires .ok check
-    result,
-
-    /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: a binding
-    /// cannot spell an export's type parameters, so a declared `dict` reaches
-    /// the checker as `Dict<unknown, unknown>`.
-    dict,
-
-    /// `Bytes` (spec 6.3). Not coarse: `Bytes` takes no type parameters, so
-    /// the kind names the type exactly.
-    bytes,
-
-    /// Lowercase JS-facing type name for signature advertisement (e.g. in
-    /// `zts modules --json`). Maps the verifier-oriented tags onto the
-    /// shapes a handler author actually sees at the call site.
-    pub fn jsTypeName(self: ReturnKind) []const u8 {
-        return switch (self) {
-            .boolean => "boolean",
-            .number => "number",
-            .string => "string",
-            .object => "object",
-            .undefined => "undefined",
-            .unknown => "unknown",
-            .optional_string => "string?",
-            .optional_object => "object?",
-            .optional_number => "number?",
-            .result => "Result",
-            .dict => "Dict",
-            .bytes => "Bytes",
-        };
-    }
-};
-
-/// A signature spelled in source text, one entry per parameter plus the
-/// return. Set it when the coarse `ReturnKind` cannot name the export's type -
-/// a literal union, a record, or a named ABI type.
-pub const DeclaredSignature = struct {
-    params: []const []const u8,
-    returns: []const u8,
-};
-
-pub const FailureSeverity = enum {
-    critical,
-    expected,
-    upstream,
-    none,
-};
-
-pub const ModuleCapability = enum {
-    env,
-    clock,
-    random,
-    crypto,
-    stderr,
-    runtime_callback,
-    sqlite,
-    filesystem,
-    network,
-    policy_check,
-};
-
-pub const ModuleCapabilityError = error{
-    MissingModuleCapability,
-    ClockUnavailable,
-    StderrWriteFailed,
-    RandomUnavailable,
-};
-
-pub const DataLabel = enum(u4) {
-    secret,
-    credential,
-    user_input,
-    config,
-    internal,
-    external,
-    validated,
-    nondeterministic,
-    unknown,
-};
-
-/// The provenance labels an extension can declare on a return value. The
-/// analyzer keeps additional private facts, so the adapter maps declared labels
-/// by name and never interprets this set's reserved bits as analyzer facts.
-///
-/// `unknown` is the one label that is not a data-sensitivity class. It is the
-/// claim that provenance could not be followed, and the analyzer assigns it
-/// wherever its own walk gives up. A binding declares it for the shape the
-/// analyzer cannot see at all: an export that reads persistent cross-call
-/// state - a cache, a queue, a SQL table, a durable signal - and hands back a
-/// value some separate write put there. The read call holds no reference to
-/// that value, so no dataflow rule can reach it and only the binding knows. A
-/// store read that declared a benign label instead reported
-/// `no_secret_leakage` PROVEN for a secret round-tripped through the store.
-pub const LabelSet = packed struct(u16) {
-    secret: bool = false,
-    credential: bool = false,
-    user_input: bool = false,
-    config: bool = false,
-    internal: bool = false,
-    external: bool = false,
-    validated: bool = false,
-    nondeterministic: bool = false,
-    /// Provenance the checker could not follow: proves nothing. Distinct from
-    /// the empty set, which is the positive claim that a value carries
-    /// nothing.
-    unknown: bool = false,
-    _reserved: u7 = 0,
-
-    pub const empty: LabelSet = .{};
-};
-
-pub const ContractCategory = enum {
-    env,
-    cache_namespace,
-    sql_registration,
-    schema_compile,
-    request_schema,
-    route_pattern,
-    cookie_name,
-    cors_origin,
-    rate_limit_key,
-    fetch_host,
-    // Partner-declared category. The actual tag string lives on
-    // ContractExtraction.extension_category and is keyed under
-    // contract.json's extensions.<specifier>.categories.
-    extension_specific,
-};
-
-pub const ContractTransform = enum {
-    extract_host,
-    identity,
-};
-
-pub const ContractExtraction = struct {
-    arg_position: u8 = 0,
-    category: ContractCategory,
-    transform: ?ContractTransform = null,
-    flag_only: bool = false,
-    extension_category: ?[]const u8 = null,
-};
-
-pub const ContractFlags = struct {
-    sets_bearer_auth: bool = false,
-    sets_jwt_auth: bool = false,
-};
-
-pub const LawKind = enum {
-    pure,
-    idempotent_call,
-    inverse_of,
-    absorbing,
-};
-
-pub const AbsorbingPattern = struct {
-    arg_position: u8 = 0,
-    argument_shape: ArgumentShape,
-    residue: Residue,
-
-    pub const ArgumentShape = enum {
-        empty_string_literal,
-        undefined_literal,
-    };
-
-    pub const Residue = enum {
-        result_err,
-        returns_undefined,
-        returns_false,
-    };
-};
-
-pub const Law = union(LawKind) {
-    pure: void,
-    idempotent_call: void,
-    inverse_of: []const u8,
-    absorbing: AbsorbingPattern,
-};
+pub const EffectClass = descriptors.EffectClass;
+pub const ReturnKind = descriptors.ReturnKind;
+pub const DeclaredSignature = descriptors.DeclaredSignature;
+pub const FailureSeverity = descriptors.FailureSeverity;
+pub const ModuleCapability = descriptors.ModuleCapability;
+pub const ModuleCapabilityError = descriptors.ModuleCapabilityError;
+pub const DataLabel = descriptors.DataLabel;
+pub const LabelSet = descriptors.LabelSet;
+pub const ContractCategory = descriptors.ContractCategory;
+pub const ContractTransform = descriptors.ContractTransform;
+pub const ContractExtraction = descriptors.ContractExtraction;
+pub const ContractFlags = descriptors.ContractFlags;
+pub const LawKind = descriptors.LawKind;
+pub const AbsorbingPattern = descriptors.AbsorbingPattern;
+pub const Law = descriptors.Law;
 
 pub const FunctionBinding = struct {
     name: []const u8,

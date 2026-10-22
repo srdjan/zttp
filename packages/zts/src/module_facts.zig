@@ -1,12 +1,10 @@
-//! `ModuleFacts` — the import and binding index, built once per compile.
+//! `ModuleFacts` — an immutable import and binding index.
 //!
 //! This is the one part of contract construction that is a pure function of
-//! the import declarations and the module binding registry. `ContractBuilder`
-//! derived it inline as `scanImports`; six other engine files
-//! (`path_generator`, `handler_verifier`, `strict_checker`, `flow_checker`,
-//! `effect_inference`, `bool_checker`) each re-derive their own subset of the
-//! same walk. The index lives in its own file so those six can read it later
-//! without importing the 5,000-line builder they do not otherwise need.
+//! the import declarations and the module binding registry. Contract builders
+//! and analyzer passes share its immutable records while retaining their own
+//! lookup policies. The type checker matches named imports by slot and binding
+//! kind; other consumers deliberately use raw slots or different filters.
 //!
 //! Built once, then immutable. Nothing appends to a `ModuleFacts` after
 //! `build` returns. `ContractBuilder.build` therefore COPIES `modules` and
@@ -72,8 +70,11 @@ pub const ExtensionBinding = struct {
 pub const ImportRecord = struct {
     pub const Resolution = enum { builtin, partner, unresolved };
 
-    /// Local binding slot, the key every analyzer looks up by.
+    /// Local binding slot, retained for consumers that match raw slots.
     slot: u16,
+    /// The type checker compares slot and kind, without scope or local name.
+    binding_kind: ir.BindingRef.BindingKind,
+    import_kind: ir.Node.ImportSpec.ImportKind,
     module_specifier: []const u8,
     /// The name as written in the import, not the local alias. For
     /// `import { env as e }` this is `env` while `slot` is `e`'s slot.
@@ -200,6 +201,8 @@ pub const ModuleFacts = struct {
                     errdefer allocator.free(nm_duped);
                     try self.imports.append(allocator, .{
                         .slot = spec.local_binding.slot,
+                        .binding_kind = spec.local_binding.kind,
+                        .import_kind = spec.kind,
                         .module_specifier = mod_duped,
                         .imported_name = nm_duped,
                         .resolution = resolution,
@@ -314,6 +317,22 @@ pub const ModuleFacts = struct {
     /// True when this handler imports `specifier`.
     pub fn importsModule(self: *const ModuleFacts, specifier: []const u8) bool {
         return containsString(self.modules.items, specifier);
+    }
+
+    /// Preserve the type checker's named-import policy: slot and binding kind
+    /// match, while scope/name do not participate. A missing export must not
+    /// hide a later matching declaration that does name a builtin export.
+    pub fn builtinDescriptorForNamedReference(
+        self: *const ModuleFacts,
+        binding: ir.BindingRef,
+    ) ?@import("zts-base").module_descriptors.ExportDescriptor {
+        for (self.imports.items) |record| {
+            if (record.import_kind != .named or
+                record.slot != binding.slot or
+                record.binding_kind != binding.kind) continue;
+            if (builtin_modules.findDescriptor(record.module_specifier, record.imported_name)) |entry| return entry;
+        }
+        return null;
     }
 
     pub fn importForReference(

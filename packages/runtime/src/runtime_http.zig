@@ -1,20 +1,15 @@
 //! Outbound HTTP and fetch native implementations.
 //!
-//! This module owns the request/response/headers JS constructors, the
-//! synchronous `fetch` bridge and the low-level `zttp:http.request` native.
-//! These are plain free functions taking an
-//! explicit `*HandlerInstance`, or recovering it from the `*Context` the engine hands
-//! every native callback (`HandlerInstance.fromContext`), so they live here and
-//! back-import `HandlerInstance` from zruntime.
-//! zruntime registers the exported native callbacks during binding setup.
+//! This module implements HTTP constructors, body tracking, the synchronous
+//! `fetch` bridge and the low-level `zttp:http.request` operation.
+//! Host-dependent operations take a borrowed View. HandlerInstance composes
+//! that view and recovers the host in its native callback adapters.
 
 const std = @import("std");
 const ascii = std.ascii;
 const zq = @import("zts");
-const handler_instance = @import("handler_instance.zig");
 const http_parser = @import("http_parser.zig");
 
-const HandlerInstance = handler_instance.HandlerInstance;
 const http_types = @import("http_types.zig");
 const HttpResponse = http_types.HttpResponse;
 const HttpRequestView = http_types.HttpRequestView;
@@ -22,7 +17,48 @@ const HttpRequestOwned = http_types.HttpRequestOwned;
 const QueryParam = http_types.QueryParam;
 const HttpHeader = http_types.HttpHeader;
 const ResponseHeader = http_types.ResponseHeader;
-const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
+
+/// Context owns the installed prototypes. This state borrows them and owns
+/// the allocation that tracks body consumption for the current request.
+pub const HttpState = struct {
+    request_prototype: ?*zq.JSObject = null,
+    response_prototype: ?*zq.JSObject = null,
+    headers_prototype: ?*zq.JSObject = null,
+    consumed_body_objects: std.AutoHashMapUnmanaged(*zq.JSObject, void) = .empty,
+
+    pub fn installPrototypes(self: *HttpState, request: *zq.JSObject, response: *zq.JSObject, headers: *zq.JSObject) void {
+        self.request_prototype = request;
+        self.response_prototype = response;
+        self.headers_prototype = headers;
+    }
+
+    pub fn reset(self: *HttpState) void {
+        self.consumed_body_objects.clearRetainingCapacity();
+    }
+
+    pub fn deinit(self: *HttpState, allocator: std.mem.Allocator) void {
+        self.consumed_body_objects.deinit(allocator);
+        self.* = .{};
+    }
+};
+
+pub const Config = struct {
+    enabled: bool = false,
+    allow_host: ?[]const u8 = null,
+    max_response_bytes: usize = 1024 * 1024,
+    timeout_ms: u32 = 10_000,
+    replay: bool = false,
+};
+
+/// Borrowed for one synchronous operation. The backend remains at its stable
+/// owner address because its Io vtable and userdata point into that storage.
+pub const View = struct {
+    allocator: std.mem.Allocator,
+    ctx: *zq.Context,
+    state: *HttpState,
+    config: Config,
+    backend: ?*OutboundIo,
+};
 
 const FetchResponseObjects = struct {
     value: zq.JSValue,
@@ -30,8 +66,8 @@ const FetchResponseObjects = struct {
     headers: *zq.JSObject,
 };
 
-fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
-    return rt.config.outbound_timeout_ms;
+fn effectiveOutboundTimeoutMs(rt: View) u32 {
+    return rt.config.timeout_ms;
 }
 const natives = @import("runtime_natives.zig");
 pub const getStringData = natives.getStringData;
@@ -49,16 +85,16 @@ const statusTextFor = natives.statusTextFor;
 const getNamedGlobalPrototype = natives.getNamedGlobalPrototype;
 const throwTypeError = natives.throwTypeError;
 
-pub fn beginBodyRead(ctx: *zq.Context, this: zq.JSValue) zq.JSValue {
+pub fn beginBodyRead(ctx: *zq.Context, state: ?*HttpState, allocator: std.mem.Allocator, this: zq.JSValue) zq.JSValue {
     if (!this.isObject()) {
         return throwTypeError(ctx, "Body reader target must be an object");
     }
     const obj = this.toPtr(zq.JSObject);
-    if (HandlerInstance.fromContext(ctx)) |rt| {
-        if (rt.consumed_body_objects.contains(obj)) {
+    if (state) |http_state| {
+        if (http_state.consumed_body_objects.contains(obj)) {
             return throwTypeError(ctx, "Body has already been consumed");
         }
-        rt.consumed_body_objects.put(rt.allocator, obj, {}) catch {
+        http_state.consumed_body_objects.put(allocator, obj, {}) catch {
             return throwTypeError(ctx, "Failed to track body consumption");
         };
     }
@@ -123,14 +159,14 @@ fn snapshotResponseHead(allocator: std.mem.Allocator, head: anytype) !OwnedRespo
     return owned;
 }
 
-fn createResponseHeadersObject(rt: *HandlerInstance) !*zq.JSObject {
+fn createResponseHeadersObject(rt: View) !*zq.JSObject {
     if (rt.ctx.http.shapes) |shapes| {
-        return rt.ctx.createObjectWithClass(shapes.response_headers.class_idx, rt.headers_prototype);
+        return rt.ctx.createObjectWithClass(shapes.response_headers.class_idx, rt.state.headers_prototype);
     }
-    return rt.ctx.createObject(rt.headers_prototype);
+    return rt.ctx.createObject(rt.state.headers_prototype);
 }
 
-pub fn createFetchResponse(rt: *HandlerInstance, status: u16, status_text: []const u8, body: []const u8, content_type: ?[]const u8) !FetchResponseObjects {
+pub fn createFetchResponse(rt: View, status: u16, status_text: []const u8, body: []const u8, content_type: ?[]const u8) !FetchResponseObjects {
     const body_val = try rt.ctx.createString(body);
     const body_str = body_val.toPtr(zq.JSString);
     const response_val = try zq.http.createResponseFromString(
@@ -140,7 +176,7 @@ pub fn createFetchResponse(rt: *HandlerInstance, status: u16, status_text: []con
         content_type orelse "application/octet-stream",
     );
     const response_obj = response_val.toPtr(zq.JSObject);
-    if (rt.response_prototype) |proto| {
+    if (rt.state.response_prototype) |proto| {
         response_obj.prototype = proto;
     }
 
@@ -167,7 +203,7 @@ pub fn createFetchResponse(rt: *HandlerInstance, status: u16, status_text: []con
     };
 }
 
-pub fn createFetchErrorResponse(rt: *HandlerInstance, err_code: []const u8, details: []const u8) !zq.JSValue {
+pub fn createFetchErrorResponse(rt: View, err_code: []const u8, details: []const u8) !zq.JSValue {
     const error_body = try httpRequestErrorJsonAlloc(rt.allocator, err_code, details);
     defer rt.allocator.free(error_body);
 
@@ -407,8 +443,8 @@ pub fn splitHeaderKV(headers: anytype, names: *[64][]const u8, values: *[64][]co
 ///
 /// `--allow-host` stays a host comparison: it is a coarse operator switch over
 /// whatever the policy already permits, not the policy itself.
-fn outboundEndpointViolation(rt: *HandlerInstance, url: []const u8, host: []const u8) ?[]const u8 {
-    if (rt.config.outbound_allow_host) |allowed_host| {
+fn outboundEndpointViolation(rt: View, url: []const u8, host: []const u8) ?[]const u8 {
+    if (rt.config.allow_host) |allowed_host| {
         if (!ascii.eqlIgnoreCase(host, allowed_host)) {
             zq.policy.emitDenied(.{
                 .action = .http_outbound,
@@ -571,13 +607,11 @@ fn resolvedScopeDecision(
     return .{ .unresolved = failure orelse "name did not resolve" };
 }
 
-pub fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx_for_host: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const rt = HandlerInstance.fromContext(ctx_for_host) orelse return error.RuntimeUnavailable;
+pub fn fetchSync(rt: View, args: []const zq.JSValue) !zq.JSValue {
     return fetchAndRecord(rt, args);
 }
 
-fn fetchAndRecord(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
+fn fetchAndRecord(rt: View, args: []const zq.JSValue) !zq.JSValue {
     const result = fetchSyncResult(rt, args) catch |err|
         return createFetchErrorResponse(rt, "InternalError", @errorName(err));
 
@@ -619,7 +653,7 @@ const FetchInitResult = union(enum) {
 };
 
 fn fetchInitError(
-    rt: *HandlerInstance,
+    rt: View,
     allocator: std.mem.Allocator,
     options: *FetchInitOptions,
     code: []const u8,
@@ -649,7 +683,7 @@ fn resolveHostSafe(uri: std.Uri, buf: *[std.Io.net.HostName.max_len]u8) std.Uri.
 
 /// Parse and validate the (url, init?) arguments common to all fetch call sites.
 /// Returns a JS error response (status 599) on validation failure.
-pub fn parseFetchArgs(rt: *HandlerInstance, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !FetchArgsResult {
+pub fn parseFetchArgs(rt: View, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !FetchArgsResult {
     if (args.len == 0) {
         return .{ .err = try createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object") };
     }
@@ -722,7 +756,7 @@ const FetchUrlResult = union(enum) {
 /// no query, for uniform caller ownership), or a JS error response if `query`
 /// is present but not an object / holds an unencodable value.
 pub fn buildFetchUrl(
-    rt: *HandlerInstance,
+    rt: View,
     pool: *const zq.HiddenClassPool,
     base_url: []const u8,
     init_obj: ?*zq.JSObject,
@@ -771,13 +805,13 @@ pub fn buildFetchUrl(
 }
 
 fn parseFetchInitOptions(
-    rt: *HandlerInstance,
+    rt: View,
     allocator: std.mem.Allocator,
     pool: *const zq.HiddenClassPool,
     init_obj: ?*zq.JSObject,
 ) !FetchInitResult {
     var options = FetchInitOptions{
-        .max_response_bytes = @max(@as(usize, 1), rt.config.outbound_max_response_bytes),
+        .max_response_bytes = @max(@as(usize, 1), rt.config.max_response_bytes),
     };
 
     const init = init_obj orelse return .{ .ok = options };
@@ -862,28 +896,22 @@ fn parseFetchInitOptions(
 }
 
 /// Report whether a fetch init requests removed credential authority.
-fn hasCredentialOption(rt: *HandlerInstance, init: *zq.JSObject, pool: *const zq.HiddenClassPool) bool {
+fn hasCredentialOption(rt: View, init: *zq.JSObject, pool: *const zq.HiddenClassPool) bool {
     return getDynamicProperty(rt.ctx, init, pool, "credential") != null;
 }
 
-fn credentialOptionRefusal(rt: *HandlerInstance) !zq.JSValue {
+fn credentialOptionRefusal(rt: View) !zq.JSValue {
     return createFetchErrorResponse(rt, "CredentialRefused", "path_unsupported");
 }
 
 /// Keep removed credential authority outside replay wrappers.
 /// Those wrappers can return a recorded result without calling the fetch body.
-pub fn credentialOptionGuard(comptime inner: zq.NativeFn) zq.NativeFn {
-    return struct {
-        fn guarded(ctx_ptr: *anyopaque, this_value: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-            const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-            const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
-            const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-            if (fetchInitObject(args)) |init| {
-                if (hasCredentialOption(rt, init, pool)) return credentialOptionRefusal(rt);
-            }
-            return inner(ctx_ptr, this_value, args);
-        }
-    }.guarded;
+pub fn refuseCredentialOption(rt: View, args: []const zq.JSValue) !?zq.JSValue {
+    const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    if (fetchInitObject(args)) |init| {
+        if (hasCredentialOption(rt, init, pool)) return try credentialOptionRefusal(rt);
+    }
+    return null;
 }
 
 fn fetchInitObject(args: []const zq.JSValue) ?*zq.JSObject {
@@ -987,9 +1015,9 @@ const OwnedExchange = struct {
     }
 };
 
-fn outboundExchange(rt: *HandlerInstance, input: ExchangeInput, failure: *ExchangeFailure) !OwnedExchange {
+fn outboundExchange(rt: View, input: ExchangeInput, failure: *ExchangeFailure) !OwnedExchange {
     const allocator = rt.allocator;
-    const backend = &rt.outbound_io_backend.?;
+    const backend = rt.backend.?;
     var client = std.http.Client{
         .allocator = allocator,
         .io = backend.io(),
@@ -1091,8 +1119,8 @@ fn outboundExchange(rt: *HandlerInstance, input: ExchangeInput, failure: *Exchan
     return .{ .head = owned_head, .body = response_body, .status = status, .ok = response.head.status.class() != .server_error and response.head.status.class() != .client_error };
 }
 
-fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
-    if (!rt.config.outbound_http_enabled) {
+fn fetchSyncResult(rt: View, args: []const zq.JSValue) !zq.JSValue {
+    if (!rt.config.enabled) {
         return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
 
@@ -1142,40 +1170,15 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     return created.value;
 }
 
-/// The fetch module callback delegates to fetchSync.
-/// Trace recording, replay, and policy enforcement stay identical.
-pub fn fetchModuleCallback(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    args: []const zq.JSValue,
-) anyerror!zq.JSValue {
-    _ = ctx;
-    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
-    return dispatchFetchModule(rt, args);
-}
-
-fn dispatchFetchModule(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
-    if (rt.config.replay_file_path != null) {
+pub fn dispatchFetchModule(rt: View, args: []const zq.JSValue) !zq.JSValue {
+    if (rt.config.replay) {
         return fetchModuleReplay(rt);
     }
 
     return fetchAndRecord(rt, args);
 }
 
-/// The `zttp:fetch` module's refusal callback: the same 599 fetch error the
-/// runtime's own senders give, for a refusal the module decides.
-pub fn fetchModuleRefusal(
-    runtime_ptr: *anyopaque,
-    ctx: *zq.Context,
-    code: []const u8,
-    details: []const u8,
-) anyerror!zq.JSValue {
-    _ = ctx;
-    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
-    return createFetchErrorResponse(rt, code, details);
-}
-
-fn fetchModuleReplay(rt: *HandlerInstance) !zq.JSValue {
+fn fetchModuleReplay(rt: View) !zq.JSValue {
     const state = rt.ctx.getModuleState(zq.trace.ReplayState, zq.trace.REPLAY_STATE_SLOT) orelse {
         return createFetchErrorResponse(rt, "ReplayNotConfigured", "fetch replay state is not installed");
     };
@@ -1232,7 +1235,7 @@ fn replayNextIs(state: *const zq.trace.ReplayState, module_name: []const u8, fn_
     return std.mem.eql(u8, entry.module, module_name) and std.mem.eql(u8, entry.func, fn_name);
 }
 
-fn copyRecordedFetchHeaders(rt: *HandlerInstance, headers_obj: *zq.JSObject, headers_json: []const u8) !void {
+fn copyRecordedFetchHeaders(rt: View, headers_obj: *zq.JSObject, headers_json: []const u8) !void {
     var pos = skipJsonWhitespace(headers_json, 0);
     if (pos >= headers_json.len or headers_json[pos] != '{') return;
     pos += 1;
@@ -1301,7 +1304,7 @@ fn skipJsonWhitespace(json: []const u8, start: usize) usize {
     return pos;
 }
 
-fn appendEncodedJsValue(rt: *HandlerInstance, buf: *std.ArrayList(u8), val: zq.JSValue) !bool {
+fn appendEncodedJsValue(rt: View, buf: *std.ArrayList(u8), val: zq.JSValue) !bool {
     if (getStringData(val)) |text| {
         try appendPercentEncoded(rt, buf, text);
         return true;
@@ -1325,7 +1328,7 @@ fn appendEncodedJsValue(rt: *HandlerInstance, buf: *std.ArrayList(u8), val: zq.J
     return false;
 }
 
-fn appendPercentEncoded(rt: *HandlerInstance, buf: *std.ArrayList(u8), input: []const u8) !void {
+fn appendPercentEncoded(rt: View, buf: *std.ArrayList(u8), input: []const u8) !void {
     return appendPercentEncodedInto(rt.allocator, buf, input);
 }
 
@@ -1352,21 +1355,19 @@ fn isUrlUnreserved(byte: u8) bool {
         byte == '~';
 }
 
-pub fn httpRequestNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
+pub fn httpRequest(rt: View, args: []const zq.JSValue) !zq.JSValue {
     const out = httpRequestResultJsonAlloc(rt, args) catch |err| {
         const fallback = try httpRequestErrorJsonAlloc(rt.allocator, "InternalError", @errorName(err));
         defer rt.allocator.free(fallback);
-        return rt.createString(fallback);
+        return rt.ctx.createString(fallback);
     };
     defer rt.allocator.free(out);
-    return rt.createString(out);
+    return rt.ctx.createString(out);
 }
 
-fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![]u8 {
+fn httpRequestResultJsonAlloc(rt: View, args: []const zq.JSValue) ![]u8 {
     const a = rt.allocator;
-    if (!rt.config.outbound_http_enabled) {
+    if (!rt.config.enabled) {
         return try httpRequestErrorJsonAlloc(a, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
     if (args.len == 0 or !args[0].isString()) {
@@ -1425,7 +1426,7 @@ fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![
     } else null;
 
     const max_response_bytes = blk: {
-        const cfg_max = @max(@as(usize, 1), rt.config.outbound_max_response_bytes);
+        const cfg_max = @max(@as(usize, 1), rt.config.max_response_bytes);
         if (obj.get("max_response_bytes")) |max_v| switch (max_v) {
             .integer => |i| {
                 const req_max = std.math.cast(usize, i) orelse {
@@ -1522,34 +1523,29 @@ pub fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, det
     return try aw.toOwnedSlice();
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-//
-// This file had zero test blocks across 2,305 lines, which the reset plan named
-// as the repository's highest-risk untested file. Most of its surface takes a
-// live `HandlerInstance` or a `Context`; these cover the parts whose behavior can be
-// pinned without standing up a request, plus the egress-host check, which is a
-// security boundary and worth a HandlerInstance.
-//
-// Collection was confirmed with a positive control before any of these were
-// written: a trivial test here moves `test-zruntime` from 494 to 495.
-// ---------------------------------------------------------------------------
+// HTTP helpers and context-policy checks. Handler integration lives in
+// zruntime_tests.zig. These fixtures require no runtime-owner dependency.
 
 const testing = std.testing;
 
 test "JSON HTTP header refusal releases parsed headers under allocation failure" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const rt = try HandlerInstance.init(arena.allocator(), .{ .outbound_http_enabled = true });
-    defer rt.deinit();
+    const fixture_allocator = arena.allocator();
+    var gc = try zq.GC.init(fixture_allocator, .{});
+    defer gc.deinit();
+    const ctx = try zq.Context.init(fixture_allocator, &gc, .{});
+    defer ctx.deinit();
+    var state: HttpState = .{};
+    defer state.deinit(fixture_allocator);
+    const rt = View{ .allocator = fixture_allocator, .ctx = ctx, .state = &state, .config = .{ .enabled = true }, .backend = null };
     rt.ctx.capability_policy = .{ .egress = .{ .enabled = true, .values = &.{"http://127.0.0.1:1"} } };
 
     const Probe = struct {
-        fn run(allocator: std.mem.Allocator, runtime: *HandlerInstance, input: zq.JSValue, expected: []const u8) !void {
-            const original_allocator = runtime.allocator;
-            runtime.allocator = allocator;
-            defer runtime.allocator = original_allocator;
-            const result = httpRequestResultJsonAlloc(runtime, &.{input}) catch |err| switch (err) {
+        fn run(allocator: std.mem.Allocator, runtime: View, input: zq.JSValue, expected: []const u8) !void {
+            var view = runtime;
+            view.allocator = allocator;
+            const result = httpRequestResultJsonAlloc(view, &.{input}) catch |err| switch (err) {
                 // JSON serialization exposes allocator exhaustion as a writer
                 // failure; keep the allocation-failure harness informed.
                 error.WriteFailed => return error.OutOfMemory,
@@ -1624,14 +1620,18 @@ test "host resolution accepts a plain host and rejects a missing one" {
 }
 
 test "the egress allowlist rejects a host it does not name" {
-    // A security boundary, so it gets a real HandlerInstance. `outbound_allow_host`
-    // restricts the bridge to one exact host; a mismatch must be reported.
+    // The HTTP view carries the operator host restriction independently of the host runtime.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try HandlerInstance.init(allocator, .{ .outbound_allow_host = "api.example.com" });
-    defer rt.deinit();
+    var gc = try zq.GC.init(allocator, .{});
+    defer gc.deinit();
+    const ctx = try zq.Context.init(allocator, &gc, .{});
+    defer ctx.deinit();
+    var state: HttpState = .{};
+    defer state.deinit(allocator);
+    const rt = View{ .allocator = allocator, .ctx = ctx, .state = &state, .config = .{ .allow_host = "api.example.com" }, .backend = null };
 
     // Exact match passes the allowlist check. Whether the capability policy also
     // allows it is a separate gate, so only assert the allowlist verdict here.
@@ -1648,8 +1648,13 @@ test "the egress allowlist is case-insensitive on the host" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try HandlerInstance.init(allocator, .{ .outbound_allow_host = "api.example.com" });
-    defer rt.deinit();
+    var gc = try zq.GC.init(allocator, .{});
+    defer gc.deinit();
+    const ctx = try zq.Context.init(allocator, &gc, .{});
+    defer ctx.deinit();
+    var state: HttpState = .{};
+    defer state.deinit(allocator);
+    const rt = View{ .allocator = allocator, .ctx = ctx, .state = &state, .config = .{ .allow_host = "api.example.com" }, .backend = null };
 
     // Not the allowlist's complaint: any violation here comes from the
     // capability policy, never from a case difference.
@@ -1663,8 +1668,13 @@ test "the endpoint decides, not the host" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try HandlerInstance.init(allocator, .{});
-    defer rt.deinit();
+    var gc = try zq.GC.init(allocator, .{});
+    defer gc.deinit();
+    const ctx = try zq.Context.init(allocator, &gc, .{});
+    defer ctx.deinit();
+    var state: HttpState = .{};
+    defer state.deinit(allocator);
+    const rt = View{ .allocator = allocator, .ctx = ctx, .state = &state, .config = .{}, .backend = null };
 
     const allowed = [_][]const u8{"https://api.example.com:443"};
     rt.ctx.capability_policy = .{ .egress = .{ .enabled = true, .values = &allowed } };

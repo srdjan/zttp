@@ -106,7 +106,7 @@ contract must identify which ones it needs.
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | Runtime lifecycle | Open; M2 grace-expiry coverage added | Current socket and panic-isolation tests | Check request-timeout policy and control-thread shutdown semantics against the intended deployment | Tests assert accepted requests, drain and expiry outcomes, and isolation; unfiltered runtime and panic suites pass |
-| Engine/runtime facade | Deferred | Lifecycle behavior pinned before changing state ownership | Replace one sibling back-import with a narrow interface | Selected cycle removed; request and pool behavior preserved; boundary and runtime gates pass |
+| Modular analysis and runtime ownership | Complete, 2026-10-22; all five phases reviewed and finally verified | Owner approved phased implementation; [delivery plan](plans/2026-10-22-modular-boundaries-plan.md) | None within the approved plan | Analysis inputs, HTTP state, import identity, static descriptors, and server generation transitions have explicit owners; focused gates, registry pins, goldens, independent aggregate and full sequential verification pass |
 | Module gaps | Needs scope | A concrete handler requirement | Identify a missing fetch-resilience, capability, or build-feature diagnostic case | Public example and regression test demonstrate the selected behavior |
 | Hosted deploy | Deferred | Accepted hosted scope, lifecycle policy, and control-plane CI | Define a supported end-to-end deployment flow | CI exercises the control plane; released commands and user docs agree |
 | Server rate limiting | Conditional | Standalone unproxied server selected as a product target | Decide whether application limits through `zttp:ratelimit` are insufficient | Approved server policy and accept-path tests, or a recorded decision to retain application limits |
@@ -114,9 +114,10 @@ contract must identify which ones it needs.
 | Certificate assurance | Open, incremental | Select one property or opcode family | Add a producer case and an independent checker rule or witness | Checker rejects a mutation; `test-proof-ratchet` and `test-proof-ratchet-drift` pass with the revised disclosed boundary |
 
 Socket health/readiness, in-flight shutdown-drain, and grace-expiry tests exist in
-`packages/runtime/src/server.zig`. The file split and server adapter also
-exist, but `HandlerInstance` and extracted siblings still import each other.
-The remaining facade work concerns that dependency boundary.
+`packages/runtime/src/server.zig`. The HTTP implementation and native helpers
+now receive explicit dependencies and no longer import `HandlerInstance`.
+Constructor registration and host callback adapters remain in the instance's
+composition layer. The delivery plan records the selected boundary and tests.
 
 The residual guard delivery record (`pre-rebase:docs/archive/plans/2026-08-31-1242-feat-residual-runtime-guard-addendum-plan.md`)
 is closed for env, egress, and cache. SQL remains deferred in the table above.

@@ -103,3 +103,62 @@ test "fillRandom surfaces a clean error when the bridge cannot fill the buffer" 
     test_shim.denyCapability(.random);
     try std.testing.expectError(error.MissingModuleCapability, sdk.fillRandom(fake_handle, &buf));
 }
+
+test "descriptors preserve declaration defaults and explicit empty metadata" {
+    const Callback = struct {
+        fn call(_: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+            return sdk.JSValue.undefined_val;
+        }
+    };
+    const inherited: sdk.FunctionBinding = .{
+        .name = "inherit",
+        .module_func = Callback.call,
+        .arg_count = 1,
+    };
+    const explicit: sdk.FunctionBinding = .{
+        .name = "explicit",
+        .module_func = Callback.call,
+        .arg_count = 1,
+        .required_arg_count = 0,
+        .required_capabilities = &.{},
+        .signature = .{ .params = &.{"string"}, .returns = "boolean" },
+        .return_labels = .{ .secret = true, .unknown = true, ._reserved = 3 },
+        .declassifies = .{ .credential = true },
+        .declassify_bound_arg = 0,
+        .derives_from_args = true,
+        .traceable = false,
+        .replay_pure = true,
+    };
+    const first = comptime sdk.descriptors.describeFunction(inherited);
+    const second = comptime sdk.descriptors.describeFunction(explicit);
+    try std.testing.expect(first.required_capabilities == null);
+    try std.testing.expect(first.required_arg_count == null);
+    try std.testing.expect(first.signature == null);
+    try std.testing.expect(first.traceable);
+    try std.testing.expect(!first.replay_pure);
+    try std.testing.expectEqual(@as(usize, 0), second.required_capabilities.?.len);
+    try std.testing.expectEqual(@as(?u8, 0), second.required_arg_count);
+    try std.testing.expectEqualDeep(explicit.signature, second.signature);
+    try std.testing.expectEqualDeep(explicit.return_labels, second.return_labels);
+    try std.testing.expectEqualDeep(explicit.declassifies, second.declassifies);
+    try std.testing.expectEqual(explicit.declassify_bound_arg, second.declassify_bound_arg);
+    try std.testing.expect(second.derives_from_args);
+    try std.testing.expect(!second.traceable);
+    try std.testing.expect(second.replay_pure);
+
+    const absent = comptime sdk.descriptors.describeModule(sdk.ModuleBinding{
+        .specifier = "zttp-ext:absent",
+        .name = "absent",
+        .exports = &.{inherited},
+    });
+    const empty = comptime sdk.descriptors.describeModule(sdk.ModuleBinding{
+        .specifier = "zttp-ext:empty",
+        .name = "empty",
+        .exports = &.{explicit},
+        .contract_section = "",
+    });
+    try std.testing.expect(absent.contract_section == null);
+    try std.testing.expectEqualStrings("", empty.contract_section.?);
+    try std.testing.expectEqualStrings("inherit", absent.exports[0].name);
+    try std.testing.expectEqualStrings("explicit", empty.exports[0].name);
+}

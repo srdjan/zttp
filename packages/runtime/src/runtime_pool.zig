@@ -26,6 +26,13 @@ const HandlerInstance = handler_instance.HandlerInstance;
 const PreparedEvalSource = @import("execution_spec.zig").PreparedEvalSource;
 const panic_recovery = @import("panic_recovery.zig");
 
+/// Concrete facts installed with a source/policy generation. They contain no
+/// acceptance authority; the server derives them before entering the pool.
+pub const ServingSettings = struct {
+    handler_proof: @import("fault_explain.zig").Proof = .{},
+    pooling_policy: contract_runtime.PoolingPolicy,
+};
+
 pub const HandlerPool = struct {
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
@@ -288,6 +295,16 @@ pub const HandlerPool = struct {
         new_filename: []const u8,
         dev_policy: ?zq.RuntimePolicy,
     ) !usize {
+        return self.reloadSourceGeneration(new_code, new_filename, dev_policy, null);
+    }
+
+    pub fn reloadSourceGeneration(
+        self: *Self,
+        new_code: []const u8,
+        new_filename: []const u8,
+        dev_policy: ?zq.RuntimePolicy,
+        serving: ?ServingSettings,
+    ) !usize {
         self.runtime_init_mutex.lock();
         if (self.policy_generation.index != null) {
             self.runtime_init_mutex.unlock();
@@ -312,6 +329,7 @@ pub const HandlerPool = struct {
         self.handler_code = new_code;
         self.handler_filename = new_filename;
         self.prepared_eval = false;
+        if (serving) |settings| self.applyServingSettingsLocked(settings);
         self.cache.clear();
         self.embedded_bytecode = null;
         const previous_policy = if (candidate) |generation| blk: {
@@ -354,6 +372,15 @@ pub const HandlerPool = struct {
         policy: zq.RuntimePolicy,
         index_required: bool,
     ) !void {
+        return self.installDevPolicyGeneration(policy, index_required, null);
+    }
+
+    pub fn installDevPolicyGeneration(
+        self: *Self,
+        policy: zq.RuntimePolicy,
+        index_required: bool,
+        serving: ?ServingSettings,
+    ) !void {
         self.runtime_init_mutex.lock();
         if (self.policy_generation.index != null) {
             self.runtime_init_mutex.unlock();
@@ -370,6 +397,7 @@ pub const HandlerPool = struct {
         };
         const previous = self.policy_generation;
         self.policy_generation = candidate;
+        if (serving) |settings| self.applyServingSettingsLocked(settings);
         self.next_policy_generation += 1;
         _ = self.reload_generation.fetchAdd(1, .acq_rel);
         self.runtime_init_mutex.unlock();
@@ -643,6 +671,20 @@ pub const HandlerPool = struct {
         }
 
         return rt;
+    }
+
+    /// Metadata-only embedding updates must also retire warmed fault facts.
+    pub fn setServingSettings(self: *Self, settings: ServingSettings) void {
+        self.runtime_init_mutex.lock();
+        defer self.runtime_init_mutex.unlock();
+        const proof_changed = !std.meta.eql(self.config.handler_proof, settings.handler_proof);
+        self.applyServingSettingsLocked(settings);
+        if (proof_changed) _ = self.reload_generation.fetchAdd(1, .acq_rel);
+    }
+
+    fn applyServingSettingsLocked(self: *Self, settings: ServingSettings) void {
+        self.config.handler_proof = settings.handler_proof;
+        self.pooling_policy = settings.pooling_policy;
     }
 
     pub fn setPoolingPolicy(self: *Self, policy: contract_runtime.PoolingPolicy) void {

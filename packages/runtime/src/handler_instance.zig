@@ -11,7 +11,6 @@ const std = @import("std");
 const execution_spec = @import("execution_spec.zig");
 const builtin = @import("builtin");
 const compat = @import("zts").compat;
-const ascii = std.ascii;
 
 // Import zts module
 const zq = @import("zts");
@@ -25,11 +24,7 @@ const natives = @import("runtime_natives.zig");
 const buildQueryObject = natives.buildQueryObject;
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 
-// Native callbacks and helpers that live in runtime_http.zig, aliased here so
-// the binding-registration sites keep referencing them by their bare names.
-const fetchSyncNative = http.fetchSyncNative;
-const httpRequestNative = http.httpRequestNative;
-const fetchModuleCallback = http.fetchModuleCallback;
+// Context-only HTTP callbacks need no host adapter.
 const headersGetNative = http.headersGetNative;
 const headersHasNative = http.headersHasNative;
 const headersSetNative = http.headersSetNative;
@@ -61,12 +56,57 @@ fn fetchCredentialOuter(
     if (comptime std.mem.eql(u8, binding.specifier, "zttp:fetch") and
         std.mem.eql(u8, exp.name, "fetch"))
     {
-        return http.credentialOptionGuard(inner);
+        return credentialOptionGuard(inner);
     }
     return inner;
 }
 const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
+
+fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
+    return http.fetchSync(rt.httpView(), args);
+}
+
+fn httpRequestNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
+    return http.httpRequest(rt.httpView(), args);
+}
+
+fn fetchModuleCallback(runtime_ptr: *anyopaque, _: *zq.Context, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
+    return http.dispatchFetchModule(rt.httpView(), args);
+}
+
+fn fetchModuleRefusal(runtime_ptr: *anyopaque, _: *zq.Context, code: []const u8, details: []const u8) anyerror!zq.JSValue {
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
+    return http.createFetchErrorResponse(rt.httpView(), code, details);
+}
+
+fn credentialOptionGuard(comptime inner: zq.NativeFn) zq.NativeFn {
+    return struct {
+        fn guarded(ctx_ptr: *anyopaque, this_value: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+            const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+            const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
+            if (try http.refuseCredentialOption(rt.httpView(), args)) |refusal| return refusal;
+            return inner(ctx_ptr, this_value, args);
+        }
+    }.guarded;
+}
+
+fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    if (HandlerInstance.fromContext(ctx)) |rt| return runtime_builtins.bodyText(ctx, &rt.http_state, rt.allocator, this);
+    return runtime_builtins.bodyText(ctx, null, ctx.allocator, this);
+}
+
+fn bodyJsonNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    if (HandlerInstance.fromContext(ctx)) |rt| return runtime_builtins.bodyJson(ctx, &rt.http_state, rt.allocator, this);
+    return runtime_builtins.bodyJson(ctx, null, ctx.allocator, this);
+}
 
 const runtime_config_mod = @import("runtime_config.zig");
 const RuntimePolicyGeneration = @import("runtime_policy_generation.zig").RuntimePolicyGeneration;
@@ -128,10 +168,7 @@ pub const HandlerInstance = struct {
     /// it out on the error path, because the server builds the 500 body after
     /// this runtime is already released.
     last_fault_location: ?zq.bytecode.LineEntry = null,
-    request_prototype: ?*zq.JSObject,
-    response_prototype: ?*zq.JSObject,
-    headers_prototype: ?*zq.JSObject,
-    consumed_body_objects: std.AutoHashMapUnmanaged(*zq.JSObject, void),
+    http_state: http.HttpState,
     // Trace recording support
     trace_file: ?std.c.fd_t,
     trace_mutex: ?*zq.trace.TraceMutex,
@@ -160,6 +197,23 @@ pub const HandlerInstance = struct {
     pub fn fromContext(ctx: *zq.Context) ?*Self {
         const host = ctx.host orelse return null;
         return @ptrCast(@alignCast(host));
+    }
+
+    /// Borrow the HTTP dependencies without moving state or the Io backend.
+    pub fn httpView(self: *Self) http.View {
+        return .{
+            .allocator = self.allocator,
+            .ctx = self.ctx,
+            .state = &self.http_state,
+            .config = .{
+                .enabled = self.config.outbound_http_enabled,
+                .allow_host = self.config.outbound_allow_host,
+                .max_response_bytes = self.config.outbound_max_response_bytes,
+                .timeout_ms = self.config.outbound_timeout_ms,
+                .replay = self.config.replay_file_path != null,
+            },
+            .backend = if (self.outbound_io_backend) |*backend| backend else null,
+        };
     }
 
     pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig) !*Self {
@@ -242,10 +296,7 @@ pub const HandlerInstance = struct {
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
             .last_fault_location = null,
-            .request_prototype = null,
-            .response_prototype = null,
-            .headers_prototype = null,
-            .consumed_body_objects = .{},
+            .http_state = .{},
             .trace_file = null,
             .trace_mutex = null,
             .trace_recorder = null,
@@ -318,10 +369,7 @@ pub const HandlerInstance = struct {
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
             .last_fault_location = null,
-            .request_prototype = null,
-            .response_prototype = null,
-            .headers_prototype = null,
-            .consumed_body_objects = .{},
+            .http_state = .{},
             .trace_file = null,
             .trace_mutex = null,
             .trace_recorder = null,
@@ -377,7 +425,7 @@ pub const HandlerInstance = struct {
             if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);
             if (self.trace_mutex) |m| self.allocator.destroy(m);
         }
-        self.consumed_body_objects.deinit(self.allocator);
+        self.http_state.deinit(self.allocator);
         if (self.outbound_io_backend) |*io_backend| {
             io_backend.deinit();
         }
@@ -427,16 +475,16 @@ pub const HandlerInstance = struct {
         errdefer if (request_proto_unowned) request_proto.destroyBuiltin(self.allocator, pool);
         try self.ctx.builtin_objects.append(self.allocator, request_proto);
         request_proto_unowned = false;
-        try self.addDynamicMethod(request_proto, "text", runtime_builtins.bodyTextNative, 0);
-        try self.addDynamicMethod(request_proto, "json", runtime_builtins.bodyJsonNative, 0);
+        try self.addDynamicMethod(request_proto, "text", bodyTextNative, 0);
+        try self.addDynamicMethod(request_proto, "json", bodyJsonNative, 0);
 
         const response_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
         var response_proto_unowned = true;
         errdefer if (response_proto_unowned) response_proto.destroyBuiltin(self.allocator, pool);
         try self.ctx.builtin_objects.append(self.allocator, response_proto);
         response_proto_unowned = false;
-        try self.addDynamicMethod(response_proto, "text", runtime_builtins.bodyTextNative, 0);
-        try self.addDynamicMethod(response_proto, "json", runtime_builtins.bodyJsonNative, 0);
+        try self.addDynamicMethod(response_proto, "text", bodyTextNative, 0);
+        try self.addDynamicMethod(response_proto, "json", bodyJsonNative, 0);
 
         const headers_proto = try zq.JSObject.create(self.allocator, root_class_idx, null, pool);
         var headers_proto_unowned = true;
@@ -509,9 +557,7 @@ pub const HandlerInstance = struct {
         try self.installGlobalFunction("requestText", zq.http.requestText, 1);
         try self.installGlobalFunction("requestJson", zq.http.requestJson, 1);
 
-        self.request_prototype = request_proto;
-        self.response_prototype = response_proto;
-        self.headers_prototype = headers_proto;
+        self.http_state.installPrototypes(request_proto, response_proto, headers_proto);
     }
 
     fn installGlobalFunction(self: *Self, name: []const u8, func: zq.NativeFn, arg_count: u8) !void {
@@ -600,9 +646,9 @@ pub const HandlerInstance = struct {
         // In replay mode, use a stub that returns recorded fetch responses.
         const fetch_replay_stub = comptime zq.trace.makeReplayStub("http", "fetchSync");
         const func: zq.NativeFn = if (self.config.replay_file_path != null)
-            comptime http.credentialOptionGuard(fetch_replay_stub)
+            comptime credentialOptionGuard(fetch_replay_stub)
         else
-            comptime http.credentialOptionGuard(fetchSyncNative);
+            comptime credentialOptionGuard(fetchSyncNative);
         const fn_obj = try zq.JSObject.createNativeFunction(
             self.allocator,
             pool,
@@ -742,7 +788,7 @@ pub const HandlerInstance = struct {
     }
 
     fn installFetchModuleState(self: *Self) !void {
-        try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback, http.fetchModuleRefusal);
+        try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback, fetchModuleRefusal);
     }
 
     fn verifyBytecodeRecursive(func: *const zq.FunctionBytecode) !void {
@@ -1434,52 +1480,9 @@ pub const HandlerInstance = struct {
         return response;
     }
 
-    /// Try to parse a query parameter value as a 32-bit signed integer.
-    /// Returns null if the value is not a valid integer (empty, has non-digit chars, overflow).
-    /// Supports optional leading minus sign for negative numbers.
-    pub fn parseQueryInt(value: []const u8) ?i32 {
-        if (value.len == 0) return null;
-        if (value.len > 11) return null; // -2147483648 is 11 chars max
-
-        var i: usize = 0;
-        var negative = false;
-
-        // Check for leading minus
-        if (value[0] == '-') {
-            negative = true;
-            i = 1;
-            if (value.len == 1) return null; // Just "-" is not valid
-        }
-
-        // Must have at least one digit
-        if (i >= value.len) return null;
-
-        var result: i64 = 0;
-        while (i < value.len) : (i += 1) {
-            const c = value[i];
-            if (c < '0' or c > '9') return null; // Non-digit character
-            result = result * 10 + (c - '0');
-            // Check for overflow (using i64 to detect i32 overflow)
-            if (result > 2147483647 and !negative) return null;
-            if (result > 2147483648 and negative) return null;
-        }
-
-        if (negative) {
-            return @intCast(-result);
-        }
-        return @intCast(result);
-    }
-
-    pub fn headerKeyToAtom(key: []const u8) ?zq.Atom {
-        if (ascii.eqlIgnoreCase(key, "accept")) return .accept;
-        if (ascii.eqlIgnoreCase(key, "host")) return .host;
-        if (ascii.eqlIgnoreCase(key, "user-agent")) return .@"user-agent";
-        if (ascii.eqlIgnoreCase(key, "content-type")) return .@"content-type";
-        if (ascii.eqlIgnoreCase(key, "connection")) return .connection;
-        if (ascii.eqlIgnoreCase(key, "accept-encoding")) return .@"accept-encoding";
-        if (ascii.eqlIgnoreCase(key, "authorization")) return .authorization;
-        return null;
-    }
+    // Retained for embedding callers; the helper implementation has one owner.
+    pub const parseQueryInt = natives.parseQueryInt;
+    pub const headerKeyToAtom = natives.headerKeyToAtom;
 
     /// Create a capabilities object for 2-arg handler invocation.
     /// The caps object contains virtual module functions grouped by namespace.
@@ -1503,7 +1506,7 @@ pub const HandlerInstance = struct {
         // If not available, fall back to dynamic object creation.
         const shapes = self.ctx.http.shapes orelse return self.createRequestObjectDynamic(request);
 
-        const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, self.request_prototype);
+        const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, self.http_state.request_prototype);
 
         // URL
         const url_str = try self.ctx.createString(request.url);
@@ -1537,7 +1540,7 @@ pub const HandlerInstance = struct {
         }
 
         // Copy request headers into the handler request object.
-        const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, self.headers_prototype);
+        const headers_obj = try self.ctx.createObjectWithClass(shapes.request_headers.class_idx, self.http_state.headers_prototype);
         for (request.headers.items) |header| {
             const key_atom = headerKeyToAtom(header.key) orelse
                 try self.ctx.atoms.intern(header.key);
@@ -1561,7 +1564,7 @@ pub const HandlerInstance = struct {
     /// Fallback for creating request objects when http_shapes is not available.
     /// This is slower than the shaped path but handles edge cases.
     fn createRequestObjectDynamic(self: *Self, request: HttpRequestView) !zq.JSValue {
-        const req_obj = try self.ctx.createObject(self.request_prototype);
+        const req_obj = try self.ctx.createObject(self.http_state.request_prototype);
 
         const url_str = try self.ctx.createString(request.url);
         try self.ctx.setPropertyChecked(req_obj, zq.Atom.url, url_str);
@@ -1587,7 +1590,7 @@ pub const HandlerInstance = struct {
             try self.ctx.setPropertyChecked(req_obj, zq.Atom.body, body_str);
         }
 
-        const headers_obj = try self.ctx.createObject(self.headers_prototype);
+        const headers_obj = try self.ctx.createObject(self.http_state.headers_prototype);
         for (request.headers.items) |header| {
             const key_atom = headerKeyToAtom(header.key) orelse
                 try self.ctx.atoms.intern(header.key);
@@ -1768,7 +1771,7 @@ pub const HandlerInstance = struct {
         self.ctx.call_depth = 0;
         self.ctx.clearException();
         self.ctx.cost_meter.reset();
-        self.consumed_body_objects.clearRetainingCapacity();
+        self.http_state.reset();
 
         // Reset ephemeral allocations when hybrid allocation is enabled
         if (self.hybrid_state) |h| {
@@ -1798,7 +1801,7 @@ pub const HandlerInstance = struct {
         // Clear zruntime-layer request state that pool.zig's HandlerInstance.reset()
         // does not know about. The engine-level sp/call_depth/exception clear
         // happens inside pool.release() -> HandlerInstance.reset().
-        self.consumed_body_objects.clearRetainingCapacity();
+        self.http_state.reset();
         self.last_request_body_len = 0;
     }
 };

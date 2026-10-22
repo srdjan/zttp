@@ -15,7 +15,6 @@ const std = @import("std");
 const Server = @import("server.zig").Server;
 const shared = @import("cli_shared.zig");
 const contract_runtime = @import("contract_runtime.zig");
-const RuntimePolicy = @import("engine_adapter.zig").RuntimePolicy;
 const zts = @import("zts");
 const compat = zts.compat;
 const zts_cli = @import("zts_cli");
@@ -32,7 +31,6 @@ const proof_card_tui = @import("proof_card_tui.zig");
 const printer_mod = @import("zttp_proof_review").printer;
 const counterexample_pipeline = @import("counterexample_pipeline.zig");
 const json_diag = precompile.json_diag;
-const retired_authority = @import("project_config").retired_authority;
 
 /// A single ZTS diagnostic carried through analysis for terminal display.
 /// All slices are owned by the producer so the diagnostic stays valid past
@@ -83,66 +81,12 @@ fn shouldSkipContract(config: *const LiveReloadConfig) bool {
     return false;
 }
 
-/// Why a swap may not proceed.
-///
-/// A live swap has no certificate or consumer acceptance run. Static resources
-/// remain safe because the compiler enumerates an exact contract allowlist. A
-/// computed resource may swap only when this same analysis parsed and checked a
-/// configured policy snapshot, which is installed atomically with the candidate
-/// generation. Without that checked pair, either guarded side is a refusal.
-///
-/// Separate from `applySwap` so the decision can be read and tested without a
-/// pool, a server, and a file watcher.
-const SwapRefusal = enum {
-    none,
-    candidate_uses_retired_authority,
-    installed_generation_is_guarded,
-    candidate_computes_a_capability_resource,
-};
-
-fn swapRefusal(
-    installed_generation_is_guarded: bool,
-    candidate: ?*const HandlerContract,
-    candidate_policy_checked: bool,
-) SwapRefusal {
-    if (candidate) |contract| {
-        if (retired_authority.first(retired_authority.contractFacts(contract)) != null) {
-            return .candidate_uses_retired_authority;
-        }
-    }
-    if (installed_generation_is_guarded and !candidate_policy_checked) {
-        return .installed_generation_is_guarded;
-    }
-    const contract = candidate orelse return .none;
-    // The plain-swap and missing-contract branches arrive here with no
-    // candidate contract. They are covered by the first check: a swap with
-    // nothing to inspect may proceed only when the running generation has no
-    // guard to preserve.
-    if (!candidate_policy_checked and (contract.env.dynamic or
-        contract.egress.dynamic or
-        contract.cache.dynamic or
-        contract.sql.dynamic))
-    {
-        return .candidate_computes_a_capability_resource;
-    }
-    return .none;
-}
-
 pub const LiveReloadState = struct {
     allocator: std.mem.Allocator,
     server: *Server,
     handler_path: []const u8,
     config: LiveReloadConfig,
     current_contract: ?HandlerContract,
-    /// The handler code the pool is currently running. Owned here; the pool
-    /// holds a borrowed reference (see runtime_pool.reloadHandler).
-    previous_code: ?[]const u8,
-    /// The generation one swap back. The pool's reloadHandler contract requires
-    /// the just-superseded code stay alive for in-flight requests still running
-    /// on it; we retain it one extra cycle and free it only when the next swap
-    /// has fully drained it. Without this, freeing the active generation at swap
-    /// time is a use-after-free on concurrent workers.
-    superseded_code: ?[]const u8,
     previous_stamp: u64,
     watch_paths: []const []const u8,
     /// Last source-bytes sha logged to .zttp/proofs.jsonl. Suppresses
@@ -171,8 +115,6 @@ pub const LiveReloadState = struct {
             .handler_path = handler_path,
             .config = config,
             .current_contract = null,
-            .previous_code = null,
-            .superseded_code = null,
             .previous_stamp = 0,
             .watch_paths = watch_paths,
             .last_ledger_sha = null,
@@ -182,8 +124,6 @@ pub const LiveReloadState = struct {
 
     pub fn deinit(self: *LiveReloadState) void {
         if (self.current_contract) |*c| c.deinit(self.allocator);
-        if (self.previous_code) |code| self.allocator.free(code);
-        if (self.superseded_code) |code| self.allocator.free(code);
         if (self.proof_trace_json) |ptj| self.allocator.free(ptj);
     }
 
@@ -507,12 +447,11 @@ pub const LiveReloadState = struct {
                 printReload("Contract failed validation: {}.\n", .{err});
                 return;
             };
-            self.server.setDevCapabilityPolicy(hc, configured_policy) catch |err| {
+            self.server.installSourceContract(validated, hc, configured_policy) catch |err| {
                 validated.deinit();
                 printReload("Failed to install runtime policy generation: {}.\n", .{err});
                 return;
             };
-            self.server.updateContract(validated);
         }
     }
 
@@ -624,108 +563,30 @@ pub const LiveReloadState = struct {
         stderr_writer.interface.flush() catch {};
     }
 
-    /// Rotate the two retained handler-code generations: the code that was
-    /// active becomes one swap back (it may still serve in-flight requests, so
-    /// keep it), and the code already one swap back has drained and is freed.
-    /// Must run only after the pool no longer points at `previous_code`.
-    fn rotateGenerations(self: *LiveReloadState, new_code: []const u8) void {
-        if (self.superseded_code) |drained| self.allocator.free(drained);
-        self.superseded_code = self.previous_code;
-        self.previous_code = new_code;
-    }
-
-    /// Take ownership of new_code and swap the handler pool. Returns true only
-    /// after the serving generation is updated. Nulls the caller's pointer
-    /// whenever ownership transfers so the defer cleanup is a no-op.
+    /// Prepare and submit one source generation. The server owns installation,
+    /// metadata invalidation and backing retirement; analysis owners stay alive
+    /// through this immediate commit because the candidate policy borrows them.
     fn doSwap(
         self: *LiveReloadState,
         new_code_ptr: *?[]const u8,
         runtime_contract: ?*const HandlerContract,
         configured_policy: ?*const HandlerPolicy,
     ) bool {
-        const new_code = new_code_ptr.* orelse return false;
-
-        const pool = if (self.server.pool) |*p| p else {
-            // No pool references the generations, but keep the same rotation so
-            // the retain/free discipline (and deinit cleanup) stays uniform.
-            new_code_ptr.* = null;
-            self.rotateGenerations(new_code);
-            printReload("No handler pool available. Swap skipped.\n", .{});
-            return false;
-        };
-
-        switch (swapRefusal(
-            self.server.generationIsGuarded(),
+        var candidate = self.server.prepareSourceGeneration(
+            self.allocator,
+            new_code_ptr,
+            self.handler_path,
             runtime_contract,
-            configured_policy != null,
-        )) {
-            .none => {},
-            .candidate_uses_retired_authority => {
-                printReload(
-                    "New handler uses retired runtime authority. Live swap refused; the old handler stays active.\n",
-                    .{},
-                );
-                return false;
-            },
-            .installed_generation_is_guarded => {
-                printReload(
-                    "Running artifact guards capability resources at run time. Live swap refused; the old handler stays active.\n",
-                    .{},
-                );
-                return false;
-            },
-            .candidate_computes_a_capability_resource => {
-                printReload(
-                    "New handler computes a capability resource, which only a checked build can install. Live swap refused; the old handler stays active.\n",
-                    .{},
-                );
-                return false;
-            },
-        }
-
-        var validated_contract: ?contract_runtime.ValidatedRuntimeContract = null;
-        var dev_policy: ?RuntimePolicy = null;
-        if (runtime_contract) |hc| {
-            const raw = contract_runtime.fromHandlerContract(self.allocator, hc) catch |err| {
-                printReload("Failed to build runtime contract: {}. Keeping previous handler active.\n", .{err});
-                return false;
-            };
-            // Live reload validates without an embedded artifact: the
-            // HandlerContract carries hashes only when the original build
-            // emitted them, and verifyArtifactHash skips when absent.
-            validated_contract = contract_runtime.validate(raw, .{}) catch |err| {
-                printReload("Contract failed validation: {}. Keeping previous handler active.\n", .{err});
-                return false;
-            };
-            dev_policy = self.server.stageDevCapabilityPolicy(hc, configured_policy);
-        }
-
-        // Switch the pool to the new generation FIRST, under the pool's
-        // runtime_init_mutex. Only once the pool no longer points at the
-        // prior generation is it safe to retire older code. Freeing before
-        // the swap (the previous bug) raced a concurrent worker reading the
-        // freed handler_code in ensureRuntime on a rapid second save.
-        const invalidated = pool.reloadHandlerWithPolicy(new_code, self.handler_path, dev_policy) catch |err| {
-            if (validated_contract) |*validated| validated.deinit();
-            printReload("Failed to install handler generation: {}. Keeping previous handler active.\n", .{err});
+            configured_policy,
+        ) catch |err| {
+            printSwapFailure(err, "prepare");
             return false;
         };
-        new_code_ptr.* = null;
-        self.rotateGenerations(new_code);
-
-        if (validated_contract) |validated| {
-            self.server.updateContract(validated);
-            if (self.server.proof_cache != null) {
-                printProve("Proof cache: enabled (deterministic + read_only)\n", .{});
-            }
-        } else {
-            // No new contract this swap (no contract extracted, contract-diff or
-            // upgrade-analysis failure, or plain --watch). Invalidate the stale
-            // proof cache and route pre-filter so we never serve the previous
-            // handler's cached responses or 404 the new handler's routes.
-            self.server.invalidateContractCaches();
-        }
-
+        defer candidate.deinit();
+        const invalidated = self.server.replaceSourceGeneration(&candidate) catch |err| {
+            printSwapFailure(err, "install");
+            return false;
+        };
         printReload("Handler swapped. {d} runtime(s) invalidated.\n", .{invalidated});
         return true;
     }
@@ -733,6 +594,15 @@ pub const LiveReloadState = struct {
 
 // ---------------------------------------------------------------------------
 // Output formatting
+fn printSwapFailure(err: anyerror, stage: []const u8) void {
+    switch (err) {
+        error.UnsupportedRuntimeAuthority => printReload("New handler uses retired runtime authority. Live swap refused; the old handler stays active.\n", .{}),
+        error.GuardedGenerationSwapRefused => printReload("Running artifact guards capability resources at run time. Live swap refused; the old handler stays active.\n", .{}),
+        error.UncheckedDynamicCapability => printReload("New handler computes a capability resource, which only a checked build can install. Live swap refused; the old handler stays active.\n", .{}),
+        else => printReload("Failed to {s} handler generation: {}. Keeping previous handler active.\n", .{ stage, err }),
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 /// Derive the flattened intent + behavior summary the contract already
@@ -1017,87 +887,6 @@ test "LiveReloadConfig defaults" {
     try std.testing.expectEqual(@as(i64, 250), config.poll_interval_ms);
     try std.testing.expect(config.policy_path == null);
     try std.testing.expect(!shouldSkipContract(&config));
-}
-
-test "a swap that would strand a guard is refused from either side" {
-    const allocator = std.testing.allocator;
-    const path = try allocator.dupe(u8, "handler.ts");
-    var contract = zts.handler_contract.emptyContract(path);
-    defer contract.deinit(allocator);
-
-    // Nothing guarded on either side: an ordinary dev swap.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, false));
-    // The plain-swap and missing-contract branches, which carry no candidate.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null, false));
-
-    // Without a checked candidate policy, the running generation's guard
-    // coverage belongs to the executable being replaced. No candidate, not
-    // even a static one or none at all, may take over.
-    try std.testing.expectEqual(
-        SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, &contract, false),
-    );
-    try std.testing.expectEqual(
-        SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, null, false),
-    );
-
-    // A candidate that computes a capability resource has no coverage at all,
-    // because a live swap runs no acceptance. Each category answers for itself.
-    contract.env.dynamic = true;
-    try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
-    );
-    contract.env.dynamic = false;
-    contract.egress.dynamic = true;
-    try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
-    );
-    contract.egress.dynamic = false;
-    contract.cache.dynamic = true;
-    try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
-    );
-    contract.cache.dynamic = false;
-    contract.sql.dynamic = true;
-    try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
-    );
-
-    // A candidate checked against an explicit policy may replace either a
-    // static or guarded generation because the checked pair is installed as
-    // one pool generation.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, true));
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, &contract, true));
-}
-
-test "every retired module candidate leaves the serving generation active" {
-    const allocator = std.testing.allocator;
-    const retired = [_][]const u8{
-        "zttp:durable",
-        "zttp:workflow",
-        "zttp:queue",
-        "zttp:scope",
-        "zttp:io",
-        "zttp:service",
-        "zttp:ledger",
-        "zttp:tool",
-    };
-    for (retired) |module| {
-        var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
-        defer contract.deinit(allocator);
-        try contract.modules.append(allocator, try allocator.dupe(u8, module));
-        // doSwap checks this result before it calls reloadHandler or rotates
-        // either retained code generation.
-        try std.testing.expectEqual(
-            SwapRefusal.candidate_uses_retired_authority,
-            swapRefusal(false, &contract, true),
-        );
-    }
 }
 
 test "retired contract obligations cannot reach the live reload pool" {

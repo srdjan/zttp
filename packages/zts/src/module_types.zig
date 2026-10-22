@@ -19,7 +19,7 @@
 const std = @import("std");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
-const mb = @import("zts-engine").module_binding;
+const mb = @import("zts-base").module_descriptors;
 const builtin_modules = @import("zts-engine").builtin_modules;
 
 const TypePool = type_pool_mod.TypePool;
@@ -163,7 +163,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     registerFetchOptions(env, pool, allocator);
 
     // Register all function signatures from the module registry
-    for (builtin_modules.all) |binding| {
+    for (builtin_modules.metadata) |binding| {
         for (binding.exports) |func| {
             // A declared signature overrides the coarse kind at every
             // position. `zttp:fetch` was a hand-built special case here -

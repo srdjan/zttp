@@ -1,6 +1,6 @@
 //! Pure native helpers: string-data readout, header-atom routing,
 //! prototype walking, status normalisation, query object construction.
-//! Threadlocal-aware natives stay in handler_instance.zig.
+//! Host callback adapters stay in handler_instance.zig.
 
 const std = @import("std");
 const zq = @import("zts");
@@ -10,8 +10,52 @@ const http_types = @import("http_types.zig");
 const QueryParam = http_types.QueryParam;
 const http_parser = @import("http_parser.zig");
 
-const handler_instance = @import("handler_instance.zig");
-const HandlerInstance = handler_instance.HandlerInstance;
+/// Try to parse a query parameter value as a 32-bit signed integer.
+/// Returns null if the value is not a valid integer (empty, has non-digit chars, overflow).
+/// Supports optional leading minus sign for negative numbers.
+pub fn parseQueryInt(value: []const u8) ?i32 {
+    if (value.len == 0) return null;
+    if (value.len > 11) return null; // -2147483648 is 11 chars max
+
+    var i: usize = 0;
+    var negative = false;
+
+    // Check for leading minus
+    if (value[0] == '-') {
+        negative = true;
+        i = 1;
+        if (value.len == 1) return null; // Just "-" is not valid
+    }
+
+    // Must have at least one digit
+    if (i >= value.len) return null;
+
+    var result: i64 = 0;
+    while (i < value.len) : (i += 1) {
+        const c = value[i];
+        if (c < '0' or c > '9') return null; // Non-digit character
+        result = result * 10 + (c - '0');
+        // Check for overflow (using i64 to detect i32 overflow)
+        if (result > 2147483647 and !negative) return null;
+        if (result > 2147483648 and negative) return null;
+    }
+
+    if (negative) {
+        return @intCast(-result);
+    }
+    return @intCast(result);
+}
+
+pub fn headerKeyToAtom(key: []const u8) ?zq.Atom {
+    if (ascii.eqlIgnoreCase(key, "accept")) return .accept;
+    if (ascii.eqlIgnoreCase(key, "host")) return .host;
+    if (ascii.eqlIgnoreCase(key, "user-agent")) return .@"user-agent";
+    if (ascii.eqlIgnoreCase(key, "content-type")) return .@"content-type";
+    if (ascii.eqlIgnoreCase(key, "connection")) return .connection;
+    if (ascii.eqlIgnoreCase(key, "accept-encoding")) return .@"accept-encoding";
+    if (ascii.eqlIgnoreCase(key, "authorization")) return .authorization;
+    return null;
+}
 
 pub fn getStringData(val: zq.JSValue) ?[]const u8 {
     if (val.isString()) {
@@ -58,7 +102,7 @@ pub fn getHeaderAtom(ctx: *zq.Context, name: []const u8) !zq.Atom {
     if (ascii.eqlIgnoreCase(name, "content-type")) {
         return try ctx.atoms.intern("Content-Type");
     }
-    return HandlerInstance.headerKeyToAtom(name) orelse try ctx.atoms.intern(name);
+    return headerKeyToAtom(name) orelse try ctx.atoms.intern(name);
 }
 
 pub const HeaderAssignMode = enum {
@@ -109,7 +153,7 @@ pub fn findHeaderPropertyAtom(
     pool: *const zq.HiddenClassPool,
     wanted: []const u8,
 ) ?zq.Atom {
-    if (HandlerInstance.headerKeyToAtom(wanted)) |known_atom| {
+    if (headerKeyToAtom(wanted)) |known_atom| {
         if (headers_obj.getOwnProperty(pool, known_atom) != null) return known_atom;
     }
     if (ascii.eqlIgnoreCase(wanted, "content-type")) {
@@ -246,7 +290,7 @@ pub fn buildQueryObject(ctx: *zq.Context, query_params: []const QueryParam) !*zq
     const query_obj = try ctx.createObject(null);
     for (query_params) |param| {
         const key_atom = try ctx.atoms.intern(param.key);
-        const param_val = if (HandlerInstance.parseQueryInt(param.value)) |int_val|
+        const param_val = if (parseQueryInt(param.value)) |int_val|
             zq.JSValue.fromInt(int_val)
         else
             try ctx.createString(param.value);

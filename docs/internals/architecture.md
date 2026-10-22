@@ -97,6 +97,19 @@ JSON object-shape entries contain pool-local hidden-class indexes. Their cache
 therefore belongs to `HiddenClassPool` and has the same lifetime as the indexes
 it stores, rather than the lifetime of a worker thread.
 
+`HandlerInstance` composes `runtime_http.HttpState`, which owns body-consumption
+tracking and borrows the HTTP prototypes owned by `Context`. Both request reset
+and pool release call the state's reset operation before request storage is
+reused; teardown releases only the tracking allocation. Constructor registration
+stays in the instance's composition layer.
+
+HTTP operations borrow a `runtime_http.View` containing context, HTTP state,
+outbound/replay configuration, allocator, and a pointer to the outbound backend.
+The backend remains in stable instance storage. Native adapters recover the host
+through `Context.host`, and the HTTP implementation reads policy from that
+context. HTTP implementations and native helpers do not import the handler
+instance. Fetch module state still uses its typed SDK envelope.
+
 ## Compiler Pipeline
 
 For a handler source file:
@@ -180,9 +193,24 @@ The session borrows parser IR, atoms, the selected parser-owned syntax store,
 registries, and injected module facts.
 The session owns type environments, checkers, internal facts, and pass results.
 
+Type-checker export lookup reads the immutable `ModuleFacts` import records.
+It matches named imports by slot and binding kind, ignoring scope and local
+spelling, and selects the first matching declaration with a builtin export.
+Session-owned canonical facts are borrowed when available. A standalone checker
+builds one owned fallback index before checking; it selects that storage from
+its current address so moving the checker cannot leave a dangling self-pointer.
+Injected contract projections remain separate from canonical type-import facts.
+Strict checking retains its raw-slot policy, and flow analysis retains its
+mutation-sensitive resolution.
+
 The session prepares immutable path effect facts only when path analysis requests them.
 Path generators borrow completed facts and never own an effect analyzer.
-Path facts use no registry, type environment, injected module facts, or imported effect rows.
+Path facts use injected sibling effect rows, but no registry, type environment,
+or injected module facts. Imported rows are borrowed immutably through fact
+preparation and extraction. The first path-fact request freezes these dependency
+inputs, including when the cached result is unavailable. Later context updates
+may change verification or dispatch metadata while retaining equivalent imported
+rows; changing the dependency inputs is refused.
 An unavailable effect result makes path coverage report recursion conservatively.
 
 The session builds separate contract effect facts during contract extraction.
@@ -230,6 +258,17 @@ The native module registry is the source of truth:
 - `packages/modules/src/root.zig` exposes SDK-pure module bindings.
 - Engine-coupled modules stay under `packages/zts/src/modules/`.
 
+`packages/zttp-sdk/src/descriptors.zig` owns the pure semantic vocabulary and
+metadata records. The builtin registry projects its declarations into an
+ordered descriptor table at compile time. Projection requires every declaration
+field to be represented or explicitly classified as a callback/lifecycle hook;
+label fields receive the same coverage check. SDK declaration forms remain
+compatible, and the SDK-to-engine adapter still sanitizes reserved label bits.
+TypeChecker's ModuleFacts lookup and module type population consume descriptors.
+Runtime registration and registry hashing continue to use the original bindings,
+including callback-presence flags. Parser IR and atom ownership remain engine
+dependencies of the compiler.
+
 Every export carries effect and capability metadata used by contract
 extraction, runtime sandboxing, and handler property classification. The
 current module list is in [Virtual Modules](../virtual-modules/README.md).
@@ -260,9 +299,31 @@ The same contract feeds:
 `zttp dev` watches handler and config files. On a valid save it recompiles
 the handler. With `--prove`, the new contract is diffed against the previous
 contract before the handler pool is swapped. Compilation failures keep the
-currently serving handler active. Accepted swaps rederive the runtime
-capability policy and handler-pool lifecycle policy from the new contract
-before new runtime generations are acquired.
+currently serving handler active.
+
+The watcher submits a prepared source candidate to the server. The candidate
+owns its source, copied filename and optional runtime contract. Its capability
+policy borrows the analyzed contract and configured policy through immediate
+installation/deinit; the pool deep-copies that policy before publishing it.
+The server holds its exclusive contract lock across pool replacement, source
+transfer/retirement, and metadata installation, in contract-then-runtime-init
+lock order. Preparation and pool policy copying finish before any mutation;
+failure keeps the current source, policy and metadata together.
+
+The server owns the active and one superseded source allocation, each with its
+original allocator. It adopts initial file-loaded bytes, leaves inline and
+embedded inputs borrowed, and retires older backing only after the pool stops
+reading it. Teardown drains the pool before freeing retained source. Existing
+runtime leases retain their compiled executable and refcounted policy.
+
+A source transition clears the prior certificate promotion, cached responses,
+attestation and stale route filter. Source analysis supplies no proof acceptance.
+One serving-settings derivation supplies pooling, fault-explanation facts and
+cache eligibility from accepted proof facts at startup; a source transition
+passes no accepted proof. The pool installs changed settings under its runtime
+initialization lock before publishing the generation counter, so newly acquired
+runtimes cannot retain the old artifact's fault-explanation facts. The separate
+source-policy index requirement remains intact.
 
 A capability policy named by `zttp.json` joins the watch set and is read again
 for every candidate, so tightening it blocks newly forbidden code without a
@@ -316,7 +377,7 @@ Startup runs four stages before a handler pool exists, in this order:
    runtime.
 
 Only a `ProofCheckedContract` drives the proof response cache, unbounded runtime
-reuse, and the result and optional safety shortcuts.
+reuse, and the result and optional fault-explanation facts.
 `ValidatedRuntimeContract` - integrity without acceptance - drives
 env validation and route pre-filtering and nothing that is unsound if a compiler
 claim is wrong. A dev server, a live-reload swap, and a `-Dhandler` build have

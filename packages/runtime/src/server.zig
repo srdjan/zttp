@@ -13,6 +13,7 @@ const Io = std.Io;
 const net = std.Io.net;
 const HandlerPool = engine.HandlerPool;
 const RuntimeConfig = engine.RuntimeConfig;
+const retired_authority = @import("project_config").retired_authority;
 const execution_spec = @import("execution_spec.zig");
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
@@ -1118,6 +1119,60 @@ fn installShutdownSignals() void {
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
 }
 
+/// Why a swap may not proceed.
+///
+/// A live swap has no certificate or consumer acceptance run. Static resources
+/// remain safe because the compiler enumerates an exact contract allowlist. A
+/// computed resource may swap only when this same analysis parsed and checked a
+/// configured policy snapshot, which is installed atomically with the candidate
+/// generation. Without that checked pair, either guarded side is a refusal.
+///
+/// Kept at the server transition boundary so the decision is tested without a
+/// pool, a server, and a file watcher.
+const SwapRefusal = enum {
+    none,
+    candidate_uses_retired_authority,
+    installed_generation_is_guarded,
+    candidate_computes_a_capability_resource,
+};
+
+fn swapRefusal(
+    installed_generation_is_guarded: bool,
+    candidate: ?*const engine.HandlerContract,
+    candidate_policy_checked: bool,
+) SwapRefusal {
+    if (candidate) |contract| {
+        if (retired_authority.first(retired_authority.contractFacts(contract)) != null) {
+            return .candidate_uses_retired_authority;
+        }
+    }
+    if (installed_generation_is_guarded and !candidate_policy_checked) {
+        return .installed_generation_is_guarded;
+    }
+    const contract = candidate orelse return .none;
+    // The plain-swap and missing-contract branches arrive here with no
+    // candidate contract. They are covered by the first check: a swap with
+    // nothing to inspect may proceed only when the running generation has no
+    // guard to preserve.
+    if (!candidate_policy_checked and (contract.env.dynamic or
+        contract.egress.dynamic or
+        contract.cache.dynamic or
+        contract.sql.dynamic))
+    {
+        return .candidate_computes_a_capability_resource;
+    }
+    return .none;
+}
+
+fn requireSourceSwap(guarded: bool, candidate: ?*const engine.HandlerContract, policy_checked: bool) !void {
+    return switch (swapRefusal(guarded, candidate, policy_checked)) {
+        .none => {},
+        .candidate_uses_retired_authority => error.UnsupportedRuntimeAuthority,
+        .installed_generation_is_guarded => error.GuardedGenerationSwapRefused,
+        .candidate_computes_a_capability_resource => error.UncheckedDynamicCapability,
+    };
+}
+
 pub const Server = struct {
     config: ServerConfig,
     allocator: std.mem.Allocator,
@@ -1127,6 +1182,10 @@ pub const Server = struct {
     pool: ?HandlerPool,
     handler_code: []const u8,
     handler_filename: []const u8,
+    /// Owned source backing, including an initial file load. Borrowed inline
+    /// and embedded inputs never enter these owners. Retire only after swap.
+    source_generation: ?SourceGeneration = null,
+    superseded_source: ?SourceGeneration = null,
     embedded_bytecode: ?[]const u8,
     runtime_dep_bytecodes: ?[]const []const u8,
     static_cache: StaticFileCache,
@@ -1162,6 +1221,111 @@ pub const Server = struct {
     well_known_doc: ?attest_well_known.Doc,
     const Self = @This();
     const IoBackend = Io.Threaded;
+
+    const SourceGeneration = struct {
+        allocator: std.mem.Allocator,
+        code: []const u8,
+        filename: []const u8,
+        owns_filename: bool = false,
+
+        fn deinit(self: *SourceGeneration) void {
+            self.allocator.free(self.code);
+            if (self.owns_filename) self.allocator.free(self.filename);
+        }
+    };
+
+    /// A source candidate owns its source/name and runtime contract. Its policy
+    /// BORROWS the analyzed HandlerContract/configured policy until installation
+    /// returns; keep those owners alive until this candidate is retired. The
+    /// pool deep-copies the policy before publishing any generation change.
+    /// This is source/development evidence, never an accepted artifact proof.
+    pub const SourceCandidate = struct {
+        source: ?SourceGeneration,
+        contract: ?ValidatedRuntimeContract,
+        policy: ?engine.RuntimePolicy,
+        configured_policy_checked: bool,
+
+        pub fn deinit(self: *SourceCandidate) void {
+            if (self.source) |*source| source.deinit();
+            if (self.contract) |*contract| contract.deinit();
+            self.source = null;
+            self.contract = null;
+            self.policy = null;
+        }
+    };
+
+    pub fn prepareSourceGeneration(
+        self: *Self,
+        source_allocator: std.mem.Allocator,
+        code: *?[]const u8,
+        filename: []const u8,
+        contract: ?*const engine.HandlerContract,
+        configured: ?*const engine.HandlerPolicy,
+    ) !SourceCandidate {
+        try requireSourceSwap(false, contract, configured != null);
+        const bytes = code.* orelse return error.MissingHandlerSource;
+        const owned_filename = try source_allocator.dupe(u8, filename);
+        errdefer source_allocator.free(owned_filename);
+        var validated: ?ValidatedRuntimeContract = null;
+        if (contract) |hc| {
+            const raw = try contract_runtime.fromHandlerContract(self.allocator, hc);
+            validated = try contract_runtime.validate(raw, .{});
+        }
+        // Every fallible preparation succeeded. Ownership now leaves the caller,
+        // including when a later no-pool/refusal path destroys this candidate.
+        code.* = null;
+        return .{
+            .source = .{ .allocator = source_allocator, .code = bytes, .filename = owned_filename, .owns_filename = true },
+            .contract = validated,
+            .policy = if (contract) |hc| self.stageDevCapabilityPolicy(hc, configured) else null,
+            .configured_policy_checked = configured != null,
+        };
+    }
+
+    pub fn replaceSourceGeneration(self: *Self, candidate: *SourceCandidate) !usize {
+        // Requests acquire contract then runtime-init. Use the same order, and
+        // keep the metadata lock until code, policy and metadata all agree.
+        self.contract_lock.lock();
+        defer self.contract_lock.unlock();
+        const pool = if (self.pool) |*p| p else return error.NoHandlerPool;
+        const source = candidate.source orelse return error.MissingHandlerSource;
+        try requireSourceSwap(self.generationIsGuarded(), null, candidate.configured_policy_checked);
+        const invalidated = try pool.reloadSourceGeneration(source.code, source.filename, candidate.policy, self.sourceServingSettings());
+        // Pool preparation is the final fallible operation. It no longer reads
+        // the retired source under runtime-init before any backing is freed.
+        if (self.superseded_source) |*retired| retired.deinit();
+        self.superseded_source = self.source_generation;
+        self.source_generation = source;
+        candidate.source = null;
+        self.handler_code = source.code;
+        self.handler_filename = source.filename;
+        self.embedded_bytecode = null;
+        self.runtime_dep_bytecodes = null;
+        self.replaceContractLocked(candidate.contract);
+        candidate.contract = null;
+        return invalidated;
+    }
+
+    /// Install the initial analyzed source contract/policy as one transition.
+    /// On error the caller retains `contract`; on success the server owns it.
+    pub fn installSourceContract(
+        self: *Self,
+        contract: ValidatedRuntimeContract,
+        analyzed: *const engine.HandlerContract,
+        configured: ?*const engine.HandlerPolicy,
+    ) !void {
+        self.contract_lock.lock();
+        defer self.contract_lock.unlock();
+        if (self.pool) |*pool| {
+            try pool.installDevPolicyGeneration(
+                self.stageDevCapabilityPolicy(analyzed, configured),
+                engine.contractRequiresRuntimePolicyIndex(analyzed),
+                self.sourceServingSettings(),
+            );
+        }
+
+        self.replaceContractLocked(contract);
+    }
 
     pub fn init(allocator: std.mem.Allocator, config: ServerConfig) !Self {
         // A disconnecting client must never take down the server with SIGPIPE.
@@ -1206,6 +1370,11 @@ pub const Server = struct {
             .pool = null,
             .handler_code = handler_code,
             .handler_filename = handler_filename,
+            .source_generation = if (cfg.handler == .file_path) .{
+                .allocator = allocator,
+                .code = handler_code,
+                .filename = handler_filename,
+            } else null,
             .embedded_bytecode = embedded_bytecode,
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
             .static_cache = StaticFileCache.init(
@@ -1245,10 +1414,9 @@ pub const Server = struct {
             self.io_backend.deinit();
         }
 
-        // Free handler code if loaded from file
-        if (self.config.handler == .file_path) {
-            self.allocator.free(self.handler_code);
-        }
+        // Runtime readers drained above; each source uses its original allocator.
+        if (self.source_generation) |*source| source.deinit();
+        if (self.superseded_source) |*source| source.deinit();
     }
 
     /// Whether the installed generation depends on a runtime guard decision.
@@ -1275,66 +1443,74 @@ pub const Server = struct {
         self.contract_lock.lock();
         defer self.contract_lock.unlock();
 
-        if (self.contract) |*c| c.deinit();
-        self.contract = new_contract;
-        // The certificate described the artifact that was replaced. A live swap
-        // therefore drops the promotion rather than carrying it across: the new
-        // handler has not been checked by anything, and the proof cache,
-        // unbounded reuse also goes with it.
-        self.clearProofChecked();
-
-        // Always rebuild: even if eligibility is unchanged, cached responses
-        // are from the old handler and must not be served after a swap.
-        if (self.proof_cache) |*pc| {
-            pc.deinit();
-            self.proof_cache = null;
-        }
-
-        // The signed JWS commits to the prior build's bytecode and contract
-        // hashes. After a swap those commitments no longer match, so silence
-        // the attestation headers AND the well-known doc rather than serve a
-        // misleading signature. A future slice will re-mint attestation on
-        // each live swap.
-        self.clearAttestation();
-
-        _ = self.applyPoolingPolicy();
+        self.replaceContractLocked(new_contract);
     }
 
-    /// Invalidate the proof cache and route pre-filter after a handler swap that
-    /// produced NO new contract (no contract extracted, contract-diff or
-    /// upgrade-analysis failure, or a plain non-prove `--watch`). Without this,
-    /// the proof cache keeps serving the previous handler's responses (up to
-    /// TTL) and the route pre-filter keeps matching the old contract, 404-ing
-    /// the new handler's routes. Drops the stale contract so matchesRoute passes
-    /// everything (the handler itself decides) and serves nothing cached.
+    /// Drop contract-derived state when a swap carries no runtime contract.
     pub fn invalidateContractCaches(self: *Self) void {
         self.contract_lock.lock();
         defer self.contract_lock.unlock();
+        self.replaceContractLocked(null);
+    }
 
-        if (self.contract) |*c| {
-            c.deinit();
-            self.contract = null;
-        }
+    /// Caller holds contract_lock, or is still in single-threaded startup.
+    fn replaceContractLocked(self: *Self, new_contract: ?ValidatedRuntimeContract) void {
+        if (self.contract) |*contract| contract.deinit();
+        self.contract = new_contract;
+        // Source analysis is not acceptance. Discard all authority and cached
+        // values belonging to the previous artifact, including fault facts.
         self.clearProofChecked();
-        if (self.proof_cache) |*pc| {
-            pc.deinit();
-            self.proof_cache = null;
-        }
+        if (self.proof_cache) |*cache| cache.deinit();
+        self.proof_cache = null;
         self.clearAttestation();
         _ = self.applyPoolingPolicy();
     }
 
-    /// Apply the effective pooling policy to the live pool: a CLI lifecycle
-    /// override wins, otherwise derive it from the current contract's
-    /// properties. Returns the applied policy, or null when there is no pool.
+    const ServingSettings = struct {
+        pooling: contract_runtime.PoolingPolicy,
+        handler_proof: fault_explain.Proof = .{},
+        cache_properties: ?contract_runtime.Properties = null,
+        policy_index_required: bool,
+    };
+
+    /// Only accepted proof facts can enable proof-driven serving behavior.
+    /// A decoded/validated contract supplies no authority to this derivation.
+    fn servingSettings(self: *const Self, checked: ?*const contract_runtime.ProofCheckedContract) ServingSettings {
+        var settings = ServingSettings{
+            .pooling = self.config.lifecycle_override orelse contract_runtime.derivePoolingPolicy(checked),
+            .policy_index_required = requiresRuntimePolicyIndex(
+                self.config.runtime_config.runtime_policy_index_required,
+                if (checked) |proof| proof.guards.required > 0 else false,
+            ),
+        };
+        if (checked) |proof| {
+            const properties = proof.properties;
+            settings.handler_proof = .{
+                .optional_safe = properties.optional_safe,
+                .result_safe = properties.result_safe,
+            };
+            if ((properties.pure or (properties.deterministic and properties.read_only)) and !proof.reads_request_state) {
+                settings.cache_properties = properties;
+            }
+        }
+        return settings;
+    }
+
+    fn sourceServingSettings(self: *const Self) @import("runtime_pool.zig").ServingSettings {
+        // Source analysis carries no accepted certificate, even when replacing
+        // an artifact that had one. Preserve the operator's lifecycle override.
+        const settings = self.servingSettings(null);
+        return .{ .handler_proof = settings.handler_proof, .pooling_policy = settings.pooling };
+    }
+
+    /// Apply the same derived facts used at pool startup after a source change.
+    /// Old runtimes retain their immutable config; new runtimes get fresh fault
+    /// explanation facts and pooling behavior under the generation lock.
     fn applyPoolingPolicy(self: *Self) ?contract_runtime.PoolingPolicy {
         const pool = if (self.pool) |*p| p else return null;
-        const contract_ptr: ?*const contract_runtime.ProofCheckedContract =
-            if (self.proof_checked) |*c| c else null;
-        const effective = self.config.lifecycle_override orelse
-            contract_runtime.derivePoolingPolicy(contract_ptr);
-        pool.setPoolingPolicy(effective);
-        return effective;
+        const settings = self.servingSettings(if (self.proof_checked) |*proof| proof else null);
+        pool.setServingSettings(.{ .handler_proof = settings.handler_proof, .pooling_policy = settings.pooling });
+        return settings.pooling;
     }
 
     fn clearAttestation(self: *Self) void {
@@ -1737,15 +1913,10 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
-        // Result and optional safety let the interpreter skip checks a handler
-        // is proven not to need. That is only sound on a proof-checked
-        // contract; an integrity-bound one has made a claim nobody checked.
-        if (self.proof_checked) |*contract| {
-            pool_rt_config.handler_proof = .{
-                .optional_safe = contract.properties.optional_safe,
-                .result_safe = contract.properties.result_safe,
-            };
-        }
+        // Fault explanation, pooling and response-cache eligibility share one
+        // derivation from accepted facts. Contract integrity alone earns none.
+        const settings = self.servingSettings(if (self.proof_checked) |*proof| proof else null);
+        pool_rt_config.handler_proof = settings.handler_proof;
 
         // Open the opt-in soundness-incident log and share the fd with every
         // pooled runtime (they write to it directly; O_APPEND keeps small lines
@@ -1762,10 +1933,7 @@ pub const Server = struct {
         // tuple can require authoritative bounded membership. Preserve the
         // source-policy bit installed before Server.init; the pool combines it
         // with the bit that `embedded_handler` carries.
-        pool_rt_config.runtime_policy_index_required = requiresRuntimePolicyIndex(
-            pool_rt_config.runtime_policy_index_required,
-            if (self.proof_checked) |promoted| promoted.guards.required > 0 else false,
-        );
+        pool_rt_config.runtime_policy_index_required = settings.policy_index_required;
 
         var pool_timer = engine.Timer.start() catch null;
         self.pool = if (self.config.handler == .prepared_eval)
@@ -1817,24 +1985,13 @@ pub const Server = struct {
             }
         }
 
-        // Initialize proof-driven response cache if handler is deterministic +
-        // read_only AND its response does not depend on request headers/body.
-        // The cache keys on method+URL only, so a handler that reads request
-        // headers (auth, content-negotiation) is excluded - otherwise one
-        // caller's response would be replayed to every other caller of the URL.
-        if (self.proof_checked) |*contract| {
-            const p = contract.properties;
-            if (p.pure or (p.deterministic and p.read_only)) {
-                if (contract.reads_request_state) {
-                    std.log.info("   Proof cache: disabled (handler reads request headers/body; method+URL key would be unsound)", .{});
-                } else {
-                    self.proof_cache = proof_adapter.ProofCache.init(
-                        self.allocator,
-                        p,
-                        .{},
-                    );
-                    std.log.info("   Proof cache: enabled (handler proven deterministic + read_only + input-independent)", .{});
-                }
+        if (settings.cache_properties) |properties| {
+            self.proof_cache = proof_adapter.ProofCache.init(self.allocator, properties, .{});
+            std.log.info("   Proof cache: enabled (handler proven deterministic + read_only + input-independent)", .{});
+        } else if (self.proof_checked) |proof| {
+            const properties = proof.properties;
+            if ((properties.pure or (properties.deterministic and properties.read_only)) and proof.reads_request_state) {
+                std.log.info("   Proof cache: disabled (handler reads request headers/body; method+URL key would be unsound)", .{});
             }
         }
 
@@ -3903,4 +4060,284 @@ test "attested appended payload requires a parsed runtime policy hash" {
         error.RuntimePolicySectionHashMissing,
         server.start(),
     );
+}
+
+test "a swap that would strand a guard is refused from either side" {
+    const allocator = std.testing.allocator;
+    const path = try allocator.dupe(u8, "handler.ts");
+    var contract = emptySourceContractForTest(path);
+    defer contract.deinit(allocator);
+
+    // Nothing guarded on either side: an ordinary dev swap.
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, false));
+    // The plain-swap and missing-contract branches, which carry no candidate.
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null, false));
+
+    // Without a checked candidate policy, the running generation's guard
+    // coverage belongs to the executable being replaced. No candidate, not
+    // even a static one or none at all, may take over.
+    try std.testing.expectEqual(
+        SwapRefusal.installed_generation_is_guarded,
+        swapRefusal(true, &contract, false),
+    );
+    try std.testing.expectEqual(
+        SwapRefusal.installed_generation_is_guarded,
+        swapRefusal(true, null, false),
+    );
+
+    // A candidate that computes a capability resource has no coverage at all,
+    // because a live swap runs no acceptance. Each category answers for itself.
+    contract.env.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract, false),
+    );
+    contract.env.dynamic = false;
+    contract.egress.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract, false),
+    );
+    contract.egress.dynamic = false;
+    contract.cache.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract, false),
+    );
+    contract.cache.dynamic = false;
+    contract.sql.dynamic = true;
+    try std.testing.expectEqual(
+        SwapRefusal.candidate_computes_a_capability_resource,
+        swapRefusal(false, &contract, false),
+    );
+
+    // A candidate checked against an explicit policy may replace either a
+    // static or guarded generation because the checked pair is installed as
+    // one pool generation.
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, true));
+    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, &contract, true));
+}
+
+test "every retired module candidate leaves the serving generation active" {
+    const allocator = std.testing.allocator;
+    const retired = [_][]const u8{
+        "zttp:durable",
+        "zttp:workflow",
+        "zttp:queue",
+        "zttp:scope",
+        "zttp:io",
+        "zttp:service",
+        "zttp:ledger",
+        "zttp:tool",
+    };
+    for (retired) |module| {
+        var contract = emptySourceContractForTest(try allocator.dupe(u8, "handler.ts"));
+        defer contract.deinit(allocator);
+        try contract.modules.append(allocator, try allocator.dupe(u8, module));
+        // Preparation checks this result before the server replaces or retires
+        // either retained code generation.
+        try std.testing.expectEqual(
+            SwapRefusal.candidate_uses_retired_authority,
+            swapRefusal(false, &contract, true),
+        );
+    }
+}
+
+fn emptySourceContractForTest(path: []const u8) engine.HandlerContract {
+    return .{
+        .handler = .{ .path = path, .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+    };
+}
+
+fn sourceContractForTest(allocator: std.mem.Allocator, route: []const u8, key: []const u8) !engine.HandlerContract {
+    var contract = emptySourceContractForTest(try allocator.dupe(u8, "handler.ts"));
+    errdefer contract.deinit(allocator);
+    contract.source_identity = engine.sourceIdentityForPath("handler.ts");
+    contract.properties = .{
+        .pure = false,
+        .read_only = true,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = true,
+        .has_egress = false,
+        .state_isolated = true,
+        .result_safe = true,
+    };
+    const owned_key = try allocator.dupe(u8, key);
+    contract.env.literal.append(allocator, owned_key) catch |err| {
+        allocator.free(owned_key);
+        return err;
+    };
+    const method = try allocator.dupe(u8, "GET");
+    errdefer allocator.free(method);
+    const path = try allocator.dupe(u8, route);
+    errdefer allocator.free(path);
+    try contract.api.routes.append(allocator, .{
+        .method = method,
+        .path = path,
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+    });
+    return contract;
+}
+
+test "source replacement keeps failed state and retires successful generations together" {
+    const allocator = std.testing.allocator;
+    var source_heap: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(source_heap.deinit() == .ok);
+    const source_allocator = source_heap.allocator();
+    const old_code = "function handler(req) { return Response.text('old'); }";
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old.ts", .data = old_code });
+    const initial_path = try tmp.dir.realPathFileAlloc(std.testing.io, "old.ts", allocator);
+    defer allocator.free(initial_path);
+    var server = try Server.init(allocator, .{ .handler = .{ .file_path = initial_path }, .pool_size = 2 });
+    defer server.deinit();
+    server.reload_active = true;
+    server.pool = try HandlerPool.init(allocator, .{}, server.handler_code, initial_path, 2, 0);
+    const pool = &server.pool.?;
+    const initial_source = server.handler_code.ptr;
+    var old_contract = try sourceContractForTest(allocator, "/old", "OLD_KEY");
+    defer old_contract.deinit(allocator);
+    const initial = try contract_runtime.validate(try contract_runtime.fromHandlerContract(allocator, &old_contract), .{});
+    try server.installSourceContract(initial, &old_contract, null);
+
+    var accepted: pcc.verdict.PropertyVerdicts = .{};
+    inline for (.{ .read_only, .deterministic, .state_isolated, .results_checked }) |property| {
+        accepted.accept(property, .translation_validated);
+    }
+    server.proof_checked = contract_runtime.promote(&server.contract.?, .{
+        .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
+        .provenance = .absent,
+        .work_spent = 1,
+        .properties = accepted,
+    }, [_]u8{0} ** 32);
+    const settings = server.servingSettings(&server.proof_checked.?);
+    try std.testing.expect(settings.handler_proof.result_safe);
+    try std.testing.expect(settings.cache_properties != null);
+    _ = server.applyPoolingPolicy();
+    server.proof_cache = proof_adapter.ProofCache.init(allocator, settings.cache_properties.?, .{});
+    server.attestation_headers = try attest_header_strings.build(allocator, settings.cache_properties.?, "old-signature");
+    server.well_known_doc = .{ .body = try allocator.dupe(u8, "old-document"), .etag_hex = [_]u8{'0'} ** 64 };
+    var old_lease = try pool.acquireWorkerRuntime();
+    defer old_lease.deinit();
+    const old_policy = old_lease.runtime.policy_generation.?;
+    const reload_before = pool.reload_generation.load(.acquire);
+    const request: HttpRequestView = .{ .method = "GET", .url = "/", .headers = .empty, .body = null };
+
+    var next_contract = try sourceContractForTest(allocator, "/new", "NEW_KEY");
+    defer next_contract.deinit(allocator);
+    {
+        var bytes: ?[]const u8 = try source_allocator.dupe(u8, "function handler(req) { return Response.text('rejected'); }");
+        defer if (bytes) |code| source_allocator.free(code);
+        var candidate = try server.prepareSourceGeneration(source_allocator, &bytes, "rejected.ts", &next_contract, null);
+        defer candidate.deinit();
+        try std.testing.expect(bytes == null);
+        candidate.policy = .{ .env = .{ .enabled = true, .values = &.{ "DUP", "DUP" } } };
+        try std.testing.expectError(error.DuplicateEntry, server.replaceSourceGeneration(&candidate));
+        try std.testing.expect(candidate.source != null);
+        try std.testing.expect(candidate.contract != null);
+        try std.testing.expectEqualStrings(old_code, server.handler_code);
+        try std.testing.expectEqualStrings(old_code, pool.handler_code);
+        try std.testing.expectEqualStrings(initial_path, server.source_generation.?.filename);
+        try std.testing.expect(server.handler_code.ptr == initial_source);
+        try std.testing.expect(pool.handler_code.ptr == initial_source);
+        try std.testing.expect(server.contract.?.matchesRoute("GET", "/old"));
+        try std.testing.expect(!server.contract.?.matchesRoute("GET", "/new"));
+        try std.testing.expect(server.proof_checked != null);
+        try std.testing.expect(server.proof_cache != null);
+        try std.testing.expectEqualStrings("old-signature", server.attestation_headers.?.attest_value);
+        try std.testing.expectEqualStrings("old-document", server.well_known_doc.?.body);
+        try std.testing.expect(pool.policy_generation == old_policy);
+        try std.testing.expectEqual(reload_before, pool.reload_generation.load(.acquire));
+        try std.testing.expect(pool.config.handler_proof.result_safe);
+    }
+    {
+        var bytes: ?[]const u8 = try source_allocator.dupe(u8, "function handler(req) { return Response.text('new'); }");
+        defer if (bytes) |code| source_allocator.free(code);
+        var candidate = try server.prepareSourceGeneration(source_allocator, &bytes, "new.ts", &next_contract, null);
+        defer candidate.deinit();
+        _ = try server.replaceSourceGeneration(&candidate);
+        try std.testing.expect(candidate.source == null);
+        try std.testing.expect(candidate.contract == null);
+        try std.testing.expect(server.contract.?.matchesRoute("GET", "/new"));
+        try std.testing.expect(!server.contract.?.matchesRoute("GET", "/old"));
+        try std.testing.expect(server.proof_checked == null);
+        try std.testing.expect(server.proof_cache == null);
+        try std.testing.expect(server.attestation_headers == null);
+        try std.testing.expect(server.well_known_doc == null);
+        try std.testing.expect(!pool.config.handler_proof.result_safe);
+        try std.testing.expectEqual(contract_runtime.PoolingPolicy.reuse_bounded_by_count, pool.pooling_policy);
+        try std.testing.expect(pool.policy_generation.policy.allowsEnv("NEW_KEY"));
+        try std.testing.expect(!pool.policy_generation.policy.allowsEnv("OLD_KEY"));
+        var response = try pool.executeHandler(request);
+        defer response.deinit();
+        try std.testing.expectEqualStrings("new", response.body);
+    }
+    // A second source transition without a contract drops the old route filter.
+    // The retained runtime still owns its old executable and policy reference.
+    {
+        var bytes: ?[]const u8 = try source_allocator.dupe(u8, "function handler(req) { return Response.text('latest'); }");
+        defer if (bytes) |code| source_allocator.free(code);
+        var candidate = try server.prepareSourceGeneration(source_allocator, &bytes, "latest.ts", null, null);
+        defer candidate.deinit();
+        _ = try server.replaceSourceGeneration(&candidate);
+        try std.testing.expect(server.contract == null);
+        try std.testing.expectEqualStrings("new.ts", server.superseded_source.?.filename);
+        try std.testing.expectEqualStrings("latest.ts", server.handler_filename);
+        var response = try pool.executeHandler(request);
+        defer response.deinit();
+        try std.testing.expectEqualStrings("latest", response.body);
+    }
+    try std.testing.expect(old_policy.policy.allowsEnv("OLD_KEY"));
+    try std.testing.expect(!old_policy.policy.allowsEnv("NEW_KEY"));
+    try std.testing.expect(old_lease.runtime.config.handler_proof.result_safe);
+    var retained_response = try old_lease.runtime.executeHandler(request);
+    defer retained_response.deinit();
+    try std.testing.expectEqualStrings("old", retained_response.body);
+}
+
+test "source preparation failure no-pool and guard refusal preserve ownership" {
+    const allocator = std.testing.allocator;
+    var server = try Server.init(allocator, .{ .handler = .{ .inline_code = "function handler(req) { return Response.text('old'); }" }, .pool_size = 1 });
+    defer server.deinit();
+    var bytes: ?[]const u8 = try allocator.dupe(u8, "function handler(req) { return Response.text('new'); }");
+    defer if (bytes) |code| allocator.free(code);
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, server.prepareSourceGeneration(failing.allocator(), &bytes, "new.ts", null, null));
+    try std.testing.expect(bytes != null);
+    var candidate = try server.prepareSourceGeneration(allocator, &bytes, "new.ts", null, null);
+    defer candidate.deinit();
+    try std.testing.expect(bytes == null);
+    try std.testing.expectError(error.NoHandlerPool, server.replaceSourceGeneration(&candidate));
+    try std.testing.expect(candidate.source != null);
+    try std.testing.expect(server.source_generation == null);
+
+    server.pool = try HandlerPool.init(allocator, .{ .runtime_policy_index_required = true }, server.handler_code, "<old>", 1, 0);
+    const previous_policy = server.pool.?.policy_generation;
+    try std.testing.expectError(error.GuardedGenerationSwapRefused, server.replaceSourceGeneration(&candidate));
+    try std.testing.expect(server.pool.?.policy_generation == previous_policy);
+    try std.testing.expect(candidate.source != null);
+    try std.testing.expectEqualStrings("<inline>", server.handler_filename);
+    try std.testing.expectEqualStrings("function handler(req) { return Response.text('old'); }", server.pool.?.handler_code);
 }

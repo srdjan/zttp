@@ -1,8 +1,7 @@
 //! Native JS-callable runtime builtins extracted from the handler instance.
 //!
-//! Each `*Native` function matches the engine's native-fn signature
-//! (ctx_ptr, this, args) -> anyerror!zq.JSValue and is registered as a
-//! method on a JS prototype during runtime setup. The helpers used here
+//! HandlerInstance registers native adapters that pass explicit HTTP state
+//! to these body readers. The helpers used here
 //! (`beginBodyRead`, `getStringData`) live with the HTTP natives they
 //! belong to.
 
@@ -11,9 +10,8 @@ const zq = @import("zts");
 const http = @import("runtime_http.zig");
 const natives = @import("runtime_natives.zig");
 
-pub fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = http.beginBodyRead(ctx, this);
+pub fn bodyText(ctx: *zq.Context, state: ?*http.HttpState, allocator: std.mem.Allocator, this: zq.JSValue) anyerror!zq.JSValue {
+    const body_val = http.beginBodyRead(ctx, state, allocator, this);
     if (ctx.hasException()) return zq.JSValue.exception_val;
     if (body_val.isNull() or body_val.isUndefined()) {
         return ctx.createString("");
@@ -24,9 +22,8 @@ pub fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSVal
     return ctx.createString("");
 }
 
-pub fn bodyJsonNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
-    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = http.beginBodyRead(ctx, this);
+pub fn bodyJson(ctx: *zq.Context, state: ?*http.HttpState, allocator: std.mem.Allocator, this: zq.JSValue) anyerror!zq.JSValue {
+    const body_val = http.beginBodyRead(ctx, state, allocator, this);
     if (ctx.hasException()) return zq.JSValue.exception_val;
     if (body_val.isNull() or body_val.isUndefined()) {
         return zq.JSValue.undefined_val;

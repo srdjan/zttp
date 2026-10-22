@@ -37,6 +37,9 @@ pub const known_globals = @import("known_globals.zig");
 /// The capability enum a virtual module declares, and its canonical hash.
 pub const module_authorization = @import("module_authorization.zig");
 
+/// Callback-free module metadata shared by SDK declarations and analyzers.
+pub const module_descriptors = @import("zttp-sdk").descriptors;
+
 /// Which `Context.module_state` slot each subsystem owns.
 pub const module_slots = @import("module_slots.zig");
 

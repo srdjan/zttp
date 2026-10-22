@@ -174,10 +174,11 @@ pub const ParsedModule = struct {
 /// and must keep it alive for as long as any analyzer that received it, exactly
 /// like `ResolveOptions.type_env`.
 ///
-/// The index cannot live inside `ResolvedModule` or `CheckedModule`: both are
-/// returned by value, so a pointer into either dangles once the phase function
-/// returns. Caller storage is the only stable home, which is the same reason
-/// `CheckedModule` borrows `*const ResolvedModule`.
+/// A shared borrowed index cannot live inline inside `ResolvedModule` or
+/// `CheckedModule`: both move by value, so other analyzers' pointers into them
+/// would dangle. A checker's private fallback can live inline because it retains
+/// no pointer to its own storage. Shared facts need stable caller storage, as
+/// does the `ResolvedModule` that `CheckedModule` borrows.
 pub fn buildModuleFacts(
     allocator: std.mem.Allocator,
     parsed: ParsedModule,
@@ -194,6 +195,10 @@ pub const ResolveOptions = struct {
     /// When non-null, runs the TypeChecker as part of resolution. The pointed-to
     /// TypeEnv must outlive the returned ResolvedModule.
     type_env: ?*TypeEnv = null,
+    /// Canonical import index built from this parsed module. Kept separate
+    /// from module_facts, whose injected contract projections may be partial.
+    /// The caller keeps this storage stable for the resolved checker's lifetime.
+    type_import_facts: ?*const ModuleFacts = null,
     /// Default-on strict ZigTS profile (ZTS6xx). Type-directed rules run when
     /// type context exists; syntax/profile rules still run for untyped sources.
     strict: bool = true,
@@ -320,6 +325,7 @@ pub fn resolve(
             env,
         );
         errdefer tc.deinit();
+        tc.import_facts = opts.type_import_facts;
         // The strict checker reports a match that is not exhaustive as ZTS603,
         // so the type checker leaves its ZTS205 out when strict runs.
         tc.strict_checker_follows = opts.strict;
@@ -785,6 +791,7 @@ pub const ModuleAnalysisSession = struct {
         dispatch: ?*const PatternDispatchTable = null,
         has_default_response: bool = false,
         verification: ?VerificationInfo = null,
+        /// Borrowed immutably through path fact preparation and extraction.
         imported_effects: []const ImportedEffect = &.{},
     };
 
@@ -935,7 +942,7 @@ pub const ModuleAnalysisSession = struct {
         return self.completedContractFacts();
     }
 
-    /// Prepare path effect facts once and return the cached outcome.
+    /// Prepare path effect facts once and freeze their imported dependencies.
     ///
     /// Effect analysis failure is conservative for path coverage. The path
     /// generator receives `.unavailable` and reports recursion instead of
@@ -1045,6 +1052,7 @@ pub const ModuleAnalysisSession = struct {
     ) !void {
         if (self.state != .completed) return error.AnalysisNotCompleted;
         if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
+        try self.requireUnchangedPublishedEffects(context.imported_effects);
         self.contract_context = context;
     }
 
@@ -1054,7 +1062,29 @@ pub const ModuleAnalysisSession = struct {
     ) !void {
         if (self.state != .completed) return error.AnalysisNotCompleted;
         if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
+        try self.requireUnchangedPublishedEffects(imported_effects);
         self.contract_context.imported_effects = imported_effects;
+    }
+
+    fn requireUnchangedPublishedEffects(
+        self: *const ModuleAnalysisSession,
+        imported_effects: []const ImportedEffect,
+    ) !void {
+        if (self.path_effect_state == .unattempted) return;
+        // An unavailable attempt is cached too. Metadata may still change,
+        // but contract extraction must see the same effect-producing inputs.
+        const current = self.contract_context.imported_effects;
+        if (current.len != imported_effects.len) return error.ImportedEffectsFrozen;
+        for (current, imported_effects) |before, after| {
+            if (before.slot != after.slot or
+                std.meta.activeTag(before.effect) != std.meta.activeTag(after.effect))
+                return error.ImportedEffectsFrozen;
+            switch (before.effect) {
+                .callable => |row| if (!row.eql(after.effect.callable)) return error.ImportedEffectsFrozen,
+                .data => |row| if (!row.eql(after.effect.data)) return error.ImportedEffectsFrozen,
+                .blocked => {},
+            }
+        }
     }
 
     pub fn extractContract(
@@ -1111,6 +1141,7 @@ pub const ModuleAnalysisSession = struct {
             .type_env = self.type_env_storage.envPtr(),
             .strict = self.full_opts.strict,
             .module_facts = &self.contract_facts.?,
+            .type_import_facts = &self.contract_facts.?,
             .policy_sections = self.full_opts.policy_sections,
         });
         if (self.resolved.?.type_checker) |*checker| try checker.ensureHealthy();
@@ -1149,6 +1180,7 @@ pub const ModuleAnalysisSession = struct {
             .type_env = self.type_env_storage.envPtr(),
             .strict = self.extraction_opts.strict,
             .module_facts = resolution_facts,
+            .type_import_facts = resolution_facts,
         });
         self.resolution_state = .completed;
         const resolved = &self.resolved.?;
@@ -1183,6 +1215,12 @@ pub const ModuleAnalysisSession = struct {
             self.type_env_storage.envPtr().?,
         );
         const checker = &self.standalone_checker.?;
+        checker.import_facts = if (self.resolution_facts) |*facts_value|
+            facts_value
+        else if (self.contract_facts) |*facts_value|
+            facts_value
+        else
+            null;
         _ = try checker.check(self.parsed.root);
         try checker.ensureHealthy();
         self.contract_type_state = .completed;
@@ -1276,6 +1314,7 @@ pub const ModuleAnalysisSession = struct {
             self.extraction_type_env_storage.envPtr().?,
         );
         const checker = &self.extraction_checker.?;
+        checker.import_facts = if (self.resolution_facts) |*facts_value| facts_value else null;
         _ = try self.extraction_opts.type_check(checker, self.parsed.root);
         try self.prepareContractFacts(true);
         try checker.ensureHealthy();
@@ -2125,6 +2164,32 @@ test "ModuleAnalysisSession requires completion and permits one extraction" {
     );
 }
 
+test "partial contract facts do not suppress imported export type diagnostics" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator,
+        \\import { sha256 as digest } from "zttp:crypto";
+        \\digest("a", "b");
+    );
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var storage: TypeEnvStorage = .{};
+    try storage.initWithSource(allocator, .omitted);
+    defer storage.deinit(allocator);
+    var partial = ModuleFacts{ .allocator = allocator };
+    defer partial.deinit();
+    var resolved = try resolve(allocator, parsed, .{
+        .type_env = storage.envPtr(),
+        .strict = false,
+        .module_facts = &partial,
+    });
+    defer resolved.deinit();
+    try testing.expectEqual(@as(u32, 1), resolved.typeErrorCount());
+    const diagnostic = resolved.type_checker.?.getDiagnostics()[0];
+    try testing.expectEqual(type_checker_mod.DiagnosticKind.arg_count_mismatch, diagnostic.kind);
+    try testing.expect(std.mem.indexOf(u8, diagnostic.message, "expected 1, got 2") != null);
+}
+
 test "ModuleAnalysisSession caches unavailable path effects after one attempt" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(
@@ -2140,6 +2205,7 @@ test "ModuleAnalysisSession caches unavailable path effects after one attempt" {
     try analysis.initContractOnly(failing.allocator(), parsed, .{});
     defer analysis.deinit();
     try analysis.complete();
+    const changed = [_]ImportedEffect{.{ .slot = 0, .effect = .{ .callable = .{ .writes = true } } }};
 
     failing.fail_index = failing.alloc_index;
     switch (try analysis.pathEffectFacts()) {
@@ -2149,9 +2215,125 @@ test "ModuleAnalysisSession caches unavailable path effects after one attempt" {
     try testing.expect(failing.has_induced_failure);
 
     failing.fail_index = std.math.maxInt(usize);
+    try testing.expectError(error.ImportedEffectsFrozen, analysis.setImportedEffects(&changed));
+    try testing.expectError(error.ImportedEffectsFrozen, analysis.setContractContext(.{ .imported_effects = &changed }));
+    try analysis.setContractContext(.{ .has_default_response = true });
     switch (try analysis.pathEffectFacts()) {
         .unavailable => {},
         .complete => return error.UnavailableEffectFactsExpected,
+    }
+}
+
+test "ModuleAnalysisSession freezes imported summaries for paths and contracts" {
+    const allocator = testing.allocator;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator,
+        \\import { run } from "./helper.ts";
+        \\function handler(req) { run(); return Response.text("ok"); }
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, &atoms);
+
+    for ([_]ModuleAnalysisSession.Profile{ .contract_only, .sound_extraction, .full }) |profile| {
+        for ([_]bool{ false, true }) |writes| {
+            var analysis: ModuleAnalysisSession = .{};
+            switch (profile) {
+                .contract_only => try analysis.initContractOnly(allocator, parsed, .{}),
+                .sound_extraction => try analysis.initSoundExtraction(allocator, parsed, .{ .strict = false }),
+                .full => try analysis.initFull(allocator, parsed, .{ .strict = false }),
+            }
+            defer analysis.deinit();
+            try analysis.complete();
+            const facts_ptr = try analysis.facts();
+            try testing.expectEqual(@as(usize, 1), facts_ptr.imports.items.len);
+            const slot = facts_ptr.imports.items[0].slot;
+            const selected = [_]ImportedEffect{.{ .slot = slot, .effect = .{ .callable = .{ .writes = writes } } }};
+            const changed = [_]ImportedEffect{.{ .slot = slot, .effect = .{ .callable = .{ .writes = !writes } } }};
+
+            // Completion still permits dependency assembly. Both setters can
+            // replace a genuinely different summary before facts are requested.
+            try analysis.setImportedEffects(&changed);
+            try analysis.setContractContext(.{ .imported_effects = &selected });
+            try analysis.setImportedEffects(&changed);
+            try analysis.setImportedEffects(&selected);
+            const path_effects = switch (try analysis.pathEffectFacts()) {
+                .complete => |effects| effects,
+                .unavailable => return error.EffectFactsExpected,
+            };
+            const path_row = path_effects.lookup("handler") orelse return error.FunctionNotFound;
+            try testing.expectEqual(writes, path_row.writes);
+            try testing.expect(!path_row.lower_bound);
+
+            try testing.expectError(error.ImportedEffectsFrozen, analysis.setImportedEffects(&changed));
+            try testing.expectError(error.ImportedEffectsFrozen, analysis.setContractContext(.{
+                .imported_effects = &changed,
+                .has_default_response = true,
+            }));
+            try testing.expect(!analysis.contract_context.has_default_response);
+
+            // Equal values in separate storage do not change dependencies.
+            // Verification and dispatch metadata may arrive after path facts.
+            const equivalent = selected;
+            const verification = VerificationInfo{
+                .exhaustive_returns = true,
+                .results_safe = true,
+                .unreachable_code = true,
+            };
+            var dispatch = PatternDispatchTable.init(allocator);
+            defer dispatch.deinit();
+            try analysis.setImportedEffects(&equivalent);
+            try analysis.setContractContext(.{
+                .imported_effects = &equivalent,
+                .dispatch = &dispatch,
+                .has_default_response = true,
+                .verification = verification,
+            });
+            var contract = try analysis.extractContract("frozen.ts");
+            defer contract.deinit(allocator);
+            const properties = contract.properties orelse return error.PropertiesMissing;
+            try testing.expectEqual(!writes, properties.read_only);
+            try testing.expectEqual(verification, contract.verification.?);
+            try testing.expect(contract.aot.?.has_default);
+            const cached = switch (try analysis.pathEffectFacts()) {
+                .complete => |effects| effects,
+                .unavailable => return error.EffectFactsExpected,
+            };
+            try testing.expect(path_effects == cached);
+            try testing.expectEqual(writes, cached.lookup("handler").?.writes);
+        }
+    }
+}
+
+test "ModuleAnalysisSession frozen imported effects retain slots and result kinds" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator, "function handler(req) { return Response.text('ok'); }");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    const outcomes = [_]ExportEffect{ .{ .callable = .{} }, .{ .data = .{} }, .blocked };
+    for (outcomes, 0..) |outcome, index| {
+        var analysis: ModuleAnalysisSession = .{};
+        try analysis.initContractOnly(allocator, parsed, .{});
+        defer analysis.deinit();
+        try analysis.complete();
+        const selected = [_]ImportedEffect{.{ .slot = 0, .effect = outcome }};
+        try analysis.setImportedEffects(&selected);
+        _ = try analysis.pathEffectFacts();
+        const equivalent = selected;
+        try analysis.setImportedEffects(&equivalent);
+        try analysis.setContractContext(.{ .imported_effects = &equivalent });
+        for (outcomes, 0..) |other, other_index| {
+            if (index == other_index) continue;
+            const changed = [_]ImportedEffect{.{ .slot = 0, .effect = other }};
+            try testing.expectError(error.ImportedEffectsFrozen, analysis.setImportedEffects(&changed));
+        }
+        const changed_slot = [_]ImportedEffect{.{ .slot = 1, .effect = outcome }};
+        try testing.expectError(error.ImportedEffectsFrozen, analysis.setImportedEffects(&changed_slot));
+        try testing.expectError(error.ImportedEffectsFrozen, analysis.setImportedEffects(&.{}));
     }
 }
 

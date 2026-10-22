@@ -6,6 +6,7 @@
 //!
 //! The list is a fixed array; the build adds no third-party modules.
 
+const descriptors = @import("zts-base").module_descriptors;
 const mb = @import("module_binding.zig");
 const adapter = @import("module_binding_adapter.zig");
 const ModuleBinding = mb.ModuleBinding;
@@ -74,6 +75,10 @@ pub const builtins = [_]ModuleBinding{
 
 /// The registry: the core built-ins.
 pub const all = builtins;
+
+/// Semantic metadata projected in registration order from the runtime declarations.
+/// Runtime registration and registry identity continue to use `all`.
+pub const metadata = descriptors.describeModules(&all);
 
 /// Number of built-in modules.
 pub const count = all.len;
@@ -145,6 +150,24 @@ comptime {
 pub fn fromSpecifier(specifier: []const u8) ?*const ModuleBinding {
     for (&all) |*b| {
         if (std.mem.eql(u8, b.specifier, specifier)) return b;
+    }
+    return null;
+}
+
+/// Look up semantic metadata without exposing callbacks or lifecycle hooks.
+pub fn descriptorFromSpecifier(specifier: []const u8) ?*const descriptors.ModuleDescriptor {
+    for (&metadata) |*descriptor| {
+        if (std.mem.eql(u8, descriptor.specifier, specifier)) return descriptor;
+    }
+    return null;
+}
+
+pub fn findDescriptor(specifier: []const u8, export_name: []const u8) ?descriptors.ExportDescriptor {
+    const descriptor = descriptorFromSpecifier(specifier) orelse return null;
+    for (descriptor.exports) |*function| {
+        if (std.mem.eql(u8, function.name, export_name)) {
+            return .{ .module = descriptor, .function = function };
+        }
     }
     return null;
 }
@@ -398,4 +421,34 @@ test "the builder's copy of the zttp:validate keyword list matches the module's"
     const builder_list = &@import("zts-base").validate_keywords.supported;
     try std.testing.expectEqual(module_list.len, builder_list.len);
     for (module_list, builder_list) |a, b| try std.testing.expectEqualStrings(a, b);
+}
+
+test "semantic descriptors preserve every builtin payload and registration order" {
+    try std.testing.expectEqual(@as(usize, 21), metadata.len);
+    try std.testing.expectEqual(all.len, metadata.len);
+    for (all, metadata) |binding, descriptor| {
+        inline for (std.meta.fields(descriptors.ModuleDescriptor)) |field| {
+            if (comptime !std.mem.eql(u8, field.name, "exports")) {
+                try std.testing.expectEqualDeep(@field(binding, field.name), @field(descriptor, field.name));
+            }
+        }
+        try std.testing.expect(binding.exports.len > 0);
+        try std.testing.expectEqual(binding.exports.len, descriptor.exports.len);
+        for (binding.exports, descriptor.exports) |function, semantic| {
+            inline for (std.meta.fields(descriptors.FunctionDescriptor)) |field| {
+                if (comptime std.mem.eql(u8, field.name, "return_labels") or std.mem.eql(u8, field.name, "declassifies")) {
+                    inline for (std.meta.fields(descriptors.LabelSet)) |label| {
+                        try std.testing.expectEqual(@field(@field(function, field.name), label.name), @field(@field(semantic, field.name), label.name));
+                    }
+                } else {
+                    try std.testing.expectEqualDeep(@field(function, field.name), @field(semantic, field.name));
+                }
+            }
+            const found = findDescriptor(binding.specifier, function.name).?;
+            try std.testing.expectEqualStrings(descriptor.specifier, found.module.specifier);
+            try std.testing.expectEqualStrings(semantic.name, found.function.name);
+        }
+    }
+    try std.testing.expect(descriptorFromSpecifier("zttp:unknown") == null);
+    try std.testing.expect(findDescriptor("zttp:env", "missing") == null);
 }

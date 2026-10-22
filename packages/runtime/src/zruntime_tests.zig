@@ -1298,6 +1298,32 @@ test "body readers are single-use for inbound and constructed HTTP objects" {
     rt.resetForNextRequest();
 }
 
+test "HTTP body consumption resets for request reuse and pool release" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try HandlerInstance.init(allocator, .{ .use_hybrid_allocation = false });
+    defer rt.deinit();
+    try rt.loadHandler("function handler(req) { return req.text(); }", "<body-reset>");
+    const request = try rt.createRequestObject(.{ .method = "POST", .url = "/", .headers = .empty, .body = "ping" });
+    // Keep the same object alive across resets so allocating a fresh object
+    // cannot conceal stale body-consumption tracking.
+    try rt.ctx.setGlobal(try rt.ctx.atoms.intern("held"), request);
+
+    const resetters = [_]*const fn (*HandlerInstance) void{
+        HandlerInstance.resetForNextRequest,
+        HandlerInstance.prepareForPoolRelease,
+    };
+    for (resetters) |reset| {
+        const first = try rt.callGlobalFunction("handler", &.{request});
+        try std.testing.expectEqualStrings("ping", first.toPtr(zq.JSString).data());
+        reset(rt);
+        const reused = try rt.callGlobalFunction("handler", &.{request});
+        try std.testing.expectEqualStrings("ping", reused.toPtr(zq.JSString).data());
+        reset(rt);
+    }
+}
+
 test "fetchSync returns response helpers and direct response objects" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -2523,7 +2549,7 @@ test "buildFetchUrl appends a dynamic query to a literal base and percent-encode
     const init = try rt.ctx.createObject(null);
     try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("query"), query.toValue());
 
-    const url = switch (try buildFetchUrl(rt, pool, "https://api.open-meteo.com/v1/forecast", init)) {
+    const url = switch (try buildFetchUrl(rt.httpView(), pool, "https://api.open-meteo.com/v1/forecast", init)) {
         .ok => |u| u,
         .err => return error.UnexpectedFetchUrlError,
     };
@@ -2549,7 +2575,7 @@ test "buildFetchUrl returns a copy of the literal base when there is no query" {
     const init = try rt.ctx.createObject(null);
     try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("method"), try rt.ctx.createString("GET"));
 
-    const url = switch (try buildFetchUrl(rt, pool, "https://api.open-meteo.com/v1/forecast", init)) {
+    const url = switch (try buildFetchUrl(rt.httpView(), pool, "https://api.open-meteo.com/v1/forecast", init)) {
         .ok => |u| u,
         .err => return error.UnexpectedFetchUrlError,
     };
@@ -2573,7 +2599,7 @@ test "buildFetchUrl uses & when the literal base already has a query string" {
     const init = try rt.ctx.createObject(null);
     try rt.ctx.setPropertyChecked(init, try rt.ctx.atoms.intern("query"), query.toValue());
 
-    const url = switch (try buildFetchUrl(rt, pool, "https://api.example.com/v1?format=json", init)) {
+    const url = switch (try buildFetchUrl(rt.httpView(), pool, "https://api.example.com/v1?format=json", init)) {
         .ok => |u| u,
         .err => return error.UnexpectedFetchUrlError,
     };

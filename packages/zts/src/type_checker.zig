@@ -27,6 +27,7 @@ const type_env_mod = @import("type_env.zig");
 const abi_types = @import("abi_types.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 const ir_json_literal = @import("ir_json_literal.zig");
+const module_facts_mod = @import("module_facts.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -130,6 +131,12 @@ pub const TypeChecker = struct {
     env: *TypeEnv,
     diagnostics: std.ArrayListUnmanaged(Diagnostic),
     compiled_schemas: std.ArrayListUnmanaged(CompiledSchemaType),
+    /// Canonical import facts borrowed from a stable analysis owner. Contract
+    /// extraction's optional partial facts are a different authority.
+    import_facts: ?*const module_facts_mod.ModuleFacts = null,
+    /// Direct checker users own one fallback index. Never retain a pointer
+    /// into this field: the checker can move by value after checking.
+    owned_import_facts: ?module_facts_mod.ModuleFacts = null,
 
     /// Inferred types for const/let bindings: packed(scope_id, slot) -> TypeIndex
     binding_types: std.AutoHashMapUnmanaged(u64, TypeIndex),
@@ -208,6 +215,7 @@ pub const TypeChecker = struct {
     }
 
     pub fn deinit(self: *TypeChecker) void {
+        if (self.owned_import_facts) |*facts| facts.deinit();
         for (self.diagnostics.items) |diag| {
             if (diag.allocated) {
                 self.allocator.free(diag.message);
@@ -234,6 +242,15 @@ pub const TypeChecker = struct {
     /// Run the checker on the given root node. Returns the number of errors.
     pub fn check(self: *TypeChecker, root: NodeIndex) !u32 {
         try self.ensureHealthy();
+        if (self.import_facts == null and self.owned_import_facts == null) {
+            errdefer self.markAllocationFailure();
+            self.owned_import_facts = try module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                null,
+            );
+        }
         // Before the main walk, so a call to a predicate declared later in the
         // file still narrows. A predicate whose body is not an admitted test is
         // rejected here and installs nothing anywhere.
@@ -3645,31 +3662,15 @@ pub const TypeChecker = struct {
     /// publish }` never matched, so the export's checks were skipped under an
     /// alias; and a handler's own `function send(...)` matched, so a local
     /// function was checked against a module export's declaration. The import
-    /// record carries `imported_atom` - the name in the source module - and
-    /// the specifier, which together identify the export exactly.
+    /// shared record carries the original export name and module specifier,
+    /// which together identify the export exactly.
     fn resolveImportedExport(
         self: *const TypeChecker,
         callee_binding: ir.BindingRef,
-    ) ?@TypeOf(@import("zts-engine").builtin_modules.findExport("", "").?) {
-        const builtin_modules = @import("zts-engine").builtin_modules;
-        const node_count = self.ir_view.nodeCount();
-        var idx: NodeIndex = 0;
-        while (idx < node_count) : (idx += 1) {
-            if (self.ir_view.getTag(idx) != .import_decl) continue;
-            const decl = self.ir_view.getImportDecl(idx) orelse continue;
-            const specifier = self.ir_view.getString(decl.module_idx) orelse continue;
-            var i: u8 = 0;
-            while (i < decl.specifiers_count) : (i += 1) {
-                const spec_idx = self.ir_view.getListIndex(decl.specifiers_start, i);
-                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
-                if (spec.kind != .named) continue;
-                if (spec.local_binding.slot != callee_binding.slot) continue;
-                if (spec.local_binding.kind != callee_binding.kind) continue;
-                const imported = self.resolveAtomName(spec.imported_atom) orelse continue;
-                if (builtin_modules.findExport(specifier, imported)) |entry| return entry;
-            }
-        }
-        return null;
+    ) ?@import("zts-base").module_descriptors.ExportDescriptor {
+        const facts = self.import_facts orelse
+            if (self.owned_import_facts) |*owned| owned else return null;
+        return facts.builtinDescriptorForNamedReference(callee_binding);
     }
 
     /// The `json_encodable_args` positions of the module export `call` names,
@@ -3679,11 +3680,11 @@ pub const TypeChecker = struct {
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
         const entry = self.resolveImportedExport(binding) orelse return;
-        for (entry.func.json_encodable_args) |position| {
+        for (entry.function.json_encodable_args) |position| {
             if (position >= call.args_count) continue;
             const arg_idx = self.ir_view.getListIndex(call.args_start, position);
             var site_buf: [128]u8 = undefined;
-            const site = std.fmt.bufPrint(&site_buf, "{s}.{s}", .{ entry.binding.specifier, entry.func.name }) catch entry.func.name;
+            const site = std.fmt.bufPrint(&site_buf, "{s}.{s}", .{ entry.module.specifier, entry.function.name }) catch entry.function.name;
             self.reportIfUnencodable(arg_idx, site);
         }
     }
@@ -3692,8 +3693,8 @@ pub const TypeChecker = struct {
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
         const entry = self.resolveImportedExport(binding) orelse return;
-        if (!std.mem.eql(u8, entry.binding.specifier, "zttp:collections") or
-            !std.mem.eql(u8, entry.func.name, "dictFilter") or
+        if (!std.mem.eql(u8, entry.module.specifier, "zttp:collections") or
+            !std.mem.eql(u8, entry.function.name, "dictFilter") or
             call.args_count < 2)
         {
             return;
@@ -3795,8 +3796,8 @@ pub const TypeChecker = struct {
         // whatever the types are. The lower bound is checked below.
         if (bound_metadata == null) {
             if (self.resolveImportedExport(binding)) |entry| {
-                if (call.args_count > entry.func.arg_count) {
-                    self.addArgCountMismatch(node, entry.func.arg_count, @intCast(call.args_count));
+                if (call.args_count > entry.function.arg_count) {
+                    self.addArgCountMismatch(node, entry.function.arg_count, @intCast(call.args_count));
                     return;
                 }
             }
@@ -4823,6 +4824,10 @@ fn freeSeenDiagnostics(allocator: std.mem.Allocator, seen: []SeenDiagnostic) voi
 /// Type check `source` and return its diagnostics. `strict_follows` is the
 /// flag the pipeline sets when the strict checker runs after this one.
 fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_follows: bool) ![]SeenDiagnostic {
+    return typedDiagnosticsWithImportFacts(allocator, source, strict_follows, false);
+}
+
+fn typedDiagnosticsWithImportFacts(allocator: std.mem.Allocator, source: []const u8, strict_follows: bool, borrow_imports: bool) ![]SeenDiagnostic {
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
@@ -4845,8 +4850,14 @@ fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_fol
         .atoms = &atoms,
     } });
 
+    var import_facts: ?module_facts_mod.ModuleFacts = if (borrow_imports)
+        try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, null)
+    else
+        null;
+    defer if (import_facts) |*facts| facts.deinit();
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer checker.deinit();
+    checker.import_facts = if (import_facts) |*facts| facts else null;
     checker.strict_checker_follows = strict_follows;
     _ = try checker.check(root);
 
@@ -5424,6 +5435,150 @@ test "TypeChecker: a module export is called with its declared arguments" {
         \\  return Response.text(sha256("a"));
         \\}
     , 0, 0);
+}
+
+test "TypeChecker import diagnostics preserve aliases shadows and first successful export" {
+    const allocator = std.testing.allocator;
+    const Case = struct { source: []const u8, errors: usize, message: []const u8 = "expected 1, got 2" };
+    const cases = [_]Case{
+        .{ .source = "import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .errors = 1 },
+        .{ .source = "import { sha256 as digest } from 'zttp-ext:unknown'; digest('a', 'b');", .errors = 0 },
+        .{ .source = "function sha256(a, b) { return a; } sha256('a', 'b');", .errors = 0 },
+        .{ .source = "import { sha256 as digest } from 'zttp:crypto'; function run(digest) { return digest('a', 'b'); }", .errors = 0 },
+        .{ .source = "import { missing as digest } from 'zttp:crypto'; import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .errors = 1 },
+        .{ .source = "import { missing as digest } from 'zttp-ext:unknown'; import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .errors = 1 },
+        .{ .source = "import { sha256 as digest } from 'zttp:crypto'; import { jwtVerify as digest } from 'zttp:auth'; digest('a', 'b', 'c');", .errors = 1, .message = "expected 1, got 3" },
+    };
+    for ([_]bool{ false, true }) |borrow_imports| {
+        for (cases) |case| {
+            const seen = try typedDiagnosticsWithImportFacts(allocator, case.source, false, borrow_imports);
+            defer freeSeenDiagnostics(allocator, seen);
+            try std.testing.expectEqual(case.errors, seen.len);
+            for (seen) |diagnostic| {
+                try std.testing.expectEqual(DiagnosticKind.arg_count_mismatch, diagnostic.kind);
+                try std.testing.expectEqual(Severity.err, diagnostic.severity);
+                try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, case.message) != null);
+            }
+        }
+    }
+}
+
+test "TypeChecker import policy compares named kind and slot without scope or local name" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |borrow_imports| {
+        for ([_]Node.ImportSpec.ImportKind{ .named, .default, .namespace }) |import_kind| {
+            for ([_]bool{ false, true }) |same_kind| {
+                var atoms = context.AtomTable.init(allocator);
+                defer atoms.deinit();
+                var parser = try @import("zts-engine").parser.JsParser.init(allocator, "digest('a', 'b');");
+                defer parser.deinit();
+                parser.setAtomTable(&atoms);
+                const root = try parser.parse();
+                const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+                var call_node: NodeIndex = null_node;
+                for (0..view.nodeCount()) |index| {
+                    const node: NodeIndex = @intCast(index);
+                    if (view.getTag(node) == .call) {
+                        call_node = node;
+                        break;
+                    }
+                }
+                try std.testing.expect(call_node != null_node);
+                const call = view.getCall(call_node).?;
+                const binding = view.getBinding(call.callee).?;
+                try std.testing.expect(binding.kind != .local);
+                var import_binding = binding;
+                import_binding.scope_id = 9000;
+                import_binding.name_atom = @intCast(@intFromEnum(try atoms.intern("other")));
+                if (!same_kind) import_binding.kind = .local;
+                const loc = view.getLoc(call_node).?;
+                // Append a declaration independently of the source spelling so
+                // the exact import-kind and binding-kind policy is exercised.
+                const spec = try parser.nodes.add(.{ .tag = .import_specifier, .loc = loc, .data = .{ .import_spec = .{
+                    .kind = import_kind,
+                    .imported_atom = @intCast(@intFromEnum(try atoms.intern("sha256"))),
+                    .local_binding = import_binding,
+                } } });
+                const specs = try parser.nodes.addIndexList(&.{spec});
+                _ = try parser.nodes.add(.{ .tag = .import_decl, .loc = loc, .data = .{ .import_decl = .{
+                    .module_idx = try parser.constants.addString("zttp:crypto"),
+                    .specifiers_start = specs,
+                    .specifiers_count = 1,
+                } } });
+                var facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+                defer facts.deinit();
+                var pool = TypePool.init(allocator);
+                defer pool.deinit(allocator);
+                var env = TypeEnv.init(allocator, &pool);
+                defer env.deinit();
+                var checker = TypeChecker.init(allocator, view, &atoms, &env);
+                defer checker.deinit();
+                if (borrow_imports) checker.import_facts = &facts;
+                // Public inference remains usable before check and does not
+                // introduce the call-argument diagnostics from the walk.
+                try std.testing.expectEqual(null_type_idx, checker.inferTypeWithoutDiagnostics(call_node));
+                try std.testing.expectEqual(@as(usize, 0), checker.getDiagnostics().len);
+                const expected: u32 = if (import_kind == .named and same_kind) 1 else 0;
+                try std.testing.expectEqual(expected, try checker.check(root));
+                try std.testing.expectEqual(expected, checker.getDiagnostics().len);
+                if (expected == 1) {
+                    const diagnostic = checker.getDiagnostics()[0];
+                    try std.testing.expectEqual(DiagnosticKind.arg_count_mismatch, diagnostic.kind);
+                    try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "expected 1, got 2") != null);
+                }
+            }
+        }
+    }
+}
+
+test "TypeChecker owned import cache survives moving a checked value" {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');");
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    const Builder = struct {
+        fn checked(a: std.mem.Allocator, ir_view: IrView, table: *context.AtomTable, type_env: *TypeEnv, program: NodeIndex) !TypeChecker {
+            var value = TypeChecker.init(a, ir_view, table, type_env);
+            errdefer value.deinit();
+            try std.testing.expectEqual(@as(u32, 1), try value.check(program));
+            return value;
+        }
+    };
+    var checker = try Builder.checked(allocator, view, &atoms, &env, root);
+    defer checker.deinit();
+    const cached = checker.owned_import_facts.?.imports.items.ptr;
+    try std.testing.expectEqual(@as(u32, 2), try checker.check(root));
+    try std.testing.expect(cached == checker.owned_import_facts.?.imports.items.ptr);
+    try std.testing.expectEqual(DiagnosticKind.arg_count_mismatch, checker.getDiagnostics()[1].kind);
+    try std.testing.expect(std.mem.indexOf(u8, checker.getDiagnostics()[1].message, "expected 1, got 2") != null);
+}
+
+test "TypeChecker import cache allocation failure stays unproven after allocator recovery" {
+    const allocator = std.testing.allocator;
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "import { sha256 } from 'zttp:crypto'; sha256('a', 'b');");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var checker = TypeChecker.init(failing.allocator(), view, null, &env);
+    defer checker.deinit();
+    try std.testing.expectError(error.OutOfMemory, checker.check(root));
+    try std.testing.expect(failing.has_induced_failure);
+    failing.fail_index = std.math.maxInt(usize);
+    try std.testing.expectError(error.OutOfMemory, checker.ensureHealthy());
+    try std.testing.expectError(error.OutOfMemory, checker.check(root));
 }
 
 test "TypeChecker: a call with exactly the declared arguments is accepted" {

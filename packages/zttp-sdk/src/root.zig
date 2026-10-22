@@ -1,6 +1,7 @@
 pub const handles = @import("handle.zig");
 pub const value = @import("value.zig");
 pub const binding = @import("binding.zig");
+pub const descriptors = @import("descriptors.zig");
 pub const capability = @import("capability.zig");
 pub const context = @import("context.zig");
 pub const crypto = @import("crypto.zig");

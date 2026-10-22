@@ -105,6 +105,18 @@ pub fn add(ctx: Context) Result {
         }),
     });
     const run_sdk_tests = ctx.addRunTest(sdk_tests);
+    // The schema is a std-only root: importing SDK as a dependency would not
+    // collect its tests or establish that it needs no runtime module imports.
+    const descriptor_tests = ctx.addTest(.{
+        .name = "zttp-descriptors",
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = zttp_sdk_dep.path("src/descriptors.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    run_sdk_tests.step.dependOn(&ctx.addRunTest(descriptor_tests).step);
     const sdk_test_step = b.step("test-sdk", "Run zttp-sdk tests");
     sdk_test_step.dependOn(&run_sdk_tests.step);
 
