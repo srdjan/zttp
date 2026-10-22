@@ -4649,8 +4649,11 @@ fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
     const allocation_shape: [5]usize = switch (case) {
-        .plain, .same_line => .{ 55, 0, 0, 11, 15965 },
-        .reordered => .{ 55, 0, 0, 11, 15949 },
+        // Parser scratch now retains one allocation through the parser's
+        // lifetime. Signature replay's capacity/order assertions below remain
+        // independent of this deliberately changed parser allocation shape.
+        .plain, .same_line => .{ 55, 0, 0, 10, 16097 },
+        .reordered => .{ 55, 0, 0, 10, 16081 },
     };
     try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
@@ -4728,7 +4731,7 @@ test "direct signature replay retains exact nested generic arrow and same-line o
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
-    try std.testing.expectEqual([5]usize{ 20, 0, 0, 2, 4543 }, direct_count.shape());
+    try std.testing.expectEqual([5]usize{ 20, 0, 0, 1, 4675 }, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
     var direct_pool = TypePool.init(allocator);
     defer direct_pool.deinit(allocator);
@@ -4839,10 +4842,10 @@ fn growthExpectSignatureKind(
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
     const allocation_shape: [5]usize = switch (case) {
-        .parameter, .arrow => .{ 13, 0, 0, 1, 3124 },
-        .return_value => .{ 12, 0, 0, 1, 2913 },
-        .guard => .{ 13, 0, 0, 1, 3125 },
-        .generic_only => .{ 13, 0, 0, 1, 3128 },
+        .parameter, .arrow => .{ 13, 0, 0, 0, 3256 },
+        .return_value => .{ 12, 0, 0, 0, 3045 },
+        .guard => .{ 13, 0, 0, 0, 3257 },
+        .generic_only => .{ 13, 0, 0, 0, 3260 },
     };
     try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);

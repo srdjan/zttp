@@ -417,22 +417,33 @@ pub const Tokenizer = struct {
 
     // --- Literal scanning ---
 
+    fn stringToken(self: *const Tokenizer, start: u32, col: u32, line: u32, kind: TokenType, has_escape: bool) Token {
+        var result = self.tokN(start, col, line, kind);
+        result.has_escape = has_escape;
+        return result;
+    }
+
     fn scanString(self: *Tokenizer, quote: u8, start: u32, col: u32, line: u32) Token {
         return self.scanStringCore(quote, start, col, line, &.{});
     }
 
     fn scanStringCore(self: *Tokenizer, quote: u8, start: u32, col: u32, line: u32, erasures: []const RecoveryErasure) Token {
         var erasure_index: usize = 0;
+        var has_escape = false;
         while (self.pos < self.source.len) {
             const byte = self.recoveryByte(self.pos, erasures, &erasure_index);
             if (byte == quote) break;
             if (byte == '\\' and self.pos + 1 < self.source.len) {
+                has_escape = true;
                 if (self.recoveryByte(self.pos + 1, erasures, &erasure_index) == '\n') {
                     self.line += 1;
                     self.line_start = self.pos + 2;
                 }
                 self.pos += 2;
             } else {
+                // Recovery erases bytes only for scanning. Consumers still
+                // decode the original token slice, including its backslashes.
+                if (erasures.len > 0 and self.source[self.pos] == '\\') has_escape = true;
                 if (byte == '\n') {
                     self.line += 1;
                     self.line_start = self.pos + 1;
@@ -441,7 +452,7 @@ pub const Tokenizer = struct {
             }
         }
         if (self.pos < self.source.len) self.pos += 1;
-        return self.tokN(start, col, line, .string_literal);
+        return self.stringToken(start, col, line, .string_literal, has_escape);
     }
 
     fn recoveryByte(self: *const Tokenizer, offset: u32, erasures: []const RecoveryErasure, index: *usize) u8 {
@@ -452,16 +463,18 @@ pub const Tokenizer = struct {
     }
 
     fn scanTemplateLiteral(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
+        var has_escape = false;
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
             if (c == '`') {
                 self.pos += 1;
-                return self.tokN(start, col, line, .template_literal);
+                return self.stringToken(start, col, line, .template_literal, has_escape);
             } else if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
                 self.pos += 2;
                 self.template_depth +|= 1;
-                return self.tokN(start, col, line, .template_head);
+                return self.stringToken(start, col, line, .template_head, has_escape);
             } else if (c == '\\' and self.pos + 1 < self.source.len) {
+                has_escape = true;
                 if (self.source[self.pos + 1] == '\n') {
                     self.line += 1;
                     self.line_start = self.pos + 2;
@@ -475,20 +488,22 @@ pub const Tokenizer = struct {
                 self.pos += 1;
             }
         }
-        return self.tokN(start, col, line, .template_literal);
+        return self.stringToken(start, col, line, .template_literal, has_escape);
     }
 
     fn scanTemplateMiddleOrTail(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
+        var has_escape = false;
         while (self.pos < self.source.len) {
             const c = self.source[self.pos];
             if (c == '`') {
                 self.pos += 1;
                 self.template_depth -|= 1;
-                return self.tokN(start, col, line, .template_tail);
+                return self.stringToken(start, col, line, .template_tail, has_escape);
             } else if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
                 self.pos += 2;
-                return self.tokN(start, col, line, .template_middle);
+                return self.stringToken(start, col, line, .template_middle, has_escape);
             } else if (c == '\\' and self.pos + 1 < self.source.len) {
+                has_escape = true;
                 if (self.source[self.pos + 1] == '\n') {
                     self.line += 1;
                     self.line_start = self.pos + 2;
@@ -503,7 +518,7 @@ pub const Tokenizer = struct {
             }
         }
         self.template_depth -|= 1;
-        return self.tokN(start, col, line, .template_tail);
+        return self.stringToken(start, col, line, .template_tail, has_escape);
     }
 
     /// Advance over a run of digits accepted by `accept`, treating `_` as a
@@ -905,6 +920,34 @@ test "template literals" {
     try std.testing.expectEqual(TokenType.template_tail, tail.type);
 }
 
+test "string escape flags survive lookahead and recovery rescanning" {
+    const cases = [_]struct { text: []const u8, escaped: bool }{
+        .{ .text = "\"plain\" next", .escaped = false },
+        .{ .text = "'plain' next", .escaped = false },
+        .{ .text = "\"line\\nvalue\" next", .escaped = true },
+        .{ .text = "\"\\\\\" next", .escaped = true },
+        .{ .text = "`plain` next", .escaped = false },
+        .{ .text = "`line\\nvalue` next", .escaped = true },
+        .{ .text = "\"\\u{1F600}\" next", .escaped = true },
+    };
+    for (cases) |case| {
+        var tokenizer = Tokenizer.init(case.text);
+        const state = tokenizer.saveState();
+        const first = tokenizer.next();
+        try std.testing.expectEqual(case.escaped, first.has_escape);
+        tokenizer.restoreState(state);
+        try std.testing.expectEqualDeep(first, tokenizer.next());
+        const next = tokenizer.next();
+        try std.testing.expectEqual(TokenType.identifier, next.type);
+        try std.testing.expect(!next.has_escape);
+    }
+    var recovery = Tokenizer.init("\"a\\qb\"");
+    const raw = recovery.next();
+    const rescanned = try recovery.rescanRecoveryString(raw, &.{.{ .start = 2, .end = 4 }});
+    try std.testing.expect(rescanned.has_escape);
+    try std.testing.expectEqualDeep(raw, rescanned);
+}
+
 test "arrow functions" {
     var tokenizer = Tokenizer.init("(x) => x * 2");
 
@@ -1174,7 +1217,13 @@ test "recovery string rescan uses logical erasures for escapes and quotes" {
     };
     var oracle = Tokenizer.init(masked);
     try std.testing.expectEqual(TokenType.regex_literal, oracle.next().type);
-    try std.testing.expectEqualDeep(oracle.next(), rescanned);
+    var expected = oracle.next();
+    try std.testing.expect(!expected.has_escape);
+    // Coordinates follow the logical erasures; text() still borrows original
+    // bytes, so the escape flag must describe that original string content.
+    try std.testing.expect(rescanned.has_escape);
+    expected.has_escape = true;
+    try std.testing.expectEqualDeep(expected, rescanned);
     try std.testing.expectEqual(oracle.pos, tokenizer.pos);
     try std.testing.expectEqual(oracle.line, tokenizer.line);
     try std.testing.expectEqual(oracle.line_start, tokenizer.line_start);

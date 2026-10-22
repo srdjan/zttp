@@ -1,17 +1,17 @@
 //! zts Compile-Time Microbenchmark
 //!
-//! Measures parse + codegen wall-clock time, bytes allocated, and IR-node
-//! count per compile across a small synthesized corpus of handler-shaped
-//! programs. Scaffolding only: this harness collects the numbers that
-//! Phase 8 of the perf plan uses to tune
-//! `packages/zts/src/parser/codegen.zig#reserveCapacity` and
-//! parser and codegen capacity hints. No tuning here.
+//! Measures parse/codegen or full semantic analysis, allocation churn, peak
+//! live allocator bytes, and teardown across handler-shaped programs. Peak
+//! bytes count requested allocator storage, not process RSS or reserved pages.
 //!
 //! Usage: `zig build compile-bench -Doptimize=ReleaseFast -- [flags]`
 //! Flags:
 //!   --json            Emit JSON to stdout.
 //!   --quiet           Suppress human-readable output.
 //!   --iterations N    Iterations per fixture (default 50).
+//!   --profile check   Resolve types/strict rules, verify, and check flow instead
+//!                     of generating bytecode. Diagnostic counts are reported;
+//!                     completion does not claim the handler is proven.
 
 const std = @import("std");
 const zq = @import("zts");
@@ -213,16 +213,84 @@ const fixtures = [_]Fixture{
     },
 };
 
+const GeneratedFixture = enum {
+    dense_expressions,
+    wide_lists,
+    nested_functions,
+    typed_declarations,
+    blob_4mb,
+    escaped_strings,
+
+    fn source(self: GeneratedFixture, allocator: std.mem.Allocator) ![]u8 {
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        defer out.deinit();
+        const w = &out.writer;
+        switch (self) {
+            .dense_expressions => {
+                for (0..128) |i| {
+                    try w.print("function dense{d}(x: number): number {{\n", .{i});
+                    for (0..32) |_| try w.writeAll("x = (x + 1) * (x - 2) + (x + 3) * (x - 4);\n");
+                    try w.writeAll("return x;\n}\n");
+                }
+                try w.writeAll("function handler(req: Request): Response { return Response.text(String(dense0(1))); }\n");
+            },
+            .wide_lists => {
+                try w.writeAll("function handler(req: Request): Response { const values = [\n");
+                for (0..512) |_| try w.writeAll("{ a: 1, b: [2, 3, 4] },\n");
+                try w.writeAll("]; return Response.json(values); }\n");
+            },
+            .nested_functions => {
+                for (0..24) |i| try w.print("function nested{d}(x: number): number {{\n", .{i});
+                try w.writeAll("return x + 1;\n}\n");
+                var depth: usize = 23;
+                while (depth > 0) : (depth -= 1) try w.print("return nested{d}(x);\n}}\n", .{depth});
+                try w.writeAll("function handler(req: Request): Response { return Response.text(String(nested0(1))); }\n");
+            },
+            .typed_declarations => {
+                for (0..128) |i| {
+                    try w.print("structural Row{d} = {{ value: number, label: string }};\n", .{i});
+                    try w.print("function read{d}(row: Row{d}): number {{ return row.value; }}\n", .{ i, i });
+                }
+                try w.writeAll("function handler(req: Request): Response { return Response.text(String(read0({value: 1, label: \"ok\"}))); }\n");
+            },
+            .blob_4mb => {
+                try w.writeAll("function handler(req: Request): Response { return Response.text(\"");
+                const block = [_]u8{'a'} ** 4096;
+                for (0..1024) |_| try w.writeAll(&block);
+                try w.writeAll("\"); }\n");
+            },
+            .escaped_strings => {
+                try w.writeAll("function handler(req: Request): Response { return Response.json([\n");
+                for (0..512) |i| try w.print("\"line\\n{d}\\tvalue\\u{{1F600}}\",\n", .{i % 64});
+                try w.writeAll("]); }\n");
+            },
+        }
+        return out.toOwnedSlice();
+    }
+};
+
+const generated_fixtures = std.meta.tags(GeneratedFixture);
+
 // -- Counting allocator -------------------------------------------------------
 //
-// Honest bytes-per-compile accounting. Wraps an underlying allocator and
-// totals every successful allocation and resize grow. We explicitly do not
-// subtract frees: "peak live bytes" would require a different shape and
-// the tuner wants a churn proxy, which this gives.
+// The shared live counter observes parser, codegen, and analysis together.
+// Summing independent peaks would overstate memory when their lifetimes differ.
+
+const MemoryUsage = struct {
+    live_bytes: u64 = 0,
+    peak_bytes: u64 = 0,
+
+    fn resize(self: *MemoryUsage, old: usize, new: usize) void {
+        self.live_bytes = self.live_bytes - old + new;
+        self.peak_bytes = @max(self.peak_bytes, self.live_bytes);
+    }
+};
 
 const CountingAlloc = struct {
     backing: std.mem.Allocator,
+    memory: *MemoryUsage,
     total_bytes: u64 = 0,
+    allocation_calls: u64 = 0,
 
     fn allocator(self: *CountingAlloc) std.mem.Allocator {
         return .{
@@ -239,15 +307,20 @@ const CountingAlloc = struct {
     fn vtAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *CountingAlloc = @ptrCast(@alignCast(ctx));
         const result = self.backing.rawAlloc(len, alignment, ret_addr);
-        if (result != null) self.total_bytes += len;
+        if (result != null) {
+            self.total_bytes += len;
+            self.allocation_calls += 1;
+            self.memory.resize(0, len);
+        }
         return result;
     }
 
     fn vtResize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *CountingAlloc = @ptrCast(@alignCast(ctx));
         const ok = self.backing.rawResize(buf, alignment, new_len, ret_addr);
-        if (ok and new_len > buf.len) {
-            self.total_bytes += new_len - buf.len;
+        if (ok) {
+            self.memory.resize(buf.len, new_len);
+            if (new_len > buf.len) self.total_bytes += new_len - buf.len;
         }
         return ok;
     }
@@ -255,8 +328,9 @@ const CountingAlloc = struct {
     fn vtRemap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *CountingAlloc = @ptrCast(@alignCast(ctx));
         const result = self.backing.rawRemap(buf, alignment, new_len, ret_addr);
-        if (result != null and new_len > buf.len) {
-            self.total_bytes += new_len - buf.len;
+        if (result != null) {
+            self.memory.resize(buf.len, new_len);
+            if (new_len > buf.len) self.total_bytes += new_len - buf.len;
         }
         return result;
     }
@@ -264,15 +338,16 @@ const CountingAlloc = struct {
     fn vtFree(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
         const self: *CountingAlloc = @ptrCast(@alignCast(ctx));
         self.backing.rawFree(buf, alignment, ret_addr);
+        self.memory.resize(buf.len, 0);
     }
 };
 
 // -- Compile once ------------------------------------------------------------
 //
-// Runs the same path hot compilation takes: parse -> IR -> codegen. We do
-// NOT run BoolChecker / TypeChecker / bytecode optimizer passes from
-// zruntime.loadCode on purpose: the target under tune is codegen buffer
-// sizing (`reserveCapacity`) and IR-node -> bytecode ratio.
+// Keep the historical parse -> codegen measurement separate from semantic
+// checking. Both profiles use the production typed parser and own teardown.
+
+const Profile = enum { compile, check };
 
 const CompileStats = struct {
     /// Total bytes across tokenizer/parser/IR/codegen. Matches the prior
@@ -284,41 +359,86 @@ const CompileStats = struct {
     codegen_bytes: u64,
     ir_nodes: u64,
     bytecode_len: u64,
+    parse_ns: u64,
+    codegen_ns: u64,
+    analysis_ns: u64,
+    teardown_ns: u64,
+    allocation_calls: u64,
+    peak_bytes: u64,
+    diagnostics: u64,
 };
 
-fn compileOnce(backing: std.mem.Allocator, source: []const u8) !CompileStats {
-    var parser_counting = CountingAlloc{ .backing = backing };
-    var codegen_counting = CountingAlloc{ .backing = backing };
+fn compileOnce(backing: std.mem.Allocator, source: []const u8, profile: Profile) !CompileStats {
+    var memory: MemoryUsage = .{};
+    var parser_counting = CountingAlloc{ .backing = backing, .memory = &memory };
+    var codegen_counting = CountingAlloc{ .backing = backing, .memory = &memory };
     const parser_alloc = parser_counting.allocator();
     const codegen_alloc = codegen_counting.allocator();
+    const start = try compat.Instant.now();
+    var parsed_at: compat.Instant = undefined;
+    var teardown_at: compat.Instant = undefined;
+    var ir_node_count: u64 = 0;
+    var bytecode_len: u64 = 0;
+    var diagnostics: u64 = 0;
+    {
+        var strings = zq.StringTable.init(parser_alloc);
+        defer strings.deinit();
+        var atoms = zq.AtomTable.init(parser_alloc);
+        defer atoms.deinit();
 
-    var strings = zq.StringTable.init(parser_alloc);
-    defer strings.deinit();
-    var atoms = zq.AtomTable.init(parser_alloc);
-    defer atoms.deinit();
-
-    var p = try zq.Parser.initTyped(parser_alloc, parser_alloc, source, &strings, &atoms);
-    defer {
-        // Nested `FunctionBytecode` payloads live in the codegen's constants and
-        // are released by this hook, not by `CodeGen.deinit`, because in the
-        // runtime the Context adopts them instead. Nothing adopts them here.
-        if (p.code_gen) |*cg| cg.freeOwnedConstantPayloads();
-        p.deinit();
+        var p = try zq.Parser.initTyped(parser_alloc, parser_alloc, source, &strings, &atoms);
+        defer {
+            // Runtime Contexts adopt these payloads; this harness owns them.
+            if (p.code_gen) |*cg| cg.freeOwnedConstantPayloads();
+            p.deinit();
+        }
+        switch (try p.parseTypedIr()) {
+            .accepted => {},
+            .terminal_admission_refused => |failure| return zq.prepareErrorForAdmissionFailure(failure),
+            .parser_refused => |refusal| return refusal.first_error,
+            .recovered_admission_refused => return error.AdmissionRefused,
+        }
+        parsed_at = try compat.Instant.now();
+        ir_node_count = @intCast(p.js_parser.nodes.tags.items.len);
+        var analysis: zq.pipeline.ModuleAnalysisSession = .{};
+        defer analysis.deinit();
+        switch (profile) {
+            .compile => bytecode_len = @intCast((try p.generateParsed(codegen_alloc)).len),
+            .check => {
+                const view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
+                var parsed = zq.pipeline.ParsedModule.fromTypedExisting(view, p.root_node, &atoms, &p.js_parser.type_store);
+                parsed.scopes = &p.js_parser.scopes;
+                try analysis.initFull(parser_alloc, parsed, .{
+                    .source_types = .direct,
+                    .select_verifier = true,
+                    .select_flow = true,
+                });
+                try analysis.complete();
+                const resolved = try analysis.resolvedForReport();
+                diagnostics = resolved.bool_error_count + resolved.typeErrorCount() + resolved.strict_error_count;
+                const handler = zq.findHandlerFunction(view, p.root_node) orelse return error.BenchmarkHandlerMissing;
+                try analysis.prepareChecked(handler, .{ .module_facts = try analysis.facts() });
+                diagnostics += try analysis.runVerifier(handler);
+                diagnostics += try analysis.runFlow(handler);
+            },
+        }
+        teardown_at = try compat.Instant.now();
     }
-    switch (try p.parseTypedIr()) {
-        .accepted => {},
-        .terminal_admission_refused => |failure| return zq.prepareErrorForAdmissionFailure(failure),
-        .parser_refused => |refusal| return refusal.first_error,
-        .recovered_admission_refused => return error.AdmissionRefused,
-    }
-    const bytecode_data = try p.generateParsed(codegen_alloc);
-    const ir_node_count: u64 = @intCast(p.js_parser.nodes.tags.items.len);
+    const end = try compat.Instant.now();
+    if (memory.live_bytes != 0) return error.BenchmarkAllocationLeak;
 
     return .{
         .bytes = parser_counting.total_bytes + codegen_counting.total_bytes,
         .codegen_bytes = codegen_counting.total_bytes,
         .ir_nodes = ir_node_count,
-        .bytecode_len = @intCast(bytecode_data.len),
+        .bytecode_len = bytecode_len,
+        .parse_ns = parsed_at.since(start),
+        .codegen_ns = if (profile == .compile) teardown_at.since(parsed_at) else 0,
+        .analysis_ns = if (profile == .check) teardown_at.since(parsed_at) else 0,
+        .teardown_ns = end.since(teardown_at),
+        .allocation_calls = parser_counting.allocation_calls + codegen_counting.allocation_calls,
+        .peak_bytes = memory.peak_bytes,
+        .diagnostics = diagnostics,
     };
 }
 
@@ -328,10 +448,11 @@ const Options = struct {
     json: bool = false,
     quiet: bool = false,
     iterations: u32 = 50,
+    profile: Profile = .compile,
 };
 
 const usage =
-    "Usage: compile-bench [--json] [--quiet] [--iterations N]\n";
+    "Usage: compile-bench [--json] [--quiet] [--iterations N] [--profile compile|check]\n";
 
 fn writeStdout(data: []const u8) void {
     _ = std.c.write(std.c.STDOUT_FILENO, data.ptr, data.len);
@@ -354,6 +475,11 @@ fn parseOptions() Options {
             options.json = true;
         } else if (std.mem.eql(u8, arg, "--quiet")) {
             options.quiet = true;
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            options.profile = std.meta.stringToEnum(Profile, iter.next() orelse "") orelse {
+                writeStdout(usage);
+                std.process.exit(1);
+            };
         } else if (std.mem.eql(u8, arg, "--iterations")) {
             const val = iter.next() orelse {
                 writeStdout("Missing value for --iterations\n");
@@ -378,99 +504,81 @@ fn parseOptions() Options {
 const Result = struct {
     name: []const u8,
     iterations: u32,
-    ns_per_iter: u64,
-    bytes_alloc: u64,
-    codegen_bytes: u64,
-    ir_nodes: u64,
-    bytecode_len: u64,
-    success: bool,
+    ns_per_iter: u64 = 0,
+    stats: CompileStats = std.mem.zeroes(CompileStats),
+    success: bool = false,
     error_name: ?[]const u8 = null,
 };
 
-fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result {
-    const fail = struct {
-        fn mk(fixture: Fixture, iters: u32, bytes: u64, cg_bytes: u64, ir_nodes: u64, bc_len: u64, err_name: []const u8) Result {
-            return .{
-                .name = fixture.name,
-                .iterations = iters,
-                .ns_per_iter = 0,
-                .bytes_alloc = bytes,
-                .codegen_bytes = cg_bytes,
-                .ir_nodes = ir_nodes,
-                .bytecode_len = bc_len,
-                .success = false,
-                .error_name = err_name,
-            };
-        }
-    }.mk;
-
-    // One warm compile to surface parse errors before timing.
-    const warm = compileOnce(allocator, fx.source) catch |err| {
-        return fail(fx, iterations, 0, 0, 0, 0, @errorName(err));
-    };
-
-    const start = compat.Instant.now() catch {
-        return fail(fx, iterations, warm.bytes, warm.codegen_bytes, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
-    };
-
-    var total_bytes: u64 = 0;
-    var total_cg_bytes: u64 = 0;
-    var i: u32 = 0;
-    while (i < iterations) : (i += 1) {
-        const s = compileOnce(allocator, fx.source) catch |err| {
-            return fail(fx, iterations, total_bytes, total_cg_bytes, warm.ir_nodes, warm.bytecode_len, @errorName(err));
-        };
-        total_bytes += s.bytes;
-        total_cg_bytes += s.codegen_bytes;
+fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32, profile: Profile) Result {
+    var result: Result = .{ .name = fx.name, .iterations = iterations };
+    if (iterations == 0) {
+        result.error_name = "EmptyBenchmark";
+        return result;
     }
-
+    // Fail before timing when a fixture no longer parses or checks.
+    const warm = compileOnce(allocator, fx.source, profile) catch |err| {
+        result.error_name = @errorName(err);
+        return result;
+    };
+    if (warm.ir_nodes == 0) {
+        result.error_name = "EmptyBenchmark";
+        return result;
+    }
+    const start = compat.Instant.now() catch {
+        result.error_name = "TimerUnavailable";
+        return result;
+    };
+    for (0..iterations) |_| {
+        const stats = compileOnce(allocator, fx.source, profile) catch |err| {
+            result.error_name = @errorName(err);
+            return result;
+        };
+        inline for (std.meta.fields(CompileStats)) |field| {
+            @field(result.stats, field.name) += @field(stats, field.name);
+        }
+    }
     const end = compat.Instant.now() catch {
-        return fail(fx, iterations, total_bytes / iterations, total_cg_bytes / iterations, warm.ir_nodes, warm.bytecode_len, "TimerUnavailable");
+        result.error_name = "TimerUnavailable";
+        return result;
     };
-    const elapsed_ns = end.since(start);
-
-    return .{
-        .name = fx.name,
-        .iterations = iterations,
-        .ns_per_iter = elapsed_ns / iterations,
-        .bytes_alloc = total_bytes / iterations,
-        .codegen_bytes = total_cg_bytes / iterations,
-        .ir_nodes = warm.ir_nodes,
-        .bytecode_len = warm.bytecode_len,
-        .success = true,
-    };
+    result.ns_per_iter = end.since(start) / iterations;
+    inline for (std.meta.fields(CompileStats)) |field| {
+        @field(result.stats, field.name) /= iterations;
+    }
+    result.success = true;
+    return result;
 }
 
-fn emitJson(results: []const Result) void {
-    writeStdout("{\n  \"schema_version\": 1,\n  \"benchmarks\": [\n");
+fn emitJson(results: []const Result, profile: Profile) void {
+    printFmt("{{\n  \"schema_version\": 1,\n  \"profile\": \"{s}\",\n  \"benchmarks\": [", .{@tagName(profile)});
     for (results, 0..) |r, i| {
-        var line: [640]u8 = undefined;
-        const written = if (r.success)
-            std.fmt.bufPrint(
-                &line,
-                "    {{\"name\":\"{s}\",\"iterations\":{},\"ns_per_iter\":{},\"bytes_alloc\":{},\"codegen_bytes\":{},\"ir_nodes\":{},\"bytecode_len\":{},\"success\":true}}",
-                .{ r.name, r.iterations, r.ns_per_iter, r.bytes_alloc, r.codegen_bytes, r.ir_nodes, r.bytecode_len },
-            ) catch continue
-        else
-            std.fmt.bufPrint(
-                &line,
-                "    {{\"name\":\"{s}\",\"iterations\":{},\"ns_per_iter\":{},\"bytes_alloc\":{},\"codegen_bytes\":{},\"ir_nodes\":{},\"bytecode_len\":{},\"success\":false,\"error_name\":\"{s}\"}}",
-                .{ r.name, r.iterations, r.ns_per_iter, r.bytes_alloc, r.codegen_bytes, r.ir_nodes, r.bytecode_len, r.error_name orelse "unknown" },
-            ) catch continue;
+        const s = r.stats;
+        var line: [1024]u8 = undefined;
+        const written = std.fmt.bufPrint(
+            &line,
+            "    {{\"name\":\"{s}\",\"iterations\":{},\"ns_per_iter\":{},\"bytes_alloc\":{},\"codegen_bytes\":{},\"ir_nodes\":{},\"bytecode_len\":{}," ++
+                "\"parse_ns\":{},\"codegen_ns\":{},\"analysis_ns\":{},\"teardown_ns\":{},\"allocation_calls\":{},\"peak_bytes\":{},\"diagnostics\":{},\"success\":{}",
+            .{ r.name, r.iterations, r.ns_per_iter, s.bytes, s.codegen_bytes, s.ir_nodes, s.bytecode_len, s.parse_ns, s.codegen_ns, s.analysis_ns, s.teardown_ns, s.allocation_calls, s.peak_bytes, s.diagnostics, r.success },
+        ) catch unreachable;
         writeStdout(written);
-        writeStdout(if (i + 1 < results.len) ",\n" else "\n");
+        if (r.error_name) |err| {
+            const error_text = std.fmt.bufPrint(&line, ",\"error_name\":\"{s}\"", .{err}) catch unreachable;
+            writeStdout(error_text);
+        }
+        writeStdout(if (i + 1 < results.len) "},\n" else "}\n");
     }
     writeStdout("  ]\n}\n");
 }
 
-fn emitHuman(results: []const Result) void {
-    writeStdout("\n=== zts compile-time microbench ===\n\n");
-    printFmt("{s:<24} {s:>12} {s:>14} {s:>12} {s:>10} {s:>8}", .{ "fixture", "ns/compile", "bytes/compile", "cg_bytes", "ir_nodes", "bc_len" });
-    writeStdout("------------------------------------------------------------------------------------\n");
+fn emitHuman(results: []const Result, profile: Profile) void {
+    printFmt("\nzts {s} benchmark (times in ns; peak is allocator bytes, not RSS)\n", .{@tagName(profile)});
+    printFmt("{s:<24} {s:>10} {s:>10} {s:>10} {s:>10} {s:>10} {s:>12} {s:>12} {s:>8}", .{ "fixture", "total", "parse", "codegen", "analysis", "teardown", "peak", "churn", "allocs" });
     for (results) |r| {
         if (r.success) {
-            printFmt("{s:<24} {d:>12} {d:>14} {d:>12} {d:>10} {d:>8}", .{
-                r.name, r.ns_per_iter, r.bytes_alloc, r.codegen_bytes, r.ir_nodes, r.bytecode_len,
+            const s = r.stats;
+            printFmt("{s:<24} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>10} {d:>12} {d:>8}", .{
+                r.name, r.ns_per_iter, s.parse_ns, s.codegen_ns, s.analysis_ns, s.teardown_ns, s.peak_bytes, s.bytes, s.allocation_calls,
             });
         } else {
             printFmt("{s:<24} FAILED: {s}", .{ r.name, r.error_name orelse "unknown" });
@@ -488,15 +596,21 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // overhead. Matches packages/runtime/bench/benchmark.zig.
     const allocator = std.heap.c_allocator;
 
-    var results: [fixtures.len]Result = undefined;
+    var results: [fixtures.len + generated_fixtures.len]Result = undefined;
     for (fixtures, 0..) |fx, i| {
-        results[i] = runFixture(allocator, fx, options.iterations);
+        results[i] = runFixture(allocator, fx, options.iterations, options.profile);
+    }
+
+    for (generated_fixtures, fixtures.len..) |kind, i| {
+        const source = try kind.source(allocator);
+        defer allocator.free(source);
+        results[i] = runFixture(allocator, .{ .name = @tagName(kind), .source = source }, options.iterations, options.profile);
     }
 
     if (options.json) {
-        emitJson(&results);
+        emitJson(&results, options.profile);
     } else if (!options.quiet) {
-        emitHuman(&results);
+        emitHuman(&results, options.profile);
     }
 
     // A fixture that stops parsing is a front-end regression, so exit non-zero
@@ -512,16 +626,70 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 test "compile-bench runs one iteration per fixture under 2s" {
     const allocator = std.testing.allocator;
+    try std.testing.expect(fixtures.len >= 8);
 
     const start = try compat.Instant.now();
     for (fixtures) |fx| {
-        const r = runFixture(allocator, fx, 1);
+        const r = runFixture(allocator, fx, 1, .compile);
         try std.testing.expect(r.success);
-        try std.testing.expect(r.ir_nodes > 0);
+        try std.testing.expect(r.stats.ir_nodes > 0);
     }
     const end = try compat.Instant.now();
     const elapsed_ns = end.since(start);
     // 2s wall-clock ceiling. Exists to catch catastrophic regressions
     // (e.g. an accidental O(n^2) path), not as a perf gate.
     try std.testing.expect(elapsed_ns < 2 * std.time.ns_per_s);
+}
+
+test "benchmark memory accounting includes shrink remap and overlapping owners" {
+    var memory: MemoryUsage = .{};
+    var first: CountingAlloc = .{ .backing = std.testing.allocator, .memory = &memory };
+    var second: CountingAlloc = .{ .backing = std.testing.allocator, .memory = &memory };
+    const a = first.allocator();
+    const b = second.allocator();
+    var bytes = try a.alloc(u8, 256);
+    const other = try b.alloc(u8, 32);
+    try std.testing.expectEqual(@as(u64, 288), memory.peak_bytes);
+    // realloc exercises resize/remap or the alloc-copy-free fallback. Account
+    // for either allocator behavior, rather than requiring an in-place grow.
+    bytes = try a.realloc(bytes, 1024);
+    try std.testing.expectEqual(@as(u64, 1056), memory.live_bytes);
+    bytes = try a.realloc(bytes, 16);
+    try std.testing.expectEqual(@as(u64, 48), memory.live_bytes);
+    b.free(other);
+    a.free(bytes);
+    try std.testing.expectEqual(@as(u64, 0), memory.live_bytes);
+    try std.testing.expect(memory.peak_bytes >= 1056);
+    try std.testing.expect(first.total_bytes >= 1024);
+    try std.testing.expectEqual(@as(u64, 1), second.allocation_calls);
+}
+
+test "generated benchmark census compiles and completes all semantic passes" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqual(@as(usize, 6), generated_fixtures.len);
+    for (generated_fixtures) |kind| {
+        const source = try kind.source(allocator);
+        defer allocator.free(source);
+        if (kind == .blob_4mb) try std.testing.expect(source.len > 4 * 1024 * 1024);
+        const compiled = try compileOnce(allocator, source, .compile);
+        try std.testing.expect(compiled.ir_nodes > 0);
+        try std.testing.expect(compiled.bytecode_len > 0);
+        if (kind == .dense_expressions or kind == .wide_lists) try std.testing.expect(compiled.ir_nodes > 1024);
+        const checked = try compileOnce(allocator, source, .check);
+        try std.testing.expectEqual(compiled.ir_nodes, checked.ir_nodes);
+        try std.testing.expectEqual(@as(u64, 0), checked.diagnostics);
+        try std.testing.expectEqual(@as(u64, 0), checked.codegen_bytes);
+        try std.testing.expect(checked.peak_bytes > 0);
+    }
+}
+
+test "check profile reports semantic diagnostics and refuses empty timing runs" {
+    const stats = try compileOnce(std.testing.allocator, "function handler(req: Request): Response { return Response.text('ok'); }", .check);
+    try std.testing.expectEqual(@as(u64, 0), stats.diagnostics);
+    try std.testing.expectEqual(@as(u64, 0), stats.bytecode_len);
+    const refused = try compileOnce(std.testing.allocator, "function handler(req: Request): Response { const n: number = 'bad'; return Response.text(n); }", .check);
+    try std.testing.expect(refused.diagnostics > 0);
+    const empty = runFixture(std.testing.allocator, fixtures[0], 0, .compile);
+    try std.testing.expect(!empty.success);
+    try std.testing.expectEqualStrings("EmptyBenchmark", empty.error_name.?);
 }

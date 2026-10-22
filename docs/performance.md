@@ -50,6 +50,32 @@ per-benchmark best result from five runs together with the source commit, Zig
 version, host details, run count, and aggregation method. Review and commit the
 resulting `benchmarks/perf-baseline.json` separately from the tooling change.
 
+## Compiler Measurements
+
+Use Zig 0.16.0 and ReleaseFast for compiler measurements:
+
+```bash
+zig build compile-bench -Doptimize=ReleaseFast -- --json --iterations 50
+zig build compile-bench -Doptimize=ReleaseFast -- --json --iterations 50 --profile check
+```
+
+The default profile measures typed parsing and code generation. The `check`
+profile measures typed parsing, type and strict checks, handler verification,
+and flow analysis. It reports diagnostic counts; completing a benchmark does
+not mean its handler is proven. Neither profile includes filesystem import
+loading or artifact acceptance.
+
+Both profiles report phase timings, teardown, successful allocation calls,
+cumulative allocation bytes, and peak live allocator bytes shared across all
+phases. Peak allocator bytes are requested storage, not RSS. Fixture generation
+is outside the measurement. The corpus includes small handlers and generated
+cases for dense expressions, wide lists, nested functions, typed declarations,
+escaped strings, and a 4 MB string literal.
+
+IR source locations retain line and column alongside byte spans: codegen needs
+them for every emitted node. Capacity estimates remain bounded so a large
+literal does not reserve nodes in proportion to its byte length.
+
 ## What Affects Latency
 
 - Build-time precompile with `zig build -Dhandler=handler.ts` or `zttp build`

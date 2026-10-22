@@ -118,6 +118,8 @@ pub fn parse(
 ) !ParseResult {
     _ = options;
     var p = try JsParser.init(allocator, source);
+    // The result adopts permanent parser storage, not reusable list scratch.
+    defer p.scratch_nodes.deinit(allocator);
 
     // Note: strict_mode is always true in zts (var keyword rejected)
     // Note: module_mode affects import/export handling (future)
@@ -410,6 +412,17 @@ test "root module imports" {
     _ = JsParser;
     _ = CodeGen;
     _ = ir_opt;
+}
+
+test "parse result owns permanent lists after scratch teardown" {
+    var result = try parse(std.testing.allocator, "function f(a) { return [a, [1, 2]]; }", .{});
+    defer result.deinit();
+    try std.testing.expect(!result.hasErrors());
+    const view = IrView.fromIRStore(&result.nodes, &result.constants);
+    const program = view.getBlock(result.root).?;
+    try std.testing.expectEqual(@as(u16, 1), program.stmts_count);
+    const decl = view.getVarDecl(view.getListIndex(program.stmts_start, 0)).?;
+    try std.testing.expectEqual(@as(u8, 1), view.getFunction(decl.init).?.params_count);
 }
 
 // Pull in tests from submodules

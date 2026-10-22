@@ -10,13 +10,13 @@ Edit these lines to 0.23.0 and change nothing else:
 - build.zig.zon:3 `.version = "0.22.4",`
 - packages/zts/build.zig.zon:3
 - packages/runtime/build.zig.zon:3
-- packages/zts/src/root.zig:934 `pub const string = "0.22.4";`
+- packages/zts/src/root.zig#version `pub const string = "0.22.4";`
 - README.md:6 `# zttp v0.22.4`
 - install.sh:6 `(current: v0.22.4)`
 
 Do not touch CHANGELOG.md (release notes are the owner's) or the historical mentions in docs/plans/2026-10-20-hardening-pruning-plan.md.
 Check: `zig build test-release-check` exits 0. `./zig-out/bin/zttp --version` prints 0.23.0 after `zig build`.
-Open question for the validator: does `zts/src/root.zig:934` feed any hashed identity (policy, registry, meta-drift pins) so that `zig build test-meta-drift` or goldens change? If so, regenerate through the documented command, never by hand.
+Open question for the validator: does `packages/zts/src/root.zig#version` feed any hashed identity (policy, registry, meta-drift pins) so that `zig build test-meta-drift` or goldens change? If so, regenerate through the documented command, never by hand.
 
 ## Q2. `zttp proofs verify` must pass the policy section to acceptance
 
@@ -59,7 +59,7 @@ Unfiltered: `zig build test` (expect 0 failures), `zig build test-zruntime`, `zi
 
 ## Validation corrections (codex gpt-6-astra review, accepted)
 
-Q1. root.zig:934 feeds the expert session digest (packages/pi/src/session/protocol_identity.zig:39) and aggregate proof ids (packages/pi/src/aggregate_proof.zig:566). Old 0.22.4 sessions will report SessionProtocolMismatch and old ledger receipts prove_drift. This is the intended effect of the owner's version bump. No pin or golden needs regeneration (expert_meta.zig:12 uses a separate version; goldens.zig:203 excludes it). Checks: `zttp --version` prints `zttp 0.23.0`, `zts --version` prints `zts 0.23.0`.
+Q1. packages/zts/src/root.zig#version feeds the expert session digest (packages/pi/src/session/protocol_identity.zig:39) and aggregate proof ids (packages/pi/src/aggregate_proof.zig:566). Old 0.22.4 sessions will report SessionProtocolMismatch and old ledger receipts prove_drift. This is the intended effect of the owner's version bump. No pin or golden needs regeneration (expert_meta.zig:12 uses a separate version; goldens.zig:203 excludes it). Checks: `zttp --version` prints `zttp 0.23.0`, `zts --version` prints `zts 0.23.0`.
 
 Q2. The build_command.zig helper near 1772 uses the development policy; bundle verify uses production (policy.zig:114). The regression fixture must first be shown to pass production acceptance with policy bytes present and to carry a guard. Then bundle it and call verify with require_proof true. Assert semantic acceptance and the line `Guards:    1 of 1 covered (env_key)` (bundle.zig:396). With the fix removed, the test must fail with error.ProofRejected and `guard_coverage (runtime_policy_missing)`, not a generic failure. Suite: `zig build test-cli` (build/runtime_tests.zig:35).
 

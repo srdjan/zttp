@@ -76,7 +76,7 @@ pub const IROptimizer = struct {
     }
 
     /// Error type for optimization operations
-    pub const OptError = std.mem.Allocator.Error;
+    pub const OptError = std.mem.Allocator.Error || error{TooManyNodes};
 
     /// Visit a node and return the optimized result (may be same or different node)
     fn visitNode(self: *IROptimizer, idx: NodeIndex) OptError!NodeIndex {

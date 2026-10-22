@@ -192,6 +192,7 @@ pub const Parser = struct {
 
     // Output
     nodes: IRStore,
+    scratch_nodes: std.ArrayListUnmanaged(NodeIndex) = .empty,
     constants: ConstantPool,
     scopes: ScopeAnalyzer,
     errors: ErrorList,
@@ -271,23 +272,29 @@ pub const Parser = struct {
     /// budget. Roughly V8's parser nesting tolerance.
     const max_recursion_depth: u32 = 512;
 
-    /// Inline capacity for the short-lived NodeIndex temporaries below. These
-    /// buffers sit on mutually recursive frames, so every byte is multiplied by
-    /// `max_recursion_depth` against the stack budget.
-    ///
-    /// Target-conditional because the two builds have very different budgets
-    /// and very different jobs. A native worker thread gets std.Thread's 16 MiB
-    /// default, where 256 bytes per frame costs ~160 KB at the depth limit -
-    /// negligible - and compile speed is on the cold-start path, so the full
-    /// buffer is worth it. The wasm64-freestanding analyzer takes the linker
-    /// default (~1 MiB) and exists to produce diagnostics, not to be fast:
-    /// there the fat buffers were measured to drop the nesting cliff from ~349
-    /// to 288 levels, so inputs nesting inside that window trapped instead of
-    /// returning the `nesting_too_deep` diagnostic the guard promises. Keeping
-    /// wasm frames slim preserves the guard.
-    ///
-    /// Re-derive both numbers if the buffer set or frame layout changes.
-    const temp_list_stack_bytes: usize = if (@import("builtin").target.cpu.arch.isWasm()) 32 else 256;
+    /// Each active list owns a suffix of this parser's scratch stack. Nested
+    /// lists truncate their suffix on exit; parents retain offsets, never
+    /// slices that a recursive parse could invalidate by growing the buffer.
+    const ScratchList = struct {
+        parser: *Parser,
+        start: usize,
+
+        fn append(self: ScratchList, node: NodeIndex) !void {
+            try self.parser.scratch_nodes.append(self.parser.allocator, node);
+        }
+
+        fn slice(self: ScratchList) []const NodeIndex {
+            return self.parser.scratch_nodes.items[self.start..];
+        }
+
+        fn deinit(self: ScratchList) void {
+            self.parser.scratch_nodes.shrinkRetainingCapacity(self.start);
+        }
+    };
+
+    fn beginScratchList(self: *Parser) ScratchList {
+        return .{ .parser = self, .start = self.scratch_nodes.items.len };
+    }
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
         return initWithProfile(allocator, allocator, source, null, false, null, false);
@@ -397,6 +404,7 @@ pub const Parser = struct {
 
     pub fn deinit(self: *Parser) void {
         if (self.printable_regions) |*regions| regions.deinit(self.type_store.allocator);
+        self.scratch_nodes.deinit(self.allocator);
         self.nodes.deinit();
         self.constants.deinit();
         self.scopes.deinit();
@@ -697,8 +705,8 @@ pub const Parser = struct {
     }
 
     fn parseProgram(self: *Parser) anyerror!NodeIndex {
-        var stmts: std.ArrayList(NodeIndex) = .empty;
-        defer stmts.deinit(self.allocator);
+        const stmts = self.beginScratchList();
+        defer stmts.deinit();
 
         var progress: ProgressGuard = .{};
         while (true) {
@@ -713,7 +721,7 @@ pub const Parser = struct {
             if (try self.tryConsumeTypeDeclaration()) continue;
             const statement_start = self.current.start;
             if (self.parseStatement()) |stmt| {
-                try stmts.append(self.allocator, stmt);
+                try stmts.append(stmt);
             } else |err| {
                 if (self.first_statement_failure_nodes == null) {
                     self.first_statement_failure_nodes = self.nodes.tags.items.len;
@@ -760,8 +768,8 @@ pub const Parser = struct {
         }
 
         // Create program node
-        const stmts_count = try self.checkedU16Count(.{ .line = 1, .column = 1, .offset = 0 }, stmts.items.len, "too many top-level statements; limit is 65535");
-        const stmts_start = try self.addStmtList(stmts.items);
+        const stmts_count = try self.checkedU16Count(.{ .line = 1, .column = 1, .offset = 0 }, stmts.slice().len, "too many top-level statements; limit is 65535");
+        const stmts_start = try self.addStmtList(stmts.slice());
         return try self.nodes.add(.{
             .tag = .program,
             .loc = .{ .line = 1, .column = 1, .offset = 0 },
@@ -3284,14 +3292,12 @@ pub const Parser = struct {
 
         _ = try self.scopes.pushScope(.function);
         defer self.scopes.popScope();
-        var params_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
-        const params_allocator = params_sfa.get();
-        var params = std.ArrayList(NodeIndex).empty;
-        defer params.deinit(params_allocator);
+        const params = self.beginScratchList();
+        defer params.deinit();
         var signature = self.type_store.beginFunctionSignature();
         defer self.type_store.cancelFunctionSignature(&signature);
         var flags: FunctionFlags = .{};
-        try self.parseParenthesizedFunctionHeader(.named, &flags, &params, params_allocator, &signature);
+        try self.parseParenthesizedFunctionHeader(.named, &flags, params, &signature);
     }
 
     fn retainAdmissionHeaderFailure(
@@ -3477,8 +3483,7 @@ pub const Parser = struct {
         self: *Parser,
         kind: HeaderKind,
         flags: *FunctionFlags,
-        params: *std.ArrayList(NodeIndex),
-        params_alloc: std.mem.Allocator,
+        params: ScratchList,
         pending_signature: ?*type_syntax.PendingFunctionSignature,
     ) !void {
         const saved_parameter_header = self.admission_parameter_header;
@@ -3639,7 +3644,7 @@ pub const Parser = struct {
                         .default_value = null_node,
                     } },
                 });
-                try params.append(params_alloc, param_node);
+                try params.append(param_node);
                 if (parameter_type) |value| {
                     try self.type_store.appendParameterAnnotation(pending_signature.?, .{
                         .owner = .{ .pattern = param_node, .binding = param_binding },
@@ -3659,7 +3664,7 @@ pub const Parser = struct {
             (self.admission == null or
                 self.hasAdmissionTypeStart(self.current.start + self.current.len)))
         {
-            const value = self.parseFunctionReturnSyntax(kind, self.previous, params.items) catch |err| {
+            const value = self.parseFunctionReturnSyntax(kind, self.previous, params.slice()) catch |err| {
                 return self.selectAdmissionHeaderFailure(err, saved_failure);
             };
             try self.type_store.setFunctionReturn(pending_signature.?, value);
@@ -3730,17 +3735,14 @@ pub const Parser = struct {
             self.scopes.popScope();
         };
 
-        var params_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
-        const params_alloc = params_sfa.get();
-        var params = std.ArrayList(NodeIndex).empty;
-        defer params.deinit(params_alloc);
+        const params = self.beginScratchList();
+        defer params.deinit();
 
         var param_flags = flags;
         try self.parseParenthesizedFunctionHeader(
             .named,
             &param_flags,
-            &params,
-            params_alloc,
+            params,
             if (pending_signature) |*pending| pending else null,
         );
         if (pending_signature) |*pending| {
@@ -3763,9 +3765,9 @@ pub const Parser = struct {
         scope_active = false;
 
         // Create function expression node
-        const params_count = try self.checkedU8Count(loc, params.items.len, "too many function parameters; limit is 255");
-        const params_start = if (params.items.len > 0)
-            try self.addNodeList(params.items)
+        const params_count = try self.checkedU8Count(loc, params.slice().len, "too many function parameters; limit is 255");
+        const params_start = if (params.slice().len > 0)
+            try self.addNodeList(params.slice())
         else
             null_node;
 
@@ -4409,28 +4411,28 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume '['
 
-        var elements = std.ArrayList(NodeIndex).empty;
-        defer elements.deinit(self.allocator);
+        const elements = self.beginScratchList();
+        defer elements.deinit();
 
         var progress: ProgressGuard = .{};
         while (!self.check(.rbracket) and !self.check(.eof)) {
             progress.iteration(self);
             if (self.check(.comma)) {
-                try elements.append(self.allocator, null_node);
+                try elements.append(null_node);
                 self.advance();
                 continue;
             }
 
             const elem = try self.parseMatchPattern(true);
-            try elements.append(self.allocator, elem);
+            try elements.append(elem);
 
             if (!self.match(.comma)) break;
         }
 
         try self.expect(.rbracket, "']'");
 
-        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many array pattern elements; limit is 65535");
-        const elements_start = try self.addNodeList(elements.items);
+        const elements_count = try self.checkedU16Count(loc, elements.slice().len, "too many array pattern elements; limit is 65535");
+        const elements_start = try self.addNodeList(elements.slice());
         return try self.nodes.add(.{
             .tag = .array_pattern,
             .loc = loc,
@@ -4479,10 +4481,8 @@ pub const Parser = struct {
         // The brace level this block's statements sit at. Recovery returns here.
         const block_depth = self.brace_depth;
 
-        var stmts_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
-        const stmts_alloc = stmts_sfa.get();
-        var stmts = std.ArrayList(NodeIndex).empty;
-        defer stmts.deinit(stmts_alloc);
+        const stmts = self.beginScratchList();
+        defer stmts.deinit();
 
         var progress: ProgressGuard = .{};
         while (true) {
@@ -4501,7 +4501,7 @@ pub const Parser = struct {
             if (try self.tryConsumeTypeDeclaration()) continue;
             const failed_statement_start = self.current.location().offset;
             if (self.parseStatement()) |stmt| {
-                try stmts.append(stmts_alloc, stmt);
+                try stmts.append(stmt);
             } else |err| {
                 if (self.shouldPropagateAdmissionError(err)) return err;
                 try self.reachAdmissionBoundary();
@@ -4538,9 +4538,9 @@ pub const Parser = struct {
         self.scopes.popScope();
         scope_active = false;
 
-        const stmts_count = try self.checkedU16Count(loc, stmts.items.len, "too many block statements; limit is 65535");
-        const stmts_start = if (stmts.items.len > 0)
-            try self.addStmtList(stmts.items)
+        const stmts_count = try self.checkedU16Count(loc, stmts.slice().len, "too many block statements; limit is 65535");
+        const stmts_start = if (stmts.slice().len > 0)
+            try self.addStmtList(stmts.slice())
         else
             null_node;
 
@@ -4564,8 +4564,8 @@ pub const Parser = struct {
         self.advance(); // consume 'import'
 
         // Collect specifiers
-        var specifiers = std.ArrayList(NodeIndex).empty;
-        defer specifiers.deinit(self.allocator);
+        const specifiers = self.beginScratchList();
+        defer specifiers.deinit();
 
         // Must have { for named imports
         if (!self.check(.lbrace)) {
@@ -4636,7 +4636,7 @@ pub const Parser = struct {
                 } },
             });
 
-            try specifiers.append(self.allocator, spec_node);
+            try specifiers.append(spec_node);
 
             if (!self.match(.comma)) break;
         }
@@ -4660,9 +4660,9 @@ pub const Parser = struct {
 
         try self.expectSemicolon();
 
-        const specifiers_count = try self.checkedU8Count(loc, specifiers.items.len, "too many import specifiers; limit is 255");
-        const specs_start = if (specifiers.items.len > 0)
-            try self.addNodeList(specifiers.items)
+        const specifiers_count = try self.checkedU8Count(loc, specifiers.slice().len, "too many import specifiers; limit is 255");
+        const specs_start = if (specifiers.slice().len > 0)
+            try self.addNodeList(specifiers.slice())
         else
             null_node;
 
@@ -5307,14 +5307,8 @@ pub const Parser = struct {
     ) anyerror!NodeIndex {
         const publication_checkpoint = self.typePublicationCheckpoint();
         errdefer if (pending_call) |pending| self.type_store.cancelExplicitCall(pending);
-        // Argument lists are almost always tiny, so a small stack buffer keeps
-        // them off the heap entirely; longer lists fall back to the parser
-        // allocator, and deinit handles either case. See
-        // `temp_list_stack_bytes` for why the buffer is kept small.
-        var args_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
-        const args_alloc = args_sfa.get();
-        var args = std.ArrayList(NodeIndex).empty;
-        defer args.deinit(args_alloc);
+        const args = self.beginScratchList();
+        defer args.deinit();
 
         if (!self.check(.rparen)) {
             var progress: ProgressGuard = .{};
@@ -5327,10 +5321,10 @@ pub const Parser = struct {
                         .loc = loc,
                         .data = .{ .opt_value = spread_expr },
                     });
-                    try args.append(args_alloc, spread_node);
+                    try args.append(spread_node);
                 } else {
                     const arg = try self.parseExpression(.assignment);
-                    try args.append(args_alloc, arg);
+                    try args.append(arg);
                 }
                 if (!self.match(.comma)) break;
                 if (self.check(.rparen)) break;
@@ -5338,9 +5332,9 @@ pub const Parser = struct {
         }
         try self.expect(.rparen, "')'");
 
-        const args_count = try self.checkedU8Count(loc, args.items.len, "too many call arguments; limit is 255");
-        const args_start = if (args.items.len > 0)
-            try self.addNodeList(args.items)
+        const args_count = try self.checkedU8Count(loc, args.slice().len, "too many call arguments; limit is 255");
+        const args_start = if (args.slice().len > 0)
+            try self.addNodeList(args.slice())
         else
             null_node;
 
@@ -5500,7 +5494,7 @@ pub const Parser = struct {
         const loc = token.location();
         const text = token.text(self.source);
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-        const str_idx = try self.unescapedStringOrDiagnostic(content, loc);
+        const str_idx = try self.unescapedStringOrDiagnostic(content, loc, token.has_escape);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -5512,7 +5506,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
 
-        const str_idx = try self.unescapedStringOrDiagnostic(text[1 .. text.len - 1], loc);
+        const str_idx = try self.unescapedStringOrDiagnostic(text[1 .. text.len - 1], loc, token.has_escape);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -5535,7 +5529,8 @@ pub const Parser = struct {
     }
 
     fn parseTemplateLiteral(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
+        const token = self.current;
+        const loc = token.location();
 
         if (self.current.type == .template_head) {
             self.errors.addErrorAt(.unsupported_feature, self.current, "template interpolation is not supported; build a string array with explicit `String(...)` conversions and call `.join(\"\")`");
@@ -5552,7 +5547,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-        const str_idx = try self.unescapedStringOrDiagnostic(content, loc);
+        const str_idx = try self.unescapedStringOrDiagnostic(content, loc, token.has_escape);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -5657,8 +5652,8 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume '['
 
-        var elements = std.ArrayList(NodeIndex).empty;
-        defer elements.deinit(self.allocator);
+        const elements = self.beginScratchList();
+        defer elements.deinit();
         var has_spread = false;
 
         if (!self.check(.rbracket)) {
@@ -5676,10 +5671,10 @@ pub const Parser = struct {
                         .loc = loc,
                         .data = .{ .opt_value = spread_expr },
                     });
-                    try elements.append(self.allocator, spread_node);
+                    try elements.append(spread_node);
                 } else {
                     const elem = try self.parseExpression(.assignment);
-                    try elements.append(self.allocator, elem);
+                    try elements.append(elem);
                 }
                 if (!self.match(.comma)) break;
                 if (self.check(.rbracket)) break;
@@ -5687,9 +5682,9 @@ pub const Parser = struct {
         }
         try self.expect(.rbracket, "']'");
 
-        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many array elements; limit is 65535");
-        const elements_start = if (elements.items.len > 0)
-            try self.addNodeList(elements.items)
+        const elements_count = try self.checkedU16Count(loc, elements.slice().len, "too many array elements; limit is 65535");
+        const elements_start = if (elements.slice().len > 0)
+            try self.addNodeList(elements.slice())
         else
             null_node;
 
@@ -5708,10 +5703,8 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume '{'
 
-        var properties_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
-        const properties_alloc = properties_sfa.get();
-        var properties = std.ArrayList(NodeIndex).empty;
-        defer properties.deinit(properties_alloc);
+        const properties = self.beginScratchList();
+        defer properties.deinit();
 
         if (!self.check(.rbrace)) {
             var progress: ProgressGuard = .{};
@@ -5727,7 +5720,7 @@ pub const Parser = struct {
                         .loc = prop_loc,
                         .data = .{ .opt_value = spread_expr },
                     });
-                    try properties.append(properties_alloc, spread_node);
+                    try properties.append(spread_node);
                 } else {
                     // Check for getter/setter
                     var prop_kind: NodeTag = .object_property;
@@ -5815,7 +5808,7 @@ pub const Parser = struct {
                             .is_shorthand = false,
                         } },
                     });
-                    try properties.append(properties_alloc, prop_node);
+                    try properties.append(prop_node);
                 }
 
                 if (!self.match(.comma)) break;
@@ -5824,9 +5817,9 @@ pub const Parser = struct {
         }
         try self.expect(.rbrace, "'}'");
 
-        const properties_count = try self.checkedU16Count(loc, properties.items.len, "too many object properties; limit is 65535");
-        const props_start = if (properties.items.len > 0)
-            try self.addNodeList(properties.items)
+        const properties_count = try self.checkedU16Count(loc, properties.slice().len, "too many object properties; limit is 65535");
+        const props_start = if (properties.slice().len > 0)
+            try self.addNodeList(properties.slice())
         else
             null_node;
 
@@ -5941,10 +5934,8 @@ pub const Parser = struct {
         };
 
         // Parse parameters
-        var params_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
-        const params_alloc = params_sfa.get();
-        var params = std.ArrayList(NodeIndex).empty;
-        defer params.deinit(params_alloc);
+        const params = self.beginScratchList();
+        defer params.deinit();
 
         if (self.check(.identifier)) {
             // Single parameter: x => ...
@@ -5969,13 +5960,12 @@ pub const Parser = struct {
                     .default_value = null_node,
                 } },
             });
-            try params.append(params_alloc, param_node);
+            try params.append(param_node);
         } else {
             try self.parseParenthesizedFunctionHeader(
                 .arrow,
                 &flags,
-                &params,
-                params_alloc,
+                params,
                 if (pending_signature) |*pending| pending else null,
             );
         }
@@ -6011,9 +6001,9 @@ pub const Parser = struct {
         self.scopes.popScope();
         scope_active = false;
 
-        const params_count = try self.checkedU8Count(loc, params.items.len, "too many arrow function parameters; limit is 255");
-        const params_start = if (params.items.len > 0)
-            try self.addNodeList(params.items)
+        const params_count = try self.checkedU8Count(loc, params.slice().len, "too many arrow function parameters; limit is 255");
+        const params_start = if (params.slice().len > 0)
+            try self.addNodeList(params.slice())
         else
             null_node;
 
@@ -6921,28 +6911,13 @@ pub const Parser = struct {
         return try self.constants.addString(str);
     }
 
-    const UnescapedString = struct {
-        bytes: []const u8,
-        allocation: ?[]u8 = null,
-
-        fn deinit(self: UnescapedString, allocator: std.mem.Allocator) void {
-            if (self.allocation) |allocation| allocator.free(allocation);
-        }
-    };
-
-    /// Unescape `content` then intern it. Frees the unescape buffer when it was
-    /// freshly allocated (i.e. the input contained backslashes), regardless of
-    /// whether the string was new or a duplicate in the constant pool.
-    ///
-    /// Template literals unescape through the same table as quoted strings.
-    /// Both parser profiles use the same decoding table. A literal must have
-    /// the same bytes in a program and in an internal expression comparison.
+    /// Both string spellings use the same closed decoding table.
     /// Decode a string literal's content, reporting a closed-escape-set
     /// violation as a located diagnostic rather than propagating a bare error.
     /// The two faults are distinct to a reader and carry different repairs, so
     /// they carry different codes.
-    fn unescapedStringOrDiagnostic(self: *Parser, content: []const u8, loc: SourceLocation) !u16 {
-        return self.addUnescapedString(content) catch |err| switch (err) {
+    fn unescapedStringOrDiagnostic(self: *Parser, content: []const u8, loc: SourceLocation, has_escape: bool) !u16 {
+        return self.addUnescapedString(content, has_escape) catch |err| switch (err) {
             error.InvalidEscapeSequence => {
                 self.errors.addError(
                     .invalid_escape_sequence,
@@ -6963,10 +6938,11 @@ pub const Parser = struct {
         };
     }
 
-    fn addUnescapedString(self: *Parser, content: []const u8) !u16 {
-        const unescaped = try self.unescape(content);
-        defer unescaped.deinit(self.allocator);
-        return self.addString(unescaped.bytes);
+    fn addUnescapedString(self: *Parser, content: []const u8, has_escape: bool) !u16 {
+        if (!has_escape) return self.addString(content);
+        // addOwnedString consumes the decoded allocation on success, duplicate,
+        // and error. It never makes a second copy of a newly decoded value.
+        return self.constants.addOwnedString(try self.unescape(content));
     }
 
     /// Decode the `\uNNNN` or `\u{N..}` escape that starts at the backslash
@@ -6996,17 +6972,15 @@ pub const Parser = struct {
 
     /// Unescape a JavaScript string literal, converting escape sequences to
     /// actual characters. Handles `\n`, `\r`, `\t`, `\b`, `\f`, `\v`, `\\`,
-    /// `\'`, `\"`, `\0`, `\xNN`, `\uNNNN`, and `\u{N..}`; every other escape
-    /// emits the character that follows the backslash.
+    /// `\'`, `\"`, `\0`, `\xNN`, `\uNNNN`, and `\u{N..}`; other escapes are
+    /// refused rather than silently changing the value.
     ///
     /// The two profiles use the same closed escape set. A mistyped escape must
     /// not change the string silently, so there is nothing to parameterize.
     ///
-    /// Returns the original input on the fast path, or an owned allocation plus
-    /// the used byte range when escape decoding shortens the string.
-    fn unescape(self: *Parser, input: []const u8) !UnescapedString {
-        if (std.mem.indexOfScalar(u8, input, '\\') == null) return .{ .bytes = input };
-
+    /// Called only for tokens the scanner marked as escaped. The returned
+    /// allocation is exact-sized so the constant pool can own and free it.
+    fn unescape(self: *Parser, input: []const u8) ![]u8 {
         // The decoded form is never longer than the input: every escape emits
         // at most as many bytes as its backslash sequence occupies.
         var result = try self.allocator.alloc(u8, input.len);
@@ -7079,7 +7053,7 @@ pub const Parser = struct {
             }
         }
 
-        return .{ .bytes = result[0..out_pos], .allocation = result };
+        return self.allocator.realloc(result, out_pos);
     }
 
     fn addAtom(self: *Parser, name: []const u8) !u16 {
@@ -7216,6 +7190,70 @@ test "admission parser reaches each syntax-owned refusal producer" {
         const kind: type_syntax.AdmissionKind = @enumFromInt(field.value);
         try std.testing.expect(seen.contains(kind));
     }
+}
+
+test "nested lists retain parent elements across scratch growth" {
+    const allocator = std.testing.allocator;
+    var source: std.Io.Writer.Allocating = .init(allocator);
+    defer source.deinit();
+    try source.writer.writeAll("function outer(first, last) { return [first, collect([");
+    for (0..256) |i| try source.writer.print("{d},", .{i});
+    try source.writer.writeAll("], {value: [11, 12]}, (x, y) => [x, y]), last]; }");
+    var parser = try Parser.init(allocator, source.written());
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const program = view.getBlock(root).?;
+    const declaration = view.getVarDecl(view.getListIndex(program.stmts_start, 0)).?;
+    const outer = view.getFunction(declaration.init).?;
+    try std.testing.expectEqual(@as(u8, 2), outer.params_count);
+    for ([_][]const u8{ "first", "last" }, 0..) |name, i| {
+        const param = view.getPatternElem(view.getListIndex(outer.params_start, @intCast(i))).?;
+        try std.testing.expectEqualStrings(name, view.getString(param.binding.name_atom).?);
+    }
+    var counts = [_]usize{ 0, 0, 0 };
+    for (parser.nodes.tags.items, 0..) |tag, i| {
+        if (tag == .array_literal) {
+            const array = view.getArray(@intCast(i)).?;
+            switch (array.elements_count) {
+                256 => {
+                    counts[0] += 1;
+                    for (0..256) |element| try std.testing.expectEqual(@as(i32, @intCast(element)), view.getIntValue(view.getListIndex(array.elements_start, @intCast(element))).?);
+                },
+                3 => {
+                    counts[1] += 1;
+                    try std.testing.expectEqual(NodeTag.identifier, view.getTag(view.getListIndex(array.elements_start, 0)).?);
+                    const call = view.getCall(view.getListIndex(array.elements_start, 1)).?;
+                    try std.testing.expectEqual(@as(u8, 3), call.args_count);
+                    try std.testing.expectEqual(NodeTag.array_literal, view.getTag(view.getListIndex(call.args_start, 0)).?);
+                    try std.testing.expectEqual(NodeTag.object_literal, view.getTag(view.getListIndex(call.args_start, 1)).?);
+                    const arrow = view.getFunction(view.getListIndex(call.args_start, 2)).?;
+                    try std.testing.expectEqual(@as(u8, 2), arrow.params_count);
+                    try std.testing.expectEqual(NodeTag.identifier, view.getTag(view.getListIndex(array.elements_start, 2)).?);
+                },
+                2 => counts[2] += 1,
+                else => return error.TestUnexpectedResult,
+            }
+        }
+    }
+    try std.testing.expectEqualDeep([_]usize{ 1, 1, 2 }, counts);
+    try std.testing.expectEqual(@as(usize, 0), parser.scratch_nodes.items.len);
+}
+
+test "list scratch unwinds on allocation failure and parser refusal" {
+    const source = "function f(a, b) { return [a, {x: [1, 2, 3]}, g([4, 5], x => [x, b])]; }";
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator, text: []const u8) !void {
+            var parser = try Parser.init(allocator, text);
+            defer parser.deinit();
+            defer std.debug.assert(parser.scratch_nodes.items.len == 0);
+            _ = try parser.parse();
+        }
+    }.run, .{source});
+    var refused = try Parser.init(std.testing.allocator, "function f(a) { return [a, {x: [1, , 2]}]; }");
+    defer refused.deinit();
+    try std.testing.expectError(error.ParseError, refused.parse());
+    try std.testing.expectEqual(@as(usize, 0), refused.scratch_nodes.items.len);
 }
 
 test "plain typed parser does not enable admission collection" {
@@ -8292,7 +8330,7 @@ test "parse variable declaration" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "parse escaped string literal owns the full temporary buffer" {
+test "parse escaped string literal transfers an exact-sized owned value" {
     var parser = try Parser.init(std.testing.allocator, "const s = \"{\\\"type\\\":\\\"object\\\"}\";");
     defer parser.deinit();
 
@@ -8308,6 +8346,25 @@ test "parse escaped string literal owns the full temporary buffer" {
         }
     }
     try std.testing.expect(found);
+}
+
+test "escaped strings decode and deduplicate through allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var parser = try Parser.init(
+                allocator,
+                "const values = [\"line\\nvalue\", `line\\nvalue`, \"\\u{1F600}\", \"\\x41\"];",
+            );
+            defer parser.deinit();
+            _ = try parser.parse();
+            try std.testing.expect(!parser.hasErrors());
+            var decoded: usize = 0;
+            for (parser.constants.strings.items) |bytes| {
+                if (std.mem.eql(u8, bytes, "line\nvalue") or std.mem.eql(u8, bytes, "😀") or std.mem.eql(u8, bytes, "A")) decoded += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 3), decoded);
+        }
+    }.run, .{});
 }
 
 test "parse function declaration" {

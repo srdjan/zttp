@@ -204,6 +204,9 @@ pub const Token = struct {
     /// separator is allowed in the current profile. Lands in the struct's
     /// existing tail padding: `Token` is 20 bytes with and without it.
     has_separator: bool = false,
+    /// The raw string/template text contains escapes. Recorded during scanning
+    /// so unescaped contents need no second search. Fits in existing padding.
+    has_escape: bool = false,
 
     /// Get the text of this token from the source
     pub fn text(self: Token, source: []const u8) []const u8 {
@@ -240,6 +243,11 @@ pub const Token = struct {
             @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_assert);
     }
 };
+
+comptime {
+    std.debug.assert(@sizeOf(Token) == 20);
+    std.debug.assert(@sizeOf(TokenType) == 1);
+}
 
 /// Keyword lookup table
 pub const keywords = std.StaticStringMap(TokenType).initComptime(.{

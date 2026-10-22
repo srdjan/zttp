@@ -14,6 +14,15 @@ pub const NodeIndex = u32;
 /// Sentinel value for "no node"
 pub const null_node: NodeIndex = std.math.maxInt(NodeIndex);
 
+/// Only property values use the all-ones 24-bit encoding for null. Ordinary
+/// operands may use that index, but must never wrap a larger index into it.
+fn packNode24(index: NodeIndex, nullable: bool) error{NodeIndexOverflow}!u32 {
+    const limit = std.math.maxInt(u24);
+    if (nullable and index == null_node) return limit;
+    if (index > limit or (nullable and index == limit)) return error.NodeIndexOverflow;
+    return index;
+}
+
 /// Scope identifier
 pub const ScopeId = u16;
 
@@ -699,6 +708,24 @@ pub const ConstantPool = struct {
         // unconditionally (callers may pass slices into source text or
         // freshly-allocated unescape buffers; ownership is not transferred).
         const owned = try self.allocator.dupe(u8, str);
+        return self.insertOwnedString(owned, idx);
+    }
+
+    /// Consumes a buffer allocated with this pool's allocator on every path.
+    /// A duplicate is freed immediately; a new string stays owned by the pool.
+    pub fn addOwnedString(self: *ConstantPool, owned: []u8) !u16 {
+        if (self.string_index.get(owned)) |idx| {
+            self.allocator.free(owned);
+            return idx;
+        }
+        const idx = std.math.cast(u16, self.strings.items.len) orelse {
+            self.allocator.free(owned);
+            return error.TooManyConstants;
+        };
+        return self.insertOwnedString(owned, idx);
+    }
+
+    fn insertOwnedString(self: *ConstantPool, owned: []u8, idx: u16) !u16 {
         errdefer self.allocator.free(owned);
         try self.strings.append(self.allocator, owned);
         errdefer _ = self.strings.pop();
@@ -747,9 +774,9 @@ pub const DataPayload = extern struct {
     }
 
     /// Pack binary expression
-    pub fn fromBinary(op: BinaryOp, left: NodeIndex, right: NodeIndex) DataPayload {
+    pub fn fromBinary(op: BinaryOp, left: NodeIndex, right: NodeIndex) error{NodeIndexOverflow}!DataPayload {
         return .{
-            .a = (@as(u32, @intFromEnum(op)) << 24) | (left & 0xFFFFFF),
+            .a = (@as(u32, @intFromEnum(op)) << 24) | try packNode24(left, false),
             .b = right,
         };
     }
@@ -774,19 +801,23 @@ pub const DataPayload = extern struct {
     }
 };
 
-/// Optimized IR storage using Structure-of-Arrays pattern
-/// ~47% memory reduction compared to Array-of-Structs Node
-///
-/// Memory layout comparison (per node):
-///   AoS (Node struct):  tag(1) + pad(3) + loc(12) + data(~24) = ~40 bytes
-///   SoA (IRStore):      tag(1) + loc(10) + data(8) = 19 bytes
+comptime {
+    std.debug.assert(@sizeOf(DataPayload) == 8);
+    std.debug.assert(@sizeOf(NodeTag) == 1);
+    std.debug.assert(@sizeOf(SourceLocation) == 16);
+    std.debug.assert(@typeInfo(BinaryOp).@"enum".fields.len < 256);
+}
+
+/// Structure-of-arrays storage: tag(1) + location(16) + payload(8) +
+/// binding-name atom(2) = 27 bytes per node, excluding side arrays, allocator
+/// overhead, and spare capacity. Tag-only passes read the one-byte column.
 pub const IRStore = struct {
     allocator: std.mem.Allocator,
 
     /// Node tags - 1 byte each, contiguous for fast dispatch
     tags: std.ArrayListUnmanaged(NodeTag),
 
-    /// Source locations - 10 bytes each (packed)
+    /// Source locations - 16 bytes each
     locs: std.ArrayListUnmanaged(SourceLocation),
 
     /// Compact data payloads - 8 bytes each
@@ -821,8 +852,8 @@ pub const IRStore = struct {
     /// node density far below one node per 5 bytes, and an uncapped estimate
     /// reserved ~5.1 bytes of heap per source byte, which measured as a 2.5x
     /// peak-memory regression (20.5 MB -> 51.1 MB) on a 4 MB blob-heavy
-    /// handler. Capping bounds the reservation at roughly 376 KB; sources that
-    /// genuinely exceed it fall back to doubling, which costs a handful of
+    /// handler. Capping bounds the up-front reservation; sources that
+    /// genuinely exceed it fall back to geometric growth, which costs a handful of
     /// reallocations on a parse that is already large.
     const max_reserved_nodes: usize = 16384;
     const max_reserved_side: usize = 4096;
@@ -866,11 +897,18 @@ pub const IRStore = struct {
 
     /// Add a node and return its index
     pub fn addNode(self: *IRStore, tag: NodeTag, loc: SourceLocation, payload: DataPayload) !NodeIndex {
-        const idx = @as(NodeIndex, @intCast(self.tags.items.len));
-        try self.tags.append(self.allocator, tag);
-        try self.locs.append(self.allocator, loc);
-        try self.data.append(self.allocator, payload);
-        try self.binding_name_atoms.append(self.allocator, 0);
+        const idx = std.math.cast(NodeIndex, self.tags.items.len) orelse return error.TooManyNodes;
+        if (idx == null_node) return error.TooManyNodes;
+        // Publish no column until every allocation succeeds. Recovery may keep
+        // walking the retained prefix after an allocation failure.
+        try self.tags.ensureUnusedCapacity(self.allocator, 1);
+        try self.locs.ensureUnusedCapacity(self.allocator, 1);
+        try self.data.ensureUnusedCapacity(self.allocator, 1);
+        try self.binding_name_atoms.ensureUnusedCapacity(self.allocator, 1);
+        self.tags.appendAssumeCapacity(tag);
+        self.locs.appendAssumeCapacity(loc);
+        self.data.appendAssumeCapacity(payload);
+        self.binding_name_atoms.appendAssumeCapacity(0);
         return idx;
     }
 
@@ -884,7 +922,8 @@ pub const IRStore = struct {
 
     /// Add extra data and return starting index
     pub fn addExtra(self: *IRStore, values: []const u32) !u32 {
-        const start = @as(u32, @intCast(self.extra.items.len));
+        const start = std.math.cast(u32, self.extra.items.len) orelse return error.TooManyNodes;
+        if (values.len > std.math.maxInt(u32) - start) return error.TooManyNodes;
         try self.extra.appendSlice(self.allocator, values);
         return start;
     }
@@ -926,7 +965,8 @@ pub const IRStore = struct {
     /// Add index list and return start position
     pub fn addIndexList(self: *IRStore, indices: []const NodeIndex) !NodeIndex {
         if (indices.len == 0) return null_node;
-        const start = @as(NodeIndex, @intCast(self.index_lists.items.len));
+        const start = std.math.cast(NodeIndex, self.index_lists.items.len) orelse return error.TooManyNodes;
+        if (indices.len > std.math.maxInt(NodeIndex) - start) return error.TooManyNodes;
         try self.index_lists.appendSlice(self.allocator, indices);
         return start;
     }
@@ -957,7 +997,7 @@ pub const IRStore = struct {
 
     /// Add binary expression
     pub fn addBinary(self: *IRStore, loc: SourceLocation, op: BinaryOp, left: NodeIndex, right: NodeIndex) !NodeIndex {
-        return self.addNode(.binary_op, loc, DataPayload.fromBinary(op, left, right));
+        return self.addNode(.binary_op, loc, try DataPayload.fromBinary(op, left, right));
     }
 
     /// Add unary expression
@@ -1024,7 +1064,7 @@ pub const IRStore = struct {
                     .b = @intFromEnum(b.kind),
                 });
             },
-            .binary_op => self.addNode(.binary_op, loc, DataPayload.fromBinary(
+            .binary_op => self.addNode(.binary_op, loc, try DataPayload.fromBinary(
                 node.data.binary.op,
                 node.data.binary.left,
                 node.data.binary.right,
@@ -1062,7 +1102,7 @@ pub const IRStore = struct {
                 const a = node.data.assignment;
                 // Pack: a = target, b = value(24) | op(8) (0 = no op, 1+ = op enum + 1)
                 const op_byte: u8 = if (a.op) |op| @as(u8, @intFromEnum(op)) + 1 else 0;
-                const b_val = @as(u32, @as(u24, @truncate(a.value))) | (@as(u32, op_byte) << 24);
+                const b_val = (try packNode24(a.value, false)) | (@as(u32, op_byte) << 24);
                 break :blk self.addNode(.assignment, loc, .{ .a = a.target, .b = b_val });
             },
             .array_literal => blk: {
@@ -1079,7 +1119,7 @@ pub const IRStore = struct {
                 const p = node.data.property;
                 // Pack: a = key, b = value(24) | is_shorthand(1) << 24.
                 const flags: u32 = @as(u32, if (p.is_shorthand) 1 else 0) << 24;
-                const b_val = @as(u32, @as(u24, @truncate(p.value))) | flags;
+                const b_val = (try packNode24(p.value, true)) | flags;
                 break :blk self.addNode(.object_property, loc, .{ .a = p.key, .b = b_val });
             },
             .object_spread => self.addNode(.object_spread, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
@@ -1285,7 +1325,7 @@ pub const IRStore = struct {
             // --- Object method/accessor ---
             .object_method, .object_getter, .object_setter => blk: {
                 const p = node.data.property;
-                const b_val = @as(u32, @as(u24, @truncate(p.value)));
+                const b_val = try packNode24(p.value, true);
                 break :blk self.addNode(node.tag, loc, .{ .a = p.key, .b = b_val });
             },
 
@@ -1438,6 +1478,24 @@ test "constant pool" {
 
     try std.testing.expectEqualStrings("hello", pool.getString(0).?);
     try std.testing.expectEqualStrings("world", pool.getString(1).?);
+}
+
+test "owned strings transfer storage and release duplicates through allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var pool = ConstantPool.init(allocator);
+            defer pool.deinit();
+            const owned = try allocator.dupe(u8, "decoded\nvalue");
+            const address = owned.ptr;
+            const idx = try pool.addOwnedString(owned);
+            try std.testing.expect(pool.getString(idx).?.ptr == address);
+            const duplicate = try allocator.dupe(u8, "decoded\nvalue");
+            try std.testing.expectEqual(idx, try pool.addOwnedString(duplicate));
+            try std.testing.expectEqual(idx, try pool.addString("decoded\nvalue"));
+            try std.testing.expectEqual(@as(usize, 1), pool.strings.items.len);
+            try std.testing.expectEqualStrings("decoded\nvalue", pool.getString(idx).?);
+        }
+    }.run, .{});
 }
 
 test "IRStore basic operations" {
@@ -1598,6 +1656,66 @@ test "IRStore memory efficiency" {
 
     // NodeTag should be 1 byte
     try std.testing.expectEqual(@as(usize, 1), @sizeOf(NodeTag));
+}
+
+test "packed node operands reject overflow and preserve nullable sentinels" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+    const loc: SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const max = std.math.maxInt(u24);
+    const binary = try store.addBinary(loc, .mul, max, 0x1000000);
+    try std.testing.expectEqual(@as(NodeIndex, max), view.getBinary(binary).?.left);
+    try std.testing.expectEqual(@as(NodeIndex, 0x1000000), view.getBinary(binary).?.right);
+    try std.testing.expectError(error.NodeIndexOverflow, store.addBinary(loc, .add, max + 1, 0));
+    try std.testing.expectError(error.NodeIndexOverflow, store.addBinary(loc, .add, null_node, 0));
+    const assignment = Node{ .tag = .assignment, .loc = loc, .data = .{ .assignment = .{ .target = 0, .value = max, .op = .add } } };
+    const assigned = try store.add(assignment);
+    try std.testing.expectEqual(@as(NodeIndex, max), view.getAssignment(assigned).?.value);
+    var overflow_assignment = assignment;
+    overflow_assignment.data.assignment.value = max + 1;
+    try std.testing.expectError(error.NodeIndexOverflow, store.add(overflow_assignment));
+    const property = Node{ .tag = .object_property, .loc = loc, .data = .{ .property = .{ .key = 0, .value = max - 1, .is_shorthand = true } } };
+    const prop = try store.add(property);
+    try std.testing.expectEqual(@as(NodeIndex, max - 1), view.getProperty(prop).?.value);
+    try std.testing.expect(view.getProperty(prop).?.is_shorthand);
+    var null_property = property;
+    null_property.data.property.value = null_node;
+    const absent = try store.add(null_property);
+    try std.testing.expectEqual(null_node, view.getProperty(absent).?.value);
+    for ([_]NodeTag{ .object_property, .object_method, .object_getter, .object_setter }) |tag| {
+        var overflow_property = property;
+        overflow_property.tag = tag;
+        for ([_]NodeIndex{ max, max + 1 }) |value| {
+            overflow_property.data.property.value = value;
+            try std.testing.expectError(error.NodeIndexOverflow, store.add(overflow_property));
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 4), store.len());
+}
+
+test "failed node append preserves the complete parallel prefix" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var store = IRStore.init(allocator);
+            defer store.deinit();
+            const loc: SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+            // Cross several growth boundaries, including the initially empty
+            // store, so failure is tested for each independently growing column.
+            for (0..64) |i| {
+                _ = store.addLitInt(loc, @intCast(i)) catch |err| {
+                    try std.testing.expectEqual(i, store.tags.items.len);
+                    try std.testing.expectEqual(i, store.locs.items.len);
+                    try std.testing.expectEqual(i, store.data.items.len);
+                    try std.testing.expectEqual(i, store.binding_name_atoms.items.len);
+                    for (0..i) |kept| try std.testing.expectEqual(@as(i32, @intCast(kept)), store.getData(@intCast(kept)).toInt());
+                    return err;
+                };
+            }
+        }
+    }.run, .{});
 }
 
 // ============================================================================
@@ -2623,9 +2741,11 @@ test "ConstantPool refuses the 65537th distinct constant and keeps deduplicating
         try std.testing.expectEqual(@as(u16, @intCast(i)), try pool.addFloat(@floatFromInt(i)));
     }
     try std.testing.expectError(error.TooManyConstants, pool.addString("one more"));
+    try std.testing.expectError(error.TooManyConstants, pool.addOwnedString(try std.testing.allocator.dupe(u8, "owned overflow")));
     try std.testing.expectError(error.TooManyConstants, pool.addFloat(-1.5));
     // A refused constant leaves no entry behind, and existing ones still resolve.
     try std.testing.expectEqual(@as(?u16, null), pool.string_index.get("one more"));
     try std.testing.expectEqual(@as(u16, 7), try pool.addString("s7"));
+    try std.testing.expectEqual(@as(u16, 7), try pool.addOwnedString(try std.testing.allocator.dupe(u8, "s7")));
     try std.testing.expectEqual(@as(u16, 7), try pool.addFloat(7));
 }
