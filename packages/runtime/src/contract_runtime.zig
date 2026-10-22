@@ -430,6 +430,66 @@ pub fn validateEnvVars(allocator: std.mem.Allocator, contract: *const ValidatedR
     return try missing.toOwnedSlice(allocator);
 }
 
+/// One field that the projection from `HandlerProperties` leaves out, with the reason.
+const Exclusion = struct {
+    name: []const u8,
+    reason: []const u8,
+};
+
+fn isExcluded(comptime excluded: []const Exclusion, comptime name: []const u8) bool {
+    for (excluded) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
+/// Return the first problem in the field projection from `Source` to `Target`, or null.
+/// Every source field is excluded or has a target field of the same name and type.
+/// Every target field is excluded or has a source field of the same name.
+/// Each exclusion names a field on its own side and states a reason.
+fn projectionProblem(
+    comptime Source: type,
+    comptime Target: type,
+    comptime source_excluded: []const Exclusion,
+    comptime target_excluded: []const Exclusion,
+) ?[]const u8 {
+    @setEvalBranchQuota(100_000);
+    const names = @typeName(Source) ++ " -> " ++ @typeName(Target);
+    for (source_excluded) |entry| {
+        if (!@hasField(Source, entry.name)) return names ++ ": source exclusion names no field: " ++ entry.name;
+        if (entry.reason.len == 0) return names ++ ": source exclusion has no reason: " ++ entry.name;
+    }
+    for (target_excluded) |entry| {
+        if (!@hasField(Target, entry.name)) return names ++ ": target exclusion names no field: " ++ entry.name;
+        if (entry.reason.len == 0) return names ++ ": target exclusion has no reason: " ++ entry.name;
+    }
+    for (std.meta.fields(Source)) |field| {
+        if (isExcluded(source_excluded, field.name)) continue;
+        if (!@hasField(Target, field.name) or isExcluded(target_excluded, field.name))
+            return names ++ ": unclassified source field: " ++ field.name;
+        if (@FieldType(Target, field.name) != field.type)
+            return names ++ ": field type differs: " ++ field.name;
+    }
+    for (std.meta.fields(Target)) |field| {
+        if (isExcluded(target_excluded, field.name)) continue;
+        if (!@hasField(Source, field.name) or isExcluded(source_excluded, field.name))
+            return names ++ ": unclassified target field: " ++ field.name;
+    }
+    return null;
+}
+
+/// The `HandlerProperties` fields that `Properties` does not carry. The runtime
+/// reads no other property bit, so a bit that is not here must be copied.
+const properties_source_exclusions = [_]Exclusion{
+    .{ .name = "post_only", .reason = "no runtime code reads it; the route pre-filter works from the contract route table" },
+    .{ .name = "canonical", .reason = "a claim about the source form, fixed at compile time; no runtime code reads it" },
+    .{ .name = "cost_bounded", .reason = "no runtime code reads the bit; the cost limits come from the separate cost_envelope field of RuntimeContract" },
+};
+
+comptime {
+    if (projectionProblem(HandlerProperties, Properties, &properties_source_exclusions, &.{})) |problem| @compileError(problem);
+}
+
 /// Build a RawRuntimeContract directly from an engine HandlerContract.
 /// Allocates all strings with the given allocator. Caller owns the result.
 pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContract) !RawRuntimeContract {
@@ -967,6 +1027,60 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(!rc.properties.pure);
     try std.testing.expectEqual(zq.CoreProfile.model_1, rc.source_identity.core_profile);
     try std.testing.expect(rc.source_identity.isStamped());
+}
+
+test "fromHandlerContract copies every HandlerProperties field that Properties carries" {
+    const allocator = std.testing.allocator;
+    // Run once with every flag true and once with every flag false, so a field
+    // that the projection forgets reads as a default in at least one run.
+    const flag_values = [_]bool{ true, false };
+    inline for (flag_values) |flag| {
+        var hc = zq.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+        defer hc.deinit(allocator);
+        var source = std.mem.zeroes(HandlerProperties);
+        inline for (std.meta.fields(HandlerProperties)) |field| {
+            if (field.type == bool) @field(source, field.name) = flag;
+        }
+        source.max_io_depth = if (flag) 7 else null;
+        hc.properties = source;
+
+        var raw = try fromHandlerContract(allocator, &hc);
+        defer raw.deinit();
+        const projected = raw.inner.properties;
+
+        var compared: usize = 0;
+        inline for (std.meta.fields(HandlerProperties)) |field| {
+            if (comptime !isExcluded(&properties_source_exclusions, field.name)) {
+                try std.testing.expectEqual(@field(source, field.name), @field(projected, field.name));
+                compared += 1;
+            }
+        }
+        // The floor: seventeen of the twenty fields are carried.
+        try std.testing.expectEqual(@as(usize, 17), compared);
+    }
+}
+
+test "projectionProblem refuses an unclassified field, a type change, and a bad exclusion" {
+    const Source = struct { kept: bool, dropped: bool };
+    const Target = struct { kept: bool };
+    const dropped = [_]Exclusion{.{ .name = "dropped", .reason = "not needed" }};
+    try std.testing.expect(comptime projectionProblem(Source, Target, &dropped, &.{}) == null);
+    // A source field with neither a target field nor an exclusion.
+    try std.testing.expect(comptime projectionProblem(Source, Target, &.{}, &.{}) != null);
+    // A target field with no source field.
+    const Wider = struct { kept: bool, extra: bool };
+    try std.testing.expect(comptime projectionProblem(Target, Wider, &.{}, &.{}) != null);
+    // A target field that an exclusion names.
+    const extra = [_]Exclusion{.{ .name = "extra", .reason = "set from another source" }};
+    try std.testing.expect(comptime projectionProblem(Target, Wider, &.{}, &extra) == null);
+    // A type change.
+    const Retyped = struct { kept: u8 };
+    try std.testing.expect(comptime projectionProblem(Target, Retyped, &.{}, &.{}) != null);
+    // An exclusion that names no field, and one with no reason.
+    const ghost = [_]Exclusion{.{ .name = "ghost", .reason = "no such field" }};
+    try std.testing.expect(comptime projectionProblem(Target, Target, &ghost, &.{}) != null);
+    const silent = [_]Exclusion{.{ .name = "dropped", .reason = "" }};
+    try std.testing.expect(comptime projectionProblem(Source, Target, &silent, &.{}) != null);
 }
 
 // Drift guard: parseContractJson is a second, hand-rolled reader of the contract

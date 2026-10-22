@@ -187,6 +187,6 @@ After U4, run `zig build test`, `zig build check-spine`, and `bash scripts/verif
 | Step 0 Baseline | Done 2026-10-22; 18 gates exit 0 |
 | U1 Unproven properties read false | Done 2026-10-22; lead re-ran U1 gates and `zig build test` (200/200 steps) with a fresh cache |
 | U2 Reflective binding adapter | Done 2026-10-22; lead re-ran U2 gates and `zig build test` (200/200 steps) with a fresh cache |
-| U3 Contract census | Not started |
+| U3 Contract census | Done 2026-10-22; lead re-ran U3 gates and `zig build test` (200/200 steps) with a fresh cache |
 | U4 Imported analysis under the swallow gate | Not started |
 | U5 Node-kind arm census | Not started |

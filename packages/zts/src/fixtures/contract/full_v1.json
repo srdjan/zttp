@@ -1,0 +1,278 @@
+{
+  "version": 24,
+  "handler": {
+    "path": "handler.ts",
+    "line": 12,
+    "column": 5
+  },
+  "sourceIdentity": {
+    "coreProfileId": "zts-model-1",
+    "coreGrammarHash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "semanticsHash": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "routes": [
+    {
+      "pattern": "/orders/:id",
+      "type": "prefix",
+      "field": "url",
+      "status": 202,
+      "contentType": "text/html; charset=utf-8",
+      "aot": true
+    },
+    {
+      "pattern": "/health",
+      "type": "exact",
+      "field": "path",
+      "status": 200,
+      "contentType": "application/json",
+      "aot": true
+    }
+  ],
+  "modules": ["zttp:fetch", "zttp:cache"],
+  "sandbox": {
+    "capabilities": ["clock", "network"],
+    "capabilityHash": "57d778a1497df4971700f0bbd776c2f9ef717295944e799ab129b8beb54dc351",
+    "declaredBudget": ["network"],
+    "policyHash": "4444444444444444444444444444444444444444444444444444444444444444",
+    "wasmPolicyHash": "5555555555555555555555555555555555555555555555555555555555555555",
+    "artifactSha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "functions": {
+    "zttp:fetch": ["fetchSync"]
+  },
+  "env": {
+    "literal": ["ORDERS_TOKEN"],
+    "dynamic": true
+  },
+  "egress": {
+    "endpoints": ["https://api.example.com:443"],
+    "urls": ["https://api.example.com/orders"],
+    "dynamic": true
+  },
+  "cache": {
+    "namespaces": ["orders", "limits"],
+    "dynamic": true
+  },
+  "sql": {
+    "backend": "sqlite",
+    "queries": [
+      {
+        "name": "findOrder",
+        "statement": "SELECT id FROM orders WHERE id = :id",
+        "operation": "select",
+        "tables": ["orders", "customers"]
+      }
+    ],
+    "dynamic": true
+  },
+  "api": {
+    "schemas": [
+      {
+        "name": "Order",
+        "schema": {"type":"object"}
+      }
+    ],
+    "requests": {
+      "schemaRefs": ["OrderCreate"],
+      "dynamic": true
+    },
+    "auth": {
+      "bearer": true,
+      "jwt": true
+    },
+    "routes": [
+      {
+        "method": "POST",
+        "path": "/orders/:id",
+        "requestSchemaRefs": ["OrderCreate"],
+        "requestSchemaDynamic": true,
+        "requiresBearer": true,
+        "requiresJwt": true,
+        "pathParams": [
+          {
+            "name": "id",
+            "location": "path",
+            "required": true,
+            "schema": {"type":"string"}
+          }
+        ],
+        "queryParams": [
+          {
+            "name": "expand",
+            "location": "query",
+            "required": true,
+            "schema": {"type":"boolean"}
+          }
+        ],
+        "headerParams": [
+          {
+            "name": "x-request-id",
+            "location": "header",
+            "required": true,
+            "schema": {"type":"string"}
+          }
+        ],
+        "queryParamsDynamic": true,
+        "headerParamsDynamic": true,
+        "requestBodies": [
+          {
+            "contentType": "application/json",
+            "schemaRef": "OrderCreate",
+            "schema": null,
+            "dynamic": false
+          },
+          {
+            "contentType": "application/xml",
+            "schemaRef": null,
+            "schema": {"type":"object"},
+            "dynamic": false
+          },
+          {
+            "contentType": "text/plain",
+            "schemaRef": null,
+            "schema": null,
+            "dynamic": true
+          }
+        ],
+        "requestBodiesDynamic": true,
+        "responses": [
+          {
+            "status": 201,
+            "contentType": "application/json",
+            "schemaRef": "Order",
+            "schema": null,
+            "dynamic": false
+          },
+          {
+            "status": 202,
+            "contentType": "application/xml",
+            "schemaRef": null,
+            "schema": {"type":"string"},
+            "dynamic": false
+          },
+          {
+            "status": 203,
+            "contentType": "text/plain",
+            "schemaRef": null,
+            "schema": null,
+            "dynamic": true
+          }
+        ],
+        "responsesDynamic": true,
+        "responseStatus": 201,
+        "responseContentType": "application/json",
+        "responseSchemaRef": "Order",
+        "responseSchema": {"type":"string"},
+        "responseSchemaDynamic": true
+      }
+    ],
+    "schemasDynamic": true,
+    "routesDynamic": true
+  },
+  "verification": {
+    "exhaustiveReturns": true,
+    "resultsSafe": true,
+    "unreachableCode": true,
+    "bytecodeVerified": true
+  },
+  "aot": {
+    "patternCount": 3,
+    "hasDefault": true
+  },
+  "faultCoverage": {
+    "totalFailable": 4,
+    "covered": 4,
+    "warnings": 1,
+    "isCovered": true
+  },
+  "rateLimiting": {
+    "namespace": "limits",
+    "dynamic": true
+  },
+  "properties": {
+    "pure": true,
+    "readOnly": true,
+    "stateless": true,
+    "retrySafe": true,
+    "deterministic": true,
+    "hasEgress": true,
+    "noSecretLeakage": true,
+    "noCredentialLeakage": true,
+    "inputValidated": true,
+    "piiContained": true,
+    "idempotent": true,
+    "injectionSafe": true,
+    "stateIsolated": true,
+    "faultCovered": true,
+    "resultSafe": true,
+    "optionalSafe": true,
+    "postOnly": true,
+    "canonical": true,
+    "costBounded": true,
+    "maxIoDepth": 3
+  },
+  "provenSpecs": ["pure", "read_only", "stateless", "retry_safe", "deterministic", "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "idempotent", "injection_safe", "state_isolated", "fault_covered", "result_safe", "optional_safe", "post_only", "canonical", "cost_bounded"],
+  "intent": {
+    "dynamic": true,
+    "assertions": [
+      {
+        "name": "creates an order",
+        "method": "POST",
+        "path": "/orders/7",
+        "requestBodyJson": "{\"item\":1}",
+        "expectedStatus": 201,
+        "expectedBodyJson": "{\"id\":7}",
+        "expectedHeaders": [{"name": "content-type", "value": "application/json"}],
+        "sourceLine": 30,
+        "sourceColumn": 9
+      }
+    ]
+  },
+  "behaviors": [
+    {
+      "method": "POST",
+      "pattern": "/orders/:id",
+      "status": 202,
+      "ioDepth": 2,
+      "failurePath": true,
+      "conditions": [{"kind": "io_ok", "module": "zttp:cache", "func": "cacheGet"}, {"kind": "io_fail", "module": "zttp:fetch", "func": "fetchSync"}, {"kind": "req_method", "value": "POST"}, {"kind": "req_url", "value": "/orders/7"}],
+      "ioSequence": [{"module": "zttp:cache", "func": "cacheGet", "args": "lit:orders"}, {"module": "zttp:fetch", "func": "fetchSync", "args": "?"}]
+    }
+  ],
+  "behaviorsExhaustive": true,
+  "declaredSpecs": ["retry_safe", "idempotent"],
+  "specDiagnostics": [
+    {
+      "kind": "incompatible_with_import",
+      "code": "ZTS501",
+      "specName": "read_only",
+      "function": "helper",
+      "incompatibleModule": "zttp:cache",
+      "suggestion": "remove the cache import"
+    }
+  ],
+  "costEnvelope": {
+    "exhaustive": true,
+    "total": { "class": "linear", "coefficient": 3, "base": 2, "source": { "line": 4, "column": 6, "desc": "items.length" } },
+    "perModule": [
+      { "module": "zttp:cache", "bound": { "class": "constant", "value": 2 } }, 
+      { "module": "zttp:fetch", "bound": { "class": "unbounded", "source": { "line": 8, "column": 2, "desc": "dynamic url" } } }
+    ]
+  },
+  "extensions": {
+    "zttp-ext:stripe": {
+      "egressEndpoints": ["https://api.stripe.com:443"],
+      "egressDynamic": true,
+      "categories": {
+        "payment_gateway": { "literals": ["stripe"], "dynamic": true }
+      },
+      "contractSection": "payments"
+    }
+  },
+  "payments": {
+    "sourceSpecifier": "zttp-ext:stripe",
+    "categories": {
+      "payment_gateway": { "literals": ["stripe"], "dynamic": true }
+    }
+  }
+}

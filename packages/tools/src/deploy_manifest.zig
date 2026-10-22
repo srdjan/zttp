@@ -344,3 +344,167 @@ comptime {
         }
     }
 }
+
+// -------------------------------------------------------------------------
+// Projection census: HandlerProperties -> ProvenFacts
+// -------------------------------------------------------------------------
+
+/// One field that the projection leaves out, with the reason.
+const Exclusion = struct {
+    name: []const u8,
+    reason: []const u8,
+};
+
+fn isExcluded(comptime excluded: []const Exclusion, comptime name: []const u8) bool {
+    for (excluded) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
+}
+
+/// Return the first problem in the field projection from `Source` to `Target`, or null.
+/// Every source field is excluded or has a target field of the same name and type.
+/// Every target field is excluded or has a source field of the same name.
+/// Each exclusion names a field on its own side and states a reason.
+fn projectionProblem(
+    comptime Source: type,
+    comptime Target: type,
+    comptime source_excluded: []const Exclusion,
+    comptime target_excluded: []const Exclusion,
+) ?[]const u8 {
+    @setEvalBranchQuota(100_000);
+    const names = @typeName(Source) ++ " -> " ++ @typeName(Target);
+    for (source_excluded) |entry| {
+        if (!@hasField(Source, entry.name)) return names ++ ": source exclusion names no field: " ++ entry.name;
+        if (entry.reason.len == 0) return names ++ ": source exclusion has no reason: " ++ entry.name;
+    }
+    for (target_excluded) |entry| {
+        if (!@hasField(Target, entry.name)) return names ++ ": target exclusion names no field: " ++ entry.name;
+        if (entry.reason.len == 0) return names ++ ": target exclusion has no reason: " ++ entry.name;
+    }
+    for (std.meta.fields(Source)) |field| {
+        if (isExcluded(source_excluded, field.name)) continue;
+        if (!@hasField(Target, field.name) or isExcluded(target_excluded, field.name))
+            return names ++ ": unclassified source field: " ++ field.name;
+        if (@FieldType(Target, field.name) != field.type)
+            return names ++ ": field type differs: " ++ field.name;
+    }
+    for (std.meta.fields(Target)) |field| {
+        if (isExcluded(target_excluded, field.name)) continue;
+        if (!@hasField(Source, field.name) or isExcluded(source_excluded, field.name))
+            return names ++ ": unclassified target field: " ++ field.name;
+    }
+    return null;
+}
+
+const not_carried = "ProvenFacts has no field for it, so neither the review card nor the proof ledger shows it";
+
+/// The `HandlerProperties` fields that `ProvenFacts` does not copy by name.
+const facts_source_exclusions = [_]Exclusion{
+    .{ .name = "pure", .reason = not_carried },
+    .{ .name = "stateless", .reason = not_carried },
+    .{ .name = "has_egress", .reason = "an inverse fact that the monotonic ratchets leave out on purpose; egress_endpoints and egress_proven carry the egress surface" },
+    .{ .name = "result_safe", .reason = "ProvenFacts.results_safe reads contract.verification.results_safe instead" },
+    .{ .name = "optional_safe", .reason = not_carried },
+    .{ .name = "post_only", .reason = not_carried },
+    .{ .name = "canonical", .reason = not_carried },
+    .{ .name = "cost_bounded", .reason = not_carried },
+};
+
+/// The `ProvenFacts` fields that do not come from `HandlerProperties`, each with its source.
+const facts_target_exclusions = [_]Exclusion{
+    .{ .name = "handler_name", .reason = "the file stem of contract.handler.path" },
+    .{ .name = "handler_path", .reason = "contract.handler.path" },
+    .{ .name = "env_vars", .reason = "contract.env.literal" },
+    .{ .name = "env_proven", .reason = "not contract.env.dynamic" },
+    .{ .name = "egress_endpoints", .reason = "contract.egress.endpoints" },
+    .{ .name = "egress_proven", .reason = "not contract.egress.dynamic" },
+    .{ .name = "cache_namespaces", .reason = "contract.cache.namespaces" },
+    .{ .name = "cache_proven", .reason = "not contract.cache.dynamic" },
+    .{ .name = "routes", .reason = "contract.routes" },
+    .{ .name = "proof_level", .reason = "deriveProofLevel over the contract verification and dynamic flags" },
+    .{ .name = "checks_passed", .reason = "the passed flags of contract.verification" },
+    .{ .name = "results_safe", .reason = "contract.verification.results_safe, not HandlerProperties.result_safe" },
+};
+
+comptime {
+    if (projectionProblem(zts.HandlerProperties, ProvenFacts, &facts_source_exclusions, &facts_target_exclusions)) |problem|
+        @compileError(problem);
+}
+
+test "extractProvenFacts copies every HandlerProperties field that ProvenFacts carries" {
+    const allocator = std.testing.allocator;
+    // Run once with every flag true and once with every flag false, so a field
+    // that the projection forgets reads as a default in at least one run.
+    const flag_values = [_]bool{ true, false };
+    inline for (flag_values) |flag| {
+        var contract = try makeTestContract(allocator);
+        defer contract.deinit(allocator);
+        var source = std.mem.zeroes(zts.HandlerProperties);
+        inline for (std.meta.fields(zts.HandlerProperties)) |field| {
+            if (field.type == bool) @field(source, field.name) = flag;
+        }
+        source.max_io_depth = if (flag) 7 else null;
+        contract.properties = source;
+
+        const result = try extractProvenFacts(allocator, &contract);
+        defer allocator.free(result.checks_buf);
+        defer allocator.free(result.routes_buf);
+
+        var compared: usize = 0;
+        inline for (std.meta.fields(zts.HandlerProperties)) |field| {
+            if (comptime !isExcluded(&facts_source_exclusions, field.name)) {
+                try std.testing.expectEqual(@field(source, field.name), @field(result.facts, field.name));
+                compared += 1;
+            }
+        }
+        // The floor: twelve of the twenty fields are carried.
+        try std.testing.expectEqual(@as(usize, 12), compared);
+    }
+}
+
+test "extractProvenFacts reads results_safe from verification and not from result_safe" {
+    const allocator = std.testing.allocator;
+    const flag_values = [_]bool{ true, false };
+    inline for (flag_values) |flag| {
+        var contract = try makeTestContract(allocator);
+        defer contract.deinit(allocator);
+        var source = std.mem.zeroes(zts.HandlerProperties);
+        // The property bit takes the opposite value, so a copy from it would show.
+        source.result_safe = !flag;
+        contract.properties = source;
+        contract.verification = .{
+            .exhaustive_returns = false,
+            .results_safe = flag,
+            .unreachable_code = false,
+            .bytecode_verified = false,
+        };
+
+        const result = try extractProvenFacts(allocator, &contract);
+        defer allocator.free(result.checks_buf);
+        defer allocator.free(result.routes_buf);
+        try std.testing.expectEqual(flag, result.facts.results_safe);
+    }
+}
+
+test "projectionProblem refuses an unclassified field, a type change, and a bad exclusion" {
+    const Source = struct { kept: bool, dropped: bool };
+    const Target = struct { kept: bool };
+    const dropped = [_]Exclusion{.{ .name = "dropped", .reason = "not needed" }};
+    try std.testing.expect(comptime projectionProblem(Source, Target, &dropped, &.{}) == null);
+    // A source field with neither a target field nor an exclusion.
+    try std.testing.expect(comptime projectionProblem(Source, Target, &.{}, &.{}) != null);
+    // A target field with no source field, and the same field once an exclusion names it.
+    const Wider = struct { kept: bool, extra: bool };
+    try std.testing.expect(comptime projectionProblem(Target, Wider, &.{}, &.{}) != null);
+    const extra = [_]Exclusion{.{ .name = "extra", .reason = "set from another source" }};
+    try std.testing.expect(comptime projectionProblem(Target, Wider, &.{}, &extra) == null);
+    // A type change.
+    const Retyped = struct { kept: u8 };
+    try std.testing.expect(comptime projectionProblem(Target, Retyped, &.{}, &.{}) != null);
+    // An exclusion that names no field, and one with no reason.
+    const ghost = [_]Exclusion{.{ .name = "ghost", .reason = "no such field" }};
+    try std.testing.expect(comptime projectionProblem(Target, Target, &ghost, &.{}) != null);
+    const silent = [_]Exclusion{.{ .name = "dropped", .reason = "" }};
+    try std.testing.expect(comptime projectionProblem(Source, Target, &silent, &.{}) != null);
+}

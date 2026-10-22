@@ -21,7 +21,9 @@ zts-base route_match.zig
 zts-base status_text.zig
 zts-base source_diagnostics.zig
 
+zts-contracts contract_census.zig
 zts-contracts contract_json_parser.zig
+zts-contracts contract_schema.zig
 zts-contracts contracts_root.zig
 zts-contracts contract_json_writer.zig
 zts-contracts contract_types.zig

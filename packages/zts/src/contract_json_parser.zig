@@ -7,6 +7,7 @@
 const std = @import("std");
 const contract_types = @import("contract_types.zig");
 const handler_contract = @import("handler_contract.zig");
+const contract_schema = @import("contract_schema.zig");
 const json_wire = @import("zts-base").json_wire;
 // The capability vocabulary from the leaf file that defines it, not through
 // `module_binding.zig`, which would pull the module bridge and the engine
@@ -585,6 +586,14 @@ const ContractWire = struct {
     costEnvelope: ?CostEnvelopeWire = null,
     extensions: ExtensionMap = .{},
 };
+
+// Every `ContractWire` field is mapped to the `HandlerContract` fields it fills,
+// or is classified as a retired field that exists only to be refused. A field
+// added here without a row in `contract_schema.wire_entries`, or a row that
+// names no field, fails the build.
+comptime {
+    contract_schema.requireWireMirror(ContractWire);
+}
 
 fn parseV2Value(
     comptime T: type,

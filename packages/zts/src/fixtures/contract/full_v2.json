@@ -1,0 +1,278 @@
+{
+  "version": 2,
+  "handler": {
+    "path": "handler.ts",
+    "line": 12,
+    "column": 5
+  },
+  "source_identity": {
+    "core_profile_id": "zts-model-1",
+    "core_grammar_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "semantics_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "routes": [
+    {
+      "pattern": "/orders/:id",
+      "type": "prefix",
+      "field": "url",
+      "status": 202,
+      "content_type": "text/html; charset=utf-8",
+      "aot": true
+    },
+    {
+      "pattern": "/health",
+      "type": "exact",
+      "field": "path",
+      "status": 200,
+      "content_type": "application/json",
+      "aot": true
+    }
+  ],
+  "modules": ["zttp:fetch", "zttp:cache"],
+  "sandbox": {
+    "capabilities": ["clock", "network"],
+    "capability_hash": "57d778a1497df4971700f0bbd776c2f9ef717295944e799ab129b8beb54dc351",
+    "declared_budget": ["network"],
+    "policy_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+    "wasm_policy_hash": "5555555555555555555555555555555555555555555555555555555555555555",
+    "artifact_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "functions": {
+    "zttp:fetch": ["fetchSync"]
+  },
+  "env": {
+    "literal": ["ORDERS_TOKEN"],
+    "dynamic": true
+  },
+  "egress": {
+    "endpoints": ["https://api.example.com:443"],
+    "urls": ["https://api.example.com/orders"],
+    "dynamic": true
+  },
+  "cache": {
+    "namespaces": ["orders", "limits"],
+    "dynamic": true
+  },
+  "sql": {
+    "backend": "sqlite",
+    "queries": [
+      {
+        "name": "findOrder",
+        "statement": "SELECT id FROM orders WHERE id = :id",
+        "operation": "select",
+        "tables": ["orders", "customers"]
+      }
+    ],
+    "dynamic": true
+  },
+  "api": {
+    "schemas": [
+      {
+        "name": "Order",
+        "schema": {"type":"object"}
+      }
+    ],
+    "requests": {
+      "schema_refs": ["OrderCreate"],
+      "dynamic": true
+    },
+    "auth": {
+      "bearer": true,
+      "jwt": true
+    },
+    "routes": [
+      {
+        "method": "POST",
+        "path": "/orders/:id",
+        "request_schema_refs": ["OrderCreate"],
+        "request_schema_dynamic": true,
+        "requires_bearer": true,
+        "requires_jwt": true,
+        "path_params": [
+          {
+            "name": "id",
+            "location": "path",
+            "required": true,
+            "schema": {"type":"string"}
+          }
+        ],
+        "query_params": [
+          {
+            "name": "expand",
+            "location": "query",
+            "required": true,
+            "schema": {"type":"boolean"}
+          }
+        ],
+        "header_params": [
+          {
+            "name": "x-request-id",
+            "location": "header",
+            "required": true,
+            "schema": {"type":"string"}
+          }
+        ],
+        "query_params_dynamic": true,
+        "header_params_dynamic": true,
+        "request_bodies": [
+          {
+            "content_type": "application/json",
+            "schema_ref": "OrderCreate",
+            "schema": null,
+            "dynamic": false
+          },
+          {
+            "content_type": "application/xml",
+            "schema_ref": null,
+            "schema": {"type":"object"},
+            "dynamic": false
+          },
+          {
+            "content_type": "text/plain",
+            "schema_ref": null,
+            "schema": null,
+            "dynamic": true
+          }
+        ],
+        "request_bodies_dynamic": true,
+        "responses": [
+          {
+            "status": 201,
+            "content_type": "application/json",
+            "schema_ref": "Order",
+            "schema": null,
+            "dynamic": false
+          },
+          {
+            "status": 202,
+            "content_type": "application/xml",
+            "schema_ref": null,
+            "schema": {"type":"string"},
+            "dynamic": false
+          },
+          {
+            "status": 203,
+            "content_type": "text/plain",
+            "schema_ref": null,
+            "schema": null,
+            "dynamic": true
+          }
+        ],
+        "responses_dynamic": true,
+        "response_status": 201,
+        "response_content_type": "application/json",
+        "response_schema_ref": "Order",
+        "response_schema": {"type":"string"},
+        "response_schema_dynamic": true
+      }
+    ],
+    "schemas_dynamic": true,
+    "routes_dynamic": true
+  },
+  "verification": {
+    "exhaustive_returns": true,
+    "results_safe": true,
+    "unreachable_code": true,
+    "bytecode_verified": true
+  },
+  "aot": {
+    "pattern_count": 3,
+    "has_default": true
+  },
+  "fault_coverage": {
+    "total_failable": 4,
+    "covered": 4,
+    "warnings": 1,
+    "is_covered": true
+  },
+  "rate_limiting": {
+    "namespace": "limits",
+    "dynamic": true
+  },
+  "properties": {
+    "pure": true,
+    "read_only": true,
+    "stateless": true,
+    "retry_safe": true,
+    "deterministic": true,
+    "has_egress": true,
+    "no_secret_leakage": true,
+    "no_credential_leakage": true,
+    "input_validated": true,
+    "pii_contained": true,
+    "idempotent": true,
+    "injection_safe": true,
+    "state_isolated": true,
+    "fault_covered": true,
+    "result_safe": true,
+    "optional_safe": true,
+    "post_only": true,
+    "canonical": true,
+    "cost_bounded": true,
+    "max_io_depth": 3
+  },
+  "proven_specs": ["pure", "read_only", "stateless", "retry_safe", "deterministic", "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "idempotent", "injection_safe", "state_isolated", "fault_covered", "result_safe", "optional_safe", "post_only", "canonical", "cost_bounded"],
+  "intent": {
+    "dynamic": true,
+    "assertions": [
+      {
+        "name": "creates an order",
+        "method": "POST",
+        "path": "/orders/7",
+        "request_body_json": "{\"item\":1}",
+        "expected_status": 201,
+        "expected_body_json": "{\"id\":7}",
+        "expected_headers": [{"name": "content-type", "value": "application/json"}],
+        "source_line": 30,
+        "source_column": 9
+      }
+    ]
+  },
+  "behaviors": [
+    {
+      "method": "POST",
+      "pattern": "/orders/:id",
+      "status": 202,
+      "io_depth": 2,
+      "failure_path": true,
+      "conditions": [{"kind": "io_ok", "module": "zttp:cache", "func": "cacheGet"}, {"kind": "io_fail", "module": "zttp:fetch", "func": "fetchSync"}, {"kind": "req_method", "value": "POST"}, {"kind": "req_url", "value": "/orders/7"}],
+      "io_sequence": [{"module": "zttp:cache", "func": "cacheGet", "args": "lit:orders"}, {"module": "zttp:fetch", "func": "fetchSync", "args": "?"}]
+    }
+  ],
+  "behaviors_exhaustive": true,
+  "declared_specs": ["retry_safe", "idempotent"],
+  "spec_diagnostics": [
+    {
+      "kind": "incompatible_with_import",
+      "code": "ZTS501",
+      "spec_name": "read_only",
+      "function": "helper",
+      "incompatible_module": "zttp:cache",
+      "suggestion": "remove the cache import"
+    }
+  ],
+  "cost_envelope": {
+    "exhaustive": true,
+    "total": { "class": "linear", "coefficient": 3, "base": 2, "source": { "line": 4, "column": 6, "desc": "items.length" } },
+    "per_module": [
+      { "module": "zttp:cache", "bound": { "class": "constant", "value": 2 } }, 
+      { "module": "zttp:fetch", "bound": { "class": "unbounded", "source": { "line": 8, "column": 2, "desc": "dynamic url" } } }
+    ]
+  },
+  "extensions": {
+    "zttp-ext:stripe": {
+      "egress_endpoints": ["https://api.stripe.com:443"],
+      "egress_dynamic": true,
+      "categories": {
+        "payment_gateway": { "literals": ["stripe"], "dynamic": true }
+      },
+      "contract_section": "payments"
+    }
+  },
+  "payments": {
+    "source_specifier": "zttp-ext:stripe",
+    "categories": {
+      "payment_gateway": { "literals": ["stripe"], "dynamic": true }
+    }
+  }
+}

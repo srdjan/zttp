@@ -26,6 +26,10 @@ pub const contract_types = @import("contract_types.zig");
 /// The contract as a whole, with its JSON reader and writer attached.
 pub const handler_contract = @import("handler_contract.zig");
 
+/// The census of contract fields: which are on the wire, which `diffContracts`
+/// compares, and how each parser-mirror field maps onto the contract.
+pub const contract_schema = @import("contract_schema.zig");
+
 /// Writes a `HandlerContract` as contract.json.
 pub const contract_json_writer = @import("contract_json_writer.zig");
 
@@ -34,4 +38,7 @@ pub const contract_json_parser = @import("contract_json_parser.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
+    // The golden-byte census of the contract wire. It holds tests only, so no
+    // public name carries it.
+    _ = @import("contract_census.zig");
 }
