@@ -1922,9 +1922,19 @@ pub const IrView = struct {
                 const expr = self.getBinary(root) orelse return false;
                 return self.subtreeContains(expr.left, target) or self.subtreeContains(expr.right, target);
             },
-            .unary_op, .spread => {
+            .unary_op => {
                 const expr = self.getUnary(root) orelse return false;
                 return self.subtreeContains(expr.operand, target);
+            },
+            // The operand of a spread is payload word `a` (`getOptValue`).
+            // `getUnary` reads word `b`, which is zero for a spread.
+            .spread, .object_spread => {
+                if (self.getOptValue(root)) |value| return self.subtreeContains(value, target);
+            },
+            .assert_stmt => {
+                const stmt = self.getAssertStmt(root) orelse return false;
+                return self.subtreeContains(stmt.condition, target) or
+                    self.subtreeContains(stmt.error_expr, target);
             },
             .ternary => {
                 const expr = self.getTernary(root) orelse return false;
@@ -1989,6 +1999,253 @@ pub const IrView = struct {
             else => {},
         }
         return false;
+    }
+
+    /// Iterator over the expression children of one node. Built by
+    /// `expressionChildren`; see that function for the contract.
+    ///
+    /// A node holds at most four fixed children (a `for` loop) and at most one
+    /// index list (call arguments, array elements, block statements, and so
+    /// on), and the fixed children always come before the list in source
+    /// order. The iterator therefore keeps a four-slot buffer and one list
+    /// cursor, with no allocation.
+    pub const ExpressionChildren = struct {
+        view: IrView,
+        fixed: [4]NodeIndex = .{ null_node, null_node, null_node, null_node },
+        fixed_len: u8 = 0,
+        fixed_pos: u8 = 0,
+        list_start: NodeIndex = null_node,
+        list_count: u16 = 0,
+        list_pos: u16 = 0,
+
+        fn push(self: *ExpressionChildren, child: NodeIndex) void {
+            self.fixed[self.fixed_len] = child;
+            self.fixed_len += 1;
+        }
+
+        fn setList(self: *ExpressionChildren, start: NodeIndex, count: u16) void {
+            self.list_start = start;
+            self.list_count = count;
+        }
+
+        /// The next child node index, or null when the node has no more.
+        /// A `null_node` child (an absent `else`, a hole in an array) is
+        /// skipped and never returned.
+        pub fn next(self: *ExpressionChildren) ?NodeIndex {
+            while (self.fixed_pos < self.fixed_len) {
+                const child = self.fixed[self.fixed_pos];
+                self.fixed_pos += 1;
+                if (child != null_node) return child;
+            }
+            if (self.list_start == null_node) return null;
+            while (self.list_pos < self.list_count) {
+                const child = self.view.getListIndex(self.list_start, self.list_pos);
+                self.list_pos += 1;
+                if (child != null_node) return child;
+            }
+            return null;
+        }
+    };
+
+    /// The expression children of `node`: every child node that holds code,
+    /// in source order, including function bodies. Use it as
+    /// `var it = view.expressionChildren(node); while (it.next()) |child| ...`.
+    /// An analysis walk names the tags it treats specially and descends through
+    /// this map for the rest, so a new node kind is handled by default and
+    /// a new `NodeTag` member fails to compile here, in the one place that
+    /// knows the storage of every node.
+    ///
+    /// The map is exhaustive on purpose: the switch below names every
+    /// `NodeTag` member and has no `else` arm. A `null_node` child is skipped.
+    ///
+    /// Excluded, with the reason:
+    /// - Binding positions: a declared name, a parameter (`function_expr` and
+    ///   `arrow_function` yield the body and not the parameter list), a
+    ///   `for...of` binding, a catch binding, and the nested pattern of a
+    ///   `pattern_element`. A binding holds no code. A default value inside a
+    ///   `pattern_element`, `pattern_rest`, or `pattern_default` is code and
+    ///   is yielded.
+    /// - Import specifiers: they name bindings, so `import_decl` yields nothing.
+    ///   `export_decl` yields its declaration. The specifier list of an export
+    ///   is names, and is not yielded.
+    /// - `match` patterns: `match_arm` yields its body and not its pattern,
+    ///   and `match_pattern`, `array_pattern`, and `match_type_test` yield
+    ///   nothing. A pattern test does run at runtime. The parser builds the
+    ///   predicate of a type test as a call, for example `isDict(x)`. A walk
+    ///   that reached it would send it to a call handler, such as the effect
+    ///   walk's `handleCall`, which finds no `importOf` or `userFnOf` match
+    ///   and sets `row.lower_bound` on every type-test `match`. No consumer
+    ///   needs pattern children today. A consumer that does must read the
+    ///   pattern through `getMatchArm` and `getMatchTypeTest`.
+    /// - The key of an object property when it is a string literal: it is the
+    ///   field name and not code. The parser refuses computed keys today, but
+    ///   the storage keeps a key node, and codegen emits a key that is not a
+    ///   `lit_string` as a computed key. Such a key is yielded, before the
+    ///   value.
+    ///
+    /// Order: a `do...while` yields its body before its condition, as in
+    /// the source. A `for` loop yields init, condition, update, then body.
+    ///
+    /// Signature choice: the result is an iterator and not a callback taking
+    /// a visitor. The callers have different error sets (`WalkError`,
+    /// `error{OutOfMemory}`, and `void`). A callback would force one error
+    /// set, or `anyerror`, on all of them. With an iterator, the caller's own
+    /// loop body returns its own errors with `try` and no signature changes.
+    /// An iterator also lets the caller recurse or stop early with `break`.
+    pub fn expressionChildren(self: IrView, node: NodeIndex) ExpressionChildren {
+        var it: ExpressionChildren = .{ .view = self };
+        if (node == null_node) return it;
+        const tag = self.getTag(node) orelse return it;
+        switch (tag) {
+            // Leaves, and internal markers with no payload.
+            .lit_int,
+            .lit_float,
+            .lit_string,
+            .lit_bool,
+            .lit_null,
+            .lit_undefined,
+            .identifier,
+            .break_stmt,
+            .continue_stmt,
+            .import_specifier,
+            .import_default,
+            .import_namespace,
+            .param_list,
+            .arg_list,
+            .stmt_list,
+            => {},
+            // A module path and binding names only.
+            .import_decl => {},
+            // Match patterns are excluded; see the doc comment.
+            .match_pattern, .match_type_test, .array_pattern => {},
+            .binary_op => if (self.getBinary(node)) |expr| {
+                it.push(expr.left);
+                it.push(expr.right);
+            },
+            .unary_op => if (self.getUnary(node)) |expr| {
+                it.push(expr.operand);
+            },
+            .ternary => if (self.getTernary(node)) |expr| {
+                it.push(expr.condition);
+                it.push(expr.then_branch);
+                it.push(expr.else_branch);
+            },
+            .call, .method_call => if (self.getCall(node)) |call| {
+                it.push(call.callee);
+                it.setList(call.args_start, call.args_count);
+            },
+            .member_access, .optional_chain, .computed_access => if (self.getMember(node)) |member| {
+                it.push(member.object);
+                it.push(member.computed);
+            },
+            .assignment => if (self.getAssignment(node)) |assign| {
+                it.push(assign.target);
+                it.push(assign.value);
+            },
+            .array_literal => if (self.getArray(node)) |arr| {
+                it.setList(arr.elements_start, arr.elements_count);
+            },
+            // `sequence_expr` and `comma_expr` store their elements as an
+            // array does: the count is the whole of word `b`.
+            .sequence_expr, .comma_expr => if (self.getArray(node)) |arr| {
+                it.setList(arr.elements_start, arr.elements_count);
+            },
+            .object_literal => if (self.getObject(node)) |obj| {
+                it.setList(obj.properties_start, obj.properties_count);
+            },
+            .object_property, .object_method, .object_getter, .object_setter => if (self.getProperty(node)) |prop| {
+                if (prop.key != null_node and self.getTag(prop.key) != .lit_string) it.push(prop.key);
+                it.push(prop.value);
+            },
+            // The operand is payload word `a`, read by `getOptValue`.
+            // `getUnary` reads word `b`, which is zero here, and is wrong.
+            .spread,
+            .object_spread,
+            .await_expr,
+            .yield_expr,
+            .throw_stmt,
+            .return_stmt,
+            .expr_stmt,
+            .export_default,
+            .export_all,
+            => if (self.getOptValue(node)) |operand| {
+                it.push(operand);
+            },
+            .function_expr, .arrow_function => if (self.getFunction(node)) |func| {
+                it.push(func.body);
+            },
+            // A `function_decl` holds `var_decl` data: a binding and the
+            // function expression as its initializer.
+            .function_decl, .var_decl => if (self.getVarDecl(node)) |decl| {
+                it.push(decl.init);
+            },
+            .if_stmt => if (self.getIfStmt(node)) |stmt| {
+                it.push(stmt.condition);
+                it.push(stmt.then_branch);
+                it.push(stmt.else_branch);
+            },
+            .for_stmt, .while_stmt => if (self.getLoop(node)) |loop| {
+                it.push(loop.init);
+                it.push(loop.condition);
+                it.push(loop.update);
+                it.push(loop.body);
+            },
+            .do_while_stmt => if (self.getLoop(node)) |loop| {
+                it.push(loop.body);
+                it.push(loop.condition);
+            },
+            .for_of_stmt, .for_in_stmt => if (self.getForIter(node)) |stmt| {
+                it.push(stmt.iterable);
+                it.push(stmt.body);
+            },
+            .switch_stmt => if (self.getSwitchStmt(node)) |stmt| {
+                it.push(stmt.discriminant);
+                it.setList(stmt.cases_start, stmt.cases_count);
+            },
+            .case_clause => if (self.getCaseClause(node)) |clause| {
+                it.push(clause.test_expr);
+                it.setList(clause.body_start, clause.body_count);
+            },
+            .match_expr => if (self.getMatchExpr(node)) |match| {
+                it.push(match.discriminant);
+                it.setList(match.arms_start, match.arms_count);
+            },
+            // The IR has no guard, so the body is the only expression.
+            .match_arm => if (self.getMatchArm(node)) |arm| {
+                it.push(arm.body);
+            },
+            .assert_stmt => if (self.getAssertStmt(node)) |stmt| {
+                it.push(stmt.condition);
+                it.push(stmt.error_expr);
+            },
+            .try_stmt => if (self.getTryBlocks(node)) |blocks| {
+                it.push(blocks.try_block);
+                it.push(blocks.catch_block);
+                it.push(blocks.finally_block);
+            },
+            .labeled_stmt => if (self.getLabeledBody(node)) |body| {
+                it.push(body);
+            },
+            .block, .program => if (self.getBlock(node)) |block| {
+                it.setList(block.stmts_start, block.stmts_count);
+            },
+            // The nested pattern is a binding position. The default value is
+            // code and runs when the matched value is undefined.
+            .pattern_element, .pattern_rest, .pattern_default => if (self.getPatternElem(node)) |elem| {
+                it.push(elem.default_value);
+            },
+            .export_decl => if (self.getExportDecl(node)) |decl| {
+                it.push(decl.declaration);
+            },
+            // `export_specifier` shares the `export_decl` storage. The
+            // specifier names a binding. The `declaration` word is null for a
+            // specifier, and is read only so that code stored there is not
+            // lost.
+            .export_specifier => if (self.getExportDecl(node)) |decl| {
+                it.push(decl.declaration);
+            },
+        }
+        return it;
     }
 
     /// Get node source location
@@ -2521,6 +2778,45 @@ pub const IrView = struct {
         };
     }
 
+    /// The blocks of a `try_stmt`: the try block, the catch block, and the
+    /// finally block. A `null_node` block is absent. The catch binding is not
+    /// part of this view: it is a binding position, and its kind is not stored.
+    /// Packing: a = extra_start -> extra = [try_block, binding_packed, catch_block, finally_block]
+    pub fn getTryBlocks(self: IrView, idx: NodeIndex) ?TryBlocks {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| .{
+                .try_block = node.data.try_stmt.try_block,
+                .catch_block = node.data.try_stmt.catch_block,
+                .finally_block = node.data.try_stmt.finally_block,
+            } else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const extra_start = ir.data.items[idx].a;
+                const extra = ir.extra.items;
+                break :blk .{
+                    .try_block = extra[extra_start],
+                    .catch_block = extra[extra_start + 2],
+                    .finally_block = extra[extra_start + 3],
+                };
+            },
+        };
+    }
+
+    pub const TryBlocks = struct {
+        try_block: NodeIndex,
+        catch_block: NodeIndex,
+        finally_block: NodeIndex,
+    };
+
+    /// The body of a `labeled_stmt`. The label is an atom and holds no code.
+    /// Packing: a = label_atom, b = body
+    pub fn getLabeledBody(self: IrView, idx: NodeIndex) ?NodeIndex {
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.labeled.body else null,
+            .ir_store => |ir| if (idx < ir.data.items.len) ir.data.items[idx].b else null,
+        };
+    }
+
     // ============ Module Accessors ============
 
     /// Get import declaration data
@@ -2809,4 +3105,654 @@ test "ConstantPool refuses the 65537th distinct constant and keeps deduplicating
     try std.testing.expectEqual(@as(u16, 7), try pool.addString("s7"));
     try std.testing.expectEqual(@as(u16, 7), try pool.addOwnedString(try std.testing.allocator.dupe(u8, "s7")));
     try std.testing.expectEqual(@as(u16, 7), try pool.addFloat(7));
+}
+
+// ============================================================
+// IrView.expressionChildren and subtreeContains tests
+// ============================================================
+
+const ExpectedChild = struct {
+    tag: NodeTag,
+    /// Checked for a `lit_int` child, to tell siblings of one tag apart.
+    int: ?i32 = null,
+};
+
+/// Parse `source`, take the `nth` node (in index order) with tag `tag`, and
+/// require that its expression children are exactly `expected`, in order.
+fn expectChildrenOf(source: []const u8, tag: NodeTag, nth: usize, expected: []const ExpectedChild) !void {
+    const allocator = std.testing.allocator;
+    var parser = try @import("parse.zig").Parser.init(allocator, source);
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expect(!parser.errors.hasErrors());
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var seen: usize = 0;
+    var node: NodeIndex = null_node;
+    var i: NodeIndex = 0;
+    while (i < view.nodeCount()) : (i += 1) {
+        if (view.getTag(i) != tag) continue;
+        if (seen == nth) {
+            node = i;
+            break;
+        }
+        seen += 1;
+    }
+    if (node == null_node) return error.TestNodeNotFound;
+
+    try expectViewChildren(view, node, expected);
+}
+
+fn expectViewChildren(view: IrView, node: NodeIndex, expected: []const ExpectedChild) !void {
+    var it = view.expressionChildren(node);
+    var count: usize = 0;
+    while (it.next()) |child| : (count += 1) {
+        if (count >= expected.len) {
+            std.debug.print("extra child {d} of tag {s}\n", .{ child, @tagName(view.getTag(child).?) });
+            return error.TestUnexpectedChild;
+        }
+        try std.testing.expectEqual(expected[count].tag, view.getTag(child).?);
+        if (expected[count].int) |want| {
+            try std.testing.expectEqual(want, view.getIntValue(child).?);
+        }
+    }
+    try std.testing.expectEqual(expected.len, count);
+}
+
+test "expressionChildren of a binary operation are its operands" {
+    try expectChildrenOf("const r = a + 1;", .binary_op, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .lit_int, .int = 1 },
+    });
+}
+
+test "expressionChildren of a unary operation is its operand" {
+    try expectChildrenOf("const r = !a;", .unary_op, 0, &.{.{ .tag = .identifier }});
+}
+
+test "expressionChildren of a ternary are condition then and else" {
+    try expectChildrenOf("const r = a ? 1 : 2;", .ternary, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .lit_int, .int = 2 },
+    });
+}
+
+test "expressionChildren of a call are the callee then each argument" {
+    try expectChildrenOf("f(1, 2, a);", .call, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .lit_int, .int = 2 },
+        .{ .tag = .identifier },
+    });
+    try expectChildrenOf("f();", .call, 0, &.{.{ .tag = .identifier }});
+}
+
+test "expressionChildren of a member access is its object" {
+    try expectChildrenOf("const r = a.b;", .member_access, 0, &.{.{ .tag = .identifier }});
+}
+
+test "expressionChildren of a computed access are the object then the index" {
+    try expectChildrenOf("const r = a[1];", .computed_access, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .lit_int, .int = 1 },
+    });
+}
+
+test "expressionChildren of an optional chain is its object" {
+    try expectChildrenOf("const r = a?.b;", .optional_chain, 0, &.{.{ .tag = .identifier }});
+}
+
+test "expressionChildren of an assignment are the target then the value" {
+    try expectChildrenOf("a.b = 1;", .assignment, 0, &.{
+        .{ .tag = .member_access },
+        .{ .tag = .lit_int, .int = 1 },
+    });
+}
+
+test "expressionChildren of an array literal are its elements in order" {
+    try expectChildrenOf("const r = [1, a, ...b, 2];", .array_literal, 0, &.{
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .identifier },
+        .{ .tag = .spread },
+        .{ .tag = .lit_int, .int = 2 },
+    });
+    try expectChildrenOf("const r = [];", .array_literal, 0, &.{});
+}
+
+test "expressionChildren of an object literal are its properties and spreads" {
+    try expectChildrenOf("const r = { k: 1, ...b, m: 2 };", .object_literal, 0, &.{
+        .{ .tag = .object_property },
+        .{ .tag = .object_spread },
+        .{ .tag = .object_property },
+    });
+}
+
+test "expressionChildren of an object property is its value and not its string key" {
+    try expectChildrenOf("const r = { k: 7 };", .object_property, 0, &.{
+        .{ .tag = .lit_int, .int = 7 },
+    });
+}
+
+test "expressionChildren of an object spread is its operand" {
+    try expectChildrenOf("const r = { ...b };", .object_spread, 0, &.{.{ .tag = .identifier }});
+}
+
+test "expressionChildren of a spread is its operand" {
+    try expectChildrenOf("const r = [...b];", .spread, 0, &.{.{ .tag = .identifier }});
+}
+
+test "expressionChildren of a function expression is its body and not its parameters" {
+    // The parser refuses a `function` expression; a declaration holds one as its initializer.
+    try expectChildrenOf("function f(a) { return a; }", .function_expr, 0, &.{
+        .{ .tag = .block },
+    });
+}
+
+test "expressionChildren of an arrow function is its body and not its parameters" {
+    try expectChildrenOf("const f = (a) => { return a; };", .arrow_function, 0, &.{
+        .{ .tag = .block },
+    });
+    // An expression body is wrapped in a return statement.
+    try expectChildrenOf("const f = (a) => a + 1;", .arrow_function, 0, &.{
+        .{ .tag = .return_stmt },
+    });
+}
+
+test "expressionChildren of a function declaration is its function expression" {
+    try expectChildrenOf("function f(a) { return a; }", .function_decl, 0, &.{
+        .{ .tag = .function_expr },
+    });
+}
+
+test "expressionChildren of a match are the discriminant then each arm" {
+    try expectChildrenOf(
+        \\const r = match (a) {
+        \\  when 1: "one"
+        \\  when 2: "two"
+        \\  default: "other"
+        \\};
+    , .match_expr, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .match_arm },
+        .{ .tag = .match_arm },
+        .{ .tag = .match_arm },
+    });
+}
+
+test "expressionChildren of a match arm is its body and not its pattern" {
+    try expectChildrenOf(
+        \\const r = match (a) {
+        \\  when 1: "one"
+        \\  default: 2
+        \\};
+    , .match_arm, 0, &.{.{ .tag = .lit_string }});
+    try expectChildrenOf(
+        \\const r = match (a) {
+        \\  when 1: "one"
+        \\  default: 2
+        \\};
+    , .match_arm, 1, &.{.{ .tag = .lit_int, .int = 2 }});
+}
+
+test "expressionChildren of an object match pattern is empty" {
+    try expectChildrenOf(
+        \\const r = match (a) {
+        \\  when { kind: "x" }: 1
+        \\  default: 2
+        \\};
+    , .match_pattern, 0, &.{});
+}
+
+test "expressionChildren of a type test is empty so its isDict predicate is not reached" {
+    const source =
+        \\const r = match (a) {
+        \\  when Dict: 1
+        \\  default: 2
+        \\};
+    ;
+    try expectChildrenOf(source, .match_type_test, 0, &.{});
+    // The predicate exists in the IR as a call. No walk from the match
+    // reaches it through the map.
+    try expectChildrenOf(source, .match_expr, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .match_arm },
+        .{ .tag = .match_arm },
+    });
+}
+
+test "expressionChildren of an array match pattern is empty" {
+    try expectChildrenOf(
+        \\const r = match (a) {
+        \\  when [1, 2]: 1
+        \\  default: 2
+        \\};
+    , .array_pattern, 0, &.{});
+}
+
+test "expressionChildren of an expression statement is its expression" {
+    try expectChildrenOf("f();", .expr_stmt, 0, &.{.{ .tag = .call }});
+}
+
+test "expressionChildren of a variable declaration is its initializer" {
+    try expectChildrenOf("const a = 1;", .var_decl, 0, &.{.{ .tag = .lit_int, .int = 1 }});
+}
+
+test "expressionChildren of an if statement are condition then and else" {
+    try expectChildrenOf("if (a) { f(); } else { g(); }", .if_stmt, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .block },
+        .{ .tag = .block },
+    });
+    try expectChildrenOf("if (a) { f(); }", .if_stmt, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .block },
+    });
+}
+
+test "expressionChildren of a for-of are the iterable then the body" {
+    try expectChildrenOf("for (const x of xs) { f(x); }", .for_of_stmt, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .block },
+    });
+}
+
+test "expressionChildren of a return statement is its value" {
+    try expectChildrenOf("function f() { return 5; }", .return_stmt, 0, &.{
+        .{ .tag = .lit_int, .int = 5 },
+    });
+    try expectChildrenOf("function f() { return; }", .return_stmt, 0, &.{});
+}
+
+test "expressionChildren of an assert are the condition then the error expression" {
+    try expectChildrenOf("assert a, 7;", .assert_stmt, 0, &.{
+        .{ .tag = .identifier },
+        .{ .tag = .lit_int, .int = 7 },
+    });
+    try expectChildrenOf("assert a;", .assert_stmt, 0, &.{.{ .tag = .identifier }});
+}
+
+test "expressionChildren of a block are its statements in order" {
+    try expectChildrenOf("function f() { g(); return 1; }", .block, 0, &.{
+        .{ .tag = .expr_stmt },
+        .{ .tag = .return_stmt },
+    });
+}
+
+test "expressionChildren of a program are its top-level statements in order" {
+    try expectChildrenOf("const a = 1; f();", .program, 0, &.{
+        .{ .tag = .var_decl },
+        .{ .tag = .expr_stmt },
+    });
+}
+
+test "expressionChildren of a parameter without a default is empty" {
+    try expectChildrenOf("function f(a) { return a; }", .pattern_element, 0, &.{});
+}
+
+test "expressionChildren of an import declaration is empty" {
+    try expectChildrenOf("import { cacheGet } from \"zttp:cache\";", .import_decl, 0, &.{});
+}
+
+test "expressionChildren of an export declaration is its declaration" {
+    try expectChildrenOf("export function f() { return 1; }", .export_decl, 0, &.{
+        .{ .tag = .function_decl },
+    });
+    try expectChildrenOf("export const x = 1;", .export_decl, 0, &.{
+        .{ .tag = .var_decl },
+    });
+}
+
+fn testLoc() SourceLocation {
+    return .{ .line = 1, .column = 1, .offset = 0 };
+}
+
+fn addOpt(store: *IRStore, tag: NodeTag, operand: NodeIndex) !NodeIndex {
+    return store.add(.{
+        .tag = tag,
+        .loc = testLoc(),
+        .data = .{ .opt_value = if (operand == null_node) null else operand },
+    });
+}
+
+fn addPatternNode(store: *IRStore, tag: NodeTag, default_value: NodeIndex) !NodeIndex {
+    return store.add(.{
+        .tag = tag,
+        .loc = testLoc(),
+        .data = .{ .pattern_elem = .{
+            .kind = .simple,
+            .binding = BindingRef.global(3),
+            .key = null_node,
+            .key_atom = 0,
+            .default_value = default_value,
+        } },
+    });
+}
+
+test "expressionChildren reads the operand of the operand-carrying tags from payload word a" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const operand = try store.addLitInt(testLoc(), 9);
+    const tags = [_]NodeTag{
+        .spread,      .object_spread, .await_expr,     .yield_expr, .throw_stmt,
+        .return_stmt, .expr_stmt,     .export_default, .export_all,
+    };
+    for (tags) |tag| {
+        const node = try addOpt(&store, tag, operand);
+        try expectViewChildren(view, node, &.{.{ .tag = .lit_int, .int = 9 }});
+        const bare = try addOpt(&store, tag, null_node);
+        try expectViewChildren(view, bare, &.{});
+    }
+}
+
+test "expressionChildren of a pattern with a default is the default value only" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const default_value = try store.addLitInt(testLoc(), 4);
+    for ([_]NodeTag{ .pattern_element, .pattern_rest, .pattern_default }) |tag| {
+        const with_default = try addPatternNode(&store, tag, default_value);
+        try expectViewChildren(view, with_default, &.{.{ .tag = .lit_int, .int = 4 }});
+        const without = try addPatternNode(&store, tag, null_node);
+        try expectViewChildren(view, without, &.{});
+    }
+}
+
+test "expressionChildren of a loop reads init condition update and body in source order" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const init_node = try store.addLitInt(testLoc(), 1);
+    const condition = try store.addLitInt(testLoc(), 2);
+    const update = try store.addLitInt(testLoc(), 3);
+    const body = try store.addLitInt(testLoc(), 4);
+    const for_node = try store.add(.{
+        .tag = .for_stmt,
+        .loc = testLoc(),
+        .data = .{ .loop = .{ .kind = .for_loop, .init = init_node, .condition = condition, .update = update, .body = body } },
+    });
+    try expectViewChildren(view, for_node, &.{
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .lit_int, .int = 2 },
+        .{ .tag = .lit_int, .int = 3 },
+        .{ .tag = .lit_int, .int = 4 },
+    });
+    const while_node = try store.add(.{
+        .tag = .while_stmt,
+        .loc = testLoc(),
+        .data = .{ .loop = .{ .kind = .while_loop, .init = null_node, .condition = condition, .update = null_node, .body = body } },
+    });
+    try expectViewChildren(view, while_node, &.{
+        .{ .tag = .lit_int, .int = 2 },
+        .{ .tag = .lit_int, .int = 4 },
+    });
+    // A do-while runs its body before it tests its condition.
+    const do_node = try store.add(.{
+        .tag = .do_while_stmt,
+        .loc = testLoc(),
+        .data = .{ .loop = .{ .kind = .do_while, .init = null_node, .condition = condition, .update = null_node, .body = body } },
+    });
+    try expectViewChildren(view, do_node, &.{
+        .{ .tag = .lit_int, .int = 4 },
+        .{ .tag = .lit_int, .int = 2 },
+    });
+}
+
+test "expressionChildren of a for-in are the iterable then the body" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const iterable = try store.addLitInt(testLoc(), 1);
+    const body = try store.addLitInt(testLoc(), 2);
+    const node = try store.add(.{
+        .tag = .for_in_stmt,
+        .loc = testLoc(),
+        .data = .{ .for_iter = .{
+            .is_for_in = true,
+            .binding = BindingRef.global(3),
+            .iterable = iterable,
+            .body = body,
+            .is_const = true,
+        } },
+    });
+    try expectViewChildren(view, node, &.{
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .lit_int, .int = 2 },
+    });
+}
+
+test "expressionChildren of a switch and its case clauses read the test and the body list" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const discriminant = try store.addLitInt(testLoc(), 1);
+    const test_expr = try store.addLitInt(testLoc(), 2);
+    const stmt_a = try store.addLitInt(testLoc(), 3);
+    const stmt_b = try store.addLitInt(testLoc(), 4);
+    const body_list = try store.addIndexList(&.{ stmt_a, stmt_b });
+    const clause = try store.add(.{
+        .tag = .case_clause,
+        .loc = testLoc(),
+        .data = .{ .case_clause = .{ .test_expr = test_expr, .body_start = body_list, .body_count = 2 } },
+    });
+    const default_clause = try store.add(.{
+        .tag = .case_clause,
+        .loc = testLoc(),
+        .data = .{ .case_clause = .{ .test_expr = null_node, .body_start = body_list, .body_count = 1 } },
+    });
+    try expectViewChildren(view, clause, &.{
+        .{ .tag = .lit_int, .int = 2 },
+        .{ .tag = .lit_int, .int = 3 },
+        .{ .tag = .lit_int, .int = 4 },
+    });
+    try expectViewChildren(view, default_clause, &.{.{ .tag = .lit_int, .int = 3 }});
+
+    const case_list = try store.addIndexList(&.{ clause, default_clause });
+    const switch_node = try store.add(.{
+        .tag = .switch_stmt,
+        .loc = testLoc(),
+        .data = .{ .switch_stmt = .{ .discriminant = discriminant, .cases_start = case_list, .cases_count = 2 } },
+    });
+    try expectViewChildren(view, switch_node, &.{
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .case_clause },
+        .{ .tag = .case_clause },
+    });
+}
+
+test "expressionChildren of an object method yields a non-string key before the value" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const string_key = try store.add(Node.litString(testLoc(), 0));
+    const computed_key = try store.addLitInt(testLoc(), 5);
+    const value = try store.addLitInt(testLoc(), 6);
+    for ([_]NodeTag{ .object_property, .object_method, .object_getter, .object_setter }) |tag| {
+        const literal_keyed = try store.add(.{
+            .tag = tag,
+            .loc = testLoc(),
+            .data = .{ .property = .{ .key = string_key, .value = value, .is_shorthand = false } },
+        });
+        try expectViewChildren(view, literal_keyed, &.{.{ .tag = .lit_int, .int = 6 }});
+        const computed = try store.add(.{
+            .tag = tag,
+            .loc = testLoc(),
+            .data = .{ .property = .{ .key = computed_key, .value = value, .is_shorthand = false } },
+        });
+        try expectViewChildren(view, computed, &.{
+            .{ .tag = .lit_int, .int = 5 },
+            .{ .tag = .lit_int, .int = 6 },
+        });
+    }
+}
+
+test "expressionChildren of try and labeled statements reads the blocks and the body" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const try_block = try store.addLitInt(testLoc(), 1);
+    const catch_block = try store.addLitInt(testLoc(), 2);
+    const finally_block = try store.addLitInt(testLoc(), 3);
+    const try_node = try store.add(.{
+        .tag = .try_stmt,
+        .loc = testLoc(),
+        .data = .{ .try_stmt = .{
+            .try_block = try_block,
+            .catch_binding = BindingRef.global(3),
+            .catch_block = catch_block,
+            .finally_block = finally_block,
+        } },
+    });
+    try expectViewChildren(view, try_node, &.{
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .lit_int, .int = 2 },
+        .{ .tag = .lit_int, .int = 3 },
+    });
+    const no_catch = try store.add(.{
+        .tag = .try_stmt,
+        .loc = testLoc(),
+        .data = .{ .try_stmt = .{
+            .try_block = try_block,
+            .catch_binding = BindingRef.global(3),
+            .catch_block = null_node,
+            .finally_block = finally_block,
+        } },
+    });
+    try expectViewChildren(view, no_catch, &.{
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .lit_int, .int = 3 },
+    });
+    const labeled = try store.add(.{
+        .tag = .labeled_stmt,
+        .loc = testLoc(),
+        .data = .{ .labeled = .{ .label_atom = 7, .body = try_block } },
+    });
+    try expectViewChildren(view, labeled, &.{.{ .tag = .lit_int, .int = 1 }});
+}
+
+test "expressionChildren of try and labeled statements agree on a NodeList" {
+    var nodes = NodeList.init(std.testing.allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromNodeList(&nodes, &constants);
+
+    const try_block = try nodes.add(Node.litInt(testLoc(), 1));
+    const finally_block = try nodes.add(Node.litInt(testLoc(), 3));
+    const try_node = try nodes.add(.{
+        .tag = .try_stmt,
+        .loc = testLoc(),
+        .data = .{ .try_stmt = .{
+            .try_block = try_block,
+            .catch_binding = BindingRef.global(3),
+            .catch_block = null_node,
+            .finally_block = finally_block,
+        } },
+    });
+    try expectViewChildren(view, try_node, &.{
+        .{ .tag = .lit_int, .int = 1 },
+        .{ .tag = .lit_int, .int = 3 },
+    });
+    const labeled = try nodes.add(.{
+        .tag = .labeled_stmt,
+        .loc = testLoc(),
+        .data = .{ .labeled = .{ .label_atom = 7, .body = try_block } },
+    });
+    try expectViewChildren(view, labeled, &.{.{ .tag = .lit_int, .int = 1 }});
+}
+
+test "expressionChildren of an export specifier is its declaration word only" {
+    var store = IRStore.init(std.testing.allocator);
+    defer store.deinit();
+    var constants = ConstantPool.init(std.testing.allocator);
+    defer constants.deinit();
+    const view = IrView.fromIRStore(&store, &constants);
+
+    const declaration = try store.addLitInt(testLoc(), 8);
+    const specifier_list = try store.addIndexList(&.{declaration});
+    const specifier = try store.add(.{
+        .tag = .export_specifier,
+        .loc = testLoc(),
+        .data = .{ .export_decl = .{
+            .kind = .named,
+            .declaration = null_node,
+            .specifiers_start = specifier_list,
+            .specifiers_count = 1,
+            .from_module_idx = 0,
+        } },
+    });
+    try expectViewChildren(view, specifier, &.{});
+}
+
+test "subtreeContains finds a node inside an array spread operand" {
+    const allocator = std.testing.allocator;
+    var parser = try @import("parse.zig").Parser.init(allocator, "const z = 1; const r = [...a.b];");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var spread: NodeIndex = null_node;
+    var target: NodeIndex = null_node;
+    var i: NodeIndex = 0;
+    while (i < view.nodeCount()) : (i += 1) {
+        if (view.getTag(i) == .spread) spread = i;
+        if (view.getTag(i) == .identifier) target = i;
+    }
+    try std.testing.expect(spread != null_node and target != null_node);
+    try std.testing.expect(view.subtreeContains(spread, target));
+    try std.testing.expect(view.subtreeContains(root, target));
+}
+
+test "subtreeContains finds a node inside an object spread operand" {
+    const allocator = std.testing.allocator;
+    var parser = try @import("parse.zig").Parser.init(allocator, "const z = 1; const r = { ...a };");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var target: NodeIndex = null_node;
+    var i: NodeIndex = 0;
+    while (i < view.nodeCount()) : (i += 1) {
+        if (view.getTag(i) == .identifier) target = i;
+    }
+    try std.testing.expect(target != null_node);
+    try std.testing.expect(view.subtreeContains(root, target));
+}
+
+test "subtreeContains finds a node inside an assert condition and an assert error expression" {
+    const allocator = std.testing.allocator;
+    var parser = try @import("parse.zig").Parser.init(allocator, "assert a, b;");
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var assert_node: NodeIndex = null_node;
+    var i: NodeIndex = 0;
+    while (i < view.nodeCount()) : (i += 1) {
+        if (view.getTag(i) == .assert_stmt) assert_node = i;
+    }
+    try std.testing.expect(assert_node != null_node);
+    const stmt = view.getAssertStmt(assert_node).?;
+    try std.testing.expect(view.subtreeContains(root, stmt.condition));
+    try std.testing.expect(view.subtreeContains(root, stmt.error_expr));
+    try std.testing.expect(!view.subtreeContains(stmt.condition, stmt.error_expr));
 }
