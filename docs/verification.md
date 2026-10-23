@@ -197,7 +197,7 @@ function handler(req: Request): Response {
 
 Fix: use `const` for module-level declarations, or move mutable state to `zttp:cache`.
 
-The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing.
+The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing. A contract built without `precompile --verify` leaves `state_isolated` false. `false` on any property means unproven, not violated.
 
 ### 8. Author-Declared Proof Discharge
 

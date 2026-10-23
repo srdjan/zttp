@@ -1375,6 +1375,7 @@ fn buildContractResultOn(
     );
     builder.manifest_registry = opts.manifest_registry;
     builder.capture_export_effects = opts.capture_export_effects;
+    builder.strict_passed = opts.strict;
     defer builder.deinit();
 
     var contract = try builder.build(

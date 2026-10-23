@@ -1664,7 +1664,7 @@ pub fn compileHandler(
 
     // Run handler verification if requested
     var verify_info: ?VerificationInfo = null;
-    var state_isolated: bool = true;
+    var state_isolated: bool = false;
     // result_safe and optional_safe default false (unproven) until verification runs and passes.
     var result_safe: bool = false;
     var optional_safe: bool = false;
@@ -5936,6 +5936,45 @@ test "compileHandler projects verifier properties only when verification runs" {
     const props = contract.properties orelse return error.MissingProperties;
     try std.testing.expect(props.result_safe);
     try std.testing.expect(props.optional_safe);
+}
+
+test "compileHandler claims state isolation only when the verifier ran and found no module mutation" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\let counter: number = 0;
+        \\function handler(req: Request): Response {
+        \\  counter = counter + 1;
+        \\  return Response.text("ok");
+        \\}
+    ;
+
+    // Without --verify no pass checked state isolation, so the contract
+    // must not claim it.
+    var unverified = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true });
+    defer unverified.deinit(allocator);
+    const unverified_props = (unverified.contract orelse return error.MissingContract).properties orelse return error.MissingProperties;
+    try std.testing.expect(!unverified_props.state_isolated);
+
+    // With --verify the mutation is found and the compile fails.
+    var verified = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
+    defer verified.deinit(allocator);
+    try std.testing.expect(verified.verify_failed);
+}
+
+test "compileHandler without strict checking does not claim canonical form" {
+    const allocator = std.testing.allocator;
+    // ZTS613: compound assignment is outside the canonical profile.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  let n = 1;
+        \\  n += 1;
+        \\  return Response.text(String(n));
+        \\}
+    ;
+    var relaxed = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .strict = false });
+    defer relaxed.deinit(allocator);
+    const props = (relaxed.contract orelse return error.MissingContract).properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.canonical);
 }
 
 test "contract-only extraction without source types preserves verifier properties" {

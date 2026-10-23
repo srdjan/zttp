@@ -41,7 +41,7 @@ and re-save; later stages often clear on their own.
 ### The Proven Surface
 
 Below the stages, the card lists the properties the compiler proved. Each is
-a pill: `[+]` proven, `[-]` not proven. They are grouped.
+a pill: `[+]` proven, `[-]` not proven. They are grouped. `[-]` means the compiler did not prove the property. It does not mean the compiler found a violation.
 
 **Verification** - structural guarantees about control flow:
 

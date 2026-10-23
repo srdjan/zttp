@@ -165,6 +165,10 @@ pub const ContractBuilder = struct {
     // bindings themselves live in `facts.extension_bindings`.
     extensions: std.StringHashMapUnmanaged(contract_types.ExtensionContract) = .empty,
 
+    /// True when the caller ran strict checking (ZTS6xx) and it passed. Only
+    /// then does the contract claim `canonical`.
+    strict_passed: bool = false,
+
     // Effect tracking
     has_nondeterministic_builtin: bool = false,
     /// First call site that broke determinism. Captured for the live-reload
@@ -2753,11 +2757,11 @@ pub const ContractBuilder = struct {
             .has_egress = has_egress,
             .idempotent = deterministic and retry_safe,
             .post_only = post_only,
-            // The contract builder runs only after strict checking passed
-            // (canonical-profile violations are hard `check` errors that block
-            // contract construction upstream), so a built contract is always in
-            // Canonical Normal Form. See HandlerProperties.canonical.
-            .canonical = true,
+            // Canonical-profile violations are hard `check` errors, so a caller
+            // that ran strict checking and reached this point passed it. A
+            // caller that skipped strict checking has proved nothing. See
+            // HandlerProperties.canonical.
+            .canonical = self.strict_passed,
         };
     }
 
@@ -2962,6 +2966,15 @@ test "computeProperties pure handler stays pure" {
     try std.testing.expect(props.stateless);
     try std.testing.expect(props.retry_safe);
     try std.testing.expect(!props.has_egress);
+}
+
+test "computeProperties claims canonical only for a caller that passed strict checking" {
+    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
+    defer builder.deinit();
+
+    try std.testing.expect(!builder.computeProperties(.{}, null, null).canonical);
+    builder.strict_passed = true;
+    try std.testing.expect(builder.computeProperties(.{}, null, null).canonical);
 }
 
 test "computeProperties cache read is read-only but not stateless" {
