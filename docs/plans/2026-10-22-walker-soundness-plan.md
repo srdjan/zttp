@@ -209,7 +209,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W6 | done: the tracker records nested calls, `return` values, `if` conditions, `for...of` iterables, `match` discriminants, and inline callbacks; an added call on a preserved path is now `breaking` (was `additive`); 14 handlers gain io entries; residuals: a named closure called later, a `match` arm body that is a bare expression, a changed ternary condition |
 | W7a | done: a `?` token never equals another signature in the law canonicalizer, and a `|` literal encodes as `?`; no tracked contract changed |
 | W7b | done (decision 9(a)): a path with a `?` argument never matches its twin unless both sources have an equal IR identity and import only `zttp:` modules; adding a route to a `routerMatch` handler is now `breaking`; `--prove` live reload blocks a formatting-only save of a handler with a local import and a dynamic argument |
-| W8 | not started |
+| W8 | done: `assert c, e` forks one failure path for each way `c` is false, with the status of `e` or 500 for a bare assert; an edit to an assert error response is now `breaking`; `fault_covered` can become true when `assert result.ok` guards a failable call |
 | W9 | not started |
 | W10 | not started |
 | W11 | not started |

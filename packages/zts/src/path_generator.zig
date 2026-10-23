@@ -1508,7 +1508,17 @@ pub const PathGenerator = struct {
                 }
             },
 
-            // exhaustive: the parser refuses while, do-while, C-style for, for-in, try, throw, and labeled statements (ZTS001); assert, break, continue, and imports hold no return or branch.
+            // An `assert` that is not a statement of a block reaches here: the
+            // unbraced body of a branch. Its failure path is walked, and the
+            // success side falls through to the caller like a body that does not
+            // return. A block statement goes through `walkBlockFrom`, which also
+            // continues the block under the condition.
+            .assert_stmt => {
+                const assert = self.ir_view.getAssertStmt(node) orelse return;
+                try self.walkAssertFailure(assert);
+            },
+
+            // exhaustive: the parser refuses while, do-while, C-style for, for-in, try, throw, and labeled statements (ZTS001); break, continue, and imports hold no return or branch.
             else => {},
         }
     }
@@ -1517,11 +1527,54 @@ pub const PathGenerator = struct {
         try self.walkBlockFrom(block, 0);
     }
 
+    /// The failure side of `assert c, e`, modeled as `if (!c) { return e; }`.
+    ///
+    /// A failed assert returns `e` from the enclosing function (`emitAssert` in
+    /// `parser/codegen.zig`). A failed `assert c` with no message returns
+    /// `undefined` (`halt` over a pushed `undefined`), and the handler
+    /// runtime answers a primitive result with status 500
+    /// (`extractResponseInternal` in `runtime/src/handler_instance.zig`).
+    ///
+    /// The condition runs on every path, so its module calls are recorded
+    /// before the fork and stay for the statements after the assert. One path
+    /// ends for each way the condition is false, and the module calls of `e`
+    /// belong to that path only. The caller continues the success side.
+    fn walkAssertFailure(self: *PathGenerator, assert: Node.AssertStmt) error{OutOfMemory}!void {
+        try self.trackModuleCall(assert.condition, null);
+
+        const saved_constraints = self.constraints.items.len;
+        const saved_io = self.io_seq.items.len;
+        var cases = try self.falseCases(assert.condition);
+        defer cases.deinit(self.allocator);
+        const has_error = self.ir_view.isValid(assert.error_expr);
+        for (0..cases.count()) |k| {
+            if (k > 0 and self.path_count >= MAX_PATHS) break;
+            try self.constraints.appendSlice(self.allocator, cases.slice(k));
+            var status: u16 = 500;
+            if (has_error) {
+                try self.trackModuleCall(assert.error_expr, null);
+                status = self.extractExprStatus(assert.error_expr);
+            }
+            try self.emitTestCase(status);
+            self.constraints.shrinkRetainingCapacity(saved_constraints);
+            self.io_seq.shrinkRetainingCapacity(saved_io);
+        }
+    }
+
     fn walkBlockFrom(self: *PathGenerator, block: Node.BlockData, first: u16) !void {
         var i: u16 = first;
         while (i < block.stmts_count) : (i += 1) {
             const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
             const stmt_tag = self.ir_view.getTag(stmt_idx) orelse continue;
+
+            if (stmt_tag == .assert_stmt) {
+                // `assert c, e` is `if (!c) { return e; }`: the failure paths end
+                // here, and the rest of the block runs under `c`.
+                const assert = self.ir_view.getAssertStmt(stmt_idx) orelse continue;
+                try self.walkAssertFailure(assert);
+                try self.extractAllConstraints(assert.condition);
+                continue;
+            }
 
             if (stmt_tag == .if_stmt) {
                 const if_s = self.ir_view.getIfStmt(stmt_idx) orelse continue;
@@ -2174,6 +2227,12 @@ pub const PathGenerator = struct {
 
     fn extractReturnStatus(self: *PathGenerator, node: NodeIndex) u16 {
         const ret_val = self.ir_view.getOptValue(node) orelse return 200;
+        return self.extractExprStatus(ret_val);
+    }
+
+    /// The response status of the value an exit returns: the `status` of a
+    /// `Response` helper call, and 200 for any other value.
+    fn extractExprStatus(self: *PathGenerator, ret_val: NodeIndex) u16 {
         const ret_tag = self.ir_view.getTag(ret_val) orelse return 200;
 
         if (ret_tag == .call or ret_tag == .method_call) {
@@ -5558,4 +5617,125 @@ test "cost stays bounded when no function value escapes" {
     for (bounded) |source| {
         try std.testing.expect((try costClassOf(source)) != .unbounded);
     }
+}
+
+/// How many generated paths end with `status`.
+fn countStatus(tests: []const GeneratedTest, status: u16) usize {
+    var n: usize = 0;
+    for (tests) |t| {
+        if (t.expected_status == status) n += 1;
+    }
+    return n;
+}
+
+test "assert with an error expression forks a failure path with the status of that expression" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  const ok = req.method === "GET";
+        \\  assert ok, Response.text("no", { status: 405 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 405));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
+}
+
+test "assert without an error expression fails with status 500" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  const ok = req.method === "GET";
+        \\  assert ok;
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 500));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
+}
+
+test "assert in an unbraced branch body gets its failure path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  const post = req.method === "POST";
+        \\  const ready = req.url === "/ready";
+        \\  if (post) assert ready, Response.text("not ready", { status: 503 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 503));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
+}
+
+test "assert on a conjunction forks one failure path for each way it is false" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  assert req.method === "GET" && req.url === "/x", Response.text("no", { status: 400 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), countStatus(tests, 400));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
+}
+
+test "a module call in the assert error expression is on the failure path only" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) {
+        \\  const ok = req.method === "GET";
+        \\  assert ok, Response.text(sha256("denied"), { status: 403 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| {
+        if (t.expected_status == 403) {
+            try std.testing.expectEqual(@as(usize, 1), t.io_stubs.items.len);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), t.io_stubs.items.len);
+        }
+    }
+}
+
+test "a module call in the assert condition is on both paths" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) {
+        \\  assert sha256(req.url) === req.method, Response.text("no", { status: 400 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| try std.testing.expectEqual(@as(usize, 1), t.io_stubs.items.len);
 }

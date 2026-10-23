@@ -1837,3 +1837,21 @@ test "a failable call under an or in an if condition is recorded but no path fai
     try std.testing.expectEqual(@as(u32, 0), coverage.covered);
     try std.testing.expect(!coverage.clean);
 }
+
+test "an assert on a Result gives the failable call its failure path" {
+    // `assert result.ok, e` returns `e` when the call fails, the same path as
+    // `if (!result.ok) { return e; }`, so the call is counted and covered.
+    const source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  const result = jwtVerify("t", "secret");
+        \\  assert result.ok, Response.text("unauthorized", { status: 401 });
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
+    try std.testing.expectEqual(@as(usize, 0), coverage.unseen_calls);
+    try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 1), coverage.covered);
+    try std.testing.expect(coverage.clean);
+}
