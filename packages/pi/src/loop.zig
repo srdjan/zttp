@@ -1108,6 +1108,8 @@ fn applyVerifiedChangeSet(
     return .{ .applied = true };
 }
 const testing = std.testing;
+const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
+const CwdOverride = @import("test_support/cwd.zig").CwdOverride;
 const Tag = transcript_mod.Tag;
 
 const CannedClient = struct {
@@ -2051,6 +2053,11 @@ test "workspace change during approval fails closed without overwriting concurre
 }
 
 test "edit path outside the workspace is surfaced as a recoverable diagnostic, not a crash" {
+    // The turn recovers the workspace under the working directory; keep it off the repository.
+    var tmp = try IsolatedTmp.init(testing.allocator, "loop");
+    defer tmp.cleanup(testing.allocator);
+    var cwd = try CwdOverride.set(testing.allocator, tmp.abs_path);
+    defer cwd.restore(testing.allocator);
     var canned: CannedClient = .{ .reply = .{
         .response = .{ .change_set = .{
             .file = "../outside-handler.ts",

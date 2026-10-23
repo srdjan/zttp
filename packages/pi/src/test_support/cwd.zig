@@ -14,3 +14,21 @@ pub fn cwdPathAlloc(allocator: std.mem.Allocator) ![]u8 {
     defer allocator.free(p);
     return allocator.dupe(u8, p);
 }
+
+/// Run a test inside its own directory. Session startup locks and recovers
+/// `.zttp` under the working directory, which must never be the repository's.
+pub const CwdOverride = struct {
+    previous: []u8,
+
+    pub fn set(allocator: std.mem.Allocator, path: []const u8) !CwdOverride {
+        const previous = try cwdPathAlloc(allocator);
+        errdefer allocator.free(previous);
+        try std.Io.Threaded.chdir(path);
+        return .{ .previous = previous };
+    }
+
+    pub fn restore(self: *CwdOverride, allocator: std.mem.Allocator) void {
+        std.Io.Threaded.chdir(self.previous) catch {};
+        allocator.free(self.previous);
+    }
+};

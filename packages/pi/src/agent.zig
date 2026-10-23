@@ -2162,7 +2162,9 @@ const testing = std.testing;
 
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const EnvOverride = @import("test_support/env.zig").EnvOverride;
-const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
+const cwd_support = @import("test_support/cwd.zig");
+const cwdPathAlloc = cwd_support.cwdPathAlloc;
+const CwdOverride = cwd_support.CwdOverride;
 
 fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
     return IsolatedTmp.init(allocator, "agent");
@@ -2933,6 +2935,10 @@ test "controlled model selection updates identity without changing request confi
 
 test "explicit DeepSeek selects only the DeepSeek credential" {
     const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "deepseek-key");
     defer deepseek.restore(allocator);
     var base_url = try EnvOverride.unset(allocator, "DEEPSEEK_BASE_URL");
@@ -2968,6 +2974,10 @@ test "explicit DeepSeek selects only the DeepSeek credential" {
 
 test "a DeepSeek session refuses to launch without a key or over plain HTTP" {
     const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     var registry: Registry = .{};
     defer registry.deinit(allocator);
 
@@ -3002,6 +3012,8 @@ test "bare persisted session follows the global default regardless of cloud keys
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3039,6 +3051,8 @@ test "new model session persists one bounded meta bootstrap across resume" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3083,6 +3097,8 @@ test "resume fork override and model mutation preserve provider identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3181,6 +3197,8 @@ test "rebuild resumes the current session through a transferred journal lock" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3229,6 +3247,8 @@ test "failed same-session rebuild keeps the original journal lock" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3265,6 +3285,8 @@ test "same-session rebuild refreshes a poisoned journal before lock transfer" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3290,6 +3312,8 @@ test "named session resume preserves transcript bytes and stored identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3352,6 +3376,8 @@ test "concurrent first launch of one named session is rejected before publicatio
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3382,6 +3408,8 @@ test "resume fails closed when metadata exists but the journal is missing" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3413,6 +3441,8 @@ test "named session with events and missing metadata fails without truncation" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3447,6 +3477,8 @@ test "model-free legacy resume bypasses provider identity and preserves metadata
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3497,6 +3529,8 @@ test "legacy resume migrates once and cross-provider rebuild is atomic" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3575,6 +3609,8 @@ test "rejected startup model creates no session state and frees owned buffers" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions-not-created");
     defer allocator.free(sessions_dir);
 
@@ -3604,6 +3640,8 @@ test "unready explicit local provider has no filesystem or cloud fallback side e
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions-not-created");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3661,6 +3699,8 @@ test "mid-turn provider failure persists one error exit without fallback" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -3764,6 +3804,8 @@ test "poisoned journal refuses a turn before the model can run" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -4221,6 +4263,8 @@ test "compact checkpoint survives immediate session close and resume" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
@@ -4578,6 +4622,8 @@ test "fork copies raw ancestry and projection checkpoints before independent div
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
     const sessions_dir = try tmp.childPath(allocator, "sessions");
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
