@@ -107,7 +107,7 @@ pub const FdWriter = struct {
         // fully consume buffer[0..end] before the data slices.
         const buffered_bytes = w.buffer[0..w.end];
         if (buffered_bytes.len > 0) {
-            writeFd(self.fd, buffered_bytes);
+            try writeFd(self.fd, buffered_bytes);
             w.end = 0;
         }
 
@@ -117,7 +117,7 @@ pub const FdWriter = struct {
         var written: usize = 0;
         var i: usize = 0;
         while (i + 1 < data.len) : (i += 1) {
-            writeFd(self.fd, data[i]);
+            try writeFd(self.fd, data[i]);
             written += data[i].len;
         }
 
@@ -125,15 +125,24 @@ pub const FdWriter = struct {
         const tail = data[data.len - 1];
         var remaining = splat;
         while (remaining > 0) : (remaining -= 1) {
-            writeFd(self.fd, tail);
+            try writeFd(self.fd, tail);
             written += tail.len;
         }
         return written;
     }
 
-    fn writeFd(fd: c_int, bytes: []const u8) void {
-        if (bytes.len == 0) return;
-        _ = std.c.write(fd, bytes.ptr, bytes.len);
+    fn writeFd(fd: c_int, bytes: []const u8) std.Io.Writer.Error!void {
+        var offset: usize = 0;
+        while (offset < bytes.len) {
+            const rest = bytes[offset..];
+            const n = std.c.write(fd, rest.ptr, rest.len);
+            if (n < 0) {
+                if (std.posix.errno(n) == .INTR) continue;
+                return error.WriteFailed;
+            }
+            if (n == 0) return error.WriteFailed;
+            offset += @intCast(n);
+        }
     }
 };
 
