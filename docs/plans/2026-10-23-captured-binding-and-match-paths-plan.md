@@ -127,7 +127,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 
 | Unit | State |
 |---|---|
-| T1 | not started |
+| T1 | done: `walkExpr` reads member bases, computed keys, spread operands, and object spread members, and sends any other tag through `expressionChildren`; `p4_objbase_hole.ts` and `p4_spread_hole.ts` give ZTS203; the 296-file sweep is byte-identical; `zig build test` 200/200 steps, 9483/9489 tests |
 | T2 | not started |
 | T3 | not started |
 | T4 | not started |

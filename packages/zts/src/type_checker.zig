@@ -1039,9 +1039,27 @@ pub const TypeChecker = struct {
                 const obj = self.ir_view.getObject(node) orelse return;
                 for (0..obj.properties_count) |i| {
                     const prop = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    // A spread member is not a property: its operand is payload
+                    // word `a`, read by `getOptValue`.
+                    if (self.ir_view.getTag(prop) == .object_spread) {
+                        if (self.ir_view.getOptValue(prop)) |operand| self.walkExpr(operand);
+                        continue;
+                    }
                     const prop_data = self.ir_view.getProperty(prop) orelse continue;
                     self.walkExpr(prop_data.value);
                 }
+            },
+
+            // A member read evaluates its base, and a computed read its key too.
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.walkExpr(member.object);
+                self.walkExpr(member.computed);
+            },
+
+            // The spread operand is payload word `a`, read by `getOptValue`.
+            .spread => {
+                if (self.ir_view.getOptValue(node)) |operand| self.walkExpr(operand);
             },
 
             .match_expr => {
@@ -1070,10 +1088,13 @@ pub const TypeChecker = struct {
                 self.current_return_type = saved_return;
             },
 
-            // exhaustive: same as the expression walker above - the statement
-            // kinds not listed carry nothing this checker types, and a missed
-            // type is a missed rejection, not a granted proof.
-            else => {},
+            // A tag named above is read by its own arm. Any other tag passes
+            // each child it holds back to this walk, so a call under a node
+            // this walk does not name is still checked. A leaf has no child.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.walkExpr(child);
+            },
         }
     }
 
@@ -7837,4 +7858,32 @@ test "a test over an unknown parameter is admitted on its form, not its effect" 
         0,
         null,
     );
+}
+
+// T1 (D21): a call in a member base, a computed key, or a spread operand.
+
+/// `mkArr` takes a `string`; `expr` passes it a number in some position.
+fn mkArrCall(comptime expr: []const u8) []const u8 {
+    return
+    \\function mkArr(s: string): number[] {
+    \\  return [s.length];
+    \\}
+    \\function run(): number {
+    \\  const r =
+    ++ " " ++ expr ++ ";\n" ++
+        \\  return 1;
+        \\}
+    ;
+}
+
+test "a call in a member base, a computed key, or a spread operand is checked" {
+    // The walk had no arm for these tags and ended in `else => {}`, so the
+    // call under them was never checked against `mkArr`'s signature.
+    try expectKindCounts(mkArrCall("mkArr(1)"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(mkArrCall("mkArr(1).length"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(mkArrCall("mkArr(1)?.length"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(mkArrCall("[1, 2][mkArr(1).length]"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(mkArrCall("[...mkArr(1)]"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(mkArrCall("{ ...{ v: mkArr(1) } }"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
+    try expectKindCounts(mkArrCall("[...mkArr(\"a\")]"), .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
 }
