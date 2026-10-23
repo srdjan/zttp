@@ -707,8 +707,10 @@ pub const CodeGen = struct {
                 if (divisor > 0) {
                     if (self.tryEmitFusedArithMod(binary.left, divisor)) |_| {
                         return;
-                    } else |_| {
-                        // Fused pattern didn't match, try simple mod_const
+                    } else |err| {
+                        // Only a pattern mismatch falls back; any other error left partial code behind.
+                        if (err != error.PatternNotMatched) return err;
+                        // Fused pattern did not match, try simple mod_const
                         try self.emitNode(binary.left);
                         // Use inline i8 opcode for small divisors (1-127)
                         if (divisor <= 127) {
@@ -864,7 +866,8 @@ pub const CodeGen = struct {
             .shl => .shl,
             .shr => .shr,
             .ushr => .ushr,
-            else => .nop,
+            // The short-circuit and loose operators return early above.
+            .and_op, .or_op, .nullish, .loose_eq, .loose_neq => return error.UnsupportedOperator,
         };
 
         try self.emit(opcode);
@@ -1213,7 +1216,7 @@ pub const CodeGen = struct {
                 self.pushStack(1);
                 try self.emitGetField(member.property); // [obj, current]
                 try self.emitNode(assign.value); // [obj, current, value]
-                try self.emit(self.binaryOpToOpcode(op)); // [obj, result]
+                try self.emit(try self.binaryOpToOpcode(op)); // [obj, result]
                 self.popStack(1);
                 try self.emit(.put_field_keep); // pops obj+result, sets, -> [result]
                 try self.emitU16(member.property);
@@ -1229,7 +1232,7 @@ pub const CodeGen = struct {
                 try self.emit(.get_elem); // [obj, key, current]
                 self.popStack(1);
                 try self.emitNode(assign.value); // [obj, key, current, value]
-                try self.emit(self.binaryOpToOpcode(op)); // [obj, key, result]
+                try self.emit(try self.binaryOpToOpcode(op)); // [obj, key, result]
                 self.popStack(1);
                 try self.emit(.put_elem_keep); // pops obj,key,result, sets, -> [result]
                 self.popStack(2);
@@ -1243,7 +1246,7 @@ pub const CodeGen = struct {
         if (assign.op) |op| {
             try self.emitNode(assign.target);
             try self.emitNode(assign.value);
-            try self.emit(self.binaryOpToOpcode(op));
+            try self.emit(try self.binaryOpToOpcode(op));
             self.popStack(1);
             const binding = self.ir.getBinding(assign.target).?;
             try self.emit(.dup);
@@ -1284,7 +1287,7 @@ pub const CodeGen = struct {
         }
     }
 
-    fn binaryOpToOpcode(self: *CodeGen, op: BinaryOp) Opcode {
+    fn binaryOpToOpcode(self: *CodeGen, op: BinaryOp) !Opcode {
         _ = self;
         return switch (op) {
             .add => .add,
@@ -1299,7 +1302,7 @@ pub const CodeGen = struct {
             .shl => .shl,
             .shr => .shr,
             .ushr => .ushr,
-            else => .nop,
+            .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .and_op, .or_op, .nullish, .loose_eq, .loose_neq => error.UnsupportedOperator,
         };
     }
 
@@ -2690,6 +2693,37 @@ test "bytecode constants refuse an unrepresentable index" {
     const result = try gen.generate(division);
     // At capacity, emit 7 / 2 normally rather than allocate a folded float.
     try std.testing.expectEqualSlices(u8, &.{ @backingInt(Opcode.push_i8), 7, @backingInt(Opcode.push_2), @backingInt(Opcode.div), @backingInt(Opcode.ret_undefined) }, result.code);
+}
+
+test "a full constant pool refuses a fused modulo instead of emitting the operands twice" {
+    const allocator = std.testing.allocator;
+    var nodes = NodeList.init(allocator);
+    defer nodes.deinit();
+    var constants = ConstantPool.init(allocator);
+    defer constants.deinit();
+    var scopes = try ScopeAnalyzer.init(allocator);
+    defer scopes.deinit();
+    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    defer gen.deinit();
+    try gen.constants.resize(allocator, std.math.maxInt(u16) + 1);
+    @memset(gen.constants.items, JSValue.undefined_val);
+
+    const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
+    const a = try nodes.add(Node.identifier(loc, .{ .scope_id = 0, .slot = 1, .name_atom = 0x101, .kind = .global }));
+    const b = try nodes.add(Node.identifier(loc, .{ .scope_id = 0, .slot = 2, .name_atom = 0x102, .kind = .global }));
+    const sum = try nodes.add(Node.binaryOp(loc, .add, a, b));
+    const seven = try nodes.add(Node.litInt(loc, 7));
+    const fused = try nodes.add(Node.binaryOp(loc, .mod, sum, seven));
+    try std.testing.expectError(error.TooManyConstants, gen.generate(fused));
+
+    // A pattern mismatch still falls back to `mod_const_i8`, which needs no constant.
+    var gen2 = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    defer gen2.deinit();
+    try gen2.constants.resize(allocator, std.math.maxInt(u16) + 1);
+    @memset(gen2.constants.items, JSValue.undefined_val);
+    const plain = try nodes.add(Node.binaryOp(loc, .mod, a, seven));
+    const result = try gen2.generate(plain);
+    try std.testing.expectEqualSlices(u8, &.{ @backingInt(Opcode.get_global), 0x01, 0x01, @backingInt(Opcode.mod_const_i8), 7, @backingInt(Opcode.ret_undefined) }, result.code);
 }
 
 test "constant expressions fold inside a handler without changing source IR" {
