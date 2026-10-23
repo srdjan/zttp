@@ -57,55 +57,6 @@ The denominator contains all eight tasks, including failures.
 A pilot, deterministic run, replay, or interrupted report cannot publish that fraction.
 Failure is a valid measured outcome; missing evidence is not success.
 
-## Running the harness
-
-At the `pre-rebase` tag, the repository-only command is `zig build provable-reach`.
-Each invocation needs a new output directory.
-Its parent directory must already exist.
-The command refuses to overwrite an existing run.
-The output directory must be outside the source tree, so live source identity can remain clean.
-
-Start with one deterministic task:
-
-```sh
-zig build provable-reach -- --smoke --limit 1 --output /tmp/zttp-reach-smoke-one
-```
-
-After that complete path works in under a minute, change only the selected count and use a new output directory:
-
-```sh
-zig build provable-reach -- --smoke --limit 8 --output /tmp/zttp-reach-smoke-all
-```
-
-Reference checks without an agent turn are available separately:
-
-```sh
-zig build provable-reach -- --references --output /tmp/zttp-reach-references
-```
-
-Live mode requires a clean known source revision, the DeepSeek API credential, and explicit confirmation.
-The confirmation flag is an operator assertion that the live run was authorized; it is not a cost estimate or a billing cap.
-The initial pilot command is:
-
-```sh
-zig build provable-reach -- --live --confirm-live --limit 1 --output /tmp/zttp-reach-live-pilot
-```
-
-Review the pilot's retained usage and outcome before authorizing the full eight-task run.
-The authoring limits stay the same for the larger run.
-The one-task pilot was authorized and completed on 2026-09-21.
-The full eight-task run was separately authorized and completed on the same date.
-
-At that tag, run the offline integrity suite with `zig build test-provable-reach`.
-It checks report membership, evidence origin, success evidence, and failure accounting.
-The deterministic smoke supplies the separate end-to-end authoring and runtime evidence.
-
-Each output directory contains `report.json` with the full task rows and `summary.json` with counts by input mode and outcome.
-The summary's `headline` is null for offline and pilot runs.
-`suite.json`, `tasks/`, `references/`, and `seeds/` retain the frozen task inputs and admission evidence.
-Each `cases/<task-id>/` directory retains generated source, its manifest, the transcript, compiler and runtime output, and `result.json` with observed usage.
-Live cases also retain provider exchanges and response diagnostics under `provider/`.
-
 ## First live pilot
 
 Run `reach-live-1790001297-82545` used `deepseek-v4-flash` at clean source revision `d460a68ab5efe78f845400b416b64d78c3461a9c`.
@@ -133,12 +84,6 @@ The retained evidence contains no billed dollar amount. Token counts do not esta
 The complete local evidence is retained outside the repository at `/Users/srdjans/Code/_TEAMOK/ZTTP-evidence/m3/reach-live-1790001297-82545/`.
 The original output remains at `/tmp/zttp-m3-live-pilot-20260921/`.
 No agent behavior, prompt, seed, or acceptance check was changed after the pilot.
-
-The approved full run changed the task count to eight and used a new output directory:
-
-```sh
-zig build provable-reach -- --live --confirm-live --limit 8 --output /tmp/zttp-reach-live-full
-```
 
 The limits remain 600,000 ms, 18 model round trips, 16 tool calls, and five verification attempts per task.
 Review all eight fresh outcomes together; do not replace a failed case with the pilot or a retry.

@@ -20,10 +20,6 @@
 # convenience for looking at the JSX frontend by hand; it blocks on a server, so
 # nothing automated can wait on it.
 
-# Developer machine setup. Runs before the tree can be built at all, so no build
-# step or gate could depend on it.
-setup.sh developer-setup
-
 # Regenerates docs/restrictions-to-proofs.md from restriction_registry.zig. The
 # drift between the two is already gated - check-docs-drift.sh compares the
 # rendered table against the registry row by row - so this script is the
