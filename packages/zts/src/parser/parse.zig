@@ -5402,14 +5402,9 @@ pub const Parser = struct {
             return try self.nodes.add(Node.litInt(loc, int_val));
         } else |_| {}
 
-        // Parse as float
-        const float_val = std.fmt.parseFloat(f64, text) catch 0.0;
-        const float_idx = try self.constants.addFloat(float_val);
-        return try self.nodes.add(.{
-            .tag = .lit_float,
-            .loc = loc,
-            .data = .{ .float_idx = float_idx },
-        });
+        // Radix literals above i32 and decimal floats: one parser, which refuses
+        // rather than reading a failed parse as 0.0.
+        return self.parseExpressionNumber(loc, text);
     }
 
     /// The message for a malformed numeric literal, or null when the text is a
@@ -5793,7 +5788,7 @@ pub const Parser = struct {
                     // rejected: codegen emits only `.object_property` and
                     // `.object_spread`, so a parsed method was silently
                     // dropped from the object it appeared in.
-                    if (self.check(.lparen)) {
+                    if (self.check(.lparen) or prop_kind != .object_property) {
                         const message = switch (prop_kind) {
                             .object_getter => "object getters are not supported; use an explicit function call instead",
                             .object_setter => "object setters are not supported; use an explicit function call instead",
@@ -9223,6 +9218,27 @@ test "the legal numeric forms still parse" {
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expect(!parser.hasErrors());
+}
+
+test "a radix literal above i32 keeps its value" {
+    // `parseFloat` reads only base 10 and 16, so `0b` and `0o` literals above
+    // i32 used to become 0.0 with no diagnostic. The pool dedups the hex value.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "const a = 0b100000000000000000000000000000000; const b = 0o100000000000; const c = 0x100000000;");
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expect(!parser.hasErrors());
+    try std.testing.expectEqualSlices(f64, &.{ 4294967296.0, 8589934592.0 }, parser.constants.floats.items);
+}
+
+test "get and set before a key without a parenthesis are refused" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "const o = { get x: 1 };", "const o = { set x: 1 };" }) |source| {
+        var parser = try Parser.init(allocator, source);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseError, parser.parse());
+        try std.testing.expect(parser.hasErrors());
+    }
 }
 
 test "an unknown escape is refused rather than copied" {
