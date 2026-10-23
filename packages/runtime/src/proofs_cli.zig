@@ -116,7 +116,9 @@ fn gateCommand(
         } else if (std.mem.eql(u8, arg, "--out")) {
             opts.out = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--no-sign")) {
-            opts.no_sign = true;
+            // Accepted and ignored. The gate used to append signed kind=equivalence
+            // ledger rows and this flag skipped them; it writes none now, but the
+            // Action and `scripts/proof-gate.sh` still pass the flag.
         } else if (std.mem.eql(u8, arg, "--format")) {
             const value = try shared.takeArg(&i, argv, error.MissingArgValue);
             if (std.mem.eql(u8, value, "md")) {
@@ -897,7 +899,7 @@ fn renderHistorical(
         .baseline = baseline,
         .delta = delta,
     };
-    try review.renderReviewCard(allocator, &card, stdout, .{});
+    try review.renderReviewCard(&card, stdout);
 }
 
 // ---------------------------------------------------------------------------

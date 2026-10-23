@@ -583,21 +583,9 @@ pub fn classify(delta: *const ReviewDelta) Verdict {
     return .safe_with_additions;
 }
 
-pub const DriftStatus = struct {
-    reason: []const u8, // borrowed
-};
-
-pub const PlanRequiredSummary = struct {
-    plan_id: []const u8,
-    review_url: ?[]const u8,
-    covered_reasons: []const []const u8,
-    uncovered_reasons: []const []const u8,
-};
-
 // DeployReview owns its `current` and `delta`. `baseline` is borrowed: it
 // lives in the caller's deploy state (or in a test fixture) and outlives
-// the render call. The drift and plan_required substructures borrow strings
-// from caller-owned data and must outlive the render call only.
+// the render call.
 pub const DeployReview = struct {
     handler_path: []const u8, // borrowed
     service_name: []const u8, // borrowed
@@ -605,55 +593,6 @@ pub const DeployReview = struct {
     current: ReviewFacts,
     baseline: ?*const ReviewFacts = null,
     delta: ReviewDelta,
-    drift: ?DriftStatus = null,
-    plan_required: ?PlanRequiredSummary = null,
-
-    pub const InitParams = struct {
-        handler_path: []const u8,
-        service_name: []const u8,
-        region: []const u8,
-        facts: *const ProvenFacts,
-        capability_names: []const []const u8,
-        contract_sha: []const u8,
-        /// Author-declared specs for the handler, paired with their current
-        /// discharge state. Defaults to empty for first-deploy callers and
-        /// for handlers without a `Proof<T, P>` annotation. ReviewFacts dupes
-        /// the names into its own ownership.
-        declared_specs: []const SpecState = &.{},
-        baseline: ?*const ReviewFacts = null,
-        drift: ?DriftStatus = null,
-        plan_required: ?PlanRequiredSummary = null,
-    };
-
-    /// Build a DeployReview from caller inputs. The labeled-block + errdefer
-    /// here are load-bearing: a struct-literal that called `deriveDelta`
-    /// inline would leak `current`'s allocations if `deriveDelta` errored,
-    /// because the caller's `defer review.deinit` is only installed once
-    /// init returns. A function-scope errdefer would instead double-free on
-    /// a later error after ownership transferred into the returned struct.
-    pub fn init(allocator: std.mem.Allocator, params: InitParams) !DeployReview {
-        return build: {
-            var current = try ReviewFacts.fromProvenFacts(
-                allocator,
-                params.facts,
-                params.capability_names,
-                params.contract_sha,
-                params.declared_specs,
-            );
-            errdefer current.deinit(allocator);
-            const delta = try deriveDelta(allocator, &current, params.baseline);
-            break :build DeployReview{
-                .handler_path = params.handler_path,
-                .service_name = params.service_name,
-                .region = params.region,
-                .current = current,
-                .baseline = params.baseline,
-                .delta = delta,
-                .drift = params.drift,
-                .plan_required = params.plan_required,
-            };
-        };
-    }
 
     pub fn verdict(self: *const DeployReview) Verdict {
         return classify(&self.delta);
@@ -663,13 +602,6 @@ pub const DeployReview = struct {
         self.current.deinit(allocator);
         self.delta.deinit(allocator);
     }
-};
-
-pub const RenderOptions = struct {
-    /// Reserved for a follow-up; v1 ships with no ANSI to keep snapshot tests
-    /// trivial. The flag exists so deploy.zig can detect TTYs today and gate
-    /// future color additions without an API churn.
-    use_color: bool = false,
 };
 
 /// ProofCard is the source-agnostic projection a renderer needs. It borrows
@@ -705,24 +637,6 @@ pub const CounterexamplePreview = struct {
     snippet: []const u8,
     handler_path: []const u8,
     suggestion: ?[]const u8 = null,
-    failing_request: ?FailingRequest = null,
-    previous_response: ?ReplayResponse = null,
-    current_response: ?ReplayResponse = null,
-
-    pub const FailingRequest = struct {
-        method: []const u8,
-        url: []const u8,
-        has_auth_header: bool = false,
-        body: ?[]const u8 = null,
-    };
-
-    pub const ReplayResponse = struct {
-        status: u16,
-        body: []const u8,
-        /// Mutually exclusive with a populated `body` carrying a successful
-        /// response payload.
-        error_text: ?[]const u8 = null,
-    };
 };
 
 pub const ProofCard = struct {
@@ -732,8 +646,6 @@ pub const ProofCard = struct {
     current: *const ReviewFacts,
     baseline: ?*const ReviewFacts = null,
     delta: *const ReviewDelta,
-    drift: ?DriftStatus = null,
-    plan_required: ?PlanRequiredSummary = null,
     /// Optional per-property "Why" entries for the live HUD. The renderer
     /// shows a Why row for every demoted_property whose field matches an
     /// entry here. Empty (default) outside the live-reload path.
@@ -754,8 +666,6 @@ pub const ProofCard = struct {
             .current = &review.current,
             .baseline = review.baseline,
             .delta = &review.delta,
-            .drift = review.drift,
-            .plan_required = review.plan_required,
         };
     }
 };
@@ -801,40 +711,11 @@ pub fn writeProofCardPlaintext(card: *const ProofCard, writer: *std.Io.Writer) !
 
     try writeKv(writer, "  Verdict:    ", card.verdict().slug());
 
-    if (card.drift) |d| {
-        try writeKv(writer, "  Drift:      ", d.reason);
-        try writer.writeAll("              re-run with --confirm to apply\n");
-    }
-    if (card.plan_required) |plan| {
-        try writer.writeAll("  Review:     capability review required\n");
-        try writeKv(writer, "  Plan ID:    ", plan.plan_id);
-        if (plan.review_url) |url| try writeKv(writer, "  URL:        ", url);
-        for (plan.covered_reasons) |r| {
-            try writer.writeAll("    already granted: ");
-            try writer.writeAll(r);
-            try writer.writeAll("\n");
-        }
-        for (plan.uncovered_reasons) |r| {
-            try writer.writeAll("    needs review:    ");
-            try writer.writeAll(r);
-            try writer.writeAll("\n");
-        }
-        try writer.writeAll("              approve the plan, then re-run\n");
-    }
-    if (card.drift == null and card.plan_required == null) {
-        try writer.writeAll("  Blockers:   none\n");
-    }
+    try writer.writeAll("  Blockers:   none\n");
 }
 
 /// Convenience wrapper for callers that already hold a `DeployReview`.
-pub fn renderReviewCard(
-    allocator: std.mem.Allocator,
-    review: *const DeployReview,
-    writer: *std.Io.Writer,
-    opts: RenderOptions,
-) !void {
-    _ = allocator;
-    _ = opts;
+pub fn renderReviewCard(review: *const DeployReview, writer: *std.Io.Writer) !void {
     const card = ProofCard.fromDeployReview(review);
     try writeProofCardPlaintext(&card, writer);
 }
@@ -1630,7 +1511,7 @@ test "renderReviewCard: first deploy shows baseline none and no blockers" {
 
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    try renderReviewCard(&review, &aw.writer);
 
     const out = aw.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "Proof review:") != null);
@@ -1641,38 +1522,6 @@ test "renderReviewCard: first deploy shows baseline none and no blockers" {
     try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   none (first deploy)") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Blockers:   none") != null);
-}
-
-test "renderReviewCard: drift section is included when drift is set" {
-    const allocator = std.testing.allocator;
-    var current = ReviewFacts{
-        .contract_sha = try allocator.dupe(u8, "sha-2"),
-        .proof_level = .complete,
-        .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_endpoints = try allocator.alloc([]const u8, 0),
-        .cache_namespaces = try allocator.alloc([]const u8, 0),
-        .routes = try allocator.alloc(Route, 0),
-        .capabilities = try allocator.alloc([]const u8, 0),
-        .properties = .{},
-    };
-    var delta = try deriveDelta(allocator, &current, null);
-    var review = DeployReview{
-        .handler_path = "src/handler.ts",
-        .service_name = "demo",
-        .region = "us-east",
-        .current = current,
-        .delta = delta,
-        .drift = .{ .reason = "scope changed" },
-    };
-    defer review.deinit(allocator);
-    _ = &delta;
-
-    var aw = std.Io.Writer.Allocating.init(allocator);
-    defer aw.deinit();
-    try renderReviewCard(allocator, &review, &aw.writer, .{});
-    const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "Drift:      scope changed") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "--confirm") != null);
 }
 
 test "renderReviewCard: additive deploy shows added route and env" {
@@ -1723,7 +1572,7 @@ test "renderReviewCard: additive deploy shows added route and env" {
 
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    try renderReviewCard(&review, &aw.writer);
     const out = aw.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "Baseline:   sha-old") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "+ env DB_URL") != null);
@@ -1767,7 +1616,7 @@ test "renderReviewCard: demoted property is breaking with bullet" {
 
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    try renderReviewCard(&review, &aw.writer);
     const out = aw.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "- property read-only") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    breaking") != null);
@@ -1808,52 +1657,10 @@ test "renderReviewCard: promoted property renders + bullet" {
 
     var aw = std.Io.Writer.Allocating.init(allocator);
     defer aw.deinit();
-    try renderReviewCard(allocator, &review, &aw.writer, .{});
+    try renderReviewCard(&review, &aw.writer);
     const out = aw.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "+ property read-only") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "Verdict:    safe_with_additions") != null);
-}
-
-test "renderReviewCard: plan_required section lists reasons" {
-    const allocator = std.testing.allocator;
-    var current = ReviewFacts{
-        .contract_sha = try allocator.dupe(u8, "sha-3"),
-        .proof_level = .complete,
-        .env_keys = try allocator.alloc([]const u8, 0),
-        .egress_endpoints = try allocator.alloc([]const u8, 0),
-        .cache_namespaces = try allocator.alloc([]const u8, 0),
-        .routes = try allocator.alloc(Route, 0),
-        .capabilities = try allocator.alloc([]const u8, 0),
-        .properties = .{},
-    };
-    var delta = try deriveDelta(allocator, &current, null);
-    const covered = [_][]const u8{"network egress to api.x"};
-    const uncovered = [_][]const u8{"crypto capability"};
-    var review = DeployReview{
-        .handler_path = "src/handler.ts",
-        .service_name = "demo",
-        .region = "us-east",
-        .current = current,
-        .delta = delta,
-        .plan_required = .{
-            .plan_id = "plan-1",
-            .review_url = "https://control/deploy/plans/plan-1",
-            .covered_reasons = &covered,
-            .uncovered_reasons = &uncovered,
-        },
-    };
-    defer review.deinit(allocator);
-    _ = &delta;
-
-    var aw = std.Io.Writer.Allocating.init(allocator);
-    defer aw.deinit();
-    try renderReviewCard(allocator, &review, &aw.writer, .{});
-    const out = aw.writer.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, out, "capability review required") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "Plan ID:    plan-1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "URL:        https://control/deploy/plans/plan-1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "already granted: network egress to api.x") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "needs review:    crypto capability") != null);
 }
 
 test "writeProofCardPlaintext: renders a card built without a DeployReview" {

@@ -335,17 +335,6 @@ fn createWithWriter(
     if (std.c.rename(tmp_path_z, output_path_z) != 0) return error.RenameFailed;
 }
 
-/// Return the size of the binary without any appended payload.
-/// If no trailer is found, returns the full length.
-pub fn getCleanBinarySize(data: []const u8) usize {
-    if (data.len < TRAILER_SIZE) return data.len;
-    const trailer_start = data.len - TRAILER_SIZE;
-    return @intCast(cleanBinarySizeFromTrailer(
-        @intCast(data.len),
-        data[trailer_start..][0..TRAILER_SIZE],
-    ));
-}
-
 fn getCleanBinarySizeFromFd(fd: std.c.fd_t) !u64 {
     const file_size = (try zts.file_io.fstatFd(fd)).size;
     if (file_size < TRAILER_SIZE) return file_size;
@@ -1127,7 +1116,7 @@ test "create strips an existing payload while streaming" {
 
     const artifact = try readFile(allocator, second_path, 1024 * 1024);
     defer allocator.free(artifact);
-    try std.testing.expectEqual(base.len, getCleanBinarySize(artifact));
+    try std.testing.expectEqual(base.len, cleanBinarySizeFromTrailer(artifact.len, artifact[artifact.len - TRAILER_SIZE ..]));
     try std.testing.expectEqualSlices(u8, base, artifact[0..base.len]);
 
     const trailer = artifact[artifact.len - TRAILER_SIZE ..];
@@ -1539,12 +1528,12 @@ test "payload parser rejects retired raw section tags 8 through 10" {
     }
 }
 
-test "getCleanBinarySize: no trailer returns full size" {
+test "cleanBinarySizeFromTrailer: no trailer returns full size" {
     const data = "just some binary data without a trailer";
-    try std.testing.expectEqual(data.len, getCleanBinarySize(data));
+    try std.testing.expectEqual(data.len, cleanBinarySizeFromTrailer(data.len, data[data.len - TRAILER_SIZE ..]));
 }
 
-test "getCleanBinarySize: with trailer returns clean offset" {
+test "cleanBinarySizeFromTrailer: with trailer returns clean offset" {
     const base = "base binary content";
     const payload = "payload data";
 
@@ -1562,7 +1551,7 @@ test "getCleanBinarySize: with trailer returns clean offset" {
     std.mem.writeInt(u64, file_buf[trailer_start + 24 ..][0..8], MAGIC, .little);
 
     const total = trailer_start + TRAILER_SIZE;
-    try std.testing.expectEqual(base.len, getCleanBinarySize(file_buf[0..total]));
+    try std.testing.expectEqual(base.len, cleanBinarySizeFromTrailer(total, file_buf[total - TRAILER_SIZE .. total]));
 }
 
 fn buildTrailer(payload_offset: u64, payload_size: u64, version: u16) [TRAILER_SIZE]u8 {

@@ -153,8 +153,6 @@
     .{ .id = "P1-BORDER", .file = "wire.zig", .old = "return std.mem.order(u8, a, b);", .new = "return std.mem.order(u8, b, a);", .equivalent = null },
     .{ .id = "P1-ASC", .file = "wire.zig", .old = "defer self.previous = item;", .new = "defer self.previous = null;", .equivalent = null },
     .{ .id = "P1-ITNEXT", .file = "wire.zig", .old = "if (self.remaining == 0) return null;", .new = "if (self.remaining <= 1) return null;", .equivalent = null },
-    .{ .id = "P1-ITSKIP", .file = "wire.zig", .old = "reader.pos = walk.pos;", .new = "reader.pos = self.pos;", .equivalent = null },
-    .{ .id = "P1-DIGDOM", .file = "wire.zig", .old = "hasher.update(domain);", .new = "_ = domain;", .equivalent = null },
     .{ .id = "P1-WRAW", .file = "wire.zig", .old = "self.len += data.len;", .new = "", .equivalent = null },
     .{ .id = "P1-WINT", .file = "wire.zig", .old = "std.mem.writeInt(T, self.buf[self.len..][0..@sizeOf(T)], value, .little);", .new = "std.mem.writeInt(T, self.buf[self.len..][0..@sizeOf(T)], value, .big);", .equivalent = null },
     .{ .id = "P1-WSTR", .file = "wire.zig", .old = "self.int(u32, @intCast(data.len));", .new = "self.int(u32, @intCast(data.len + 1));", .equivalent = null },

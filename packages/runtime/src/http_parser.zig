@@ -76,37 +76,6 @@ pub const RequestLine = struct {
     is_http_10: bool = false,
 };
 
-pub fn parseRequestLine(
-    storage: []u8,
-    offset: *usize,
-    request_line: []const u8,
-    max_url_length: usize,
-) !RequestLine {
-    var parts = std.mem.splitScalar(u8, request_line, ' ');
-    const method_slice = parts.next() orelse return error.InvalidRequest;
-    const url_slice = parts.next() orelse return error.InvalidRequest;
-
-    if (url_slice.len > max_url_length) return error.UriTooLong;
-
-    const version = parts.next() orelse "";
-    const is_http_10 = std.mem.eql(u8, version, "HTTP/1.0");
-
-    const method = try copyToStorage(storage, offset, method_slice);
-    const url = try copyToStorage(storage, offset, url_slice);
-
-    const query_start = std.mem.indexOf(u8, url, "?");
-    const path = if (query_start) |idx| url[0..idx] else url;
-    const query_string = if (query_start) |idx| url[idx + 1 ..] else "";
-
-    return .{
-        .method = method,
-        .url = url,
-        .path = path,
-        .query_string = query_string,
-        .is_http_10 = is_http_10,
-    };
-}
-
 /// The methods this runtime dispatches. The same closed set the outbound and
 /// service paths already enforce through `runtime_http.parseHttpMethod`, so an
 /// inbound request cannot name a method the rest of the runtime would refuse.
@@ -166,16 +135,6 @@ pub fn parseHeadersFromLinesBorrowed(
         try processHeaderLineBorrowed(line, headers, allocator, fast_slots);
         header_count += 1;
     }
-}
-
-/// Copy a string into a pre-allocated batch storage buffer.
-/// Returns a slice into the storage buffer.
-fn copyToStorage(storage: []u8, offset: *usize, src: []const u8) ![]const u8 {
-    if (offset.* + src.len > storage.len) return error.HeaderStorageExhausted;
-    const dest = storage[offset.*..][0..src.len];
-    @memcpy(dest, src);
-    offset.* += src.len;
-    return dest;
 }
 
 /// Result of query parameter parsing.
@@ -624,44 +583,6 @@ test "findHeaderEnd: terminator straddling SIMD/scalar boundary" {
     // Place terminator at offset 14 - inside first SIMD chunk's tail span.
     @memcpy(buf[14..18], "\r\n\r\n");
     try testing.expectEqual(@as(?usize, 14), findHeaderEnd(&buf));
-}
-
-test "parseRequestLine: GET with query string" {
-    var storage: [256]u8 = undefined;
-    var offset: usize = 0;
-    const line = try parseRequestLine(&storage, &offset, "GET /api/v1/users?id=42 HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
-    try testing.expectEqualStrings("GET", line.method);
-    try testing.expectEqualStrings("/api/v1/users?id=42", line.url);
-    try testing.expectEqualStrings("/api/v1/users", line.path);
-    try testing.expectEqualStrings("id=42", line.query_string);
-}
-
-test "parseRequestLine: no query string yields empty query" {
-    var storage: [256]u8 = undefined;
-    var offset: usize = 0;
-    const line = try parseRequestLine(&storage, &offset, "POST /submit HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
-    try testing.expectEqualStrings("POST", line.method);
-    try testing.expectEqualStrings("/submit", line.path);
-    try testing.expectEqualStrings("", line.query_string);
-}
-
-test "parseRequestLine: storage exhaustion errors" {
-    var storage: [4]u8 = undefined; // too small for "GET" + "/"
-    var offset: usize = 0;
-    try testing.expectError(error.HeaderStorageExhausted, parseRequestLine(&storage, &offset, "GET /path HTTP/1.1", DEFAULT_MAX_URL_LENGTH));
-}
-
-test "parseRequestLine: malformed line missing url" {
-    var storage: [128]u8 = undefined;
-    var offset: usize = 0;
-    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "GET", DEFAULT_MAX_URL_LENGTH));
-}
-
-test "parseRequestLine: rejects URLs exceeding max_url_length with UriTooLong" {
-    var storage: [4096]u8 = undefined;
-    var offset: usize = 0;
-    // URL of length 33 vs limit of 16
-    try testing.expectError(error.UriTooLong, parseRequestLine(&storage, &offset, "GET /aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HTTP/1.1", 16));
 }
 
 test "parseRequestLineBorrowed: path and query slices point into input" {
@@ -1160,43 +1081,6 @@ fn fuzzScratch(rng: *std.Random, kind: FuzzKind, buf: []u8) []u8 {
     return buf[0..len];
 }
 
-test "fuzz: parseRequestLine never panics or returns out-of-bounds slices" {
-    var prng = std.Random.DefaultPrng.init(0xC0FFEE_1234);
-    var rng = prng.random();
-    var input_buf: [4096]u8 = undefined;
-    var storage: [8192]u8 = undefined;
-
-    var iter: usize = 0;
-    while (iter < 2000) : (iter += 1) {
-        const input = fuzzScratch(&rng, .request_line, &input_buf);
-        var offset: usize = 0;
-        if (parseRequestLine(&storage, &offset, input, DEFAULT_MAX_URL_LENGTH)) |line| {
-            // Slices must lie inside the storage buffer.
-            const storage_base = @intFromPtr(&storage[0]);
-            const storage_end = storage_base + storage.len;
-            const method_ptr = @intFromPtr(line.method.ptr);
-            const url_ptr = @intFromPtr(line.url.ptr);
-            try testing.expect(method_ptr >= storage_base and method_ptr + line.method.len <= storage_end);
-            try testing.expect(url_ptr >= storage_base and url_ptr + line.url.len <= storage_end);
-            try testing.expect(line.url.len <= DEFAULT_MAX_URL_LENGTH);
-            // path and query_string are subslices of url. By construction
-            // (split at the first '?'), the sum is exactly url.len when no
-            // '?' is present, and url.len - 1 when it is. The bound
-            // therefore is path.len + query.len <= url.len; a tighter
-            // bound here catches off-by-one errors at the '?' split.
-            try testing.expect(line.path.len + line.query_string.len <= line.url.len);
-        } else |err| {
-            // Any error must be one the call site expects to handle.
-            switch (err) {
-                error.InvalidRequest,
-                error.UriTooLong,
-                error.HeaderStorageExhausted,
-                => {},
-            }
-        }
-    }
-}
-
 test "fuzz: parseRequestLineBorrowed slices stay inside the input" {
     var prng = std.Random.DefaultPrng.init(0xC0FFEE_5678);
     var rng = prng.random();
@@ -1304,14 +1188,9 @@ test "fuzz: findHeaderEnd reports only in-range offsets" {
 // Specific known-bad inputs that have historically tripped HTTP parsers.
 // These are regression pins, not fuzz iterations.
 test "parser rejects classic malformed request-line shapes" {
-    var storage: [256]u8 = undefined;
-    var offset: usize = 0;
-    // Two-tuple missing version is fine; the parser only enforces method+url.
-    // But truly empty parts must error.
-    offset = 0;
-    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "", DEFAULT_MAX_URL_LENGTH));
-    offset = 0;
-    try testing.expectError(error.InvalidRequest, parseRequestLine(&storage, &offset, "GET", DEFAULT_MAX_URL_LENGTH));
+    // A line with no method or no url must error.
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("", DEFAULT_MAX_URL_LENGTH));
+    try testing.expectError(error.InvalidRequest, parseRequestLineBorrowed("GET", DEFAULT_MAX_URL_LENGTH));
 }
 
 test "parser preserves CR/LF embedded in the request line verbatim" {
@@ -1320,9 +1199,7 @@ test "parser preserves CR/LF embedded in the request line verbatim" {
     // end up inside `url` and downstream consumers see them. Pin that
     // current behavior so any future "strip CR/LF" change is a
     // conscious decision (and updates this test).
-    var storage: [256]u8 = undefined;
-    var offset: usize = 0;
-    const line = try parseRequestLine(&storage, &offset, "GET /a\r\nInjected: header HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
+    const line = try parseRequestLineBorrowed("GET /a\r\nInjected: header HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
     try testing.expect(std.mem.indexOf(u8, line.url, "\r") != null);
 }
 
@@ -1332,8 +1209,6 @@ test "parser preserves path traversal sequences in the URL slice verbatim" {
     // does the canonicalization. Pin that contract so a refactor that
     // moves traversal handling into the parser doesn't quietly change
     // semantics for proxy/passthrough handlers that want raw URLs.
-    var storage: [256]u8 = undefined;
-    var offset: usize = 0;
-    const line = try parseRequestLine(&storage, &offset, "GET /../etc/passwd HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
+    const line = try parseRequestLineBorrowed("GET /../etc/passwd HTTP/1.1", DEFAULT_MAX_URL_LENGTH);
     try testing.expectEqualStrings("/../etc/passwd", line.url);
 }

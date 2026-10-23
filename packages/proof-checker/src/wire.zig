@@ -109,24 +109,7 @@ pub fn Iterator(comptime T: type, comptime E: type, comptime read: fn (*Reader) 
             self.remaining -= 1;
             return item;
         }
-
-        /// Walk every record once, leaving `reader` after the last.
-        pub fn skipAll(self: @This(), reader: *Reader) E!void {
-            @setRuntimeSafety(true);
-            var walk = self;
-            while (try walk.next()) |_| {}
-            reader.pos = walk.pos;
-        }
     };
-}
-
-/// Domain-separated SHA-256 over a whole encoding.
-pub fn domainDigest(comptime domain: []const u8, bytes: []const u8) [32]u8 {
-    @setRuntimeSafety(true);
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(domain);
-    hasher.update(bytes);
-    return hasher.finalResult();
 }
 
 /// A writer over a fixed buffer for building encodings in tests. It writes
@@ -194,7 +177,7 @@ test "a canonical list admits only strictly ascending items" {
     try testing.expectEqual(std.math.Order.gt, order.step("a"));
 }
 
-test "iterator returns its final record and skipAll advances the reader" {
+test "iterator returns its final record" {
     const Support = struct {
         fn read(reader: *Reader) Truncated!u8 {
             @setRuntimeSafety(true);
@@ -207,18 +190,6 @@ test "iterator returns its final record and skipAll advances the reader" {
     var one = RecordIterator{ .bytes = &bytes, .pos = 0, .remaining = 1 };
     try testing.expectEqual(@as(?u8, 7), try one.next());
     try testing.expectEqual(@as(?u8, null), try one.next());
-
-    var reader = Reader{ .bytes = &bytes };
-    const two = RecordIterator{ .bytes = &bytes, .pos = 0, .remaining = 2 };
-    try two.skipAll(&reader);
-    try testing.expectEqual(@as(usize, bytes.len), reader.pos);
-    try testing.expect(reader.atEnd());
-}
-
-test "digest includes its domain" {
-    const left = domainDigest("left", "same payload");
-    const right = domainDigest("right", "same payload");
-    try testing.expect(!std.mem.eql(u8, &left, &right));
 }
 
 test "writer exposes exact raw integer and string bytes" {

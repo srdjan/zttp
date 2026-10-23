@@ -38,13 +38,6 @@ pub fn writeKinds(writer: *std.Io.Writer, kinds: u8) std.Io.Writer.Error!void {
     }
 }
 
-/// `writeKinds` into a caller-owned buffer, for a surface that needs a slice.
-pub fn kindsText(buffer: *[max_kinds_bytes]u8, kinds: u8) []const u8 {
-    var writer = std.Io.Writer.fixed(buffer);
-    writeKinds(&writer, kinds) catch return "";
-    return writer.buffered();
-}
-
 /// One line, for a surface whose reader is a person.
 ///
 /// Says "none" rather than "0 of 0" for an artifact with nothing to guard,
@@ -62,16 +55,22 @@ pub fn writeSummary(writer: *std.Io.Writer, verdicts: GuardVerdicts) std.Io.Writ
 
 const testing = std.testing;
 
+fn kindsString(buffer: *[max_kinds_bytes]u8, kinds: u8) ![]const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    try writeKinds(&writer, kinds);
+    return writer.buffered();
+}
+
 test "kinds are named in catalog order and none is invented" {
     var buffer: [max_kinds_bytes]u8 = undefined;
-    try testing.expectEqualStrings("", kindsText(&buffer, 0));
-    try testing.expectEqualStrings("env_key", kindsText(&buffer, 0b0000_0001));
+    try testing.expectEqualStrings("", try kindsString(&buffer, 0));
+    try testing.expectEqualStrings("env_key", try kindsString(&buffer, 0b0000_0001));
     try testing.expectEqualStrings(
         "env_key, cache_namespace",
-        kindsText(&buffer, 0b0000_0101),
+        try kindsString(&buffer, 0b0000_0101),
     );
     // A bit outside the alphabet names nothing rather than printing a number.
-    try testing.expectEqualStrings("", kindsText(&buffer, 0b1000_0000));
+    try testing.expectEqualStrings("", try kindsString(&buffer, 0b1000_0000));
 }
 
 test "a summary says none rather than zero of zero" {

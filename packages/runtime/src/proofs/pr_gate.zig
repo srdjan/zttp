@@ -46,10 +46,6 @@ pub const Options = struct {
     format: Format = .md,
     /// Write the report to this file instead of stdout.
     out: ?[]const u8 = null,
-    /// Accepted and ignored. The gate used to append signed kind=equivalence
-    /// ledger rows and this flag skipped them; it writes none now, but the
-    /// Action and `scripts/proof-gate.sh` still pass the flag.
-    no_sign: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -1038,7 +1034,7 @@ test "gate fails closed when a deleted TypeScript file cannot be analyzed" {
     defer err.deinit();
     const code = try run(
         testing.allocator,
-        .{ .base = "HEAD", .format = .json, .no_sign = true },
+        .{ .base = "HEAD", .format = .json },
         &out.writer,
         &err.writer,
     );
@@ -1116,7 +1112,7 @@ test "gate analyzes newly added TypeScript before classifying it" {
         defer err.deinit();
         const code = try run(
             testing.allocator,
-            .{ .base = "HEAD", .format = .json, .no_sign = true },
+            .{ .base = "HEAD", .format = .json },
             &out.writer,
             &err.writer,
         );
@@ -1604,7 +1600,7 @@ test "run: a critical lost proof fails the gate, lists the loss, and writes no l
     defer out.deinit();
     var err: std.Io.Writer.Allocating = .init(testing.allocator);
     defer err.deinit();
-    const code = try run(testing.allocator, .{ .base = "HEAD", .format = .md, .no_sign = false }, &out.writer, &err.writer);
+    const code = try run(testing.allocator, .{ .base = "HEAD", .format = .md }, &out.writer, &err.writer);
     const report = out.writer.buffered();
 
     try testing.expectEqual(@as(u8, 1), code);
@@ -1637,7 +1633,7 @@ test "run: a loss of only non-critical proofs is listed and does not fail the ga
     defer out.deinit();
     var err: std.Io.Writer.Allocating = .init(testing.allocator);
     defer err.deinit();
-    const code = try run(testing.allocator, .{ .base = "HEAD", .format = .json, .no_sign = true }, &out.writer, &err.writer);
+    const code = try run(testing.allocator, .{ .base = "HEAD", .format = .json }, &out.writer, &err.writer);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.writer.buffered(), .{});
     defer parsed.deinit();

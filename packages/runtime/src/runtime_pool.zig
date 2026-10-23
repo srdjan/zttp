@@ -66,7 +66,7 @@ pub const HandlerPool = struct {
     /// mismatch that is, by definition, only visible on cache hits.
     cache_disabled: std.atomic.Value(bool),
     runtime_init_mutex: compat.Mutex,
-    /// Bumped by reloadHandler / setDevCapabilityPolicy so idle runtimes rebuild
+    /// Bumped by reloadSourceGeneration / setDevCapabilityPolicy so idle runtimes rebuild
     /// lazily on their next acquire (under runtime_init_mutex) instead of being
     /// torn down from the reload thread while a worker may be executing on them.
     reload_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -282,22 +282,9 @@ pub const HandlerPool = struct {
     /// lifetime of both old and new code (keep the previous generation alive
     /// until the next reload cycle to avoid use-after-free on in-flight
     /// runtimes).
-    pub fn reloadHandler(self: *Self, new_code: []const u8, new_filename: []const u8) !usize {
-        return self.reloadHandlerWithPolicy(new_code, new_filename, null);
-    }
-
-    /// Hot-swap handler code and, when supplied, the dev capability policy in
-    /// one generation update. This prevents newly-created runtimes from seeing
-    /// new code with the old dev policy or the reverse.
-    pub fn reloadHandlerWithPolicy(
-        self: *Self,
-        new_code: []const u8,
-        new_filename: []const u8,
-        dev_policy: ?zq.RuntimePolicy,
-    ) !usize {
-        return self.reloadSourceGeneration(new_code, new_filename, dev_policy, null);
-    }
-
+    ///
+    /// When `dev_policy` is supplied it swaps in the same generation update, so a
+    /// new runtime never sees new code with the old dev policy or the reverse.
     pub fn reloadSourceGeneration(
         self: *Self,
         new_code: []const u8,
@@ -403,7 +390,7 @@ pub const HandlerPool = struct {
         self.runtime_init_mutex.unlock();
         previous.release();
 
-        // Same rationale as reloadHandler: bump the generation so idle runtimes
+        // Same rationale as reloadSourceGeneration: bump the generation so idle runtimes
         // rebuild lazily (reading the new config) under runtime_init_mutex on
         // their next acquire, instead of being freed from this thread underneath
         // an in-flight request.
@@ -685,10 +672,6 @@ pub const HandlerPool = struct {
     fn applyServingSettingsLocked(self: *Self, settings: ServingSettings) void {
         self.config.handler_proof = settings.handler_proof;
         self.pooling_policy = settings.pooling_policy;
-    }
-
-    pub fn setPoolingPolicy(self: *Self, policy: contract_runtime.PoolingPolicy) void {
-        self.pooling_policy = policy;
     }
 
     fn emitRuntimeEvent(kind: zq.security_events.SecurityEventKind, detail: []const u8) void {
@@ -1253,7 +1236,7 @@ test "owned response outlives a recycled runtime slot" {
     var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 1, 0);
     defer pool.deinit();
     // Every release drops the slot, which destroys its lifetime arena.
-    pool.setPoolingPolicy(.ephemeral);
+    pool.pooling_policy = .ephemeral;
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1638,7 +1621,7 @@ test "HandlerPool does not leak request data across pooled requests" {
         try std.testing.expect(std.mem.indexOf(u8, clean_resp.body, "path-") == null);
     }
 }
-test "reloadHandler swaps handler code and new requests use new handler" {
+test "reloadSourceGeneration swaps handler code and new requests use new handler" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1664,7 +1647,7 @@ test "reloadHandler swaps handler code and new requests use new handler" {
 
     // Reload with new handler
     const new_code = "function handler(req) { return Response.text('v2'); }";
-    const invalidated = try pool.reloadHandler(new_code, "<handler>");
+    const invalidated = try pool.reloadSourceGeneration(new_code, "<handler>", null, null);
     try std.testing.expect(invalidated > 0);
 
     // Execute with new handler - should return v2
@@ -1674,7 +1657,7 @@ test "reloadHandler swaps handler code and new requests use new handler" {
         try std.testing.expectEqualStrings("v2", response.body);
     }
 }
-test "reloadHandler clears bytecode cache" {
+test "reloadSourceGeneration clears bytecode cache" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1702,9 +1685,11 @@ test "reloadHandler clears bytecode cache" {
     try std.testing.expect(pool.cache.count() > 0);
 
     // Reload clears cache
-    _ = try pool.reloadHandler(
+    _ = try pool.reloadSourceGeneration(
         "function handler(req) { return Response.text('cached-v2'); }",
         "<handler>",
+        null,
+        null,
     );
     try std.testing.expectEqual(@as(usize, 0), pool.cache.count());
 
@@ -1772,7 +1757,7 @@ test "fallible policy and handler swaps leave the active generation unchanged" {
 
     try std.testing.expectError(
         error.DuplicateEntry,
-        pool.reloadHandlerWithPolicy("function handler(req) { return Response.text('new'); }", "<new>", invalid),
+        pool.reloadSourceGeneration("function handler(req) { return Response.text('new'); }", "<new>", invalid, null),
     );
     try std.testing.expectEqualStrings(old_code, pool.handler_code);
     try std.testing.expectEqualStrings("<old>", pool.handler_filename);
@@ -1801,7 +1786,7 @@ test "a guarded pool owns one index and refuses an unchecked reload" {
     try std.testing.expect(pool.policy_generation.policy.installed_index != null);
     try std.testing.expectError(
         error.GuardedGenerationSwapRefused,
-        pool.reloadHandler("function handler(req) { return Response.text('unchecked'); }", "<new>"),
+        pool.reloadSourceGeneration("function handler(req) { return Response.text('unchecked'); }", "<new>", null, null),
     );
 }
 // Probe HandlerPool.init under FailingAllocator at every allocation site.
@@ -2055,10 +2040,10 @@ test "prepared evaluation caches bytecode and reload restores raw virtual parsin
         try std.testing.expectEqual(@as(u64, 1), pool.cache.hits.load(.monotonic));
         try std.testing.expect(!pool.cache_disabled.load(.monotonic));
     }
-    _ = try pool.reloadHandler(source, "<inline>");
+    _ = try pool.reloadSourceGeneration(source, "<inline>", null, null);
     try std.testing.expectEqual(@as(usize, 0), pool.cache.count());
     try std.testing.expectError(error.UnexpectedToken, pool.executeHandler(request.asView()));
-    _ = try pool.reloadHandler("function handler(req) { return Response.text(\"reloaded\"); }", "<inline>");
+    _ = try pool.reloadSourceGeneration("function handler(req) { return Response.text(\"reloaded\"); }", "<inline>", null, null);
     var response = try pool.executeHandler(request.asView());
     defer response.deinit();
     try std.testing.expectEqualStrings("reloaded", response.body);

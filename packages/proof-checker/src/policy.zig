@@ -65,14 +65,6 @@ pub const Policy = struct {
         }
     }
 
-    pub fn acceptsSchema(self: Policy, schema: u16) bool {
-        @setRuntimeSafety(true);
-        for (self.schema_versions) |candidate| {
-            if (candidate == schema) return true;
-        }
-        return false;
-    }
-
     pub fn acceptsProofSystem(self: Policy, system: ps.ProofSystem) bool {
         @setRuntimeSafety(true);
         for (self.proof_systems) |candidate| {
@@ -196,8 +188,6 @@ test "production refuses development artifacts and solver edges" {
 }
 
 test "policy pins its proof system and epoch" {
-    try testing.expect(production.acceptsSchema(5));
-    try testing.expect(!production.acceptsSchema(4));
     try testing.expect(production.acceptsProofSystem(.zttp_pcc_v3));
     try testing.expect(production.acceptsEpoch(ps.semantics_epoch));
     try testing.expect(!production.acceptsEpoch(ps.semantics_epoch + 1));

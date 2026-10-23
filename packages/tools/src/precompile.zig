@@ -652,24 +652,9 @@ fn summarizeGeneratedPaths(
     return analysis;
 }
 
-/// Like runCheckOnly but operates on pre-read source. When skip_contract
-/// is true, stages 7-10 (verification, contract, paths, fault coverage)
-/// are skipped - only parse and type checking run, enough to detect errors.
-pub fn runCheckOnlyFromSource(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    handler_path: []const u8,
-    sql_schema_path: ?[]const u8,
-    json_mode: bool,
-    skip_contract: bool,
-) !CheckResult {
-    return runCheckOnlyFromSourceWithOptions(allocator, source, handler_path, .{
-        .sql_schema_path = sql_schema_path,
-        .json_mode = json_mode,
-        .skip_contract = skip_contract,
-    });
-}
-
+/// Like runCheckOnly but operates on pre-read source. `opts.skip_contract` skips
+/// stages 7-10 (verification, contract, paths, fault coverage): only parse and
+/// type checking run, enough to detect errors.
 pub fn runCheckOnlyFromSourceWithOptions(
     allocator: std.mem.Allocator,
     source: []const u8,

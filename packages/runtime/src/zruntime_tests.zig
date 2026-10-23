@@ -1,7 +1,7 @@
 //! Test root for the runtime package's handler instance.
 //!
 //! The instance itself is `handler_instance.HandlerInstance`. This file holds
-//! the end-to-end tests that drive fetch, WebSocket, and JSX. The file also
+//! the end-to-end tests that drive fetch and JSX. The file also
 //! contains the loopback HTTP server that these tests use.
 
 const std = @import("std");
@@ -59,13 +59,6 @@ const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapability
 const handler_instance = @import("handler_instance.zig");
 const HandlerInstance = handler_instance.HandlerInstance;
 const OutboundIo = @import("outbound_io.zig").OutboundIo;
-const AotOverrideFn = handler_instance.AotOverrideFn;
-const setAotOverrideForTest = handler_instance.setAotOverrideForTest;
-
-// ===========================================================================
-// WebSocket runtime callbacks (W1-d.4-b)
-// ===========================================================================
-
 // ============================================================================
 // Handler Pool (Lock-Free)
 // ============================================================================
@@ -3058,50 +3051,6 @@ test "HandlerInstance rejects malformed nested cached bytecode before execution"
         error.BytecodeVerificationFailed,
         rt.loadFromCachedBytecodeNoHandler(writer.getWritten()),
     );
-}
-
-test "AOT override fallback and success" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    const handler_code = "function handler(req) { return Response.json({ok:false}); }";
-    var rt = try HandlerInstance.init(allocator, .{});
-    defer rt.deinit();
-    try rt.loadHandler(handler_code, "<handler>");
-
-    var request = HttpRequestOwned{
-        .method = try allocator.dupe(u8, "GET"),
-        .url = try allocator.dupe(u8, "/"),
-        .headers = .empty,
-        .body = null,
-    };
-    defer request.deinit(allocator);
-
-    const aot_ok: AotOverrideFn = struct {
-        fn call(ctx: *zq.Context, args: []const zq.JSValue) anyerror!zq.JSValue {
-            _ = args;
-            return zq.http.createResponse(ctx, "{\"ok\":true}", 200, "application/json");
-        }
-    }.call;
-
-    const aot_bail: AotOverrideFn = struct {
-        fn call(_: *zq.Context, _: []const zq.JSValue) anyerror!zq.JSValue {
-            return error.AotBail;
-        }
-    }.call;
-
-    setAotOverrideForTest(aot_bail);
-    defer setAotOverrideForTest(null);
-
-    var fallback_response = try rt.executeHandler(request.asView());
-    defer fallback_response.deinit();
-    try std.testing.expectEqualStrings("{\"ok\":false}", fallback_response.body);
-
-    setAotOverrideForTest(aot_ok);
-    var aot_response = try rt.executeHandler(request.asView());
-    defer aot_response.deinit();
-    try std.testing.expectEqualStrings("{\"ok\":true}", aot_response.body);
 }
 
 test "string prototype methods are callable" {

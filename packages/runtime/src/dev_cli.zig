@@ -571,10 +571,6 @@ fn deferredAccountVerb(command: []const u8) bool {
     return false;
 }
 
-fn commandInjectsStoredProviders(command: []const u8) bool {
-    return std.mem.eql(u8, command, "expert");
-}
-
 test "hasLongHelpFlag preserves -h for host flags" {
     try std.testing.expect(hasLongHelpFlag(&.{"--help"}));
     try std.testing.expect(hasLongHelpFlag(&.{"help"}));
@@ -594,14 +590,6 @@ test "deployArgsRequestCloud requires explicit opt-in and reports the triggering
     try std.testing.expectEqualStrings("--confirm", deployArgsRequestCloud(&.{"--confirm"}).?);
     try std.testing.expectEqualStrings("--wait", deployArgsRequestCloud(&.{"--wait"}).?);
     try std.testing.expectEqualStrings("--no-wait", deployArgsRequestCloud(&.{"--no-wait"}).?);
-}
-
-test "stored provider injection is limited to expert direct dispatch" {
-    try std.testing.expect(commandInjectsStoredProviders("expert"));
-    try std.testing.expect(!commandInjectsStoredProviders("dev"));
-    try std.testing.expect(!commandInjectsStoredProviders("serve"));
-    try std.testing.expect(!commandInjectsStoredProviders("init"));
-    try std.testing.expect(!commandInjectsStoredProviders("doctor"));
 }
 
 test "resolveDeveloperServeBinary re-enters developer CLI for dev" {

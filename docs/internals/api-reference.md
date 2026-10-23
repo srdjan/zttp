@@ -25,10 +25,6 @@ pub fn main() !void {
         .pool_size = 16,                        // Handler pool size (0 = auto)
         .pool_wait_timeout_ms = 5000,           // Max wait for available handler (ms)
 
-        // Static file cache configuration
-        .static_cache_max_bytes = 1024 * 1024,         // Max total cache size (default: 1MB)
-        .static_cache_max_file_size = 64 * 1024,       // Max individual file size (default: 64KB)
-
         // Network configuration
         .port = 8080,
         .host = "127.0.0.1",
@@ -59,13 +55,6 @@ pub fn main() !void {
 **`pool_size`** (default: auto = 2 * cpu_count, min 8) - Number of pre-allocated handler contexts. Memory scales linearly with pool size.
 
 **`pool_wait_timeout_ms`** (default: 5000) - Maximum time to wait for available handler (milliseconds). Returns 503 if timeout exceeded.
-
-
-#### Static File Cache
-
-**`static_cache_max_bytes`** (default: 1MB) - Maximum total cache size. LRU eviction when exceeded.
-
-**`static_cache_max_file_size`** (default: 64KB) - Files larger than this are served directly from disk.
 
 ## Extending with Native Functions
 

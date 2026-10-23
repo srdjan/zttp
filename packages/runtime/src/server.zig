@@ -263,8 +263,7 @@ const ConnectionPool = struct {
     }
 
     fn handleConnection(self: *ConnectionPool, fd: std.posix.fd_t) void {
-        var fd_owned = true;
-        defer if (fd_owned) std.Io.Threaded.closeFd(fd);
+        defer std.Io.Threaded.closeFd(fd);
 
         // TCP_NODELAY: disable Nagle's algorithm for lower latency
         // This reduces response latency by sending data immediately.
@@ -300,12 +299,6 @@ const ConnectionPool = struct {
             const outcome = self.handleSingleRequestSync(fd, requests_on_connection, req_allocator, &pending_request_bytes) catch break;
             requests_on_connection += 1;
 
-            if (outcome == .transferred) {
-                // A subsystem (WebSocket frame loop) owns the fd now.
-                // Skip the defer close and let that subsystem clean up.
-                fd_owned = false;
-                return;
-            }
             if (outcome == .close) break;
             if (self.server.config.keep_alive_max_requests > 0 and
                 requests_on_connection >= self.server.config.keep_alive_max_requests) break;
@@ -330,10 +323,8 @@ const ConnectionPool = struct {
     }
 
     /// Outcome of a single request on a keep-alive connection. `keep_alive`
-    /// continues the loop; `close` breaks and the defer closes the fd;
-    /// `transferred` hands fd ownership to another subsystem (W1
-    /// WebSocket frame loop) — the caller must not close it.
-    const RequestOutcome = enum { keep_alive, close, transferred };
+    /// continues the loop; `close` breaks and the defer closes the fd.
+    const RequestOutcome = enum { keep_alive, close };
 
     const PendingRequestBytes = struct {
         bytes: []u8 = &.{},
@@ -366,7 +357,7 @@ const ConnectionPool = struct {
         _ = request_num;
 
         // Hold a shared lock across the request so the live-reload watcher's
-        // exclusive contract/proof_cache swap (updateContract) waits for
+        // exclusive contract/proof_cache swap (replaceSourceGeneration) waits for
         // in-flight readers instead of freeing structures this request still
         // points into. Gated on reload being active: the production path takes
         // no lock. Concurrent requests still run in parallel (shared lock).
@@ -958,11 +949,6 @@ const ConnectionPool = struct {
     }
 };
 
-/// Inspect request headers for a literal RFC 6455 upgrade. Checks the
-/// `Upgrade` header value only; the full validation (Connection token,
-/// version, key) happens inside ws_gateway. This predicate is a cheap
-/// prefilter so handlers without WS exports don't pay the cost of the
-/// full validation path.
 // ============================================================================
 // Server Configuration
 // ============================================================================
@@ -1007,12 +993,6 @@ pub const ServerConfig = struct {
 
     /// Static file directory (null = disabled)
     static_dir: ?[]const u8 = null,
-
-    /// Max total bytes for static file cache (0 = disabled)
-    static_cache_max_bytes: usize = 1024 * 1024,
-
-    /// Max individual file size to cache
-    static_cache_max_file_size: usize = 64 * 1024,
 
     /// Enable HTTP keep-alive connections
     keep_alive: bool = true,
@@ -1188,7 +1168,6 @@ pub const Server = struct {
     superseded_source: ?SourceGeneration = null,
     embedded_bytecode: ?[]const u8,
     runtime_dep_bytecodes: ?[]const []const u8,
-    static_cache: StaticFileCache,
     running: std.atomic.Value(bool),
     request_count: std.atomic.Value(u64),
     conn_pool: ?*ConnectionPool,
@@ -1199,12 +1178,12 @@ pub const Server = struct {
     /// handler is not the artifact the certificate described.
     proof_checked: ?contract_runtime.ProofCheckedContract = null,
     /// Guards `contract`/`proof_cache` against the live-reload watcher thread
-    /// freeing+rebuilding them (`updateContract`) while worker threads read
+    /// freeing+rebuilding them (`replaceContractLocked`) while worker threads read
     /// them mid-request. Only engaged when `reload_active` is set, so the
     /// production path (no swaps) takes no lock.
     contract_lock: engine.RwLock = .{},
     /// True once live reload (`--watch`) is wired up and may call
-    /// `updateContract` concurrently with request handling.
+    /// `replaceSourceGeneration` concurrently with request handling.
     reload_active: bool = false,
     /// Opt-in soundness-incident log fd, opened once at startup from
     /// `config.runtime_config.incident_log_path` and shared with pooled runtimes
@@ -1377,11 +1356,6 @@ pub const Server = struct {
             } else null,
             .embedded_bytecode = embedded_bytecode,
             .runtime_dep_bytecodes = runtime_dep_bytecodes,
-            .static_cache = StaticFileCache.init(
-                allocator,
-                cfg.static_cache_max_bytes,
-                cfg.static_cache_max_file_size,
-            ),
             .running = std.atomic.Value(bool).init(false),
             .request_count = std.atomic.Value(u64).init(0),
             .conn_pool = null,
@@ -1407,7 +1381,6 @@ pub const Server = struct {
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
         if (self.security_logger) |logger| logger.deinit();
         engine.deinitSecurityEvents();
-        self.static_cache.deinit();
         if (self.evented_ready) {
             const io = self.io_backend.io();
             if (self.listener) |*l| l.deinit(io);
@@ -1433,24 +1406,6 @@ pub const Server = struct {
     pub fn generationIsGuarded(self: *const Self) bool {
         const promoted = self.proof_checked orelse return false;
         return promoted.guards.required > 0;
-    }
-
-    /// Replace the runtime contract and reconfigure the proof cache.
-    /// Called by live reload after a handler swap with a new contract.
-    pub fn updateContract(self: *Self, new_contract: ValidatedRuntimeContract) void {
-        // Exclusive: wait for any in-flight request readers to drain before
-        // freeing+rebuilding the contract/proof_cache they may be reading.
-        self.contract_lock.lock();
-        defer self.contract_lock.unlock();
-
-        self.replaceContractLocked(new_contract);
-    }
-
-    /// Drop contract-derived state when a swap carries no runtime contract.
-    pub fn invalidateContractCaches(self: *Self) void {
-        self.contract_lock.lock();
-        defer self.contract_lock.unlock();
-        self.replaceContractLocked(null);
     }
 
     /// Caller holds contract_lock, or is still in single-threaded startup.
@@ -2363,237 +2318,6 @@ const ParsedRequest = struct {
     }
 };
 
-const CacheEntry = struct {
-    data: []u8,
-    size: usize,
-    mtime: Io.Timestamp,
-    content_type: []const u8,
-    ref_count: u32 = 0,
-    stale: bool = false,
-};
-
-/// LRU node for tracking access order (intrusive doubly-linked list)
-const LruNode = struct {
-    path: []const u8, // Points to the key in entries map
-    prev: ?*LruNode,
-    next: ?*LruNode,
-};
-
-const StaticFileCache = struct {
-    allocator: std.mem.Allocator,
-    entries: std.StringHashMapUnmanaged(CacheEntry),
-    /// Map from path to LRU node for O(1) lookup on access
-    lru_nodes: std.StringHashMapUnmanaged(*LruNode),
-    /// Most recently used (head of list)
-    lru_head: ?*LruNode,
-    /// Least recently used (tail of list)
-    lru_tail: ?*LruNode,
-    total_bytes: usize,
-    max_bytes: usize,
-    max_file_size: usize,
-    mutex: engine.Mutex,
-
-    pub const Handle = struct {
-        entry: CacheEntry,
-        cache: *StaticFileCache,
-        path: []const u8,
-
-        pub fn release(self: *const Handle) void {
-            self.cache.release(self.path);
-        }
-    };
-
-    pub fn init(allocator: std.mem.Allocator, max_bytes: usize, max_file_size: usize) StaticFileCache {
-        return .{
-            .allocator = allocator,
-            .entries = .{},
-            .lru_nodes = .{},
-            .lru_head = null,
-            .lru_tail = null,
-            .total_bytes = 0,
-            .max_bytes = max_bytes,
-            .max_file_size = max_file_size,
-            .mutex = .{},
-        };
-    }
-
-    pub fn deinit(self: *StaticFileCache) void {
-        self.clear();
-        self.entries.deinit(self.allocator);
-        self.lru_nodes.deinit(self.allocator);
-    }
-
-    fn enabled(self: *const StaticFileCache) bool {
-        return self.max_bytes > 0 and self.max_file_size > 0;
-    }
-
-    fn clear(self: *StaticFileCache) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        var it = self.entries.iterator();
-        while (it.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*.data);
-        }
-        self.entries.clearRetainingCapacity();
-        // Clear LRU nodes
-        var lru_it = self.lru_nodes.iterator();
-        while (lru_it.next()) |node_entry| {
-            self.allocator.destroy(node_entry.value_ptr.*);
-        }
-        self.lru_nodes.clearRetainingCapacity();
-        self.lru_head = null;
-        self.lru_tail = null;
-        self.total_bytes = 0;
-    }
-
-    fn removeLocked(self: *StaticFileCache, path: []const u8) void {
-        // Remove from LRU list first to avoid comparing against freed keys.
-        if (self.lru_nodes.fetchRemove(path)) |lru_kv| {
-            const node = lru_kv.value;
-            self.unlinkNode(node);
-            self.allocator.destroy(node);
-        }
-        if (self.entries.fetchRemove(path)) |kv| {
-            self.allocator.free(kv.key);
-            self.allocator.free(kv.value.data);
-            self.total_bytes -= kv.value.data.len;
-        }
-    }
-
-    /// Unlink a node from the LRU doubly-linked list
-    fn unlinkNode(self: *StaticFileCache, node: *LruNode) void {
-        if (node.prev) |prev| {
-            prev.next = node.next;
-        } else {
-            self.lru_head = node.next;
-        }
-        if (node.next) |next| {
-            next.prev = node.prev;
-        } else {
-            self.lru_tail = node.prev;
-        }
-        node.prev = null;
-        node.next = null;
-    }
-
-    /// Move a node to the front of the LRU list (most recently used)
-    fn touchNode(self: *StaticFileCache, node: *LruNode) void {
-        if (self.lru_head == node) return; // Already at front
-        self.unlinkNode(node);
-        // Insert at head
-        node.next = self.lru_head;
-        node.prev = null;
-        if (self.lru_head) |head| {
-            head.prev = node;
-        }
-        self.lru_head = node;
-        if (self.lru_tail == null) {
-            self.lru_tail = node;
-        }
-    }
-
-    /// Evict least recently used entries until we have enough space
-    fn evictLru(self: *StaticFileCache, needed_bytes: usize) void {
-        var freed: usize = 0;
-        var node = self.lru_tail;
-        while (freed < needed_bytes and node != null) {
-            const current = node.?;
-            node = current.prev;
-            if (self.entries.getPtr(current.path)) |entry| {
-                if (entry.ref_count > 0) continue;
-                const entry_size = entry.data.len;
-                self.removeLocked(current.path);
-                freed += entry_size;
-            }
-        }
-    }
-
-    fn get(self: *StaticFileCache, path: []const u8, size: usize, mtime: Io.Timestamp) ?Handle {
-        if (!self.enabled()) return null;
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.entries.getPtr(path)) |entry| {
-            if (entry.size == size and entry.mtime.nanoseconds == mtime.nanoseconds) {
-                // Update LRU on access
-                if (self.lru_nodes.get(path)) |node| {
-                    self.touchNode(node);
-                }
-                entry.ref_count += 1;
-                return .{ .entry = entry.*, .cache = self, .path = path };
-            }
-            entry.stale = true;
-            if (entry.ref_count == 0) {
-                self.removeLocked(path);
-            }
-        }
-        return null;
-    }
-
-    fn put(self: *StaticFileCache, path: []const u8, entry: CacheEntry) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (!self.enabled()) {
-            self.allocator.free(entry.data);
-            return;
-        }
-        if (entry.data.len > self.max_file_size or entry.data.len > self.max_bytes) {
-            self.allocator.free(entry.data);
-            return;
-        }
-        if (self.entries.getPtr(path)) |existing| {
-            if (existing.ref_count > 0) {
-                existing.stale = true;
-                self.allocator.free(entry.data);
-                return;
-            }
-            self.removeLocked(path);
-        }
-        // Evict LRU entries instead of clearing everything
-        if (self.total_bytes + entry.data.len > self.max_bytes) {
-            const needed = (self.total_bytes + entry.data.len) - self.max_bytes;
-            self.evictLru(needed);
-        }
-        const key_dup = try self.allocator.dupe(u8, path);
-        errdefer self.allocator.free(key_dup);
-        try self.entries.put(self.allocator, key_dup, entry);
-        self.total_bytes += entry.data.len;
-
-        // Create LRU node and add to hash map first (can fail)
-        const node = try self.allocator.create(LruNode);
-        errdefer self.allocator.destroy(node);
-        node.* = .{
-            .path = key_dup,
-            .prev = null,
-            .next = null,
-        };
-        try self.lru_nodes.put(self.allocator, key_dup, node);
-
-        // Link into LRU list at head (cannot fail, so do after hash map)
-        node.next = self.lru_head;
-        if (self.lru_head) |head| {
-            head.prev = node;
-        }
-        self.lru_head = node;
-        if (self.lru_tail == null) {
-            self.lru_tail = node;
-        }
-    }
-
-    fn release(self: *StaticFileCache, path: []const u8) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.entries.getPtr(path)) |entry| {
-            if (entry.ref_count > 0) {
-                entry.ref_count -= 1;
-            }
-            if (entry.ref_count == 0 and entry.stale) {
-                self.removeLocked(path);
-            }
-        }
-    }
-};
-
 // ============================================================================
 // Helpers
 // ============================================================================
@@ -2687,37 +2411,6 @@ test "accessLogField caps oversized values" {
     const logged = accessLogField(&oversized, &buf);
     try std.testing.expectEqual(@as(usize, max_logged_access_field_len), logged.len);
     try std.testing.expectEqualStrings(&@as([max_logged_access_field_len:0]u8, @splat('a')), logged);
-}
-
-test "static file cache hit and invalidation" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var cache = StaticFileCache.init(allocator, 1024, 256);
-    defer cache.deinit();
-
-    const payload = try allocator.dupe(u8, "hello");
-    const mtime1: Io.Timestamp = .{ .nanoseconds = 123 };
-    const mtime2: Io.Timestamp = .{ .nanoseconds = 124 };
-    try cache.put("a.txt", .{
-        .data = payload,
-        .size = payload.len,
-        .mtime = mtime1,
-        .content_type = "text/plain",
-    });
-
-    const hit_opt = cache.get("a.txt", payload.len, mtime1);
-    try std.testing.expect(hit_opt != null);
-    var handle = hit_opt.?;
-    const hit = handle.entry;
-    try std.testing.expectEqual(payload.len, hit.data.len);
-    try std.testing.expectEqual(@as(usize, 1), cache.entries.count());
-    handle.release();
-
-    const miss = cache.get("a.txt", payload.len, mtime2);
-    try std.testing.expect(miss == null);
-    try std.testing.expectEqual(@as(usize, 0), cache.entries.count());
 }
 
 test "threaded readRequestData handles partial headers" {
@@ -3921,13 +3614,21 @@ test "a live swap drops the promotion the replaced artifact earned" {
     // The certificate described the artifact that is being replaced, so the
     // swap takes the promotion with it.
     const swapped_raw = try contract_runtime.parseContractJson(allocator, contract_json);
-    server.updateContract(try contract_runtime.validate(swapped_raw, .{}));
+    {
+        server.contract_lock.lock();
+        defer server.contract_lock.unlock();
+        server.replaceContractLocked(try contract_runtime.validate(swapped_raw, .{}));
+    }
     try std.testing.expect(server.contract != null);
     try std.testing.expect(server.proof_checked == null);
     try std.testing.expect(server.proof_cache == null);
 
     // And dropping the contract entirely leaves nothing promoted either.
-    server.invalidateContractCaches();
+    {
+        server.contract_lock.lock();
+        defer server.contract_lock.unlock();
+        server.replaceContractLocked(null);
+    }
     try std.testing.expect(server.proof_checked == null);
 }
 

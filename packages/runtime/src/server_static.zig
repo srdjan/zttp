@@ -2,9 +2,7 @@
 //!
 //! Pure helpers — no Server / ConnectionPool coupling. Cover path-safety
 //! validation, content-type inference, canonical-root containment, and the
-//! StaticFile lookup result type. The StaticFileCache (LRU + eviction)
-//! stays in server.zig because it embeds a per-Server mutex and lives on
-//! the server struct.
+//! StaticFile lookup result type.
 
 const std = @import("std");
 const Io = std.Io;
@@ -131,10 +129,6 @@ fn canonicalPathStatusInsideRoot(allocator: std.mem.Allocator, io: Io, static_ro
     return if (boundary == '/' or boundary == '\\') .inside else .outside;
 }
 
-pub fn isCanonicalPathInsideRoot(allocator: std.mem.Allocator, io: Io, static_root: []const u8, full_path: []const u8) bool {
-    return canonicalPathStatusInsideRoot(allocator, io, static_root, full_path) == .inside;
-}
-
 // -------------------------------------------------------------------------
 // Tests (moved from server.zig)
 // -------------------------------------------------------------------------
@@ -187,7 +181,7 @@ test "path safety validation" {
     // Note on URL encoding: `..%2f..%2fetc/passwd` is NOT caught here
     // because isPathSafe splits on the literal `/` and `\\` only, and
     // %2f survives as a literal sub-string. The defense in depth is
-    // isCanonicalPathInsideRoot + openFile resolving the literal path
+    // canonicalPathStatusInsideRoot + openFile resolving the literal path
     // name `..%2fetc..`, which does not exist on disk. This test pins
     // the current contract: pre-decoded traversal must be caught here,
     // post-decoded traversal relies on the filesystem layer.

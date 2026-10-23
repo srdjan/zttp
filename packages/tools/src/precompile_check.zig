@@ -12,7 +12,7 @@ const HandlerContract = zts.HandlerContract;
 const SpecDiagnostic = zts.SpecDiagnostic;
 const json_diag = @import("json_diagnostics.zig");
 
-/// The analysis stages `runCheckOnlyFromSource*` can run, in pipeline order.
+/// The analysis stages `runCheckOnlyFromSourceWithOptions` can run, in pipeline order.
 /// A stage is recorded once its work has been performed, including when it
 /// then reports errors. A stage the pipeline skips is absent, which is the
 /// point: the diagnostic corpus pins this set, so a `good` case cannot pass

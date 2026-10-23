@@ -115,12 +115,6 @@ fn writeCounterexampleBlock(
 ) !void {
     try writeCounterexampleHeadline(allocator, writer, widths, cx);
     if (cx.suggestion) |hint| try writeWhyRow(allocator, writer, widths, hint);
-    if (cx.failing_request) |req| try writeReplaySection(allocator, writer, widths, req, cx);
-    try writeFullRow(
-        writer,
-        widths,
-        "  [r] replay live   [s] pin as regression test   [a] ask expert to fix",
-    );
 }
 
 fn writeCounterexampleHeadline(
@@ -143,40 +137,6 @@ fn writeWhyRow(
     const line = try allocator.print("  why: {s}", .{hint});
     defer allocator.free(line);
     try writeFullRow(writer, widths, line);
-}
-
-fn writeReplaySection(
-    allocator: std.mem.Allocator,
-    writer: *std.Io.Writer,
-    widths: ColumnWidths,
-    req: review.CounterexamplePreview.FailingRequest,
-    cx: *const review.CounterexamplePreview,
-) !void {
-    const req_line = try allocator.print("  request: {s} {s}", .{ req.method, req.url });
-    defer allocator.free(req_line);
-    try writeFullRow(writer, widths, req_line);
-
-    if (cx.previous_response) |prev| {
-        const line = try formatReplayLine(allocator, "  previous build", prev);
-        defer allocator.free(line);
-        try writeFullRow(writer, widths, line);
-    }
-    if (cx.current_response) |curr| {
-        const line = try formatReplayLine(allocator, "  this build    ", curr);
-        defer allocator.free(line);
-        try writeFullRow(writer, widths, line);
-    }
-}
-
-fn formatReplayLine(
-    allocator: std.mem.Allocator,
-    prefix: []const u8,
-    r: review.CounterexamplePreview.ReplayResponse,
-) ![]u8 {
-    if (r.error_text) |err| {
-        return allocator.print("{s}: crashed - {s}", .{ prefix, err });
-    }
-    return allocator.print("{s}: {d}  {s}", .{ prefix, r.status, r.body });
 }
 
 /// Build the Why-on-regression row content for the live HUD: when a property
@@ -861,7 +821,7 @@ fn renderForTest(
     try writeProofCardFrame(allocator, &card, &out_aw.writer, .{});
 }
 
-test "writeProofCardFrame: renders Counterexample block with suggestion and key hints" {
+test "writeProofCardFrame: renders Counterexample block with suggestion" {
     const allocator = std.testing.allocator;
     const cx = review.CounterexamplePreview{
         .field = "deterministic",
@@ -880,9 +840,6 @@ test "writeProofCardFrame: renders Counterexample block with suggestion and key 
 
     try std.testing.expect(std.mem.indexOf(u8, out, "Counterexample: -deterministic at src/handler.ts:14: Date.now()") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "why: remove Date.now()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "[r] replay live") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "[s] pin as regression test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "[a] ask expert to fix") != null);
 }
 
 test "writeProofCardFrame: omits Counterexample block when card has none" {
@@ -891,31 +848,6 @@ test "writeProofCardFrame: omits Counterexample block when card has none" {
     defer aw.deinit();
     try renderForTest(allocator, .none, null, &aw);
     try std.testing.expect(std.mem.indexOf(u8, aw.writer.buffered(), "Counterexample:") == null);
-}
-
-test "writeProofCardFrame: Counterexample block includes failing request and replay diff when present" {
-    const allocator = std.testing.allocator;
-    const cx = review.CounterexamplePreview{
-        .field = "input_validated",
-        .label = "input-validated",
-        .line = 18,
-        .column = 12,
-        .snippet = ".length",
-        .handler_path = "src/handler.ts",
-        .suggestion = "guard with `?.` or validate the input shape with zttp:validate.",
-        .failing_request = .{ .method = "POST", .url = "/api/users", .body = "{\"name\":null}" },
-        .previous_response = .{ .status = 201, .body = "{\"id\":\"u_abc\"}" },
-        .current_response = .{ .status = 500, .body = "", .error_text = "cannot read length of undefined" },
-    };
-
-    var aw = std.Io.Writer.Allocating.init(allocator);
-    defer aw.deinit();
-    try renderForTest(allocator, .input_validated, cx, &aw);
-    const out = aw.writer.buffered();
-
-    try std.testing.expect(std.mem.indexOf(u8, out, "request: POST /api/users") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "previous build: 201  {\"id\":\"u_abc\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "this build    : crashed - cannot read length of undefined") != null);
 }
 
 test "writeProofCardFrame: two panes at every width, status bar rows keep the width" {

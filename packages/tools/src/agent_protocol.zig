@@ -5936,7 +5936,7 @@ test "every admitted surface form has an example, and every example names one" {
 }
 
 test "every published example checks clean, at every severity" {
-    // The legality gate. `runCheckOnlyFromSource` is the same path `zts check`
+    // The legality gate. `runCheckOnlyFromSourceWithOptions` is the same path `zts check`
     // takes, so an example that stops being legal fails here rather than
     // teaching a form this compiler now refuses. Warnings count: an example
     // that checks with a warning is one an agent would copy into a warning.

@@ -129,15 +129,6 @@ const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapability
 
 const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
 
-pub const AotOverrideFn = *const fn (ctx: *zq.Context, args: []const zq.JSValue) anyerror!zq.JSValue;
-threadlocal var aot_override: ?AotOverrideFn = null;
-
-pub fn setAotOverrideForTest(callback: ?AotOverrideFn) void {
-    if (builtin.is_test) {
-        aot_override = callback;
-    }
-}
-
 pub const HandlerInstance = struct {
     allocator: std.mem.Allocator,
     ctx: *zq.Context,
@@ -177,14 +168,6 @@ pub const HandlerInstance = struct {
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
-    /// WebSocket connection pool pointer. The pool itself is server-
-    /// owned and lives for the server process; it is not swapped on
-    /// handler hot reload. `ws_frame_loop` re-installs this pointer
-    /// on every WS dispatch (onOpen/onMessage/onClose) so a freshly
-    /// recycled runtime picks up the (same) pool on its first event
-    /// dispatch. Stays null on runtimes that never see a WS event.
-    /// Read by the WS module's send/close callbacks via
-    /// `wsPoolFromRuntime`. See `installWebSocketModuleState`.
     const Self = @This();
 
     /// Recover the runtime that owns `ctx`. This is the sanctioned way for a
@@ -1294,26 +1277,6 @@ pub const HandlerInstance = struct {
             args_buf[1] = try self.createCapabilitiesObject();
             break :blk args_buf[0..2];
         } else args_buf[0..1];
-
-        // === TEST SEAM: injected native handler (builtin.is_test only) ===
-        aot_attempt: {
-            if (builtin.is_test) {
-                if (aot_override) |override_fn| {
-                    const override_result = override_fn(self.ctx, args) catch |err| {
-                        if (err == error.AotBail) break :aot_attempt;
-                        std.log.err("handler override failed: {}", .{err});
-                        return error.HandlerError;
-                    };
-
-                    const response = try self.extractResponseInternal(override_result, borrow_body);
-                    if (borrow_body and response.requires_runtime) {
-                        reset_after = false;
-                    }
-                    trace_request_recorder.recordResponse(self, &response);
-                    return response;
-                }
-            }
-        }
 
         // === SLOW PATH: Full bytecode execution ===
 
