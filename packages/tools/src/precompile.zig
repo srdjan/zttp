@@ -12223,3 +12223,106 @@ test "prove-behavior: a handler with a call in a condition, iterable, discrimina
         try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, verdict);
     }
 }
+
+const ProveBehaviorOutcome = struct {
+    verdict: zts.contract_diff.Classification,
+    laws_fired: usize,
+};
+
+/// Like `proveBehaviorVerdict`, and also counts the laws the diff used.
+fn proveBehaviorOutcome(
+    allocator: std.mem.Allocator,
+    before_src: []const u8,
+    after_src: []const u8,
+) !ProveBehaviorOutcome {
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, before_src, "handler.ts", .{ .json_mode = true });
+    defer before.deinit(allocator);
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, after_src, "handler.ts", .{ .json_mode = true });
+    defer after.deinit(allocator);
+    const before_contract = before.contract orelse return error.NoContractFromBefore;
+    const after_contract = after.contract orelse return error.NoContractFromAfter;
+    var diff = try zts.contract_diff.diffContracts(allocator, &before_contract, &after_contract);
+    defer diff.deinit(allocator);
+    return .{ .verdict = diff.behavioralVerdict(), .laws_fired = diff.laws_used.items.len };
+}
+
+const two_dynamic_writes =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  const a = req.url;
+    \\  const b = req.method;
+    \\  cacheSet("items", a, "v", 60);
+    \\  cacheSet("items", b, "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const one_dynamic_write =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  const a = req.url;
+    \\  const b = req.method;
+    \\  cacheSet("items", a, "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const two_literal_writes =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k1", "v", 60);
+    \\  cacheSet("items", "k2", "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const one_literal_write =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k1", "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const same_literal_twice =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k1", "v", 60);
+    \\  cacheSet("items", "k1", "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const same_pipe_literal_twice =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "a|b", "v", 60);
+    \\  cacheSet("items", "a|b", "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const one_pipe_literal =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "a|b", "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+
+test "prove-behavior: dropping the second of two dynamic-key writes is breaking and fires no law" {
+    const outcome = try proveBehaviorOutcome(std.testing.allocator, two_dynamic_writes, one_dynamic_write);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, outcome.verdict);
+    try std.testing.expectEqual(@as(usize, 0), outcome.laws_fired);
+}
+
+test "prove-behavior: dropping the second of two different literal-key writes is breaking" {
+    const outcome = try proveBehaviorOutcome(std.testing.allocator, two_literal_writes, one_literal_write);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, outcome.verdict);
+}
+
+test "prove-behavior: collapsing two identical literal-key writes stays equivalent modulo laws" {
+    const outcome = try proveBehaviorOutcome(std.testing.allocator, same_literal_twice, one_literal_write);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent_modulo_laws, outcome.verdict);
+    try std.testing.expectEqual(@as(usize, 1), outcome.laws_fired);
+}
+
+test "prove-behavior: a string literal that holds a pipe is unknown and does not collapse" {
+    const outcome = try proveBehaviorOutcome(std.testing.allocator, same_pipe_literal_twice, one_pipe_literal);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, outcome.verdict);
+    try std.testing.expectEqual(@as(usize, 0), outcome.laws_fired);
+}

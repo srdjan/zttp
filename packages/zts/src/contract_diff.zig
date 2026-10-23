@@ -2630,11 +2630,11 @@ test "diffContracts reclassifies cacheSet idempotent collapse" {
     defer new.deinit(allocator);
 
     try old.behaviors.append(allocator, try makeOwnedPath(allocator, "POST", "/session", 201, &.{
-        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|?" },
+        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|int:60" },
     }));
     try new.behaviors.append(allocator, try makeOwnedPath(allocator, "POST", "/session", 201, &.{
-        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|?" },
-        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|?" },
+        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|int:60" },
+        .{ .module = "cache", .func = "cacheSet", .args = "lit:sessions|lit:k|lit:v|int:60" },
     }));
 
     var diff = try diffContracts(allocator, &old, &new);

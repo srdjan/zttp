@@ -2103,11 +2103,14 @@ pub const PathGenerator = struct {
 
     /// Build a canonical argument signature for the call at `call_node`.
     /// Pipe-delimited, one token per argument position:
-    ///   "lit:<raw>"   - string literal
+    ///   "lit:<raw>"   - string literal that holds no `|`
     ///   "int:<raw>"   - integer literal
     ///   "bool:true"   - boolean literal
     ///   "bool:false"
-    ///   "?"           - dynamic or unknown
+    ///   "?"           - dynamic or unknown, and a string literal that holds `|`
+    /// No token other than `?` is ambiguous: none holds `|`. A consumer must
+    /// not treat two `?` tokens as equal, because they may hold different
+    /// values.
     /// Returns an owned slice. Caller frees.
     fn computeArgSignature(self: *const PathGenerator, allocator: std.mem.Allocator, call_node: NodeIndex) !?[]const u8 {
         const tag = self.ir_view.getTag(call_node) orelse return null;
@@ -2135,6 +2138,12 @@ pub const PathGenerator = struct {
                         try buf.append(allocator, '?');
                         continue;
                     };
+                    // A `|` in the raw text would make the joined encoding
+                    // ambiguous, so the literal is unknown.
+                    if (std.mem.indexOfScalar(u8, raw, '|') != null) {
+                        try buf.append(allocator, '?');
+                        continue;
+                    }
                     try buf.appendSlice(allocator, "lit:");
                     try buf.appendSlice(allocator, raw);
                 },

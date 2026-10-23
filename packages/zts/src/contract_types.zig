@@ -909,11 +909,14 @@ pub const PathIoCall = struct {
     func: []const u8, // owned
     /// Canonical argument signature used by the behavior-path canonicalizer.
     /// Pipe-delimited, one token per argument position:
-    ///   "lit:<raw>"   - string literal
+    ///   "lit:<raw>"   - string literal that holds no `|`
     ///   "int:<raw>"   - integer literal
     ///   "bool:true"   - boolean literal
     ///   "bool:false"
-    ///   "?"           - dynamic or unknown
+    ///   "?"           - dynamic or unknown, and a string literal that holds `|`
+    /// No token other than `?` holds `|`. Two `?` tokens are never equal:
+    /// each may hold a different value, so the canonicalizer collapses no
+    /// pair of calls whose signature has a `?`.
     /// `null` means the path generator did not record arguments for this
     /// call (older contracts, or a call site where we could not walk the
     /// arguments). A null signature disables all rewrites on this call.

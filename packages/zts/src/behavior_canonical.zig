@@ -22,17 +22,18 @@
 //!
 //! 1. **Adjacent pure dedup** - if `seq[i]` and `seq[i+1]` are the same
 //!    `(module, func)`, the function has the `.pure` law, and both calls
-//!    have matching non-null `arg_signature`, drop `seq[i+1]`. Justified
-//!    by `f(args) = f(args)`: the second call is a no-op if the first's
-//!    result is reused. We do not require dataflow proof that the result
-//!    *is* reused - for pure functions, executing twice vs once is
-//!    observationally equivalent.
+//!    have matching non-null `arg_signature` with no unknown (`?`) token,
+//!    drop `seq[i+1]`. Justified by `f(args) = f(args)`: the second call is
+//!    a no-op if the first's result is reused. We do not require dataflow
+//!    proof that the result *is* reused - for pure functions, executing twice
+//!    vs once is observationally equivalent.
 //!
 //! 2. **Idempotent-write collapse** - if `seq[i]` and `seq[i+1]` are the
 //!    same `(module, func)`, the function has the `.idempotent_call` law,
-//!    and both calls have matching non-null `arg_signature`, drop
-//!    `seq[i+1]`. Justified by `f(args); f(args) = f(args)`. The only
-//!    rule that applies to write-effect functions.
+//!    and both calls have matching non-null `arg_signature` with no unknown
+//!    (`?`) token, drop `seq[i+1]`. Justified by
+//!    `f(args); f(args) = f(args)`. The only rule that applies to
+//!    write-effect functions.
 //!
 //! ## Deferred rules
 //!
@@ -114,13 +115,32 @@ fn defaultLookup(module: []const u8, func: []const u8) ?LookupResult {
 // Signature equality
 // ---------------------------------------------------------------------------
 
-/// Two calls have *equal* arg signatures iff both are non-null and byte-equal.
-/// A null signature (the path generator could not capture args) disables all
-/// rewrites on that call.
+/// Two calls have *equal* arg signatures iff both are non-null, neither holds
+/// an unknown token, and the bytes are equal. A null signature (the path
+/// generator could not capture args) disables all rewrites on that call.
+///
+/// The token `?` stands for a dynamic argument, and two dynamic arguments may
+/// hold different values. `cacheSet("items", a, ...)` and
+/// `cacheSet("items", b, ...)` both encode as `lit:items|?|...`, so byte
+/// equality would collapse two different writes. A signature with any `?`
+/// token therefore equals nothing, not even itself. A signature with no
+/// argument (the empty string) holds no token and equals itself.
 fn signaturesEqual(a: ?[]const u8, b: ?[]const u8) bool {
     const sa = a orelse return false;
     const sb = b orelse return false;
+    if (hasUnknownToken(sa) or hasUnknownToken(sb)) return false;
     return std.mem.eql(u8, sa, sb);
+}
+
+/// True iff some token of a `|`-joined signature is exactly `?`. The path
+/// generator encodes a string literal that holds `|` as `?`, so no other
+/// token contains `|`, and the split is unambiguous.
+fn hasUnknownToken(signature: []const u8) bool {
+    var tokens = std.mem.splitScalar(u8, signature, '|');
+    while (tokens.next()) |token| {
+        if (std.mem.eql(u8, token, "?")) return true;
+    }
+    return false;
 }
 
 /// True iff two adjacent calls are the same virtual-module function with
@@ -369,8 +389,8 @@ test "canonicalize collapses adjacent idempotent cacheSet" {
     const a = testing.allocator;
 
     const calls = [_]PathIoCall{
-        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:k|lit:v|?"),
-        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:k|lit:v|?"),
+        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:k|lit:v|int:60"),
+        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:k|lit:v|int:60"),
     };
     var in = try makePath(a, &calls, 200);
     defer in.deinit(a);
@@ -387,8 +407,8 @@ test "canonicalize does not collapse cacheSet with different keys" {
     const a = testing.allocator;
 
     const calls = [_]PathIoCall{
-        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:a|lit:v|?"),
-        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:b|lit:v|?"),
+        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:a|lit:v|int:60"),
+        try makeCall(a, "cache", "cacheSet", "lit:sessions|lit:b|lit:v|int:60"),
     };
     var in = try makePath(a, &calls, 200);
     defer in.deinit(a);
@@ -542,4 +562,53 @@ test "canonicalize reports only laws that actually fired" {
     try testing.expectEqualStrings("env", fired.items[0].module);
     try testing.expectEqualStrings("env", fired.items[0].func);
     try testing.expectEqual(LawKind.pure, fired.items[0].kind);
+}
+
+test "canonicalize does not collapse adjacent calls whose signatures hold an unknown token" {
+    const a = testing.allocator;
+
+    // Two writes to dynamic keys encode alike but may write different keys.
+    const calls = [_]PathIoCall{
+        try makeCall(a, "cache", "cacheSet", "lit:items|?|lit:v|int:60"),
+        try makeCall(a, "cache", "cacheSet", "lit:items|?|lit:v|int:60"),
+    };
+    var in = try makePath(a, &calls, 200);
+    defer in.deinit(a);
+
+    var stats: CanonicalStats = .{};
+    var fired: std.ArrayList(FiredLawId) = .empty;
+    defer fired.deinit(a);
+    var out = try canonicalize(a, &in, .default, &stats, &fired);
+    defer out.deinit(a);
+
+    try testing.expectEqual(@as(usize, 2), out.io_sequence.items.len);
+    try testing.expectEqual(@as(u32, 0), stats.total());
+    try testing.expectEqual(@as(usize, 0), fired.items.len);
+}
+
+test "canonicalize does not collapse pure calls whose signatures hold an unknown token" {
+    const a = testing.allocator;
+
+    const calls = [_]PathIoCall{
+        try makeCall(a, "env", "env", "?"),
+        try makeCall(a, "env", "env", "?"),
+    };
+    var in = try makePath(a, &calls, 200);
+    defer in.deinit(a);
+
+    var out = try canonicalize(a, &in, .default, null, null);
+    defer out.deinit(a);
+
+    try testing.expectEqual(@as(usize, 2), out.io_sequence.items.len);
+}
+
+test "signaturesEqual: an empty signature equals itself and a signature with ? equals nothing" {
+    try testing.expect(signaturesEqual("", ""));
+    try testing.expect(signaturesEqual("lit:a|int:1", "lit:a|int:1"));
+    try testing.expect(!signaturesEqual("?", "?"));
+    try testing.expect(!signaturesEqual("lit:a|?", "lit:a|?"));
+    try testing.expect(!signaturesEqual("?|lit:a", "lit:a"));
+    try testing.expect(!signaturesEqual(null, null));
+    // A token that merely contains a question mark is a literal, not unknown.
+    try testing.expect(signaturesEqual("lit:?", "lit:?"));
 }

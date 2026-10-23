@@ -433,6 +433,12 @@ aggregates one repo-level verdict:
 The repo verdict is the worst single handler: one `breaking` handler makes the
 whole pull request `breaking`.
 
+A law applies only to two calls whose arguments are all known. The compiler
+records a dynamic argument, and a string literal that holds `|`, as the token
+`?`. A call with a `?` argument is never collapsed with another call, because
+two dynamic arguments may hold different values. Two writes to different
+dynamic keys stay two writes.
+
 ### A lost proof
 
 The gate also compares the proven properties of each handler. A property that
