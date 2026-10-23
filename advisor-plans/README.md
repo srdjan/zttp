@@ -20,8 +20,8 @@ overlapping plans at the same time.
 | 006 (`pre-round-3-archive:advisor-plans/006-modular-boundaries.md`) | Make analysis and runtime ownership explicit | P1 | L | COMPLETE 2026-10-22; five phases reviewed, aggregate/full gate passed; isolated `codex/modular-boundaries` worktree |
 
 Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
-2026-08-14. Its measurement half stands, and the local corpus is still parked at
-16 of 19 cases.
+2026-08-14. Its measurement half stands. The parked local corpus (16 of 19 cases)
+was deleted in round 3 and stays at the `pre-round-3-archive` tag.
 
 Phase 4 starts with [CHECK facts reuse](../docs/plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md).
 The plan preserves current reader calls and removes one duplicate root facts producer.

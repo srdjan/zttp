@@ -851,7 +851,6 @@ pub fn writeLegible(writer: *std.Io.Writer, payload: UiPayload) !bool {
                 },
             );
             for (receipt.changes) |change| try writer.print("  {s}\n", .{change.file});
-            if (receipt.system_proven) try writer.writeAll("  aggregate system proof passed\n");
             return true;
         },
         .diagnostics => |diagnostics| {
@@ -1515,10 +1514,6 @@ pub fn getUnsigned(obj: std.json.ObjectMap, key: []const u8) ?usize {
     const value = obj.get(key) orelse return null;
     if (value != .integer or value.integer < 0) return null;
     return std.math.cast(usize, value.integer);
-}
-
-fn getUnsignedOrDefault(obj: std.json.ObjectMap, key: []const u8, default: usize) usize {
-    return getUnsigned(obj, key) orelse default;
 }
 
 fn getOptionalUnsignedValue(value_opt: ?std.json.Value) !?u32 {

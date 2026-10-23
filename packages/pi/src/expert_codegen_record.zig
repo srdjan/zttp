@@ -13,7 +13,6 @@ const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const local = @import("providers/local/client.zig");
 const deepseek = @import("providers/deepseek/client.zig");
-const cassette_client = @import("providers/cassette_client.zig");
 const model_request = @import("providers/model_request.zig");
 const tool_catalog = @import("providers/tool_catalog.zig");
 const registry_mod = @import("registry/registry.zig");

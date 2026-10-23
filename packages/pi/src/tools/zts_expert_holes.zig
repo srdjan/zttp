@@ -167,7 +167,6 @@ fn writeDiagnosticsJson(
 }
 
 const testing = std.testing;
-const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
 test "in-process publisher returns the compiler hole frame" {
     const source =

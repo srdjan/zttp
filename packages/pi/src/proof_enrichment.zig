@@ -1,7 +1,6 @@
 const std = @import("std");
 const zts = @import("zts");
 const zts_cli = @import("zts_cli");
-const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const tools_common = @import("tools/common.zig");
@@ -246,11 +245,6 @@ fn lineCount(text: []const u8) u32 {
 }
 
 const testing = std.testing;
-const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
-
-fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
-    return IsolatedTmp.init(allocator, "proof-enrichment");
-}
 
 test "propertiesSnapshot maps full handler properties surface" {
     const snapshot = propertiesSnapshot(.{

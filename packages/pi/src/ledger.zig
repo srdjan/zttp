@@ -1,7 +1,6 @@
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
-const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
 const turn = @import("turn.zig");
 const change_set = @import("change_set.zig");

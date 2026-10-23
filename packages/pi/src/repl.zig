@@ -1102,10 +1102,6 @@ fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
         if (change.rewrite_trace.len > 0) writeRewriteTrace(change.rewrite_trace);
         writeEditDiff(change.before, change.after);
     }
-    if (preview.system_proven) {
-        const system_line = "\nAggregate system proof passed.\n";
-        _ = std.c.write(std.c.STDOUT_FILENO, system_line.ptr, system_line.len);
-    }
 
     while (true) {
         const prompt = "Apply this change set? [y/N, d=show files] ";

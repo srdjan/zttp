@@ -26,7 +26,6 @@ const ui_payload = @import("ui_payload.zig");
 const witness_replay = @import("witness_replay.zig");
 const session_state = @import("session_state.zig");
 const session_events = @import("session/events.zig");
-const persister = @import("session/persister.zig");
 const tools_common = @import("tools/common.zig");
 const pi_apply_repair_plan = @import("tools/pi_apply_repair_plan.zig");
 const pi_goal_check = @import("tools/pi_goal_check.zig");
