@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Captured binding and match paths](2026-10-23-captured-binding-and-match-paths-plan.md) | Revised 2026-10-23 after one Codex and Fable round; 10 defects, T1 to T6; decision 13 (path analysis version) waits for the owner | Owner chose decisions 10(a), 11(a), 12(a) with "as recommended" |
+| [Captured binding and match paths](2026-10-23-captured-binding-and-match-paths-plan.md) | Done 2026-10-23: T1 to T6 committed; `path_analyzer_version` 4; the DeepSeek re-record is approved (decision 15(a)) and run by the owner; results in the [worklog](2026-10-22-coupling-census-worklog.md) | Owner chose decisions 10(a), 11(a), 12(a) with "as recommended", 13(a) and 14(a) with "as recommended", and 15(a) and 16(a) with "a" |
 | [Walker soundness](2026-10-22-walker-soundness-plan.md) | Done 2026-10-22: W1 to W10 committed, W11 records; D14, D15, and the residual gaps wait for the owner | Owner chose decisions 8(a), 5(a), 6(a), 7(a), and 9(a) with "a" |
 | [Coupling census](2026-10-22-coupling-census-plan.md) | Complete 2026-10-22; U1 to U4 committed, `verify.sh` passed; U5 census confirmed two fail-opens (assert, spread), not fixed; results in the [worklog](2026-10-22-coupling-census-worklog.md) | Owner chose audit decisions 1(a) to 4(a) with "as recommended" |
 | [Modular boundaries](2026-10-22-modular-boundaries-plan.md) | Complete, 2026-10-22; all five phases reviewed, focused gates and independent aggregate/full verification passed | Owner approved phased implementation with "go ahead in phases" |

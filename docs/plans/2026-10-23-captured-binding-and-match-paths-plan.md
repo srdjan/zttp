@@ -1,6 +1,6 @@
 # Captured binding and match path plan: narrowing joins, capture identity, and match arm paths
 
-Status: revised 2026-10-23 after one validation round (Codex astra for facts, Fable for the argument). Decision 13 (the path analysis version) waits for the owner. T1 to T4 do not depend on it.
+Status: done 2026-10-23. T1 to T6 committed. The DeepSeek re-record that decision 13(a) requires was approved as decision 15(a) and is run by the owner (decision 16(a)).
 
 Authority: on 2026-10-23 the owner answered decisions 10, 11, and 12 of the walker soundness plan with "as recommended". That answer chose 10(a): one type-checker unit for D14 and the missed ZTS620 on a captured boolean. It chose 11(a): a unit that forks one behavior path for each arm of a returned `match`. It chose 12(a): defer the six residual gaps. Research and validation for 10(a) found seven more fail-opens in the same narrowing, capture, and walk code (D16, D18, D20, D21, D22, D23, and the loop and `match` restore paths in D16). This plan includes them, because the fix for 10(a) changes the same mechanism and is not sound without them. The owner sees them in the next report and can remove them.
 
@@ -129,7 +129,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 |---|---|
 | T1 | done: `walkExpr` reads member bases, computed keys, spread operands, and object spread members, and sends any other tag through `expressionChildren`; `p4_objbase_hole.ts` and `p4_spread_hole.ts` give ZTS203; the 296-file sweep is byte-identical; `zig build test` 200/200 steps, 9483/9489 tests |
 | T2 | done: journal entries record kills, `endNarrowScope` returns them, and each join applies the kills of the branches that fall through; `match` arms and loop bodies use journaled scopes; a nested function body discards its kills; a kill in a condition voids its guard; `br_assign.ts` and `reinstall_and.ts` give ZTS203, `p5` and `p11` still pass, `p6` is refused (accepted cost); three stale swallow rows deleted under decision 14(a); the 296-file sweep is byte-identical; `zig build test` 200/200 steps, 9497/9503 tests |
-| T3 | not started |
-| T4 | not started |
-| T5 | waits for decision 13 |
-| T6 | not started |
+| T3 | done: an `upvalue` reference resolves to its declaring binding through the parser's capture record, and the name search is removed; all six production `TypeChecker` sites pass the record; `cap_assign.ts` and `p16_param_assign.ts` give ZTS200, `p1_unsound.ts` and `p2_unsound.ts` give ZTS203, `bc_closure_upvalue.ts` and `bc_arrow_upvalue.ts` give ZTS620; `p1_forof_shadow.ts` and `p2_match_binding.ts` lose a false ZTS203; one stale swallow row deleted; the 296-file sweep is byte-identical; `zig build test` 200/200 steps, 9508/9514 tests |
+| T4 | done: `closure_writes_outer` is set before the walk, and with it set each call walks its arguments and then kills every narrowing; `o1.ts`, `p8_loop_call.ts`, `p15_and_chain_reinstall.ts`, an argument-order probe, and a module-level `let` probe give ZTS203; `p12_closure_decl_call.ts` still passes; 2 of 296 tracked files set the flag; the sweep is byte-identical; `zig build test` 200/200 steps, 9514/9520 tests |
+| T5 | done: a returned `match` forks one path for each arm; `path_analyzer_version` is 4 for W6, W7a, W8, and T5 (decision 13(a)); policy hash `ebb4b2b0...4f96`; 22 pins moved, each by the hash alone, checked by applying only the version rise; `m_a.ts` to `m_b.ts` and `m_a.ts` to `m_c.ts` are `breaking`; `examples/routing/match-handler.ts` goes from 1 path to 4; `zig build test` 197/200 steps, 9538/9545 tests, and the one failure is the codegen baseline replay, whose 10 cassettes carry the old hash. The owner approved the DeepSeek re-record (decision 15(a)) and runs it (decision 16(a)) |
+| T6 | done: the worklog section "Captured binding and match path units", this table, the index row, and the solution note |

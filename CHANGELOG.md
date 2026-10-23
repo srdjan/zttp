@@ -16,6 +16,19 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   `.github/workflows/proof-gate.yml` to `docs/examples/proof-gate.yml`, and the
   zttp repository no longer runs it. Copy it to `.github/workflows/` in your
   project, as before.
+- **The path analysis version is 4.** A returned `match` now gives one
+  behavior path for each arm, and an `assert` gives a failure path. Module
+  calls are recorded in every expression position. The policy hash moves, so a
+  contract that an older analysis stamped is rebuilt and not trusted.
+
+### Fixed
+
+- **The type checker reads more of the program.** It now checks calls in
+  member bases, computed keys, and spread operands. An assignment inside a
+  branch, a loop body, or a `match` arm now ends the narrowing after the join.
+  A captured binding has the type of its declaration, so an assignment through
+  a closure or to a parameter is checked. In a program where a closure writes
+  an outer binding, a call ends every narrowing.
 
 ## [0.22.3] - 2026-10-18
 

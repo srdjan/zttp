@@ -744,3 +744,29 @@ Two premises in the plan were wrong:
 - W10: D13 was wider than planned. The boolean checker also treated member bases and computed keys as leaves.
 
 Open items for the owner are D14, D15, and the residual gaps in the progress table.
+
+## Captured binding and match path units
+
+The plan is `docs/plans/2026-10-23-captured-binding-and-match-paths-plan.md`. It closes D14 and D15 from the walker soundness units, and eight more defects that research found in the same code. Its progress table gives the change of each unit.
+
+For each unit, the lead reviewed the diff and ran the gates again on a private cache, with `DEEPSEEK_API_KEY` unset. In T1 to T4, every listed step exited 0, and `test-expert-app` replay and `test-meta-drift` did not move. No unit changed `proof_ir.zig` lowering or certificate bytes.
+
+| Unit | Commit | Moved verdicts | `zig build test` |
+|---|---|---|---|
+| T1 | `6d47e08d` | `p4_objbase_hole.ts`, `p4_spread_hole.ts`: now refused (ZTS203); sweep byte-identical | 200/200 steps, 9483/9489 tests |
+| T2 | `4474d297` | `br_assign.ts`, `reinstall_and.ts`: now refused (ZTS203); `p6_assign_string_in_branch.ts` now refused (accepted cost); sweep byte-identical | 200/200 steps, 9497/9503 tests |
+| T3 | `abc3803e` | `cap_assign.ts`, `p16_param_assign.ts`: now refused (ZTS200); `p1_unsound.ts`, `p2_unsound.ts`: now refused (ZTS203); two captured-boolean probes give ZTS620; `p1_forof_shadow.ts`, `p2_match_binding.ts` lose a false ZTS203; sweep byte-identical | 200/200 steps, 9508/9514 tests |
+| T4 | `239c4fca` | `o1.ts`, `p8_loop_call.ts`, `p15_and_chain_reinstall.ts`, and two new probes: now refused (ZTS203); sweep byte-identical | 200/200 steps, 9514/9520 tests |
+| T5 | `ae06a288` | `m_a.ts` to `m_b.ts` and `m_a.ts` to `m_c.ts`: now `breaking`; `examples/routing/match-handler.ts` goes from 1 path to 4, with no other change in the sweep | 197/200 steps, 9538/9545 tests; the one failure is the codegen baseline replay |
+
+The sweep is `zts check --json` over the 296 tracked `.ts` files, compared with the sweep before T1.
+
+T5 raised `path_analyzer_version` to 4 under decision 13(a). The policy hash moved to `ebb4b2b0a1456b5024a91fe5bfe41a7833c1ac19da923c9e6b7c0c8fa3624f96`. Twenty-two pins moved: `policy-hash.txt`, `scripts/check-meta-drift.sh`, five expert goldens, and fifteen hashes in test source. To check that each pin moved only by the hash, the lead applied the version rise and the new pins without the fork to a worktree of `239c4fca`. There `test-zts`, `test-cli`, `test-meta-drift`, and `test-expert-golden` passed. The codegen baseline replay fails, because its ten cassettes carry the old hash. The owner approved the DeepSeek re-record as decision 15(a), and runs it as decision 16(a), because the permission classifier refused the recorder command for the lead.
+
+Two premises in the plan were wrong:
+- D17: a closure that names a later declaration reads the outer binding with the same name, and the runtime does too. It is not a fail-open.
+- The T3 implementer found that each production `ParsedModule` already carried the parser's scopes, so no site needed new plumbing.
+
+T4 costs precision. In a program where a closure writes an outer binding, every call after a narrowing drops that narrowing. Two tracked files set the flag, and neither changed verdict.
+
+Residual gaps, recorded and not fixed: a changed arm pattern with the same status, a body swap between two arms with the same status, a returned ternary, and a `match` reached through a `const` each still diff as `equivalent`. `p14_ternary_guard.ts` is refused with ZTS203 and ZTS612 before and after T4. The probable cause is that a ternary condition does not narrow its branches. A read of the ternary arm of `walkExpr` can confirm it. It is a false refusal, not a fail-open.
