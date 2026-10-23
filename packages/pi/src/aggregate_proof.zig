@@ -167,7 +167,7 @@ pub fn prove(
                 if (err == error.OutOfMemory) return err;
                 return rejectedFmt(allocator, "baseline_analysis_failed", "baseline analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
             };
-            baseline_has_handler = collected.has_handler orelse false;
+            baseline_has_handler = collected.has_handler == true;
             if (root_index == 0) baseline_primary_properties = collected.properties;
         }
         const collected = collectCheckDiagnostics(
@@ -182,7 +182,7 @@ pub fn prove(
             return rejectedFmt(allocator, "candidate_analysis_failed", "candidate analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
         };
         // A candidate that did not parse is unknown, not handler-less.
-        if (baseline_has_handler and !(collected.has_handler orelse true)) {
+        if (baseline_has_handler and collected.has_handler == false) {
             return rejectedFmt(allocator, "handler_export_lost", "aggregate proof rejected {s}: the candidate has no handler export", .{relative_root});
         }
         if (root_index == 0) primary_properties = collected.properties;
@@ -837,10 +837,6 @@ test "only a new failed full analysis rejects an edit" {
 
 /// Prove an edit that replaces `src/handler.ts` with an empty file and return
 /// whether the aggregate proof rejected it.
-fn emptiedHandlerIsRejected(baseline_source: []const u8) !bool {
-    return replacedHandlerIsRejected(baseline_source, "");
-}
-
 fn replacedHandlerIsRejected(baseline_source: []const u8, candidate_source: []const u8) !bool {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -866,16 +862,18 @@ fn replacedHandlerIsRejected(baseline_source: []const u8, candidate_source: []co
 test "aggregate proof rejects an emptied handler whose baseline already has ZTS500" {
     // ZTS310 and ZTS500 in the baseline: an empty candidate with fewer
     // diagnostics must not pass as a sub-multiset of them.
-    try testing.expect(try emptiedHandlerIsRejected(
+    try testing.expect(try replacedHandlerIsRejected(
         "let count = 0;\n" ++
             "structural Guard<T> = Proof<T, \"state_isolated\">;\n" ++
             "function handler(req: Request): Guard<Response> {\n" ++
             "  count = count + 1;\n" ++
             "  return Response.json({ count: count });\n}\n",
+        "",
     ));
     // No capsule: the baseline's ZTS500 message equals the one an empty file gets.
-    try testing.expect(try emptiedHandlerIsRejected(
+    try testing.expect(try replacedHandlerIsRejected(
         "export function handler(req: Request): Response { return Response.text(\"old\"); }\n",
+        "",
     ));
 }
 

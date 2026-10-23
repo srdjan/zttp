@@ -390,11 +390,9 @@ test "workspace_read_file: a file under a secret-named directory is refused" {
     try testing.expect(!common.isSecretPath("src/environment/handler.ts"));
     try testing.expect(!common.isSecretPath("src/handler.ts"));
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
-    defer testing.allocator.free(root);
-    const refusal = (try common.ignoredRefusal(testing.allocator, root, "config/.env.d/prod.txt", name)) orelse return error.TestUnexpectedResult;
+    var tmp = try IsolatedTmp.init(testing.allocator, "workspace-read-secret-dir");
+    defer tmp.cleanup(testing.allocator);
+    const refusal = (try common.ignoredRefusal(testing.allocator, tmp.abs_path, "config/.env.d/prod.txt", name)) orelse return error.TestUnexpectedResult;
     defer testing.allocator.free(refusal);
     try testing.expect(std.mem.indexOf(u8, refusal, "secret file deny list") != null);
 }
